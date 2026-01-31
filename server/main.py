@@ -118,12 +118,11 @@ async def chunk_processing_worker():
                     # 4. Save PLY for persistence/replay
                     if aligned_chunk:
                         frame_storage.save_ply(session, chunk_id, aligned_chunk.point_cloud)
-                        # Get alignment transform and validity mapping for retroactive segmentation
+                        # Use sample_indices from aligned_chunk (CRITICAL: same indices used for PLY)
                         align_transform = alignment_manager.gravity_correction if hasattr(alignment_manager, 'gravity_correction') else None
-                        validity_map = alignment_manager.generate_validity_mapping(chunk_id)
+                        sample_indices = aligned_chunk.sample_indices
                         frame_storage.save_chunk_metadata(session, chunk_id, result, 
-                                                         alignment_transform=align_transform,
-                                                         validity_mapping=validity_map)
+                                                         alignment_transform=align_transform)
                         # Save segmentation with new format (point_indices)
                         if result.segmentation_masks:
                             depth_shape = result.depths[0].shape  # (H, W)
@@ -134,7 +133,9 @@ async def chunk_processing_worker():
                                 depth_shape=depth_shape,
                                 frame_count=result.frame_count,
                                 depths=result.depths,  # Pass for validity mask
-                                confs=result.confs     # Pass for validity mask
+                                confs=result.confs,    # Pass for validity mask
+                                sample_indices=sample_indices if sample_indices is not None else None,
+                                point_cloud=aligned_chunk.point_cloud  # For 3D outlier filtering
                             )
                 return result
 
@@ -294,6 +295,21 @@ async def get_mode():
         "da3_loaded": chunk_processor.is_loaded if chunk_processor else False,
         "ready_for_streaming": server_mode == "online" and (chunk_processor.is_loaded if chunk_processor else False)
     }
+
+@app.get("/segments/{session_id}")
+async def get_segments(session_id: str):
+    """Get unified segmentation data for a session."""
+    try:
+        scans_dir = Path(__file__).parent / "scans"
+        segments_file = scans_dir / session_id / "output" / "segments.json"
+        
+        if segments_file.exists():
+            with open(segments_file, 'r') as f:
+                return json.load(f)
+        return {"object_types": []}
+    except Exception as e:
+        print(f"Error serving segments: {e}")
+        return {"error": str(e)}
 
 @app.post("/mode/{new_mode}")
 async def set_mode(new_mode: str):
@@ -547,37 +563,38 @@ async def viewer_websocket(websocket: WebSocket):
                                 # --- PASS 1: DEPTH ESTIMATION (DA3) ---
                                 if not refine_mode:
                                     print("\n[Retro-Offline] === PHASE 1: Depth Estimation (DA3) ===")
-                                    chunk_processor.load_model() # Load ONCE
-                                    
-                                    for chunk_info in chunks:
-                                        chunk_id = chunk_info.chunk_id
-                                        frames_dir = frame_storage.get_chunk_frames_dir(chunk_info)
-                                        print(f"[Retro-Offline] Depth Pass: Chunk {chunk_id}...")
+                                    try:
+                                        chunk_processor.load_model() # Load ONCE
                                         
-                                        res = chunk_processor.process_chunk(frames_dir, chunk_id, prompt=None)
-                                        
-                                        if res:
-                                            # Restore poses if partial re-run?
-                                            # If full re-process, we might want to restore original poses anyway if available
-                                            # to avoid "Stacking" if alignment fails.
-                                            old_meta = frame_storage.load_chunk_metadata(session, chunk_id)
-                                            if old_meta and "extrinsics" in old_meta:
-                                                try:
-                                                    res.extrinsics = np.array(old_meta["extrinsics"], dtype=np.float32)
-                                                    res.intrinsics = np.array(old_meta["intrinsics"], dtype=np.float32)
-                                                    print(f"[Retro-Offline] Restored original poses for Chunk {chunk_id}")
-                                                except: pass
+                                        for chunk_info in chunks:
+                                            chunk_id = chunk_info.chunk_id
+                                            frames_dir = frame_storage.get_chunk_frames_dir(chunk_info)
+                                            print(f"[Retro-Offline] Depth Pass: Chunk {chunk_id}...")
+                                            
+                                            res = chunk_processor.process_chunk(frames_dir, chunk_id, prompt=None)
+                                            
+                                            if res:
+                                                # Restore poses if partial re-run?
+                                                # If full re-process, we might want to restore original poses anyway if available
+                                                # to avoid "Stacking" if alignment fails.
+                                                old_meta = frame_storage.load_chunk_metadata(session, chunk_id)
+                                                if old_meta and "extrinsics" in old_meta:
+                                                    try:
+                                                        res.extrinsics = np.array(old_meta["extrinsics"], dtype=np.float32)
+                                                        res.intrinsics = np.array(old_meta["intrinsics"], dtype=np.float32)
+                                                        print(f"[Retro-Offline] Restored original poses for Chunk {chunk_id}")
+                                                    except: pass
 
-                                            chunk_results[chunk_id] = res
-                                        else:
-                                            print(f"[Retro-Offline] Failed to process depth for Chunk {chunk_id}")
-                                    
-                                    # Unload DA3 completely
-                                    chunk_processor.unload_model()
-                                    gc.collect()
-                                    if torch.cuda.is_available():
-                                        torch.cuda.empty_cache()
-                                    print("[Retro-Offline] DA3 Unloaded. VRAM Cleared.")
+                                                chunk_results[chunk_id] = res
+                                            else:
+                                                print(f"[Retro-Offline] Failed to process depth for Chunk {chunk_id}")
+                                    finally:
+                                        # Unload DA3 completely
+                                        chunk_processor.unload_model()
+                                        gc.collect()
+                                        if torch.cuda.is_available():
+                                            torch.cuda.empty_cache()
+                                        print("[Retro-Offline] DA3 Unloaded. VRAM Cleared.")
                                 else:
                                     print("[Retro-Offline] Skipping Phase 1 (Geometry exists).")
                                 
@@ -586,31 +603,32 @@ async def viewer_websocket(websocket: WebSocket):
                                     print("\n[Retro-Offline] === PHASE 2: Segmentation (SAM3) ===")
                                     sam3 = get_sam3_wrapper() # Load ONCE
                                     
-                                    for chunk_info in chunks:
-                                        chunk_id = chunk_info.chunk_id
-                                        
-                                        # In refinement mode, we process all chunks.
-                                        # In full mode, only successful depth chunks.
-                                        if not refine_mode and chunk_id not in chunk_results: continue
-                                        
-                                        frames_dir = frame_storage.get_chunk_frames_dir(chunk_info)
-                                        print(f"[Retro-Offline] Segmentation Pass: Chunk {chunk_id}...")
-                                        
-                                        try:
-                                            sam3_masks = sam3.process_chunk(str(frames_dir), prompt, keyframe_interval=5)
-                                            if not refine_mode:
-                                                chunk_results[chunk_id].segmentation_masks = sam3_masks
-                                            else:
-                                                sam3_masks_cache[chunk_id] = sam3_masks
-                                        except Exception as e:
-                                            print(f"[Retro-Offline] SAM3 Error for Chunk {chunk_id}: {e}")
-                                    
-                                    # Unload SAM3 completely
-                                    sam3.unload_model()
-                                    gc.collect()
-                                    if torch.cuda.is_available():
-                                        torch.cuda.empty_cache()
-                                    print("[Retro-Offline] SAM3 Unloaded. VRAM Cleared.")
+                                    try:
+                                        for chunk_info in chunks:
+                                            chunk_id = chunk_info.chunk_id
+                                            
+                                            # In refinement mode, we process all chunks.
+                                            # In full mode, only successful depth chunks.
+                                            if not refine_mode and chunk_id not in chunk_results: continue
+                                            
+                                            frames_dir = frame_storage.get_chunk_frames_dir(chunk_info)
+                                            print(f"[Retro-Offline] Segmentation Pass: Chunk {chunk_id}...")
+                                            
+                                            try:
+                                                sam3_masks = sam3.process_chunk(str(frames_dir), prompt, keyframe_interval=5)
+                                                if not refine_mode:
+                                                    chunk_results[chunk_id].segmentation_masks = sam3_masks
+                                                else:
+                                                    sam3_masks_cache[chunk_id] = sam3_masks
+                                            except Exception as e:
+                                                print(f"[Retro-Offline] SAM3 Error for Chunk {chunk_id}: {e}")
+                                    finally:
+                                        # Unload SAM3 completely
+                                        sam3.unload_model()
+                                        gc.collect()
+                                        if torch.cuda.is_available():
+                                            torch.cuda.empty_cache()
+                                        print("[Retro-Offline] SAM3 Unloaded. VRAM Cleared.")
                                 
                                 # --- PASS 3: FUSION / PROJECTION & BROADCAST ---
                                 print("\n[Retro-Offline] === PHASE 3: Fusion & Alignment ===")
@@ -661,26 +679,27 @@ async def viewer_websocket(websocket: WebSocket):
                                         # Save & Broadcast
                                         if aligned_chunk:
                                             frame_storage.save_ply(session, chunk_id, aligned_chunk.point_cloud)
-                                            # Get alignment transform and validity mapping for retroactive segmentation
+                                            # Use sample_indices from aligned_chunk (CRITICAL: same indices used for PLY)
                                             align_transform = alignment_manager.gravity_correction if hasattr(alignment_manager, 'gravity_correction') else None
-                                            validity_map = alignment_manager.generate_validity_mapping(chunk_id)
+                                            sample_indices = aligned_chunk.sample_indices
                                             frame_storage.save_chunk_metadata(session, chunk_id, result, 
-                                                                             alignment_transform=align_transform,
-                                                                             validity_mapping=validity_map)
+                                                                             alignment_transform=align_transform)
                                             # Save segmentation with new format (point_indices)
                                             # Masks can be in sam3_masks_cache (refine) or result.segmentation_masks (full)
                                             seg_path = None
                                             masks_for_save = sam3_masks_cache.get(chunk_id) or result.segmentation_masks
                                             if masks_for_save:
                                                 depth_shape = result.depths[0].shape  # (H, W)
-                                                seg_path = frame_storage.save_chunk_segmentation(
+                                            seg_path = frame_storage.save_chunk_segmentation(
                                                     session, chunk_id,
                                                     masks=masks_for_save,
                                                     prompt=prompt,
                                                     depth_shape=depth_shape,
                                                     frame_count=result.frame_count,
                                                     depths=result.depths,  # Pass for validity mask
-                                                    confs=result.confs     # Pass for validity mask
+                                                    confs=result.confs,    # Pass for validity mask
+                                                    sample_indices=sample_indices if sample_indices is not None else None,
+                                                    point_cloud=aligned_chunk.point_cloud  # For 3D outlier filtering
                                                 )
                                             
                                             # Live Broadcast (with proper await via .result())

@@ -409,7 +409,7 @@
                     checkbox.type = 'checkbox';
                     checkbox.checked = obj.visible;
                     checkbox.style.cursor = 'pointer';
-                    checkbox.onchange = () => renderer.setObjectHighlight(obj.label, checkbox.checked);
+                    checkbox.onchange = () => renderer.setObjectHighlight(key, checkbox.checked);
 
                     const label = document.createElement('span');
                     label.textContent = obj.label;
@@ -591,12 +591,26 @@
                             item.style.borderColor = 'transparent';
                         };
 
-                        item.onclick = (e) => {
+                        item.onclick = async (e) => {
                             e.stopPropagation(); // Prevent backdrop click logic
                             if (connection) {
                                 connection.send({ type: 'load_session', session_id: s.id });
                                 toggleModal(false);
                                 showToast(`Loading ${s.id}...`);
+
+                                // Fetch unified segments
+                                try {
+                                    console.log(`[Viewer] Fetching segments for ${s.id}...`);
+                                    const segRes = await fetch(`/segments/${s.id}`);
+                                    const segmentsData = await segRes.json();
+                                    console.log(`[Viewer] Segments loaded`, segmentsData);
+
+                                    if (renderer && segmentsData && (segmentsData.object_types || segmentsData.chunk_id)) {
+                                        renderer.applySegmentation(segmentsData);
+                                    }
+                                } catch (err) {
+                                    console.error("Error loading segments:", err);
+                                }
                             }
                         };
                         sessionList.appendChild(item);

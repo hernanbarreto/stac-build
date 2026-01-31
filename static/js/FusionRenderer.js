@@ -255,7 +255,6 @@ export class FusionRenderer {
             colors[dstIdx3] = floatArray[srcIdx++];
             colors[dstIdx3 + 1] = floatArray[srcIdx++];
             colors[dstIdx3 + 2] = floatArray[srcIdx++];
-
             // Class ID
             classIds[dstIdx] = floatArray[srcIdx++];
         }
@@ -268,6 +267,14 @@ export class FusionRenderer {
         this.geometry.attributes.color.needsUpdate = true;
         this.geometry.attributes.classId.needsUpdate = true;
 
+        // Mark chunk as completely loaded
+        if (!this.chunksLoaded) this.chunksLoaded = {};
+        if (this.lastChunkId !== undefined) {
+            this.chunksLoaded[this.lastChunkId] = true;
+            // Now it is safe to apply potential pending segments
+            this._processPendingSegments(this.lastChunkId);
+        }
+
         // Update draw range to show ALL points
         this.geometry.setDrawRange(0, this.pointCursor);
 
@@ -276,58 +283,33 @@ export class FusionRenderer {
     }
 
     /**
-     * Register the start of a new chunk to track offsets
+     * Process pending segments for a loaded chunk
      */
-    registerChunk(chunkId) {
-        this.chunkOffsets[chunkId] = this.pointCursor;
-        console.log(`[Renderer] Registered Chunk ${chunkId} at offset ${this.pointCursor}`);
-    }
+    _processPendingSegments(chunkId) {
+        if (!this.pendingSegments) return;
 
-    /**
- * Apply segmentation from JSON with new format
- * data: { chunk_id: int, objects: [{id, label, point_indices}] }
- */
-    applySegmentation(data) {
-        console.log('[Renderer] applySegmentation called with:', JSON.stringify(data).substring(0, 500));
-        const chunkId = data.chunk_id;
-        const offset = this.chunkOffsets[chunkId];
+        const pendingForChunk = this.pendingSegments.filter(p => p.chunkId === chunkId);
+        if (pendingForChunk.length === 0) return;
 
-        if (offset === undefined) {
-            console.warn(`[Renderer] Received segments for unknown chunk ${chunkId}`);
-            return;
-        }
+        console.log(`[Renderer] Applying DEFERRED segments for Chunk ${chunkId} (${pendingForChunk.length} items)`);
 
         const classIds = this.geometry.attributes.classId.array;
-        const objects = data.objects || [];
         let modified = false;
 
-        // Store original colors for points that get segmented
-        if (!this.originalColors) {
-            this.originalColors = new Float32Array(this.geometry.attributes.color.array);
-        }
+        for (const p of pendingForChunk) {
+            const { globalObjKey, indices, objId } = p;
+            const offset = this.chunkOffsets[chunkId];
 
-        for (const obj of objects) {
-            const objId = obj.id || 1;
-            const label = obj.label || "Unknown";
-            const indices = obj.point_indices || [];
-
-            // Register this object globally
-            const globalObjKey = `${label}_${objId}`;
-            if (!this.segmentedObjects) this.segmentedObjects = {};
-            if (!this.segmentedObjects[globalObjKey]) {
-                this.segmentedObjects[globalObjKey] = {
-                    id: objId,
-                    label: label,
-                    chunks: [],
-                    visible: true,  // Default highlighted
-                    totalPoints: 0,
-                    globalIndices: []  // Store all global indices for toggle
-                };
+            if (offset === undefined) {
+                console.warn(`[Renderer] Offset missing for loaded chunk ${chunkId}? Should not happen.`);
+                continue;
             }
-            this.segmentedObjects[globalObjKey].chunks.push(chunkId);
+
+            // Ensure object exists
+            if (!this.segmentedObjects[globalObjKey]) continue;
+
             this.segmentedObjects[globalObjKey].totalPoints += indices.length;
 
-            // Apply classId to points and STORE global indices
             for (const idx of indices) {
                 const globalIdx = offset + idx;
                 if (globalIdx < this.options.maxPoints) {
@@ -340,7 +322,160 @@ export class FusionRenderer {
 
         if (modified) {
             this.geometry.attributes.classId.needsUpdate = true;
-            console.log(`[Renderer] Applied segments for Chunk ${chunkId}:`, objects.map(o => o.label));
+        }
+
+        // Remove processed
+        this.pendingSegments = this.pendingSegments.filter(p => p.chunkId !== chunkId);
+    }
+
+    /**
+     * Register the start of a new chunk to track offsets
+     */
+    /**
+     * Register a chunk's memory offset
+     */
+    /**
+     * Register a chunk's memory offset
+     */
+    registerChunk(chunkId) {
+        this.chunkOffsets[chunkId] = this.pointCursor;
+        this.lastChunkId = chunkId;
+        console.log(`[Renderer] Registered Chunk ${chunkId} at offset ${this.pointCursor}`);
+    }
+
+    /**
+ * Apply segmentation from JSON with new format
+ * data: { chunk_id: int, objects: [{id, label, point_indices}] }
+ */
+    applySegmentation(data) {
+        console.log('[Renderer] applySegmentation called with:', JSON.stringify(data).substring(0, 100) + "...");
+
+        const classIds = this.geometry.attributes.classId.array;
+        let modified = false;
+
+        // Store original colors for points that get segmented
+        if (!this.originalColors) {
+            this.originalColors = new Float32Array(this.geometry.attributes.color.array);
+        }
+
+        // UNIFIED FORMAT (from segments.json)
+        if (data.object_types) {
+            console.log('[Renderer] Processing Unified Segments format');
+            for (const objType of data.object_types) {
+                for (const instance of objType.instances) {
+                    const label = objType.label;
+                    const objId = instance.instance_id; // Or generate unique ID
+                    const globalObjKey = instance.global_id || `${label}_${objId}`;
+
+                    if (!this.segmentedObjects) this.segmentedObjects = {};
+                    if (!this.segmentedObjects[globalObjKey]) {
+                        this.segmentedObjects[globalObjKey] = {
+                            id: objId, // TODO: Map to unique shader ID if needed
+                            label: label,
+                            globalId: globalObjKey,
+                            visible: true,
+                            totalPoints: 0,
+                            chunks: [], // Initialize for compatibility
+                            globalIndices: []
+                        };
+                    }
+
+                    // Iterate chunks
+                    for (const [chunkIdStr, indices] of Object.entries(instance.chunks)) {
+                        const chunkId = parseInt(chunkIdStr);
+                        const offset = this.chunkOffsets[chunkId];
+
+                        if (offset === undefined || !this.chunksLoaded || !this.chunksLoaded[chunkId]) {
+                            // Chunk not loaded yet (or offset missing)? Queue it.
+                            if (!this.pendingSegments) this.pendingSegments = [];
+                            this.pendingSegments.push({
+                                chunkId: chunkId,
+                                globalObjKey: globalObjKey,
+                                indices: indices,
+                                objId: objId
+                            });
+                            // debounced log?
+                            // console.log(`[Renderer] Queued segments for Chunk ${chunkId} (Data not ready)`);
+                            continue;
+                        }
+
+                        this.segmentedObjects[globalObjKey].totalPoints += indices.length;
+
+                        for (const idx of indices) {
+                            const globalIdx = offset + idx;
+                            if (globalIdx < this.options.maxPoints) {
+                                classIds[globalIdx] = objId; // Might need mapping if IDs clash
+                                this.segmentedObjects[globalObjKey].globalIndices.push(globalIdx);
+                                modified = true;
+                            }
+                        }
+                    }
+
+                    // Render OBB if available
+                    if (instance.obb) {
+                        this._addOBB(globalObjKey, instance.obb);
+                    }
+                }
+            }
+        }
+        // LEGACY/LIVE FORMAT (per chunk)
+        else if (data.chunk_id !== undefined) {
+            const chunkId = data.chunk_id;
+            const offset = this.chunkOffsets[chunkId];
+
+            if (offset === undefined) {
+                console.warn(`[Renderer] Received segments for unknown chunk ${chunkId}`);
+                return;
+            }
+            const objects = data.objects || [];
+
+            for (const obj of objects) {
+
+                const objId = obj.id || 1;
+                const label = obj.label || "Unknown";
+                const indices = obj.point_indices || [];
+
+                // Register this object globally
+                const normalizedLabel = label.replace(/\s+/g, '_');
+                const globalObjKey = `${normalizedLabel}_${objId}`;
+                if (!this.segmentedObjects) this.segmentedObjects = {};
+                if (!this.segmentedObjects[globalObjKey]) {
+                    this.segmentedObjects[globalObjKey] = {
+                        id: objId,
+                        label: label,
+                        chunks: [],
+                        visible: true,  // Default highlighted
+                        totalPoints: 0,
+                        globalIndices: []  // Store all global indices for toggle
+                    };
+                }
+                if (!this.segmentedObjects[globalObjKey].chunks) this.segmentedObjects[globalObjKey].chunks = [];
+                this.segmentedObjects[globalObjKey].chunks.push(chunkId);
+                this.segmentedObjects[globalObjKey].totalPoints += indices.length;
+
+                // Apply classId to points and STORE global indices
+                for (const idx of indices) {
+                    const globalIdx = offset + idx;
+                    if (globalIdx < this.options.maxPoints) {
+                        classIds[globalIdx] = objId;
+                        this.segmentedObjects[globalObjKey].globalIndices.push(globalIdx);
+                        modified = true;
+                    }
+                }
+            }
+        }
+
+        if (modified) {
+            this.geometry.attributes.classId.needsUpdate = true;
+            // The following console.log and onSegmentUpdate are specific to the LEGACY/LIVE FORMAT
+            // and might need adjustment if unified format also needs to trigger these.
+            // For now, assuming they are only relevant for the chunk-based update.
+            if (data.chunk_id !== undefined) {
+                const chunkId = data.chunk_id; // Re-declare or pass chunkId if needed
+                const objects = data.objects || []; // Re-declare or pass objects if needed
+                console.log(`[Renderer] Applied segments for Chunk ${chunkId}:`, objects.map(o => o.label));
+            }
+
 
             // Notify UI that objects changed
             if (this.onSegmentUpdate) {
@@ -352,13 +487,18 @@ export class FusionRenderer {
     /**
      * Toggle highlight visibility for a specific object
      */
-    setObjectHighlight(label, visible) {
+    setObjectHighlight(key, visible) {
         if (!this.segmentedObjects) return;
 
-        const obj = Object.values(this.segmentedObjects).find(o => o.label === label);
+        const obj = this.segmentedObjects[key];
         if (!obj || !obj.globalIndices) return;
 
         obj.visible = visible;
+
+        // Toggle OBB visibility if exists
+        if (obj.obbMesh) {
+            obj.obbMesh.visible = visible;
+        }
 
         // Update classId for all stored indices
         const classIds = this.geometry.attributes.classId.array;
@@ -397,16 +537,21 @@ export class FusionRenderer {
         // Clear segmentation data
         this.segmentedObjects = {};
 
+        // Clear OBBs
+        if (this.obbGroup) {
+            this.scene.remove(this.obbGroup);
+            this.obbGroup = null;
+        }
+
         // Reset colors to original (if any modifications were made)
         // No need to do anything as geometry is cleared
 
         // Notify UI to clear segment panel
         if (this.onSegmentUpdate) {
-            this.onSegmentUpdate({});
+            this.onSegmentUpdate(this.segmentedObjects);
         }
-
-        console.log("Renderer cleared (points + segments)");
     }
+
 
     /**
      * Start the render loop
@@ -458,6 +603,43 @@ export class FusionRenderer {
         }
     }
 
+    /**
+     * Add OBB helper to scene
+     */
+    _addOBB(key, obbData) {
+        if (!this.obbGroup) {
+            this.obbGroup = new THREE.Group();
+            this.scene.add(this.obbGroup);
+        }
+
+        // Remove existing OBB for this key if any
+        const existing = this.obbGroup.children.find(c => c.userData.key === key);
+        if (existing) {
+            this.obbGroup.remove(existing);
+        }
+
+        const { center, extent, rotation } = obbData;
+
+        // Create box geometry
+        const geometry = new THREE.BoxGeometry(extent[0], extent[1], extent[2]);
+        const edges = new THREE.EdgesGeometry(geometry);
+        const material = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 2 });
+        const box = new THREE.LineSegments(edges, material);
+
+        box.position.set(center[0], center[1], center[2]);
+        if (rotation && rotation.length === 4) {
+            box.quaternion.set(rotation[0], rotation[1], rotation[2], rotation[3]);
+        }
+
+        box.userData.key = key;
+        this.obbGroup.add(box);
+
+        // Store reference in segmentedObjects
+        if (this.segmentedObjects[key]) {
+            this.segmentedObjects[key].obbMesh = box;
+        }
+    }
+
     _onResize() {
         const width = this.container.clientWidth;
         const height = this.container.clientHeight;
@@ -466,6 +648,7 @@ export class FusionRenderer {
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(width, height);
     }
+
 
     /**
      * Set camera position

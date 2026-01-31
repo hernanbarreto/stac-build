@@ -96,6 +96,7 @@ def weighted_align_point_maps(point_map1, conf1, point_map2, conf2, conf_thresho
 class AlignedChunk:
     chunk_id: int
     point_cloud: Optional[np.ndarray] = None
+    sample_indices: Optional[np.ndarray] = None  # Indices used during sampling - MUST be reused for segmentation
 
 class AlignmentManager:
     def __init__(self, overlap_frames: int = 10):
@@ -245,8 +246,11 @@ class AlignmentManager:
 
     def _add_first_chunk(self, chunk_data) -> AlignedChunk:
         s, R, t = self.gravity_correction
-        point_cloud = self._generate_point_cloud(chunk_data, s, R, t)
-        aligned = AlignedChunk(chunk_id=0, point_cloud=point_cloud)
+        # CRITICAL: Capture sample_indices to reuse for segmentation
+        point_cloud, validity_mapping, sample_indices = self._generate_point_cloud(
+            chunk_data, s, R, t, return_validity_info=True
+        )
+        aligned = AlignedChunk(chunk_id=0, point_cloud=point_cloud, sample_indices=sample_indices)
         self.aligned_chunks.append(aligned)
         return aligned
     
@@ -280,8 +284,11 @@ class AlignmentManager:
         R_final = R_g @ R_acc
         t_final = s_g * (R_g @ t_acc) + t_g
         
-        point_cloud = self._generate_point_cloud(chunk_data, s_final, R_final, t_final)
-        aligned = AlignedChunk(chunk_id=chunk_id, point_cloud=point_cloud)
+        # CRITICAL: Capture sample_indices to reuse for segmentation
+        point_cloud, validity_mapping, sample_indices = self._generate_point_cloud(
+            chunk_data, s_final, R_final, t_final, return_validity_info=True
+        )
+        aligned = AlignedChunk(chunk_id=chunk_id, point_cloud=point_cloud, sample_indices=sample_indices)
         self.aligned_chunks.append(aligned)
         return aligned
 
@@ -548,28 +555,29 @@ class AlignmentManager:
         all_points = np.concatenate(all_points, axis=0) if all_points else np.empty((0, 3))
         all_colors = np.concatenate(all_colors, axis=0) if all_colors else np.empty((0, 3))
         
+        sample_indices = None
         if sample_ratio < 1.0 and len(all_points) > 0:
             n_samples = int(len(all_points) * sample_ratio)
-            indices = np.random.choice(len(all_points), n_samples, replace=False)
-            all_points = all_points[indices]
-            all_colors = all_colors[indices]
-            # Note: sampling breaks the validity_mapping correspondence
-            # For now, we skip sampling when return_validity_info is True
+            sample_indices = np.sort(np.random.choice(len(all_points), n_samples, replace=False))
+            all_points = all_points[sample_indices]
+            all_colors = all_colors[sample_indices]
             
         # Output: XYZ (3) + RGB (3) = 6 channels, original colors
         point_cloud = np.concatenate([all_points, all_colors], axis=1).astype(np.float32)
         
         if return_validity_info:
-            return point_cloud, validity_mapping
+            return point_cloud, validity_mapping, sample_indices
         return point_cloud
 
-    def generate_validity_mapping(self, chunk_id: int) -> list:
+    def generate_validity_mapping(self, chunk_id: int, sample_ratio: float = 0.1) -> tuple:
         """
         Generate validity mapping for a chunk (which pixels became points).
-        Returns list of dicts: [{orig_frame_idx, valid_pixel_indices}, ...]
+        Returns tuple: (validity_mapping, sample_indices)
+        - validity_mapping: list of dicts [{orig_frame_idx, valid_pixel_indices}, ...]
+        - sample_indices: numpy array of indices kept after sampling, or None if no sampling
         """
         if chunk_id >= len(self.chunk_data_list):
-            return []
+            return [], None
         
         chunk_data = self.chunk_data_list[chunk_id]
         
@@ -587,14 +595,14 @@ class AlignmentManager:
             else:
                 s, R, t = s_g, R_g, t_g
         
-        # Generate point cloud WITH validity info (don't use sampling for accuracy)
-        _, validity_mapping = self._generate_point_cloud(
+        # Generate point cloud WITH validity info (use same sample_ratio as PLY)
+        _, validity_mapping, sample_indices = self._generate_point_cloud(
             chunk_data, s, R, t, 
-            sample_ratio=1.0,  # No sampling for accurate mapping
+            sample_ratio=sample_ratio,
             return_validity_info=True
         )
         
-        return validity_mapping
+        return validity_mapping, sample_indices
 
     def get_unified_cloud(self): return None 
     def get_chunk_count(self): return len(self.aligned_chunks)

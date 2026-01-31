@@ -15,6 +15,90 @@ from dataclasses import dataclass, field
 from threading import Lock
 import pandas as pd # Optional if we use parquet, but PLY is text/binary
 
+from segmentation_manager import SegmentationManager
+
+
+def filter_segment_outliers_3d(point_indices: List[int], point_cloud: np.ndarray, 
+                                eps: float = 0.05, min_samples: int = 10,
+                                sor_k: int = 20, sor_std_ratio: float = 2.0) -> List[int]:
+    """
+    Filter spurious points from a segment using DBSCAN + Statistical Outlier Removal.
+    
+    Args:
+        point_indices: List of point indices that belong to the segment
+        point_cloud: Full point cloud array [N, 6] where [:, :3] are XYZ coordinates
+        eps: DBSCAN epsilon (max distance between two samples in same neighborhood)
+        min_samples: DBSCAN minimum samples to form a core point
+        sor_k: Number of neighbors for SOR
+        sor_std_ratio: Standard deviation multiplier for SOR threshold
+        
+    Returns:
+        Filtered list of point indices (outliers removed)
+    """
+    if len(point_indices) < min_samples:
+        return point_indices  # Not enough points to filter
+    
+    # Extract 3D positions for segment points
+    indices_array = np.array(point_indices)
+    valid_mask = indices_array < len(point_cloud)
+    indices_array = indices_array[valid_mask]
+    
+    if len(indices_array) < min_samples:
+        return point_indices
+    
+    points_3d = point_cloud[indices_array, :3]
+    
+    # Step 1: DBSCAN clustering
+    try:
+        from sklearn.cluster import DBSCAN
+        from sklearn.neighbors import NearestNeighbors
+        
+        clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(points_3d)
+        labels = clustering.labels_
+        
+        # Keep only the largest cluster (main object)
+        unique_labels, counts = np.unique(labels[labels >= 0], return_counts=True)
+        if len(unique_labels) == 0:
+            # All points are noise - return empty or original
+            return point_indices
+        
+        largest_cluster = unique_labels[np.argmax(counts)]
+        cluster_mask = labels == largest_cluster
+        
+        # Step 2: Statistical Outlier Removal on the main cluster
+        cluster_points = points_3d[cluster_mask]
+        cluster_indices = indices_array[cluster_mask]
+        
+        if len(cluster_points) < sor_k:
+            return cluster_indices.tolist()
+        
+        nbrs = NearestNeighbors(n_neighbors=sor_k).fit(cluster_points)
+        distances, _ = nbrs.kneighbors(cluster_points)
+        mean_distances = np.mean(distances[:, 1:], axis=1)  # Exclude self (distance 0)
+        
+        mean_dist = np.mean(mean_distances)
+        std_dist = np.std(mean_distances)
+        threshold = mean_dist + sor_std_ratio * std_dist
+        
+        inlier_mask = mean_distances < threshold
+        filtered_indices = cluster_indices[inlier_mask]
+        
+        removed_count = len(point_indices) - len(filtered_indices)
+        if removed_count > 0:
+            print(f"[Filter3D] Removed {removed_count} outliers ({100*removed_count/len(point_indices):.1f}%)")
+        
+        return filtered_indices.tolist()
+        
+    except ImportError:
+        # sklearn not available - fallback to simple distance-based filtering
+        print("[Filter3D] sklearn not available, using simple centroid filter")
+        centroid = np.mean(points_3d, axis=0)
+        distances = np.linalg.norm(points_3d - centroid, axis=1)
+        threshold = np.mean(distances) + 2 * np.std(distances)
+        inlier_mask = distances < threshold
+        return indices_array[inlier_mask].tolist()
+
+
 
 @dataclass
 class ChunkInfo:
@@ -60,9 +144,9 @@ class FrameStorage:
         self.scans_dir.mkdir(parents=True, exist_ok=True)
         
         self.current_session: Optional[ScanSession] = None
-        self.current_session: Optional[ScanSession] = None
         self.lock = Lock()
         self.current_prompt: Optional[str] = None  # Current text prompt
+        self.segmentation_manager = None  # Will be set when session starts/loads
         
         # Callbacks
         self.on_chunk_ready = None  # Called when a chunk is ready for processing
@@ -91,6 +175,9 @@ class FrameStorage:
                 chunks_dir=chunks_dir,
                 output_dir=output_dir,
             )
+            
+            # Initialize unified segmentation manager
+            self.segmentation_manager = SegmentationManager(output_dir)
             
             print(f"[FrameStorage] Started session: {session_id}")
             print(f"[FrameStorage] Frames dir: {frames_dir}")
@@ -162,6 +249,10 @@ class FrameStorage:
                 chunks=chunks,
                 frame_count=len(list(frames_dir.glob("*.jpg"))) if frames_dir.exists() else 0
             )
+            
+            # Initialize unified segmentation manager (loads existing segments.json if present)
+            self.segmentation_manager = SegmentationManager(output_dir)
+            
             print(f"[FrameStorage] Loaded session {session_id} from disk (Offline Mode).")
             return self.current_session
 
@@ -362,13 +453,15 @@ class FrameStorage:
 
     def save_chunk_metadata(self, session: ScanSession, chunk_id: int, result: Any, 
                             alignment_transform: tuple = None,
-                            validity_mapping: list = None) -> Optional[str]:
+                            validity_mapping: list = None,
+                            sample_indices: np.ndarray = None) -> Optional[str]:
         """
         Save chunk metadata (poses, intrinsics) to JSON for offline refinement.
         Avoids re-running DA3 if we just want to update masks.
         
         alignment_transform: (s, R, t) tuple used for point cloud alignment
         validity_mapping: list of {orig_frame_idx, valid_pixel_indices} for pixel-to-point mapping
+        sample_indices: indices of points kept after sampling (for mapping pre-sample to post-sample indices)
         """
         try:
             filename = f"chunk_{chunk_id:03d}_meta.json"
@@ -391,9 +484,8 @@ class FrameStorage:
                     "translation": t.tolist() if isinstance(t, np.ndarray) else t
                 }
             
-            # Save validity mapping for pixel-to-point correlation
-            if validity_mapping:
-                data["validity_mapping"] = validity_mapping
+            # NOTE: validity_mapping and sample_indices removed to reduce file size
+            # save_chunk_segmentation computes validity from depths/confs at runtime
             
             if result.segmentation_masks:
                  # Masks are dict {frame_idx: mask_array}
@@ -425,7 +517,8 @@ class FrameStorage:
                                  depths: np.ndarray = None,
                                  confs: np.ndarray = None,
                                  sample_indices: np.ndarray = None,
-                                 conf_mask: np.ndarray = None) -> Optional[str]:
+                                 conf_mask: np.ndarray = None,
+                                 point_cloud: np.ndarray = None) -> Optional[str]:
         """
         Save segmentation data to JSON with enhanced format.
         
@@ -438,6 +531,7 @@ class FrameStorage:
             confs: [N, H, W] confidence maps for validity filtering
             sample_indices: If point cloud was sampled, the indices that were kept
             conf_mask: Boolean mask of valid points (confidence filter)
+            point_cloud: [N, 6] point cloud for 3D outlier filtering
         
         Format:
         {
@@ -459,6 +553,7 @@ class FrameStorage:
             
             H, W = depth_shape
             points_per_frame = H * W
+            print(f"[DEBUG save_chunk_segmentation] depth_shape: H={H}, W={W}, total={points_per_frame}")
             
             # Compute conf_threshold matching _generate_point_cloud
             if confs is not None:
@@ -519,14 +614,19 @@ class FrameStorage:
                 if raw_mask.size == 0:
                     cumulative_valid_count += len(valid_flat_indices)
                     continue
+                
+                orig_mask_shape = raw_mask.shape
                     
                 # Resize mask if needed
                 if raw_mask.shape[1] != H or raw_mask.shape[2] != W:
+                    print(f"[DEBUG] Frame {orig_frame_idx}: Resizing mask from {raw_mask.shape} to [{raw_mask.shape[0]}, {H}, {W}]")
                     resized = []
                     for m in raw_mask:
                         m_resized = cv2.resize(m.astype(np.float32), (W, H), interpolation=cv2.INTER_NEAREST)
                         resized.append(m_resized)
                     raw_mask = np.stack(resized, axis=0)
+                else:
+                    print(f"[DEBUG] Frame {orig_frame_idx}: Mask already correct size {raw_mask.shape}")
                 
                 # Combine all object masks for this frame
                 combined = np.max(raw_mask, axis=0) > 0  # [H, W] boolean
@@ -535,13 +635,27 @@ class FrameStorage:
                 mask_flat = combined.flatten()
                 mask_pixel_indices = np.where(mask_flat)[0]
                 
+                # Debug: Show mask pixel positions in 2D
+                if len(mask_pixel_indices) > 0:
+                    # Convert flat indices to (row, col)
+                    rows = mask_pixel_indices // W
+                    cols = mask_pixel_indices % W
+                    print(f"[DEBUG] Frame {orig_frame_idx}: {len(mask_pixel_indices)} mask pixels")
+                    print(f"  Mask 2D region: rows [{rows.min()}-{rows.max()}], cols [{cols.min()}-{cols.max()}]")
+                    
+                    # How many mask pixels are also valid depth pixels?
+                    matches = sum(1 for idx in mask_pixel_indices if idx in flat_to_local_point)
+                    print(f"  Matched {matches}/{len(mask_pixel_indices)} with valid depth ({100*matches/len(mask_pixel_indices):.1f}%)")
+                
                 # Map mask pixels to point cloud indices
+                frame_matched = 0
                 for flat_idx in mask_pixel_indices:
                     if flat_idx in flat_to_local_point:
                         # This pixel is valid and in the mask
                         local_pt_idx = flat_to_local_point[flat_idx]
                         global_pt_idx = cumulative_valid_count + local_pt_idx
                         all_segmented_indices.append(global_pt_idx)
+                        frame_matched += 1
                 
                 # Advance cumulative counter
                 cumulative_valid_count += len(valid_flat_indices)
@@ -557,6 +671,10 @@ class FrameStorage:
                 sample_set = set(sample_indices.tolist())
                 sample_to_new = {old: new for new, old in enumerate(sample_indices)}
                 point_indices = [sample_to_new[idx] for idx in point_indices if idx in sample_set]
+            
+            # Apply 3D outlier filtering if point cloud is provided
+            if point_cloud is not None and len(point_indices) > 20:
+                point_indices = filter_segment_outliers_3d(point_indices, point_cloud)
             
             # Create enhanced format
             data = {
@@ -576,6 +694,15 @@ class FrameStorage:
             import json
             with open(filepath, 'w') as f:
                 json.dump(data, f)
+            
+            # Also update unified segments.json
+            if self.segmentation_manager is not None:
+                self.segmentation_manager.add_segment(
+                    label=prompt,
+                    chunk_id=chunk_id,
+                    point_indices=point_indices,
+                    instance_id=1  # For now, single instance per prompt
+                )
             
             print(f"[FrameStorage] Saved Segments: {len(point_indices)} points for '{prompt}'")
             return str(filepath)

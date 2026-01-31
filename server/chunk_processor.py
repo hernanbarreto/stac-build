@@ -257,15 +257,25 @@ class ChunkProcessor:
         - validity_mapping contains valid_pixel_indices for each keyframe
         - For each mask pixel that is True, check if that pixel index is in valid_pixel_indices
         - If yes, map to the corresponding point index
+        - sample_indices maps pre-sample indices to post-sample PLY indices
         """
         import cv2
         
         try:
             validity_mapping = metadata.get("validity_mapping")
+            sample_indices = metadata.get("sample_indices")  # List of pre-sample indices that were kept
             
             if not validity_mapping:
                 print("[ChunkProcessor] No validity_mapping in metadata - cannot compute segmentation")
                 return {}
+            
+            # Build pre-sample to post-sample index mapping
+            pre_to_post = None
+            if sample_indices:
+                pre_to_post = {pre_idx: post_idx for post_idx, pre_idx in enumerate(sample_indices)}
+                print(f"[Debug] Using sample_indices with {len(sample_indices)} indices (mapping {max(sample_indices)+1} -> {len(sample_indices)})")
+            else:
+                print("[Debug] No sample_indices - assuming no sampling was applied")
             
             print(f"[Debug] Using validity_mapping with {len(validity_mapping)} keyframes")
             print(f"[Debug] Masks available for frames: {sorted(masks.keys())}")
@@ -362,8 +372,18 @@ class ChunkProcessor:
                 
                 cumulative_offset += points_in_frame
             
-            # Convert sets to lists
-            result = {k: list(v) for k, v in segments_sets.items()}
+            # Remap pre-sample indices to post-sample PLY indices
+            if pre_to_post:
+                remapped_result = {}
+                for obj_id, pre_indices in segments_sets.items():
+                    post_indices = [pre_to_post[idx] for idx in pre_indices if idx in pre_to_post]
+                    if post_indices:
+                        remapped_result[obj_id] = post_indices
+                    print(f"[Debug] Obj {obj_id}: {len(pre_indices)} pre-sample -> {len(post_indices)} post-sample")
+                result = remapped_result
+            else:
+                result = {k: list(v) for k, v in segments_sets.items()}
+            
             total_segmented = sum(len(v) for v in result.values())
             print(f"[Debug] Total segmented: {total_segmented} points in {len(result)} objects")
             return result
