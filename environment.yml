@@ -1,0 +1,50 @@
+name: stac-build
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pytorch>=2.0
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+  - cuda-toolkit=12.1
+  - ninja
+  - numpy>=1.24
+  - scipy>=1.10
+  - pip:
+    - ninja
+    - jaxtyping
+    - websockets>=12.0
+    - opencv-python>=4.8
+    - fastapi>=0.104
+    - uvicorn[standard]>=0.24
+    - python-multipart
+    # DA3 dependencies
+    - huggingface_hub
+    - einops
+    - pillow
+    - requests
+    - typer
+    # SAM3 dependencies
+    - timm>=1.0.17
+    - hydra-core
+    - iopath>=0.1.10
+    - regex
+    - ftfy
+    - tqdm
+    # Additional dependencies
+    - moviepy==1.0.3
+    - pycocotools
+    - decord
+    - psutil
+    - addict
+    - plyfile
+    - matplotlib
+    - pycolmap
+    - trimesh
+    - evo-1
+    - e3nn  # For DA3NESTED spherical harmonics

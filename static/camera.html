@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>STAC-BUILD | Camera</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #0a0a0f;
+            color: #fff;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #header {
+            background: linear-gradient(90deg, #1a1a2e 0%, #16213e 100%);
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid #2a2a4a;
+        }
+
+        .logo {
+            font-size: 18px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #00d4ff, #7b2ff7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        #status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #444;
+            transition: background 0.3s;
+        }
+
+        .status-dot.connected {
+            background: #00ff88;
+            box-shadow: 0 0 10px #00ff88;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.6;
+            }
+        }
+
+        #video-container {
+            flex: 1;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+        }
+
+        #video {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+
+        #canvas {
+            display: none;
+        }
+
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+        }
+
+        .recording-indicator {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: rgba(255, 0, 0, 0.8);
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .recording-indicator.active {
+            opacity: 1;
+        }
+
+        .rec-dot {
+            width: 8px;
+            height: 8px;
+            background: #fff;
+            border-radius: 50%;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.3;
+            }
+        }
+
+        #stats {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.7);
+            background: rgba(0, 0, 0, 0.5);
+            padding: 8px 12px;
+            border-radius: 6px;
+        }
+
+        .btn {
+            padding: 16px 32px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            border-radius: 30px;
+            color: #fff;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            pointer-events: auto;
+        }
+
+        #start-btn {
+            background: linear-gradient(135deg, #00d4ff, #7b2ff7);
+        }
+
+        #stop-btn {
+            background: linear-gradient(135deg, #ff4444, #cc0000);
+            display: none;
+        }
+
+        .btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 10px 30px rgba(0, 212, 255, 0.3);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        #chunk-info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.9);
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px 14px;
+            border-radius: 6px;
+        }
+
+        #chunk-info .label {
+            color: #00d4ff;
+            font-weight: 600;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="header">
+        <div class="logo">STAC-BUILD Scanner</div>
+        <div id="status">
+            <div class="status-dot" id="status-dot"></div>
+            <span id="status-text">Disconnected</span>
+        </div>
+    </div>
+
+    <div id="video-container">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas"></canvas>
+
+        <div id="overlay">
+            <button id="start-btn" class="btn">Start Scanning</button>
+            <button id="stop-btn" class="btn">Stop & Process</button>
+        </div>
+
+        <div class="recording-indicator" id="recording">
+            <div class="rec-dot"></div>
+            <span>SCANNING</span>
+        </div>
+
+        <div id="chunk-info" class="hidden">
+            <div><span class="label">Frames:</span> <span id="frame-count">0</span></div>
+            <div><span class="label">Chunks:</span> <span id="chunk-count">0</span> ready</div>
+        </div>
+
+        <div id="stats" class="hidden">
+            <div>FPS: <span id="fps">0</span></div>
+            <div>Sent: <span id="sent">0</span> frames</div>
+        </div>
+    </div>
+
+    <div id="debug-log"
+        style="position:fixed;bottom:0;left:0;right:0;height:80px;background:rgba(0,0,0,0.8);color:#0f0;font-family:monospace;font-size:10px;overflow-y:auto;padding:5px;display:none;z-index:9999;">
+    </div>
+
+    <script>
+        // Debug logger
+        const debugLog = document.getElementById('debug-log');
+        function log(msg, type = 'info') {
+            console.log(msg);
+            if (window.location.search.includes('debug')) {
+                debugLog.style.display = 'block';
+                const el = document.createElement('div');
+                el.style.color = type === 'error' ? '#ff5555' : '#00ff88';
+                el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+                debugLog.appendChild(el);
+                debugLog.scrollTop = debugLog.scrollHeight;
+            }
+        }
+
+        // Configuration
+        // Configuration
+        // Detectar si estamos en https para usar wss, si no ws
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const httpProtocol = window.location.protocol; // http: o https:
+        
+        const WS_URL = `${protocol}//${window.location.hostname}:8765/ws/camera`;
+        const CONFIG_URL = `${httpProtocol}//${window.location.hostname}:8765/health`;
+        //const WS_URL = `ws://${window.location.hostname}:8765/ws/camera`;
+        //const CONFIG_URL = `http://${window.location.hostname}:8765/health`;
+        const TARGET_FPS = 30;  // 30 fps capture
+        const FRAME_INTERVAL = 1000 / TARGET_FPS;
+        const JPEG_QUALITY = 0.8;
+        const TARGET_WIDTH = 1280;
+        const TARGET_HEIGHT = 720;
+        let CHUNK_SIZE = 30;  // Default, will be updated from server
+
+        // State
+        let ws = null;
+        let video = null;
+        let canvas = null;
+        let ctx = null;
+        let stream = null;
+        let isScanning = false;
+        let frameCount = 0;
+        let lastFpsTime = Date.now();
+        let fps = 0;
+        let sentFrames = 0;
+
+        // DOM elements
+        const startBtn = document.getElementById('start-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const recordingIndicator = document.getElementById('recording');
+        const fpsDisplay = document.getElementById('fps');
+        const sentDisplay = document.getElementById('sent');
+        const frameCountDisplay = document.getElementById('frame-count');
+        const chunkCountDisplay = document.getElementById('chunk-count');
+        const chunkInfo = document.getElementById('chunk-info');
+        const stats = document.getElementById('stats');
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', init);
+
+        async function init() {
+            log('Initializing Camera Client...');
+
+            // Fetch server config
+            await fetchConfig();
+
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                log('ERROR: getUserMedia not available!', 'error');
+                startBtn.textContent = 'Camera Unavailable';
+                startBtn.disabled = true;
+                return;
+            }
+
+            video = document.getElementById('video');
+            canvas = document.getElementById('canvas');
+            ctx = canvas.getContext('2d');
+
+            startBtn.addEventListener('click', startScanning);
+            stopBtn.addEventListener('click', stopScanning);
+
+            // Connect WebSocket
+            connectWebSocket();
+        }
+
+        async function fetchConfig() {
+            try {
+                const response = await fetch(CONFIG_URL);
+                const data = await response.json();
+                if (data.session && data.session.chunk_size) {
+                    CHUNK_SIZE = data.session.chunk_size;
+                    log(`Server chunk size: ${CHUNK_SIZE}`);
+                }
+            } catch (e) {
+                log('Could not fetch config, using defaults');
+            }
+        }
+
+        function connectWebSocket() {
+            if (ws && ws.readyState === WebSocket.OPEN) return;
+
+            log(`Connecting to ${WS_URL}`);
+            ws = new WebSocket(WS_URL);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                log('WebSocket connected');
+                statusDot.classList.add('connected');
+                statusText.textContent = 'Connected';
+            };
+
+            ws.onclose = () => {
+                statusDot.classList.remove('connected');
+                statusText.textContent = 'Disconnected';
+                // Reconnect after delay
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onmessage = (event) => {
+                // Handle status messages from server
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.chunks_queued !== undefined) {
+                        chunkCountDisplay.textContent = data.chunks_queued;
+                    }
+                } catch (e) {
+                    // Binary data, ignore
+                }
+            };
+        }
+
+        async function startScanning() {
+            log('Starting scan...');
+            try {
+                startBtn.disabled = true;
+                startBtn.textContent = 'Starting...';
+
+                // Request camera access
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: { ideal: 'environment' },
+                        width: { ideal: TARGET_WIDTH },
+                        height: { ideal: TARGET_HEIGHT }
+                    },
+                    audio: false
+                });
+
+                log('Camera stream acquired');
+                video.srcObject = stream;
+
+                video.onloadedmetadata = async () => {
+                    try {
+                        await video.play();
+                        log('Video playing');
+                    } catch (e) {
+                        log(`Play error: ${e.message}`, 'error');
+                    }
+                };
+
+                // Wait for video to be ready
+                await new Promise(r => setTimeout(r, 500));
+
+                const videoWidth = video.videoWidth;
+                const videoHeight = video.videoHeight;
+                log(`Resolution: ${videoWidth}x${videoHeight}`);
+
+                let scale = 1;
+                if (videoWidth > TARGET_WIDTH) {
+                    scale = TARGET_WIDTH / videoWidth;
+                }
+
+                canvas.width = Math.floor(videoWidth * scale);
+                canvas.height = Math.floor(videoHeight * scale);
+
+                // Update UI
+                startBtn.classList.add('hidden');
+                stopBtn.style.display = 'block';
+                recordingIndicator.classList.add('active');
+                chunkInfo.classList.remove('hidden');
+                stats.classList.remove('hidden');
+
+                // Reset counters
+                sentFrames = 0;
+                frameCount = 0;
+
+                // Start streaming
+                isScanning = true;
+                streamLoop();
+                log('Scanning started');
+
+            } catch (error) {
+                log(`Camera Error: ${error.message}`, 'error');
+                startBtn.disabled = false;
+                startBtn.textContent = 'Retry';
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        function stopScanning() {
+            log('Stopping scan...');
+            isScanning = false;
+
+            // Stop camera stream
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+
+            // Update UI
+            stopBtn.style.display = 'none';
+            recordingIndicator.classList.remove('active');
+
+            startBtn.classList.remove('hidden');
+            startBtn.disabled = false;
+            startBtn.textContent = 'Start New Scan';
+
+            log(`Scan complete: ${sentFrames} frames sent`);
+
+            // Show completion message
+            const chunks = Math.floor(sentFrames / CHUNK_SIZE);
+            alert(`Scan Complete!\n\n${sentFrames} frames captured\n${chunks} chunks will be processed\n\nOpen viewer.html to see results`);
+        }
+
+        function streamLoop() {
+            if (!isScanning) return;
+
+            const now = Date.now();
+
+            // Capture and send frame
+            captureFrame();
+
+            // Update FPS counter
+            frameCount++;
+            if (now - lastFpsTime >= 1000) {
+                fps = frameCount;
+                frameCount = 0;
+                lastFpsTime = now;
+                fpsDisplay.textContent = fps;
+                sentDisplay.textContent = sentFrames;
+                frameCountDisplay.textContent = sentFrames;
+                chunkCountDisplay.textContent = Math.floor(sentFrames / CHUNK_SIZE);
+            }
+
+            // Schedule next frame
+            setTimeout(streamLoop, FRAME_INTERVAL);
+        }
+
+        function captureFrame() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                return;
+            }
+
+            try {
+                // Draw video to canvas
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                // Convert to JPEG blob and send
+                canvas.toBlob((blob) => {
+                    if (!blob) return;
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(blob);
+                        sentFrames++;
+                    }
+                }, 'image/jpeg', JPEG_QUALITY);
+            } catch (e) {
+                log('Capture error: ' + e.message, 'error');
+            }
+        }
+
+        // Prevent accidental page close during scan
+        window.onbeforeunload = function (e) {
+            if (isScanning) {
+                e.preventDefault();
+                e.returnValue = 'Scan in progress. Are you sure you want to leave?';
+                return e.returnValue;
+            }
+        };
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STAC-BUILD | 3D Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #0a0a0f;
+            color: #fff;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* UI Overlay */
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        /* Header */
+        #header {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 12px 20px;
+            background: linear-gradient(180deg, rgba(10, 10, 15, 0.9) 0%, transparent 100%);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            pointer-events: auto;
+        }
+
+        .logo {
+            font-size: 18px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #00d4ff, #7b2ff7);
+            background: linear-gradient(135deg, #00d4ff, #7b2ff7);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header-right {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 4px;
+        }
+
+        #connection-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        #chunk-counter {
+            font-size: 11px;
+            color: #00d4ff;
+            font-family: 'Consolas', monospace;
+            background: rgba(0, 212, 255, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ff4444;
+            transition: background 0.3s, box-shadow 0.3s;
+        }
+
+        .status-dot.connected {
+            background: #00ff88;
+            box-shadow: 0 0 8px #00ff88;
+        }
+
+        /* Toggle Stats Button */
+        #toggle-stats-btn {
+            position: absolute;
+            top: 70px;
+            right: 20px;
+            width: 40px;
+            height: 40px;
+            background: rgba(26, 26, 46, 0.9);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            pointer-events: auto;
+            z-index: 110;
+        }
+
+        /* Stats Panel (Escondido por defecto) */
+        #stats-panel {
+            position: absolute;
+            top: 70px;
+            right: 20px;
+            background: rgba(26, 26, 46, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 16px;
+            min-width: 180px;
+            pointer-events: auto;
+            backdrop-filter: blur(10px);
+            display: none;
+            /* ESCONDIDO POR DEFECTO */
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+
+        .stats-title {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.5);
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+
+        .stat-label {
+            color: rgba(255, 255, 255, 0.6);
+        }
+
+        .stat-value {
+            color: #00d4ff;
+            font-weight: 600;
+            font-family: 'Consolas', monospace;
+        }
+
+        /* Prompt Panel - Optimizado para móvil */
+        #prompt-panel {
+            position: absolute;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(26, 26, 46, 0.95);
+            border: 1px solid rgba(123, 47, 247, 0.3);
+            border-radius: 16px;
+            padding: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            pointer-events: auto;
+            backdrop-filter: blur(10px);
+            max-width: 95vw;
+        }
+
+        #prompt-input {
+            flex: 1;
+            min-width: 120px;
+            padding: 10px;
+            font-size: 14px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            color: #fff;
+        }
+
+        .btn {
+            padding: 10px 15px;
+            font-size: 13px;
+            font-weight: 600;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #00d4ff, #7b2ff7);
+            color: #fff;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+        }
+
+        #active-prompts {
+            position: absolute;
+            top: 70px;
+            left: 20px;
+            pointer-events: auto;
+        }
+
+        .prompt-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(123, 47, 247, 0.3);
+            border: 1px solid rgba(123, 47, 247, 0.5);
+            border-radius: 20px;
+            padding: 6px 12px;
+            margin-right: 6px;
+            margin-bottom: 6px;
+            font-size: 12px;
+        }
+
+        #toast-container {
+            position: absolute;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            pointer-events: none;
+        }
+
+        .toast {
+            background: rgba(0, 212, 255, 0.9);
+            color: #000;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="canvas-container"></div>
+
+    <div id="ui-overlay">
+        <div id="header">
+            <div class="logo">STAC-BUILD</div>
+            <div class="header-right">
+                <div id="connection-status">
+                    <div class="status-dot" id="status-dot"></div>
+                    <span id="status-text">Connecting...</span>
+                </div>
+                <!-- Mode Toggle -->
+                <div id="mode-toggle"
+                    style="display:flex; align-items:center; gap:8px; font-size:11px; padding:4px 8px; background:rgba(0,0,0,0.3); border-radius:6px;">
+                    <span style="color:rgba(255,255,255,0.5);">Mode:</span>
+                    <button id="mode-offline-btn" class="mode-btn active"
+                        style="padding:3px 8px; border:none; border-radius:4px; font-size:10px; cursor:pointer; background:#7b2ff7; color:#fff;">OFFLINE</button>
+                    <button id="mode-online-btn" class="mode-btn"
+                        style="padding:3px 8px; border:none; border-radius:4px; font-size:10px; cursor:pointer; background:rgba(255,255,255,0.1); color:#888;">ONLINE</button>
+                    <span id="mode-status" style="font-size:10px; color:#888; margin-left:4px;">Ready</span>
+                </div>
+                <div id="chunk-counter">Chunks: 0 / 0</div>
+                <div id="session-info" style="font-size:10px; color:rgba(255,255,255,0.5); text-align:right;">Live
+                    Session</div>
+            </div>
+        </div>
+
+        <div id="toggle-stats-btn">⚙️</div>
+
+        <div id="stats-panel">
+            <div class="stats-title">Performance</div>
+            <div class="stat-row">
+                <span class="stat-label">FPS</span>
+                <span class="stat-value" id="fps">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Points</span>
+                <span class="stat-value" id="points">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Latency</span>
+                <span class="stat-value" id="latency">0 ms</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Camera</span>
+                <span class="stat-value" id="camera-status">No</span>
+            </div>
+            <div style="margin-top: 15px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 10px;">
+                <div class="stat-label" style="margin-bottom: 5px;">Point Size</div>
+                <input type="range" id="point-scale-range" min="1" max="50" value="10" style="width: 100%;">
+            </div>
+        </div>
+
+        <!-- Segmentation Panel -->
+        <div id="segments-panel"
+            style="position:absolute; top:70px; left:20px; pointer-events:auto; background:rgba(26,26,46,0.95); border-radius:12px; padding:15px; min-width:200px; max-width:280px; display:none;">
+            <div
+                style="font-size:11px; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:1px; margin-bottom:10px;">
+                Segments</div>
+            <div id="segments-list" style="max-height:200px; overflow-y:auto; margin-bottom:10px;">
+                <div style="color:#888; font-size:12px;">No segments yet</div>
+            </div>
+            <div style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
+                <div style="font-size:11px; color:rgba(255,255,255,0.5); margin-bottom:5px;">Background Brightness</div>
+                <input type="range" id="brightness-slider" min="0" max="100" value="100" style="width:100%;">
+            </div>
+        </div>
+
+        <div id="active-prompts"></div>
+
+        <div id="prompt-panel">
+            <input type="text" id="prompt-input" placeholder="Object...">
+            <button class="btn btn-primary" id="search-btn">🔍</button>
+            <button class="btn btn-secondary" id="load-scan-btn">📂</button>
+            <button class="btn btn-secondary" id="clear-btn">🗑️</button>
+        </div>
+
+        <div id="toast-container"></div>
+
+        <!-- Session Modal -->
+        <!-- Session Modal -->
+        <div id="session-modal-backdrop"
+            style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:200; pointer-events:auto; align-items:center; justify-content:center;">
+            <div id="session-modal-content"
+                style="background:rgba(26,26,46,0.95); border:1px solid rgba(255,255,255,0.1); border-radius:12px; padding:20px; width:320px; backdrop-filter:blur(10px); box-shadow:0 10px 40px rgba(0,0,0,0.8);">
+                <div
+                    style="display:flex; justify-content:space-between; margin-bottom:15px; border-bottom:1px solid rgba(255,255,255,0.1); padding-bottom:10px;">
+                    <h3 style="color:#fff; font-size:16px;">Load Scan</h3>
+                    <span id="close-modal" style="cursor:pointer; color:#aaa; font-size:18px;">&times;</span>
+                </div>
+                <div id="session-list"
+                    style="max-height:300px; overflow-y:auto; display:flex; flex-direction:column; gap:8px;">
+                    <div style="color:#aaa; font-size:13px; text-align:center;">Loading...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { FusionRenderer, STACConnection } from './js/FusionRenderer.js';
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const WS_URL = `${protocol}//${window.location.hostname}:8765/ws/viewer`;
+
+        let renderer = null;
+        let connection = null;
+        let receivedChunks = 0;
+
+        const container = document.getElementById('canvas-container');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const chunkCounter = document.getElementById('chunk-counter');
+        const statsPanel = document.getElementById('stats-panel');
+        const toggleStatsBtn = document.getElementById('toggle-stats-btn');
+        const promptInput = document.getElementById('prompt-input');
+        const searchBtn = document.getElementById('search-btn');
+        const clearBtn = document.getElementById('clear-btn');
+        const fpsDisplay = document.getElementById('fps');
+        const pointsDisplay = document.getElementById('points');
+        const latencyDisplay = document.getElementById('latency');
+        const cameraDisplay = document.getElementById('camera-status');
+        const sessionInfoDisplay = document.getElementById('session-info');
+        // Fix: correctly select range input
+        const pointScaleRange = document.getElementById('point-scale-range');
+
+        document.addEventListener('DOMContentLoaded', init);
+
+        function init() {
+            renderer = new FusionRenderer(container, {
+                backgroundColor: 0x0a0a0f,
+                pointScale: 10,
+                maxPoints: 10000000 // Aumentado para mayor capacidad
+            });
+
+            renderer.onStats = (stats) => {
+                fpsDisplay.textContent = stats.fps;
+                pointsDisplay.textContent = formatNumber(stats.points);
+            };
+
+            // Segmentation panel updates
+            const segmentsPanel = document.getElementById('segments-panel');
+            const segmentsList = document.getElementById('segments-list');
+            const brightnessSlider = document.getElementById('brightness-slider');
+
+            renderer.onSegmentUpdate = (objects) => {
+                if (!objects || Object.keys(objects).length === 0) {
+                    segmentsPanel.style.display = 'none';
+                    return;
+                }
+
+                segmentsPanel.style.display = 'block';
+                segmentsList.innerHTML = '';
+
+                for (const [key, obj] of Object.entries(objects)) {
+                    const item = document.createElement('div');
+                    item.style.cssText = 'display:flex; align-items:center; gap:8px; margin-bottom:6px; font-size:12px;';
+
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.checked = obj.visible;
+                    checkbox.style.cursor = 'pointer';
+                    checkbox.onchange = () => renderer.setObjectHighlight(obj.label, checkbox.checked);
+
+                    const label = document.createElement('span');
+                    label.textContent = obj.label;
+                    label.style.color = obj.visible ? '#00d4ff' : '#888';
+
+                    const count = document.createElement('span');
+                    count.textContent = `(${obj.totalPoints.toLocaleString()})`;
+                    count.style.cssText = 'color:#666; font-size:10px;';
+
+                    item.appendChild(checkbox);
+                    item.appendChild(label);
+                    item.appendChild(count);
+                    segmentsList.appendChild(item);
+                }
+            };
+
+            brightnessSlider.oninput = () => {
+                renderer.setBackgroundBrightness(brightnessSlider.value / 100);
+            };
+
+            renderer.start();
+            connection = new STACConnection(WS_URL, renderer);
+
+            connection.onStatusChange = (connected) => {
+                statusDot.className = connected ? 'status-dot connected' : 'status-dot';
+                statusText.textContent = connected ? 'Connected' : 'Disconnected';
+                if (!connected) receivedChunks = 0;
+            };
+
+            // Detectar cada vez que llega un chunk binario
+            const originalUpdate = renderer.updateFromBinary;
+            renderer.updateFromBinary = function (buffer) {
+                originalUpdate.apply(this, [buffer]);
+                receivedChunks++;
+                updateChunkUI();
+            };
+
+            connection.onMessage = (data) => {
+                if (data.type === 'status') {
+                    cameraDisplay.textContent = data.camera_connected ? 'Yes' : 'No';
+                    cameraDisplay.style.color = data.camera_connected ? '#00ff88' : '#ff4444';
+                    // Actualizar cola total desde el servidor
+                    if (data.chunk_queue !== undefined) {
+                        window.totalQueue = data.chunk_queue;
+                        updateChunkUI();
+                    }
+                } else if (data.type === 'session_info') {
+                    // Update Session Info UI
+                    sessionInfoDisplay.textContent = `${data.session_id} (${data.mode})`;
+                    window.totalSessionChunks = data.total_chunks;
+                    updateChunkUI();
+
+                    if (data.mode === 'Offline') {
+                        statusText.textContent = 'Replay';
+                        statusDot.className = 'status-dot';
+                        statusDot.style.background = '#00d4ff'; // Blue for replay
+                        statusDot.style.boxShadow = '0 0 8px #00d4ff';
+                    }
+                } else if (data.type === 'mode_ready') {
+                    // Mode change completed - update UI
+                    if (typeof updateModeUI === 'function') {
+                        updateModeUI(data.mode, data.mode === 'online');
+                    }
+                } else if (data.type === 'info' && data.message && data.message.includes('DA3')) {
+                    // DA3 loading status
+                    const modeStatusEl = document.getElementById('mode-status');
+                    if (modeStatusEl) {
+                        modeStatusEl.textContent = 'Loading...';
+                        modeStatusEl.style.color = '#ffaa00';
+                    }
+                }
+            };
+
+            connection.connect();
+
+            // Toggle Stats Logic
+            toggleStatsBtn.addEventListener('click', () => {
+                const isVisible = statsPanel.style.display === 'block';
+                statsPanel.style.display = isVisible ? 'none' : 'block';
+                toggleStatsBtn.style.background = isVisible ? 'rgba(26, 26, 46, 0.9)' : '#7b2ff7';
+            });
+
+            // Mode Toggle Logic
+            const modeOfflineBtn = document.getElementById('mode-offline-btn');
+            const modeOnlineBtn = document.getElementById('mode-online-btn');
+            const modeStatus = document.getElementById('mode-status');
+            let currentMode = 'offline';
+
+            async function setMode(mode) {
+                modeStatus.textContent = 'Switching...';
+                modeStatus.style.color = '#ffaa00';
+
+                try {
+                    const res = await fetch(`/mode/${mode}`, { method: 'POST' });
+                    const data = await res.json();
+
+                    currentMode = data.mode;
+                    updateModeUI(data.mode, data.da3_loaded);
+                } catch (e) {
+                    console.error('Mode switch failed:', e);
+                    modeStatus.textContent = 'Error';
+                    modeStatus.style.color = '#ff4444';
+                }
+            }
+
+            function updateModeUI(mode, da3Loaded) {
+                if (mode === 'online') {
+                    modeOnlineBtn.style.background = '#00d4ff';
+                    modeOnlineBtn.style.color = '#000';
+                    modeOfflineBtn.style.background = 'rgba(255,255,255,0.1)';
+                    modeOfflineBtn.style.color = '#888';
+                    modeStatus.textContent = da3Loaded ? '✓ Ready' : 'Loading...';
+                    modeStatus.style.color = da3Loaded ? '#00ff88' : '#ffaa00';
+                } else {
+                    modeOfflineBtn.style.background = '#7b2ff7';
+                    modeOfflineBtn.style.color = '#fff';
+                    modeOnlineBtn.style.background = 'rgba(255,255,255,0.1)';
+                    modeOnlineBtn.style.color = '#888';
+                    modeStatus.textContent = 'Ready';
+                    modeStatus.style.color = '#888';
+                }
+            }
+
+            modeOfflineBtn.addEventListener('click', () => setMode('offline'));
+            modeOnlineBtn.addEventListener('click', () => setMode('online'));
+
+            // Fetch initial mode state
+            fetch('/mode').then(r => r.json()).then(data => {
+                updateModeUI(data.mode, data.da3_loaded);
+            });
+
+            searchBtn.addEventListener('click', submitPrompt);
+            promptInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') submitPrompt();
+            });
+            clearBtn.addEventListener('click', () => {
+                connection.sendClear();
+                receivedChunks = 0;
+                window.totalSessionChunks = 0; // Reset offline meta
+                sessionInfoDisplay.textContent = "Live Session";
+                updateChunkUI();
+            });
+
+            // Session Modal Logic
+            const loadScanBtn = document.getElementById('load-scan-btn');
+            const sessionBackdrop = document.getElementById('session-modal-backdrop');
+            const closeModal = document.getElementById('close-modal');
+            const sessionList = document.getElementById('session-list');
+
+            function toggleModal(show) {
+                sessionBackdrop.style.display = show ? 'flex' : 'none';
+            }
+
+            loadScanBtn.addEventListener('click', async () => {
+                toggleModal(true);
+                sessionList.innerHTML = '<div style="color:#aaa; text-align:center;">Loading...</div>';
+
+                try {
+                    const res = await fetch('/sessions');
+                    const sessions = await res.json();
+                    sessionList.innerHTML = '';
+
+                    if (sessions.length === 0) {
+                        sessionList.innerHTML = '<div style="color:#aaa; text-align:center;">No sessions found</div>';
+                        return;
+                    }
+
+                    sessions.forEach(s => {
+                        const item = document.createElement('div');
+                        item.style = 'padding:12px; background:rgba(255,255,255,0.05); border-radius:8px; cursor:pointer; font-size:13px; transition:all 0.2s; border:1px solid transparent;';
+                        item.textContent = s.date;
+
+                        item.onmouseover = () => {
+                            item.style.background = 'rgba(255,255,255,0.1)';
+                            item.style.borderColor = 'rgba(0, 212, 255, 0.3)';
+                        };
+                        item.onmouseout = () => {
+                            item.style.background = 'rgba(255,255,255,0.05)';
+                            item.style.borderColor = 'transparent';
+                        };
+
+                        item.onclick = (e) => {
+                            e.stopPropagation(); // Prevent backdrop click logic
+                            if (connection) {
+                                connection.send({ type: 'load_session', session_id: s.id });
+                                toggleModal(false);
+                                showToast(`Loading ${s.id}...`);
+                            }
+                        };
+                        sessionList.appendChild(item);
+                    });
+                } catch (e) {
+                    sessionList.innerHTML = '<div style="color:#f55;">Error loading sessions</div>';
+                }
+            });
+
+            closeModal.addEventListener('click', () => toggleModal(false));
+
+            // Close on backdrop click
+            sessionBackdrop.addEventListener('click', (e) => {
+                if (e.target === sessionBackdrop) {
+                    toggleModal(false);
+                }
+            });
+            pointScaleRange.addEventListener('input', (e) => {
+                const val = parseFloat(e.target.value);
+                if (renderer && renderer.material) renderer.material.uniforms.pointScale.value = val;
+            });
+
+            setInterval(() => {
+                latencyDisplay.textContent = `${connection.latency.toFixed(1)} ms`;
+            }, 1000);
+        }
+
+        function updateChunkUI() {
+            // Logic: If offline, use totalSessionChunks. If online, use queue + received (growing).
+            if (window.totalSessionChunks) {
+                chunkCounter.textContent = `Chunks: ${receivedChunks} / ${window.totalSessionChunks}`;
+            } else {
+                const queue = window.totalQueue || 0;
+                // Online: We don't know total. Just show received + queue pending
+                chunkCounter.textContent = `Chunks: ${receivedChunks} / ${receivedChunks + queue}`;
+            }
+        }
+
+        function submitPrompt() {
+            const text = promptInput.value.trim();
+            if (!text) return;
+            connection.sendPrompt(text);
+            promptInput.value = '';
+            showToast(`Searching: ${text}`);
+        }
+
+        function formatNumber(num) {
+            if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+            if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+            return num.toString();
+        }
+
+        function showToast(message) {
+            const toast = document.createElement('div');
+            toast.className = 'toast';
+            toast.textContent = message;
+            document.getElementById('toast-container').appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+        setInterval(() => {
+            if (connection && connection.isConnected) connection.requestStatus();
+        }, 2000);
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>STAC-BUILD | XR Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #000;
+            color: #fff;
+            height: 100vh;
+            overflow: hidden;
+            touch-action: none;
+        }
+
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Minimal UI for immersive experience */
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        /* Corner status */
+        #status-corner {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-size: 12px;
+            backdrop-filter: blur(5px);
+        }
+
+        .status-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+
+        .status-row:last-child {
+            margin-bottom: 0;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #ff4444;
+        }
+
+        .status-dot.connected {
+            background: #00ff88;
+            box-shadow: 0 0 6px #00ff88;
+        }
+
+        /* Center reticle */
+        #reticle {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 30px;
+            height: 30px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+        }
+
+        #reticle::before,
+        #reticle::after {
+            content: '';
+            position: absolute;
+            background: rgba(255, 255, 255, 0.5);
+        }
+
+        #reticle::before {
+            width: 10px;
+            height: 2px;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        #reticle::after {
+            width: 2px;
+            height: 10px;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        /* Mode indicator */
+        #mode-indicator {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(123, 47, 247, 0.8);
+            padding: 8px 14px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        /* Control buttons */
+        #controls {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 16px;
+            pointer-events: auto;
+        }
+
+        .xr-btn {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            font-size: 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+            backdrop-filter: blur(5px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .xr-btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+            border-color: rgba(255, 255, 255, 0.5);
+        }
+
+        .xr-btn:active {
+            transform: scale(0.95);
+        }
+
+        .xr-btn.active {
+            background: rgba(0, 212, 255, 0.3);
+            border-color: #00d4ff;
+        }
+
+        /* Gyro permission prompt */
+        #gyro-prompt {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(26, 26, 46, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 16px;
+            padding: 30px;
+            text-align: center;
+            max-width: 300px;
+            pointer-events: auto;
+        }
+
+        #gyro-prompt h3 {
+            margin-bottom: 12px;
+            font-size: 18px;
+        }
+
+        #gyro-prompt p {
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 14px;
+            margin-bottom: 20px;
+        }
+
+        #gyro-prompt button {
+            padding: 12px 30px;
+            font-size: 14px;
+            font-weight: 600;
+            background: linear-gradient(135deg, #00d4ff, #7b2ff7);
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            cursor: pointer;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="canvas-container"></div>
+
+    <div id="ui-overlay">
+        <!-- Status corner -->
+        <div id="status-corner">
+            <div class="status-row">
+                <div class="status-dot" id="status-dot"></div>
+                <span id="status-text">Connecting...</span>
+            </div>
+            <div class="status-row">
+                <span style="opacity: 0.6;">Points:</span>
+                <span id="points">0</span>
+            </div>
+        </div>
+
+        <!-- Mode indicator -->
+        <div id="mode-indicator">XR Mode</div>
+
+        <!-- Center reticle -->
+        <div id="reticle"></div>
+
+        <!-- Control buttons -->
+        <div id="controls">
+            <button class="xr-btn" id="gyro-btn" title="Toggle Gyroscope">
+                📱
+            </button>
+            <button class="xr-btn" id="reset-btn" title="Reset View">
+                🔄
+            </button>
+            <button class="xr-btn" id="fullscreen-btn" title="Fullscreen">
+                ⛶
+            </button>
+        </div>
+
+        <!-- Gyro permission prompt -->
+        <div id="gyro-prompt" class="hidden">
+            <h3>Enable Motion Controls?</h3>
+            <p>Allow device orientation access for immersive XR experience</p>
+            <button id="enable-gyro-btn">Enable</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from './js/libs/three.module.js';
+        import { FusionRenderer, STACConnection } from './js/FusionRenderer.js';
+
+        // Configuration
+        const WS_URL = `ws://${window.location.hostname}:8765/ws/xr`;
+
+        // State
+        let renderer = null;
+        let connection = null;
+        let gyroEnabled = false;
+        let initialEuler = null;
+        let deviceQuaternion = new THREE.Quaternion();
+        let screenOrientation = 0;
+
+        // DOM Elements
+        const container = document.getElementById('canvas-container');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const pointsDisplay = document.getElementById('points');
+        const modeIndicator = document.getElementById('mode-indicator');
+        const gyroBtn = document.getElementById('gyro-btn');
+        const resetBtn = document.getElementById('reset-btn');
+        const fullscreenBtn = document.getElementById('fullscreen-btn');
+        const gyroPrompt = document.getElementById('gyro-prompt');
+        const enableGyroBtn = document.getElementById('enable-gyro-btn');
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', init);
+
+        function init() {
+            // Create renderer with XR-optimized settings
+            renderer = new FusionRenderer(container, {
+                backgroundColor: 0x000000,
+                pointScale: 10,
+                maxPoints: 1000000 // Lower for mobile performance
+            });
+
+            // Stats callback
+            renderer.onStats = (stats) => {
+                pointsDisplay.textContent = formatNumber(stats.points);
+            };
+
+            // Position camera for first-person view
+            renderer.setCameraPosition(0, 1.6, 0); // Eye height
+            renderer.lookAt(0, 1.6, -5);
+
+            // Disable orbit controls for XR mode
+            renderer.controls.enabled = false;
+
+            // Start render loop
+            renderer.start();
+
+            // Create WebSocket connection
+            connection = new STACConnection(WS_URL, renderer);
+
+            connection.onStatusChange = (connected) => {
+                if (connected) {
+                    statusDot.classList.add('connected');
+                    statusText.textContent = 'Live';
+                } else {
+                    statusDot.classList.remove('connected');
+                    statusText.textContent = 'Offline';
+                }
+            };
+
+            connection.connect();
+
+            // Event listeners
+            gyroBtn.addEventListener('click', toggleGyro);
+            resetBtn.addEventListener('click', resetView);
+            fullscreenBtn.addEventListener('click', toggleFullscreen);
+            enableGyroBtn.addEventListener('click', requestGyroPermission);
+
+            // Handle orientation changes
+            window.addEventListener('orientationchange', () => {
+                screenOrientation = window.orientation || 0;
+            });
+
+            // Touch controls for non-gyro mode
+            setupTouchControls();
+
+            // Check for gyro support
+            if (window.DeviceOrientationEvent) {
+                // iOS 13+ requires permission
+                if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    // Will show prompt
+                } else {
+                    // Android or older iOS - can enable directly
+                    gyroBtn.classList.add('available');
+                }
+            }
+        }
+
+        function toggleGyro() {
+            if (gyroEnabled) {
+                disableGyro();
+            } else {
+                // Check if we need to request permission (iOS)
+                if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    gyroPrompt.classList.remove('hidden');
+                } else {
+                    enableGyro();
+                }
+            }
+        }
+
+        async function requestGyroPermission() {
+            gyroPrompt.classList.add('hidden');
+
+            try {
+                const permission = await DeviceOrientationEvent.requestPermission();
+                if (permission === 'granted') {
+                    enableGyro();
+                }
+            } catch (error) {
+                console.error('Gyro permission error:', error);
+            }
+        }
+
+        function enableGyro() {
+            gyroEnabled = true;
+            gyroBtn.classList.add('active');
+            modeIndicator.textContent = 'Gyro Active';
+
+            // Reset initial orientation
+            initialEuler = null;
+
+            window.addEventListener('deviceorientation', handleOrientation);
+        }
+
+        function disableGyro() {
+            gyroEnabled = false;
+            gyroBtn.classList.remove('active');
+            modeIndicator.textContent = 'XR Mode';
+
+            window.removeEventListener('deviceorientation', handleOrientation);
+
+            // Re-enable touch controls
+            renderer.controls.enabled = false;
+        }
+
+        function handleOrientation(event) {
+            if (!gyroEnabled) return;
+
+            const alpha = event.alpha || 0; // Compass direction (0-360)
+            const beta = event.beta || 0;   // Front-back tilt (-180 to 180)
+            const gamma = event.gamma || 0; // Left-right tilt (-90 to 90)
+
+            // Convert to radians
+            const alphaRad = THREE.MathUtils.degToRad(alpha);
+            const betaRad = THREE.MathUtils.degToRad(beta);
+            const gammaRad = THREE.MathUtils.degToRad(gamma);
+
+            // Set initial orientation on first reading
+            if (initialEuler === null) {
+                initialEuler = { alpha: alphaRad, beta: betaRad, gamma: gammaRad };
+            }
+
+            // Calculate relative rotation
+            const relAlpha = alphaRad - initialEuler.alpha;
+            const relBeta = betaRad;
+            const relGamma = gammaRad;
+
+            // Create quaternion from device orientation
+            // The ZXY order matches typical device orientation
+            const euler = new THREE.Euler(relBeta, relAlpha, -relGamma, 'YXZ');
+            deviceQuaternion.setFromEuler(euler);
+
+            // Apply screen orientation offset
+            const screenRotation = new THREE.Quaternion();
+            screenRotation.setFromAxisAngle(
+                new THREE.Vector3(0, 0, 1),
+                -THREE.MathUtils.degToRad(screenOrientation)
+            );
+            deviceQuaternion.multiply(screenRotation);
+
+            // Apply to camera
+            renderer.camera.quaternion.copy(deviceQuaternion);
+        }
+
+        function resetView() {
+            if (gyroEnabled) {
+                initialEuler = null; // Will recalibrate on next reading
+            } else {
+                renderer.camera.position.set(0, 1.6, 0);
+                renderer.camera.lookAt(0, 1.6, -5);
+            }
+        }
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(err => {
+                    console.error('Fullscreen error:', err);
+                });
+            } else {
+                document.exitFullscreen();
+            }
+        }
+
+        function setupTouchControls() {
+            let touchStartX = 0;
+            let touchStartY = 0;
+            let cameraYaw = 0;
+            let cameraPitch = 0;
+
+            container.addEventListener('touchstart', (e) => {
+                if (gyroEnabled) return;
+                touchStartX = e.touches[0].clientX;
+                touchStartY = e.touches[0].clientY;
+            });
+
+            container.addEventListener('touchmove', (e) => {
+                if (gyroEnabled) return;
+                e.preventDefault();
+
+                const deltaX = e.touches[0].clientX - touchStartX;
+                const deltaY = e.touches[0].clientY - touchStartY;
+
+                touchStartX = e.touches[0].clientX;
+                touchStartY = e.touches[0].clientY;
+
+                // Rotate camera based on touch movement
+                const sensitivity = 0.005;
+                cameraYaw -= deltaX * sensitivity;
+                cameraPitch -= deltaY * sensitivity;
+
+                // Clamp pitch
+                cameraPitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, cameraPitch));
+
+                // Apply rotation
+                const euler = new THREE.Euler(cameraPitch, cameraYaw, 0, 'YXZ');
+                renderer.camera.quaternion.setFromEuler(euler);
+            }, { passive: false });
+        }
+
+        function formatNumber(num) {
+            if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+            if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+            return num.toString();
+        }
+
+        // Keep screen awake
+        let wakeLock = null;
+        async function requestWakeLock() {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                }
+            } catch (err) {
+                console.log('Wake lock error:', err);
+            }
+        }
+        requestWakeLock();
+
+        // Re-acquire wake lock on visibility change
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                requestWakeLock();
+            }
+        });
+    </script>
+</body>
+
+</html>
