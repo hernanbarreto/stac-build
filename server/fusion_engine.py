@@ -16,14 +16,16 @@ except ImportError:
     HAS_TORCH = False
     torch = None  # type: ignore
 
+from config import cfg
+
 
 @dataclass
 class CameraIntrinsics:
     """Camera intrinsic parameters."""
-    fx: float = 1000.0
-    fy: float = 1000.0
-    cx: float = 640.0
-    cy: float = 360.0
+    fx: float
+    fy: float
+    cx: float
+    cy: float
     
     def to_matrix(self) -> np.ndarray:
         """Convert to 3x3 intrinsics matrix."""
@@ -34,8 +36,8 @@ class CameraIntrinsics:
         ], dtype=np.float32)
     
     @classmethod
-    def from_resolution(cls, width: int, height: int, fx: float = 1000.0):
-        """Create intrinsics centered on image."""
+    def from_resolution(cls, width: int, height: int, fx: float):
+        """Create intrinsics centered on image. FX is required."""
         return cls(
             fx=fx,
             fy=fx,  # Assume square pixels
@@ -56,9 +58,9 @@ class FusionEngine:
     
     def __init__(self, 
                  intrinsics: Optional[CameraIntrinsics] = None,
-                 max_depth: float = 50.0,
-                 min_depth: float = 0.1,
-                 downsample_factor: int = 2):
+                 max_depth: float = None,
+                 min_depth: float = None,
+                 downsample_factor: int = None):
         """
         Initialize the fusion engine.
         
@@ -68,6 +70,11 @@ class FusionEngine:
             min_depth: Minimum depth to include (meters)
             downsample_factor: Spatial downsampling for performance
         """
+        fusion_cfg = cfg.get("fusion", {})
+        if max_depth is None: max_depth = fusion_cfg.get("max_depth", 50.0)
+        if min_depth is None: min_depth = fusion_cfg.get("min_depth", 0.1)
+        if downsample_factor is None: downsample_factor = fusion_cfg.get("downsample_factor", 2)
+
         self.intrinsics = intrinsics
         self.max_depth = max_depth
         self.min_depth = min_depth
@@ -78,7 +85,7 @@ class FusionEngine:
         
         # Accumulation buffer (for SLAM-like behavior)
         self._accumulated_points = []
-        self._max_accumulated_frames = 30
+        self._max_accumulated_frames = fusion_cfg.get("buffer_size", 30)
     
     def _get_pixel_coords(self, height: int, width: int) -> Tuple[np.ndarray, np.ndarray]:
         """

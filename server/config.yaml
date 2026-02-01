@@ -1,0 +1,130 @@
+# --- Server Settings ---
+server:
+  host: "0.0.0.0"
+  port: 8765
+  static_dir: "../static"  # Relative to server directory
+  chunk_size: 30
+  chunk_overlap: 22 # Aggressive overlap (73%) to prevent drift
+  # Derived: chunk_step = chunk_size - chunk_overlap = 8 frames between chunk starts
+
+# --- Paths ---
+paths:
+  # Base directory for DA3 models/weights
+  da3_weights_dir: "/home/hernan/Depth-Anything-3/da3_streaming/weights"
+  # Directory where scan sessions are stored
+  scans_dir: "scans"
+  # Default output directory name within each session
+  output_dir_name: "output"
+
+# --- Models ---
+models:
+  depth:
+    # Model Architecture/Name
+    # Options: 
+    #   - "depth-anything/DA3-LARGE-1.1" (Efficient, fit for RTX 3060)
+    #   - "depth-anything/DA3NESTED-GIANT-LARGE-1.1" (High Quality, requires CPU or High VRAM)
+    #name: "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
+    name: "depth-anything/DA3-LARGE-1.1"
+    
+    # Checkpoint filename (must exist in da3_weights_dir)
+    #weights_file: "da3nested-giant-large-1.1.safetensors"
+    weights_file: "da3-large-1.1.safetensors"
+    # Config file
+    config_file: "config.json"
+    
+    # Device: "cuda" or "cpu"
+    #device: "cpu" 
+    device: "cuda"
+    
+    # Advanced Inference Settings (Formerly Hardcoded)
+    inference_precision: "float16"        # float16 or float32
+    torch_compile_mode: "reduce-overhead" # reduce-overhead, max-autotune, or default
+    ref_view_strategy: "saddle_balanced"  # saddle_balanced, etc.
+    
+
+  # DA3 Streaming Specific Settings
+  da3:
+    loop_chunk_size: 20  # Images of loop chunk = 2 * loop_chunk_size
+    pointcloud_save:
+      conf_threshold_coef: 0.75
+      sample_ratio: 0.35
+
+  segmentation:
+    # SAM3 Model
+    model_type: "vit_b" # Options: vit_b, vit_l, vit_h
+    device: "cuda"
+
+    # Inference parameters
+    keyframe_interval: 2
+    max_search_frames: 300
+    points_per_side: 32
+    pred_iou_thresh: 0.88
+    stability_score_thresh: 0.95
+
+    # Prompting Strategy (Formerly Hardcoded)
+    prompt_search_frames: [0, 15] # Frames to apply prompt to (Relative to chunk start)
+    
+
+# --- Point Cloud Generation ---
+point_cloud:
+  generation:
+    sample_ratio: 0.15
+    conf_threshold_coef: 0.75
+    keyframe_interval: 2
+    min_depth: 0.1
+    max_depth: 100.0
+    # Dynamic Thresholding Parameters (Formerly Hardcoded)
+    dynamic_threshold_coef: 0.1
+    dynamic_threshold_min: 0.000001 # 1e-6
+
+# --- Alignment (SIM3 & Auto-Leveling) ---
+alignment:
+  ransac:
+    delta: 0.1
+    max_iters: 2000
+    tolerance: 1e-9
+  
+  # Method: "sim3" (re-opt scale) or "scale+se3" (fix scale from ransac)
+  method: "scale+se3"
+
+  reference_chunk_id: 0
+
+  # Auto-leveling (Floor Detection)
+  auto_leveling:
+    enabled: true
+    ransac_iters: 500
+    ransac_threshold: 0.05
+    min_points: 100
+    sample_ratio: 0.1
+    gravity_check_threshold: 0.5
+    target_gravity: [0.0, 1.0, 0.0]
+
+# --- Storage & Filtering ---
+storage:
+  jpeg_quality: 95
+  
+  outlier_removal:
+    enabled: true
+    eps: 0.05
+    min_samples: 10
+    sor_k: 20
+    sor_std_ratio: 2.0
+
+# --- Fusion Engine (Visualization) ---
+fusion:
+  min_depth: 0.1
+  max_depth: 50.0
+  downsample_factor: 2
+  buffer_size: 30
+  intrinsics:
+    fx: 1000.0
+    fy: 1000.0
+    cx: 640.0
+    cy: 360.0
+
+# --- Visualization Assets ---
+visualization:
+  segment_colors: [
+    "#FFFF00", "#00FF00", "#FF00FF", "#00FFFF", 
+    "#FF8000", "#8000FF", "#FF0080", "#0080FF"
+  ]

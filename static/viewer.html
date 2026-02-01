@@ -297,7 +297,7 @@
             </div>
             <div style="margin-top: 15px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 10px;">
                 <div class="stat-label" style="margin-bottom: 5px;">Point Size</div>
-                <input type="range" id="point-scale-range" min="1" max="50" value="10" style="width: 100%;">
+                <input type="range" id="point-scale-range" min="1" max="50" value="1" style="width: 100%;">
             </div>
         </div>
 
@@ -375,11 +375,13 @@
 
         document.addEventListener('DOMContentLoaded', init);
 
+
+
         function init() {
             renderer = new FusionRenderer(container, {
                 backgroundColor: 0x0a0a0f,
-                pointScale: 10,
-                maxPoints: 10000000 // Aumentado para mayor capacidad
+                pointScale: 1.0, // Set to same default
+                maxPoints: 50000000 // 80 Million
             });
 
             renderer.onStats = (stats) => {
@@ -579,8 +581,83 @@
 
                     sessions.forEach(s => {
                         const item = document.createElement('div');
-                        item.style = 'padding:12px; background:rgba(255,255,255,0.05); border-radius:8px; cursor:pointer; font-size:13px; transition:all 0.2s; border:1px solid transparent;';
-                        item.textContent = s.date;
+                        item.style = 'padding:12px; background:rgba(255,255,255,0.05); border-radius:8px; font-size:13px; transition:all 0.2s; border:1px solid transparent; display:flex; justify-content:space-between; align-items:center; gap:8px;';
+
+                        // Session name
+                        const nameSpan = document.createElement('span');
+                        nameSpan.textContent = s.date;
+                        nameSpan.style = 'flex:1; cursor:pointer;';
+                        nameSpan.title = 'Click to load session';
+                        item.appendChild(nameSpan);
+
+                        // Buttons container
+                        const btns = document.createElement('div');
+                        btns.style = 'display:flex; gap:6px;';
+
+                        // Load button
+                        const loadBtn = document.createElement('button');
+                        loadBtn.innerHTML = '📂';
+                        loadBtn.title = 'Cargar sesión';
+                        loadBtn.style = 'background:rgba(0,212,255,0.2); border:1px solid rgba(0,212,255,0.4); border-radius:4px; padding:4px 8px; cursor:pointer; color:white; font-size:14px;';
+                        loadBtn.onclick = async (e) => {
+                            e.stopPropagation();
+                            if (connection) {
+                                connection.send({ type: 'load_session', session_id: s.id });
+                                toggleModal(false);
+                                showToast(`Loading ${s.id}...`);
+                                // Fetch unified segments
+                                try {
+                                    const segRes = await fetch(`/segments/${s.id}`);
+                                    const segmentsData = await segRes.json();
+                                    if (renderer && segmentsData && (segmentsData.object_types || segmentsData.chunk_id)) {
+                                        renderer.applySegmentation(segmentsData);
+                                    }
+                                } catch (err) {
+                                    console.error("Error loading segments:", err);
+                                }
+                            }
+                        };
+                        btns.appendChild(loadBtn);
+
+                        // Reconstruct button (geometry only)
+                        const reconstructBtn = document.createElement('button');
+                        reconstructBtn.innerHTML = '🔧';
+                        reconstructBtn.title = 'Reconstruir geometría (sin segmentación)';
+                        reconstructBtn.style = 'background:rgba(255,165,0,0.2); border:1px solid rgba(255,165,0,0.4); border-radius:4px; padding:4px 8px; cursor:pointer; color:white; font-size:14px;';
+                        reconstructBtn.onclick = async (e) => {
+                            e.stopPropagation();
+                            if (connection) {
+                                if (!confirm('¿Reconstruir geometría para esta sesión? Esto puede tardar varios minutos.')) return;
+                                connection.send({ type: 'reconstruct_geometry', session_id: s.id });
+                                toggleModal(false);
+                                showToast(`Reconstructing geometry for ${s.id}...`);
+                            }
+                        };
+                        btns.appendChild(reconstructBtn);
+
+                        // Delete button
+                        const deleteBtn = document.createElement('button');
+                        deleteBtn.innerHTML = '🗑️';
+                        deleteBtn.title = 'Borrar sesión';
+                        deleteBtn.style = 'background:rgba(255,68,68,0.2); border:1px solid rgba(255,68,68,0.4); border-radius:4px; padding:4px 8px; cursor:pointer; color:white; font-size:14px;';
+                        deleteBtn.onclick = async (e) => {
+                            e.stopPropagation();
+                            if (!confirm(`¿Borrar sesión ${s.id}? Esta acción no se puede deshacer.`)) return;
+                            try {
+                                const res = await fetch(`/sessions/${s.id}`, { method: 'DELETE' });
+                                if (res.ok) {
+                                    showToast(`Session ${s.id} deleted.`);
+                                    loadSessions(); // Refresh list
+                                } else {
+                                    showToast('Error deleting session.');
+                                }
+                            } catch (err) {
+                                showToast('Error deleting session.');
+                            }
+                        };
+                        btns.appendChild(deleteBtn);
+
+                        item.appendChild(btns);
 
                         item.onmouseover = () => {
                             item.style.background = 'rgba(255,255,255,0.1)';
@@ -591,28 +668,9 @@
                             item.style.borderColor = 'transparent';
                         };
 
-                        item.onclick = async (e) => {
-                            e.stopPropagation(); // Prevent backdrop click logic
-                            if (connection) {
-                                connection.send({ type: 'load_session', session_id: s.id });
-                                toggleModal(false);
-                                showToast(`Loading ${s.id}...`);
+                        // Clicking the name itself also loads
+                        nameSpan.onclick = loadBtn.onclick;
 
-                                // Fetch unified segments
-                                try {
-                                    console.log(`[Viewer] Fetching segments for ${s.id}...`);
-                                    const segRes = await fetch(`/segments/${s.id}`);
-                                    const segmentsData = await segRes.json();
-                                    console.log(`[Viewer] Segments loaded`, segmentsData);
-
-                                    if (renderer && segmentsData && (segmentsData.object_types || segmentsData.chunk_id)) {
-                                        renderer.applySegmentation(segmentsData);
-                                    }
-                                } catch (err) {
-                                    console.error("Error loading segments:", err);
-                                }
-                            }
-                        };
                         sessionList.appendChild(item);
                     });
                 } catch (e) {

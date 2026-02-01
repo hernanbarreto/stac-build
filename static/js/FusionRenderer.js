@@ -80,11 +80,11 @@ export class FusionRenderer {
         this.container = container;
         this.options = {
             backgroundColor: 0x1a1a2e,
-            pointScale: 10,
-            minPointSize: 1,
-            maxPointSize: 15,
+            pointScale: 1.0,  // Reduced from 5
+            minPointSize: 1.0, // Smallest visible point
+            maxPointSize: 5.0, // Reduced max size
             highlightIntensity: 1.0,
-            maxPoints: 10000000, // 5 Million points buffer
+            maxPoints: 50000000, // 80 Million (Safe for browser <2GB limit)
             ...options
         };
 

@@ -19,9 +19,12 @@ sys.path.insert(0, str(DA3_STREAMING))
 
 try:
     from loop_utils.alignment_torch import robust_weighted_estimate_sim3_torch
+    from loop_utils.sim3utils import precompute_scale_chunks_with_depth
     DA3_IMPORTS_OK = True
 except ImportError:
     DA3_IMPORTS_OK = False
+
+from config import cfg
 
 def depth_to_point_cloud_vectorized(depth, intrinsics, extrinsics, device=None):
     depth_tensor = torch.tensor(depth, dtype=torch.float32)
@@ -60,12 +63,15 @@ def depth_to_point_cloud_vectorized(depth, intrinsics, extrinsics, device=None):
 
     return point_cloud_world.float().cpu().numpy()
 
-def weighted_align_point_maps(point_map1, conf1, point_map2, conf2, conf_threshold):
+def weighted_align_point_maps(point_map1, conf1, point_map2, conf2, conf_threshold, precompute_scale=None):
     # Force float32 to avoid bfloat16 numpy incompatibility
     point_map1 = np.asarray(point_map1, dtype=np.float32)
     point_map2 = np.asarray(point_map2, dtype=np.float32)
     conf1 = np.asarray(conf1, dtype=np.float32)
     conf2 = np.asarray(conf2, dtype=np.float32)
+    
+    if precompute_scale is not None:
+        point_map2 = point_map2 * precompute_scale
     
     b = min(point_map1.shape[0], point_map2.shape[0])
     aligned_points1, aligned_points2, confidence_weights = [], [], []
@@ -86,10 +92,19 @@ def weighted_align_point_maps(point_map1, conf1, point_map2, conf2, conf_thresho
     all_weights = np.concatenate(confidence_weights, axis=0)
 
     if DA3_IMPORTS_OK:
-        return robust_weighted_estimate_sim3_torch(
+        align_method = cfg["alignment"]["method"]
+        s_refine, R, t = robust_weighted_estimate_sim3_torch(
             all_pts2.astype(np.float32), all_pts1.astype(np.float32), all_weights.astype(np.float32),
-            delta=0.1, max_iters=20, tol=1e-9, align_method="sim3",
+            delta=cfg["alignment"]["ransac"]["delta"],
+            max_iters=cfg["alignment"]["ransac"]["max_iters"],
+            tol=cfg["alignment"]["ransac"]["tolerance"],
+            align_method=align_method,
         )
+        
+        # Combine scales: final_s = s_pre * s_refine
+        final_s = s_refine * (precompute_scale if precompute_scale is not None else 1.0)
+        return final_s, R, t
+
     return 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
 
 @dataclass
@@ -124,22 +139,71 @@ class AlignmentManager:
             print("[AlignmentManager] Reset")
     
     def add_chunk(self, chunk_result) -> Optional[AlignedChunk]:
+        """
+        Add a pre-aligned chunk from ChunkProcessor.
+        ChunkProcessor now handles alignment via DA3_Streaming.
+        AlignmentManager only applies gravity correction.
+        """
         with self.lock:
             chunk_id = len(self.chunk_data_list)
             chunk_data = {
                 'depths': chunk_result.depths, 'confs': chunk_result.confs,
                 'intrinsics': chunk_result.intrinsics, 'extrinsics': chunk_result.extrinsics,
                 'images': chunk_result.images, 'frame_count': chunk_result.frame_count,
-                 # Key fix: Pass segmentation masks!
                 'masks': chunk_result.segmentation_masks
             }
             self.chunk_data_list.append(chunk_data)
-            
+
+            # ChunkProcessor provides pre-aligned point cloud with SIM3 transform
+            # We just need to apply gravity correction on first chunk
             if chunk_id == 0:
                 self._compute_initial_leveling(chunk_data)
-                return self._add_first_chunk(chunk_data)
+                # Apply gravity correction to the pre-generated point cloud
+                if chunk_result.point_cloud is not None:
+                    point_cloud = self._apply_gravity_correction(chunk_result.point_cloud)
+                else:
+                    # Fallback if point cloud not yet generated
+                    point_cloud = self._generate_point_cloud(
+                        chunk_data, *self.gravity_correction, return_validity_info=False
+                    )
+
+                aligned = AlignedChunk(chunk_id=0, point_cloud=point_cloud, sample_indices=None)
+                self.aligned_chunks.append(aligned)
+                return aligned
             else:
-                return self._align_to_previous(chunk_data, chunk_id)
+                # Chunks after first: already aligned by ChunkProcessor
+                # Just apply gravity correction
+                if chunk_result.point_cloud is not None:
+                    point_cloud = self._apply_gravity_correction(chunk_result.point_cloud)
+                else:
+                    # Fallback: generate with identity transform + gravity
+                    s_g, R_g, t_g = self.gravity_correction
+                    point_cloud = self._generate_point_cloud(
+                        chunk_data, s_g, R_g, t_g, return_validity_info=False
+                    )
+
+                aligned = AlignedChunk(chunk_id=chunk_id, point_cloud=point_cloud, sample_indices=None)
+                self.aligned_chunks.append(aligned)
+                return aligned
+
+    def _apply_gravity_correction(self, point_cloud: np.ndarray) -> np.ndarray:
+        """
+        Apply gravity correction to an already aligned point cloud.
+        point_cloud: [N, 6] (XYZ + RGB)
+        """
+        if point_cloud is None or len(point_cloud) == 0:
+            return point_cloud
+
+        s_g, R_g, t_g = self.gravity_correction
+
+        # Extract points
+        points = point_cloud[:, :3]
+
+        # Apply transform: P' = s * (R @ P) + t
+        points_corrected = s_g * (points @ R_g.T) + t_g
+
+        # Recombine with colors
+        return np.concatenate([points_corrected, point_cloud[:, 3:]], axis=1).astype(np.float32)
 
     def _compute_initial_leveling(self, chunk_data):
         """
@@ -148,12 +212,31 @@ class AlignmentManager:
         """
         print("[AlignmentManager] Auto-leveling Chunk 0...")
         
+        # Load Config - STRICT ACCESS (No defaults)
+        # User requested elimination of hardcoded fallbacks.
+        if "alignment" not in cfg or "auto_leveling" not in cfg["alignment"]:
+            print("[AlignmentManager] ⚠️ Config missing 'alignment.auto_leveling'. Skipping.")
+            return
+
+        al_cfg = cfg["alignment"]["auto_leveling"]
+        
+        if not al_cfg["enabled"]:
+             print("[AlignmentManager] Auto-leveling disabled in config.")
+             return
+
+        sample_ratio = al_cfg["sample_ratio"]
+        min_points_ransac = al_cfg["min_points"]
+        ransac_iters = al_cfg["ransac_iters"]
+        ransac_thresh = al_cfg["ransac_threshold"]
+        gravity_dot_thresh = al_cfg["gravity_check_threshold"]
+        target_gravity = np.array(al_cfg["target_gravity"], dtype=np.float32)
+
         # 1. Generar nube temporal
         points_raw = self._generate_point_cloud(
-            chunk_data, 1.0, np.eye(3), np.zeros(3), sample_ratio=0.1, ignore_masks=True
+            chunk_data, 1.0, np.eye(3), np.zeros(3), sample_ratio=sample_ratio, ignore_masks=True
         )[:, :3]
         
-        if len(points_raw) < 100:
+        if len(points_raw) < min_points_ransac:
             print("[Align] Not enough points for RANSAC")
             return
 
@@ -168,11 +251,9 @@ class AlignmentManager:
         # 3. RANSAC
         best_plane = None
         max_inliers = 0
-        n_iters = 50
-        threshold = 0.05
         n_pts = len(points_raw)
         
-        for _ in range(n_iters):
+        for _ in range(ransac_iters):
             idxs = np.random.choice(n_pts, 3, replace=False)
             p1, p2, p3 = points_raw[idxs]
             
@@ -184,12 +265,12 @@ class AlignmentManager:
             normal /= norm
             
             # Filtro de pared (debe ser paralelo a la gravedad de la cámara)
-            if abs(np.dot(normal, avg_cam_down)) < 0.5:
+            if abs(np.dot(normal, avg_cam_down)) < gravity_dot_thresh:
                 continue
                 
             d = -np.dot(normal, p1)
             dists = np.abs(points_raw @ normal + d)
-            inliers = np.sum(dists < threshold)
+            inliers = np.sum(dists < ransac_thresh)
             
             if inliers > max_inliers:
                 max_inliers = inliers
@@ -201,18 +282,17 @@ class AlignmentManager:
 
         normal, d_val = best_plane
         
-        # Orientar la normal para que apunte hacia el suelo (misma dirección que cam_down)
-        # Esto hace que 'normal' sea el vector de GRAVEDAD
-        if np.dot(normal, avg_cam_down) < 0:
+        # FIX: Ensure normal points UP (opposite to gravity/cam_down)
+        # avg_cam_down points to the floor. We want normal to point AWAY from floor (UP).
+        if np.dot(normal, avg_cam_down) > 0:
             normal = -normal
             d_val = -d_val
             
-        print(f"[Align] Floor/Gravity Vector detected: {normal}")
+        print(f"[Align] Floor Normal (UP): {normal}")
 
         # 4. Calcular Rotación (LA CORRECCIÓN FINAL)
         # Queremos que la gravedad (normal) apunte a +Y (0, 1, 0) en Python.
-        # main.py invertirá esto a -Y (0, -1, 0) en el visor -> SUELO ABAJO.
-        target_down = np.array([0, 1, 0], dtype=np.float32) # <--- AQUÍ ESTABA LA CLAVE
+        target_down = target_gravity
         
         v = np.cross(normal, target_down)
         s = np.linalg.norm(v)
@@ -229,7 +309,7 @@ class AlignmentManager:
 
         # 5. Calcular Traslación (Llevar suelo a Y=0)
         dists = np.abs(points_raw @ normal + d_val)
-        inliers_mask = dists < threshold
+        inliers_mask = dists < ransac_thresh
         if np.sum(inliers_mask) > 0:
             centroid = np.mean(points_raw[inliers_mask], axis=0)
             centroid_rot = R_align @ centroid
@@ -243,6 +323,83 @@ class AlignmentManager:
 
         print(f"[Align] Gravity correction applied. Target: +Y (will be -Y in viewer).")
         self.gravity_correction = (1.0, R_align, t_align)
+
+    def compute_leveling_from_points(self, points: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray]:
+        """
+        Standalone auto-leveling for point clouds (legacy session support).
+        Computes Sim3 to align the largest plane (floor) to Y=0.
+        Returns (s=1.0, R, t).
+        """
+        if points is None or len(points) < 100:
+             return 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
+
+        # 1. Subsample
+        if len(points) > 5000:
+             idx = np.random.choice(len(points), 5000, replace=False)
+             pts_sub = points[idx, :3]
+        else:
+             pts_sub = points[:, :3]
+
+        # 2. RANSAC for Plane
+        best_plane = None
+        max_inliers = 0
+        # Config defaults if not available
+        thresh = cfg.get("alignment", {}).get("auto_leveling", {}).get("ransac_threshold", 0.05)
+        
+        for _ in range(50): # Fast iterations
+             idxs = np.random.choice(len(pts_sub), 3, replace=False)
+             p1, p2, p3 = pts_sub[idxs]
+             v1 = p2 - p1
+             v2 = p3 - p1
+             normal = np.cross(v1, v2)
+             norm = np.linalg.norm(normal)
+             if norm < 1e-6: continue
+             normal /= norm
+             
+             d = -np.dot(normal, p1)
+             dists = np.abs(pts_sub @ normal + d)
+             inliers = np.sum(dists < thresh)
+             if inliers > max_inliers:
+                 max_inliers = inliers
+                 best_plane = (normal, d)
+
+        if not best_plane or max_inliers < len(pts_sub) * 0.1:
+             print("[AlignStandalone] No floor plane found.")
+             return 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
+
+        normal, d = best_plane
+
+        # 3. Orient UP
+        # Assume most points are ABOVE the floor.
+        signed_dists = pts_sub @ normal + d
+        if np.mean(signed_dists) > 0:
+             # Points are on positive side. Normal points towards points (UP).
+             pass 
+        else:
+             # Points are on negative side. Normal points down. Flip.
+             normal = -normal
+             d = -d
+        
+        # 4. Compute Rotation to (0, 1, 0)
+        target = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        v = np.cross(normal, target)
+        s = np.linalg.norm(v)
+        c = np.dot(normal, target)
+        
+        if s < 1e-6:
+             R = np.eye(3, dtype=np.float32) 
+             if c < 0: # 180 deg flip
+                 # Flip around X
+                 R = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float32)
+        else:
+             vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]], dtype=np.float32)
+             R = np.eye(3, dtype=np.float32) + vx + (vx @ vx) * ((1 - c) / (s**2))
+
+        # 5. Translation t=(0, d, 0)
+        t = np.array([0, d, 0], dtype=np.float32)
+        
+        print(f"[AlignStandalone] Correction found: d={d:.3f}")
+        return 1.0, R, t
 
     def _add_first_chunk(self, chunk_data) -> AlignedChunk:
         s, R, t = self.gravity_correction
@@ -266,7 +423,42 @@ class AlignmentManager:
         
         try:
             print(f"[Align] aligning chunk {chunk_id} to {chunk_id-1} with overlap {overlap}")
-            s_rel, R_rel, t_rel = weighted_align_point_maps(point_map1, conf1, point_map2, conf2, 0.01)
+            
+            # 1. Dynamic Threshold Logic (DA3 Reference: MIN Logic)
+            med1 = np.median(conf1) if conf1.size > 0 else 0
+            med2 = np.median(conf2) if conf2.size > 0 else 0
+            
+            thresh_coef = cfg["point_cloud"]["generation"]["dynamic_threshold_coef"]
+            thresh_min = cfg["point_cloud"]["generation"]["dynamic_threshold_min"]
+            
+            # Use min() so if EITHER chunk is blurry, we lower the bar to find points.
+            dynamic_threshold = min(med1, med2) * thresh_coef
+            dynamic_threshold = max(dynamic_threshold, thresh_min) # Safety floor
+            print(f"[Align] Dynamic Threshold: {dynamic_threshold:.5f} (Medians: {med1:.4f}, {med2:.4f})")
+            
+            # 2. Robust Scale Precomputation (RANSAC on Depths)
+            s_init = 1.0
+            if DA3_IMPORTS_OK:
+                # Prepare depths for precompute
+                d1_sq = np.squeeze(prev_data['depths'][-overlap:])
+                c1_sq = np.squeeze(prev_data['confs'][-overlap:])
+                d2_sq = np.squeeze(curr_data['depths'][:overlap])
+                c2_sq = np.squeeze(curr_data['confs'][:overlap])
+                
+                s_init, quality, method = precompute_scale_chunks_with_depth(
+                    d1_sq, c1_sq, d2_sq, c2_sq, method="auto"
+                )
+                print(f"[Align] Precomputed Scale: {s_init:.4f} (Quality: {quality:.4f}, Method: {method})")
+            
+            # 3. Weighted Alignment with Pre-Scale
+            s_rel, R_rel, t_rel = weighted_align_point_maps(
+                point_map1, conf1, point_map2, conf2, 
+                conf_threshold=dynamic_threshold,
+                precompute_scale=s_init
+            )
+            
+            print(f"[Align] Final Transform: s={s_rel:.4f}")
+            
         except Exception as e:
             print(f"[Align] Alignment Failed for Chunk {chunk_id}: {e}")
             import traceback

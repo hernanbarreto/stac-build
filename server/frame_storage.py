@@ -16,25 +16,33 @@ from threading import Lock
 import pandas as pd # Optional if we use parquet, but PLY is text/binary
 
 from segmentation_manager import SegmentationManager
+from config import cfg
 
 
 def filter_segment_outliers_3d(point_indices: List[int], point_cloud: np.ndarray, 
-                                eps: float = 0.05, min_samples: int = 10,
-                                sor_k: int = 20, sor_std_ratio: float = 2.0) -> List[int]:
+                                eps: float = None, min_samples: int = None,
+                                sor_k: int = None, sor_std_ratio: float = None) -> List[int]:
     """
     Filter spurious points from a segment using DBSCAN + Statistical Outlier Removal.
     
     Args:
         point_indices: List of point indices that belong to the segment
         point_cloud: Full point cloud array [N, 6] where [:, :3] are XYZ coordinates
-        eps: DBSCAN epsilon (max distance between two samples in same neighborhood)
-        min_samples: DBSCAN minimum samples to form a core point
-        sor_k: Number of neighbors for SOR
-        sor_std_ratio: Standard deviation multiplier for SOR threshold
+        eps: DBSCAN epsilon (if None, uses config)
+        min_samples: DBSCAN minimum samples (if None, uses config)
+        sor_k: Number of neighbors for SOR (if None, uses config)
+        sor_std_ratio: Standard deviation multiplier for SOR (if None, uses config)
         
     Returns:
         Filtered list of point indices (outliers removed)
     """
+    # Load defaults from config
+    outlier_cfg = cfg.get("storage", {}).get("outlier_removal", {})
+    if eps is None: eps = outlier_cfg.get("eps", 0.05)
+    if min_samples is None: min_samples = outlier_cfg.get("min_samples", 10)
+    if sor_k is None: sor_k = outlier_cfg.get("sor_k", 20)
+    if sor_std_ratio is None: sor_std_ratio = outlier_cfg.get("sor_std_ratio", 2.0)
+
     if len(point_indices) < min_samples:
         return point_indices  # Not enough points to filter
     
@@ -134,13 +142,12 @@ class FrameStorage:
     chunks for processing.
     """
     
-    # Configuration - reduced for RTX 3060
-    CHUNK_SIZE = 30  # Frames per chunk (reduced from 120)
-    CHUNK_OVERLAP = 10  # Increased from 5 for better stability
-    SCANS_BASE_DIR = Path("./scans")
-    
     def __init__(self, scans_dir: Optional[Path] = None):
-        self.scans_dir = scans_dir or self.SCANS_BASE_DIR
+        self.chunk_size = cfg["server"]["chunk_size"]
+        self.chunk_overlap = cfg["server"]["chunk_overlap"]
+        # Use strict path from config if not provided
+        base_path = Path(cfg["paths"]["scans_dir"])
+        self.scans_dir = scans_dir or base_path
         self.scans_dir.mkdir(parents=True, exist_ok=True)
         
         self.current_session: Optional[ScanSession] = None
@@ -189,10 +196,11 @@ class FrameStorage:
         with self.lock:
             session = self.current_session
             if session:
-                print(f"[FrameStorage] Stopped session: {session.session_id}")
-                print(f"[FrameStorage] Total frames: {session.frame_count}")
                 print(f"[FrameStorage] Total chunks: {len(session.chunks)}")
                 self.current_session = None
+            
+            # Reset segmentation manager to avoid state pollution
+            self.segmentation_manager = None 
             return session
     
     def set_prompt(self, prompt: str):
@@ -278,7 +286,8 @@ class FrameStorage:
             
             # Convert RGB to BGR for OpenCV
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(str(frame_path), frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            jpeg_quality = cfg["storage"]["jpeg_quality"]
+            cv2.imwrite(str(frame_path), frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
             
             session.frame_count += 1
             
@@ -294,12 +303,12 @@ class FrameStorage:
         if len(session.chunks) == 0:
             # First chunk starts at frame 0
             chunk_start = 0
-            chunk_end = self.CHUNK_SIZE - 1
+            chunk_end = self.chunk_size - 1
         else:
             # Subsequent chunks have overlap
             last_chunk = session.chunks[-1]
-            chunk_start = last_chunk.end_frame - self.CHUNK_OVERLAP + 1
-            chunk_end = chunk_start + self.CHUNK_SIZE - 1
+            chunk_start = last_chunk.end_frame - self.chunk_overlap + 1
+            chunk_end = chunk_start + self.chunk_size - 1
         
         # Check if we have enough frames
         if session.frame_count - 1 >= chunk_end:
@@ -422,43 +431,92 @@ class FrameStorage:
             return None
 
     def load_ply(self, session: ScanSession, chunk_id: int) -> Optional[np.ndarray]:
-        """Load point cloud from ASCII PLY file."""
+        """Load point cloud from PLY file (supporting ASCII and Binary)."""
         try:
-            filename = f"chunk_{chunk_id:03d}.ply"
-            filepath = session.output_dir / filename
+            # Try legacy format first: chunk_000.ply in output root
+            filename_legacy = f"chunk_{chunk_id:03d}.ply"
+            filepath = session.output_dir / filename_legacy
+            
+            # Try new DA3 format: {id}_pcd.ply in output/pcd
+            if not filepath.exists():
+                filename_da3 = f"{chunk_id}_pcd.ply"
+                filepath = session.output_dir / "pcd" / filename_da3
+            
             if not filepath.exists(): return None
             
-            points = []
-            header_ended = False
-            
-            with open(filepath, 'r') as f:
-                for line in f:
-                    if not header_ended:
-                        if line.strip() == "end_header":
-                            header_ended = True
-                        continue
+            with open(filepath, 'rb') as f:
+                # Read Header
+                properties = []
+                num_points = 0
+                is_binary = False
+                header_end = False
+                
+                while not header_end:
+                    line = f.readline().decode('ascii').strip()
+                    if line.startswith('element vertex'):
+                        num_points = int(line.split()[-1])
+                    elif line.startswith('format'):
+                        if 'binary_little_endian' in line:
+                            is_binary = True
+                    elif line.startswith('end_header'):
+                        header_end = True
+                
+                if num_points == 0: return None
+
+                points = []
+                if is_binary:
+                    # Binary Loader
+                    # Assumes: x(f4), y(f4), z(f4), r(u1), g(u1), b(u1) 
+                    # This matches da3_native logic and main.py logic
+                    dtype = np.dtype([
+                        ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+                        ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
+                    ])
+                    # Ensure alignment (15 bytes per point is odd, packed?)
+                    # sim3utils saves as packed/standard. np.frombuffer handles contiguous
+                    # But if stride is 15 bytes, numpy needs structured array
                     
-                    # Parse line: x y z r g b
-                    parts = line.strip().split()
-                    if len(parts) >= 6:
-                        x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
-                        # Normalize colors back to 0-1
-                        r, g, b = float(parts[3])/255.0, float(parts[4])/255.0, float(parts[5])/255.0
-                        points.append([x, y, z, r, g, b])
+                    data = np.frombuffer(f.read(), dtype=dtype)
+                    
+                    # Convert to float array (N, 6)
+                    result = np.zeros((len(data), 6), dtype=np.float32)
+                    result[:, 0] = data['x']
+                    result[:, 1] = data['y']
+                    result[:, 2] = data['z']
+                    result[:, 3] = data['r'] / 255.0
+                    result[:, 4] = data['g'] / 255.0
+                    result[:, 5] = data['b'] / 255.0
+                    return result
+                
+                else:
+                    # ASCII Loader
+                    for line_bytes in f:
+                        line = line_bytes.decode('ascii').strip()
+                        parts = line.split()
+                        if len(parts) >= 6:
+                            x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+                            r, g, b = float(parts[3])/255.0, float(parts[4])/255.0, float(parts[5])/255.0
+                            points.append([x, y, z, r, g, b])
+                    
+                    return np.array(points, dtype=np.float32)
+
+        except Exception as e:
+            print(f"[FrameStorage] Error loading PLY {filepath}: {e}")
+            return None
             
             return np.array(points, dtype=np.float32)
         except Exception as e:
             print(f"[FrameStorage] Error loading PLY: {e}")
             return None
 
-    def save_chunk_metadata(self, session: ScanSession, chunk_id: int, result: Any, 
+    def save_chunk_metadata(self, session: ScanSession, chunk_id: int, result: Any,
                             alignment_transform: tuple = None,
                             validity_mapping: list = None,
                             sample_indices: np.ndarray = None) -> Optional[str]:
         """
         Save chunk metadata (poses, intrinsics) to JSON for offline refinement.
         Avoids re-running DA3 if we just want to update masks.
-        
+
         alignment_transform: (s, R, t) tuple used for point cloud alignment
         validity_mapping: list of {orig_frame_idx, valid_pixel_indices} for pixel-to-point mapping
         sample_indices: indices of points kept after sampling (for mapping pre-sample to post-sample indices)
@@ -466,15 +524,48 @@ class FrameStorage:
         try:
             filename = f"chunk_{chunk_id:03d}_meta.json"
             filepath = session.output_dir / filename
-            
+
+            # Format as 'cameras' dict {idx: {intrinsics: ..., extrinsics: ...}}
+            # This matches compute_segmentation_for_ply and avoids ambiguity
+            cameras = {}
+            if result.extrinsics is not None and result.intrinsics is not None:
+                for i in range(result.frame_count):
+                    cameras[str(i)] = {
+                        "extrinsics": result.extrinsics[i].tolist() if isinstance(result.extrinsics, np.ndarray) else result.extrinsics[i],
+                        "intrinsics": result.intrinsics[i].tolist() if isinstance(result.intrinsics, np.ndarray) else result.intrinsics[i]
+                    }
+
+            # Get scaled resolution from depth output
+            scaled_resolution = None
+            if result.depths is not None and len(result.depths) > 0:
+                scaled_resolution = list(result.depths[0].shape)
+
+            # Get original resolution from first image in chunk (dynamic, not hardcoded)
+            original_resolution = None
+            chunk_dir = session.chunks_dir / f"chunk_{chunk_id:03d}"
+            if chunk_dir.exists():
+                img_files = sorted(chunk_dir.glob("*.jpg"))
+                if img_files:
+                    first_img = cv2.imread(str(img_files[0]))
+                    if first_img is not None:
+                        original_resolution = [first_img.shape[0], first_img.shape[1]]
+
+            # Get chunk step from config (NOT hardcoded)
+            chunk_size = cfg["server"]["chunk_size"]
+            chunk_overlap = cfg["server"]["chunk_overlap"]
+            chunk_step = chunk_size - chunk_overlap
+
             data = {
                 "chunk_id": chunk_id,
                 "frame_count": result.frame_count,
-                # Convert numpy arrays to lists
-                "extrinsics": result.extrinsics.tolist() if isinstance(result.extrinsics, np.ndarray) else result.extrinsics,
-                "intrinsics": result.intrinsics.tolist() if isinstance(result.intrinsics, np.ndarray) else result.intrinsics,
+                "cameras": cameras,
+                "scaled_resolution": scaled_resolution,
+                "original_resolution": original_resolution,
+                "chunk_step": chunk_step,
+                "frame_global_start": chunk_id * chunk_step,
+                "frame_global_end": chunk_id * chunk_step + result.frame_count - 1
             }
-            
+
             # Save alignment transform if provided (for retroactive segmentation projection)
             if alignment_transform:
                 s, R, t = alignment_transform
@@ -483,22 +574,18 @@ class FrameStorage:
                     "rotation": R.tolist() if isinstance(R, np.ndarray) else R,
                     "translation": t.tolist() if isinstance(t, np.ndarray) else t
                 }
-            
-            # NOTE: validity_mapping and sample_indices removed to reduce file size
-            # save_chunk_segmentation computes validity from depths/confs at runtime
-            
-            if result.segmentation_masks:
-                 # Masks are dict {frame_idx: mask_array}
-                 # We don't save full masks in JSON (too big). We rely on them being generated or re-generated.
-                 # But we might want to save OBB if we computed it.
-                 pass
+                # PLY was saved with alignment already applied (online mode saves aligned PLYs)
+                data["ply_pre_aligned"] = True
 
-            import json
+            # Save sample_indices if provided (CRITICAL for segmentation index mapping)
+            if sample_indices is not None:
+                data["sample_indices"] = sample_indices.tolist() if isinstance(sample_indices, np.ndarray) else sample_indices
+
             with open(filepath, 'w') as f:
                 json.dump(data, f)
-            
-            print(f"[FrameStorage] Saved Metadata: {filepath}")
-            
+
+            print(f"[FrameStorage] Saved Metadata: {filepath} (original_res={original_resolution}, scaled_res={scaled_resolution})")
+
             # Save OBB if present
             if hasattr(result, 'obb') and result.obb:
                 obb_path = session.output_dir / f"chunk_{chunk_id:03d}_obb.json"
@@ -509,6 +596,8 @@ class FrameStorage:
             return str(filepath)
         except Exception as e:
              print(f"[FrameStorage] Error saving Metadata: {e}")
+             import traceback
+             traceback.print_exc()
              return None
 
     def save_chunk_segmentation(self, session: ScanSession, chunk_id: int, 
@@ -742,6 +831,33 @@ class FrameStorage:
                 json.dump(data, f)
             
             total_points = sum(len(obj["point_indices"]) for obj in objects)
+            
+            # Update unified segmentation manager
+            if self.segmentation_manager:
+                for obj in objects:
+                    label = obj.get("label", "Unknown")
+                    instance_id = obj.get("id", 1)
+                    point_indices_data = obj.get("point_indices", [])
+                    
+                    actual_indices = []
+                    if isinstance(point_indices_data, list):
+                        if len(point_indices_data) > 0 and isinstance(point_indices_data[0], dict):
+                            # Enhanced format (list of objects with 'indices' field)
+                            for item in point_indices_data:
+                                if "indices" in item:
+                                    actual_indices.extend(item["indices"])
+                        else:
+                            # Legacy format (list of ints)
+                            actual_indices = point_indices_data
+                    
+                    if actual_indices:
+                        self.segmentation_manager.add_segment(
+                            label=label,
+                            chunk_id=chunk_id,
+                            point_indices=actual_indices,
+                            instance_id=instance_id
+                        )
+            
             print(f"[FrameStorage] Saved Segments: {total_points} points in {len(objects)} objects")
             return str(filepath)
         except Exception as e:
@@ -753,29 +869,13 @@ class FrameStorage:
         try:
             filename = f"chunk_{chunk_id:03d}_meta.json"
             filepath = session.output_dir / filename
-            if not filepath.exists(): return None
-            
+            if not filepath.exists():
+                return None
+
             with open(filepath, 'r') as f:
                 return json.load(f)
         except Exception as e:
             print(f"[FrameStorage] Error loading metadata: {e}")
-            return None
-                
-            if not segments:
-                return None
-                
-            data = {
-                "chunk_id": chunk_id,
-                "segments": segments
-            }
-            
-            with open(filepath, 'w') as f:
-                json.dump(data, f)
-                
-            print(f"[FrameStorage] Saved Segmentation: {filepath}")
-            return str(filepath)
-        except Exception as e:
-            print(f"[FrameStorage] Error saving segmentation: {e}")
             return None
 
 

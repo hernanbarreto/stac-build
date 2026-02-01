@@ -11,6 +11,7 @@ import logging
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SAM3Wrapper")
+from config import cfg
 
 class SAM3Wrapper:
     """
@@ -65,7 +66,7 @@ class SAM3Wrapper:
                 gc.collect()
                 logger.info("SAM3 Model unloaded.")
 
-    def process_chunk(self, frames_path: str, prompt_text: str, keyframe_interval: int = 5) -> Dict[int, Any]:
+    def process_chunk(self, frames_path: str, prompt_text: str, keyframe_interval: int = None) -> Dict[int, Any]:
         """
         Process a video chunk with a text prompt.
         
@@ -79,6 +80,10 @@ class SAM3Wrapper:
         """
         if not self.is_loaded:
             self.load_model()
+        
+        # Load default from config if needed
+        if keyframe_interval is None:
+            keyframe_interval = cfg["models"]["segmentation"]["keyframe_interval"]
             
         session_id = None
         results = {}
@@ -116,12 +121,18 @@ class SAM3Wrapper:
             # But assume object is NOT in frame 0. Frame 0 constraint might produce empty mask.
             # Frame 15 produces sofa mask.
             # SAM3 handles this. 
-            # So the strategy: Prompt at Frame 0 AND Middle Frame (15).
+            # So the strategy: Prompt at configured frames (e.g. 0 and 15)
+            prompts_to_add = cfg["models"]["segmentation"]["prompt_search_frames"]
             
-            prompts_to_add = [0]
-            if len(os.listdir(frames_path)) > 15: prompts_to_add.append(15)
+            # Filter out frames that exceed the actual chunk length
+            max_frame_idx = len(os.listdir(frames_path)) - 1
+            valid_prompts = [p for p in prompts_to_add if p <= max_frame_idx]
             
-            for f_idx in prompts_to_add:
+            if not valid_prompts:
+                 logger.warning(f"No valid prompt frames found (prompts: {prompts_to_add}, max_frame: {max_frame_idx}). Defaulting to 0.")
+                 valid_prompts = [0]
+            
+            for f_idx in valid_prompts:
                 try:
                     logger.info(f"Adding text prompt '{prompt_text}' to frame {f_idx}...")
                     _ = self.predictor.handle_request(
