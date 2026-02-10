@@ -244,6 +244,168 @@ class SAM3Wrapper:
                      
         return results
 
+    def process_full_sequence(self, frames_dir: str, prompt_text: str, 
+                               keyframe_interval: int = None,
+                               save_masks: bool = True) -> Dict[int, Any]:
+        """
+        Procesar la secuencia COMPLETA de frames (no por chunk).
+        Esto evita segmentar el mismo frame múltiples veces debido al overlap.
+        
+        Args:
+            frames_dir: Path al directorio de frames (frames/00000.jpg, 00001.jpg...)
+            prompt_text: Texto del prompt para segmentación
+            keyframe_interval: Intervalo para extraer máscaras
+            save_masks: Si True, guarda máscaras en masks/frame_XXX.npz
+            
+        Returns:
+            Dictionary mapping frame_index -> mask_data
+        """
+        if not self.is_loaded:
+            self.load_model()
+        
+        if keyframe_interval is None:
+            keyframe_interval = cfg["models"]["segmentation"]["keyframe_interval"]
+        
+        frames_path = Path(frames_dir)
+        masks_dir = frames_path.parent / "masks"
+        masks_dir.mkdir(exist_ok=True)
+        
+        session_id = None
+        results = {}
+        
+        try:
+            logger.info(f"[SAM3-Full] Processing FULL sequence in {frames_dir} with prompt '{prompt_text}'")
+            
+            # Contar frames
+            frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith(('.jpg', '.png'))])
+            total_frames = len(frame_files)
+            logger.info(f"[SAM3-Full] Found {total_frames} frames")
+            
+            # 1. Start Session
+            response = self.predictor.handle_request(
+                request=dict(
+                    type="start_session",
+                    resource_path=frames_dir,
+                )
+            )
+            session_id = response["session_id"]
+            
+            # 2. Add Prompts (a frames clave distribuidos)
+            prompt_frames = cfg["models"]["segmentation"]["prompt_search_frames"]
+            # Distribuir prompts a lo largo de la secuencia
+            if total_frames > 100:
+                # Para secuencias largas, añadir prompts adicionales
+                step = total_frames // 5
+                prompt_frames = list(set(prompt_frames + [0, step, step*2, step*3, step*4]))
+            
+            valid_prompts = [p for p in prompt_frames if p < total_frames]
+            
+            for f_idx in valid_prompts:
+                try:
+                    logger.info(f"[SAM3-Full] Adding prompt to frame {f_idx}")
+                    self.predictor.handle_request(
+                        request=dict(
+                            type="add_prompt",
+                            session_id=session_id,
+                            frame_index=f_idx,
+                            text=prompt_text,
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not add prompt to frame {f_idx}: {e}")
+            
+            # 3. Propagate
+            logger.info("[SAM3-Full] Propagating segmentation...")
+            for response in self.predictor.handle_stream_request(
+                request=dict(
+                    type="propagate_in_video",
+                    session_id=session_id,
+                )
+            ):
+                frame_idx = response["frame_index"]
+                
+                # Guardar en keyframes
+                if frame_idx % keyframe_interval == 0:
+                    outputs = response["outputs"]
+                    results[frame_idx] = outputs
+                    
+                    # Guardar máscara a disco
+                    if save_masks and 'out_binary_masks' in outputs:
+                        mask = outputs['out_binary_masks']
+                        if hasattr(mask, 'cpu'):
+                            mask = mask.cpu().numpy()
+                        
+                        mask_path = masks_dir / f"frame_{frame_idx:05d}.npz"
+                        np.savez_compressed(mask_path, mask=mask)
+            
+            # Guardar metadatos de segmentación
+            meta_path = masks_dir / "segmentation_meta.json"
+            import json
+            with open(meta_path, 'w') as f:
+                json.dump({
+                    "prompt": prompt_text,
+                    "keyframe_interval": keyframe_interval,
+                    "total_frames": total_frames,
+                    "masked_frames": list(results.keys())
+                }, f, indent=2)
+            
+            logger.info(f"[SAM3-Full] Complete! {len(results)} frames with masks saved")
+            
+        except Exception as e:
+            logger.error(f"Error during full sequence processing: {e}")
+            import traceback
+            traceback.print_exc()
+            
+        finally:
+            if session_id is not None:
+                try:
+                    self.predictor.handle_request(
+                        request=dict(
+                            type="reset_session",
+                            session_id=session_id,
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"Error resetting session: {e}")
+        
+        return results
+    
+    def load_cached_masks(self, session_dir: Path, frame_indices: List[int] = None) -> Dict[int, Any]:
+        """
+        Cargar máscaras pre-calculadas desde masks/.
+        
+        Args:
+            session_dir: Directorio base de la sesión
+            frame_indices: Lista opcional de índices de frames a cargar
+            
+        Returns:
+            Dictionary mapping frame_index -> mask_data
+        """
+        masks_dir = session_dir / "masks"
+        if not masks_dir.exists():
+            return {}
+        
+        results = {}
+        mask_files = sorted(masks_dir.glob("frame_*.npz"))
+        
+        for mf in mask_files:
+            try:
+                # Extraer índice del nombre
+                idx = int(mf.stem.split("_")[1])
+                
+                if frame_indices is not None and idx not in frame_indices:
+                    continue
+                
+                data = np.load(mf)
+                results[idx] = {"out_binary_masks": data["mask"]}
+                
+            except Exception as e:
+                logger.warning(f"Failed to load mask {mf}: {e}")
+        
+        logger.info(f"[SAM3] Loaded {len(results)} cached masks from {masks_dir}")
+        return results
+
+
 # Singleton instance
 _sam3_wrapper: Optional[SAM3Wrapper] = None
 

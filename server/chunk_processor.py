@@ -13,18 +13,44 @@ from typing import Optional, Tuple, List
 from dataclasses import dataclass
 from threading import Lock
 
-# Add DA3 paths
-DA3_ROOT = Path(__file__).parent.parent / "Depth-Anything-3"
+# Add DA3 paths - use absolute path from config or known location
+from config import cfg
+_da3_path = cfg.get("da3", {}).get("install_path", "/home/hernan/Depth-Anything-3")
+DA3_ROOT = Path(_da3_path)
 DA3_STREAMING = DA3_ROOT / "da3_streaming"
-sys.path.insert(0, str(DA3_STREAMING))
+# Add paths so all modules can be found
+# CRITICAL: DA3_STREAMING must come AFTER DA3_ROOT in sys.path
+# Otherwise Python finds da3_streaming.py (file) before da3_streaming/ (package)
 sys.path.insert(0, str(DA3_ROOT / "src"))
+sys.path.insert(0, str(DA3_STREAMING))  # For loop_utils, fastloop etc
+sys.path.insert(0, str(DA3_ROOT))       # MUST be first so da3_streaming resolves to package
 
-from da3_streaming import DA3_Streaming
+# DA3 is optional - falls back to MASt3R-SLAM if not available
+DA3_AVAILABLE = False
+DA3_Streaming = None
+depth_to_point_cloud_vectorized = None
+
 try:
-    # These functions are in da3_streaming.py itself
-    from da3_streaming import depth_to_point_cloud_vectorized
-except ImportError:
-    # Fallback: define it here if not available
+    from da3_streaming.da3_streaming import DA3_Streaming as _DA3_Streaming
+    DA3_Streaming = _DA3_Streaming
+    DA3_AVAILABLE = True
+    print("[ChunkProcessor] DA3_Streaming loaded successfully")
+    
+    try:
+        from da3_streaming.da3_streaming import depth_to_point_cloud_vectorized as _depth_to_point_cloud_vectorized
+        depth_to_point_cloud_vectorized = _depth_to_point_cloud_vectorized
+    except ImportError:
+        pass
+        
+except ImportError as e:
+    # Only warn if DA3 backend is selected (mast3r/hybrid use DA3 via subprocess)
+    from config import cfg as _cfg
+    if _cfg.get("slam_backend", "mast3r") == "da3":
+        print(f"[ChunkProcessor] DA3_Streaming not available: {e}")
+        print("[ChunkProcessor] Using MASt3R-SLAM backend only")
+
+# Fallback implementation if DA3 not available
+if depth_to_point_cloud_vectorized is None:
     def depth_to_point_cloud_vectorized(depth, intrinsics, extrinsics, device=None):
         import torch
         input_is_numpy = False
@@ -64,13 +90,32 @@ except ImportError:
         world_coords_homo = torch.einsum("nij,nhwj->nhwi", c2w, camera_coords_homo)
         point_cloud_world = world_coords_homo[..., :3]
 
+
         if input_is_numpy:
             point_cloud_world = point_cloud_world.cpu().numpy()
 
         return point_cloud_world
 
-from loop_utils.sim3utils import accumulate_sim3_transforms, save_confident_pointcloud_batch
-from loop_utils.alignment_torch import apply_sim3_direct_torch
+# DA3 utility imports (optional)
+accumulate_sim3_transforms = None
+save_confident_pointcloud_batch = None
+apply_sim3_direct_torch = None
+
+try:
+    from loop_utils.sim3utils import accumulate_sim3_transforms as _accum
+    from loop_utils.alignment_torch import apply_sim3_direct_torch as _apply
+    accumulate_sim3_transforms = _accum
+    apply_sim3_direct_torch = _apply
+    
+    try:
+        from loop_utils.sim3utils import save_confident_pointcloud_batch as _save
+        save_confident_pointcloud_batch = _save
+    except ImportError:
+        pass
+except ImportError as e:
+    from config import cfg as _cfg
+    if _cfg.get("slam_backend", "mast3r") == "da3":
+        print(f"[ChunkProcessor] loop_utils not available: {e}")
 
 from sam3_wrapper import get_sam3_wrapper
 from config import cfg
@@ -108,7 +153,7 @@ class ChunkProcessorStreaming:
     """
 
     def __init__(self, device: str = None):
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or cfg.get("models", {}).get("depth", {}).get("device", "cuda" if torch.cuda.is_available() else "cpu")
         self.lock = Lock()
 
         # DA3_Streaming instance (created per session)
@@ -143,78 +188,9 @@ class ChunkProcessorStreaming:
 
     def _init_da3_streaming(self, frames_dir: Path, output_dir: Path):
         """Initialize DA3_Streaming for a new session."""
-        # Build config for DA3_Streaming
-        weights_dir = Path(cfg["paths"]["da3_weights_dir"]).resolve()
-
-        # Auto-select correct config.json based on model name
-        model_name = cfg["models"]["depth"]["name"]
-        if "GIANT" in model_name.upper() or "NESTED" in model_name.upper():
-            # Use GIANT config
-            config_source = weights_dir / "config_giant.json"
-            if config_source.exists():
-                import shutil
-                shutil.copy(str(config_source), str(weights_dir / "config.json"))
-                print(f"[ChunkProcessorStreaming] Using GIANT config (CPU mode)")
-        else:
-            # Use LARGE config
-            config_source = weights_dir / "config_large.json"
-            if config_source.exists():
-                import shutil
-                shutil.copy(str(config_source), str(weights_dir / "config.json"))
-                print(f"[ChunkProcessorStreaming] Using LARGE config (GPU mode)")
-
-        da3_config = {
-            "Weights": {
-                "DA3_CONFIG": str(weights_dir / cfg["models"]["depth"]["config_file"]),
-                "DA3": str(weights_dir / cfg["models"]["depth"]["weights_file"]),
-                "SALAD": str(weights_dir / "dino_salad.ckpt")  # Absolute path
-            },
-            "Model": {
-                "chunk_size": cfg["server"]["chunk_size"],
-                "overlap": cfg["server"]["chunk_overlap"],
-                "loop_chunk_size": cfg["models"]["da3"]["loop_chunk_size"],
-                "loop_enable": False,  # Disable loop closure for online mode
-                "useDBoW": False,
-                "delete_temp_files": False,  # Keep for debugging
-                "align_method": cfg["alignment"]["method"],
-                "align_lib": "torch",
-                "scale_compute_method": "auto",
-                "align_type": "dense",
-                "ref_view_strategy": cfg["models"]["depth"]["ref_view_strategy"],
-                "ref_view_strategy_loop": cfg["models"]["depth"]["ref_view_strategy"],
-                "depth_threshold": 15.0,
-                "save_depth_conf_result": False,
-                "save_debug_info": False,
-                "Sparse_Align": {
-                    "keypoint_select": "orb",
-                    "keypoint_num": 5000
-                },
-                "IRLS": {
-                    "delta": cfg["alignment"]["ransac"]["delta"],
-                    "max_iters": cfg["alignment"]["ransac"]["max_iters"],
-                    "tol": cfg["alignment"]["ransac"]["tolerance"]
-                },
-                "Pointcloud_Save": {
-                    "conf_threshold_coef": cfg["models"]["da3"]["pointcloud_save"]["conf_threshold_coef"],
-                    "sample_ratio": cfg["models"]["da3"]["pointcloud_save"]["sample_ratio"]
-                }
-            },
-            "Loop": {
-                "SALAD": {
-                    "image_size": [336, 336],
-                    "batch_size": 32,
-                    "similarity_threshold": 0.85,
-                    "top_k": 5,
-                    "use_nms": True,
-                    "nms_threshold": 25
-                },
-                "SIM3_Optimizer": {
-                    "lang_version": "python",
-                    "max_iterations": 30,
-                    "lambda_init": 1e-6
-                }
-            }
-        }
+        # Build config from config.yaml + HF cache (all from config.yaml, zero hardcoding)
+        from da3_config_builder import build_da3_config
+        da3_config = build_da3_config(cfg)
 
         # Create DA3_Streaming instance
         self.da3_streaming = DA3_Streaming(
@@ -780,5 +756,7 @@ def get_chunk_processor() -> ChunkProcessorStreaming:
     """Get or create the singleton ChunkProcessorStreaming."""
     global _processor
     if _processor is None:
-        _processor = ChunkProcessorStreaming()
+        _processor = ChunkProcessorStreaming(
+            device=cfg.get("models", {}).get("depth", {}).get("device", None)
+        )
     return _processor

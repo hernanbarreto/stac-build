@@ -7,6 +7,7 @@ import time
 import gc
 import os
 import sys
+import threading
 import torch
 import numpy as np
 from pathlib import Path
@@ -23,6 +24,7 @@ from alignment_manager import get_alignment_manager, AlignmentManager
 from sam3_wrapper import get_sam3_wrapper
 from config import cfg
 from da3_native_wrapper import RealtimeDA3
+from slam_processor import get_slam_processor, SLAMProcessor, SLAMFrame
 
 # --- Helper for Chunking ---
 def chunk_data(data, chunk_size=1048572): # approx 1MB, multiple of 28 bytes (7 floats * 4)
@@ -46,7 +48,7 @@ def cloud_to_binary(point_cloud: np.ndarray) -> bytes:
     output_data[:, 2] = point_cloud[:, 2]
     
     # RGB (Assumed float 0-1 or 0-255? DA3 returns 0-1 usually, or 0-255?)
-    # AlignmentManager._generate_point_cloud uses images_kf which are 0-255, then divides by 255.0. 
+    # AlignmentManagerr._generate_point_cloud uses images_kf which are 0-255, then divides by 255.0. 
     # So point_cloud[:, 3:] is 0-1 float.
     output_data[:, 3] = point_cloud[:, 3]
     output_data[:, 4] = point_cloud[:, 4]
@@ -59,7 +61,7 @@ def cloud_to_binary(point_cloud: np.ndarray) -> bytes:
 
 # --- PLY Utilities for Offline Streaming ---
 def load_ply_to_numpy(ply_path: Path) -> Optional[np.ndarray]:
-    """Load PLY file (ASCII or BINARY) to numpy array [N, 6] (XYZ + RGB)."""
+    """Load PLY file (ASCII or BINARY) to numpy array [N, 6] (XYZ + RGB 0-1)."""
     try:
         import struct
 
@@ -96,16 +98,25 @@ def load_ply_to_numpy(ply_path: Path) -> Optional[np.ndarray]:
             # Read vertex data
             if is_binary:
                 # Binary format: float x, float y, float z, uchar r, uchar g, uchar b
-                points = []
-                for _ in range(vertex_count):
-                    data = f.read(15)  # 3 floats (12 bytes) + 3 uchars (3 bytes)
-                    if len(data) < 15:
-                        break
-                    x, y, z = struct.unpack('<fff', data[0:12])
-                    r, g, b = struct.unpack('<BBB', data[12:15])
-                    points.append([x, y, z, r/255.0, g/255.0, b/255.0])
-
-                return np.array(points, dtype=np.float32) if points else None
+                # Vectorized read using structured dtype
+                vertex_dtype = np.dtype([
+                    ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                    ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')
+                ])
+                vertices = np.fromfile(f, dtype=vertex_dtype, count=vertex_count)
+                
+                if len(vertices) == 0:
+                    return None
+                
+                result = np.empty((len(vertices), 6), dtype=np.float32)
+                result[:, 0] = vertices['x']
+                result[:, 1] = vertices['y']
+                result[:, 2] = vertices['z']
+                result[:, 3] = vertices['red'].astype(np.float32) / 255.0
+                result[:, 4] = vertices['green'].astype(np.float32) / 255.0
+                result[:, 5] = vertices['blue'].astype(np.float32) / 255.0
+                
+                return result
             else:
                 # ASCII format
                 points = []
@@ -127,6 +138,265 @@ def load_ply_to_numpy(ply_path: Path) -> Optional[np.ndarray]:
         traceback.print_exc()
         return None
 
+# --- CloudCompPy Post-Processing ---
+async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, websocket=None):
+    """Run CloudCompPy post-processing on DA3 chunk PLYs as subprocess."""
+    import subprocess
+    
+    scans_dir = Path(__file__).parent / "scans" / session_id / "output"
+    output_ply = scans_dir / "cleaned_cloud.ply"
+    script_path = Path(__file__).parent / "run_cloudcompy.sh"
+    
+    voxel_size = postproc_config.get("voxel_size", 0.001)
+    max_points = postproc_config.get("max_points", 0)
+    
+    if not script_path.exists():
+        print(f"[PostProc] ⚠️ run_cloudcompy.sh not found, skipping")
+        return
+    
+    # Check if chunks exist
+    chunks = sorted(scans_dir.glob("chunk_*.ply"))
+    if not chunks:
+        print(f"[PostProc] ⚠️ No chunk PLYs found in {scans_dir}, skipping")
+        return
+    
+    print(f"\n[PostProc] 🔧 Starting CloudCompPy professional cleaning ({len(chunks)} chunks, voxel={voxel_size*1000:.1f}mm)...")
+    
+    if websocket:
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "status",
+                "message": f"Post-processing {len(chunks)} chunks with CloudCompPy..."
+            }))
+        except:
+            pass
+    
+    cmd = [
+        "bash", str(script_path),
+        "--input-dir", str(scans_dir),
+        "--output", str(output_ply),
+        "--voxel-size", str(voxel_size),
+        "--sor-knn", str(postproc_config.get("sor_knn", 6)),
+        "--sor-sigma", str(postproc_config.get("sor_sigma", 1.0)),
+        "--noise-radius", str(postproc_config.get("noise_radius", 0.01)),
+        "--noise-sigma", str(postproc_config.get("noise_sigma", 1.0)),
+    ]
+    if max_points > 0:
+        cmd.extend(["--max-points", str(max_points)])
+    if postproc_config.get("skip_duplicates", False):
+        cmd.append("--skip-duplicates")
+    if postproc_config.get("skip_sor", False):
+        cmd.append("--skip-sor")
+    if postproc_config.get("skip_noise", False):
+        cmd.append("--skip-noise")
+    if postproc_config.get("skip_normals", False):
+        cmd.append("--skip-normals")
+    
+    try:
+        # Run as async subprocess
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        
+        # Read output line by line
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+            line_str = line.decode('utf-8', errors='replace').strip()
+            if line_str:
+                print(f"  {line_str}")
+        
+        await process.wait()
+        
+        if process.returncode == 0 and output_ply.exists():
+            file_size_mb = output_ply.stat().st_size / (1024 * 1024)
+            print(f"[PostProc] ✅ Cleaned cloud saved: {output_ply} ({file_size_mb:.1f} MB)")
+        else:
+            print(f"[PostProc] ❌ CloudCompPy failed (exit code: {process.returncode})")
+    
+    except Exception as e:
+        print(f"[PostProc] ❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+def _align_cloud_to_floor(output_data: np.ndarray) -> np.ndarray:
+    """
+    Apply RANSAC floor alignment to the final cloud.
+    Finds the floor plane and rotates so it sits at y=0 (XZ plane).
+    input/output: [N, 7] float32 (x, y, z, r, g, b, classId)
+    """
+    if output_data is None or len(output_data) < 100:
+        print("[FloorAlign] ⚠️ Not enough points for alignment")
+        return output_data
+    
+    try:
+        from alignment_manager import get_alignment_manager
+        am = get_alignment_manager()
+        
+        # compute_leveling_from_points expects [N, 3+] with XYZ in first 3 cols
+        s, R, t = am.compute_leveling_from_points(output_data[:, :3])
+        
+        # Check if alignment is identity (no floor found)
+        if np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3)):
+            print("[FloorAlign] ⚠️ No floor plane detected — sending unaligned")
+            return output_data
+        
+        # Apply: P' = s * (R @ P) + t
+        xyz = output_data[:, :3]
+        xyz_aligned = s * (xyz @ R.T) + t
+        
+        result = output_data.copy()
+        result[:, :3] = xyz_aligned
+        
+        # Log stats
+        y_min = xyz_aligned[:, 1].min()
+        y_max = xyz_aligned[:, 1].max()
+        print(f"[FloorAlign] ✅ Floor aligned to y=0 (range: {y_min:.3f} to {y_max:.3f})")
+        
+        return result
+    except Exception as e:
+        print(f"[FloorAlign] ❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return output_data
+
+async def _send_cleaned_cloud(websocket, session_id: str):
+    """Load, align floor, and send cleaned_cloud.ply to viewer."""
+    scans_dir = Path(__file__).parent / "scans" / session_id / "output"
+    cleaned_ply = scans_dir / "cleaned_cloud.ply"
+    
+    if not cleaned_ply.exists():
+        print(f"[SendCloud] ⚠️ cleaned_cloud.ply not found for {session_id}")
+        return False
+    
+    try:
+        file_size_mb = cleaned_ply.stat().st_size / (1024 * 1024)
+        print(f"[SendCloud] Loading cleaned_cloud.ply ({file_size_mb:.1f} MB)...")
+        
+        # Read binary PLY directly
+        with open(cleaned_ply, "rb") as f:
+            n_pts = 0
+            while True:
+                line = f.readline()
+                if line.startswith(b"element vertex"):
+                    n_pts = int(line.split()[-1])
+                if line.startswith(b"end_header"):
+                    break
+            ply_dtype = np.dtype([
+                ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
+            ])
+            raw_data = np.frombuffer(f.read(), dtype=ply_dtype)
+        
+        point_count = len(raw_data)
+        if point_count == 0:
+            print(f"[SendCloud] ⚠️ Empty cloud")
+            return False
+        
+        # Convert to viewer format (N, 7) float32: x, y, z, r, g, b, classId
+        output_data = np.zeros((point_count, 7), dtype=np.float32)
+        output_data[:, 0] = raw_data['x']
+        output_data[:, 1] = raw_data['y']
+        output_data[:, 2] = raw_data['z']
+        output_data[:, 3] = raw_data['r'] / 255.0
+        output_data[:, 4] = raw_data['g'] / 255.0
+        output_data[:, 5] = raw_data['b'] / 255.0
+        output_data[:, 6] = 0.0
+        
+        # ── Floor Alignment ──
+        output_data = _align_cloud_to_floor(output_data)
+        
+        binary_bytes = output_data.tobytes()
+        
+        # Send via proper viewer protocol
+        await websocket.send_text(json.dumps({
+            "type": "status",
+            "message": f"Sending cleaned cloud ({point_count:,} points, {file_size_mb:.1f} MB)..."
+        }))
+        await websocket.send_text(json.dumps({
+            "type": "chunk_start",
+            "chunk_id": 0,
+            "point_count": point_count
+        }))
+        
+        for sub in chunk_data(binary_bytes):
+            await websocket.send_bytes(sub)
+            await asyncio.sleep(0.001)
+        
+        print(f"[SendCloud] ✅ Sent {point_count:,} points to viewer (floor-aligned)")
+        return True
+    
+    except Exception as e:
+        print(f"[SendCloud] ❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+async def _send_cleaned_cloud_broadcast(session_id: str):
+    """Load and broadcast cleaned_cloud.ply to ALL connected viewers."""
+    scans_dir = Path(__file__).parent / "scans" / session_id / "output"
+    cleaned_ply = scans_dir / "cleaned_cloud.ply"
+    
+    if not cleaned_ply.exists():
+        print(f"[SendCloud] ⚠️ cleaned_cloud.ply not found for broadcast")
+        return False
+    
+    try:
+        file_size_mb = cleaned_ply.stat().st_size / (1024 * 1024)
+        
+        with open(cleaned_ply, "rb") as f:
+            n_pts = 0
+            while True:
+                line = f.readline()
+                if line.startswith(b"element vertex"):
+                    n_pts = int(line.split()[-1])
+                if line.startswith(b"end_header"):
+                    break
+            ply_dtype = np.dtype([
+                ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
+            ])
+            raw_data = np.frombuffer(f.read(), dtype=ply_dtype)
+        
+        point_count = len(raw_data)
+        if point_count == 0:
+            return False
+        
+        output_data = np.zeros((point_count, 7), dtype=np.float32)
+        output_data[:, 0] = raw_data['x']
+        output_data[:, 1] = raw_data['y']
+        output_data[:, 2] = raw_data['z']
+        output_data[:, 3] = raw_data['r'] / 255.0
+        output_data[:, 4] = raw_data['g'] / 255.0
+        output_data[:, 5] = raw_data['b'] / 255.0
+        output_data[:, 6] = 0.0
+        
+        # ── Floor Alignment ──
+        output_data = _align_cloud_to_floor(output_data)
+        
+        binary_bytes = output_data.tobytes()
+        
+        await viewer_manager.broadcast_text(json.dumps({
+            "type": "chunk_start",
+            "chunk_id": 0,
+            "point_count": point_count
+        }))
+        for sub in chunk_data(binary_bytes):
+            await viewer_manager.broadcast_binary(sub)
+            await asyncio.sleep(0.001)
+        
+        print(f"[SendCloud] ✅ Broadcast {point_count:,} points to all viewers (floor-aligned, {file_size_mb:.1f} MB)")
+        return True
+    
+    except Exception as e:
+        print(f"[SendCloud] ❌ Broadcast error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def numpy_to_ply_bytes(points: np.ndarray) -> bytes:
     """Convert numpy [N, 6] to binary PLY bytes for streaming."""
     import struct
@@ -141,10 +411,10 @@ property float z
 property uchar red
 property uchar green
 property uchar blue
-end_header
+end_heade
 """.encode('ascii')
 
-    # Pack points: XYZ as float, RGB as uchar
+    # Pack points: XYZ as float, RGB as ucha
     data = bytearray()
     for p in points:
         data += struct.pack('<fff', p[0], p[1], p[2])  # XYZ
@@ -182,7 +452,11 @@ class CameraManager:
         self.frame_count = 0
     
     async def connect(self, websocket: WebSocket):
-        if self.active_camera: await self.active_camera.close()
+        if self.active_camera:
+            try:
+                await self.active_camera.close()
+            except Exception as e:
+                print(f"[CameraManager] ⚠️ Warning: Error closing previous connection: {e}")
         self.active_camera = websocket
         print("[Camera] Client connected")
     
@@ -243,6 +517,7 @@ chunk_queue = asyncio.Queue()
 last_chunk_result = None
 is_processing_chunk = False
 server_mode = "offline"  # "online" or "offline" - controls DA3 preloading
+slam_processor = None  # Unified SLAM processor (MASt3R or DA3)
 
 # --- WORKER: INCREMENTAL SENDING ---
 async def chunk_processing_worker():
@@ -309,59 +584,37 @@ async def chunk_processing_worker():
                 last_chunk_result = result
                 chunk_info.status = "complete"
                 
-                # --- KEY FIX: INCREMENTAL BROADCAST ---
-                # Enviamos SOLO el último chunk procesado.
-                # El JS (FusionRenderer) se encarga de acumularlo.
+                # No real-time streaming — only log progress
                 latest_chunk = alignment_manager.aligned_chunks[-1]
                 if latest_chunk.point_cloud is not None and len(latest_chunk.point_cloud) > 0:
-                    # 1. Send Chunk Start
+                    print(f"[ChunkWorker] Chunk {chunk_id} processed: {len(latest_chunk.point_cloud):,} points (not streaming)")
+                    
+                    # Send progress status to viewers
+                    total_chunks = alignment_manager.get_chunk_count()
                     await viewer_manager.broadcast_text(json.dumps({
-                        "type": "chunk_start",
-                        "chunk_id": chunk_id,
-                        "point_count": len(latest_chunk.point_cloud)
+                        "type": "status",
+                        "message": f"Processing chunk {chunk_id + 1}... ({total_chunks} chunks done)"
                     }))
-                    
-                    # 2. Send Binary
-                    binary = cloud_to_binary(latest_chunk.point_cloud)
-                    await viewer_manager.broadcast_binary(binary)
-                    
-                    # 3. Send Segmentation
-                    # The file was just saved in _heavy_lifting at save_chunk_segmentation
-                    seg_path = session.chunks_dir.parent / "output" / f"chunk_{chunk_id:03d}_segments.json"
-                    
-                    # Check if file exists, if not maybe frame_storage has different path logic
-                    # frame_storage.save_chunk_segmentation uses self.output_dir which is session.output_path
-                    # session.chunks_dir is usually .../frames/chunk_XXX. 
-                    # Output is .../output/chunk_XXX.
-                    # Let's rely on constructing path or check frame_storage.
-                    
-                    if not seg_path.exists():
-                         # Fallback: try to construct path from session root
-                         seg_path = session.output_dir / f"chunk_{chunk_id:03d}_segments.json"
-
-                    if seg_path.exists():
-                        try:
-                            with open(seg_path, 'r') as f:
-                                seg_data = json.load(f)
-                            seg_data["type"] = "segmentation"
-                            await viewer_manager.broadcast_text(json.dumps(seg_data))
-                            print(f"[ChunkWorker] Sent segmentation for Chunk {chunk_id}")
-                        except Exception as e:
-                            print(f"[ChunkWorker] Failed to send seg: {e}")
-                    
-                    print(f"[ChunkWorker] Sent INCREMENTAL update: {len(latest_chunk.point_cloud)} points")
 
             is_processing_chunk = False
 
-            # Check if DA3 is done (queue empty) and there's a pending retroactive prompt
-            if chunk_queue.qsize() == 0 and hasattr(frame_storage, '_pending_retroactive_prompt'):
-                pending_prompt = getattr(frame_storage, '_pending_retroactive_prompt', None)
-                if pending_prompt:
-                    print(f"[ChunkWorker] DA3 complete. Running pending retroactive segmentation for '{pending_prompt}'...")
-                    frame_storage._pending_retroactive_prompt = None  # Clear the flag
-
-                    # Run retroactive segmentation in background
-                    asyncio.create_task(_run_pending_retroactive(pending_prompt))
+            # Check if DA3 is done (queue empty) — trigger CloudCompPy + send cleaned cloud
+            if chunk_queue.qsize() == 0:
+                # Run CloudCompPy post-processing and send cleaned cloud
+                session_id_current = frame_storage.current_session.session_id if frame_storage and frame_storage.current_session else None
+                if session_id_current:
+                    postproc_config = cfg.get("postprocessing", {})
+                    if postproc_config.get("enabled", False):
+                        await _run_cloudcompy_postprocess(session_id_current, postproc_config)
+                    await _send_cleaned_cloud_broadcast(session_id_current)
+                
+                # Also check for pending retroactive segmentation
+                if hasattr(frame_storage, '_pending_retroactive_prompt'):
+                    pending_prompt = getattr(frame_storage, '_pending_retroactive_prompt', None)
+                    if pending_prompt:
+                        print(f"[ChunkWorker] DA3 complete. Running pending retroactive segmentation for '{pending_prompt}'...")
+                        frame_storage._pending_retroactive_prompt = None
+                        asyncio.create_task(_run_pending_retroactive(pending_prompt))
 
         except asyncio.CancelledError:
             break
@@ -394,7 +647,7 @@ async def _run_pending_retroactive(prompt: str):
 
         # Discover ALL chunks (not just those without segmentation)
         # This ensures consistent segmentation across the entire session
-        output_dir = session.output_dir
+        output_dir = session.output_di
         ply_files = sorted(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
 
         chunk_ids = []
@@ -479,7 +732,7 @@ def cloud_to_binary(cloud: np.ndarray) -> bytes:
         data[:, :6] = cloud[:, :6]
     
     # CV to Three.js transform
-    # REMOVED: Data is already aligned by AlignmentManager to Y-up (GL compatible)
+    # REMOVED: Data is already aligned by AlignmentManagerr to Y-up (GL compatible)
     # data[:, 1] *= -1 
     # data[:, 2] *= -1 
     
@@ -492,7 +745,7 @@ def on_chunk_ready(session, chunk_info):
 # --- Lifecycle ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global frame_storage, chunk_processor, alignment_manager, chunk_queue
+    global frame_storage, chunk_processor, alignment_manager, chunk_queue, slam_processor
     print("[Server] Starting STAC-BUILD...")
     
     frame_storage = get_frame_storage()
@@ -503,10 +756,15 @@ async def lifespan(app: FastAPI):
     # Initialize SAM3 Wrapper (lazy load, but triggers init log)
     get_sam3_wrapper()
     
-    # NOTE: DA3 model is NOT loaded here anymore for memory efficiency.
-    # It will be loaded lazily when needed:
-    # - Online streaming: loaded when first chunk arrives
-    # - Offline: only loaded if PLYs don't exist
+    # Initialize SLAM Processor (lazy loading of backend)
+    slam_backend = cfg.get("slam_backend", "mast3r")
+    slam_processor = get_slam_processor()
+    print(f"[Server] SLAM backend configured: {slam_backend}")
+    
+    # NOTE: Models are NOT loaded here for memory efficiency.
+    # They will be loaded lazily when needed:
+    # - Online streaming: loaded when first frame arrives
+    # - Offline: loaded when processing session
     print("[Server] Models will be loaded on-demand (lazy loading enabled)")
     
     worker_task = asyncio.create_task(chunk_processing_worker())
@@ -592,26 +850,26 @@ async def set_mode(new_mode: str):
     server_mode = new_mode
     
     if new_mode == "online":
-        # Pre-load DA3 for streaming readiness
-        if not chunk_processor.is_loaded:
-            print("[Server] 🔌 Switching to ONLINE mode - Loading DA3...")
+        # Pre-load SLAM backend for streaming readiness
+        if not slam_processor.is_initialized:
+            print(f"[Server] 🔌 Switching to ONLINE mode - Loading {slam_processor.backend_name}...")
             await viewer_manager.broadcast_text(json.dumps({
                 "type": "info",
-                "message": "Loading DA3 model for streaming..."
+                "message": f"Loading {slam_processor.backend_name} model for streaming..."
             }))
             
             # Load in executor to not block
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, chunk_processor.load_model)
+            await loop.run_in_executor(None, slam_processor.initialize)
             
-            print("[Server] ✅ DA3 loaded - Ready for streaming!")
+            print(f"[Server] ✅ {slam_processor.backend_name} loaded - Ready for streaming!")
             await viewer_manager.broadcast_text(json.dumps({
                 "type": "mode_ready",
                 "mode": "online",
                 "message": "Ready for streaming"
             }))
         else:
-            print("[Server] DA3 already loaded")
+            print(f"[Server] {slam_processor.backend_name} already loaded")
             
     elif new_mode == "offline":
         # Unload DA3 to free VRAM
@@ -643,34 +901,353 @@ async def set_mode(new_mode: str):
         "changed": old_mode != new_mode
     }
 
-@app.websocket("/ws/camera")
-async def camera_websocket(websocket: WebSocket):
-    await websocket.accept()
-    
-    # 1. Enforce Online Mode
-    if server_mode != "online":
-        print(f"[Camera] ⛔ Connection rejected: Server is in {server_mode} mode")
-        await websocket.close(code=1008, reason="Server is offline")
-        return
+# --- SLAM Processing Endpoints ---
 
-    await camera_manager.connect(websocket)
-    # frame_storage.start_session() # REMOVED: Lazy init in add_frame to avoid empty folders
+@app.get("/slam/status")
+async def slam_status():
+    """Get SLAM processor status."""
+    if slam_processor is None:
+        return {"initialized": False, "backend": cfg.get("slam_backend", "unknown")}
+    return slam_processor.get_state()
+
+@app.post("/slam/process/{session_id}")
+async def process_session_with_slam(session_id: str):
+    """
+    Process an existing session's frames with SLAM.
+    Uses configured backend (MASt3R or DA3).
+    """
+    if slam_processor is None:
+        return {"error": "SLAM processor not initialized"}
+    
+    # Get session paths
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    session_dir = scans_dir / session_id
+    frames_dir = session_dir / "frames"
+    output_dir = session_dir / "output"
+    
+    if not frames_dir.exists():
+        return {"error": f"Session not found or no frames: {session_id}"}
+    
+    # Notify viewers
+    await viewer_manager.broadcast_text(json.dumps({
+        "type": "info",
+        "message": f"Starting SLAM processing for {session_id}..."
+    }))
+    
+    # Process in executor to not block
+    loop = asyncio.get_event_loop()
+    
+    def _process_slam():
+        # Initialize SLAM if not already
+        slam_processor.initialize()
+        
+        # Start session
+        slam_processor.start_session(session_id, frames_dir, output_dir)
+        
+        # Process all frames
+        frame_count = 0
+        keyframe_count = 0
+        
+        for result in slam_processor.process_frames_directory(frames_dir):
+            frame_count += 1
+            if result.is_keyframe:
+                keyframe_count += 1
+                
+        # Get final point cloud
+        points, colors = slam_processor.get_global_pointcloud()
+        
+        # Save PLY
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ply_path = output_dir / "slam_reconstruction.ply"
+        slam_processor.save_pointcloud_ply(ply_path)
+        
+        slam_processor.stop_session()
+        
+        return {
+            "session_id": session_id,
+            "frames_processed": frame_count,
+            "keyframes": keyframe_count,
+            "points": len(points),
+            "output_ply": str(ply_path),
+        }
+    
+    try:
+        result = await loop.run_in_executor(None, _process_slam)
+        
+        # Send point cloud to viewers
+        binary_data = slam_processor.get_pointcloud_binary()
+        if binary_data:
+            for sub_chunk in chunk_data(binary_data):
+                await viewer_manager.broadcast_binary(sub_chunk)
+        
+        await viewer_manager.broadcast_text(json.dumps({
+            "type": "slam_complete",
+            "data": result
+        }))
+        
+        return result
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
+
+@app.websocket("/ws/slam")
+async def slam_websocket(websocket: WebSocket):
+    """
+    Real-time SLAM WebSocket for streaming frame processing.
+    Client sends frames, receives incremental point cloud updates.
+    """
+    await websocket.accept()
+    print("[SLAM WS] Client connected")
+    
+    if slam_processor is None:
+        await websocket.close(code=1011, reason="SLAM not initialized")
+        return
+    
+    # Initialize SLAM on first connection
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, slam_processor.initialize)
+    
+    # Start new session
+    session_id = f"live_{int(time.time())}"
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    session_dir = scans_dir / session_id
+    frames_dir = session_dir / "frames"
+    output_dir = session_dir / "output"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    slam_processor.start_session(session_id, frames_dir, output_dir)
+    
+    await websocket.send_text(json.dumps({
+        "type": "session_started",
+        "session_id": session_id
+    }))
+    
+    frame_idx = 0
+    
     try:
         while True:
             data = await websocket.receive_bytes()
+            
+            # Decode frame
             import cv2
+            frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
+                
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Save frame
+            cv2.imwrite(str(frames_dir / f"{frame_idx:06d}.jpg"), frame)
+            
+            # Process with SLAM
+            def _process_frame():
+                return slam_processor.process_frame(frame_rgb, float(frame_idx))
+            
+            result = await loop.run_in_executor(None, _process_frame)
+            frame_idx += 1
+            
+            # Send status update
+            await websocket.send_text(json.dumps({
+                "type": "frame_processed",
+                "frame_id": result.frame_id,
+                "is_keyframe": result.is_keyframe,
+                "status": result.status,
+            }))
+            
+            # If keyframe, send incremental point cloud
+            if result.is_keyframe and result.points is not None:
+                # Create binary data for this keyframe's points
+                n_pts = len(result.points)
+                if n_pts > 0:
+                    output = np.zeros((n_pts, 7), dtype=np.float32)
+                    output[:, :3] = result.points
+                    output[:, 3:6] = result.colors if result.colors is not None else 0.7
+                    output[:, 6] = 0.0
+                    
+                    # Send to this client
+                    await websocket.send_bytes(output.tobytes())
+                    
+                    # Also broadcast to viewers
+                    await viewer_manager.broadcast_binary(output.tobytes())
+                    
+    except WebSocketDisconnect:
+        print("[SLAM WS] Client disconnected")
+    except Exception as e:
+        print(f"[SLAM WS] Error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Save final reconstruction
+        output_ply = output_dir / "slam_reconstruction.ply"
+        slam_processor.save_pointcloud_ply(output_ply)
+        slam_processor.stop_session()
+        print(f"[SLAM WS] Session saved: {session_id}")
+
+@app.websocket("/ws/camera")
+async def camera_websocket(websocket: WebSocket):
+    """
+    Camera WebSocket - receives frames from camera.html client.
+    Routes to appropriate SLAM backend (MASt3R or DA3 chunks).
+    """
+    await websocket.accept()
+    
+    # Get configured backend
+    slam_backend = cfg.get("slam_backend", "mast3r")
+    
+    # For MASt3R, we can work in online or offline mode
+    # For DA3, we require online mode (existing behavior)
+    if slam_backend != "mast3r" and server_mode != "online":
+        print(f"[Camera] ⛔ Connection rejected: Server is in {server_mode} mode")
+        await websocket.close(code=1008, reason="Server is offline")
+        return
+        
+    # Check if backend is ready (only if online mode is active/requested)
+    if server_mode == "online" and not slam_processor.is_initialized:
+        print("[Camera] ⏳ Connection rejected: Model loading...")
+        await websocket.close(code=1013, reason="Server initializing")
+        return
+
+    await camera_manager.connect(websocket)
+    
+    # Initialize based on backend
+    if slam_backend == "mast3r":
+        await _camera_mast3r_flow(websocket)
+    else:
+        await _camera_da3_flow(websocket)
+
+
+async def _camera_mast3r_flow(websocket: WebSocket):
+    """Handle camera frames with MASt3R-SLAM backend."""
+    import cv2
+    
+    # Initialize SLAM
+    loop = asyncio.get_event_loop()
+    
+    print("[Camera/MASt3R] Initializing SLAM processor...")
+    print("[Camera/MASt3R] Initializing SLAM processor...")
+    # Use singleton accessor directly to avoid global state issues
+    from slam_processor import get_slam_processor
+    slam_processor = get_slam_processor()
+    
+    if slam_processor is None:
+        print("❌ CRITICAL ERROR: slam_processor is still None after getter!")
+        return
+
+    await loop.run_in_executor(None, slam_processor.initialize)
+    
+    # Start session
+    session_id = f"live_{int(time.time())}"
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    session_dir = scans_dir / session_id
+    frames_dir = session_dir / "frames"
+    output_dir = session_dir / "output"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    slam_processor.start_session(session_id, frames_dir, output_dir)
+    
+    await viewer_manager.broadcast_text(json.dumps({
+        "type": "session_started",
+        "session_id": session_id,
+        "backend": "mast3r"
+    }))
+    
+    frame_idx = 0
+    
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            
+            frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
+                
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Save frame
+            cv2.imwrite(str(frames_dir / f"{frame_idx:06d}.jpg"), frame)
+            
+            # Process with SLAM in executo
+            def _process():
+                return slam_processor.process_frame(frame_rgb, float(frame_idx))
+            
+            result = await loop.run_in_executor(None, _process)
+            frame_idx += 1
+            camera_manager.frame_count = frame_idx
+            
+            # If keyframe, broadcast point cloud to viewers
+            if result.is_keyframe and result.points is not None:
+                n_pts = len(result.points)
+                if n_pts > 0:
+                    # Transform points from camera space to world space using pose
+                    points_cam = result.points.reshape(-1, 3)
+                    if result.pose is not None:
+                        R = result.pose[:3, :3]
+                        t = result.pose[:3, 3]
+                        points_world = (R @ points_cam.T).T + t
+                    else:
+                        points_world = points_cam
+                    
+                    output = np.zeros((n_pts, 7), dtype=np.float32)
+                    output[:, :3] = points_world
+                    output[:, 3:6] = result.colors if result.colors is not None else 0.7
+                    output[:, 6] = 0.0
+                    
+                    # Broadcast to all viewers
+                    for sub_chunk in chunk_data(output.tobytes()):
+                        await viewer_manager.broadcast_binary(sub_chunk)
+                        
+            # Status update every 30 frames
+            if frame_idx % 30 == 0:
+                state = slam_processor.get_state()
+                await viewer_manager.broadcast_text(json.dumps({
+                    "type": "slam_status",
+                    "frames": frame_idx,
+                    "keyframes": state.get("backend_state", {}).get("num_keyframes", 0),
+                    "fps": state.get("backend_state", {}).get("fps", 0),
+                }))
+                    
+    except Exception as e:
+        print(f"[Camera/MASt3R] Connection closed: {e}")
+    finally:
+        camera_manager.disconnect()
+        
+        # Save final reconstruction
+        print(f"[Camera/MASt3R] Saving session {session_id}...")
+        output_ply = output_dir / "slam_reconstruction.ply"
+        await loop.run_in_executor(None, lambda: slam_processor.save_pointcloud_ply(output_ply))
+        slam_processor.stop_session()
+        
+        await viewer_manager.broadcast_text(json.dumps({
+            "type": "session_complete",
+            "session_id": session_id,
+            "frames": frame_idx,
+            "output": str(output_ply),
+        }))
+
+
+async def _camera_da3_flow(websocket: WebSocket):
+    """Handle camera frames with DA3 chunks backend (original behavior)."""
+    import cv2
+    
+    try:
+        while True:
+            data = await websocket.receive_bytes()
             frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
             if frame is not None:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frame_storage.add_frame(frame)
                 camera_manager.frame_count += 1
     except Exception as e:
-        print(f"[Camera] Connection closed: {e}")
+        print(f"[Camera/DA3] Connection closed: {e}")
     finally:
         camera_manager.disconnect()
-        # 2. Finalize Session (Save Poses/Intrinsics)
+        # Finalize Session (Save Poses/Intrinsics)
         if chunk_processor and chunk_processor.is_loaded:
-             print("[Camera] Finalizing session...")
+             print("[Camera/DA3] Finalizing session...")
              await asyncio.to_thread(chunk_processor.finalize_session)
 
 @app.websocket("/ws/viewer")
@@ -685,20 +1262,8 @@ async def viewer_websocket(websocket: WebSocket):
     try:
         await viewer_manager.send_text(websocket, json.dumps({"type": "status", "message": "Connected"}))
         
-        # --- STREAMING HISTORY ---
-        # Instead of sending one giant file, we send the movie frame-by-frame
-        if alignment_manager:
-            history = alignment_manager.aligned_chunks
-            if history:
-                print(f"[Viewer] Streaming history: {len(history)} chunks...")
-                for chunk in history:
-                    if chunk.point_cloud is not None and len(chunk.point_cloud) > 0:
-                        binary = cloud_to_binary(chunk.point_cloud)
-                        # Send in small chunks to avoid disconnection
-                        for sub_chunk in chunk_data(binary):
-                            await viewer_manager.send_bytes(websocket, sub_chunk)
-                            await asyncio.sleep(0.001) # Micro-sleep
-                print("[Viewer] History stream complete.")
+        # No auto-streaming on connect — viewer loads session explicitly
+        # CloudCompPy cleaned cloud is sent only on load_session or after reconstruction
         
         while True:
             try:
@@ -748,12 +1313,12 @@ async def viewer_websocket(websocket: WebSocket):
                     has_plys_in_memory = alignment_manager.get_chunk_count() > 0
                     has_plys_on_disk = False
                     if frame_storage and frame_storage.current_session:
-                        output_dir = frame_storage.current_session.output_dir
+                        output_dir = frame_storage.current_session.output_di
                         ply_files = list(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
                         has_plys_on_disk = len(ply_files) > 0
 
                     if da3_is_active:
-                        # DA3 is working - queue the segmentation for later
+                        # DA3 is working - queue the segmentation for late
                         print(f"[Viewer] DA3 is active (processing={is_processing_chunk}, queue={chunk_queue.qsize()}).")
                         print(f"[Viewer] Segmentation queued - will run AFTER DA3 completes ALL chunks.")
                         frame_storage._pending_retroactive_prompt = prompt
@@ -771,7 +1336,6 @@ async def viewer_websocket(websocket: WebSocket):
                          # Run in background to not block socket
                          def _retro_process_active():
                              try:
-                                 # Iterate all chunks that are already finished
                                  session = frame_storage.current_session
                                  if not session: return False
 
@@ -785,15 +1349,38 @@ async def viewer_websocket(websocket: WebSocket):
 
                                  sam3 = get_sam3_wrapper()
 
-                                 # Discover chunks from PLY files on disk (more reliable than session.chunks for offline)
-                                 output_dir = session.output_dir
+                                 # === FASE 2: SEGMENTACIÓN UNIFICADA ===
+                                 # En vez de segmentar por chunk (duplicando trabajo en overlaps),
+                                 # procesamos TODA la secuencia de frames una sola vez
+                                 
+                                 frames_dir = session.frames_di
+                                 if not frames_dir.exists():
+                                     print(f"[Retro] ERROR: Frames directory not found: {frames_dir}")
+                                     return False
+                                 
+                                 print(f"[Retro] 🎯 Processing FULL frame sequence in {frames_dir}")
+                                 all_masks = sam3.process_full_sequence(str(frames_dir), prompt)
+                                 
+                                 if not all_masks:
+                                     print("[Retro] WARNING: No masks generated by SAM3")
+                                     return False
+                                 
+                                 print(f"[Retro] SAM3 generated masks for {len(all_masks)} frames")
+                                 
+                                 # Discover chunks from PLY files on disk
+                                 output_dir = session.output_di
                                  ply_files = sorted(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
 
-                                 # Extract chunk IDs from PLY filenames
+                                 # Extract chunk IDs and get frame ranges from manifest
+                                 manifest_path = session.base_dir / "chunks.json"
+                                 chunks_manifest = None
+                                 if manifest_path.exists():
+                                     with open(manifest_path, 'r') as f:
+                                         chunks_manifest = json.load(f)
+                                 
                                  chunk_ids = []
                                  for ply_path in ply_files:
                                      try:
-                                         # chunk_XXX.ply -> XXX
                                          cid = int(ply_path.stem.split('_')[1])
                                          chunk_ids.append(cid)
                                      except:
@@ -803,20 +1390,33 @@ async def viewer_websocket(websocket: WebSocket):
                                  print(f"[Retro] Found {len(chunk_ids)} chunks with PLY files: {chunk_ids}")
 
                                  for chunk_id in chunk_ids:
-                                     # Build frames directory path
-                                     frames_dir = session.chunks_dir / f"chunk_{chunk_id:03d}"
-
-                                     # Ensure Frames Exist
-                                     if not frames_dir.exists():
-                                         print(f"[Retro] Skipped Chunk {chunk_id}: Frames directory not found.")
-                                         continue
-
-                                     print(f"[Retro] Segmenting Chunk {chunk_id}...")
                                      try:
-                                         # Run SAM3
-                                         masks = sam3.process_chunk(str(frames_dir), prompt, keyframe_interval=None)
-
-                                         # PROJECT to Existing PLY (Do NOT regenerate PLY)
+                                         # Get frame range for this chunk
+                                         if chunks_manifest and str(chunk_id) in chunks_manifest.get("chunks", {}):
+                                             chunk_def = chunks_manifest["chunks"][str(chunk_id)]
+                                             start_frame = chunk_def["start_frame"]
+                                             end_frame = chunk_def["end_frame"]
+                                         else:
+                                             # Fallback: estimate from chunk_size/overlap
+                                             chunk_size = cfg["server"]["chunk_size"]
+                                             chunk_overlap = cfg["server"]["chunk_overlap"]
+                                             chunk_step = chunk_size - chunk_overlap
+                                             start_frame = chunk_id * chunk_step
+                                             end_frame = start_frame + chunk_size - 1
+                                         
+                                         # Get masks for THIS chunk's frame range
+                                         chunk_masks = {
+                                             fid: all_masks[fid] 
+                                             for fid in all_masks.keys() 
+                                             if start_frame <= fid <= end_frame
+                                         }
+                                         
+                                         if not chunk_masks:
+                                             print(f"[Retro] Chunk {chunk_id}: No masks in frame range {start_frame}-{end_frame}")
+                                             continue
+                                         
+                                         print(f"[Retro] Chunk {chunk_id}: Using {len(chunk_masks)} masks (frames {start_frame}-{end_frame})")
+                                         
                                          # Load PLY & Meta
                                          ply_points = frame_storage.load_ply(session, chunk_id)
                                          meta = frame_storage.load_chunk_metadata(session, chunk_id)
@@ -828,20 +1428,18 @@ async def viewer_websocket(websocket: WebSocket):
                                                  sample_indices = np.array(sample_indices, dtype=np.int64)
 
                                              segments = chunk_processor.compute_segmentation_for_ply(
-                                                 ply_points, meta, masks,
+                                                 ply_points, meta, chunk_masks,
                                                  sample_indices=sample_indices,
                                                  chunk_idx=chunk_id
                                              )
                                              seg_path = frame_storage.save_segments_direct(session, chunk_id, segments, prompt=prompt)
-
-                                             # Broadcast Segments IMMEDIATELY via main loop
-                                             if seg_path and os.path.exists(seg_path):
-                                                  pass # Viewer refresh at end will handle it
                                          else:
                                              print(f"[Retro] Skipped Chunk {chunk_id}: Missing PLY/Meta.")
 
                                      except Exception as e:
                                          print(f"[Retro] Error Segmenting Chunk {chunk_id}: {e}")
+                                         import traceback
+                                         traceback.print_exc()
 
                                  print("[Retro] Done re-segmenting history.")
 
@@ -853,6 +1451,7 @@ async def viewer_websocket(websocket: WebSocket):
                                      torch.cuda.empty_cache()
                                  print("[Retro] SAM3 unloaded, resources freed.")
 
+
                                  # Rebuild unified segments.json
                                  if frame_storage.segmentation_manager:
                                      print("[Retro] Rebuilding unified segments.json...")
@@ -863,7 +1462,7 @@ async def viewer_websocket(websocket: WebSocket):
                                  print(f"[Retro] Error: {e}")
                                  import traceback
                                  traceback.print_exc()
-                                 # Ensure SAM3 is unloaded even on error
+                                 # Ensure SAM3 is unloaded even on erro
                                  try:
                                      sam3.unload_model()
                                  except:
@@ -875,7 +1474,7 @@ async def viewer_websocket(websocket: WebSocket):
                              loop = asyncio.get_running_loop()
                              success = await loop.run_in_executor(None, _retro_process_active)
                              if success:
-                                 # Refresh viewer
+                                 # Refresh viewe
                                  await websocket.send_text(json.dumps({"type": "cleared"}))
                                  history = alignment_manager.aligned_chunks
                                  for chunk in history:
@@ -916,126 +1515,29 @@ async def viewer_websocket(websocket: WebSocket):
                                 # 1. Prepare Paths
                                 images_dir = session.frames_dir.resolve()
                                 output_dir = session.output_dir.resolve()
-                                weights_dir = Path(cfg["paths"]["da3_weights_dir"]).resolve()
 
-                                # Auto-select correct config.json based on model name
-                                model_name = cfg["models"]["depth"]["name"]
-                                if "GIANT" in model_name.upper() or "NESTED" in model_name.upper():
-                                    config_source = weights_dir / "config_giant.json"
-                                    if config_source.exists():
-                                        import shutil
-                                        shutil.copy(str(config_source), str(weights_dir / "config.json"))
-                                        print(f"[Retro-Offline] Using GIANT config (CPU mode)")
-                                else:
-                                    config_source = weights_dir / "config_large.json"
-                                    if config_source.exists():
-                                        import shutil
-                                        shutil.copy(str(config_source), str(weights_dir / "config.json"))
-                                        print(f"[Retro-Offline] Using LARGE config (GPU mode)")
+                                # 2. Create DA3 Config (all from config.yaml + HF cache)
+                                from da3_config_builder import build_da3_config
+                                da3_config = build_da3_config(cfg)
 
-                                # 2. Create DA3 Config
-                                da3_config = {
-                                    "Weights": {
-                                        "DA3_CONFIG": str(weights_dir / cfg["models"]["depth"]["config_file"]),
-                                        "DA3": str(weights_dir / cfg["models"]["depth"]["weights_file"]),
-                                        "SALAD": str(weights_dir / "dino_salad.ckpt")
-                                    },
-                                    "Model": {
-                                        "chunk_size": cfg["server"]["chunk_size"],
-                                        "overlap": cfg["server"]["chunk_overlap"],
-                                        "loop_chunk_size": cfg["models"]["da3"]["loop_chunk_size"],
-                                        "loop_enable": False,
-                                        "useDBoW": False,
-                                        "delete_temp_files": True,
-                                        "align_method": cfg["alignment"]["method"],
-                                        "align_lib": "torch",
-                                        "scale_compute_method": "auto",
-                                        "align_type": "dense",
-                                        "ref_view_strategy": cfg["models"]["depth"]["ref_view_strategy"],
-                                        "ref_view_strategy_loop": cfg["models"]["depth"]["ref_view_strategy"],
-                                        "depth_threshold": 15.0,
-                                        "save_depth_conf_result": False,
-                                        "save_debug_info": False,
-                                        "Sparse_Align": {
-                                            "keypoint_select": "orb",
-                                            "keypoint_num": 5000
-                                        },
-                                        "IRLS": {
-                                            "delta": cfg["alignment"]["ransac"]["delta"],
-                                            "max_iters": cfg["alignment"]["ransac"]["max_iters"],
-                                            "tol": cfg["alignment"]["ransac"]["tolerance"]
-                                        },
-                                        "Pointcloud_Save": {
-                                            "conf_threshold_coef": cfg["models"]["da3"]["pointcloud_save"]["conf_threshold_coef"],
-                                            "sample_ratio": cfg["models"]["da3"]["pointcloud_save"]["sample_ratio"]
-                                        }
-                                    },
-                                    "Loop": {
-                                        "SALAD": {
-                                            "image_size": [336, 336],
-                                            "batch_size": 32,
-                                            "similarity_threshold": 0.85,
-                                            "top_k": 5,
-                                            "use_nms": True,
-                                            "nms_threshold": 25
-                                        },
-                                        "SIM3_Optimizer": {
-                                            "lang_version": "python",
-                                            "max_iterations": 30,
-                                            "lambda_init": 1e-6
-                                        }
-                                    }
-                                }
-
-                                # 3. Create RealtimeDA3 instance with AlignmentManager for gravity correction
+                                # 3. Create RealtimeDA3 instance with AlignmentManagerr for gravity correction
                                 print(f"[Retro-Offline] Initializing RealtimeDA3...")
                                 alignment_manager.reset()  # Reset to compute fresh gravity for this session
                                 da3 = RealtimeDA3(
                                     image_dir=str(images_dir),
                                     save_dir=str(output_dir),
                                     config=da3_config,
-                                    alignment_manager=alignment_manager
+                                    alignment_manager=alignment_manage
                                 )
 
-                                # 4. Setup incremental streaming callback
-                                sent_chunks = set()
-
+                                # 4. No-op callback (no streaming during processing)
                                 async def on_chunk_complete(chunk_id, sim3_transform):
-                                    """Callback: Send PLY to viewer as soon as it's generated."""
-                                    try:
-                                        # Look for chunk_XXX.ply in output directory
-                                        ply_file = output_dir / f"chunk_{chunk_id:03d}.ply"
+                                    print(f"[Retro-Offline] Chunk {chunk_id} saved (not streaming)")
 
-                                        # Wait briefly for file to be written
-                                        await asyncio.sleep(0.1)
-
-                                        if ply_file.exists() and chunk_id not in sent_chunks:
-                                            file_size = ply_file.stat().st_size
-                                            if file_size > 0:
-                                                # Load and count points
-                                                points = load_ply_to_numpy(ply_file)
-                                                point_count = len(points) if points is not None else 0
-
-                                                # Read binary PLY for sending
-                                                with open(ply_file, "rb") as f:
-                                                    ply_data = f.read()
-
-                                                await viewer_manager.broadcast_text(json.dumps({
-                                                    "type": "chunk_start",
-                                                    "chunk_id": chunk_id,
-                                                    "point_count": point_count
-                                                }))
-                                                await viewer_manager.broadcast_binary(ply_data)
-                                                print(f"[Retro-Offline] ✅ Sent Chunk {chunk_id} ({point_count:,} points, {file_size/1024/1024:.1f}MB)")
-                                                sent_chunks.add(chunk_id)
-                                    except Exception as e:
-                                        print(f"[Retro-Offline] ⚠️  Error sending chunk {chunk_id}: {e}")
-
-                                # 5. Run DA3 with incremental streaming
+                                # 5. Run DA3
                                 print(f"[Retro-Offline] Processing {len(da3.img_list)} images...")
                                 await da3.process_long_sequence_async(callback=on_chunk_complete)
-
-                                print(f"[Retro-Offline] ✅ Complete! Sent {len(sent_chunks)} chunks")
+                                print(f"[Retro-Offline] ✅ DA3 complete!")
                                 return True
 
                             except Exception as e:
@@ -1044,13 +1546,19 @@ async def viewer_websocket(websocket: WebSocket):
                                 traceback.print_exc()
                                 return False
                         
-                        # Direct await since it is now async
+                        # Run DA3 then CloudCompPy then send
                         success = await _retro_process_offline()
-
-
                         
                         if success:
-                            # Send completion message - chunks were already broadcast during Phase 3
+                            # Run CloudCompPy post-processing
+                            session_id = frame_storage.current_session.session_id if frame_storage.current_session else None
+                            if session_id:
+                                postproc_config = cfg.get("postprocessing", {})
+                                if postproc_config.get("enabled", False):
+                                    await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
+                                # Send cleaned cloud to viewer
+                                await _send_cleaned_cloud(websocket, session_id)
+                            
                             await websocket.send_text(json.dumps({
                                 "type": "status",
                                 "message": "Offline processing complete"
@@ -1108,111 +1616,47 @@ async def viewer_websocket(websocket: WebSocket):
                     "total_chunks": total_chunks
                 }))
                 
-                # Stream saved PLYs
+                # Stream saved point clouds
                 try:
                     scans_dir = Path(__file__).parent / "scans"
                     output_dir = scans_dir / session_id / "output"
 
-                    # Look for PLY files in both pcd/ subdirectory and output/ directory
-                    pcd_dir = output_dir / "pcd"
-                    ply_files = []
-
-                    if pcd_dir.exists():
-                        ply_files.extend(pcd_dir.glob("*.ply"))
-
-                    # Also check output directory itself
-                    if output_dir.exists():
-                        ply_files.extend(output_dir.glob("*.ply"))
-
-                    # Remove duplicates and sort
-                    ply_files = sorted(set(ply_files))
+                    # ── Send cleaned_cloud.ply (from CloudCompPy) ──
+                    cleaned_ply = output_dir / "cleaned_cloud.ply"
                     
-                    if not ply_files:
-                        await websocket.send_text(json.dumps({"type": "error", "message": "No point clouds found for this session"}))
+                    if cleaned_ply.exists():
+                        # Direct send of cleaned cloud
+                        sent = await _send_cleaned_cloud(websocket, session_id)
+                        if sent:
+                            await websocket.send_text(json.dumps({
+                                "type": "status",
+                                "message": f"Loaded cleaned cloud from {session_id}"
+                            }))
+                        else:
+                            await websocket.send_text(json.dumps({"type": "error", "message": "Failed to load cleaned cloud"}))
                     else:
-                        print(f"[Viewer] Found {len(ply_files)} PLY files in {pcd_dir}")
-                        valid_chunks = 0
-                        
-                        # Legacy Alignment Support
-                        offline_transform = None
-                        
-                        for ply_path in ply_files:
-                            try:
-                                # Skip non-chunk files
-                                if "camera_poses" in ply_path.name: continue
-                                
-                                # Parse Chunk ID
-                                cid_str = ""
-                                if "_pcd" in ply_path.name:
-                                    cid_str = ply_path.name.split('_')[0]
-                                elif "chunk_" in ply_path.name:
-                                    cid_str = ply_path.stem.split('_')[1]
-                                else:
-                                    continue # Unknown format
-                                    
-                                chunk_id = int(cid_str)
-                                
-                                # Use unified loader
-                                if frame_storage.current_session:
-                                    # Use frame_storage.load_ply which now handles ASCII/Binary and multiple paths
-                                    data = frame_storage.load_ply(frame_storage.current_session, chunk_id)
-                                    
-                                    if data is None: 
-                                        print(f"[Viewer] Failed to load Chunk {chunk_id} (None returned)")
-                                        continue
-                                    
-                                    # Check for metadata to decide on auto-leveling
-                                    # If chunk 0 and no meta, compute leveling
-                                    if chunk_id == 0:
-                                        meta = frame_storage.load_chunk_metadata(frame_storage.current_session, 0)
-                                        # ALWAYS compute auto-leveling on chunk 0 for gravity correction
-                                        # ply_pre_aligned means chunks aligned to EACH OTHER, not gravity
-                                        print(f"[Viewer] Computing Auto-Leveling on Chunk 0...")
-                                        s_l, R_l, t_l = alignment_manager.compute_leveling_from_points(data)
-                                        offline_transform = (s_l, R_l, t_l)
-
-                                    # Apply Offline Transform if computed
-                                    if offline_transform is not None:
-                                        s_l, R_l, t_l = offline_transform
-                                        # Apply: p' = s * (p @ R.T) + t
-                                        # Data is (N, 6) [x,y,z,r,g,b]
-                                        xyz = data[:, :3]
-                                        data[:, :3] = s_l * (xyz @ R_l.T) + t_l
-                                    
-                                    # 1. Send Chunk Start
-                                    # 1. Send Chunk Start
-                                    await viewer_manager.send_text(websocket, json.dumps({
-                                        "type": "chunk_start",
-                                        "chunk_id": chunk_id,
-                                        "point_count": len(data)
+                        # No cleaned cloud yet — check if chunks exist to run CloudCompPy
+                        chunk_plys = sorted(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
+                        if chunk_plys:
+                            print(f"[Viewer] No cleaned_cloud.ply found. Running CloudCompPy on {len(chunk_plys)} chunks...")
+                            await websocket.send_text(json.dumps({
+                                "type": "status",
+                                "message": f"Building cleaned cloud from {len(chunk_plys)} chunks..."
+                            }))
+                            postproc_config = cfg.get("postprocessing", {})
+                            await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
+                            
+                            if cleaned_ply.exists():
+                                sent = await _send_cleaned_cloud(websocket, session_id)
+                                if sent:
+                                    await websocket.send_text(json.dumps({
+                                        "type": "status",
+                                        "message": f"Loaded cleaned cloud from {session_id}"
                                     }))
-                                    
-                                    # 2. Send Binary Cloud
-                                    binary = cloud_to_binary(data)
-                                    # Send small chunks
-                                    for sub_chunk in chunk_data(binary):
-                                        await viewer_manager.send_bytes(websocket, sub_chunk)
-                                        await asyncio.sleep(0.001)
-
-                                    valid_chunks += 1
-                                    
-                                    # 3. Send Segmentation (if exists) -> Look in output dir (not pcd)
-                                    seg_path = output_dir / f"chunk_{chunk_id:03d}_segments.json"
-                                    if seg_path.exists():
-                                        try:
-                                            with open(seg_path, 'r') as f:
-                                                seg_data = json.load(f)
-                                            seg_data["type"] = "segmentation"
-                                            await viewer_manager.send_text(websocket, json.dumps(seg_data))
-                                        except Exception as e:
-                                            print(f"[Viewer] Seg send error: {e}")
-                                    
-                                    await asyncio.sleep(0.01)
-                                    
-                            except Exception as e:
-                                print(f"[Viewer] Error loading chunk {ply_path}: {e}")
-                        
-                        await websocket.send_text(json.dumps({"type": "status", "message": f"Loaded {len(ply_files)} chunks from {session_id}"}))
+                            else:
+                                await websocket.send_text(json.dumps({"type": "error", "message": "CloudCompPy failed to produce cleaned cloud"}))
+                        else:
+                            await websocket.send_text(json.dumps({"type": "error", "message": "No point clouds found for this session"}))
 
                 except Exception as e:
                     print(f"Error loading session: {e}")
@@ -1241,172 +1685,103 @@ async def viewer_websocket(websocket: WebSocket):
                         session = frame_storage.current_session
                         if not session: return False
 
-                        print(f"[Reconstruct] 🟢 STARTING DA3 INCREMENTAL RECONSTRUCTION (RealtimeDA3)")
-
-                        # 1. Prepare Paths
+                        # Check which backend to use
+                        backend = cfg.get("slam_backend", "mast3r")
                         images_dir = session.frames_dir.resolve()
                         output_dir = session.output_dir.resolve()
-                        weights_dir = Path(cfg["paths"]["da3_weights_dir"]).resolve()
-
-                        # Auto-select correct config.json based on model name
-                        model_name = cfg["models"]["depth"]["name"]
-                        if "GIANT" in model_name.upper() or "NESTED" in model_name.upper():
-                            config_source = weights_dir / "config_giant.json"
-                            if config_source.exists():
-                                import shutil
-                                shutil.copy(str(config_source), str(weights_dir / "config.json"))
-                                print(f"[Reconstruct] Using GIANT config (CPU mode)")
+                        
+                        if backend in ("mast3r", "hybrid"):
+                            # === MAST3R / HYBRID RECONSTRUCTION ===
+                            mode_name = "HYBRID (MASt3R + DA3)" if backend == "hybrid" else "MAST3R"
+                            print(f"[Reconstruct] 🟢 STARTING {mode_name} RECONSTRUCTION")
+                            
+                            # Initialize SLAM processor if needed
+                            if not slam_processor.is_initialized:
+                                print("[Reconstruct] Initializing MASt3R...")
+                                loop = asyncio.get_event_loop()
+                                await loop.run_in_executor(None, slam_processor.initialize)
+                            
+                            # Process frames synchronously (simpler, no deadlock)
+                            def _process_mast3r():
+                                slam_processor.start_session(
+                                    session.session_id, 
+                                    images_dir, 
+                                    output_dir
+                                )
+                                
+                                frame_count = 0
+                                keyframe_count = 0
+                                
+                                for result in slam_processor.process_frames_directory(images_dir):
+                                    frame_count += 1
+                                    if result.is_keyframe:
+                                        keyframe_count += 1
+                                        
+                                return frame_count, keyframe_count
+                            
+                            loop = asyncio.get_event_loop()
+                            frame_count, keyframe_count = await loop.run_in_executor(None, _process_mast3r)
+                            
+                            # In hybrid mode: DA3 dense depth with MASt3R metric poses
+                            if backend == "hybrid":
+                                print(f"[Reconstruct] 🔄 Phase 2: Running DA3 dense depth with MASt3R metric poses...")
+                                
+                                # Run DA3 densification (no streaming callback — CloudCompPy at end)
+                                success_da3 = await loop.run_in_executor(
+                                    None,
+                                    lambda: slam_processor.run_hybrid_densification(
+                                        images_dir, output_dir,
+                                        on_chunk_callback=None
+                                    )
+                                )
+                                if not success_da3:
+                                    raise RuntimeError("[Hybrid] DA3 densification returned no points. Cannot proceed.")
+                                print(f"[Reconstruct] ✅ DA3 hybrid densification complete")
+                            
+                            # Save PLY (needed for CloudCompPy input or as fallback)
+                            points, colors = slam_processor.get_global_pointcloud()
+                            if points is not None and len(points) > 0:
+                                print(f"[Reconstruct] {len(points):,} points from {mode_name} (not streaming — CloudCompPy will process)")
+                            
+                            # Save PLY
+                            ply_path = output_dir / "slam_reconstruction.ply"
+                            await loop.run_in_executor(
+                                None, 
+                                lambda: slam_processor.save_pointcloud_ply(ply_path)
+                            )
+                            
+                            slam_processor.stop_session()
+                            
+                            print(f"[Reconstruct] ✅ {mode_name} complete: {frame_count} frames, {keyframe_count} keyframes")
+                            return True
+                            
                         else:
-                            config_source = weights_dir / "config_large.json"
-                            if config_source.exists():
-                                import shutil
-                                shutil.copy(str(config_source), str(weights_dir / "config.json"))
-                                print(f"[Reconstruct] Using LARGE config (GPU mode)")
+                            # === DA3 RECONSTRUCTION ===
+                            print(f"[Reconstruct] 🟢 STARTING DA3 INCREMENTAL RECONSTRUCTION (RealtimeDA3)")
 
-                        # 2. Create DA3 Config
-                        da3_config = {
-                            "Weights": {
-                                "DA3_CONFIG": str(weights_dir / cfg["models"]["depth"]["config_file"]),
-                                "DA3": str(weights_dir / cfg["models"]["depth"]["weights_file"]),
-                                "SALAD": str(weights_dir / "dino_salad.ckpt")
-                            },
-                            "Model": {
-                                "chunk_size": cfg["server"]["chunk_size"],
-                                "overlap": cfg["server"]["chunk_overlap"],
-                                "loop_chunk_size": cfg["models"]["da3"]["loop_chunk_size"],
-                                "loop_enable": False,
-                                "useDBoW": False,
-                                "delete_temp_files": True,
-                                "align_method": cfg["alignment"]["method"],
-                                "align_lib": "torch",
-                                "scale_compute_method": "auto",
-                                "align_type": "dense",
-                                "ref_view_strategy": cfg["models"]["depth"]["ref_view_strategy"],
-                                "ref_view_strategy_loop": cfg["models"]["depth"]["ref_view_strategy"],
-                                "depth_threshold": 15.0,
-                                "save_depth_conf_result": False,
-                                "save_debug_info": False,
-                                "Sparse_Align": {
-                                    "keypoint_select": "orb",
-                                    "keypoint_num": 5000
-                                },
-                                "IRLS": {
-                                    "delta": cfg["alignment"]["ransac"]["delta"],
-                                    "max_iters": cfg["alignment"]["ransac"]["max_iters"],
-                                    "tol": cfg["alignment"]["ransac"]["tolerance"]
-                                },
-                                "Pointcloud_Save": {
-                                    "conf_threshold_coef": cfg["point_cloud"]["generation"]["conf_threshold_coef"],
-                                    "sample_ratio": cfg["point_cloud"]["generation"]["sample_ratio"]
-                                }
-                            },
-                            "Loop": {
-                                "SALAD": {
-                                    "image_size": [336, 336],
-                                    "batch_size": 32,
-                                    "similarity_threshold": 0.85,
-                                    "top_k": 5,
-                                    "use_nms": True,
-                                    "nms_threshold": 25
-                                },
-                                "SIM3_Optimizer": {
-                                    "lang_version": "python",
-                                    "max_iterations": 30,
-                                    "lambda_init": 1e-6
-                                }
-                            }
-                        }
+                            # Create DA3 Config (all from config.yaml + HF cache)
+                            from da3_config_builder import build_da3_config
+                            da3_config = build_da3_config(cfg)
 
-                        # 3. Create RealtimeDA3 instance
-                        print(f"[Reconstruct] Initializing RealtimeDA3...")
-                        da3 = RealtimeDA3(
-                            image_dir=str(images_dir),
-                            save_dir=str(output_dir),
-                            config=da3_config,
-                            alignment_manager=alignment_manager
-                        )
+                            # 3. Create RealtimeDA3 instance
+                            print(f"[Reconstruct] Initializing RealtimeDA3...")
+                            da3 = RealtimeDA3(
+                                image_dir=str(images_dir),
+                                save_dir=str(output_dir),
+                                config=da3_config,
+                                alignment_manager=alignment_manager
+                            )
 
-                        # 4. Setup incremental streaming callback
-                        sent_chunks = set()
+                            # 4. No-op callback (no real-time streaming — only CloudCompPy at end)
+                            async def on_chunk_complete(chunk_id, sim3_transform):
+                                print(f"[Reconstruct] Chunk {chunk_id} saved (not streaming)")
 
-                        async def on_chunk_complete(chunk_id, sim3_transform):
-                            """Callback: Send PLY to viewer as soon as it's generated."""
-                            print(f"[Main] Callback triggered for Chunk {chunk_id}")
-                            try:
-                                # Look for chunk_XXX.ply in output directory
-                                ply_file = output_dir / f"chunk_{chunk_id:03d}.ply"
+                            # 5. Run DA3
+                            print(f"[Reconstruct] Processing {len(da3.img_list)} images...")
+                            await da3.process_long_sequence_async(callback=on_chunk_complete)
 
-                                # Wait briefly for file to be written
-                                await asyncio.sleep(0.5) # Increased wait time
-
-                                if ply_file.exists(): 
-                                    file_size = ply_file.stat().st_size
-                                    print(f"[Main] Found {ply_file.name} ({file_size} bytes)")
-                                    
-                                    if chunk_id not in sent_chunks and file_size > 0:
-                                        # Parse PLY and convert to FusionRenderer format (N, 7) float32
-                                        with open(ply_file, "rb") as f:
-                                            # Skip header
-                                            while True:
-                                                line = f.readline()
-                                                if line.startswith(b"end_header"):
-                                                    break
-                                            
-                                            # Read binary body
-                                            # PLY format from sim3utils: x, y, z (f4), r, g, b (u1)
-                                            ply_dtype = np.dtype([
-                                                ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
-                                                ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
-                                            ])
-                                            raw_data = np.frombuffer(f.read(), dtype=ply_dtype)
-                                        
-                                        point_count = len(raw_data)
-                                        
-                                        if point_count > 0:
-                                            # Convert to (N, 7) float32: x, y, z, r, g, b, classId
-                                            # r,g,b need to be normalized 0-1 for FusionRenderer if it expects floats
-                                            # (Actually FusionRenderer reads them as floats. If we send 255.0 it might be too bright, 
-                                            # but let's stick to standard 0-1 for normalized float colors)
-                                            output_data = np.zeros((point_count, 7), dtype=np.float32)
-                                            output_data[:, 0] = raw_data['x']
-                                            output_data[:, 1] = raw_data['y']
-                                            output_data[:, 2] = raw_data['z']
-                                            output_data[:, 3] = raw_data['r'] / 255.0
-                                            output_data[:, 4] = raw_data['g'] / 255.0
-                                            output_data[:, 5] = raw_data['b'] / 255.0
-                                            output_data[:, 6] = 0.0 # classId
-                                            
-                                            ply_data_bytes = output_data.tobytes()
-
-                                            print(f"[Main] Broadcasting Chunk {chunk_id} to viewer... ({len(ply_data_bytes)} bytes)")
-                                            await viewer_manager.broadcast_text(json.dumps({
-                                                "type": "chunk_start",
-                                                "chunk_id": chunk_id,
-                                                "point_count": point_count
-                                            }))
-                                            
-                                            # Send in multiple small chunks (1MB) to prevent disconnection
-                                            for sub_chunk in chunk_data(ply_data_bytes):
-                                                await viewer_manager.broadcast_binary(sub_chunk)
-                                                await asyncio.sleep(0.001)
-
-                                            print(f"[Reconstruct] ✅ Sent Chunk {chunk_id} ({point_count:,} points)")
-                                            sent_chunks.add(chunk_id)
-                                        else:
-                                            print(f"[Main] Skipping Chunk {chunk_id}: No points in PLY.")
-                                    else:
-                                        print(f"[Main] Skipping Chunk {chunk_id}: Already sent or empty.")
-                                else:
-                                    print(f"[Main] File NOT found: {ply_file}")
-                            except Exception as e:
-                                print(f"[Reconstruct] ⚠️  Error sending chunk {chunk_id}: {e}")
-
-                        # 5. Run DA3 with incremental streaming
-                        print(f"[Reconstruct] Processing {len(da3.img_list)} images...")
-                        await da3.process_long_sequence_async(callback=on_chunk_complete)
-
-                        print(f"[Reconstruct] ✅ Complete! Sent {len(sent_chunks)} chunks")
-                        return True
+                            print(f"[Reconstruct] ✅ DA3 complete!")
+                            return True
 
                     except Exception as e:
                         print(f"[Reconstruct] Error: {e}")
@@ -1419,6 +1794,14 @@ async def viewer_websocket(websocket: WebSocket):
                     success = await _reconstruct_geometry_only()
                     try:
                         if success:
+                            # ── CloudCompPy Post-Processing ──
+                            postproc_config = cfg.get("postprocessing", {})
+                            if postproc_config.get("enabled", False):
+                                await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
+                            
+                            # ── Send cleaned cloud to viewer ──
+                            await _send_cleaned_cloud(websocket, session_id)
+                            
                             await websocket.send_text(json.dumps({
                                 "type": "status",
                                 "message": f"Geometry reconstruction complete for {session_id}"

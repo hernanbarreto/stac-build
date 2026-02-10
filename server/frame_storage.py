@@ -314,29 +314,24 @@ class FrameStorage:
         if session.frame_count - 1 >= chunk_end:
             chunk_id = len(session.chunks)
             
-            # Create chunk directory with symlinks to frames
+            # NO COPIAR FRAMES - Solo crear directorio vacío para compatibilidad
             chunk_dir = session.chunks_dir / f"chunk_{chunk_id:03d}"
             chunk_dir.mkdir(exist_ok=True)
-            
-            # Create symlinks to frames
-            for i, frame_idx in enumerate(range(chunk_start, chunk_end + 1)):
-                src = session.frames_dir / f"{frame_idx:05d}.jpg"
-                dst = chunk_dir / f"{i:05d}.jpg"
-                if src.exists() and not dst.exists():
-                    # Copy instead of symlink for cross-filesystem compatibility
-                    shutil.copy2(src, dst)
             
             chunk_info = ChunkInfo(
                 chunk_id=chunk_id,
                 start_frame=chunk_start,
                 end_frame=chunk_end,
                 frame_count=chunk_end - chunk_start + 1,
-                prompt=self.current_prompt,  # Associate current prompt with this chunk
+                prompt=self.current_prompt,
             )
             
             session.chunks.append(chunk_info)
             
-            print(f"[FrameStorage] Chunk {chunk_id} ready: frames {chunk_start}-{chunk_end}")
+            # Guardar manifiesto de chunks
+            self._save_chunks_manifest(session)
+            
+            print(f"[FrameStorage] Chunk {chunk_id} ready: frames {chunk_start}-{chunk_end} (manifest only)")
             
             # Trigger callback if set
             if self.on_chunk_ready:
@@ -345,6 +340,50 @@ class FrameStorage:
             return chunk_info
         
         return None
+    
+    def _save_chunks_manifest(self, session: ScanSession):
+        """Guardar chunks.json con la definición de todos los chunks."""
+        manifest = {
+            "version": "2.0",
+            "chunk_size": self.chunk_size,
+            "overlap": self.chunk_overlap,
+            "total_frames": session.frame_count,
+            "chunks": {}
+        }
+        
+        for chunk in session.chunks:
+            manifest["chunks"][str(chunk.chunk_id)] = {
+                "start_frame": chunk.start_frame,
+                "end_frame": chunk.end_frame,
+                "frame_count": chunk.frame_count,
+                "status": chunk.status
+            }
+        
+        manifest_path = session.base_dir / "chunks.json"
+        with open(manifest_path, 'w') as f:
+            json.dump(manifest, f, indent=2)
+    
+    def get_chunk_frame_paths(self, session: ScanSession, chunk_id: int) -> List[Path]:
+        """Obtener lista de paths de frames para un chunk (desde frames/, no chunks/)."""
+        # Buscar en manifiesto primero
+        manifest_path = session.base_dir / "chunks.json"
+        if manifest_path.exists():
+            with open(manifest_path, 'r') as f:
+                manifest = json.load(f)
+            
+            chunk_def = manifest.get("chunks", {}).get(str(chunk_id))
+            if chunk_def:
+                start = chunk_def["start_frame"]
+                end = chunk_def["end_frame"]
+                return [session.frames_dir / f"{i:05d}.jpg" for i in range(start, end + 1)]
+        
+        # Fallback: buscar en chunks_dir (sesiones antiguas)
+        chunk_dir = session.chunks_dir / f"chunk_{chunk_id:03d}"
+        if chunk_dir.exists():
+            return sorted(chunk_dir.glob("*.jpg"))
+        
+        return []
+
     
     def get_chunk_frames_dir(self, chunk_info: ChunkInfo) -> Path:
         """Get the directory containing frames for a chunk."""

@@ -44,7 +44,6 @@ dependencies:
     - addict
     - plyfile
     - matplotlib
-    - pycolmap
     - trimesh
     - evo-1
     - e3nn  # For DA3NESTED spherical harmonics

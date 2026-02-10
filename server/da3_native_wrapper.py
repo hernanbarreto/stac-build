@@ -9,22 +9,65 @@ import shutil
 import argparse
 from datetime import datetime
 import gc
+from pathlib import Path
+
+# Import config to get DA3 path
+try:
+    from config import cfg
+    _da3_path = cfg.get("da3", {}).get("install_path", "/home/hernan/Depth-Anything-3")
+except ImportError:
+    _da3_path = "/home/hernan/Depth-Anything-3"
 
 # Add Depth-Anything-3 to path to allow imports
-da3_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../Depth-Anything-3"))
+da3_root = os.path.abspath(_da3_path)
 da3_streaming_path = os.path.join(da3_root, "da3_streaming")
 
+# CRITICAL: da3_root must come BEFORE da3_streaming_path in sys.path
+# Otherwise Python finds da3_streaming.py (file) before da3_streaming/ (package)
 if da3_streaming_path not in sys.path:
     sys.path.insert(0, da3_streaming_path)
 if da3_root not in sys.path:
-    sys.path.insert(0, da3_root)
+    sys.path.insert(0, da3_root)  # MUST be last insert(0) so it ends up first
 
-from da3_streaming import DA3_Streaming, depth_to_point_cloud_vectorized
-from loop_utils.sim3utils import (
-    accumulate_sim3_transforms,
-    save_confident_pointcloud_batch,
-    process_loop_list
-)
+# DA3 imports are optional
+DA3_NATIVE_AVAILABLE = False
+DA3_Streaming = None
+depth_to_point_cloud_vectorized = None
+accumulate_sim3_transforms = None
+save_confident_pointcloud_batch = None
+process_loop_list = None
+
+try:
+    from da3_streaming.da3_streaming import DA3_Streaming as _DA3_Streaming
+    from da3_streaming.da3_streaming import depth_to_point_cloud_vectorized as _depth_func
+    DA3_Streaming = _DA3_Streaming
+    depth_to_point_cloud_vectorized = _depth_func
+    
+    from loop_utils.sim3utils import (
+        accumulate_sim3_transforms as _accum,
+        save_confident_pointcloud_batch as _save,
+        process_loop_list as _process
+    )
+    accumulate_sim3_transforms = _accum
+    save_confident_pointcloud_batch = _save
+    process_loop_list = _process
+    
+    DA3_NATIVE_AVAILABLE = True
+    print("[DA3 Native] DA3_Streaming loaded successfully")
+except ImportError as e:
+    from config import cfg as _cfg
+    if _cfg.get("slam_backend", "mast3r") == "da3":
+        print(f"[DA3 Native] DA3_Streaming not available: {e}")
+        print("[DA3 Native] RealtimeDA3 will not be functional")
+
+
+# Stub class if DA3 not available
+if DA3_Streaming is None:
+    class DA3_Streaming:
+        """Stub class when DA3 is not available."""
+        def __init__(self, *args, **kwargs):
+            raise NotImplementedError("DA3_Streaming is not available. Install pypose, numba and other DA3 dependencies.")
+
 
 class RealtimeDA3(DA3_Streaming):
     """
@@ -52,7 +95,7 @@ class RealtimeDA3(DA3_Streaming):
         self.gravity_transform = (1.0, np.eye(3), np.zeros(3))
         
     def _compute_initial_gravity_transform(self, chunk_data):
-        # Deprecated: Logic moved to AlignmentManager
+        # Deprecated: Logic moved to AlignmentManagerr
         pass
         
     def _save_metadata(self, chunk_id, result, alignment_transform, sample_indices=None):
@@ -203,13 +246,13 @@ class RealtimeDA3(DA3_Streaming):
                  acc_transforms = accumulate_sim3_transforms(self.sim3_list)
                  current_s, current_R, current_t = acc_transforms[-1]
             
-            # 2. Use AlignmentManager if available (User Requirement)
+            # 2. Use AlignmentManagerr if available (User Requirement)
             # This delegates floor alignment (Auto-leveling) to the existing manager
             aligned_points = None
             final_s, final_R, final_t = current_s, current_R, current_t
             
             if self.alignment_manager:
-                # Wrap DA3 predictions into a simple object compatible with AlignmentManager
+                # Wrap DA3 predictions into a simple object compatible with AlignmentManagerr
                 class ChunkWrapper:
                     def __init__(self, p, frame_count):
                         self.depths = np.squeeze(p.depth)
@@ -252,19 +295,19 @@ class RealtimeDA3(DA3_Streaming):
                 
                 # We need to compose the SIM3 transform BEFORE passing to Manager?
                 # Actually Manager.add_chunk expects "ChunkResult" which has SIM3 applied?
-                # No, AlignmentManager apply_gravity_correction expects logic.
+                # No, AlignmentManagerr apply_gravity_correction expects logic.
                 
-                # In AlignmentManager.add_chunk(chunk_result):
+                # In AlignmentManagerr.add_chunk(chunk_result):
                 # It calls _generate_point_cloud using just the raw data + gravity.
                 # BUT for chunks > 0, we need the accumulation.
-                # AlignmentManager handles accumulation internally?
-                # AlignmentManager.sim3_list.
+                # AlignmentManagerr handles accumulation internally?
+                # AlignmentManagerr.sim3_list.
                 # BUT we are adding chunks here in RealtimeDA3.
-                # We should use AlignmentManager ONLY for the auto-leveling of the FIRST chunk if we want to stay robust.
+                # We should use AlignmentManagerr ONLY for the auto-leveling of the FIRST chunk if we want to stay robust.
                 # Or we feed it everything.
                 
                 # Let's simplify: RealtimeDA3 calculates the Accumulation (SIM3).
-                # We want AlignmentManager to calculate Gravity (on chunk 0).
+                # We want AlignmentManagerr to calculate Gravity (on chunk 0).
                 # And apply Gravity * Accumulation on chunk N.
                 
                 # Step A: Feed Chunk 0 to Manager to get Gravity.

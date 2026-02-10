@@ -666,6 +666,7 @@ class AlignmentManager:
         confs = confs_kf
         
         all_points, all_colors = [], []
+        all_point_indices = []  # Mapeo: cada punto → índice global (frame_local * H*W + pixel)
         validity_mapping = []  # For each keyframe: list of valid flat pixel indices
         conf_threshold = max(0.0, np.mean(confs[confs > 0]) * 0.5)
         
@@ -739,6 +740,14 @@ class AlignmentManager:
             
             all_points.append(valid_pts)
             all_colors.append(valid_clrs)
+            
+            # Calcular índices globales para mapeo de segmentación
+            # Índice global = frame_local * (H * W) + pixel_index
+            H, W = depths_kf[kf_idx].shape
+            pixels_per_frame = H * W
+            global_indices = kf_idx * pixels_per_frame + valid_flat_indices
+            all_point_indices.append(global_indices)
+            
             validity_mapping.append({
                 'orig_frame_idx': orig_frame_idx,
                 'valid_pixel_indices': valid_flat_indices.tolist()
@@ -746,13 +755,18 @@ class AlignmentManager:
             
         all_points = np.concatenate(all_points, axis=0) if all_points else np.empty((0, 3))
         all_colors = np.concatenate(all_colors, axis=0) if all_colors else np.empty((0, 3))
+        all_point_indices = np.concatenate(all_point_indices, axis=0) if all_point_indices else np.empty((0,), dtype=np.int64)
         
-        sample_indices = None
+        # sample_indices ahora contiene el mapeo global (punto PLY → índice en frame*H*W)
+        sample_indices = all_point_indices
+        
         if sample_ratio < 1.0 and len(all_points) > 0:
             n_samples = int(len(all_points) * sample_ratio)
-            sample_indices = np.sort(np.random.choice(len(all_points), n_samples, replace=False))
-            all_points = all_points[sample_indices]
-            all_colors = all_colors[sample_indices]
+            subsample_indices = np.sort(np.random.choice(len(all_points), n_samples, replace=False))
+            all_points = all_points[subsample_indices]
+            all_colors = all_colors[subsample_indices]
+            # CRÍTICO: También subsamplueamos el mapeo de índices
+            sample_indices = sample_indices[subsample_indices]
             
         # Output: XYZ (3) + RGB (3) = 6 channels, original colors
         point_cloud = np.concatenate([all_points, all_colors], axis=1).astype(np.float32)
