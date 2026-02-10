@@ -89,6 +89,24 @@ class RealtimeDA3(DA3_Streaming):
         )
         if len(self.img_list) == 0:
             raise ValueError(f"[DIR EMPTY] No images found in {self.img_dir}!")
+        
+        # Filter blurry frames via frame_quality.json (if available)
+        try:
+            from frame_quality import load_valid_frames
+            valid_files = load_valid_frames(self.img_dir)
+            if valid_files is not None:
+                original_count = len(self.img_list)
+                valid_set = set(valid_files)
+                self.img_list = [p for p in self.img_list if os.path.basename(p) in valid_set]
+                filtered = original_count - len(self.img_list)
+                print(f"[DA3] 🔍 Frame quality filter: {original_count} → {len(self.img_list)} frames ({filtered} blurry removed)")
+            else:
+                print(f"[DA3] No frame_quality.json found — using all {len(self.img_list)} frames")
+        except Exception as e:
+            print(f"[DA3] ⚠️ Frame quality filter skipped: {e}")
+        
+        if len(self.img_list) == 0:
+            raise ValueError(f"[DIR EMPTY] All frames were filtered as blurry!")
         print(f"Found {len(self.img_list)} images")
 
         self.alignment_manager = alignment_manager
@@ -312,7 +330,8 @@ class RealtimeDA3(DA3_Streaming):
                 
                 # Step A: Feed Chunk 0 to Manager to get Gravity.
                 if chunk_idx == 0:
-                    wrapper = ChunkWrapper(cur_predictions, self.chunk_size)
+                    actual_frame_count = cur_predictions.depth.shape[0]
+                    wrapper = ChunkWrapper(cur_predictions, actual_frame_count)
                     # We need to hack the Manager to JUST compute gravity without storing full history if we don't want double storage?
                     # Actually Main.py resets manager. So we can use it fully.
                     aligned_chunk = self.alignment_manager.add_chunk(wrapper) # Will compute gravity on chunk 0
@@ -387,6 +406,49 @@ class RealtimeDA3(DA3_Streaming):
                 conf_threshold=0.0,  # No additional filtering needed
                 sample_ratio=1.0,  # No additional sampling needed
             )
+
+            # --- SAVE POINT ORIGINS (For SAM3 Segmentation Mapping) ---
+            # Each final point came from a specific (frame, pixel_row, pixel_col)
+            # Flat index i in the (N*H*W) array maps to:
+            #   frame_local = i // (H*W), row = (i % (H*W)) // W, col = i % W
+            try:
+                N_frames = cur_predictions.depth.shape[0]
+                H_scaled = cur_predictions.depth.shape[-2] if cur_predictions.depth.ndim >= 3 else cur_predictions.depth.shape[0]
+                W_scaled = cur_predictions.depth.shape[-1]
+                HW = H_scaled * W_scaled
+                
+                # Get the final flat indices into the original (N*H*W) array
+                if sample_ratio < 1.0 and sample_indices_for_meta is not None:
+                    final_flat_indices = sample_indices_for_meta
+                else:
+                    final_flat_indices = valid_indices
+                
+                # Compute origin for each point
+                frame_local = final_flat_indices // HW
+                pixel_row = (final_flat_indices % HW) // W_scaled
+                pixel_col = final_flat_indices % W_scaled
+                
+                # Convert local frame index to global frame index
+                from config import cfg as _cfg
+                chunk_size = _cfg["server"]["chunk_size"]
+                chunk_overlap = _cfg["server"]["chunk_overlap"]
+                chunk_step = chunk_size - chunk_overlap
+                frame_global = frame_local + chunk_idx * chunk_step
+                
+                # Also map to original resolution pixels (for SAM3 mask lookup)
+                # SAM3 runs on original images, DA3 runs on scaled resolution
+                origin_path = os.path.join(self.save_dir, f"chunk_{chunk_idx:03d}_origins.npz")
+                np.savez_compressed(origin_path,
+                    frame_global=frame_global.astype(np.int32),
+                    pixel_row=pixel_row.astype(np.int16),
+                    pixel_col=pixel_col.astype(np.int16),
+                    scaled_resolution=[H_scaled, W_scaled],
+                )
+                print(f"[DA3] Saved point origins: {origin_path} ({len(frame_global)} points)")
+            except Exception as e:
+                print(f"[DA3] ⚠️ Failed to save point origins: {e}")
+                import traceback
+                traceback.print_exc()
 
             # --- SAVE METADATA (For Retroactive Segmentation) ---
             self._save_metadata(chunk_idx, cur_predictions, (final_s, final_R, final_t), sample_indices_for_meta)

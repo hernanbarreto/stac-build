@@ -424,6 +424,24 @@
                     item.appendChild(checkbox);
                     item.appendChild(label);
                     item.appendChild(count);
+
+                    // OBB toggle button (only if OBB exists)
+                    if (obj.obbMesh) {
+                        const obbBtn = document.createElement('button');
+                        obbBtn.textContent = '📦';
+                        obbBtn.title = 'Toggle OBB wireframe';
+                        obbBtn.style.cssText = 'background:none; border:1px solid #444; border-radius:3px; ' +
+                            'cursor:pointer; font-size:11px; padding:1px 4px; color:#00ffff; margin-left:auto;';
+                        obbBtn.onclick = () => {
+                            const mesh = obj.obbMesh;
+                            if (mesh) {
+                                mesh.visible = !mesh.visible;
+                                obbBtn.style.opacity = mesh.visible ? '1' : '0.3';
+                            }
+                        };
+                        item.appendChild(obbBtn);
+                    }
+
                     segmentsList.appendChild(item);
                 }
             };
@@ -605,16 +623,7 @@
                                 connection.send({ type: 'load_session', session_id: s.id });
                                 toggleModal(false);
                                 showToast(`Loading ${s.id}...`);
-                                // Fetch unified segments
-                                try {
-                                    const segRes = await fetch(`/segments/${s.id}`);
-                                    const segmentsData = await segRes.json();
-                                    if (renderer && segmentsData && (segmentsData.object_types || segmentsData.chunk_id)) {
-                                        renderer.applySegmentation(segmentsData);
-                                    }
-                                } catch (err) {
-                                    console.error("Error loading segments:", err);
-                                }
+                                // Segmentation is sent via WebSocket after cloud loads
                             }
                         };
                         btns.appendChild(loadBtn);

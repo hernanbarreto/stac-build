@@ -418,6 +418,84 @@ export class FusionRenderer {
                 }
             }
         }
+        // V2.0 FORMAT (from segmentation_pipeline.py batched output)
+        // data: { version: "2.0", instances: [{id, label, instance_id, color, total_points, chunks: {chunk_id: [indices]}}] }
+        else if (data.instances && Array.isArray(data.instances)) {
+            console.log(`[Renderer] Processing v2.0 segmentation: ${data.instances.length} instances`);
+            if (!this.segmentedObjects) this.segmentedObjects = {};
+
+            for (const instance of data.instances) {
+                const objId = instance.instance_id || instance.id;
+                const label = instance.label || 'object';
+                const color = instance.color || '#FFFF00';
+                const globalObjKey = `${label}_${objId}`;
+
+                // Register object
+                this.segmentedObjects[globalObjKey] = {
+                    id: objId,
+                    label: `${label} #${objId}`,
+                    globalId: globalObjKey,
+                    color: color,
+                    visible: true,
+                    totalPoints: 0,
+                    chunks: [],
+                    globalIndices: []
+                };
+
+                // Iterate chunks from this instance
+                // Cleaned cloud mode: globalIndices (flat list matching the loaded cloud)
+                if (instance.globalIndices && instance.globalIndices.length > 0) {
+                    const indices = instance.globalIndices;
+                    this.segmentedObjects[globalObjKey].totalPoints += indices.length;
+                    for (const globalIdx of indices) {
+                        if (globalIdx < this.options.maxPoints) {
+                            classIds[globalIdx] = objId;
+                            this.segmentedObjects[globalObjKey].globalIndices.push(globalIdx);
+                            modified = true;
+                        }
+                    }
+                }
+                // Per-chunk mode: chunks dict
+                else if (instance.chunks) {
+                    for (const [chunkIdStr, indices] of Object.entries(instance.chunks)) {
+                        const chunkId = parseInt(chunkIdStr);
+                        const offset = this.chunkOffsets[chunkId];
+
+                        if (offset === undefined || !this.chunksLoaded || !this.chunksLoaded[chunkId]) {
+                            // Queue for when chunk loads
+                            if (!this.pendingSegments) this.pendingSegments = [];
+                            this.pendingSegments.push({
+                                chunkId: chunkId,
+                                globalObjKey: globalObjKey,
+                                indices: indices,
+                                objId: objId
+                            });
+                            console.log(`[Renderer] Queued ${indices.length} seg points for Chunk ${chunkId} (not loaded yet)`);
+                            continue;
+                        }
+
+                        this.segmentedObjects[globalObjKey].totalPoints += indices.length;
+                        this.segmentedObjects[globalObjKey].chunks.push(chunkId);
+
+                        for (const idx of indices) {
+                            const globalIdx = offset + idx;
+                            if (globalIdx < this.options.maxPoints) {
+                                classIds[globalIdx] = objId;
+                                this.segmentedObjects[globalObjKey].globalIndices.push(globalIdx);
+                                modified = true;
+                            }
+                        }
+                    }
+                }
+
+                // Render OBB if available
+                if (instance.obb) {
+                    this._addOBB(globalObjKey, instance.obb);
+                }
+
+                console.log(`[Renderer] Instance "${label} #${objId}": ${this.segmentedObjects[globalObjKey].totalPoints} points, color=${color}`);
+            }
+        }
         // LEGACY/LIVE FORMAT (per chunk)
         else if (data.chunk_id !== undefined) {
             const chunkId = data.chunk_id;
@@ -511,7 +589,7 @@ export class FusionRenderer {
         }
 
         this.geometry.attributes.classId.needsUpdate = true;
-        console.log(`[Renderer] ${visible ? 'Enabled' : 'Disabled'} highlight for "${label}" (${obj.globalIndices.length} points)`);
+        console.log(`[Renderer] ${visible ? 'Enabled' : 'Disabled'} highlight for "${obj.label}" (${obj.globalIndices.length} points)`);
     }
 
     /**
@@ -618,17 +696,31 @@ export class FusionRenderer {
             this.obbGroup.remove(existing);
         }
 
-        const { center, extent, rotation } = obbData;
+        const { center, half_extents, rotation } = obbData;
+        if (!center || !half_extents) return;
 
-        // Create box geometry
-        const geometry = new THREE.BoxGeometry(extent[0], extent[1], extent[2]);
+        // Box dimensions = 2 * half_extents
+        const sx = half_extents[0] * 2;
+        const sy = half_extents[1] * 2;
+        const sz = half_extents[2] * 2;
+
+        const geometry = new THREE.BoxGeometry(sx, sy, sz);
         const edges = new THREE.EdgesGeometry(geometry);
-        const material = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 2 });
+        const material = new THREE.LineBasicMaterial({ color: 0x00ffff, linewidth: 2 });
         const box = new THREE.LineSegments(edges, material);
 
         box.position.set(center[0], center[1], center[2]);
-        if (rotation && rotation.length === 4) {
-            box.quaternion.set(rotation[0], rotation[1], rotation[2], rotation[3]);
+
+        // Apply rotation from 3x3 matrix (rows are axes)
+        if (rotation && rotation.length === 3) {
+            const m = new THREE.Matrix4();
+            m.set(
+                rotation[0][0], rotation[0][1], rotation[0][2], 0,
+                rotation[1][0], rotation[1][1], rotation[1][2], 0,
+                rotation[2][0], rotation[2][1], rotation[2][2], 0,
+                0, 0, 0, 1
+            );
+            box.setRotationFromMatrix(m);
         }
 
         box.userData.key = key;
@@ -638,6 +730,8 @@ export class FusionRenderer {
         if (this.segmentedObjects[key]) {
             this.segmentedObjects[key].obbMesh = box;
         }
+
+        console.log(`[Renderer] Added OBB for "${key}": ${sx.toFixed(2)}×${sy.toFixed(2)}×${sz.toFixed(2)}m`);
     }
 
     _onResize() {

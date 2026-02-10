@@ -370,6 +370,104 @@ class SAM3Wrapper:
         
         return results
     
+    def process_batch(self, batch_dir: str, prompt_text: str,
+                      index_mapping: Dict[int, int],
+                      prompt_frames: List[int] = None) -> Dict[int, Any]:
+        """
+        Process a batch of frames in a temporary directory.
+        
+        Args:
+            batch_dir: Path to directory with sequential batch frames (000000.jpg, ...)
+            prompt_text: Text prompt for segmentation
+            index_mapping: {batch_local_idx → original_frame_idx}
+            prompt_frames: Local batch indices where to add prompts (None = auto)
+        
+        Returns:
+            Dict[original_frame_idx → {"out_binary_masks": ndarray, "out_obj_ids": ndarray}]
+        """
+        if not self.is_loaded:
+            self.load_model()
+        
+        batch_path = Path(batch_dir)
+        batch_size = len(index_mapping)
+        session_id = None
+        results = {}
+        
+        try:
+            logger.info(f"[SAM3-Batch] Processing {batch_size} frames from {batch_dir}")
+            
+            # 1. Start session
+            response = self.predictor.handle_request(
+                request=dict(type="start_session", resource_path=batch_dir)
+            )
+            session_id = response["session_id"]
+            
+            # 2. Add prompts at distributed frames
+            if prompt_frames is None:
+                # Auto-distribute: start, 1/3, 2/3, end
+                if batch_size <= 10:
+                    prompt_frames = [0]
+                else:
+                    step = batch_size // 4
+                    prompt_frames = [0, step, step * 2, step * 3]
+            
+            for f_idx in prompt_frames:
+                if f_idx >= batch_size:
+                    continue
+                try:
+                    self.predictor.handle_request(
+                        request=dict(
+                            type="add_prompt",
+                            session_id=session_id,
+                            frame_index=f_idx,
+                            text=prompt_text,
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not add prompt to batch frame {f_idx}: {e}")
+            
+            # 3. Propagate (save ALL frames, keyframe_interval=1)
+            for response in self.predictor.handle_stream_request(
+                request=dict(
+                    type="propagate_in_video",
+                    session_id=session_id,
+                )
+            ):
+                local_idx = response["frame_index"]
+                outputs = response["outputs"]
+                
+                # Map back to original frame index
+                orig_idx = index_mapping.get(local_idx, local_idx)
+                
+                # Convert tensors to numpy
+                if "out_binary_masks" in outputs:
+                    mask = outputs["out_binary_masks"]
+                    if hasattr(mask, 'cpu'):
+                        outputs["out_binary_masks"] = mask.cpu().numpy()
+                if "out_obj_ids" in outputs:
+                    oids = outputs["out_obj_ids"]
+                    if hasattr(oids, 'cpu'):
+                        outputs["out_obj_ids"] = oids.cpu().numpy()
+                
+                results[orig_idx] = outputs
+            
+            logger.info(f"[SAM3-Batch] Produced masks for {len(results)} frames")
+            
+        except Exception as e:
+            logger.error(f"Error during batch processing: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            if session_id is not None:
+                try:
+                    self.predictor.handle_request(
+                        request=dict(type="reset_session", session_id=session_id)
+                    )
+                except Exception as e:
+                    logger.error(f"Error resetting session: {e}")
+        
+        return results
+    
     def load_cached_masks(self, session_dir: Path, frame_indices: List[int] = None) -> Dict[int, Any]:
         """
         Cargar máscaras pre-calculadas desde masks/.

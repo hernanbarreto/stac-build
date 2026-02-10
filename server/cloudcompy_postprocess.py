@@ -124,6 +124,33 @@ def main():
     current.setName("merged")
     print(f"  ✅ Merged: {current.size():,} points ({time.time()-t0:.1f}s)\n")
 
+    # ── Step 1b: Inject origin scalar fields from .npz ──
+    origin_files = sorted(glob.glob(os.path.join(args.input_dir, "chunk_*_origins.npz")))
+    if origin_files:
+        import numpy as np
+        t_orig = time.time()
+        
+        all_fg, all_pr, all_pc = [], [], []
+        for of in origin_files:
+            d = np.load(of)
+            all_fg.append(d["frame_global"].astype(np.float32))
+            all_pr.append(d["pixel_row"].astype(np.float32))
+            all_pc.append(d["pixel_col"].astype(np.float32))
+        
+        fg = np.concatenate(all_fg)
+        pr = np.concatenate(all_pr)
+        pc = np.concatenate(all_pc)
+        
+        n_cloud = current.size()
+        if len(fg) == n_cloud:
+            for name, arr in [('frame_global', fg), ('pixel_row', pr), ('pixel_col', pc)]:
+                idx = current.addScalarField(name)
+                sf = current.getScalarField(idx)
+                sf.fromNpArrayCopy(arr)
+            print(f"  ✅ Injected origin scalar fields ({n_cloud:,} pts) ({time.time()-t_orig:.1f}s)\n")
+        else:
+            print(f"  ⚠️ Origin size mismatch: {len(fg)} vs cloud {n_cloud} — origins NOT injected\n")
+
     # ══════════════════════════════════════════════════════════════
     # STEP 2: DUPLICATE REMOVAL
     # ══════════════════════════════════════════════════════════════
@@ -262,14 +289,13 @@ def main():
         print(f"[Step 6/6] Normal estimation: SKIPPED\n")
 
     # ══════════════════════════════════════════════════════════════
-    # SAVE (Binary PLY — CloudCompPy defaults to ASCII which is 3x larger)
+    # SAVE (Binary PLY — with origin fields preserved if available)
     # ══════════════════════════════════════════════════════════════
     t_save = time.time()
     output_path = args.output
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     
     import numpy as np
-    import struct
     
     print(f"[Save] Writing binary PLY...")
     
@@ -282,6 +308,19 @@ def main():
     if has_colors:
         rgb = current.colorsToNpArray()  # [N, 3] or [N, 4] uint8
         rgb = rgb[:, :3]  # keep only RGB, drop alpha if present
+    
+    # Check for origin scalar fields (preserved through partialClone operations)
+    origin_fields = {}
+    sf_dic = current.getScalarFieldDic()  # {name: index}
+    for field_name in ['frame_global', 'pixel_row', 'pixel_col']:
+        if field_name in sf_dic:
+            sf_idx = sf_dic[field_name]
+            sf = current.getScalarField(sf_idx)
+            origin_fields[field_name] = sf.toNpArray()
+    
+    has_origins = len(origin_fields) == 3
+    if has_origins:
+        print(f"  ✅ Origin fields preserved ({n_pts} points with frame_global, pixel_row, pixel_col)")
     
     # Write binary PLY
     with open(output_path, 'wb') as f:
@@ -296,32 +335,40 @@ def main():
             header += "property uchar red\n"
             header += "property uchar green\n"
             header += "property uchar blue\n"
+        if has_origins:
+            header += "property int frame_global\n"
+            header += "property short pixel_row\n"
+            header += "property short pixel_col\n"
         header += "end_header\n"
         f.write(header.encode('ascii'))
         
-        # Bulk binary write via structured numpy array (fast)
+        # Build structured dtype and pack
+        fields = [('x','<f4'),('y','<f4'),('z','<f4')]
         if has_colors:
-            dtype = np.dtype([('x','<f4'),('y','<f4'),('z','<f4'),
-                              ('r','u1'),('g','u1'),('b','u1')])
-            packed = np.empty(n_pts, dtype=dtype)
-            packed['x'] = xyz[:, 0]
-            packed['y'] = xyz[:, 1]
-            packed['z'] = xyz[:, 2]
+            fields += [('r','u1'),('g','u1'),('b','u1')]
+        if has_origins:
+            fields += [('frame_global','<i4'),('pixel_row','<i2'),('pixel_col','<i2')]
+        
+        dtype = np.dtype(fields)
+        packed = np.empty(n_pts, dtype=dtype)
+        packed['x'] = xyz[:, 0]
+        packed['y'] = xyz[:, 1]
+        packed['z'] = xyz[:, 2]
+        if has_colors:
             packed['r'] = rgb[:, 0]
             packed['g'] = rgb[:, 1]
             packed['b'] = rgb[:, 2]
-        else:
-            dtype = np.dtype([('x','<f4'),('y','<f4'),('z','<f4')])
-            packed = np.empty(n_pts, dtype=dtype)
-            packed['x'] = xyz[:, 0]
-            packed['y'] = xyz[:, 1]
-            packed['z'] = xyz[:, 2]
+        if has_origins:
+            packed['frame_global'] = origin_fields['frame_global'].astype(np.int32)
+            packed['pixel_row'] = origin_fields['pixel_row'].astype(np.int16)
+            packed['pixel_col'] = origin_fields['pixel_col'].astype(np.int16)
         
         packed.tofile(f)
     
     file_size = os.path.getsize(output_path) / (1024 * 1024)
+    origin_tag = " +origins" if has_origins else ""
     print(f"  ✅ {output_path}")
-    print(f"     {n_pts:,} points | {file_size:.1f} MB | Binary PLY")
+    print(f"     {n_pts:,} points | {file_size:.1f} MB | Binary PLY{origin_tag}")
     
     print(f"  ({time.time()-t_save:.1f}s)\n")
 

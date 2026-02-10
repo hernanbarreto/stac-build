@@ -124,6 +124,7 @@ class AlignmentManager:
         self.gravity_correction = (1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32))
         self.next_global_id = 1
         self.last_chunk_last_frame_masks = None
+        self._leveling_cache = None  # Cache for compute_leveling_from_points
     
     def reset(self):
         with self.lock:
@@ -134,6 +135,7 @@ class AlignmentManager:
             self.gravity_correction = (1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32))
             self.next_global_id = 1
             self.last_chunk_last_frame_masks = None
+            self._leveling_cache = None
             torch.cuda.empty_cache()
             gc.collect()
             print("[AlignmentManager] Reset")
@@ -332,6 +334,11 @@ class AlignmentManager:
         """
         if points is None or len(points) < 100:
              return 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
+        
+        # Return cached result if available (ensures OBB uses same transform as cloud)
+        if self._leveling_cache is not None:
+            print("[AlignStandalone] Using cached leveling transform")
+            return self._leveling_cache
 
         # 1. Subsample
         if len(points) > 5000:
@@ -399,7 +406,9 @@ class AlignmentManager:
         t = np.array([0, d, 0], dtype=np.float32)
         
         print(f"[AlignStandalone] Correction found: d={d:.3f}")
-        return 1.0, R, t
+        result = (1.0, R, t)
+        self._leveling_cache = result  # Cache for reuse
+        return result
 
     def _add_first_chunk(self, chunk_data) -> AlignedChunk:
         s, R, t = self.gravity_correction

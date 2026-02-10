@@ -264,47 +264,91 @@ def _align_cloud_to_floor(output_data: np.ndarray) -> np.ndarray:
         return output_data
 
 async def _send_cleaned_cloud(websocket, session_id: str):
-    """Load, align floor, and send cleaned_cloud.ply to viewer."""
+    """Load, align floor, and send point cloud to viewer.
+    Prefers cleaned_cloud.ply; falls back to raw chunk_000.ply.
+    Auto-detects origin fields in PLY header for correct binary parsing.
+    """
     scans_dir = Path(__file__).parent / "scans" / session_id / "output"
-    cleaned_ply = scans_dir / "cleaned_cloud.ply"
     
-    if not cleaned_ply.exists():
-        print(f"[SendCloud] ⚠️ cleaned_cloud.ply not found for {session_id}")
+    cleaned_ply = scans_dir / "cleaned_cloud.ply"
+    raw_chunk = scans_dir / "chunk_000.ply"
+    
+    # Prefer cleaned cloud, fallback to raw chunk
+    if cleaned_ply.exists():
+        ply_path = cleaned_ply
+        label = "cleaned_cloud"
+    elif raw_chunk.exists():
+        ply_path = raw_chunk
+        label = "RAW chunk_000"
+    else:
+        print(f"[SendCloud] ⚠️ No PLY found for {session_id}")
         return False
     
     try:
-        file_size_mb = cleaned_ply.stat().st_size / (1024 * 1024)
-        print(f"[SendCloud] Loading cleaned_cloud.ply ({file_size_mb:.1f} MB)...")
+        file_size_mb = ply_path.stat().st_size / (1024 * 1024)
+        print(f"[SendCloud] Loading {label} ({file_size_mb:.1f} MB)...")
         
-        # Read binary PLY directly
-        with open(cleaned_ply, "rb") as f:
+        # Read PLY (detect ASCII vs binary, detect origin fields)
+        with open(ply_path, "rb") as f:
             n_pts = 0
+            is_binary = False
+            has_origins = False
             while True:
                 line = f.readline()
                 if line.startswith(b"element vertex"):
                     n_pts = int(line.split()[-1])
+                if line.startswith(b"format binary"):
+                    is_binary = True
+                if b"frame_global" in line:
+                    has_origins = True
                 if line.startswith(b"end_header"):
                     break
-            ply_dtype = np.dtype([
-                ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-                ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
-            ])
-            raw_data = np.frombuffer(f.read(), dtype=ply_dtype)
+            
+            if is_binary:
+                # Build dtype matching the PLY properties
+                if has_origins:
+                    ply_dtype = np.dtype([
+                        ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                        ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+                        ('frame_global', '<i4'),
+                        ('pixel_row', '<i2'), ('pixel_col', '<i2')
+                    ])
+                else:
+                    ply_dtype = np.dtype([
+                        ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                        ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
+                    ])
+                raw_data = np.frombuffer(f.read(), dtype=ply_dtype)
+                point_count = len(raw_data)
+                output_data = np.zeros((point_count, 7), dtype=np.float32)
+                output_data[:, 0] = raw_data['x']
+                output_data[:, 1] = raw_data['y']
+                output_data[:, 2] = raw_data['z']
+                output_data[:, 3] = raw_data['r'] / 255.0
+                output_data[:, 4] = raw_data['g'] / 255.0
+                output_data[:, 5] = raw_data['b'] / 255.0
+            else:
+                # ASCII PLY
+                points = []
+                for line_bytes in f:
+                    parts = line_bytes.decode('ascii').strip().split()
+                    if len(parts) >= 6:
+                        x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+                        r, g, b = float(parts[3])/255.0, float(parts[4])/255.0, float(parts[5])/255.0
+                        points.append([x, y, z, r, g, b, 0.0])
+                output_data = np.array(points, dtype=np.float32)
+                point_count = len(output_data)
         
-        point_count = len(raw_data)
         if point_count == 0:
             print(f"[SendCloud] ⚠️ Empty cloud")
             return False
         
-        # Convert to viewer format (N, 7) float32: x, y, z, r, g, b, classId
-        output_data = np.zeros((point_count, 7), dtype=np.float32)
-        output_data[:, 0] = raw_data['x']
-        output_data[:, 1] = raw_data['y']
-        output_data[:, 2] = raw_data['z']
-        output_data[:, 3] = raw_data['r'] / 255.0
-        output_data[:, 4] = raw_data['g'] / 255.0
-        output_data[:, 5] = raw_data['b'] / 255.0
-        output_data[:, 6] = 0.0
+        if output_data.shape[1] == 7:
+            pass  # Already has classId column
+        else:
+            tmp = np.zeros((point_count, 7), dtype=np.float32)
+            tmp[:, :6] = output_data[:, :6]
+            output_data = tmp
         
         # ── Floor Alignment ──
         output_data = _align_cloud_to_floor(output_data)
@@ -314,7 +358,7 @@ async def _send_cleaned_cloud(websocket, session_id: str):
         # Send via proper viewer protocol
         await websocket.send_text(json.dumps({
             "type": "status",
-            "message": f"Sending cleaned cloud ({point_count:,} points, {file_size_mb:.1f} MB)..."
+            "message": f"Sending {label} ({point_count:,} points, {file_size_mb:.1f} MB)..."
         }))
         await websocket.send_text(json.dumps({
             "type": "chunk_start",
@@ -326,7 +370,8 @@ async def _send_cleaned_cloud(websocket, session_id: str):
             await websocket.send_bytes(sub)
             await asyncio.sleep(0.001)
         
-        print(f"[SendCloud] ✅ Sent {point_count:,} points to viewer (floor-aligned)")
+        origin_tag = " +origins" if has_origins else ""
+        print(f"[SendCloud] ✅ Sent {point_count:,} points ({label}{origin_tag}, floor-aligned)")
         return True
     
     except Exception as e:
@@ -349,16 +394,28 @@ async def _send_cleaned_cloud_broadcast(session_id: str):
         
         with open(cleaned_ply, "rb") as f:
             n_pts = 0
+            has_origins = False
             while True:
                 line = f.readline()
                 if line.startswith(b"element vertex"):
                     n_pts = int(line.split()[-1])
+                if b"frame_global" in line:
+                    has_origins = True
                 if line.startswith(b"end_header"):
                     break
-            ply_dtype = np.dtype([
-                ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-                ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
-            ])
+            
+            if has_origins:
+                ply_dtype = np.dtype([
+                    ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                    ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+                    ('frame_global', '<i4'),
+                    ('pixel_row', '<i2'), ('pixel_col', '<i2')
+                ])
+            else:
+                ply_dtype = np.dtype([
+                    ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                    ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
+                ])
             raw_data = np.frombuffer(f.read(), dtype=ply_dtype)
         
         point_count = len(raw_data)
@@ -388,7 +445,8 @@ async def _send_cleaned_cloud_broadcast(session_id: str):
             await viewer_manager.broadcast_binary(sub)
             await asyncio.sleep(0.001)
         
-        print(f"[SendCloud] ✅ Broadcast {point_count:,} points to all viewers (floor-aligned, {file_size_mb:.1f} MB)")
+        origin_tag = " +origins" if has_origins else ""
+        print(f"[SendCloud] ✅ Broadcast {point_count:,} points to all viewers (floor-aligned{origin_tag}, {file_size_mb:.1f} MB)")
         return True
     
     except Exception as e:
@@ -633,7 +691,7 @@ async def _run_pending_retroactive(prompt: str):
             print("[Retro-Pending] No active session")
             return
 
-        print(f"[Retro-Pending] DA3 complete. Starting segmentation for ALL chunks with prompt: '{prompt}'")
+        print(f"[Retro-Pending] DA3 complete. Starting segmentation with prompt: '{prompt}'")
 
         # Unload DA3 to free VRAM (CRITICAL: DA3 must be fully unloaded before SAM3)
         print("[Retro-Pending] Unloading DA3 to free VRAM...")
@@ -641,76 +699,31 @@ async def _run_pending_retroactive(prompt: str):
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            print(f"[Retro-Pending] VRAM freed. Available: {torch.cuda.memory_allocated()/1e9:.2f}GB used")
 
-        sam3 = get_sam3_wrapper()
+        # Run new segmentation pipeline
+        from segmentation_pipeline import run_segmentation
+        result = run_segmentation(
+            frames_dir=str(session.frames_dir),
+            output_dir=str(session.output_dir),
+            prompt=prompt
+        )
 
-        # Discover ALL chunks (not just those without segmentation)
-        # This ensures consistent segmentation across the entire session
-        output_dir = session.output_di
-        ply_files = sorted(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
+        if "error" in result:
+            print(f"[Retro-Pending] Segmentation failed: {result['error']}")
+        else:
+            print(f"[Retro-Pending] ✅ Segmentation complete: {len(result['instances'])} instances")
 
-        chunk_ids = []
-        for ply_path in ply_files:
-            try:
-                cid = int(ply_path.stem.split('_')[1])
-                chunk_ids.append(cid)
-            except:
-                pass
-
-        chunk_ids = sorted(set(chunk_ids))
-
-        if not chunk_ids:
-            print("[Retro-Pending] No chunks found to segment.")
-            sam3.unload_model()
-            return
-
-        print(f"[Retro-Pending] Processing {len(chunk_ids)} chunks: {chunk_ids}")
-
-        for chunk_id in sorted(chunk_ids):
-            frames_dir = session.chunks_dir / f"chunk_{chunk_id:03d}"
-            if not frames_dir.exists():
-                continue
-
-            print(f"[Retro-Pending] Segmenting Chunk {chunk_id}...")
-            try:
-                masks = sam3.process_chunk(str(frames_dir), prompt, keyframe_interval=None)
-
-                ply_points = frame_storage.load_ply(session, chunk_id)
-                meta = frame_storage.load_chunk_metadata(session, chunk_id)
-
-                if ply_points is not None and meta:
-                    sample_indices = meta.get("sample_indices")
-                    if sample_indices is not None:
-                        sample_indices = np.array(sample_indices, dtype=np.int64)
-
-                    segments = chunk_processor.compute_segmentation_for_ply(
-                        ply_points, meta, masks,
-                        sample_indices=sample_indices,
-                        chunk_idx=chunk_id
-                    )
-                    frame_storage.save_segments_direct(session, chunk_id, segments, prompt=prompt)
-            except Exception as e:
-                print(f"[Retro-Pending] Error segmenting chunk {chunk_id}: {e}")
-
-        # Unload SAM3
-        print("[Retro-Pending] Unloading SAM3...")
-        sam3.unload_model()
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        # Rebuild unified segments.json
-        if frame_storage.segmentation_manager:
-            frame_storage.segmentation_manager.rebuild_from_chunks()
-
-        # Notify viewers
+        # Match masks against current cloud and broadcast
+        from segmentation_pipeline import apply_segmentation_to_cloud
+        seg_data = apply_segmentation_to_cloud(session.output_dir)
+        if seg_data.get("instances"):
+            await viewer_manager.broadcast_text(json.dumps(seg_data))
+            print(f"[Retro-Pending] Broadcast segmentation ({len(seg_data['instances'])} instances)")
+        
         await viewer_manager.broadcast_text(json.dumps({
             "type": "info",
-            "message": f"Retroactive segmentation complete for '{prompt}'"
+            "message": f"Segmentation complete for '{prompt}': {len(result.get('instances', []))} instances"
         }))
-
-        print("[Retro-Pending] Retroactive segmentation complete.")
 
     except Exception as e:
         print(f"[Retro-Pending] Error: {e}")
@@ -824,12 +837,21 @@ async def get_segments(session_id: str):
     """Get unified segmentation data for a session."""
     try:
         scans_dir = Path(__file__).parent / "scans"
-        segments_file = scans_dir / session_id / "output" / "segments.json"
+        output_dir = scans_dir / session_id / "output"
         
-        if segments_file.exists():
-            with open(segments_file, 'r') as f:
+        # Use display-time matching (masks → cloud)
+        masks_file = output_dir / "seg_masks.npz"
+        seg_file = output_dir / "segmentation.json"
+        if masks_file.exists() and seg_file.exists():
+            from segmentation_pipeline import apply_segmentation_to_cloud
+            return apply_segmentation_to_cloud(output_dir)
+        
+        # Fallback to legacy formats
+        if seg_file.exists():
+            with open(seg_file, 'r') as f:
                 return json.load(f)
-        return {"object_types": []}
+        
+        return {"object_types": [], "instances": []}
     except Exception as e:
         print(f"Error serving segments: {e}")
         return {"error": str(e)}
@@ -1313,7 +1335,7 @@ async def viewer_websocket(websocket: WebSocket):
                     has_plys_in_memory = alignment_manager.get_chunk_count() > 0
                     has_plys_on_disk = False
                     if frame_storage and frame_storage.current_session:
-                        output_dir = frame_storage.current_session.output_di
+                        output_dir = frame_storage.current_session.output_dir
                         ply_files = list(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
                         has_plys_on_disk = len(ply_files) > 0
 
@@ -1347,126 +1369,24 @@ async def viewer_websocket(websocket: WebSocket):
                                  if torch.cuda.is_available():
                                      torch.cuda.empty_cache()
 
-                                 sam3 = get_sam3_wrapper()
+                                 # Run new segmentation pipeline
+                                 from segmentation_pipeline import run_segmentation
+                                 result = run_segmentation(
+                                     frames_dir=str(session.frames_dir),
+                                     output_dir=str(session.output_dir),
+                                     prompt=prompt
+                                 )
 
-                                 # === FASE 2: SEGMENTACIÓN UNIFICADA ===
-                                 # En vez de segmentar por chunk (duplicando trabajo en overlaps),
-                                 # procesamos TODA la secuencia de frames una sola vez
-                                 
-                                 frames_dir = session.frames_di
-                                 if not frames_dir.exists():
-                                     print(f"[Retro] ERROR: Frames directory not found: {frames_dir}")
+                                 if "error" in result:
+                                     print(f"[Retro] Segmentation failed: {result['error']}")
                                      return False
-                                 
-                                 print(f"[Retro] 🎯 Processing FULL frame sequence in {frames_dir}")
-                                 all_masks = sam3.process_full_sequence(str(frames_dir), prompt)
-                                 
-                                 if not all_masks:
-                                     print("[Retro] WARNING: No masks generated by SAM3")
-                                     return False
-                                 
-                                 print(f"[Retro] SAM3 generated masks for {len(all_masks)} frames")
-                                 
-                                 # Discover chunks from PLY files on disk
-                                 output_dir = session.output_di
-                                 ply_files = sorted(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
 
-                                 # Extract chunk IDs and get frame ranges from manifest
-                                 manifest_path = session.base_dir / "chunks.json"
-                                 chunks_manifest = None
-                                 if manifest_path.exists():
-                                     with open(manifest_path, 'r') as f:
-                                         chunks_manifest = json.load(f)
-                                 
-                                 chunk_ids = []
-                                 for ply_path in ply_files:
-                                     try:
-                                         cid = int(ply_path.stem.split('_')[1])
-                                         chunk_ids.append(cid)
-                                     except:
-                                         pass
-
-                                 chunk_ids = sorted(set(chunk_ids))
-                                 print(f"[Retro] Found {len(chunk_ids)} chunks with PLY files: {chunk_ids}")
-
-                                 for chunk_id in chunk_ids:
-                                     try:
-                                         # Get frame range for this chunk
-                                         if chunks_manifest and str(chunk_id) in chunks_manifest.get("chunks", {}):
-                                             chunk_def = chunks_manifest["chunks"][str(chunk_id)]
-                                             start_frame = chunk_def["start_frame"]
-                                             end_frame = chunk_def["end_frame"]
-                                         else:
-                                             # Fallback: estimate from chunk_size/overlap
-                                             chunk_size = cfg["server"]["chunk_size"]
-                                             chunk_overlap = cfg["server"]["chunk_overlap"]
-                                             chunk_step = chunk_size - chunk_overlap
-                                             start_frame = chunk_id * chunk_step
-                                             end_frame = start_frame + chunk_size - 1
-                                         
-                                         # Get masks for THIS chunk's frame range
-                                         chunk_masks = {
-                                             fid: all_masks[fid] 
-                                             for fid in all_masks.keys() 
-                                             if start_frame <= fid <= end_frame
-                                         }
-                                         
-                                         if not chunk_masks:
-                                             print(f"[Retro] Chunk {chunk_id}: No masks in frame range {start_frame}-{end_frame}")
-                                             continue
-                                         
-                                         print(f"[Retro] Chunk {chunk_id}: Using {len(chunk_masks)} masks (frames {start_frame}-{end_frame})")
-                                         
-                                         # Load PLY & Meta
-                                         ply_points = frame_storage.load_ply(session, chunk_id)
-                                         meta = frame_storage.load_chunk_metadata(session, chunk_id)
-
-                                         if ply_points is not None and meta:
-                                             # Get sample_indices from metadata for direct 2D→3D mapping
-                                             sample_indices = meta.get("sample_indices")
-                                             if sample_indices is not None:
-                                                 sample_indices = np.array(sample_indices, dtype=np.int64)
-
-                                             segments = chunk_processor.compute_segmentation_for_ply(
-                                                 ply_points, meta, chunk_masks,
-                                                 sample_indices=sample_indices,
-                                                 chunk_idx=chunk_id
-                                             )
-                                             seg_path = frame_storage.save_segments_direct(session, chunk_id, segments, prompt=prompt)
-                                         else:
-                                             print(f"[Retro] Skipped Chunk {chunk_id}: Missing PLY/Meta.")
-
-                                     except Exception as e:
-                                         print(f"[Retro] Error Segmenting Chunk {chunk_id}: {e}")
-                                         import traceback
-                                         traceback.print_exc()
-
-                                 print("[Retro] Done re-segmenting history.")
-
-                                 # Unload SAM3 to free VRAM
-                                 print("[Retro] Unloading SAM3 to free VRAM...")
-                                 sam3.unload_model()
-                                 gc.collect()
-                                 if torch.cuda.is_available():
-                                     torch.cuda.empty_cache()
-                                 print("[Retro] SAM3 unloaded, resources freed.")
-
-
-                                 # Rebuild unified segments.json
-                                 if frame_storage.segmentation_manager:
-                                     print("[Retro] Rebuilding unified segments.json...")
-                                     frame_storage.segmentation_manager.rebuild_from_chunks()
-
+                                 print(f"[Retro] ✅ Segmentation complete: {len(result['instances'])} instances")
                                  return True
                              except Exception as e:
                                  print(f"[Retro] Error: {e}")
                                  import traceback
                                  traceback.print_exc()
-                                 # Ensure SAM3 is unloaded even on erro
-                                 try:
-                                     sam3.unload_model()
-                                 except:
-                                     pass
                                  return False
                          
                          # Execute in thread
@@ -1474,24 +1394,20 @@ async def viewer_websocket(websocket: WebSocket):
                              loop = asyncio.get_running_loop()
                              success = await loop.run_in_executor(None, _retro_process_active)
                              if success:
-                                 # Refresh viewe
+                                 # Refresh viewer: resend cleaned cloud + segmentation
+                                 session_id = frame_storage.current_session.session_id
                                  await websocket.send_text(json.dumps({"type": "cleared"}))
-                                 history = alignment_manager.aligned_chunks
-                                 for chunk in history:
-                                     if chunk.point_cloud is not None and len(chunk.point_cloud) > 0:
-                                         binary = cloud_to_binary(chunk.point_cloud)
-                                         await viewer_manager.send_bytes(websocket, binary)
-                                         await asyncio.sleep(0.01)
-                                         
-                                         # Send Segments if available
-                                         seg_path = frame_storage.current_session.output_dir / f"chunk_{chunk.chunk_id:03d}_segments.json"
-                                         if seg_path.exists():
-                                             with open(seg_path, 'r') as f:
-                                                 seg_data = json.load(f)
-                                             seg_data["type"] = "segmentation"
-                                             await viewer_manager.send_text(websocket, json.dumps(seg_data))
-
-                                 print("[Viewer] Refreshed view with segmented data.")
+                                 
+                                 # Resend the cleaned cloud
+                                 sent = await _send_cleaned_cloud(websocket, session_id)
+                                 
+                                 # Apply segmentation against current cloud
+                                 from segmentation_pipeline import apply_segmentation_to_cloud
+                                 seg_data = apply_segmentation_to_cloud(frame_storage.current_session.output_dir)
+                                 if seg_data.get("instances"):
+                                     await websocket.send_text(json.dumps(seg_data))
+                                 
+                                 print(f"[Viewer] Refreshed view with segmented data (cloud={'✅' if sent else '❌'}).")
 
                          asyncio.create_task(_run_retro_active())
                     else:
@@ -1515,6 +1431,12 @@ async def viewer_websocket(websocket: WebSocket):
                                 # 1. Prepare Paths
                                 images_dir = session.frames_dir.resolve()
                                 output_dir = session.output_dir.resolve()
+
+                                # 1.5. Frame quality analysis (blur detection)
+                                from frame_quality import analyze_frames, save_manifest
+                                fq_result = analyze_frames(str(images_dir))
+                                if "error" not in fq_result:
+                                    save_manifest(str(images_dir), fq_result)
 
                                 # 2. Create DA3 Config (all from config.yaml + HF cache)
                                 from da3_config_builder import build_da3_config
@@ -1546,18 +1468,40 @@ async def viewer_websocket(websocket: WebSocket):
                                 traceback.print_exc()
                                 return False
                         
-                        # Run DA3 then CloudCompPy then send
+                        # Run DA3 then CloudCompPy then segment then send
                         success = await _retro_process_offline()
                         
                         if success:
-                            # Run CloudCompPy post-processing
                             session_id = frame_storage.current_session.session_id if frame_storage.current_session else None
                             if session_id:
+                                # Run CloudCompPy post-processing
                                 postproc_config = cfg.get("postprocessing", {})
                                 if postproc_config.get("enabled", False):
                                     await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
+                                
+                                # Run segmentation pipeline if prompt was set
+                                if prompt:
+                                    session = frame_storage.current_session
+                                    try:
+                                        from segmentation_pipeline import run_segmentation
+                                        result = run_segmentation(
+                                            frames_dir=str(session.frames_dir),
+                                            output_dir=str(session.output_dir),
+                                            prompt=prompt
+                                        )
+                                        print(f"[Retro-Offline] Segmentation: {len(result.get('instances', []))} instances")
+                                    except Exception as e:
+                                        print(f"[Retro-Offline] Segmentation error: {e}")
+                                
                                 # Send cleaned cloud to viewer
                                 await _send_cleaned_cloud(websocket, session_id)
+                                
+                                # Apply segmentation against current cloud
+                                output_dir = Path(__file__).parent / "scans" / session_id / "output"
+                                from segmentation_pipeline import apply_segmentation_to_cloud
+                                seg_data = apply_segmentation_to_cloud(output_dir)
+                                if seg_data.get("instances"):
+                                    await websocket.send_text(json.dumps(seg_data))
                             
                             await websocket.send_text(json.dumps({
                                 "type": "status",
@@ -1632,6 +1576,12 @@ async def viewer_websocket(websocket: WebSocket):
                                 "type": "status",
                                 "message": f"Loaded cleaned cloud from {session_id}"
                             }))
+                            # Apply segmentation against current cloud
+                            from segmentation_pipeline import apply_segmentation_to_cloud
+                            seg_data = apply_segmentation_to_cloud(output_dir)
+                            if seg_data.get("instances"):
+                                await websocket.send_text(json.dumps(seg_data))
+                                print(f"[Viewer] Sent segmentation ({len(seg_data['instances'])} instances)")
                         else:
                             await websocket.send_text(json.dumps({"type": "error", "message": "Failed to load cleaned cloud"}))
                     else:
@@ -1653,6 +1603,11 @@ async def viewer_websocket(websocket: WebSocket):
                                         "type": "status",
                                         "message": f"Loaded cleaned cloud from {session_id}"
                                     }))
+                                    # Apply segmentation against current cloud
+                                    from segmentation_pipeline import apply_segmentation_to_cloud as _apply_seg
+                                    seg_data2 = _apply_seg(output_dir)
+                                    if seg_data2.get("instances"):
+                                        await websocket.send_text(json.dumps(seg_data2))
                             else:
                                 await websocket.send_text(json.dumps({"type": "error", "message": "CloudCompPy failed to produce cleaned cloud"}))
                         else:
@@ -1758,6 +1713,12 @@ async def viewer_websocket(websocket: WebSocket):
                         else:
                             # === DA3 RECONSTRUCTION ===
                             print(f"[Reconstruct] 🟢 STARTING DA3 INCREMENTAL RECONSTRUCTION (RealtimeDA3)")
+
+                            # Frame quality analysis (blur detection)
+                            from frame_quality import analyze_frames, save_manifest
+                            fq_result = analyze_frames(str(images_dir))
+                            if "error" not in fq_result:
+                                save_manifest(str(images_dir), fq_result)
 
                             # Create DA3 Config (all from config.yaml + HF cache)
                             from da3_config_builder import build_da3_config

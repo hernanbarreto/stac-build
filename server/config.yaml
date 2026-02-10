@@ -78,6 +78,11 @@ models:
     # Prompting Strategy (Formerly Hardcoded)
     prompt_search_frames: [0, 15] # Frames to apply prompt to (Relative to chunk start)
     
+    # Batched processing (memory management for long videos)
+    batch_size: 50              # Frames per SAM3 session
+    batch_overlap: 10           # Overlap between batches for ID continuity
+    iou_match_threshold: 0.3    # Min IoU to consider same object across batches
+    
 
 # --- Point Cloud Generation ---
 point_cloud:
@@ -256,17 +261,17 @@ postprocessing:
   
   # Step 2: Statistical Outlier Removal
   skip_sor: false
-  sor_knn: 6              # Number of nearest neighbors for SOR
-  sor_sigma: 1.0           # Standard deviation multiplier
+  sor_knn: 12              # Number of nearest neighbors for SOR (higher = less aggressive)
+  sor_sigma: 2.5           # Standard deviation multiplier (higher = keeps more points)
   
   # Step 3: Noise filter — DISABLED (O(n²), hangs on clouds >1M points)
-  # SOR already handles outlier removal effectively (10.3% at knn=6/σ=1.0)
+  # SOR already handles outlier removal effectively
   skip_noise: true
   noise_radius: 0.02      # Only usable on small clouds (<500K points)
   noise_sigma: 2.0
   
   # Step 4: Voxel subsampling
-  voxel_size: 0.003        # 3mm voxel (excellent visual quality, ~77% reduction)
+  voxel_size: 0.001        # 1mm voxel (maximum detail, user-requested)
   max_points: 0            # 0 = unlimited
   
   # Step 5: Normal estimation (slow on big clouds, not needed for point cloud viewer)

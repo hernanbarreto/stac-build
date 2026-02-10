@@ -431,46 +431,99 @@ class FrameStorage:
         }
     
     def save_ply(self, session: ScanSession, chunk_id: int, point_cloud: np.ndarray) -> Optional[str]:
-        """Save point cloud to PLY file in the session output directory."""
+        """Save point cloud to binary PLY with origin traceability fields.
+        
+        Automatically embeds frame_global, pixel_row, pixel_col from
+        chunk_*_origins.npz if available, enabling segmentation to work
+        on any filtered/reordered version of this cloud.
+        """
         if point_cloud is None or len(point_cloud) == 0:
             return None
             
         try:
             filename = f"chunk_{chunk_id:03d}.ply"
             filepath = session.output_dir / filename
+            n_pts = len(point_cloud)
             
-            with open(filepath, 'w') as f:
-                f.write("ply\n")
-                f.write("format ascii 1.0\n")
-                f.write(f"element vertex {len(point_cloud)}\n")
-                f.write("property float x\n")
-                f.write("property float y\n")
-                f.write("property float z\n")
-                f.write("property uchar red\n")
-                f.write("property uchar green\n")
-                f.write("property uchar blue\n")
-                f.write("end_header\n")
+            # Try to load origin data from DA3's origins.npz
+            origins_path = session.output_dir / f"chunk_{chunk_id:03d}_origins.npz"
+            has_origins = False
+            if origins_path.exists():
+                try:
+                    origins = np.load(origins_path)
+                    fg = origins["frame_global"].astype(np.int32)
+                    pr = origins["pixel_row"].astype(np.int16)
+                    pc = origins["pixel_col"].astype(np.int16)
+                    if len(fg) == n_pts:
+                        has_origins = True
+                    else:
+                        print(f"[FrameStorage] ⚠️ Origins count mismatch: {len(fg)} vs {n_pts} points")
+                except Exception as e:
+                    print(f"[FrameStorage] ⚠️ Could not load origins: {e}")
+            
+            # Build binary PLY
+            with open(filepath, 'wb') as f:
+                header = "ply\n"
+                header += "format binary_little_endian 1.0\n"
+                header += f"element vertex {n_pts}\n"
+                header += "property float x\n"
+                header += "property float y\n"
+                header += "property float z\n"
+                header += "property uchar red\n"
+                header += "property uchar green\n"
+                header += "property uchar blue\n"
+                if has_origins:
+                    header += "property int frame_global\n"
+                    header += "property short pixel_row\n"
+                    header += "property short pixel_col\n"
+                header += "end_header\n"
+                f.write(header.encode('ascii'))
                 
-                for p in point_cloud:
-                    # p is [x, y, z, r, g, b] (floats 0-1 for color? No, usually 0-1 from DA3?)
-                    # ChunkProcessor output:
-                    # valid_colors = colors_all[mask] (from images, so 0-1)
-                    # point_cloud = concatenate([valid_points, valid_colors])
-                    
-                    # Colors need to be 0-255 for PLY uchar
-                    r = int(np.clip(p[3], 0, 1) * 255)
-                    g = int(np.clip(p[4], 0, 1) * 255)
-                    b = int(np.clip(p[5], 0, 1) * 255)
-                    f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {r} {g} {b}\n")
+                # Pack vertex data
+                if has_origins:
+                    dtype = np.dtype([
+                        ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                        ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+                        ('frame_global', '<i4'),
+                        ('pixel_row', '<i2'), ('pixel_col', '<i2')
+                    ])
+                    packed = np.empty(n_pts, dtype=dtype)
+                    packed['x'] = point_cloud[:, 0]
+                    packed['y'] = point_cloud[:, 1]
+                    packed['z'] = point_cloud[:, 2]
+                    packed['r'] = np.clip(point_cloud[:, 3], 0, 1) * 255
+                    packed['g'] = np.clip(point_cloud[:, 4], 0, 1) * 255
+                    packed['b'] = np.clip(point_cloud[:, 5], 0, 1) * 255
+                    packed['frame_global'] = fg
+                    packed['pixel_row'] = pr
+                    packed['pixel_col'] = pc
+                else:
+                    dtype = np.dtype([
+                        ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                        ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
+                    ])
+                    packed = np.empty(n_pts, dtype=dtype)
+                    packed['x'] = point_cloud[:, 0]
+                    packed['y'] = point_cloud[:, 1]
+                    packed['z'] = point_cloud[:, 2]
+                    packed['r'] = np.clip(point_cloud[:, 3], 0, 1) * 255
+                    packed['g'] = np.clip(point_cloud[:, 4], 0, 1) * 255
+                    packed['b'] = np.clip(point_cloud[:, 5], 0, 1) * 255
+                
+                packed.tofile(f)
             
-            print(f"[FrameStorage] Saved PLY: {filepath}")
+            origin_tag = " +origins" if has_origins else ""
+            print(f"[FrameStorage] Saved PLY: {filepath} ({n_pts:,} pts, binary{origin_tag})")
             return str(filepath)
         except Exception as e:
             print(f"[FrameStorage] Error saving PLY: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
+
     def load_ply(self, session: ScanSession, chunk_id: int) -> Optional[np.ndarray]:
-        """Load point cloud from PLY file (supporting ASCII and Binary)."""
+        """Load point cloud from PLY file (supporting ASCII and Binary, with or without origins)."""
         try:
             # Try legacy format first: chunk_000.ply in output root
             filename_legacy = f"chunk_{chunk_id:03d}.ply"
@@ -488,36 +541,42 @@ class FrameStorage:
                 properties = []
                 num_points = 0
                 is_binary = False
-                header_end = False
+                has_origins = False
                 
-                while not header_end:
+                while True:
                     line = f.readline().decode('ascii').strip()
                     if line.startswith('element vertex'):
                         num_points = int(line.split()[-1])
                     elif line.startswith('format'):
                         if 'binary_little_endian' in line:
                             is_binary = True
-                    elif line.startswith('end_header'):
-                        header_end = True
+                    elif line.startswith('property'):
+                        properties.append(line)
+                        if 'frame_global' in line:
+                            has_origins = True
+                    elif line == 'end_header':
+                        break
                 
                 if num_points == 0: return None
 
-                points = []
                 if is_binary:
-                    # Binary Loader
-                    # Assumes: x(f4), y(f4), z(f4), r(u1), g(u1), b(u1) 
-                    # This matches da3_native logic and main.py logic
-                    dtype = np.dtype([
-                        ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
-                        ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
-                    ])
-                    # Ensure alignment (15 bytes per point is odd, packed?)
-                    # sim3utils saves as packed/standard. np.frombuffer handles contiguous
-                    # But if stride is 15 bytes, numpy needs structured array
+                    # Build dtype from properties
+                    if has_origins:
+                        dtype = np.dtype([
+                            ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                            ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+                            ('frame_global', '<i4'),
+                            ('pixel_row', '<i2'), ('pixel_col', '<i2')
+                        ])
+                    else:
+                        dtype = np.dtype([
+                            ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                            ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
+                        ])
                     
                     data = np.frombuffer(f.read(), dtype=dtype)
                     
-                    # Convert to float array (N, 6)
+                    # Convert to float array (N, 6) - xyz + rgb normalized
                     result = np.zeros((len(data), 6), dtype=np.float32)
                     result[:, 0] = data['x']
                     result[:, 1] = data['y']
@@ -529,6 +588,7 @@ class FrameStorage:
                 
                 else:
                     # ASCII Loader
+                    points = []
                     for line_bytes in f:
                         line = line_bytes.decode('ascii').strip()
                         parts = line.split()
@@ -542,11 +602,7 @@ class FrameStorage:
         except Exception as e:
             print(f"[FrameStorage] Error loading PLY {filepath}: {e}")
             return None
-            
-            return np.array(points, dtype=np.float32)
-        except Exception as e:
-            print(f"[FrameStorage] Error loading PLY: {e}")
-            return None
+
 
     def save_chunk_metadata(self, session: ScanSession, chunk_id: int, result: Any,
                             alignment_transform: tuple = None,
