@@ -411,9 +411,9 @@ export class FusionRenderer {
                         }
                     }
 
-                    // Render OBB if available
+                    // Render OBB if available (color matches segment highlight)
                     if (instance.obb) {
-                        this._addOBB(globalObjKey, instance.obb);
+                        this._addOBB(globalObjKey, instance.obb, instance.color);
                     }
                 }
             }
@@ -488,9 +488,9 @@ export class FusionRenderer {
                     }
                 }
 
-                // Render OBB if available
+                // Render OBB if available (color matches segment highlight)
                 if (instance.obb) {
-                    this._addOBB(globalObjKey, instance.obb);
+                    this._addOBB(globalObjKey, instance.obb, instance.color);
                 }
 
                 console.log(`[Renderer] Instance "${label} #${objId}": ${this.segmentedObjects[globalObjKey].totalPoints} points, color=${color}`);
@@ -684,7 +684,7 @@ export class FusionRenderer {
     /**
      * Add OBB helper to scene
      */
-    _addOBB(key, obbData) {
+    _addOBB(key, obbData, color) {
         if (!this.obbGroup) {
             this.obbGroup = new THREE.Group();
             this.scene.add(this.obbGroup);
@@ -704,9 +704,11 @@ export class FusionRenderer {
         const sy = half_extents[1] * 2;
         const sz = half_extents[2] * 2;
 
+        // Use instance color for wireframe (fallback to cyan)
+        const obbColor = color ? new THREE.Color(color) : new THREE.Color(0x00ffff);
         const geometry = new THREE.BoxGeometry(sx, sy, sz);
         const edges = new THREE.EdgesGeometry(geometry);
-        const material = new THREE.LineBasicMaterial({ color: 0x00ffff, linewidth: 2 });
+        const material = new THREE.LineBasicMaterial({ color: obbColor, linewidth: 2 });
         const box = new THREE.LineSegments(edges, material);
 
         box.position.set(center[0], center[1], center[2]);

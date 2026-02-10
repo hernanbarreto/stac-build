@@ -32,6 +32,7 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str) -> dict:
     """
     Full segmentation pipeline: batched SAM3 → IoU ID matching → mask-to-point mapping.
     
+    Supports multiple categories separated by ';' (e.g., "sofa;cushion;table").
     Uses the same blur-filtered frame set as DA3 to ensure frame_global indices match.
     Valid frames are copied to frames_valid/ with sequential numbering, then cleaned up.
     """
@@ -45,7 +46,12 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str) -> dict:
     batch_overlap = seg_cfg.get("batch_overlap", 10)
     iou_threshold = seg_cfg.get("iou_match_threshold", 0.3)
     
-    print(f"[SegPipeline] Starting segmentation for prompt: '{prompt}'")
+    # Split prompt by ';' for multi-category support
+    categories = [c.strip() for c in prompt.split(";") if c.strip()]
+    if not categories:
+        return {"error": "Empty prompt", "instances": []}
+    
+    print(f"[SegPipeline] Starting segmentation for {len(categories)} categories: {categories}")
     print(f"[SegPipeline] Frames: {frames_dir}  |  Batch: {batch_size} frames, {batch_overlap} overlap")
     
     # ── Step 1: Prepare valid frames (matching DA3's blur filter) ──
@@ -58,9 +64,9 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str) -> dict:
         return {"error": "No frames found", "instances": []}
     
     try:
-        # ── Step 2: Run SAM3 in batches with IoU matching ──
-        all_masks = _run_sam3_batched(
-            seg_frames_dir, frame_files, prompt,
+        # ── Step 2: Run SAM3 in batches with IoU matching (per category) ──
+        all_masks, obj_labels = _run_sam3_batched(
+            seg_frames_dir, frame_files, categories,
             batch_size, batch_overlap, iou_threshold
         )
         
@@ -69,7 +75,7 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str) -> dict:
             return {"error": "No masks generated", "instances": []}
         
         # ── Step 3: Save masks and metadata ──
-        seg_meta = _save_masks(output_dir, all_masks, prompt, cfg)
+        seg_meta = _save_masks(output_dir, all_masks, categories, obj_labels, cfg)
         
         return seg_meta
     
@@ -149,21 +155,24 @@ def _prepare_valid_frames(frames_dir: Path):
 #  BATCHED SAM3 PROCESSING
 # ═══════════════════════════════════════════════════════════════════
 
-def _run_sam3_batched(frames_dir: Path, frame_files: List[str], prompt: str,
+def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List[str],
                       batch_size: int, batch_overlap: int,
-                      iou_threshold: float) -> Dict[int, Dict[int, np.ndarray]]:
+                      iou_threshold: float) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, str]]:
     """
-    Process frames in overlapping batches, matching IDs across batches via IoU.
+    Process frames in overlapping batches, one category at a time.
+    Each category gets its own SAM3 pass; obj_ids are remapped to avoid collisions.
     
     Returns:
-        Dict[orig_frame_idx → {global_obj_id: binary_mask}]
+        (all_masks, obj_labels)
+        - all_masks: Dict[orig_frame_idx → {global_obj_id: binary_mask}]
+        - obj_labels: Dict[global_obj_id → category_label]
     """
     from sam3_wrapper import get_sam3_wrapper
     
     total_frames = len(frame_files)
     batch_step = batch_size - batch_overlap
     
-    # Calculate batch boundaries
+    # Calculate batch boundaries (shared across all categories)
     batches = []
     start = 0
     while start < total_frames:
@@ -173,91 +182,120 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], prompt: str,
             break
         start += batch_step
     
-    print(f"[SegPipeline] Processing {total_frames} frames in {len(batches)} batches")
+    print(f"[SegPipeline] Processing {total_frames} frames in {len(batches)} batches × {len(categories)} categories")
     
     sam3 = get_sam3_wrapper()
     
-    # Global state
+    # Master state across all categories
     all_masks = {}  # orig_frame_idx → {global_obj_id: mask}
-    next_global_id = 1
-    prev_batch_masks = None  # Masks from previous batch (for overlap IoU matching)
-    prev_overlap_start = None
+    obj_labels = {}  # global_obj_id → category_label
+    global_id_offset = 0  # Offset to remap IDs between categories
     
-    for batch_idx, (b_start, b_end) in enumerate(batches):
-        batch_frame_files = frame_files[b_start:b_end]
-        batch_len = len(batch_frame_files)
+    for cat_idx, category in enumerate(categories):
+        print(f"\n[SegPipeline] ═══ Category {cat_idx+1}/{len(categories)}: '{category}' ═══")
         
-        print(f"\n[SegPipeline] ── Batch {batch_idx}/{len(batches)-1}: "
-              f"frames {b_start}–{b_end-1} ({batch_len} frames) ──")
+        # Per-category state
+        cat_masks = {}  # orig_frame_idx → {cat_local_obj_id: mask}
+        next_global_id = 1  # Local to this category's batch loop
+        prev_batch_masks = None
+        prev_overlap_start = None
         
-        # Create temp directory with sequential symlinks for this batch
-        batch_dir, index_mapping = _prepare_batch_dir(frames_dir, batch_frame_files, b_start)
-        
-        try:
-            # Run SAM3 on this batch
-            raw_results = sam3.process_batch(
-                str(batch_dir), prompt, index_mapping
-            )
+        for batch_idx, (b_start, b_end) in enumerate(batches):
+            batch_frame_files = frame_files[b_start:b_end]
+            batch_len = len(batch_frame_files)
             
-            if not raw_results:
-                print(f"[SegPipeline] Batch {batch_idx}: no masks produced")
-                continue
+            print(f"\n[SegPipeline] ── Batch {batch_idx}/{len(batches)-1}: "
+                  f"frames {b_start}–{b_end-1} ({batch_len} frames) ──")
             
-            # Parse raw SAM3 output into structured format
-            batch_masks = _parse_raw_masks(raw_results)
+            # Create temp directory with sequential symlinks for this batch
+            batch_dir, index_mapping = _prepare_batch_dir(frames_dir, batch_frame_files, b_start)
             
-            if not batch_masks:
-                print(f"[SegPipeline] Batch {batch_idx}: no valid masks after parsing")
-                continue
-            
-            # Match IDs with previous batch via IoU in overlap region
-            if batch_idx == 0:
-                # First batch: assign initial global IDs
-                id_remap = {}
-                batch_obj_ids = set()
-                for frame_masks in batch_masks.values():
-                    batch_obj_ids.update(frame_masks.keys())
-                for local_id in sorted(batch_obj_ids):
-                    id_remap[local_id] = next_global_id
-                    next_global_id += 1
-            else:
-                # Subsequent batches: IoU matching in overlap zone
-                overlap_start_frame = b_start  # Original frame idx where overlap begins
-                overlap_end_frame = prev_overlap_start + batch_step + batch_overlap - 1 if prev_overlap_start is not None else b_start + batch_overlap - 1
-                
-                id_remap, next_global_id = _match_ids_iou(
-                    prev_batch_masks, batch_masks,
-                    overlap_start=overlap_start_frame,
-                    overlap_end=min(overlap_end_frame, b_end - 1),
-                    iou_threshold=iou_threshold,
-                    next_global_id=next_global_id
+            try:
+                # Run SAM3 on this batch with this category's prompt
+                raw_results = sam3.process_batch(
+                    str(batch_dir), category, index_mapping
                 )
-            
-            # Apply ID remap and merge into global masks
-            # For overlap frames, prefer the newer batch (fresher propagation)
-            remapped_batch = {}
-            for orig_idx, frame_masks in batch_masks.items():
-                remapped = {}
-                for local_id, mask in frame_masks.items():
-                    global_id = id_remap.get(local_id, local_id)
-                    remapped[global_id] = mask
-                all_masks[orig_idx] = remapped
-                remapped_batch[orig_idx] = remapped
-            
-            # Store REMAPPED batch masks for next overlap matching
-            # (so IoU matching compares against global IDs, not local)
-            prev_batch_masks = remapped_batch
-            prev_overlap_start = b_start
-            
-            unique_objects = set()
-            for fm in batch_masks.values():
-                unique_objects.update(fm.keys())
-            print(f"[SegPipeline] Batch {batch_idx}: {len(batch_masks)} frames, "
-                  f"{len(unique_objects)} objects → remapped to {len(set(id_remap.values()))} global IDs")
-            
-        finally:
-            # Clean up temp directory
-            shutil.rmtree(batch_dir, ignore_errors=True)
+                
+                if not raw_results:
+                    print(f"[SegPipeline] Batch {batch_idx}: no masks produced")
+                    continue
+                
+                # Parse raw SAM3 output into structured format
+                batch_masks = _parse_raw_masks(raw_results)
+                
+                if not batch_masks:
+                    print(f"[SegPipeline] Batch {batch_idx}: no valid masks after parsing")
+                    continue
+                
+                # Match IDs with previous batch via IoU in overlap region
+                if batch_idx == 0:
+                    # First batch: assign initial global IDs
+                    id_remap = {}
+                    batch_obj_ids = set()
+                    for frame_masks in batch_masks.values():
+                        batch_obj_ids.update(frame_masks.keys())
+                    for local_id in sorted(batch_obj_ids):
+                        id_remap[local_id] = next_global_id
+                        next_global_id += 1
+                else:
+                    # Subsequent batches: IoU matching in overlap zone
+                    overlap_start_frame = b_start
+                    overlap_end_frame = prev_overlap_start + batch_step + batch_overlap - 1 if prev_overlap_start is not None else b_start + batch_overlap - 1
+                    
+                    id_remap, next_global_id = _match_ids_iou(
+                        prev_batch_masks, batch_masks,
+                        overlap_start=overlap_start_frame,
+                        overlap_end=min(overlap_end_frame, b_end - 1),
+                        iou_threshold=iou_threshold,
+                        next_global_id=next_global_id
+                    )
+                
+                # Apply ID remap and merge into category masks
+                remapped_batch = {}
+                for orig_idx, frame_masks in batch_masks.items():
+                    remapped = {}
+                    for local_id, mask in frame_masks.items():
+                        global_id = id_remap.get(local_id, local_id)
+                        remapped[global_id] = mask
+                    cat_masks[orig_idx] = {**cat_masks.get(orig_idx, {}), **remapped}
+                    remapped_batch[orig_idx] = remapped
+                
+                prev_batch_masks = remapped_batch
+                prev_overlap_start = b_start
+                
+                unique_objects = set()
+                for fm in batch_masks.values():
+                    unique_objects.update(fm.keys())
+                print(f"[SegPipeline] Batch {batch_idx}: {len(batch_masks)} frames, "
+                      f"{len(unique_objects)} objects → remapped to {len(set(id_remap.values()))} global IDs")
+                
+            finally:
+                shutil.rmtree(batch_dir, ignore_errors=True)
+        
+        # Collect unique obj_ids for this category
+        cat_obj_ids = set()
+        for fm in cat_masks.values():
+            cat_obj_ids.update(fm.keys())
+        
+        print(f"[SegPipeline] Category '{category}': {len(cat_obj_ids)} objects across {len(cat_masks)} frames")
+        
+        # Remap this category's IDs to global space (offset by previous categories)
+        cat_id_remap = {}
+        for local_id in sorted(cat_obj_ids):
+            global_id = local_id + global_id_offset
+            cat_id_remap[local_id] = global_id
+            obj_labels[global_id] = category
+        
+        # Merge into all_masks with remapped global IDs
+        for frame_idx, frame_masks in cat_masks.items():
+            if frame_idx not in all_masks:
+                all_masks[frame_idx] = {}
+            for local_id, mask in frame_masks.items():
+                all_masks[frame_idx][cat_id_remap[local_id]] = mask
+        
+        # Advance offset for next category
+        if cat_obj_ids:
+            global_id_offset = max(cat_id_remap.values())
     
     # Unload SAM3 to free VRAM
     sam3.unload_model()
@@ -267,9 +305,9 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], prompt: str,
     for fm in all_masks.values():
         total_objects.update(fm.keys())
     print(f"\n[SegPipeline] SAM3 complete: {len(all_masks)} frames, "
-          f"{len(total_objects)} unique objects across all batches")
+          f"{len(total_objects)} unique objects across {len(categories)} categories")
     
-    return all_masks
+    return all_masks, obj_labels
 
 
 def _prepare_batch_dir(frames_dir: Path, batch_files: List[str], 
@@ -446,15 +484,14 @@ def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
 # ═══════════════════════════════════════════════════════════════════
 
 def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
-                prompt: str, cfg: dict):
+                categories: List[str], obj_labels: Dict[int, str], cfg: dict):
     """
     Save SAM3 masks as compressed NPZ + metadata JSON.
+    CUMULATIVE: merges with existing data if seg_masks.npz/segmentation.json exist.
     
-    seg_masks.npz: per-frame, per-object boolean masks
-       keys: "f{frame}_o{obj_id}" → bool array (H, W)
-       plus: "obj_ids" → int array, "frames" → int array
-    
-    segmentation.json: metadata only (prompt, objects, colors, resolution)
+    Args:
+        categories: List of category labels used in this run
+        obj_labels: Dict mapping obj_id → category label
     """
     colors = cfg["visualization"]["segment_colors"]
     
@@ -468,62 +505,138 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
             scaled_res = meta.get("scaled_resolution", scaled_res)
             original_res = meta.get("original_resolution", original_res)
     
-    # Collect all object IDs and frames
-    obj_ids = set()
-    frame_indices = sorted(all_masks.keys())
+    # ── Load existing data (if any) for cumulative merge ──
+    masks_path = output_dir / "seg_masks.npz"
+    seg_path = output_dir / "segmentation.json"
+    
+    existing_npz = {}
+    existing_instances = []
+    existing_prompts = []  # track all prompts used
+    max_existing_id = -1
+    existing_frames = set()
+    existing_obj_ids = set()
+    
+    if masks_path.exists() and seg_path.exists():
+        try:
+            old_data = np.load(masks_path)
+            # Copy all existing mask keys
+            for key in old_data.files:
+                if key.startswith("f") and "_o" in key:
+                    existing_npz[key] = old_data[key]
+            if "obj_ids" in old_data:
+                existing_obj_ids = set(old_data["obj_ids"].tolist())
+            if "frames" in old_data:
+                existing_frames = set(old_data["frames"].tolist())
+            
+            with open(seg_path) as f:
+                old_meta = json.load(f)
+            existing_instances = old_meta.get("instances", [])
+            existing_prompts = old_meta.get("prompts", [])
+            if not existing_prompts and old_meta.get("prompt"):
+                existing_prompts = [old_meta["prompt"]]
+            
+            # Find max existing object ID
+            for inst in existing_instances:
+                max_existing_id = max(max_existing_id, inst.get("id", -1))
+            for oid in existing_obj_ids:
+                max_existing_id = max(max_existing_id, oid)
+            
+            print(f"[SegPipeline] 📦 Merging with existing: {len(existing_instances)} instances, "
+                  f"max_id={max_existing_id}")
+        except Exception as e:
+            print(f"[SegPipeline] ⚠️ Could not load existing data, starting fresh: {e}")
+            existing_npz = {}
+            existing_instances = []
+            existing_prompts = []
+            max_existing_id = -1
+    
+    # ── Remap new SAM3 obj_ids to continue from max_existing_id + 1 ──
+    new_obj_ids_raw = set()
     for fm in all_masks.values():
-        obj_ids.update(fm.keys())
-    obj_ids = sorted(obj_ids)
+        new_obj_ids_raw.update(fm.keys())
+    new_obj_ids_raw = sorted(new_obj_ids_raw)
     
-    # Build NPZ data dict
-    npz_data = {
-        "obj_ids": np.array(obj_ids, dtype=np.int32),
-        "frames": np.array(frame_indices, dtype=np.int32),
-        "scaled_res": np.array(scaled_res, dtype=np.int32),
-    }
+    id_remap = {}
+    next_id = max_existing_id + 1
+    for raw_id in new_obj_ids_raw:
+        id_remap[raw_id] = next_id
+        next_id += 1
     
-    mask_count = 0
+    # ── Build merged NPZ data ──
+    # Start with existing masks
+    npz_data = dict(existing_npz)
+    
+    # Add new masks with remapped IDs
+    new_frame_indices = sorted(all_masks.keys())
+    mask_count = len(existing_npz)
+    
     for frame_idx, frame_masks in all_masks.items():
-        for obj_id, mask in frame_masks.items():
-            key = f"f{frame_idx}_o{obj_id}"
+        for raw_obj_id, mask in frame_masks.items():
+            remapped_id = id_remap[raw_obj_id]
+            key = f"f{frame_idx}_o{remapped_id}"
             # Ensure mask is at scaled resolution
             if mask.shape[0] != scaled_res[0] or mask.shape[1] != scaled_res[1]:
                 mask = cv2.resize(mask.astype(np.uint8),
                                  (scaled_res[1], scaled_res[0]),
                                  interpolation=cv2.INTER_NEAREST)
-            npz_data[key] = mask.astype(np.uint8)  # uint8 compresses well
+            npz_data[key] = mask.astype(np.uint8)
             mask_count += 1
     
+    # Merge frame lists and obj_id lists
+    all_frames = sorted(existing_frames | set(new_frame_indices))
+    all_obj_ids = sorted(existing_obj_ids | set(id_remap.values()))
+    
+    npz_data["obj_ids"] = np.array(all_obj_ids, dtype=np.int32)
+    npz_data["frames"] = np.array(all_frames, dtype=np.int32)
+    npz_data["scaled_res"] = np.array(scaled_res, dtype=np.int32)
+    
     # Save compressed NPZ
-    masks_path = output_dir / "seg_masks.npz"
     np.savez_compressed(masks_path, **npz_data)
     masks_mb = masks_path.stat().st_size / (1024 * 1024)
+    new_count = mask_count - len(existing_npz)
     print(f"[SegPipeline] ✅ Saved masks: {masks_path.name} "
-          f"({mask_count} masks, {len(obj_ids)} objects, {len(frame_indices)} frames, "
-          f"{masks_mb:.1f} MB)")
+          f"({new_count} new masks, {len(all_obj_ids)} total objects, "
+          f"{len(all_frames)} frames, {masks_mb:.1f} MB)")
     
-    # Save metadata JSON (lightweight)
-    instances = []
-    for i, obj_id in enumerate(obj_ids):
-        instances.append({
-            "id": int(obj_id),
-            "label": prompt,
+    # ── Build merged metadata JSON ──
+    color_offset = len(existing_instances)
+    
+    new_instances = []
+    remapped_ids = sorted(id_remap.values())
+    for i, remapped_id in enumerate(remapped_ids):
+        # Look up the original obj_id to get its label
+        raw_id = [k for k, v in id_remap.items() if v == remapped_id][0]
+        label = obj_labels.get(raw_id, categories[0] if categories else "object")
+        
+        new_instances.append({
+            "id": int(remapped_id),
+            "label": label,
             "instance_id": i + 1,
-            "color": colors[i % len(colors)],
+            "color": colors[(color_offset + i) % len(colors)],
         })
+    
+    all_instances = existing_instances + new_instances
+    
+    # Track all prompts used
+    all_prompts = list(existing_prompts)
+    for cat in categories:
+        if cat not in all_prompts:
+            all_prompts.append(cat)
     
     segmentation = {
         "version": "3.0",
-        "prompt": prompt,
+        "prompt": ";".join(categories),  # last prompt string used
+        "prompts": all_prompts,  # all prompts ever used
         "resolution": {"scaled": scaled_res, "original": original_res},
-        "instances": instances,
+        "instances": all_instances,
         "mask_file": "seg_masks.npz",
     }
     
-    seg_path = output_dir / "segmentation.json"
     with open(seg_path, 'w') as f:
         json.dump(segmentation, f, indent=2)
-    print(f"[SegPipeline] ✅ Saved metadata: {seg_path.name} ({len(instances)} instances)")
+    print(f"[SegPipeline] ✅ Saved metadata: {seg_path.name} "
+          f"({len(new_instances)} new + {len(existing_instances)} existing = "
+          f"{len(all_instances)} total instances)")
     
     return segmentation
 
@@ -676,6 +789,85 @@ def _find_nearest_keyframe(frame_idx: int, keyframes: list) -> Optional[int]:
     return best
 
 
+def _filter_instance_outliers(xyz: np.ndarray, indices: np.ndarray,
+                               obj_id: int, min_samples: int = 10,
+                               sor_k: int = 20, sor_std: float = 1.5) -> np.ndarray:
+    """
+    Remove outlier points from a segmented instance using DBSCAN + SOR.
+    
+    1. DBSCAN clusters the instance's 3D points (auto-calibrated eps)
+    2. Keep only the largest cluster (removes satellite clusters)
+    3. SOR refines within the cluster (removes borderline strays)
+    
+    Args:
+        xyz: Full point cloud (N, 3) in display coordinates
+        indices: Indices of points belonging to this instance
+        obj_id: Object ID (for logging)
+        min_samples: DBSCAN min_samples parameter
+        sor_k: Number of neighbors for SOR
+        sor_std: Standard deviation multiplier for SOR threshold
+    
+    Returns:
+        Filtered indices array
+    """
+    points = xyz[indices]
+    
+    try:
+        from sklearn.cluster import DBSCAN
+        from sklearn.neighbors import NearestNeighbors
+        
+        # Auto-calibrate eps from k-NN distances (adapts to object density)
+        k = min(min_samples, len(points) - 1)
+        if k < 2:
+            return indices
+        
+        nbrs = NearestNeighbors(n_neighbors=k).fit(points)
+        distances, _ = nbrs.kneighbors(points)
+        knn_dists = distances[:, -1]  # distance to k-th neighbor
+        eps = np.percentile(knn_dists, 90)  # 90th percentile → robust eps
+        
+        # Step 1: DBSCAN clustering
+        clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(points)
+        labels = clustering.labels_
+        
+        unique_labels, counts = np.unique(labels[labels >= 0], return_counts=True)
+        if len(unique_labels) == 0:
+            return indices  # all noise → keep originals
+        
+        largest_cluster = unique_labels[np.argmax(counts)]
+        cluster_mask = labels == largest_cluster
+        
+        # Step 2: SOR on largest cluster
+        cluster_points = points[cluster_mask]
+        cluster_indices = indices[cluster_mask]
+        
+        if len(cluster_points) >= sor_k:
+            nbrs2 = NearestNeighbors(n_neighbors=sor_k).fit(cluster_points)
+            dists2, _ = nbrs2.kneighbors(cluster_points)
+            mean_dists = np.mean(dists2[:, 1:], axis=1)
+            threshold = np.mean(mean_dists) + sor_std * np.std(mean_dists)
+            sor_mask = mean_dists < threshold
+            cluster_indices = cluster_indices[sor_mask]
+        
+        removed = len(indices) - len(cluster_indices)
+        if removed > 0:
+            n_clusters = len(unique_labels)
+            noise_count = np.sum(labels == -1)
+            print(f"[SegPipeline]   DBSCAN obj {obj_id}: eps={eps:.4f}, "
+                  f"{n_clusters} clusters, {noise_count} noise pts → "
+                  f"removed {removed} outliers ({100*removed/len(indices):.1f}%)")
+        
+        return cluster_indices
+        
+    except ImportError:
+        # Fallback: centroid + stddev filter
+        centroid = np.mean(points, axis=0)
+        dists = np.linalg.norm(points - centroid, axis=1)
+        threshold = np.mean(dists) + 2 * np.std(dists)
+        inlier_mask = dists < threshold
+        return indices[inlier_mask]
+
+
 def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
     """
     Match saved SAM3 masks against a loaded PLY cloud at display time.
@@ -762,6 +954,12 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
     
     # Match each object's masks against cloud points
     colors = cfg["visualization"]["segment_colors"]
+    
+    # Build lookup from obj_id → instance metadata (label, color)
+    instance_meta = {}
+    for inst in metadata.get("instances", []):
+        instance_meta[inst["id"]] = inst
+    
     instances = []
     total_segmented = 0
     
@@ -795,14 +993,28 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
         
         all_matched = np.concatenate(matched_indices)
         all_matched = np.unique(all_matched)  # deduplicate
+        
+        # ── Per-instance DBSCAN outlier removal ──
+        # Removes stray points and small satellite clusters before OBB
+        pre_filter_count = len(all_matched)
+        if pre_filter_count >= 20:  # need enough points for meaningful clustering
+            all_matched = _filter_instance_outliers(
+                xyz_display, all_matched, obj_id
+            )
+        
         total_segmented += len(all_matched)
+        
+        # Look up label/color from metadata (supports multi-prompt)
+        meta_inst = instance_meta.get(obj_id, {})
+        label = meta_inst.get("label", "object")
+        color = meta_inst.get("color", colors[i % len(colors)])
         
         # Build instance data
         instance = {
             "id": int(obj_id),
-            "label": metadata.get("prompt", "object"),
-            "instance_id": i + 1,
-            "color": colors[i % len(colors)],
+            "label": label,
+            "instance_id": meta_inst.get("instance_id", i + 1),
+            "color": color,
             "total_points": int(len(all_matched)),
             "globalIndices": all_matched.tolist(),
         }
@@ -812,8 +1024,10 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
             instance["obb"] = _compute_obb(xyz_display[all_matched])
         
         instances.append(instance)
-        print(f"[SegPipeline]   Object {obj_id} ('{metadata.get('prompt', '')}' #{i+1}): "
-              f"{len(all_matched):,} points matched")
+        removed = pre_filter_count - len(all_matched)
+        filter_info = f" (filtered {removed} outliers)" if removed > 0 else ""
+        print(f"[SegPipeline]   Object {obj_id} ('{label}' #{meta_inst.get('instance_id', i+1)}): "
+              f"{len(all_matched):,} points{filter_info}")
     
     coverage = round(total_segmented / max(1, n_pts), 4)
     
@@ -821,6 +1035,7 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
         "type": "segmentation",
         "version": "3.0",
         "prompt": metadata.get("prompt", ""),
+        "prompts": metadata.get("prompts", [metadata.get("prompt", "")]),
         "cloud_source": cloud_label,
         "total_points": n_pts,
         "segmented_points": total_segmented,
