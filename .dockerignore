@@ -1,0 +1,20 @@
+# Docker build context exclusions
+.git
+.gitignore
+*.md
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+
+# Don't copy scan data into image
+server/scans/
+
+# Don't copy weights into image (mounted at runtime)
+weights/
+
+# Vendor large data
+vendor/depth_anything_3/da3_streaming/weights/
+vendor/depth_anything_3/da3_streaming/exps/
+vendor/depth_anything_3/da3_streaming/exps_simple/
+vendor/depth_anything_3/da3_streaming/frames/

@@ -17,6 +17,8 @@ import threading
 import queue
 import cv2
 
+# Centralised vendor path resolution
+import vendor_paths
 from config import cfg
 
 
@@ -252,8 +254,8 @@ class SLAMProcessor:
                 f"The hybrid backend requires a 'da3' conda environment."
             )
         
-        # Build PYTHONPATH for the DA3 subprocess
-        da3_root = _os.path.expanduser("~/Depth-Anything-3")
+        # Build PYTHONPATH for the DA3 subprocess (using vendored path)
+        da3_root = str(vendor_paths.DA3_ROOT)
         da3_pythonpath = f"{da3_root}/src:{da3_root}"
         
         # Serialize all relevant config to a temp JSON for the subprocess

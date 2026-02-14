@@ -54,8 +54,12 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str) -> dict:
     print(f"[SegPipeline] Starting segmentation for {len(categories)} categories: {categories}")
     print(f"[SegPipeline] Frames: {frames_dir}  |  Batch: {batch_size} frames, {batch_overlap} overlap")
     
-    # ── Step 1: Prepare valid frames (matching DA3's blur filter) ──
-    seg_frames_dir, frame_files, frames_valid_dir = _prepare_valid_frames(frames_dir)
+    # ── Step 1: Prepare valid frames (matching DA3's blur + novelty filter) ──
+    frame_sel_cfg = cfg.get("frame_selection", {})
+    frame_stride = cfg.get("server", {}).get("frame_stride", 1)
+    seg_frames_dir, frame_files, frames_valid_dir = _prepare_valid_frames(
+        frames_dir, frame_stride, frame_sel_cfg
+    )
     
     total_frames = len(frame_files)
     print(f"[SegPipeline] Using {total_frames} valid frames for segmentation")
@@ -86,42 +90,72 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str) -> dict:
             print(f"[SegPipeline] 🧹 frames_valid/ vaciado")
 
 
-def _prepare_valid_frames(frames_dir: Path):
+def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
+                          frame_sel_cfg: dict = None):
     """
-    Copy valid (non-blurry) frames to frames_valid/ with sequential numbering
+    Copy valid frames to frames_valid/ with sequential numbering
     matching DA3's frame_global indexing.
+    
+    Frame selection priority:
+      1. selected_frames.json (visual novelty H/F filter) — if available
+      2. frame_stride (fixed decimation) — fallback
+    
+    Args:
+        frame_stride: Take 1 every N valid frames (fallback, from config.yaml)
+        frame_sel_cfg: frame_selection config section (for novelty filter)
     
     Returns:
         (seg_frames_dir, frame_files, frames_valid_dir)
-        - seg_frames_dir: directory to use for SAM3 (frames_valid/ or frames/)
-        - frame_files: sorted list of filenames in seg_frames_dir
-        - frames_valid_dir: path to cleanup (None if no filtering applied)
     """
     import shutil
     
-    # Check if frame_quality.json exists (same filter DA3 uses)
-    fq_path = frames_dir / "frame_quality.json"
-    if not fq_path.exists():
-        # No blur filtering — use all frames directly
-        print(f"[SegPipeline] No frame_quality.json found — using all frames")
-        frame_files = sorted([
-            f for f in os.listdir(frames_dir) 
-            if f.lower().endswith(('.jpg', '.jpeg', '.png'))
-        ], key=lambda f: int(os.path.splitext(f)[0]))
-        return frames_dir, frame_files, None
+    # ── Try visual novelty filter first (selected_frames.json) ──
+    sel_path = frames_dir / "selected_frames.json"
+    use_novelty = False
     
-    # Load valid frame list
-    with open(fq_path) as f:
-        fq_data = json.load(f)
+    if frame_sel_cfg and frame_sel_cfg.get("enabled", False) and sel_path.exists():
+        try:
+            from frame_selector import load_selected_frames
+            selected_files = load_selected_frames(str(frames_dir))
+            if selected_files:
+                valid_filenames = selected_files
+                use_novelty = True
+                print(f"[SegPipeline] 🎯 Using visual novelty keyframes: {len(valid_filenames)} frames")
+        except ImportError:
+            print("[SegPipeline] ⚠️ frame_selector not available, falling back to stride")
     
-    valid_filenames = sorted(
-        [f["file"] for f in fq_data["frames"] if f["valid"]],
-        key=lambda f: int(os.path.splitext(f)[0])
-    )
+    if not use_novelty:
+        # ── Fallback: blur filter + stride ──
+        fq_path = frames_dir / "frame_quality.json"
+        if not fq_path.exists():
+            print(f"[SegPipeline] No frame_quality.json found — using all frames")
+            frame_files = sorted([
+                f for f in os.listdir(frames_dir) 
+                if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+            ], key=lambda f: int(os.path.splitext(f)[0]))
+            if frame_stride > 1:
+                original = len(frame_files)
+                frame_files = frame_files[::frame_stride]
+                print(f"[SegPipeline] 📐 Frame stride {frame_stride}: {original} → {len(frame_files)} frames")
+            return frames_dir, frame_files, None
+        
+        with open(fq_path) as f:
+            fq_data = json.load(f)
+        
+        valid_filenames = sorted(
+            [f["file"] for f in fq_data["frames"] if f["valid"]],
+            key=lambda f: int(os.path.splitext(f)[0])
+        )
+        
+        if frame_stride > 1:
+            original = len(valid_filenames)
+            valid_filenames = valid_filenames[::frame_stride]
+            print(f"[SegPipeline] 📐 Frame stride {frame_stride}: {original} → {len(valid_filenames)} valid frames")
     
-    total = fq_data["total_frames"]
-    rejected = fq_data["rejected_frames"]
-    print(f"[SegPipeline] Frame quality filter: {len(valid_filenames)}/{total} valid ({rejected} blurry removed)")
+    if not use_novelty:
+        total = fq_data["total_frames"]
+        rejected = fq_data["rejected_frames"]
+        print(f"[SegPipeline] Frame quality filter: {len(valid_filenames)}/{total} valid ({rejected} blurry removed)")
     
     if not valid_filenames:
         return frames_dir, [], None

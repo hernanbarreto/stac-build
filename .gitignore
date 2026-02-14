@@ -77,7 +77,19 @@ logs/
 
 # Jupyter Notebooks checkpoints
 .ipynb_checkpoints/
-server/scans/
-nul
-server/scans/
-nul
+
+# =========================
+# Vendor — Large / Generated
+# =========================
+# Model weights (downloaded by setup_weights.sh)
+weights/
+
+# DA3 vendor: exclude experiments, frames, and model weights
+vendor/depth_anything_3/da3_streaming/weights/
+vendor/depth_anything_3/da3_streaming/exps/
+vendor/depth_anything_3/da3_streaming/exps_simple/
+vendor/depth_anything_3/da3_streaming/frames/
+vendor/depth_anything_3/workspace/
+
+# HuggingFace cache
+.cache/huggingface/

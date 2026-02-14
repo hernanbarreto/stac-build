@@ -683,6 +683,31 @@ async def chunk_processing_worker():
             is_processing_chunk = False
 
 
+def _resolve_segmentation_prompt(prompt: str, frames_dir: str) -> str:
+    """
+    Resolve segmentation prompt: if 'auto' or empty, use InternVL3 scene analyzer.
+    
+    The VLM runs AFTER DA3 unload and BEFORE SAM3 load, so no VRAM conflict.
+    """
+    if prompt and prompt.lower() != "auto":
+        return prompt
+    
+    print("[SceneAnalyzer] Auto-detecting categories with InternVL3...")
+    try:
+        from scene_analyzer import analyze_scene
+        scene_cfg = cfg.get("scene_analysis", {})
+        auto_prompt = analyze_scene(frames_dir, scene_cfg)
+        if auto_prompt:
+            print(f"[SceneAnalyzer] ✅ Auto-detected prompt: '{auto_prompt}'")
+            return auto_prompt
+        else:
+            print("[SceneAnalyzer] ⚠️ No categories detected, falling back to generic")
+            return "concrete wall;floor surface;ceiling;pipe;electrical panel;duct;cable tray;door"
+    except Exception as e:
+        print(f"[SceneAnalyzer] ❌ Error: {e}. Using fallback categories.")
+        return "concrete wall;floor surface;ceiling;pipe;electrical panel;duct;cable tray;door"
+
+
 async def _run_pending_retroactive(prompt: str):
     """Execute pending retroactive segmentation after DA3 completes ALL chunks."""
     try:
@@ -699,6 +724,9 @@ async def _run_pending_retroactive(prompt: str):
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+        # Resolve prompt (auto-detect if needed, VLM runs here before SAM3)
+        prompt = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
 
         # Run new segmentation pipeline
         from segmentation_pipeline import run_segmentation
@@ -1369,6 +1397,9 @@ async def viewer_websocket(websocket: WebSocket):
                                  if torch.cuda.is_available():
                                      torch.cuda.empty_cache()
 
+                                 # Resolve prompt (auto-detect if needed)
+                                 prompt = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
+
                                  # Run new segmentation pipeline
                                  from segmentation_pipeline import run_segmentation
                                  result = run_segmentation(
@@ -1438,6 +1469,16 @@ async def viewer_websocket(websocket: WebSocket):
                                 if "error" not in fq_result:
                                     save_manifest(str(images_dir), fq_result)
 
+                                # 1.6. Visual novelty frame selection (H/F ratio keyframe filter)
+                                frame_sel_cfg = cfg.get("frame_selection", {})
+                                if frame_sel_cfg.get("enabled", False):
+                                    try:
+                                        from frame_selector import select_keyframes
+                                        sel_result = select_keyframes(str(images_dir), frame_sel_cfg)
+                                        print(f"[Retro-Offline] 🎯 Selected {sel_result['selected_count']}/{sel_result['total_frames']} keyframes")
+                                    except Exception as e:
+                                        print(f"[Retro-Offline] ⚠️ Frame selection failed, using stride fallback: {e}")
+
                                 # 2. Create DA3 Config (all from config.yaml + HF cache)
                                 from da3_config_builder import build_da3_config
                                 da3_config = build_da3_config(cfg)
@@ -1483,6 +1524,9 @@ async def viewer_websocket(websocket: WebSocket):
                                 if prompt:
                                     session = frame_storage.current_session
                                     try:
+                                        # Resolve prompt (auto-detect if needed)
+                                        prompt = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
+
                                         from segmentation_pipeline import run_segmentation
                                         result = run_segmentation(
                                             frames_dir=str(session.frames_dir),
@@ -1719,6 +1763,16 @@ async def viewer_websocket(websocket: WebSocket):
                             fq_result = analyze_frames(str(images_dir))
                             if "error" not in fq_result:
                                 save_manifest(str(images_dir), fq_result)
+
+                            # Visual novelty frame selection (H/F ratio keyframe filter)
+                            frame_sel_cfg = cfg.get("frame_selection", {})
+                            if frame_sel_cfg.get("enabled", False):
+                                try:
+                                    from frame_selector import select_keyframes
+                                    sel_result = select_keyframes(str(images_dir), frame_sel_cfg)
+                                    print(f"[Reconstruct] 🎯 Selected {sel_result['selected_count']}/{sel_result['total_frames']} keyframes")
+                                except Exception as e:
+                                    print(f"[Reconstruct] ⚠️ Frame selection failed, using stride fallback: {e}")
 
                             # Create DA3 Config (all from config.yaml + HF cache)
                             from da3_config_builder import build_da3_config

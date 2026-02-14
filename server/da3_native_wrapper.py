@@ -11,23 +11,8 @@ from datetime import datetime
 import gc
 from pathlib import Path
 
-# Import config to get DA3 path
-try:
-    from config import cfg
-    _da3_path = cfg.get("da3", {}).get("install_path", "/home/hernan/Depth-Anything-3")
-except ImportError:
-    _da3_path = "/home/hernan/Depth-Anything-3"
-
-# Add Depth-Anything-3 to path to allow imports
-da3_root = os.path.abspath(_da3_path)
-da3_streaming_path = os.path.join(da3_root, "da3_streaming")
-
-# CRITICAL: da3_root must come BEFORE da3_streaming_path in sys.path
-# Otherwise Python finds da3_streaming.py (file) before da3_streaming/ (package)
-if da3_streaming_path not in sys.path:
-    sys.path.insert(0, da3_streaming_path)
-if da3_root not in sys.path:
-    sys.path.insert(0, da3_root)  # MUST be last insert(0) so it ends up first
+# Centralised vendor path resolution (replaces hardcoded DA3 paths)
+import vendor_paths
 
 # DA3 imports are optional
 DA3_NATIVE_AVAILABLE = False
@@ -104,6 +89,30 @@ class RealtimeDA3(DA3_Streaming):
                 print(f"[DA3] No frame_quality.json found — using all {len(self.img_list)} frames")
         except Exception as e:
             print(f"[DA3] ⚠️ Frame quality filter skipped: {e}")
+        
+        # Apply frame selection: visual novelty filter (preferred) or fixed stride (fallback)
+        try:
+            from frame_selector import load_selected_frames
+            selected_files = load_selected_frames(self.img_dir)
+            if selected_files is not None:
+                original_count = len(self.img_list)
+                selected_set = set(selected_files)
+                self.img_list = [p for p in self.img_list if os.path.basename(p) in selected_set]
+                print(f"[DA3] 🎯 Visual novelty filter: {original_count} → {len(self.img_list)} keyframes")
+            else:
+                # Fallback to fixed stride
+                frame_stride = config.get("frame_stride", 1)
+                if frame_stride > 1 and len(self.img_list) > 0:
+                    original_count = len(self.img_list)
+                    self.img_list = self.img_list[::frame_stride]
+                    print(f"[DA3] 📐 Frame stride {frame_stride}: {original_count} → {len(self.img_list)} frames")
+        except ImportError:
+            # frame_selector not available, use stride
+            frame_stride = config.get("frame_stride", 1)
+            if frame_stride > 1 and len(self.img_list) > 0:
+                original_count = len(self.img_list)
+                self.img_list = self.img_list[::frame_stride]
+                print(f"[DA3] 📐 Frame stride {frame_stride}: {original_count} → {len(self.img_list)} frames")
         
         if len(self.img_list) == 0:
             raise ValueError(f"[DIR EMPTY] All frames were filtered as blurry!")

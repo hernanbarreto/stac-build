@@ -85,6 +85,7 @@ def build_da3_config(cfg: dict) -> dict:
     salad_path = os.path.join(cfg["paths"]["da3_weights_dir"], "dino_salad.ckpt")
     
     return {
+        "frame_stride": server_cfg.get("frame_stride", 1),
         "Weights": {
             "DA3_CONFIG": config_path,
             "DA3": weights_path,

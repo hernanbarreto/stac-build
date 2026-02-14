@@ -8,6 +8,9 @@ from typing import Optional, List, Dict, Any
 from threading import Lock
 import logging
 
+# Centralised vendor path resolution (ensures sam3 package is findable)
+import vendor_paths
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SAM3Wrapper")

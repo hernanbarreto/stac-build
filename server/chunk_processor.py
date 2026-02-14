@@ -13,17 +13,9 @@ from typing import Optional, Tuple, List
 from dataclasses import dataclass
 from threading import Lock
 
-# Add DA3 paths - use absolute path from config or known location
+# Centralised vendor path resolution (replaces hardcoded DA3 paths)
+import vendor_paths
 from config import cfg
-_da3_path = cfg.get("da3", {}).get("install_path", "/home/hernan/Depth-Anything-3")
-DA3_ROOT = Path(_da3_path)
-DA3_STREAMING = DA3_ROOT / "da3_streaming"
-# Add paths so all modules can be found
-# CRITICAL: DA3_STREAMING must come AFTER DA3_ROOT in sys.path
-# Otherwise Python finds da3_streaming.py (file) before da3_streaming/ (package)
-sys.path.insert(0, str(DA3_ROOT / "src"))
-sys.path.insert(0, str(DA3_STREAMING))  # For loop_utils, fastloop etc
-sys.path.insert(0, str(DA3_ROOT))       # MUST be first so da3_streaming resolves to package
 
 # DA3 is optional - falls back to MASt3R-SLAM if not available
 DA3_AVAILABLE = False

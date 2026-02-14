@@ -6,11 +6,34 @@ server:
   chunk_size: 120
   chunk_overlap: 60 # 50% overlap — original DA3 default
   # Derived: chunk_step = chunk_size - chunk_overlap = 60 frames between chunk starts
+  frame_stride: 10  # Take 1 every N valid frames (1 = use all, 10 = 1/10th)
+                     # Used as FALLBACK when frame_selection.enabled is false
+
+# --- Scene Analysis (VLM Auto-Inventory) ---
+# InternVL3 auto-detects object categories from scan frames
+# Replaces manual prompt input for segmentation
+scene_analysis:
+  enabled: true
+  model_id: "OpenGVLab/InternVL3-8B"   # MIT license, auto-downloads from HuggingFace
+  sample_frames: 5                       # Number of representative frames to analyze
+  max_tiles: 6                           # Image tiles (6=dev/12GB, 12=production/24GB+)
+
+# --- Frame Selection (Visual Novelty Filter) ---
+# ORB-SLAM style H/F ratio keyframe selection (no camera intrinsics needed)
+# Replaces fixed frame_stride with intelligent parallax-based selection
+frame_selection:
+  enabled: true
+  max_features: 2000          # ORB features per frame
+  sigma: 1.0                  # Reprojection error std dev (pixels)
+  process_scale: 0.25         # Process at 25% resolution (speed)
+  hf_ratio_threshold: 0.45    # H/(H+F) ratio: < 0.45 = parallax present (ORB-SLAM default)
+  min_displacement: 3.0       # Minimum median pixel displacement
+  force_accept_interval: 30   # Safety: force accept every N frames even if no parallax
 
 # --- Paths ---
 paths:
   # Base directory for DA3 models/weights
-  da3_weights_dir: "/home/hernan/Depth-Anything-3/da3_streaming/weights"
+  da3_weights_dir: "vendor/depth_anything_3/da3_streaming/weights"  # relative to project root
   # Directory where scan sessions are stored
   scans_dir: "scans"
   # Default output directory name within each session
@@ -18,7 +41,8 @@ paths:
 
 # --- Depth Anything 3 (DA3) Configuration ---
 da3:
-  install_path: "/home/hernan/Depth-Anything-3"
+  # install_path is now resolved automatically by vendor_paths.py
+  install_path: "vendor/depth_anything_3"  # relative to project root
 
 # --- Models ---
 models:

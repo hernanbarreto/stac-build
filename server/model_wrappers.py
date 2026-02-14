@@ -19,9 +19,8 @@ except ImportError:
     HAS_TORCH = False
     torch = None  # type: ignore
 
-# Add model path
-DA3_PATH = Path(__file__).parent.parent.parent / "Depth-Anything-3" / "src"
-sys.path.insert(0, str(DA3_PATH))
+# Centralised vendor path resolution
+import vendor_paths
 
 
 def to_numpy(x):

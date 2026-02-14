@@ -6,7 +6,9 @@
 
 set -e
 
-CLOUDCOMPY_ROOT="/home/hernan/CloudComPy310"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CLOUDCOMPY_ROOT="${PROJECT_ROOT}/vendor/cloudcompy"
 CONDA_ENV="CloudComPy310"
 CONDA_ROOT="/home/hernan/miniforge3"
 

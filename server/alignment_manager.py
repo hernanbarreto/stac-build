@@ -12,10 +12,8 @@ from typing import Optional, List, Tuple
 from dataclasses import dataclass
 from threading import Lock
 
-# Add DA3 paths
-DA3_ROOT = Path(__file__).parent.parent.parent / "Depth-Anything-3"
-DA3_STREAMING = DA3_ROOT / "da3_streaming"
-sys.path.insert(0, str(DA3_STREAMING))
+# Centralised vendor path resolution
+import vendor_paths
 
 try:
     from loop_utils.alignment_torch import robust_weighted_estimate_sim3_torch
