@@ -17,6 +17,7 @@ Usage from main.py:
 import os
 import json
 import shutil
+import torch
 import numpy as np
 import cv2
 import gc
@@ -71,7 +72,8 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str) -> dict:
         # ── Step 2: Run SAM3 in batches with IoU matching (per category) ──
         all_masks, obj_labels = _run_sam3_batched(
             seg_frames_dir, frame_files, categories,
-            batch_size, batch_overlap, iou_threshold
+            batch_size, batch_overlap, iou_threshold,
+            output_dir=output_dir, cfg=cfg
         )
         
         if not all_masks:
@@ -191,10 +193,12 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
 
 def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List[str],
                       batch_size: int, batch_overlap: int,
-                      iou_threshold: float) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, str]]:
+                      iou_threshold: float,
+                      output_dir: Path = None, cfg: dict = None) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, str]]:
     """
     Process frames in overlapping batches, one category at a time.
     Each category gets its own SAM3 pass; obj_ids are remapped to avoid collisions.
+    Saves incrementally after each category if output_dir and cfg are provided.
     
     Returns:
         (all_masks, obj_labels)
@@ -218,6 +222,21 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
     
     print(f"[SegPipeline] Processing {total_frames} frames in {len(batches)} batches × {len(categories)} categories")
     
+    def _log_vram(label):
+        """Diagnostic: log GPU memory state at a given point."""
+        if not torch.cuda.is_available():
+            return
+        try:
+            alloc = torch.cuda.memory_allocated() / (1024**3)
+            resrv = torch.cuda.memory_reserved() / (1024**3)
+            free, total = torch.cuda.mem_get_info()
+            free_gb = free / (1024**3)
+            total_gb = total / (1024**3)
+            print(f"[VRAM] {label}: alloc={alloc:.2f}GB  reserved={resrv:.2f}GB  "
+                  f"driver_free={free_gb:.2f}GB  total={total_gb:.2f}GB")
+        except Exception as e:
+            print(f"[VRAM] {label}: error reading — {e}")
+    
     sam3 = get_sam3_wrapper()
     
     # Master state across all categories
@@ -227,84 +246,128 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
     
     for cat_idx, category in enumerate(categories):
         print(f"\n[SegPipeline] ═══ Category {cat_idx+1}/{len(categories)}: '{category}' ═══")
+        _log_vram(f"cat {cat_idx+1} START")
         
-        # Per-category state
-        cat_masks = {}  # orig_frame_idx → {cat_local_obj_id: mask}
-        next_global_id = 1  # Local to this category's batch loop
-        prev_batch_masks = None
-        prev_overlap_start = None
-        
-        for batch_idx, (b_start, b_end) in enumerate(batches):
-            batch_frame_files = frame_files[b_start:b_end]
-            batch_len = len(batch_frame_files)
+        def _process_category(category, batches, frames_dir, frame_files, sam3,
+                              batch_size, batch_overlap, iou_threshold):
+            """Process all batches for a single category. Raises on OOM."""
+            batch_step = batch_size - batch_overlap
+            cat_masks = {}
+            next_global_id = 1
+            prev_batch_masks = None
+            prev_overlap_start = None
             
-            print(f"\n[SegPipeline] ── Batch {batch_idx}/{len(batches)-1}: "
-                  f"frames {b_start}–{b_end-1} ({batch_len} frames) ──")
-            
-            # Create temp directory with sequential symlinks for this batch
-            batch_dir, index_mapping = _prepare_batch_dir(frames_dir, batch_frame_files, b_start)
-            
-            try:
-                # Run SAM3 on this batch with this category's prompt
-                raw_results = sam3.process_batch(
-                    str(batch_dir), category, index_mapping
-                )
+            for batch_idx, (b_start, b_end) in enumerate(batches):
+                batch_frame_files = frame_files[b_start:b_end]
+                batch_len = len(batch_frame_files)
                 
-                if not raw_results:
-                    print(f"[SegPipeline] Batch {batch_idx}: no masks produced")
-                    continue
+                print(f"\n[SegPipeline] ── Batch {batch_idx}/{len(batches)-1}: "
+                      f"frames {b_start}–{b_end-1} ({batch_len} frames) ──")
+                _log_vram(f"  batch {batch_idx} BEFORE")
                 
-                # Parse raw SAM3 output into structured format
-                batch_masks = _parse_raw_masks(raw_results)
+                batch_dir, index_mapping = _prepare_batch_dir(frames_dir, batch_frame_files, b_start)
                 
-                if not batch_masks:
-                    print(f"[SegPipeline] Batch {batch_idx}: no valid masks after parsing")
-                    continue
-                
-                # Match IDs with previous batch via IoU in overlap region
-                if batch_idx == 0:
-                    # First batch: assign initial global IDs
-                    id_remap = {}
-                    batch_obj_ids = set()
-                    for frame_masks in batch_masks.values():
-                        batch_obj_ids.update(frame_masks.keys())
-                    for local_id in sorted(batch_obj_ids):
-                        id_remap[local_id] = next_global_id
-                        next_global_id += 1
-                else:
-                    # Subsequent batches: IoU matching in overlap zone
-                    overlap_start_frame = b_start
-                    overlap_end_frame = prev_overlap_start + batch_step + batch_overlap - 1 if prev_overlap_start is not None else b_start + batch_overlap - 1
-                    
-                    id_remap, next_global_id = _match_ids_iou(
-                        prev_batch_masks, batch_masks,
-                        overlap_start=overlap_start_frame,
-                        overlap_end=min(overlap_end_frame, b_end - 1),
-                        iou_threshold=iou_threshold,
-                        next_global_id=next_global_id
+                try:
+                    raw_results = sam3.process_batch(
+                        str(batch_dir), category, index_mapping
                     )
-                
-                # Apply ID remap and merge into category masks
-                remapped_batch = {}
-                for orig_idx, frame_masks in batch_masks.items():
-                    remapped = {}
-                    for local_id, mask in frame_masks.items():
-                        global_id = id_remap.get(local_id, local_id)
-                        remapped[global_id] = mask
-                    cat_masks[orig_idx] = {**cat_masks.get(orig_idx, {}), **remapped}
-                    remapped_batch[orig_idx] = remapped
-                
-                prev_batch_masks = remapped_batch
-                prev_overlap_start = b_start
-                
-                unique_objects = set()
-                for fm in batch_masks.values():
-                    unique_objects.update(fm.keys())
-                print(f"[SegPipeline] Batch {batch_idx}: {len(batch_masks)} frames, "
-                      f"{len(unique_objects)} objects → remapped to {len(set(id_remap.values()))} global IDs")
-                
-            finally:
-                shutil.rmtree(batch_dir, ignore_errors=True)
+                    
+                    if not raw_results:
+                        print(f"[SegPipeline] Batch {batch_idx}: no masks produced")
+                        continue
+                    
+                    batch_masks = _parse_raw_masks(raw_results)
+                    
+                    if not batch_masks:
+                        print(f"[SegPipeline] Batch {batch_idx}: no valid masks after parsing")
+                        continue
+                    
+                    if batch_idx == 0:
+                        id_remap = {}
+                        batch_obj_ids = set()
+                        for frame_masks in batch_masks.values():
+                            batch_obj_ids.update(frame_masks.keys())
+                        for local_id in sorted(batch_obj_ids):
+                            id_remap[local_id] = next_global_id
+                            next_global_id += 1
+                    else:
+                        overlap_start_frame = b_start
+                        overlap_end_frame = prev_overlap_start + batch_step + batch_overlap - 1 if prev_overlap_start is not None else b_start + batch_overlap - 1
+                        
+                        id_remap, next_global_id = _match_ids_iou(
+                            prev_batch_masks, batch_masks,
+                            overlap_start=overlap_start_frame,
+                            overlap_end=min(overlap_end_frame, b_end - 1),
+                            iou_threshold=iou_threshold,
+                            next_global_id=next_global_id
+                        )
+                    
+                    remapped_batch = {}
+                    for orig_idx, frame_masks in batch_masks.items():
+                        remapped = {}
+                        for local_id, mask in frame_masks.items():
+                            global_id = id_remap.get(local_id, local_id)
+                            remapped[global_id] = mask
+                        cat_masks[orig_idx] = {**cat_masks.get(orig_idx, {}), **remapped}
+                        remapped_batch[orig_idx] = remapped
+                    
+                    prev_batch_masks = remapped_batch
+                    prev_overlap_start = b_start
+                    
+                    unique_objects = set()
+                    for fm in batch_masks.values():
+                        unique_objects.update(fm.keys())
+                    print(f"[SegPipeline] Batch {batch_idx}: {len(batch_masks)} frames, "
+                          f"{len(unique_objects)} objects → remapped to {len(set(id_remap.values()))} global IDs")
+                    _log_vram(f"  batch {batch_idx} AFTER")
+                    
+                finally:
+                    shutil.rmtree(batch_dir, ignore_errors=True)
+            
+            return cat_masks
+        
+        def _recover_sam3(sam3):
+            """Full SAM3 unload/reload cycle to recover from CUDA OOM."""
+            print("[SegPipeline] 🔄 OOM detected — unloading SAM3 for recovery...")
+            sam3.unload_model()
+            for _ in range(3):
+                gc.collect()
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                    torch.cuda.reset_peak_memory_stats()
+                except Exception:
+                    pass
+            _log_vram("  after OOM cleanup")
+            print("[SegPipeline] 🔄 Reloading SAM3...")
+            sam3.load_model()
+            _log_vram("  after SAM3 reload")
+        
+        # ── Try category, recover from OOM once, skip if OOM again ──
+        cat_masks = {}
+        try:
+            cat_masks = _process_category(
+                category, batches, frames_dir, frame_files, sam3,
+                batch_size, batch_overlap, iou_threshold
+            )
+        except Exception as e:
+            if "out of memory" in str(e).lower():
+                _recover_sam3(sam3)
+                print(f"[SegPipeline] 🔄 Retrying category '{category}'...")
+                try:
+                    cat_masks = _process_category(
+                        category, batches, frames_dir, frame_files, sam3,
+                        batch_size, batch_overlap, iou_threshold
+                    )
+                except Exception as e2:
+                    if "out of memory" in str(e2).lower():
+                        print(f"[SegPipeline] ⛔ Category '{category}' failed twice with OOM — skipping")
+                        _recover_sam3(sam3)
+                    else:
+                        print(f"[SegPipeline] ⚠️ Category '{category}' retry failed: {e2}")
+            else:
+                print(f"[SegPipeline] ⚠️ Category '{category}' failed: {e}")
         
         # Collect unique obj_ids for this category
         cat_obj_ids = set()
@@ -330,6 +393,25 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         # Advance offset for next category
         if cat_obj_ids:
             global_id_offset = max(cat_id_remap.values())
+        
+        # Incremental save: persist results after each category
+        if output_dir and cfg and all_masks:
+            try:
+                categories_so_far = categories[:cat_idx + 1]
+                _save_masks(output_dir, all_masks, categories_so_far, obj_labels, cfg)
+                print(f"[SegPipeline] 💾 Incremental save: {cat_idx+1}/{len(categories)} categories saved")
+            except Exception as e:
+                print(f"[SegPipeline] ⚠️ Incremental save failed: {e}")
+        
+        # VRAM cleanup between categories
+        gc.collect()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+        _log_vram(f"cat {cat_idx+1} END (after cleanup)")
     
     # Unload SAM3 to free VRAM
     sam3.unload_model()
@@ -419,14 +501,15 @@ def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
     """
     # Collect overlap frame indices present in both batches
     overlap_frames = []
-    for fidx in range(overlap_start, overlap_end + 1):
-        if fidx in prev_masks and fidx in curr_masks:
-            overlap_frames.append(fidx)
+    if prev_masks and curr_masks:
+        for fidx in range(overlap_start, overlap_end + 1):
+            if fidx in prev_masks and fidx in curr_masks:
+                overlap_frames.append(fidx)
     
     if not overlap_frames:
         # No overlap — assign fresh IDs to all objects
         curr_obj_ids = set()
-        for fm in curr_masks.values():
+        for fm in (curr_masks or {}).values():
             curr_obj_ids.update(fm.keys())
         id_remap = {}
         for cid in sorted(curr_obj_ids):
@@ -987,6 +1070,7 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
     print(f"[SegPipeline]   {len(frame_groups)} unique frames in cloud")
     
     # Match each object's masks against cloud points
+    # Uses erosion for tighter boundaries + deconfliction (each point → one obj_id)
     colors = cfg["visualization"]["segment_colors"]
     
     # Build lookup from obj_id → instance metadata (label, color)
@@ -994,11 +1078,20 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
     for inst in metadata.get("instances", []):
         instance_meta[inst["id"]] = inst
     
-    instances = []
-    total_segmented = 0
+    # Erosion kernel (configurable)
+    erosion_iterations = 2
+    erosion_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    
+    # ── Phase 1: Match all objects, track per-point best assignment ──
+    # For deconfliction: each point goes to the object with the smallest mask area
+    point_obj_id = np.full(n_pts, -1, dtype=np.int32)     # winning obj_id per point
+    point_mask_area = np.full(n_pts, np.inf, dtype=np.float64)  # smaller wins
+    
+    obj_mask_areas = {}  # obj_id → average mask area (for priority)
     
     for i, obj_id in enumerate(obj_ids):
-        matched_indices = []
+        # Compute average mask area for this object (across all frames)
+        frame_areas = []
         
         for cloud_frame, pt_indices in frame_groups.items():
             # Find nearest SAM3 keyframe
@@ -1011,43 +1104,72 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
             if mask_key not in masks_data:
                 continue
             
-            mask = masks_data[mask_key].astype(bool)
+            mask = masks_data[mask_key].astype(np.uint8)
             
-            # Look up each point's pixel in the mask
+            # ── Erosion: shrink mask edges for tighter boundaries ──
+            mask = cv2.erode(mask, erosion_kernel, iterations=erosion_iterations)
+            mask = mask.astype(bool)
+            
+            mask_area = float(np.sum(mask))
+            if mask_area == 0:
+                continue
+            frame_areas.append(mask_area)
+            
+            # Look up each point's pixel in the eroded mask
             rows = np.clip(pixel_row[pt_indices], 0, mask.shape[0] - 1)
             cols = np.clip(pixel_col[pt_indices], 0, mask.shape[1] - 1)
             in_mask = mask[rows, cols]
             
             matched = pt_indices[in_mask]
-            if len(matched) > 0:
-                matched_indices.append(matched)
+            
+            # ── Deconfliction: assign point to smallest-mask object ──
+            # Vectorized: only update points where this mask_area is smaller
+            wins = mask_area < point_mask_area[matched]
+            winning_pts = matched[wins]
+            point_obj_id[winning_pts] = obj_id
+            point_mask_area[winning_pts] = mask_area
         
-        if not matched_indices:
+        avg_area = np.mean(frame_areas) if frame_areas else 0
+        obj_mask_areas[obj_id] = avg_area
+    
+    # ── Phase 2: Build instances by merging obj_ids with the same instance_id ──
+    # Each logical object may have multiple obj_ids (one per batch), merge them.
+    from collections import defaultdict
+    instance_groups = defaultdict(list)  # instance_id → [obj_id, ...]
+    for obj_id in obj_ids:
+        meta = instance_meta.get(obj_id, {})
+        iid = meta.get("instance_id", obj_id)
+        instance_groups[iid].append(obj_id)
+    
+    instances = []
+    total_segmented = 0
+    
+    for iid, group_obj_ids in instance_groups.items():
+        # Merge all points assigned to any obj_id in this instance group
+        all_matched = np.where(np.isin(point_obj_id, group_obj_ids))[0].astype(np.int64)
+        
+        if len(all_matched) == 0:
             continue
         
-        all_matched = np.concatenate(matched_indices)
-        all_matched = np.unique(all_matched)  # deduplicate
-        
         # ── Per-instance DBSCAN outlier removal ──
-        # Removes stray points and small satellite clusters before OBB
         pre_filter_count = len(all_matched)
-        if pre_filter_count >= 20:  # need enough points for meaningful clustering
+        if pre_filter_count >= 20:
             all_matched = _filter_instance_outliers(
-                xyz_display, all_matched, obj_id
+                xyz_display, all_matched, iid
             )
         
         total_segmented += len(all_matched)
         
-        # Look up label/color from metadata (supports multi-prompt)
-        meta_inst = instance_meta.get(obj_id, {})
+        # Look up label/color from the first obj_id's metadata
+        meta_inst = instance_meta.get(group_obj_ids[0], {})
         label = meta_inst.get("label", "object")
-        color = meta_inst.get("color", colors[i % len(colors)])
+        color = meta_inst.get("color", colors[len(instances) % len(colors)])
         
         # Build instance data
         instance = {
-            "id": int(obj_id),
+            "id": int(iid),
             "label": label,
-            "instance_id": meta_inst.get("instance_id", i + 1),
+            "instance_id": int(iid),
             "color": color,
             "total_points": int(len(all_matched)),
             "globalIndices": all_matched.tolist(),
@@ -1060,7 +1182,7 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
         instances.append(instance)
         removed = pre_filter_count - len(all_matched)
         filter_info = f" (filtered {removed} outliers)" if removed > 0 else ""
-        print(f"[SegPipeline]   Object {obj_id} ('{label}' #{meta_inst.get('instance_id', i+1)}): "
+        print(f"[SegPipeline]   Object '{label}' #{iid}: "
               f"{len(all_matched):,} points{filter_info}")
     
     coverage = round(total_segmented / max(1, n_pts), 4)

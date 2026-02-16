@@ -71,7 +71,7 @@ models:
     loop_chunk_size: 20  # Images of loop chunk = 2 * loop_chunk_size
     depth_threshold: 15.0
     pointcloud_save:
-      conf_threshold_coef: 0.75
+      conf_threshold_coef: 0.4    # Lower = keeps more points (0.75 was too aggressive, lost small objects)
       sample_ratio: 1.0
     # Loop closure - SALAD retrieval
     loop_salad:
@@ -285,8 +285,8 @@ postprocessing:
   
   # Step 2: Statistical Outlier Removal
   skip_sor: false
-  sor_knn: 12              # Number of nearest neighbors for SOR (higher = less aggressive)
-  sor_sigma: 2.5           # Standard deviation multiplier (higher = keeps more points)
+  sor_knn: 8               # Number of nearest neighbors for SOR (lower = keeps isolated objects)
+  sor_sigma: 3.0           # Standard deviation multiplier (higher = keeps more points)
   
   # Step 3: Noise filter — DISABLED (O(n²), hangs on clouds >1M points)
   # SOR already handles outlier removal effectively
@@ -295,7 +295,7 @@ postprocessing:
   noise_sigma: 2.0
   
   # Step 4: Voxel subsampling
-  voxel_size: 0.001        # 1mm voxel (maximum detail, user-requested)
+  voxel_size: 0.001        # 5mm voxel (keeps cloud under 100M pts)
   max_points: 0            # 0 = unlimited
   
   # Step 5: Normal estimation (slow on big clouds, not needed for point cloud viewer)

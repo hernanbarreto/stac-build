@@ -52,21 +52,8 @@ void main() {
     // Soft edge
     float alpha = 1.0 - smoothstep(0.3, 0.5, dist);
     
-    vec3 finalColor;
-    
-    if (vClassId > 0.0) {
-        // Highlighted/segmented objects - pulsing orange/yellow
-        float pulse = 0.7 + 0.3 * sin(time * 5.0 + vClassId * 0.5);
-        finalColor = mix(
-            vec3(1.0, 0.6, 0.0),  // Orange
-            vec3(1.0, 1.0, 0.2),  // Yellow
-            pulse * highlightIntensity
-        );
-        alpha = min(alpha + 0.2, 1.0);
-    } else {
-        // Normal points - apply background brightness
-        finalColor = vColor * backgroundBrightness;
-    }
+    // All points rendered uniformly — only OBBs indicate segmentation
+    vec3 finalColor = vColor * backgroundBrightness;
     
     gl_FragColor = vec4(finalColor, alpha);
 }

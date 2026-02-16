@@ -837,7 +837,7 @@ async def status():
 
 @app.get("/sessions")
 async def get_sessions():
-    """List available scan sessions."""
+    """List available scan sessions with metadata."""
     try:
         scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
         if not scans_dir.exists(): return []
@@ -845,7 +845,32 @@ async def get_sessions():
         sessions = []
         for d in sorted(scans_dir.iterdir(), reverse=True):
             if d.is_dir():
-                sessions.append({"id": d.name, "date": d.name})
+                # Count frames
+                frames_dir = d / "frames"
+                frame_count = len(list(frames_dir.glob("*.jpg"))) if frames_dir.exists() else 0
+                
+                # Check output
+                output_dir = d / "output"
+                has_cloud = (output_dir / "cleaned_cloud.ply").exists() if output_dir.exists() else False
+                has_segments = (output_dir / "segmentation.json").exists() if output_dir.exists() else False
+                
+                # Count PLY chunks
+                ply_files = list(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
+                
+                # Cloud size (MB)
+                cloud_size_mb = 0
+                if has_cloud:
+                    cloud_size_mb = round((output_dir / "cleaned_cloud.ply").stat().st_size / (1024*1024), 1)
+                
+                sessions.append({
+                    "id": d.name,
+                    "date": d.name,
+                    "frame_count": frame_count,
+                    "chunk_count": len(ply_files),
+                    "has_cloud": has_cloud,
+                    "has_segments": has_segments,
+                    "cloud_size_mb": cloud_size_mb,
+                })
         return sessions
     except Exception as e:
         print(f"Error listing sessions: {e}")
@@ -1807,27 +1832,82 @@ async def viewer_websocket(websocket: WebSocket):
                 # Wrapper to run internally and handle completion
                 async def _background_reconstruction():
                     success = await _reconstruct_geometry_only()
+
+                    # Helper: send to websocket if still alive (never crash)
+                    async def _safe_ws_send(msg: dict):
+                        try:
+                            await websocket.send_text(json.dumps(msg))
+                        except Exception:
+                            pass  # Client disconnected, ignore
+
+                    if not success:
+                        await _safe_ws_send({"type": "error", "message": "Geometry reconstruction failed. Check server logs."})
+                        return
+
+                    session = frame_storage.current_session
+
+                    # ── Step 1: CloudCompPy Post-Processing ──
                     try:
-                        if success:
-                            # ── CloudCompPy Post-Processing ──
-                            postproc_config = cfg.get("postprocessing", {})
-                            if postproc_config.get("enabled", False):
-                                await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
-                            
-                            # ── Send cleaned cloud to viewer ──
-                            await _send_cleaned_cloud(websocket, session_id)
-                            
-                            await websocket.send_text(json.dumps({
-                                "type": "status",
-                                "message": f"Geometry reconstruction complete for {session_id}"
-                            }))
-                        else:
-                            await websocket.send_text(json.dumps({
-                                "type": "error",
-                                "message": "Geometry reconstruction failed. Check server logs."
-                            }))
-                    except:
-                         print("[Reconstruct] Failed to send completion message (client disconnected).")
+                        postproc_config = cfg.get("postprocessing", {})
+                        if postproc_config.get("enabled", False):
+                            await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
+                    except Exception as e:
+                        print(f"[Reconstruct] CloudComPy error (non-fatal): {e}")
+
+                    # ── Step 2: Send cleaned cloud to viewer ──
+                    try:
+                        await _send_cleaned_cloud(websocket, session_id)
+                    except Exception as e:
+                        print(f"[Reconstruct] Send cloud error (client disconnected?): {e}")
+
+                    await _safe_ws_send({"type": "status", "message": f"Geometry reconstruction complete for {session_id}"})
+
+                    # ── Step 3: Auto-Segmentation (VLM → SAM3) ──
+                    # This runs regardless of websocket state — results are saved to disk
+                    if session:
+                        try:
+                            print(f"[AutoSeg] Starting automatic segmentation for {session_id}...")
+
+                            # Unload DA3 to free VRAM before VLM + SAM3
+                            print("[AutoSeg] Unloading DA3 to free VRAM...")
+                            chunk_processor.unload_model()
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+
+                            # VLM analyzes keyframes → generates prompts automatically
+                            prompt = _resolve_segmentation_prompt("auto", str(session.frames_dir))
+                            print(f"[AutoSeg] Prompt resolved: '{prompt}'")
+
+                            # Run SAM3 segmentation with auto-generated prompts
+                            from segmentation_pipeline import run_segmentation
+                            result = run_segmentation(
+                                frames_dir=str(session.frames_dir),
+                                output_dir=str(session.output_dir),
+                                prompt=prompt
+                            )
+
+                            if "error" in result:
+                                print(f"[AutoSeg] ❌ Segmentation failed: {result['error']}")
+                            else:
+                                print(f"[AutoSeg] ✅ Segmentation complete: {len(result['instances'])} instances")
+
+                                # Apply to cloud and broadcast to ALL connected viewers
+                                from segmentation_pipeline import apply_segmentation_to_cloud
+                                seg_data = apply_segmentation_to_cloud(session.output_dir)
+                                if seg_data.get("instances"):
+                                    await viewer_manager.broadcast_text(json.dumps(seg_data))
+                                    print(f"[AutoSeg] Broadcast {len(seg_data['instances'])} segmented instances")
+
+                                await _safe_ws_send({
+                                    "type": "status",
+                                    "message": f"Auto-segmentation complete: {len(result['instances'])} objects detected"
+                                })
+
+                        except Exception as e:
+                            print(f"[AutoSeg] ❌ Error: {e}")
+                            import traceback
+                            traceback.print_exc()
 
                 # Fire and forget (don't await)
                 asyncio.create_task(_background_reconstruction())

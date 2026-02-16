@@ -60,12 +60,22 @@ RUN pip3 install --no-cache-dir \
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
+# FlashAttention2 — accelerates VLM inference (~2x faster attention)
+RUN pip3 install --no-cache-dir flash-attn --no-build-isolation
+
 # ── Copy project ────────────────────────────────────────────────────
 # Vendor dependencies (source code, ~280MB)
 COPY vendor/ ./vendor/
 
 # Server code
 COPY server/ ./server/
+
+# Static files (viewer, camera HTML/JS)
+COPY static/ ./static/
+
+# Docs and scripts
+COPY docs/ ./docs/ 
+COPY scripts/ ./scripts/
 
 # Config and scripts
 COPY setup_weights.sh .

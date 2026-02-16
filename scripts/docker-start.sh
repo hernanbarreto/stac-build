@@ -107,6 +107,7 @@ DOCKER_ARGS=(
     -v "${PROJECT_ROOT}/server/scans:/app/server/scans"
     -v "${PROJECT_ROOT}/scripts/cert.pem:/app/certs/cert.pem"
     -v "${PROJECT_ROOT}/scripts/key.pem:/app/certs/key.pem"
+    -v "${HOME}/.cache/huggingface:/root/.cache/huggingface"
     --rm
 )
 

@@ -145,13 +145,9 @@ class DA3_Streaming:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[DA3_Streaming] Using device: {self.device}")
 
-        # Dtype: float32 for CPU, bfloat16/float16 for CUDA
-        if self.device == "cpu":
-            self.dtype = torch.float32
-        else:
-            self.dtype = (
-                torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-            )
+        # Dtype: always float16 — works on both CPU and CUDA, 
+        # prevents FP32 fallback that makes CPU inference 3x slower
+        self.dtype = torch.float16
 
         self.img_dir = image_dir
         self.img_list = None

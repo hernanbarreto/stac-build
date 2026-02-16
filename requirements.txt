@@ -31,6 +31,9 @@ plyfile>=1.1
 pillow_heif>=0.18
 pycolmap>=3.10
 moviepy==1.0.3
+faiss-cpu>=1.7.0
+numba>=0.59.0
+pypose>=0.6.0
 
 # ── SAM3 dependencies ───────────────────────────────────────────────
 tqdm>=4.65
@@ -40,8 +43,9 @@ iopath>=0.1.10
 typing_extensions>=4.0
 
 # ── Scene Analyzer (InternVL3) ───────────────────────────────────────
-transformers>=4.40.0
-accelerate>=0.30.0
+transformers>=4.40.0,<4.48.0
+accelerate>=1.1.0
+bitsandbytes>=0.43.0
 
 # ── STAC server ──────────────────────────────────────────────────────
 fastapi>=0.100.0

@@ -152,32 +152,29 @@ def main():
             print(f"  ⚠️ Origin size mismatch: {len(fg)} vs cloud {n_cloud} — origins NOT injected\n")
 
     # ══════════════════════════════════════════════════════════════
-    # STEP 2: DUPLICATE REMOVAL
+    # STEP 2: NEAR-DUPLICATE REMOVAL (micro-voxel 0.1mm)
+    # Points from overlapping chunks are nearly identical but not
+    # bit-exact.  A tiny voxel pass collapses them efficiently.
     # ══════════════════════════════════════════════════════════════
     if not args.skip_duplicates:
         t1 = time.time()
         n_before = current.size()
-        print(f"[Step 2/6] Removing exact duplicate points...")
+        MICRO_VOXEL = 0.0001  # 0.1mm — catches near-duplicates without losing detail
+        print(f"[Step 2/6] Removing near-duplicate points (micro-voxel {MICRO_VOXEL*1000:.1f}mm)...")
         
-        dup_sf_idx = current.addScalarField("DuplicateFlags")
-        current.setCurrentScalarField(dup_sf_idx)
-        ret = cc.GeometricalAnalysisTools.FlagDuplicatePoints(current)
-        
-        if ret == cc.ErrorCode.NoError:
-            no_dup = current.filterPointsByScalarValue(0., 0., outside=False)
-            if no_dup is not None and no_dup.size() > 0:
-                n_removed = n_before - no_dup.size()
-                pct = (n_removed / n_before) * 100
-                print(f"  ✅ {n_before:,} → {no_dup.size():,} ({n_removed:,} duplicates, {pct:.1f}%)")
-                current = no_dup
-            else:
-                print(f"  ℹ️  No exact duplicates found")
+        ref_micro = cc.CloudSamplingTools.resampleCloudSpatially(current, MICRO_VOXEL)
+        if ref_micro is not None and ref_micro.size() > 0:
+            deduped = _clone_from_ref(current, ref_micro, "NearDedup")
+            n_removed = n_before - deduped.size()
+            pct = (n_removed / n_before) * 100
+            print(f"  ✅ {n_before:,} → {deduped.size():,} ({n_removed:,} near-duplicates, {pct:.1f}%)")
+            current = deduped
         else:
-            print(f"  ⚠️  FlagDuplicatePoints failed (code: {ret})")
+            print(f"  ℹ️  Micro-voxel returned None, keeping original")
         
         print(f"  ({time.time()-t1:.1f}s)\n")
     else:
-        print(f"[Step 2/6] Duplicate removal: SKIPPED\n")
+        print(f"[Step 2/6] Near-duplicate removal: SKIPPED\n")
 
     # ══════════════════════════════════════════════════════════════
     # STEP 3: VOXEL SPATIAL SUBSAMPLING

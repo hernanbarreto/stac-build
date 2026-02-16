@@ -125,50 +125,50 @@ def _load_image(image_path: str, input_size: int = 448, max_num: int = 6):
 
 # ── GPU detection and model loading ──────────────────────────────────
 
-def _detect_precision() -> dict:
+def _select_model_and_dtype(model_id: str = None):
     """
-    Auto-detect optimal precision based on available GPU memory.
+    Auto-select model size and dtype based on available GPU memory.
+
+    ≥16GB VRAM → InternVL3-8B in BF16 (~16GB)
+    <16GB VRAM → InternVL3-2B in BF16 (~4GB) — fits comfortably
+    No GPU     → InternVL3-2B in FP32 on CPU (slow but works)
 
     Returns:
-        dict with loading kwargs for AutoModel.from_pretrained
+        (model_id, torch_dtype, device)
     """
-    if not torch.cuda.is_available():
-        logger.warning("No CUDA GPU detected — VLM will run on CPU (very slow)")
-        return {"torch_dtype": torch.float32}
+    SMALL_MODEL = "OpenGVLab/InternVL3-2B"
 
-    gpu_mem_gb = torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
+    if model_id is None:
+        model_id = DEFAULT_MODEL_ID
+
+    if not torch.cuda.is_available():
+        logger.warning("No CUDA GPU — using 2B model on CPU (slow)")
+        return SMALL_MODEL, torch.float32, "cpu"
+
+    gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
     logger.info(f"GPU memory: {gpu_mem_gb:.1f} GB")
 
     if gpu_mem_gb >= 16:
-        logger.info("Loading InternVL3 in FP16 (full precision)")
-        return {"torch_dtype": torch.bfloat16}
-    elif gpu_mem_gb >= 8:
-        logger.info("Loading InternVL3 in INT8 (8-bit quantized)")
-        return {"torch_dtype": torch.bfloat16, "load_in_8bit": True}
+        logger.info(f"Using {model_id} in BF16 (enough VRAM)")
+        return model_id, torch.bfloat16, "cuda"
     else:
-        logger.info("Loading InternVL3 in INT4 (4-bit quantized)")
-        return {"torch_dtype": torch.bfloat16, "load_in_4bit": True}
+        logger.info(f"GPU < 16GB — using {SMALL_MODEL} in BF16 to fit in {gpu_mem_gb:.0f}GB")
+        return SMALL_MODEL, torch.bfloat16, "cuda"
 
 
 def _load_model(model_id: str = None, precision: dict = None):
     """
     Load InternVL3 model and tokenizer.
-
-    Args:
-        model_id: HuggingFace model ID (default: InternVL3-8B)
-        precision: Loading kwargs (auto-detected if None)
+    Uses direct loading (no device_map, no quantization) for maximum compatibility.
 
     Returns:
         (model, tokenizer)
     """
     from transformers import AutoTokenizer, AutoModel
 
-    if model_id is None:
-        model_id = DEFAULT_MODEL_ID
-    if precision is None:
-        precision = _detect_precision()
+    model_id, dtype, device = _select_model_and_dtype(model_id)
 
-    logger.info(f"Loading {model_id}...")
+    logger.info(f"Loading {model_id} (dtype={dtype}, device={device})...")
     t0 = time.time()
 
     # Check if flash_attn is available
@@ -179,19 +179,29 @@ def _load_model(model_id: str = None, precision: dict = None):
     except ImportError:
         use_flash = False
         logger.info("Flash Attention not available — using standard attention")
+    # WORKAROUND: InternVL3's modeling_intern_vit.py calls torch.linspace().item()
+    # during __init__, which fails when PyTorch's device context manager redirects
+    # tensor creation to the "meta" device. We monkey-patch torch.linspace to
+    # always create on CPU during model loading.
+    _orig_linspace = torch.linspace
+    def _safe_linspace(*args, **kwargs):
+        kwargs['device'] = 'cpu'
+        return _orig_linspace(*args, **kwargs)
+    
+    torch.linspace = _safe_linspace
+    try:
+        model = AutoModel.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=False,
+            use_flash_attn=use_flash,
+            trust_remote_code=True,
+        ).eval()
+    finally:
+        torch.linspace = _orig_linspace  # Always restore
 
-    model = AutoModel.from_pretrained(
-        model_id,
-        low_cpu_mem_usage=True,
-        use_flash_attn=use_flash,
-        trust_remote_code=True,
-        **precision
-    ).eval()
-
-    # Move to CUDA only if not quantized (quantized models auto-place)
-    if "load_in_8bit" not in precision and "load_in_4bit" not in precision:
-        if torch.cuda.is_available():
-            model = model.cuda()
+    if device == "cuda":
+        model = model.cuda()
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_id, trust_remote_code=True, use_fast=False
@@ -494,12 +504,42 @@ def analyze_scene(frames_dir: str, config: dict = None) -> str:
     # ── Step 4: Merge categories ──
     merged = _merge_categories(model, tokenizer, categories_per_frame)
 
-    # ── Step 5: Unload model (free VRAM for the rest of the pipeline) ──
+    # ── Step 4b: Ensure mandatory structural categories are always present ──
+    # The smaller VLM model may miss obvious surfaces. These are always relevant
+    # for construction/BIM scenes and SAM3 will simply skip categories not visible.
+    MANDATORY_STRUCTURAL = [
+        {"label": "floor", "description": "floor surface"},
+        {"label": "wall", "description": "wall surface"},
+        {"label": "ceiling", "description": "ceiling surface"},
+        {"label": "stairs", "description": "staircase or steps"},
+        {"label": "door", "description": "door"},
+    ]
+    existing_labels = {item["label"].lower() for item in merged}
+    # Also check descriptions for substring match (e.g., VLM detected "concrete wall" covers "wall")
+    existing_text = " ".join(f"{item['label']} {item.get('description','')}" for item in merged).lower()
+    for mandatory in MANDATORY_STRUCTURAL:
+        # Skip if the mandatory keyword appears anywhere in existing labels/descriptions
+        if any(mandatory["label"] in lbl for lbl in existing_labels) or mandatory["label"] in existing_text:
+            continue
+        merged.append(mandatory)
+        logger.info(f"  Added mandatory structural: {mandatory['label']}")
+
+    # ── Step 5: Unload model (free VRAM for SAM3) ──
+    # Move to CPU first to release GPU tensors, then delete all references
+    try:
+        model.cpu()
+    except:
+        pass
     del model, tokenizer
-    gc.collect()
+    # Multiple gc.collect passes to break circular references
+    for _ in range(3):
+        gc.collect()
     if torch.cuda.is_available():
+        torch.cuda.synchronize()
         torch.cuda.empty_cache()
-    logger.info("VLM unloaded — VRAM freed")
+        torch.cuda.reset_peak_memory_stats()
+        vram_free = torch.cuda.mem_get_info()[0] / (1024**3)
+        logger.info(f"VLM unloaded — {vram_free:.1f} GB VRAM free")
 
     elapsed = time.time() - t0
 

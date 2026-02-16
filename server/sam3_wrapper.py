@@ -62,11 +62,20 @@ class SAM3Wrapper:
         """Unload model to free VRAM."""
         with self.lock:
             if self.predictor is not None:
+                try:
+                    self.predictor.model.cpu()
+                except:
+                    pass
                 del self.predictor
                 self.predictor = None
                 self.is_loaded = False
-                torch.cuda.empty_cache()
                 gc.collect()
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                except Exception as e:
+                    logger.warning(f"CUDA cleanup warning (non-fatal): {e}")
                 logger.info("SAM3 Model unloaded.")
 
     def process_chunk(self, frames_path: str, prompt_text: str, keyframe_interval: int = None) -> Dict[int, Any]:
@@ -457,17 +466,27 @@ class SAM3Wrapper:
             logger.info(f"[SAM3-Batch] Produced masks for {len(results)} frames")
             
         except Exception as e:
+            is_oom = "out of memory" in str(e).lower()
             logger.error(f"Error during batch processing: {e}")
             import traceback
             traceback.print_exc()
+            if is_oom:
+                raise  # Let caller handle OOM recovery
         finally:
             if session_id is not None:
                 try:
                     self.predictor.handle_request(
-                        request=dict(type="reset_session", session_id=session_id)
+                        request=dict(type="close_session", session_id=session_id)
                     )
                 except Exception as e:
-                    logger.error(f"Error resetting session: {e}")
+                    logger.error(f"Error closing session: {e}")
+            # Free GPU tensors from propagation after each batch
+            gc.collect()
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except:
+                pass
         
         return results
     
