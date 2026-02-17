@@ -15,6 +15,15 @@
 #     stac-builder
 # ===========================================================================
 
+# ── Stage 1: Build UI ───────────────────────────────────────────────
+FROM node:20-slim AS ui-builder
+WORKDIR /build
+COPY ui/package.json ui/package-lock.json* ./
+RUN npm ci --silent
+COPY ui/ .
+RUN npm run build
+
+# ── Stage 2: Main image ─────────────────────────────────────────────
 FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
 
 # Avoid interactive prompts
@@ -58,7 +67,7 @@ RUN pip3 install --no-cache-dir \
 
 # Copy and install requirements
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --upgrade pip && pip3 install --no-cache-dir -r requirements.txt
 
 # FlashAttention2 — accelerates VLM inference (~2x faster attention)
 RUN pip3 install --no-cache-dir flash-attn --no-build-isolation
@@ -72,6 +81,9 @@ COPY server/ ./server/
 
 # Static files (viewer, camera HTML/JS)
 COPY static/ ./static/
+
+# UI build output (from Stage 1)
+COPY --from=ui-builder /build/dist ./static/ui/
 
 # Docs and scripts
 COPY docs/ ./docs/ 
@@ -90,9 +102,11 @@ RUN cd vendor/sam3 && pip3 install --no-cache-dir -e . 2>/dev/null || true
 ENV PYTHONPATH="/app/vendor/cloudcompy/lib/cloudcompare:${PYTHONPATH}"
 ENV LD_LIBRARY_PATH="/app/vendor/cloudcompy/lib/cloudcompare:/app/vendor/cloudcompy/lib/cloudcompare/plugins:${LD_LIBRARY_PATH}"
 
-# ── Weights volume (mounted at runtime) ─────────────────────────────
-# Model weights are NOT baked into the image — mount or download at start
+# ── Volumes ──────────────────────────────────────────────────────────
+# Model weights (mounted at runtime)
 VOLUME /app/weights
+# Auth database (persists across container restarts)
+VOLUME /app/server/data
 
 # ── Health check ─────────────────────────────────────────────────────
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \

@@ -5,6 +5,9 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import './App.css'
 import Viewport, { ViewportHandle, SegmentInstance } from './components/Viewport'
+import { useAuth } from './context/AuthContext'
+import LoginPage from './pages/LoginPage'
+import AdminPage from './pages/AdminPage'
 
 interface SessionInfo {
   id: string
@@ -24,13 +27,74 @@ function App() {
   const [activeSession, setActiveSession] = useState<string | null>(null)
   const [activeTool, setActiveTool] = useState<Tool>('navigate')
   const [connected, setConnected] = useState(false)
+  const [serverAlive, setServerAlive] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [pointSize, setPointSize] = useState(2.0)
   const [pointCount, setPointCount] = useState(0)
   const [fps, setFps] = useState(0)
+  const [consoleOpen, setConsoleOpen] = useState(false)
+  const [consoleLogs, setConsoleLogs] = useState<{ ts: string; level: string; msg: string }[]>([])
+  const consoleEndRef = useRef<HTMLDivElement>(null)
   const [openMenu, setOpenMenu] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<ViewportHandle>(null)
+  const [adminOpen, setAdminOpen] = useState(false)
+
+  const { user, loading: authLoading, logout } = useAuth()
+
+  // Periodic server health check — updates indicator only
+  useEffect(() => {
+    const checkHealth = async () => {
+      try {
+        const resp = await fetch('/health', { signal: AbortSignal.timeout(3000) })
+        setServerAlive(resp.ok)
+      } catch {
+        setServerAlive(false)
+      }
+    }
+    checkHealth()
+    const id = setInterval(checkHealth, 3000)
+    return () => clearInterval(id)
+  }, [])
+
+  // When server goes down, clear session state
+  const prevAliveRef = useRef(serverAlive)
+  useEffect(() => {
+    if (prevAliveRef.current && !serverAlive) {
+      // Server just went from alive → dead
+      setConnected(false)
+      setSessions([])
+      setActiveSession(null)
+      setSegments([])
+      setPointCount(0)
+      setStatusMessage('Server disconnected')
+    }
+    prevAliveRef.current = serverAlive
+  }, [serverAlive])
+
+  // Console log WebSocket
+  useEffect(() => {
+    if (!consoleOpen) return
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${proto}//${window.location.host}/ws/logs`)
+    ws.onmessage = (ev) => {
+      try {
+        const entry = JSON.parse(ev.data)
+        setConsoleLogs(prev => {
+          const next = [...prev, entry]
+          return next.length > 500 ? next.slice(-400) : next
+        })
+      } catch { /* ignore */ }
+    }
+    ws.onclose = () => { }
+    return () => ws.close()
+  }, [consoleOpen])
+
+  // Auto-scroll console
+  useEffect(() => {
+    consoleEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [consoleLogs])
+
   const [statusMessage, setStatusMessage] = useState('')
   const [segments, setSegments] = useState<SegmentInstance[]>([])
 
@@ -43,6 +107,16 @@ function App() {
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
+  }, [])
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Home') { viewportRef.current?.resetCamera(); e.preventDefault() }
+      if (e.key === '`' && e.ctrlKey) { setConsoleOpen(prev => !prev); e.preventDefault() }
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
   }, [])
 
   const connectToServer = useCallback(async () => {
@@ -70,6 +144,10 @@ function App() {
   }, [])
 
   const handleSessionClick = useCallback((sessionId: string) => {
+    // Clear React state from previous session
+    setSegments([])
+    setPointCount(0)
+    setStatusMessage('')
     setActiveSession(sessionId)
     setActiveTool('navigate')
   }, [])
@@ -107,6 +185,19 @@ function App() {
 
   const hasSession = activeSession !== null
 
+  if (authLoading) {
+    return (
+      <div className="login-page">
+        <div className="login-card">
+          <div className="login-logo spinning">S</div>
+          <p className="login-subtitle">Loading…</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!user) return <LoginPage />
+
   return (
     <div className={`app-layout ${!sidebarOpen ? 'sidebar-collapsed' : ''}`}>
       {/* ── Menu Bar ── */}
@@ -126,7 +217,16 @@ function App() {
                 </button>
               ) : (
                 <button className="menu-dropdown-item"
-                  onClick={() => menuAction(() => { setConnected(false); setSessions([]); setActiveSession(null) })}>
+                  onClick={() => menuAction(() => {
+                    viewportRef.current?.sendCommand({ type: 'cleared' })
+                    setConnected(false)
+                    setSessions([])
+                    setActiveSession(null)
+                    setSegments([])
+                    setPointCount(0)
+                    setActiveTool('navigate')
+                    setStatusMessage('')
+                  })}>
                   ⏏️ Disconnect
                 </button>
               )}
@@ -156,13 +256,26 @@ function App() {
                 <span className="menu-shortcut">Ctrl+B</span>
               </button>
               <div className="menu-separator" />
-              <button className="menu-dropdown-item" disabled={!hasSession}>
+              <button className="menu-dropdown-item" disabled={!hasSession}
+                onClick={() => menuAction(() => viewportRef.current?.resetCamera())}>
                 🎯 Reset Camera
                 <span className="menu-shortcut">Home</span>
               </button>
-              <button className="menu-dropdown-item" disabled={!hasSession}>
+              <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => {
+                  if (document.fullscreenElement) document.exitFullscreen()
+                  else document.documentElement.requestFullscreen()
+                })}>
                 🔲 Fullscreen
                 <span className="menu-shortcut">F11</span>
+              </button>
+              <div className="menu-separator" />
+              <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => {
+                  setConsoleOpen(prev => !prev)
+                })}>
+                {consoleOpen ? '🖥️ Console ✓' : '🖥️ Console'}
+                <span className="menu-shortcut">Ctrl+`</span>
               </button>
             </div>
           )}
@@ -213,6 +326,45 @@ function App() {
               <div className="menu-separator" />
               <button className="menu-dropdown-item" disabled>
                 ℹ️ About STAC Build
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* User Menu — right side */}
+        <div className="menu-spacer" />
+        <div className="menu-item">
+          <button className={`menu-trigger user-trigger ${openMenu === 'user' ? 'open' : ''}`}
+            onClick={() => toggleMenu('user')}>
+            <span className="user-avatar-small">{user.username[0].toUpperCase()}</span>
+            {user.username}
+          </button>
+          {openMenu === 'user' && (
+            <div className="menu-dropdown menu-dropdown-right">
+              <div className="menu-dropdown-header">
+                <strong>{user.full_name || user.username}</strong>
+                <div className="menu-dropdown-role">{user.role}</div>
+              </div>
+              <div className="menu-separator" />
+              {user.role === 'admin' && (
+                <button className="menu-dropdown-item"
+                  onClick={() => menuAction(() => setAdminOpen(true))}>
+                  👥 User Management
+                </button>
+              )}
+              <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => {
+                  viewportRef.current?.sendCommand({ type: 'cleared' })
+                  setConnected(false)
+                  setSessions([])
+                  setActiveSession(null)
+                  setSegments([])
+                  setPointCount(0)
+                  setActiveTool('navigate')
+                  setStatusMessage('')
+                  logout()
+                })}>
+                🚪 Logout
               </button>
             </div>
           )}
@@ -305,6 +457,11 @@ function App() {
                       <span className="nav-item-icon">📏</span>
                       <span className="nav-item-label">Measure Distance</span>
                     </div>
+                    <div className={`nav-item ${activeTool === 'measure-angle' ? 'active' : ''}`}
+                      onClick={() => setActiveTool('measure-angle')}>
+                      <span className="nav-item-icon">📐</span>
+                      <span className="nav-item-label">Measure Angle</span>
+                    </div>
                     <div className={`nav-item ${activeTool === 'section-box' ? 'active' : ''}`}
                       onClick={() => setActiveTool('section-box')}>
                       <span className="nav-item-icon">✂️</span>
@@ -316,7 +473,21 @@ function App() {
                 {/* Segments panel */}
                 {segments.length > 0 && (
                   <>
-                    <div className="nav-section">Segments</div>
+                    <div className="nav-section">
+                      Segments
+                      <span style={{ float: 'right', display: 'flex', gap: '4px' }}>
+                        <button className="segment-toggle-btn" title="Select All"
+                          onClick={() => {
+                            setSegments(prev => prev.map(s => ({ ...s, visible: true })))
+                            segments.forEach(s => viewportRef.current?.toggleOBB(s.key, true))
+                          }}>☑</button>
+                        <button className="segment-toggle-btn" title="Deselect All"
+                          onClick={() => {
+                            setSegments(prev => prev.map(s => ({ ...s, visible: false })))
+                            segments.forEach(s => viewportRef.current?.toggleOBB(s.key, false))
+                          }}>☐</button>
+                      </span>
+                    </div>
                     <div className="segments-list">
                       {segments.map(seg => (
                         <div key={seg.key} className="segment-item">
@@ -349,12 +520,7 @@ function App() {
             )}
           </nav>
 
-          <div className="sidebar-footer">
-            <div className={`connection-dot ${connected ? 'connected' : ''}`} />
-            <span className="connection-text">
-              {connected ? 'Connected' : 'Disconnected'}
-            </span>
-          </div>
+          <div className="sidebar-footer" />
         </aside>
       )}
 
@@ -376,8 +542,14 @@ function App() {
                 onClick={() => setActiveTool('navigate')} title="Navigate">🔄</button>
               <button className={`tool-btn ${activeTool === 'measure-distance' ? 'active' : ''}`}
                 onClick={() => setActiveTool('measure-distance')} title="Measure Distance">📏</button>
+              <button className={`tool-btn ${activeTool === 'measure-angle' ? 'active' : ''}`}
+                onClick={() => setActiveTool('measure-angle')} title="Measure Angle">📐</button>
               <button className={`tool-btn ${activeTool === 'section-box' ? 'active' : ''}`}
                 onClick={() => setActiveTool('section-box')} title="Section Box">✂️</button>
+              <button className="tool-btn" onClick={() => viewportRef.current?.clearMeasurements()}
+                title="Clear Measurements">🗑️</button>
+              <button className="tool-btn" onClick={() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') }}
+                title="Reset Section Box">🔓</button>
             </div>
             <div className="toolbar-separator" />
             <div className="toolbar-group">
@@ -396,6 +568,7 @@ function App() {
             ref={viewportRef}
             pointSize={pointSize}
             activeSession={activeSession}
+            activeTool={activeTool}
             onPointCount={setPointCount}
             onFps={setFps}
             onStatusMessage={setStatusMessage}
@@ -434,14 +607,37 @@ function App() {
               </div>
             </div>
           )}
+
+          {/* Console Panel */}
+          {consoleOpen && (
+            <div className="console-panel">
+              <div className="console-header">
+                <span>Console</span>
+                <button className="console-close" onClick={() => setConsoleOpen(false)} title="Close console">✕</button>
+              </div>
+              <div className="console-body">
+                {consoleLogs.map((entry, i) => (
+                  <div key={i} className={`console-line console-${entry.level}`}>
+                    <span className="console-ts">{entry.ts}</span>
+                    <span className="console-msg">{entry.msg}</span>
+                  </div>
+                ))}
+                <div ref={consoleEndRef} />
+              </div>
+            </div>
+          )}
         </div>
       </main>
 
       {/* ── Status Bar ── */}
       <div className="statusbar">
         <div className="statusbar-item">
+          <span>{serverAlive ? '🟢' : '🔴'}</span>
+          <span>STAC Server</span>
+        </div>
+        <div className="statusbar-item">
           <span>{connected ? '🟢' : '🔴'}</span>
-          <span>{connected ? 'STAC Server' : 'Not connected'}</span>
+          <span>{connected ? 'Connected' : 'Disconnected'}</span>
         </div>
         <div className="statusbar-spacer" />
         <div className="statusbar-item">
@@ -456,6 +652,8 @@ function App() {
           {pointCount > 0 ? `${pointCount.toLocaleString()} pts` : ''}
         </div>
       </div>
+      {/* Admin Panel Overlay */}
+      {adminOpen && <AdminPage onClose={() => setAdminOpen(false)} />}
     </div>
   )
 }

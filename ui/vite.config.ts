@@ -60,6 +60,21 @@ export default defineConfig(async () => {
           changeOrigin: true,
           secure: false,
         },
+        '/api': {
+          target: 'https://localhost:8765',
+          changeOrigin: true,
+          secure: false,
+        },
+        '/health': {
+          target: 'https://localhost:8765',
+          changeOrigin: true,
+          secure: false,
+        },
+        '/status': {
+          target: 'https://localhost:8765',
+          changeOrigin: true,
+          secure: false,
+        },
       },
     },
   }

@@ -93,3 +93,5 @@ vendor/depth_anything_3/workspace/
 
 # HuggingFace cache
 .cache/huggingface/
+server/stac.db
+server/data/

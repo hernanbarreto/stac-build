@@ -4,6 +4,15 @@
 import asyncio
 import json
 import time
+import logging
+
+# Suppress /health access logs from flooding the console
+class HealthCheckFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return "/health" not in msg
+
+logging.getLogger("uvicorn.access").addFilter(HealthCheckFilter())
 import gc
 import os
 import sys
@@ -848,6 +857,10 @@ async def lifespan(app: FastAPI):
     print("[Server] Models will be loaded on-demand (lazy loading enabled)")
     
     worker_task = asyncio.create_task(chunk_processing_worker())
+
+    # Initialize auth database
+    from db import init_db
+    await init_db()
     
     yield
     
@@ -856,6 +869,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+# Mount auth routes
+from routes_auth import router as auth_router
+app.include_router(auth_router)
+
 @app.get("/")
 async def root():
     return HTMLResponse('<html><head><meta http-equiv="refresh" content="0;url=/static/viewer.html"></head></html>')
@@ -863,6 +880,101 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok", "session": frame_storage.get_session_info() if frame_storage else {}}
+
+# ─── Console Log Streaming via /ws/logs ─────────────────────────────────
+class LogBroadcaster:
+    """Manages WebSocket clients subscribed to server logs."""
+    def __init__(self):
+        self._clients: Set[WebSocket] = set()
+        self._lock = asyncio.Lock()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def set_loop(self, loop: asyncio.AbstractEventLoop):
+        self._loop = loop
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        async with self._lock:
+            self._clients.add(ws)
+
+    async def disconnect(self, ws: WebSocket):
+        async with self._lock:
+            self._clients.discard(ws)
+
+    async def _broadcast(self, message: str):
+        async with self._lock:
+            dead = []
+            for ws in self._clients:
+                try:
+                    await ws.send_text(message)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                self._clients.discard(ws)
+
+    def emit(self, level: str, message: str):
+        """Thread-safe emit — schedule onto the event loop."""
+        payload = json.dumps({
+            "ts": time.strftime("%H:%M:%S"),
+            "level": level,
+            "msg": message.rstrip()
+        })
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._broadcast(payload), self._loop)
+
+log_broadcaster = LogBroadcaster()
+
+class WebSocketLogHandler(logging.Handler):
+    """Routes Python log records to connected console WebSockets."""
+    LEVEL_MAP = {
+        logging.DEBUG: "debug",
+        logging.INFO: "info",
+        logging.WARNING: "warn",
+        logging.ERROR: "error",
+        logging.CRITICAL: "error",
+    }
+    def emit(self, record: logging.LogRecord):
+        try:
+            level = self.LEVEL_MAP.get(record.levelno, "info")
+            log_broadcaster.emit(level, self.format(record))
+        except Exception:
+            pass
+
+class StreamCapture:
+    """Captures print() / stderr output and forwards to LogBroadcaster."""
+    def __init__(self, original, level: str):
+        self._original = original
+        self._level = level
+
+    def write(self, text: str):
+        self._original.write(text)
+        if text.strip():
+            log_broadcaster.emit(self._level, text)
+
+    def flush(self):
+        self._original.flush()
+
+    def isatty(self):
+        return False
+
+# Install log handler + stream captures
+_ws_log_handler = WebSocketLogHandler()
+_ws_log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+logging.getLogger().addHandler(_ws_log_handler)
+logging.getLogger("uvicorn").addHandler(_ws_log_handler)
+logging.getLogger("uvicorn.access").addHandler(_ws_log_handler)
+sys.stdout = StreamCapture(sys.__stdout__, "info")
+sys.stderr = StreamCapture(sys.__stderr__, "error")
+
+@app.websocket("/ws/logs")
+async def ws_logs(websocket: WebSocket):
+    log_broadcaster.set_loop(asyncio.get_event_loop())
+    await log_broadcaster.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # keep alive
+    except WebSocketDisconnect:
+        await log_broadcaster.disconnect(websocket)
 
 @app.get("/status")
 async def status():
