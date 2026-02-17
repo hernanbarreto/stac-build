@@ -29,13 +29,18 @@ import logging
 logger = logging.getLogger("SegPipeline")
 
 
-def run_segmentation(frames_dir: str, output_dir: str, prompt: str) -> dict:
+def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
+                     frame_ranges: dict = None) -> dict:
     """
     Full segmentation pipeline: batched SAM3 → IoU ID matching → mask-to-point mapping.
     
     Supports multiple categories separated by ';' (e.g., "sofa;cushion;table").
     Uses the same blur-filtered frame set as DA3 to ensure frame_global indices match.
     Valid frames are copied to frames_valid/ with sequential numbering, then cleaned up.
+    
+    Args:
+        frame_ranges: Optional dict mapping category label → [start_frame, end_frame].
+                      If provided, SAM3 only processes frames in each category's range.
     """
     from config import cfg
     
@@ -73,7 +78,8 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str) -> dict:
         all_masks, obj_labels = _run_sam3_batched(
             seg_frames_dir, frame_files, categories,
             batch_size, batch_overlap, iou_threshold,
-            output_dir=output_dir, cfg=cfg
+            output_dir=output_dir, cfg=cfg,
+            frame_ranges=frame_ranges
         )
         
         if not all_masks:
@@ -83,6 +89,10 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str) -> dict:
         # ── Step 3: Save masks and metadata ──
         seg_meta = _save_masks(output_dir, all_masks, categories, obj_labels, cfg)
         
+        # ── Step 4: Match masks to cloud and cache final result ──
+        result = _match_and_save_result(output_dir)
+        if result.get("instances"):
+            return result
         return seg_meta
     
     finally:
@@ -194,33 +204,39 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
 def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List[str],
                       batch_size: int, batch_overlap: int,
                       iou_threshold: float,
-                      output_dir: Path = None, cfg: dict = None) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, str]]:
+                      output_dir: Path = None, cfg: dict = None,
+                      frame_ranges: dict = None) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, str]]:
     """
     Process frames in overlapping batches, one category at a time.
     Each category gets its own SAM3 pass; obj_ids are remapped to avoid collisions.
     Saves incrementally after each category if output_dir and cfg are provided.
     
+    If frame_ranges is provided, each category only processes frames within its
+    VLM-detected range, significantly reducing SAM3 computation.
+    
     Returns:
         (all_masks, obj_labels)
-        - all_masks: Dict[orig_frame_idx → {global_obj_id: binary_mask}]
-        - obj_labels: Dict[global_obj_id → category_label]
+        - all_masks: Dict[orig_frame_idx, {global_obj_id: binary_mask}]
+        - obj_labels: Dict[global_obj_id, category_label]
     """
     from sam3_wrapper import get_sam3_wrapper
     
     total_frames = len(frame_files)
     batch_step = batch_size - batch_overlap
     
-    # Calculate batch boundaries (shared across all categories)
-    batches = []
+    # Default batch boundaries (all frames) — may be overridden per category
+    default_batches = []
     start = 0
     while start < total_frames:
         end = min(start + batch_size, total_frames)
-        batches.append((start, end))
+        default_batches.append((start, end))
         if end >= total_frames:
             break
         start += batch_step
     
-    print(f"[SegPipeline] Processing {total_frames} frames in {len(batches)} batches × {len(categories)} categories")
+    print(f"[SegPipeline] Processing {total_frames} frames in {len(default_batches)} batches x {len(categories)} categories")
+    if frame_ranges:
+        print(f"[SegPipeline] VLM frame ranges available for {len(frame_ranges)} categories")
     
     def _log_vram(label):
         """Diagnostic: log GPU memory state at a given point."""
@@ -235,18 +251,59 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             print(f"[VRAM] {label}: alloc={alloc:.2f}GB  reserved={resrv:.2f}GB  "
                   f"driver_free={free_gb:.2f}GB  total={total_gb:.2f}GB")
         except Exception as e:
-            print(f"[VRAM] {label}: error reading — {e}")
+            print(f"[VRAM] {label}: error reading - {e}")
     
     sam3 = get_sam3_wrapper()
     
     # Master state across all categories
-    all_masks = {}  # orig_frame_idx → {global_obj_id: mask}
-    obj_labels = {}  # global_obj_id → category_label
+    all_masks = {}  # orig_frame_idx -> {global_obj_id: mask}
+    obj_labels = {}  # global_obj_id -> category_label
     global_id_offset = 0  # Offset to remap IDs between categories
     
     for cat_idx, category in enumerate(categories):
-        print(f"\n[SegPipeline] ═══ Category {cat_idx+1}/{len(categories)}: '{category}' ═══")
+        print(f"\n[SegPipeline] === Category {cat_idx+1}/{len(categories)}: '{category}' ===")
         _log_vram(f"cat {cat_idx+1} START")
+        
+        # ── Per-category frame range from VLM ──
+        # If VLM detected this category's frame range, only process those frames
+        cat_frame_files = frame_files
+        cat_frame_offset = 0  # offset to map back to original frame indices
+        cat_label = category.split(";")[0].strip().lower() if ";" in category else category.strip().lower()
+        
+        if frame_ranges:
+            # Try to match category label to frame_ranges keys
+            matched_range = None
+            for range_label, fr in frame_ranges.items():
+                if range_label.lower() == cat_label or cat_label in range_label.lower() or range_label.lower() in cat_label:
+                    matched_range = fr
+                    break
+            
+            if matched_range:
+                fr_start, fr_end = matched_range
+                fr_start = max(0, fr_start)
+                fr_end = min(total_frames - 1, fr_end)
+                cat_frame_files = frame_files[fr_start:fr_end + 1]
+                cat_frame_offset = fr_start
+                pct_saved = (1 - len(cat_frame_files) / total_frames) * 100
+                print(f"[SegPipeline]   VLM range: frames {fr_start}-{fr_end} "
+                      f"({len(cat_frame_files)}/{total_frames} frames, {pct_saved:.0f}% saved)")
+            else:
+                print(f"[SegPipeline]   No VLM range for '{cat_label}', processing all {total_frames} frames")
+        
+        # Compute batches for this category's frame subset
+        cat_total = len(cat_frame_files)
+        if cat_total == 0:
+            print(f"[SegPipeline]   Skipping '{category}' — no frames in range")
+            continue
+            
+        cat_batches = []
+        s = 0
+        while s < cat_total:
+            e = min(s + batch_size, cat_total)
+            cat_batches.append((s, e))
+            if e >= cat_total:
+                break
+            s += batch_step
         
         def _process_category(category, batches, frames_dir, frame_files, sam3,
                               batch_size, batch_overlap, iou_threshold):
@@ -348,7 +405,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         cat_masks = {}
         try:
             cat_masks = _process_category(
-                category, batches, frames_dir, frame_files, sam3,
+                category, cat_batches, frames_dir, cat_frame_files, sam3,
                 batch_size, batch_overlap, iou_threshold
             )
         except Exception as e:
@@ -357,7 +414,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                 print(f"[SegPipeline] 🔄 Retrying category '{category}'...")
                 try:
                     cat_masks = _process_category(
-                        category, batches, frames_dir, frame_files, sam3,
+                        category, cat_batches, frames_dir, cat_frame_files, sam3,
                         batch_size, batch_overlap, iou_threshold
                     )
                 except Exception as e2:
@@ -383,12 +440,14 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             cat_id_remap[local_id] = global_id
             obj_labels[global_id] = category
         
-        # Merge into all_masks with remapped global IDs
+        # Merge into all_masks with remapped global IDs and offset frame indices
         for frame_idx, frame_masks in cat_masks.items():
-            if frame_idx not in all_masks:
-                all_masks[frame_idx] = {}
+            # Remap local frame index back to global (when using per-category ranges)
+            global_frame_idx = frame_idx + cat_frame_offset
+            if global_frame_idx not in all_masks:
+                all_masks[global_frame_idx] = {}
             for local_id, mask in frame_masks.items():
-                all_masks[frame_idx][cat_id_remap[local_id]] = mask
+                all_masks[global_frame_idx][cat_id_remap[local_id]] = mask
         
         # Advance offset for next category
         if cat_obj_ids:
@@ -400,6 +459,8 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                 categories_so_far = categories[:cat_idx + 1]
                 _save_masks(output_dir, all_masks, categories_so_far, obj_labels, cfg)
                 print(f"[SegPipeline] 💾 Incremental save: {cat_idx+1}/{len(categories)} categories saved")
+                # Match masks to cloud and save result after each category
+                _match_and_save_result(output_dir)
             except Exception as e:
                 print(f"[SegPipeline] ⚠️ Incremental save failed: {e}")
         
@@ -985,21 +1046,13 @@ def _filter_instance_outliers(xyz: np.ndarray, indices: np.ndarray,
         return indices[inlier_mask]
 
 
-def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
+def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
     """
-    Match saved SAM3 masks against a loaded PLY cloud at display time.
+    Core processing: match SAM3 masks against PLY cloud with erosion,
+    deconfliction, DBSCAN filtering, and OBB computation.
     
-    For each point in the PLY, uses its (frame_global, pixel_row, pixel_col)
-    to check if it falls inside any object's mask. Points from filtered clouds
-    that were removed simply won't be in the PLY → not highlighted.
-    
-    Args:
-        output_dir: session output directory containing seg_masks.npz + segmentation.json
-        ply_path: path to the PLY to match against. If None, auto-detects
-                  cleaned_cloud.ply or chunk_000.ply
-    
-    Returns:
-        v2.0-compatible dict with type="segmentation", instances with globalIndices + obb
+    This is CPU-intensive. Called once after segmentation to produce
+    segmentation_result.json. Use apply_segmentation_to_cloud() for cached loading.
     """
     from config import cfg
     
@@ -1202,6 +1255,71 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
     
     print(f"[SegPipeline] ✅ {len(instances)} instances matched against {cloud_label}, "
           f"{total_segmented:,}/{n_pts:,} points ({coverage*100:.1f}% coverage)")
+    
+    return result
+
+
+def _match_and_save_result(output_dir, ply_path=None):
+    """
+    Run full mask→cloud matching (erosion + deconfliction + DBSCAN + OBB)
+    and save the result to segmentation_result.json for instant loading later.
+    
+    Called incrementally after each category completes segmentation.
+    """
+    output_dir = Path(output_dir)
+    
+    try:
+        result = _match_masks_to_cloud(output_dir, ply_path)
+        
+        if "error" not in result and result.get("instances"):
+            result_path = output_dir / "segmentation_result.json"
+            with open(result_path, "w") as f:
+                json.dump(result, f)
+            print(f"[SegPipeline] 💾 Saved segmentation_result.json "
+                  f"({len(result['instances'])} instances, "
+                  f"{result.get('coverage', 0)*100:.1f}% coverage)")
+        return result
+    except Exception as e:
+        print(f"[SegPipeline] ⚠️ Match-and-save failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e), "instances": []}
+
+
+def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
+    """
+    Load pre-computed segmentation result (instant) or fall back to
+    full processing for backward compatibility with old sessions.
+    """
+    output_dir = Path(output_dir)
+    
+    # ── Fast path: cached result from segmentation time ──
+    result_path = output_dir / "segmentation_result.json"
+    if result_path.exists():
+        try:
+            with open(result_path) as f:
+                result = json.load(f)
+            n_inst = len(result.get("instances", []))
+            coverage = result.get("coverage", 0)
+            print(f"[SegPipeline] ⚡ Loaded cached segmentation_result.json "
+                  f"({n_inst} instances, {coverage*100:.1f}% coverage)")
+            return result
+        except Exception as e:
+            print(f"[SegPipeline] ⚠️ Failed to load cached result: {e}")
+    
+    # ── Slow path: full processing (backward compat with old sessions) ──
+    print(f"[SegPipeline] No cached result, running full mask matching (will cache for next time)...")
+    result = _match_masks_to_cloud(output_dir, ply_path)
+    
+    # Cache the result so next load is instant
+    if "error" not in result and result.get("instances"):
+        try:
+            result_path = output_dir / "segmentation_result.json"
+            with open(result_path, "w") as f:
+                json.dump(result, f)
+            print(f"[SegPipeline] 💾 Cached result for instant future loads")
+        except Exception as e:
+            print(f"[SegPipeline] ⚠️ Failed to cache result: {e}")
     
     return result
 

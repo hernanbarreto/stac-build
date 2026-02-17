@@ -386,6 +386,146 @@ def _merge_categories(model, tokenizer,
     return merged
 
 
+# ── Lightweight presence prompt for frame scanning ────────────────────
+
+PRESENCE_PROMPT_TEMPLATE = """<image>
+Given these object categories:
+{categories}
+
+Which of these objects are VISIBLE in this image?
+Return ONLY a JSON array of the labels that are visible. Example: ["sofa", "door", "wall"]
+If none are visible, return an empty array: []
+Output ONLY the JSON array, nothing else."""
+
+
+def _scan_frames_for_presence(model, tokenizer, frames_dir: Path,
+                               categories: List[Dict[str, str]],
+                               scan_stride: int = 3,
+                               max_tiles: int = 4) -> Dict[str, List[int]]:
+    """
+    Scan all frames (at stride intervals) to determine which frames
+    contain each category. Returns frame_ranges per category.
+    
+    Uses a lightweight VLM prompt (just yes/no per category) which is
+    much faster than full scene analysis.
+    
+    Args:
+        model, tokenizer: loaded InternVL3
+        frames_dir: directory with all frames
+        categories: list of {"label": ..., "description": ...}
+        scan_stride: check every Nth frame (higher = faster, less precise)
+        max_tiles: fewer tiles = faster inference per frame
+    
+    Returns:
+        Dict mapping category label → [first_frame_idx, last_frame_idx]
+    """
+    exts = {".jpg", ".jpeg", ".png"}
+    all_frames = sorted([
+        f for f in frames_dir.iterdir()
+        if f.suffix.lower() in exts
+    ])
+    
+    if not all_frames:
+        return {}
+    
+    # Build category list string for prompt
+    cat_labels = [c["label"] for c in categories]
+    cat_list_str = "\n".join(f"  - {lbl}" for lbl in cat_labels)
+    prompt = PRESENCE_PROMPT_TEMPLATE.format(categories=cat_list_str)
+    
+    # Track first/last frame index per category
+    first_seen = {}  # label → frame_idx
+    last_seen = {}   # label → frame_idx
+    
+    # Sample frames at stride
+    scan_indices = list(range(0, len(all_frames), scan_stride))
+    # Always include first and last frame
+    if 0 not in scan_indices:
+        scan_indices.insert(0, 0)
+    if len(all_frames) - 1 not in scan_indices:
+        scan_indices.append(len(all_frames) - 1)
+    
+    dtype = next(model.parameters()).dtype
+    device = next(model.parameters()).device
+    generation_config = dict(max_new_tokens=512, do_sample=False)
+    
+    print(f"[SceneAnalyzer] Scanning {len(scan_indices)} frames for object presence "
+          f"(stride={scan_stride}, {len(cat_labels)} categories)...")
+    
+    for i, frame_idx in enumerate(scan_indices):
+        frame_path = str(all_frames[frame_idx])
+        
+        try:
+            pixel_values = _load_image(frame_path, max_num=max_tiles)
+            pixel_values = pixel_values.to(dtype).to(device)
+            
+            response = model.chat(tokenizer, pixel_values, prompt, generation_config)
+            
+            # Parse response — expect JSON array of visible labels
+            visible = _parse_presence_response(response, cat_labels)
+            
+            for lbl in visible:
+                if lbl not in first_seen:
+                    first_seen[lbl] = frame_idx
+                last_seen[lbl] = frame_idx
+            
+            if (i + 1) % 10 == 0 or i == len(scan_indices) - 1:
+                print(f"[SceneAnalyzer]   [{i+1}/{len(scan_indices)}] "
+                      f"frame {frame_idx}: {len(visible)} objects visible")
+        
+        except Exception as e:
+            logger.warning(f"Presence scan failed for frame {frame_idx}: {e}")
+            continue
+    
+    # Build frame_ranges with margin (±stride to account for sampling gaps)
+    frame_ranges = {}
+    margin = scan_stride  # extend range by stride to catch gaps
+    for lbl in cat_labels:
+        if lbl in first_seen:
+            start = max(0, first_seen[lbl] - margin)
+            end = min(len(all_frames) - 1, last_seen[lbl] + margin)
+            frame_ranges[lbl] = [start, end]
+        # If not seen in any frame, don't add — SAM3 will skip it
+    
+    # Summary
+    print(f"[SceneAnalyzer] Frame ranges:")
+    for lbl in cat_labels:
+        if lbl in frame_ranges:
+            r = frame_ranges[lbl]
+            span = r[1] - r[0] + 1
+            pct = span / len(all_frames) * 100
+            print(f"  {lbl:30s} frames {r[0]:4d}–{r[1]:4d} ({span} frames, {pct:.0f}%)")
+        else:
+            print(f"  {lbl:30s} NOT DETECTED in any frame")
+    
+    return frame_ranges
+
+
+def _parse_presence_response(response: str, valid_labels: List[str]) -> List[str]:
+    """Parse VLM response for presence check — returns list of visible labels."""
+    response = response.strip()
+    
+    # Try JSON parse
+    try:
+        # Find JSON array in response
+        start = response.find('[')
+        end = response.rfind(']')
+        if start >= 0 and end > start:
+            import ast
+            parsed = json.loads(response[start:end+1])
+            if isinstance(parsed, list):
+                # Normalize and validate against known labels
+                valid_set = {lbl.lower() for lbl in valid_labels}
+                return [lbl for lbl in valid_labels 
+                        if lbl.lower() in {str(p).lower().strip() for p in parsed}]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    
+    # Fallback: check which labels appear as substrings in the response
+    response_lower = response.lower()
+    return [lbl for lbl in valid_labels if lbl.lower() in response_lower]
+
+
 def _parse_categories(response: str) -> List[Dict[str, str]]:
     """
     Parse VLM response into a list of category dicts.
@@ -437,7 +577,7 @@ def _parse_categories(response: str) -> List[Dict[str, str]]:
 
 # ── Public API ───────────────────────────────────────────────────────
 
-def analyze_scene(frames_dir: str, config: dict = None) -> str:
+def analyze_scene(frames_dir: str, config: dict = None) -> tuple:
     """
     Analyze a scene and return auto-detected segmentation categories.
 
@@ -446,8 +586,9 @@ def analyze_scene(frames_dir: str, config: dict = None) -> str:
     2. Loads InternVL3 with adaptive precision
     3. Analyzes each frame for object categories + descriptions
     4. Merges and deduplicates categories
+    4c. Scans ALL frames for per-category presence → frame ranges
     5. Unloads the model to free VRAM for DA3/SAM3
-    6. Returns a semicolon-separated DESCRIPTION string for SAM3
+    6. Returns (prompt, frame_ranges) for SAM3
 
     The descriptions are used as SAM3 text prompts (SAM3 understands
     descriptive phrases like "exposed concrete wall" or "rectangular metal duct").
@@ -457,19 +598,21 @@ def analyze_scene(frames_dir: str, config: dict = None) -> str:
         config: Optional scene_analysis config dict
 
     Returns:
-        Semicolon-separated description string for SAM3
-        Returns empty string if analysis fails
+        (prompt, frame_ranges) tuple where:
+          - prompt: semicolon-separated description string for SAM3
+          - frame_ranges: dict mapping category label → [first_frame, last_frame]
+        Returns ("", {}) if analysis fails
     """
     config = config or {}
     enabled = config.get("enabled", True)
     if not enabled:
         logger.info("Scene analysis disabled in config")
-        return ""
+        return "", {}
 
     frames_dir = Path(frames_dir).resolve()
     if not frames_dir.exists():
         logger.error(f"Frames directory not found: {frames_dir}")
-        return ""
+        return "", {}
 
     model_id = config.get("model_id", DEFAULT_MODEL_ID)
     n_frames = config.get("sample_frames", 5)
@@ -489,7 +632,7 @@ def analyze_scene(frames_dir: str, config: dict = None) -> str:
     selected_frames = _sample_representative_frames(frames_dir, n_frames)
     if not selected_frames:
         logger.error("No frames available for analysis")
-        return ""
+        return "", {}
 
     # ── Step 2: Load model ──
     model, tokenizer = _load_model(model_id)
@@ -523,6 +666,24 @@ def analyze_scene(frames_dir: str, config: dict = None) -> str:
             continue
         merged.append(mandatory)
         logger.info(f"  Added mandatory structural: {mandatory['label']}")
+
+    # ── Step 4c: Scan ALL frames for per-category presence ──
+    scan_stride = config.get("presence_scan_stride", 3)
+    frame_ranges = {}
+    try:
+        frame_ranges = _scan_frames_for_presence(
+            model, tokenizer, frames_dir, merged,
+            scan_stride=scan_stride, max_tiles=4
+        )
+        # Attach frame_range to each category
+        for item in merged:
+            lbl = item["label"]
+            if lbl in frame_ranges:
+                item["frame_range"] = frame_ranges[lbl]
+    except Exception as e:
+        logger.warning(f"Frame presence scan failed: {e}")
+        import traceback
+        traceback.print_exc()
 
     # ── Step 5: Unload model (free VRAM for SAM3) ──
     # Move to CPU first to release GPU tensors, then delete all references
@@ -562,6 +723,7 @@ def analyze_scene(frames_dir: str, config: dict = None) -> str:
         "n_frames_analyzed": len(selected_frames),
         "elapsed_seconds": round(elapsed, 2),
         "categories": merged,
+        "frame_ranges": frame_ranges,
         "prompt": prompt,
         "per_frame": {
             Path(k).name: v for k, v in categories_per_frame.items()
@@ -576,7 +738,7 @@ def analyze_scene(frames_dir: str, config: dict = None) -> str:
     except Exception as e:
         logger.warning(f"Could not save results: {e}")
 
-    return prompt
+    return prompt, frame_ranges
 
 
 # ── CLI interface ────────────────────────────────────────────────────
@@ -611,7 +773,7 @@ def main():
         "max_tiles": args.max_tiles,
     }
 
-    prompt = analyze_scene(args.frames_dir, config)
+    prompt, frame_ranges = analyze_scene(args.frames_dir, config)
 
     if prompt:
         print(f"\n{'=' * 40}")

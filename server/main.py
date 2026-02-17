@@ -222,17 +222,40 @@ async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, we
         import traceback
         traceback.print_exc()
 
-def _align_cloud_to_floor(output_data: np.ndarray) -> np.ndarray:
+def _align_cloud_to_floor(output_data: np.ndarray, session_dir: Path = None) -> np.ndarray:
     """
     Apply RANSAC floor alignment to the final cloud.
     Finds the floor plane and rotates so it sits at y=0 (XZ plane).
     input/output: [N, 7] float32 (x, y, z, r, g, b, classId)
+    
+    If session_dir is provided, persists the transform to disk so
+    subsequent loads produce identical alignment.
     """
     if output_data is None or len(output_data) < 100:
         print("[FloorAlign] ⚠️ Not enough points for alignment")
         return output_data
     
     try:
+        # ── Try loading cached transform from disk ──
+        if session_dir:
+            transform_path = Path(session_dir) / "output" / "floor_transform.npz"
+            if transform_path.exists():
+                data = np.load(transform_path)
+                s_val = float(data['s'])
+                R = data['R']
+                t = data['t']
+                print(f"[FloorAlign] ✅ Loaded cached floor transform from disk")
+                
+                xyz = output_data[:, :3]
+                xyz_aligned = s_val * (xyz @ R.T) + t
+                result = output_data.copy()
+                result[:, :3] = xyz_aligned
+                y_min = xyz_aligned[:, 1].min()
+                y_max = xyz_aligned[:, 1].max()
+                print(f"[FloorAlign] ✅ Floor aligned to y=0 (range: {y_min:.3f} to {y_max:.3f})")
+                return result
+        
+        # ── Compute alignment (first time) ──
         from alignment_manager import get_alignment_manager
         am = get_alignment_manager()
         
@@ -250,6 +273,16 @@ def _align_cloud_to_floor(output_data: np.ndarray) -> np.ndarray:
         
         result = output_data.copy()
         result[:, :3] = xyz_aligned
+        
+        # Save transform to disk for consistent future loads
+        if session_dir:
+            transform_path = Path(session_dir) / "output" / "floor_transform.npz"
+            try:
+                transform_path.parent.mkdir(parents=True, exist_ok=True)
+                np.savez(transform_path, s=np.array(s), R=R, t=t)
+                print(f"[FloorAlign] 💾 Saved floor transform to {transform_path}")
+            except Exception as e:
+                print(f"[FloorAlign] ⚠️ Could not save transform: {e}")
         
         # Log stats
         y_min = xyz_aligned[:, 1].min()
@@ -351,7 +384,8 @@ async def _send_cleaned_cloud(websocket, session_id: str):
             output_data = tmp
         
         # ── Floor Alignment ──
-        output_data = _align_cloud_to_floor(output_data)
+        session_dir = Path(__file__).parent / "scans" / session_id
+        output_data = _align_cloud_to_floor(output_data, session_dir=session_dir)
         
         binary_bytes = output_data.tobytes()
         
@@ -432,7 +466,8 @@ async def _send_cleaned_cloud_broadcast(session_id: str):
         output_data[:, 6] = 0.0
         
         # ── Floor Alignment ──
-        output_data = _align_cloud_to_floor(output_data)
+        session_dir = Path(__file__).parent / "scans" / session_id
+        output_data = _align_cloud_to_floor(output_data, session_dir=session_dir)
         
         binary_bytes = output_data.tobytes()
         
@@ -683,29 +718,32 @@ async def chunk_processing_worker():
             is_processing_chunk = False
 
 
-def _resolve_segmentation_prompt(prompt: str, frames_dir: str) -> str:
+def _resolve_segmentation_prompt(prompt: str, frames_dir: str) -> tuple:
     """
     Resolve segmentation prompt: if 'auto' or empty, use InternVL3 scene analyzer.
     
     The VLM runs AFTER DA3 unload and BEFORE SAM3 load, so no VRAM conflict.
+    
+    Returns:
+        (prompt, frame_ranges) where frame_ranges maps category label → [start, end]
     """
     if prompt and prompt.lower() != "auto":
-        return prompt
+        return prompt, {}
     
     print("[SceneAnalyzer] Auto-detecting categories with InternVL3...")
     try:
         from scene_analyzer import analyze_scene
         scene_cfg = cfg.get("scene_analysis", {})
-        auto_prompt = analyze_scene(frames_dir, scene_cfg)
+        auto_prompt, frame_ranges = analyze_scene(frames_dir, scene_cfg)
         if auto_prompt:
             print(f"[SceneAnalyzer] ✅ Auto-detected prompt: '{auto_prompt}'")
-            return auto_prompt
+            return auto_prompt, frame_ranges
         else:
             print("[SceneAnalyzer] ⚠️ No categories detected, falling back to generic")
-            return "concrete wall;floor surface;ceiling;pipe;electrical panel;duct;cable tray;door"
+            return "concrete wall;floor surface;ceiling;pipe;electrical panel;duct;cable tray;door", {}
     except Exception as e:
         print(f"[SceneAnalyzer] ❌ Error: {e}. Using fallback categories.")
-        return "concrete wall;floor surface;ceiling;pipe;electrical panel;duct;cable tray;door"
+        return "concrete wall;floor surface;ceiling;pipe;electrical panel;duct;cable tray;door", {}
 
 
 async def _run_pending_retroactive(prompt: str):
@@ -726,14 +764,15 @@ async def _run_pending_retroactive(prompt: str):
             torch.cuda.empty_cache()
 
         # Resolve prompt (auto-detect if needed, VLM runs here before SAM3)
-        prompt = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
+        prompt, frame_ranges = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
 
         # Run new segmentation pipeline
         from segmentation_pipeline import run_segmentation
         result = run_segmentation(
             frames_dir=str(session.frames_dir),
             output_dir=str(session.output_dir),
-            prompt=prompt
+            prompt=prompt,
+            frame_ranges=frame_ranges
         )
 
         if "error" in result:
@@ -1423,14 +1462,15 @@ async def viewer_websocket(websocket: WebSocket):
                                      torch.cuda.empty_cache()
 
                                  # Resolve prompt (auto-detect if needed)
-                                 prompt = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
+                                 prompt, frame_ranges = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
 
                                  # Run new segmentation pipeline
                                  from segmentation_pipeline import run_segmentation
                                  result = run_segmentation(
                                      frames_dir=str(session.frames_dir),
                                      output_dir=str(session.output_dir),
-                                     prompt=prompt
+                                     prompt=prompt,
+                                     frame_ranges=frame_ranges
                                  )
 
                                  if "error" in result:
@@ -1550,13 +1590,14 @@ async def viewer_websocket(websocket: WebSocket):
                                     session = frame_storage.current_session
                                     try:
                                         # Resolve prompt (auto-detect if needed)
-                                        prompt = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
+                                        prompt, frame_ranges = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
 
                                         from segmentation_pipeline import run_segmentation
                                         result = run_segmentation(
                                             frames_dir=str(session.frames_dir),
                                             output_dir=str(session.output_dir),
-                                            prompt=prompt
+                                            prompt=prompt,
+                                            frame_ranges=frame_ranges
                                         )
                                         print(f"[Retro-Offline] Segmentation: {len(result.get('instances', []))} instances")
                                     except Exception as e:
@@ -1876,7 +1917,7 @@ async def viewer_websocket(websocket: WebSocket):
                                 torch.cuda.empty_cache()
 
                             # VLM analyzes keyframes → generates prompts automatically
-                            prompt = _resolve_segmentation_prompt("auto", str(session.frames_dir))
+                            prompt, frame_ranges = _resolve_segmentation_prompt("auto", str(session.frames_dir))
                             print(f"[AutoSeg] Prompt resolved: '{prompt}'")
 
                             # Run SAM3 segmentation with auto-generated prompts
@@ -1884,7 +1925,8 @@ async def viewer_websocket(websocket: WebSocket):
                             result = run_segmentation(
                                 frames_dir=str(session.frames_dir),
                                 output_dir=str(session.output_dir),
-                                prompt=prompt
+                                prompt=prompt,
+                                frame_ranges=frame_ranges
                             )
 
                             if "error" in result:
