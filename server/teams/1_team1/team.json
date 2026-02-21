@@ -1,0 +1,46 @@
+{
+  "id": 1,
+  "name": "team1",
+  "description": "Primary project team",
+  "is_active": true,
+  "manager": {
+    "id": 2,
+    "username": "manager"
+  },
+  "members": [
+    {
+      "user_id": 2,
+      "username": "manager",
+      "full_name": "Project Manager",
+      "role": "manager",
+      "added_at": "2026-02-19T12:30:53.432392Z"
+    },
+    {
+      "user_id": 3,
+      "username": "viewer",
+      "full_name": null,
+      "role": "viewer",
+      "added_at": "2026-02-19T12:30:53.448577Z"
+    },
+    {
+      "user_id": 4,
+      "username": "editor",
+      "full_name": null,
+      "role": "editor",
+      "added_at": "2026-02-19T12:30:53.448580Z"
+    },
+    {
+      "user_id": 5,
+      "username": "recorder",
+      "full_name": null,
+      "role": "recorder",
+      "added_at": "2026-02-19T12:30:53.448580Z"
+    }
+  ],
+  "sessions": [
+    "2026-01-31-22-23-52",
+    "live_1770423147",
+    "pccr-10022026"
+  ],
+  "updated_at": "2026-02-19T14:43:40.914574Z"
+}

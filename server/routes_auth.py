@@ -1,4 +1,4 @@
-# STAC-BUILD: Auth REST API Routes
+# STAC-BUILD: Auth REST API Routes — with Activity Logging
 # Hernán Barreto — Ingerop IN3
 
 from datetime import datetime
@@ -13,6 +13,7 @@ from auth import (
     hash_password, verify_password, create_access_token,
     get_current_user, require_role,
 )
+from activity_logger import log_activity, save_user_profile, _append_user_log
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -69,6 +70,9 @@ async def login(body: LoginRequest):
         "role": user.role,
     })
 
+    # ── Log login ──
+    _append_user_log(user.username, "login", detail="User logged in")
+
     return {"token": token, "user": user.to_dict()}
 
 
@@ -96,6 +100,10 @@ async def change_password(
             raise HTTPException(status_code=400, detail="Current password is incorrect")
         user.password_hash = hash_password(body.new_password)
         await session.commit()
+
+    # ── Log password change ──
+    _append_user_log(current_user["username"], "password_changed", detail="Password changed by user")
+
     return {"message": "Password changed successfully"}
 
 
@@ -138,7 +146,23 @@ async def create_user(
         session.add(user)
         await session.commit()
         await session.refresh(user)
-        return {"user": user.to_dict()}
+
+        user_data = user.to_dict()
+
+    # ── Log to admin's log ──
+    await log_activity(
+        admin["id"], admin["username"], "user_created",
+        detail=f"Created user '{body.username}' with role '{body.role}'",
+    )
+
+    # ── Log to new user's log ──
+    _append_user_log(body.username, "account_created",
+        detail=f"Account created by {admin['username']} with role '{body.role}'")
+
+    # ── Create profile.json ──
+    save_user_profile(user_data)
+
+    return {"user": user_data}
 
 
 @router.put("/users/{user_id}")
@@ -153,22 +177,48 @@ async def update_user(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
+        # Track changes for logging
+        changes = []
+        username = user.username
+
         if body.email is not None:
+            changes.append(f"email: {user.email} → {body.email}")
             user.email = body.email
         if body.role is not None:
             if body.role not in User.ROLES:
                 raise HTTPException(status_code=400, detail=f"Invalid role")
+            changes.append(f"role: {user.role} → {body.role}")
             user.role = body.role
         if body.full_name is not None:
+            changes.append(f"full_name: {user.full_name} → {body.full_name}")
             user.full_name = body.full_name
         if body.is_active is not None:
+            changes.append(f"is_active: {user.is_active} → {body.is_active}")
             user.is_active = body.is_active
         if body.password is not None:
+            changes.append("password: changed")
             user.password_hash = hash_password(body.password)
 
         await session.commit()
         await session.refresh(user)
-        return {"user": user.to_dict()}
+        user_data = user.to_dict()
+
+    change_detail = "; ".join(changes) if changes else "no changes"
+
+    # ── Log to admin's log ──
+    await log_activity(
+        admin["id"], admin["username"], "user_updated",
+        detail=f"Updated user '{username}': {change_detail}",
+    )
+
+    # ── Log to user's log ──
+    _append_user_log(username, "account_updated",
+        detail=f"Updated by {admin['username']}: {change_detail}")
+
+    # ── Update profile.json ──
+    save_user_profile(user_data)
+
+    return {"user": user_data}
 
 
 @router.delete("/users/{user_id}")
@@ -184,6 +234,18 @@ async def delete_user(
         user = await session.get(User, user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+        username = user.username
         await session.delete(user)
         await session.commit()
+
+    # ── Log to admin's log ──
+    await log_activity(
+        admin["id"], admin["username"], "user_deleted",
+        detail=f"Deleted user '{username}'",
+    )
+
+    # ── Log to user's log (final entry) ──
+    _append_user_log(username, "account_deleted",
+        detail=f"Account deleted by {admin['username']}")
+
     return {"message": "User deleted"}

@@ -15,8 +15,59 @@ server:
 scene_analysis:
   enabled: true
   model_id: "OpenGVLab/InternVL3-8B"   # MIT license, auto-downloads from HuggingFace
-  sample_frames: 5                       # Number of representative frames to analyze
   max_tiles: 6                           # Image tiles (6=dev/12GB, 12=production/24GB+)
+  max_merged_categories: 25              # Cap after merge across all frames (was 40)
+
+  # VLM prompt — fully configurable, change without touching code
+  prompt: |
+    <image>
+    You are an expert visual analyst for 3D scanning. Identify every UNIQUE physical object
+    and surface visible in this image.
+
+    MANDATORY categories (ALWAYS include if visible):
+    - floor (with material: wooden floor, concrete floor, tiled floor, etc.)
+    - wall (with material: painted wall, brick wall, etc.)
+    - ceiling
+    - door
+    - window
+
+    For other objects, list each UNIQUE INSTANCE only once.
+    If you see 3 identical chairs, list "chair" once with count=3.
+
+    For each element provide:
+    - "label": short name (1-3 words, lowercase)
+    - "description": 2-5 word descriptive phrase for a segmentation model
+    - "count": number of visible instances (default 1)
+    - "structural": true if floor/wall/ceiling/door/window, false otherwise
+
+    Rules:
+    1. Return a JSON array of objects
+    2. NEVER duplicate — "wooden chair" and "chair" are the same thing, pick one
+    3. Maximum 20 entries per image — prefer quality over quantity
+    4. Structural elements are MANDATORY — never skip floor, wall, ceiling
+    5. Do NOT list the same object under different names
+
+    Output ONLY the JSON array, nothing else.
+
+  # Merge prompt for combining detections across frames
+  merge_prompt: |
+    Merge the following category lists from {n_frames} scan views into one unified inventory.
+
+    {categories_per_frame}
+
+    Rules:
+    1. Merge duplicates and synonyms (e.g., "wooden chair" + "chair" = "chair")
+    2. Max {max_categories} entries — prioritize items seen in most frames
+    3. MANDATORY: floor, wall, ceiling must be in the final list if detected in any frame
+    4. Return JSON array of {{"label": "...", "description": "..."}} objects
+
+    Output ONLY the JSON array.
+
+  # Force-inject these categories even if VLM misses them
+  required_categories:
+    - { label: "floor", description: "floor surface" }
+    - { label: "wall", description: "wall surface" }
+    - { label: "ceiling", description: "ceiling surface" }
 
 # --- Frame Selection (Visual Novelty Filter) ---
 # ORB-SLAM style H/F ratio keyframe selection (no camera intrinsics needed)
@@ -71,7 +122,7 @@ models:
     loop_chunk_size: 20  # Images of loop chunk = 2 * loop_chunk_size
     depth_threshold: 15.0
     pointcloud_save:
-      conf_threshold_coef: 0.4    # Lower = keeps more points (0.75 was too aggressive, lost small objects)
+      conf_threshold_coef: 0.25    # Lower = keeps more points (0.75 was too aggressive, lost small objects)
       sample_ratio: 1.0
     # Loop closure - SALAD retrieval
     loop_salad:

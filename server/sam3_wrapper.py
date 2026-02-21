@@ -42,12 +42,15 @@ class SAM3Wrapper:
             try:
                 from sam3.model_builder import build_sam3_video_predictor
                 
-                # Determine GPUs to use
-                if self.device == "cuda":
-                    gpus_to_use = [torch.cuda.current_device()]
-                else:
-                    gpus_to_use = [] # CPU mode effectively
+                # SAM3 requires CUDA GPU — fail clearly if not available
+                if not torch.cuda.is_available():
+                    raise RuntimeError(
+                        "SAM3 requires a CUDA GPU but none is available. "
+                        "In Docker, ensure: docker run --gpus all ... "
+                        "and NVIDIA Container Toolkit is installed."
+                    )
                 
+                gpus_to_use = [torch.cuda.current_device()]
                 self.predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
                 self.is_loaded = True
                 logger.info("SAM3 Model loaded successfully.")
@@ -407,6 +410,9 @@ class SAM3Wrapper:
         
         try:
             logger.info(f"[SAM3-Batch] Processing {batch_size} frames from {batch_dir}")
+            _vram_before = 0
+            if torch.cuda.is_available():
+                _vram_before = torch.cuda.memory_allocated() / (1024**3)
             
             # 1. Start session
             response = self.predictor.handle_request(
@@ -427,7 +433,7 @@ class SAM3Wrapper:
                 if f_idx >= batch_size:
                     continue
                 try:
-                    self.predictor.handle_request(
+                    prompt_response = self.predictor.handle_request(
                         request=dict(
                             type="add_prompt",
                             session_id=session_id,
@@ -435,6 +441,14 @@ class SAM3Wrapper:
                             text=prompt_text,
                         )
                     )
+                    # Log what SAM3 detected at the prompt frame
+                    if prompt_response:
+                        n_objs = 0
+                        if "out_obj_ids" in prompt_response:
+                            ids = prompt_response["out_obj_ids"]
+                            n_objs = len(ids) if hasattr(ids, '__len__') else 0
+                        has_mask = "out_binary_masks" in prompt_response
+                        logger.info(f"[SAM3-Batch] Prompt '{prompt_text}' @ frame {f_idx}: {n_objs} objects, has_mask={has_mask}")
                 except Exception as e:
                     logger.warning(f"Could not add prompt to batch frame {f_idx}: {e}")
             
@@ -463,7 +477,10 @@ class SAM3Wrapper:
                 
                 results[orig_idx] = outputs
             
-            logger.info(f"[SAM3-Batch] Produced masks for {len(results)} frames")
+            _vram_after = 0
+            if torch.cuda.is_available():
+                _vram_after = torch.cuda.memory_allocated() / (1024**3)
+            logger.info(f"[SAM3-Batch] Produced masks for {len(results)} frames (VRAM: {_vram_before:.2f}→{_vram_after:.2f} GB)")
             
         except Exception as e:
             is_oom = "out of memory" in str(e).lower()

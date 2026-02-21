@@ -6,6 +6,7 @@
 import { useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { PotreeOctreeLoader } from './PotreeLoader'
 
 type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box'
 
@@ -17,6 +18,7 @@ interface ViewportProps {
     onFps: (fps: number) => void
     onStatusMessage?: (msg: string) => void
     onSegments?: (segments: SegmentInstance[]) => void
+    onPipelineProgress?: (data: Record<string, unknown>) => void
 }
 
 export interface SegmentInstance {
@@ -162,7 +164,7 @@ interface Measurement {
 }
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, activeSession, activeTool, onPointCount, onFps, onStatusMessage, onSegments },
+    { pointSize, activeSession, activeTool, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -188,6 +190,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const raycasterRef = useRef(new THREE.Raycaster())
     const activeToolRef = useRef(activeTool)
     const hoverHighlightRef = useRef<THREE.Group | null>(null)
+    const potreeLoaderRef = useRef<PotreeOctreeLoader | null>(null)
+    const lastLodUpdateRef = useRef(0)
+    const floorTransformRef = useRef<THREE.Matrix4 | null>(null)
 
     // Keep activeToolRef in sync with prop
     useEffect(() => { activeToolRef.current = activeTool }, [activeTool])
@@ -335,7 +340,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         raycaster.params.Points = { threshold: 0.01 }
         raycaster.setFromCamera(mouse, camera)
 
-        const intersects = raycaster.intersectObject(pointCloud)
+        // Raycast against both legacy pointCloud and Potree octree nodes
+        const targets: THREE.Object3D[] = [pointCloud]
+        if (potreeLoaderRef.current) {
+            const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
+            if (octreeGroup) targets.push(...octreeGroup.children)
+        }
+        const intersects = raycaster.intersectObjects(targets)
         // Filter out section-box-clipped points
         const hit = intersects.find(i => {
             if (!sectionBoxActiveRef.current) return true
@@ -408,7 +419,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         raycaster.params.Points = { threshold: 0.01 }
         raycaster.setFromCamera(mouse, camera)
 
-        const intersects = raycaster.intersectObject(pointCloud)
+        // Raycast against both legacy pointCloud and Potree octree nodes
+        const targets: THREE.Object3D[] = [pointCloud]
+        if (potreeLoaderRef.current) {
+            const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
+            if (octreeGroup) targets.push(...octreeGroup.children)
+        }
+        const intersects = raycaster.intersectObjects(targets)
         // Filter out section-box-clipped points
         const hit = intersects.find(i => {
             if (!sectionBoxActiveRef.current) return true
@@ -542,14 +559,20 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const group = new THREE.Group()
         group.name = 'sectionBox'
 
-        // Compute bounds from point cloud
-        const geom = geometryRef.current
-        if (geom) {
-            geom.computeBoundingBox()
-            if (geom.boundingBox) {
-                const pad = 0.1
-                sectionBoxMinRef.current.copy(geom.boundingBox.min).addScalar(-pad)
-                sectionBoxMaxRef.current.copy(geom.boundingBox.max).addScalar(pad)
+        // Compute bounds from point cloud (Potree or legacy)
+        const pad = 0.1
+        const potreeBBox = potreeLoaderRef.current?.getBoundingBox()
+        if (potreeBBox) {
+            sectionBoxMinRef.current.copy(potreeBBox.min).addScalar(-pad)
+            sectionBoxMaxRef.current.copy(potreeBBox.max).addScalar(pad)
+        } else {
+            const geom = geometryRef.current
+            if (geom) {
+                geom.computeBoundingBox()
+                if (geom.boundingBox) {
+                    sectionBoxMinRef.current.copy(geom.boundingBox.min).addScalar(-pad)
+                    sectionBoxMaxRef.current.copy(geom.boundingBox.max).addScalar(pad)
+                }
             }
         }
 
@@ -808,9 +831,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         controls.enableDamping = true
         controls.dampingFactor = 0.08
         controls.screenSpacePanning = true
-        controls.minDistance = 0.1
+        controls.minDistance = 0.00001
         controls.maxDistance = 500
         controls.maxPolarAngle = Math.PI
+        controls.zoomSpeed = 3.0
         controlsRef.current = controls
 
         // Shader material for point cloud
@@ -856,6 +880,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
             // Update time uniform
             material.uniforms.time.value = now * 0.001
+
+            // Potree LOD: update visible nodes based on camera (~10 Hz, not every frame)
+            if (potreeLoaderRef.current?.isLoaded && now - lastLodUpdateRef.current > 100) {
+                lastLodUpdateRef.current = now
+                potreeLoaderRef.current.updateVisibility()
+                // Report visible points back to UI
+                const visiblePts = potreeLoaderRef.current.getVisiblePointCount()
+                if (visiblePts !== totalPointsRef.current) {
+                    totalPointsRef.current = visiblePts
+                    onPointCount(visiblePts)
+                }
+            }
 
             renderer.render(scene, camera)
         }
@@ -1021,6 +1057,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
     // Clear geometry and OBBs
     const clearScene = useCallback(() => {
+        // Dispose Potree loader if active
+        if (potreeLoaderRef.current) {
+            potreeLoaderRef.current.dispose()
+            potreeLoaderRef.current = null
+        }
         if (geometryRef.current) {
             geometryRef.current.dispose()
             const newGeometry = new THREE.BufferGeometry()
@@ -1118,8 +1159,69 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
     }, [onPointCount])
 
-    // Handle JSON messages from server (segmentation, status, etc)
+    // Handle JSON messages from server (segmentation, status, potree_ready, etc)
     const handleJsonMessage = useCallback((msg: Record<string, unknown>) => {
+        // ── Potree LOD: load octree via HTTP ──
+        if (msg.type === 'potree_ready') {
+            const url = msg.url as string
+            const pts = msg.points as number
+            const floorTransform = msg.floorTransform as number[] | undefined
+            console.log(`[Viewport] Potree ready: ${pts?.toLocaleString()} points at ${url}`)
+            if (onStatusMessage) onStatusMessage(`Loading LOD octree (${pts?.toLocaleString()} points)...`)
+
+            // Create loader with existing material for section-box/segmentation compat
+            const scene = sceneRef.current
+            const camera = cameraRef.current
+            const mat = materialRef.current
+            if (!scene || !camera || !mat) return
+
+            // Dispose previous loader
+            if (potreeLoaderRef.current) {
+                potreeLoaderRef.current.dispose()
+            }
+
+            const loader = new PotreeOctreeLoader(scene, camera, mat)
+            potreeLoaderRef.current = loader
+
+            loader.load(url).then((loadedPts) => {
+                console.log(`[Viewport] Potree loaded: ${loadedPts.toLocaleString()} points`)
+                if (onStatusMessage) onStatusMessage(`LOD octree loaded — ${pts?.toLocaleString()} total points`)
+                onPointCount(loadedPts)
+
+                // Apply floor alignment transform if provided
+                if (floorTransform && floorTransform.length === 16) {
+                    loader.setTransform(floorTransform)
+                    // Store for camera centering only — OBBs are already
+                    // floor-aligned on the backend so they don't need this
+                    floorTransformRef.current = new THREE.Matrix4().fromArray(floorTransform)
+                }
+
+                // Auto-center camera on cloud bounding box
+                const bbox = loader.getBoundingBox()
+                if (bbox && cameraRef.current && controlsRef.current) {
+                    // If transform was applied, transform the bbox too
+                    if (floorTransform && floorTransform.length === 16) {
+                        const m = new THREE.Matrix4().fromArray(floorTransform)
+                        bbox.applyMatrix4(m)
+                    }
+                    const center = new THREE.Vector3()
+                    bbox.getCenter(center)
+                    const radius = bbox.getSize(new THREE.Vector3()).length() / 2
+                    cameraRef.current.position.set(
+                        center.x + radius * 1.5,
+                        center.y + radius,
+                        center.z + radius * 1.5
+                    )
+                    controlsRef.current.target.copy(center)
+                    controlsRef.current.update()
+                }
+            }).catch((err) => {
+                console.error('[Viewport] Potree load failed:', err)
+                if (onStatusMessage) onStatusMessage(`Potree load error: ${err.message}`)
+            })
+            return // Don't process further
+        }
+
         // v2.0 format: { instances: [{label, instance_id, color, total_points, obb, ...}] }
         if (Array.isArray(msg.instances)) {
             renderOBBs(msg.instances as Array<Record<string, unknown>>)
@@ -1128,7 +1230,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const text = (msg.message || msg.status || '') as string
             if (text && onStatusMessage) onStatusMessage(text)
         }
-    }, [onStatusMessage, onSegments])
+        if (msg.type === 'pipeline_progress' && onPipelineProgress) {
+            onPipelineProgress(msg)
+        }
+    }, [onStatusMessage, onSegments, onPipelineProgress, onPointCount])
 
     // Render OBB wireframe boxes for segmentation instances
     const renderOBBs = useCallback((instances: Array<Record<string, unknown>>) => {
@@ -1204,6 +1309,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             obbMapRef.current.set(globalKey, wireframe)
             geom.dispose()
         }
+
+        // NOTE: OBBs are already in floor-aligned coordinates from the backend
+        // (segmentation_pipeline.py applies floor transform to xyz_display before
+        // computing OBBs). No additional transform needed here.
 
         console.log(`[Viewport] Rendered ${group.children.length} OBBs`)
 

@@ -75,6 +75,11 @@ export default defineConfig(async () => {
           changeOrigin: true,
           secure: false,
         },
+        '/potree': {
+          target: 'https://localhost:8765',
+          changeOrigin: true,
+          secure: false,
+        },
       },
     },
   }

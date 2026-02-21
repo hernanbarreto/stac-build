@@ -1,6 +1,6 @@
 # ===========================================================================
 # STAC-Builder — Unified Docker Image
-# Single container for DA3 + SAM3 + CloudComPy + InternVL3 scene analyzer
+# Single container for DA3 + SAM3 + CloudComPy + InternVL3 + PotreeConverter
 #
 # Build:
 #   docker build -t stac-builder .
@@ -21,7 +21,8 @@ WORKDIR /build
 COPY ui/package.json ui/package-lock.json* ./
 RUN npm ci --silent
 COPY ui/ .
-RUN npm run build
+# Only build the web assets (skip electron-builder, not needed in Docker)
+RUN npx tsc && npx vite build
 
 # ── Stage 2: Main image ─────────────────────────────────────────────
 FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
@@ -48,6 +49,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 \
     libxext6 \
     libgomp1 \
+    # CloudComPy runtime deps (pre-built .so need these)
+    libqt5core5a \
+    libqt5widgets5 \
+    libqt5gui5 \
+    libqt5opengl5 \
+    libqt5svg5 \
+    libqt5concurrent5 \
+    libglew2.2 \
+    libboost-filesystem1.74.0 \
+    libboost-program-options1.74.0 \
+    libtbb2 \
+    # PotreeConverter build dependencies
+    cmake \
+    make \
+    g++ \
+    libtbb-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Set python3.10 as default
@@ -72,9 +89,19 @@ RUN pip3 install --upgrade pip && pip3 install --no-cache-dir -r requirements.tx
 # FlashAttention2 — accelerates VLM inference (~2x faster attention)
 RUN pip3 install --no-cache-dir flash-attn --no-build-isolation
 
+# Potree converter needs laspy for PLY→LAS conversion
+RUN pip3 install --no-cache-dir laspy
+
 # ── Copy project ────────────────────────────────────────────────────
 # Vendor dependencies (source code, ~280MB)
 COPY vendor/ ./vendor/
+
+# Build PotreeConverter from source (C++20, needs cmake + tbb)
+RUN cd vendor/PotreeConverter \
+    && mkdir -p build && cd build \
+    && cmake -DCMAKE_BUILD_TYPE=Release .. \
+    && make -j$(nproc) \
+    && echo '✅ PotreeConverter built successfully'
 
 # Server code
 COPY server/ ./server/
@@ -96,7 +123,15 @@ RUN chmod +x docker-entrypoint.sh setup_weights.sh
 
 # ── Install vendored packages in editable/path mode ─────────────────
 # SAM3 needs to be importable as a package
-RUN cd vendor/sam3 && pip3 install --no-cache-dir -e . 2>/dev/null || true
+# Use --no-deps to avoid numpy==1.26 pin conflicting with our numpy<2
+RUN cd vendor/sam3 && pip3 install --no-cache-dir --no-deps -e .
+
+# ── Verify critical dependencies ────────────────────────────────────
+RUN python3 -c "import numba; print('✅ numba:', numba.__version__)" && \
+    python3 -c "import pypose; print('✅ pypose:', pypose.__version__)" && \
+    python3 -c "import e3nn; print('✅ e3nn:', e3nn.__version__)" && \
+    python3 -c "from sam3.model_builder import build_sam3_video_predictor; print('✅ SAM3 importable')" && \
+    echo '✅ All critical dependencies verified'
 
 # ── CloudComPy runtime setup ────────────────────────────────────────
 ENV PYTHONPATH="/app/vendor/cloudcompy/lib/cloudcompare:${PYTHONPATH}"

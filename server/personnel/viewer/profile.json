@@ -1,0 +1,14 @@
+{
+  "id": 3,
+  "username": "viewer",
+  "full_name": null,
+  "email": null,
+  "role": "viewer",
+  "is_active": true,
+  "created_at": "2026-02-19T12:08:29.010843",
+  "last_login": null,
+  "updated_at": "2026-02-19T12:33:28.167202Z",
+  "teams": [
+    1
+  ]
+}

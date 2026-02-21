@@ -1,0 +1,14 @@
+{
+  "id": 4,
+  "username": "editor",
+  "full_name": null,
+  "email": null,
+  "role": "editor",
+  "is_active": true,
+  "created_at": "2026-02-19T12:08:59.189469",
+  "last_login": null,
+  "updated_at": "2026-02-19T12:33:28.168383Z",
+  "teams": [
+    1
+  ]
+}

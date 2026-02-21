@@ -5,14 +5,6 @@ import asyncio
 import json
 import time
 import logging
-
-# Suppress /health access logs from flooding the console
-class HealthCheckFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        return "/health" not in msg
-
-logging.getLogger("uvicorn.access").addFilter(HealthCheckFilter())
 import gc
 import os
 import sys
@@ -23,9 +15,20 @@ from pathlib import Path
 from typing import Set, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+# Suppress /health spam from access logs (applies to all uvicorn start modes)
+class _HealthCheckFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "GET /health" not in record.getMessage()
+
+logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
+
+from typing import Optional
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+security = HTTPBearer(auto_error=False)
 
 from frame_storage import get_frame_storage, FrameStorage
 from chunk_processor import get_chunk_processor, ChunkProcessor, ChunkResult
@@ -34,6 +37,7 @@ from sam3_wrapper import get_sam3_wrapper
 from config import cfg
 from da3_native_wrapper import RealtimeDA3
 from slam_processor import get_slam_processor, SLAMProcessor, SLAMFrame
+from pipeline_manager import PipelineManager, PipelineStage, StageId, build_default_stages
 
 # --- Helper for Chunking ---
 def chunk_data(data, chunk_size=1048572): # approx 1MB, multiple of 28 bytes (7 floats * 4)
@@ -620,6 +624,7 @@ last_chunk_result = None
 is_processing_chunk = False
 server_mode = "offline"  # "online" or "offline" - controls DA3 preloading
 slam_processor = None  # Unified SLAM processor (MASt3R or DA3)
+pipeline_manager = PipelineManager()  # Pipeline orchestrator (subprocess workers)
 
 # --- WORKER: INCREMENTAL SENDING ---
 async def chunk_processing_worker():
@@ -734,7 +739,7 @@ def _resolve_segmentation_prompt(prompt: str, frames_dir: str) -> tuple:
     The VLM runs AFTER DA3 unload and BEFORE SAM3 load, so no VRAM conflict.
     
     Returns:
-        (prompt, frame_ranges) where frame_ranges maps category label → [start, end]
+        (prompt, frame_map) where frame_map maps category label → list of frame filenames
     """
     if prompt and prompt.lower() != "auto":
         return prompt, {}
@@ -743,16 +748,18 @@ def _resolve_segmentation_prompt(prompt: str, frames_dir: str) -> tuple:
     try:
         from scene_analyzer import analyze_scene
         scene_cfg = cfg.get("scene_analysis", {})
-        auto_prompt, frame_ranges = analyze_scene(frames_dir, scene_cfg)
+        auto_prompt, frame_map = analyze_scene(frames_dir, scene_cfg)
         if auto_prompt:
             print(f"[SceneAnalyzer] ✅ Auto-detected prompt: '{auto_prompt}'")
-            return auto_prompt, frame_ranges
+            return auto_prompt, frame_map
         else:
             print("[SceneAnalyzer] ⚠️ No categories detected, falling back to generic")
-            return "concrete wall;floor surface;ceiling;pipe;electrical panel;duct;cable tray;door", {}
+            return "floor;wall;ceiling;door;window;furniture;object", {}
     except Exception as e:
         print(f"[SceneAnalyzer] ❌ Error: {e}. Using fallback categories.")
-        return "concrete wall;floor surface;ceiling;pipe;electrical panel;duct;cable tray;door", {}
+        import traceback
+        traceback.print_exc()
+        return "floor;wall;ceiling;door;window;furniture;object", {}
 
 
 async def _run_pending_retroactive(prompt: str):
@@ -773,7 +780,7 @@ async def _run_pending_retroactive(prompt: str):
             torch.cuda.empty_cache()
 
         # Resolve prompt (auto-detect if needed, VLM runs here before SAM3)
-        prompt, frame_ranges = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
+        prompt, frame_map = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
 
         # Run new segmentation pipeline
         from segmentation_pipeline import run_segmentation
@@ -781,7 +788,7 @@ async def _run_pending_retroactive(prompt: str):
             frames_dir=str(session.frames_dir),
             output_dir=str(session.output_dir),
             prompt=prompt,
-            frame_ranges=frame_ranges
+            frame_map=frame_map
         )
 
         if "error" in result:
@@ -869,9 +876,34 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+# ── Potree octree file serving ──────────────────────────────────────────
+# Serves pre-built LOD octree files (metadata.json, octree.bin, hierarchy.bin)
+from potree_converter import convert_ply_to_potree, convert_ply_to_potree_async
+
+SCANS_DIR = Path(__file__).parent / "scans"
+
+@app.get("/potree/{session_id}/{file_path:path}")
+async def serve_potree_files(session_id: str, file_path: str):
+    """Serve Potree octree files for a session."""
+    from fastapi.responses import FileResponse
+    full_path = SCANS_DIR / session_id / "output" / "potree" / file_path
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+    # Set proper content type for binary files
+    content_type = "application/json" if file_path.endswith(".json") else "application/octet-stream"
+    return FileResponse(
+        str(full_path),
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=3600"},  # Cache 1h
+    )
+
 # Mount auth routes
 from routes_auth import router as auth_router
 app.include_router(auth_router)
+
+# Mount team routes
+from routes_team import router as team_router
+app.include_router(team_router)
 
 @app.get("/")
 async def root():
@@ -987,8 +1019,51 @@ async def status():
     }
 
 @app.get("/sessions")
-async def get_sessions():
-    """List available scan sessions with metadata."""
+async def get_sessions(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """List available scan sessions filtered by team assignment.
+    Admins see all sessions. Other roles see only sessions assigned to their teams."""
+    from auth import decode_token
+    from db import async_session_factory
+    from db_team import TeamMember, SessionAssignment, Team
+    from sqlalchemy import select
+
+    # ── Resolve user ───────────────────────────────────────────
+    user_info = None
+    if credentials:
+        try:
+            payload = decode_token(credentials.credentials)
+            user_info = {
+                "id": int(payload.get("sub", 0)),
+                "role": payload.get("role", "viewer"),
+            }
+        except Exception:
+            pass
+
+    # ── Determine allowed session IDs ──────────────────────────
+    allowed_session_ids: set | None = None  # None = allow all
+
+    if user_info and user_info["role"] != "admin":
+        allowed_session_ids = set()
+        async with async_session_factory() as session:
+            # Get teams the user belongs to (as member or manager)
+            member_q = await session.execute(
+                select(TeamMember.team_id).where(TeamMember.user_id == user_info["id"])
+            )
+            managed_q = await session.execute(
+                select(Team.id).where(Team.manager_id == user_info["id"])
+            )
+            team_ids = set(r[0] for r in member_q.all()) | set(r[0] for r in managed_q.all())
+
+            if team_ids:
+                sa_q = await session.execute(
+                    select(SessionAssignment.session_id).where(
+                        SessionAssignment.team_id.in_(team_ids)
+                    )
+                )
+                allowed_session_ids = set(r[0] for r in sa_q.all())
+
     try:
         scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
         if not scans_dir.exists(): return []
@@ -996,6 +1071,10 @@ async def get_sessions():
         sessions = []
         for d in sorted(scans_dir.iterdir(), reverse=True):
             if d.is_dir():
+                # Filter by team assignment (non-admin)
+                if allowed_session_ids is not None and d.name not in allowed_session_ids:
+                    continue
+
                 # Count frames
                 frames_dir = d / "frames"
                 frame_count = len(list(frames_dir.glob("*.jpg"))) if frames_dir.exists() else 0
@@ -1026,6 +1105,42 @@ async def get_sessions():
     except Exception as e:
         print(f"Error listing sessions: {e}")
         return []
+
+@app.post("/sessions")
+async def create_session(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Create a new empty session folder. Admin only."""
+    from auth import decode_token
+
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = decode_token(credentials.credentials)
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    body = await request.json()
+    session_name = body.get("name", "").strip()
+    if not session_name:
+        raise HTTPException(status_code=400, detail="Session name is required")
+
+    # Sanitize: only allow alphanumeric, dashes, underscores
+    import re
+    if not re.match(r'^[a-zA-Z0-9_-]+$', session_name):
+        raise HTTPException(status_code=400, detail="Session name can only contain letters, numbers, dashes, and underscores")
+
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    session_dir = scans_dir / session_name
+
+    if session_dir.exists():
+        raise HTTPException(status_code=409, detail=f"Session '{session_name}' already exists")
+
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "frames").mkdir(exist_ok=True)
+    (session_dir / "output").mkdir(exist_ok=True)
+
+    return {"ok": True, "session_id": session_name}
 
 @app.get("/mode")
 async def get_mode():
@@ -1574,7 +1689,7 @@ async def viewer_websocket(websocket: WebSocket):
                                      torch.cuda.empty_cache()
 
                                  # Resolve prompt (auto-detect if needed)
-                                 prompt, frame_ranges = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
+                                 prompt, frame_map = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
 
                                  # Run new segmentation pipeline
                                  from segmentation_pipeline import run_segmentation
@@ -1582,7 +1697,7 @@ async def viewer_websocket(websocket: WebSocket):
                                      frames_dir=str(session.frames_dir),
                                      output_dir=str(session.output_dir),
                                      prompt=prompt,
-                                     frame_ranges=frame_ranges
+                                     frame_map=frame_map
                                  )
 
                                  if "error" in result:
@@ -1702,14 +1817,14 @@ async def viewer_websocket(websocket: WebSocket):
                                     session = frame_storage.current_session
                                     try:
                                         # Resolve prompt (auto-detect if needed)
-                                        prompt, frame_ranges = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
+                                        prompt, frame_map = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
 
                                         from segmentation_pipeline import run_segmentation
                                         result = run_segmentation(
                                             frames_dir=str(session.frames_dir),
                                             output_dir=str(session.output_dir),
                                             prompt=prompt,
-                                            frame_ranges=frame_ranges
+                                            frame_map=frame_map
                                         )
                                         print(f"[Retro-Offline] Segmentation: {len(result.get('instances', []))} instances")
                                     except Exception as e:
@@ -1787,26 +1902,11 @@ async def viewer_websocket(websocket: WebSocket):
                     scans_dir = Path(__file__).parent / "scans"
                     output_dir = scans_dir / session_id / "output"
 
-                    # ── Send cleaned_cloud.ply (from CloudCompPy) ──
+                    # ── Potree LOD: always convert before serving ──
                     cleaned_ply = output_dir / "cleaned_cloud.ply"
+                    potree_metadata = output_dir / "potree" / "metadata.json"
                     
-                    if cleaned_ply.exists():
-                        # Direct send of cleaned cloud
-                        sent = await _send_cleaned_cloud(websocket, session_id)
-                        if sent:
-                            await websocket.send_text(json.dumps({
-                                "type": "status",
-                                "message": f"Loaded cleaned cloud from {session_id}"
-                            }))
-                            # Apply segmentation against current cloud
-                            from segmentation_pipeline import apply_segmentation_to_cloud
-                            seg_data = apply_segmentation_to_cloud(output_dir)
-                            if seg_data.get("instances"):
-                                await websocket.send_text(json.dumps(seg_data))
-                                print(f"[Viewer] Sent segmentation ({len(seg_data['instances'])} instances)")
-                        else:
-                            await websocket.send_text(json.dumps({"type": "error", "message": "Failed to load cleaned cloud"}))
-                    else:
+                    if not cleaned_ply.exists():
                         # No cleaned cloud yet — check if chunks exist to run CloudCompPy
                         chunk_plys = sorted(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
                         if chunk_plys:
@@ -1817,255 +1917,203 @@ async def viewer_websocket(websocket: WebSocket):
                             }))
                             postproc_config = cfg.get("postprocessing", {})
                             await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
-                            
-                            if cleaned_ply.exists():
-                                sent = await _send_cleaned_cloud(websocket, session_id)
-                                if sent:
-                                    await websocket.send_text(json.dumps({
-                                        "type": "status",
-                                        "message": f"Loaded cleaned cloud from {session_id}"
-                                    }))
-                                    # Apply segmentation against current cloud
-                                    from segmentation_pipeline import apply_segmentation_to_cloud as _apply_seg
-                                    seg_data2 = _apply_seg(output_dir)
-                                    if seg_data2.get("instances"):
-                                        await websocket.send_text(json.dumps(seg_data2))
-                            else:
-                                await websocket.send_text(json.dumps({"type": "error", "message": "CloudCompPy failed to produce cleaned cloud"}))
                         else:
                             await websocket.send_text(json.dumps({"type": "error", "message": "No point clouds found for this session"}))
+                            raise Exception("No PLY data")
+                    
+                    if cleaned_ply.exists():
+                        # Ensure Potree octree exists (convert if needed)
+                        if not potree_metadata.exists():
+                            await websocket.send_text(json.dumps({
+                                "type": "status",
+                                "message": "Building LOD octree (first load)..."
+                            }))
+                            session_path = SCANS_DIR / session_id
+                            success = await convert_ply_to_potree_async(
+                                session_path,
+                                on_progress=lambda msg: websocket.send_text(json.dumps({"type": "status", "message": msg}))
+                            )
+                            if not success:
+                                await websocket.send_text(json.dumps({"type": "error", "message": "Potree conversion failed"}))
+                                raise Exception("Potree conversion failed")
+                        
+                        # Send potree_ready message — UI loads via HTTP, not WebSocket binary
+                        potree_meta = json.loads(potree_metadata.read_text())
+                        
+                        # Load floor transform if available
+                        floor_transform_4x4 = None
+                        transform_path = output_dir / "floor_transform.npz"
+                        if transform_path.exists():
+                            try:
+                                data = np.load(transform_path)
+                                s_val = float(data['s'])
+                                R = data['R']       # 3x3 rotation
+                                t = data['t']       # 3 translation
+                                # Build 4x4 matrix: P' = s*(R@P) + t
+                                # Three.js uses column-major: elements[0..3]=col0, [4..7]=col1, etc.
+                                M = np.eye(4)
+                                M[:3, :3] = s_val * R
+                                M[:3, 3] = t
+                                # Column-major flatten for Three.js
+                                floor_transform_4x4 = M.T.flatten().tolist()
+                                print(f"[Viewer] Floor transform loaded for Potree cloud")
+                            except Exception as e:
+                                print(f"[Viewer] ⚠️ Could not load floor_transform: {e}")
+                        
+                        msg = {
+                            "type": "potree_ready",
+                            "session_id": session_id,
+                            "url": f"/potree/{session_id}/",
+                            "points": potree_meta.get("points", 0),
+                        }
+                        if floor_transform_4x4:
+                            msg["floorTransform"] = floor_transform_4x4
+                        await websocket.send_text(json.dumps(msg))
+                        print(f"[Viewer] ✅ Sent potree_ready for {session_id} ({potree_meta.get('points', 0):,} pts)")
+                        
+                        # Apply segmentation if available
+                        from segmentation_pipeline import apply_segmentation_to_cloud
+                        seg_data = apply_segmentation_to_cloud(output_dir)
+                        if seg_data.get("instances"):
+                            await websocket.send_text(json.dumps(seg_data))
+                            print(f"[Viewer] Sent segmentation ({len(seg_data['instances'])} instances)")
+                    else:
+                        await websocket.send_text(json.dumps({"type": "error", "message": "Failed to build cleaned cloud"}))
 
                 except Exception as e:
                     print(f"Error loading session: {e}")
                     await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
 
-            elif cmd.get("type") == "reconstruct_geometry":
-                # Geometry-only reconstruction (no segmentation)
+            elif cmd.get("type") in ("reconstruct_geometry", "run_pipeline"):
+                # Pipeline-based reconstruction (subprocess workers)
                 session_id = cmd.get("session_id")
-                print(f"[Viewer] 🔧 Reconstructing geometry ONLY for session {session_id}...")
-                
-                # Load session first
-                alignment_manager.reset()
-                frame_storage.stop_session()
-                if frame_storage:
-                    frame_storage.load_session_from_disk(session_id)
-                
-                await websocket.send_text(json.dumps({
-                    "type": "info", 
-                    "message": f"Starting geometry reconstruction for {session_id}... This may take several minutes."
-                }))
-                
-                main_loop = asyncio.get_running_loop()
-                
-                async def _reconstruct_geometry_only():
+                print(f"[Pipeline] 🔧 Starting pipeline for session {session_id}")
+
+                # Build stages from client config or defaults
+                stages_config = cmd.get("stages", None)  # e.g. {"da3": true, "vlm": false}
+                if stages_config:
+                    stages = build_default_stages(enabled=stages_config)
+                else:
+                    stages = build_default_stages()  # all enabled
+
+                # Progress callback: relay to this websocket + broadcast
+                async def _on_pipeline_progress(sid, job_dict):
                     try:
-                        session = frame_storage.current_session
-                        if not session: return False
+                        await websocket.send_text(json.dumps({
+                            "type": "pipeline_progress",
+                            "session_id": sid,
+                            **job_dict,
+                        }))
+                    except Exception:
+                        pass
 
-                        # Check which backend to use
-                        backend = cfg.get("slam_backend", "mast3r")
-                        images_dir = session.frames_dir.resolve()
-                        output_dir = session.output_dir.resolve()
-                        
-                        if backend in ("mast3r", "hybrid"):
-                            # === MAST3R / HYBRID RECONSTRUCTION ===
-                            mode_name = "HYBRID (MASt3R + DA3)" if backend == "hybrid" else "MAST3R"
-                            print(f"[Reconstruct] 🟢 STARTING {mode_name} RECONSTRUCTION")
-                            
-                            # Initialize SLAM processor if needed
-                            if not slam_processor.is_initialized:
-                                print("[Reconstruct] Initializing MASt3R...")
-                                loop = asyncio.get_event_loop()
-                                await loop.run_in_executor(None, slam_processor.initialize)
-                            
-                            # Process frames synchronously (simpler, no deadlock)
-                            def _process_mast3r():
-                                slam_processor.start_session(
-                                    session.session_id, 
-                                    images_dir, 
-                                    output_dir
-                                )
-                                
-                                frame_count = 0
-                                keyframe_count = 0
-                                
-                                for result in slam_processor.process_frames_directory(images_dir):
-                                    frame_count += 1
-                                    if result.is_keyframe:
-                                        keyframe_count += 1
-                                        
-                                return frame_count, keyframe_count
-                            
-                            loop = asyncio.get_event_loop()
-                            frame_count, keyframe_count = await loop.run_in_executor(None, _process_mast3r)
-                            
-                            # In hybrid mode: DA3 dense depth with MASt3R metric poses
-                            if backend == "hybrid":
-                                print(f"[Reconstruct] 🔄 Phase 2: Running DA3 dense depth with MASt3R metric poses...")
-                                
-                                # Run DA3 densification (no streaming callback — CloudCompPy at end)
-                                success_da3 = await loop.run_in_executor(
-                                    None,
-                                    lambda: slam_processor.run_hybrid_densification(
-                                        images_dir, output_dir,
-                                        on_chunk_callback=None
-                                    )
-                                )
-                                if not success_da3:
-                                    raise RuntimeError("[Hybrid] DA3 densification returned no points. Cannot proceed.")
-                                print(f"[Reconstruct] ✅ DA3 hybrid densification complete")
-                            
-                            # Save PLY (needed for CloudCompPy input or as fallback)
-                            points, colors = slam_processor.get_global_pointcloud()
-                            if points is not None and len(points) > 0:
-                                print(f"[Reconstruct] {len(points):,} points from {mode_name} (not streaming — CloudCompPy will process)")
-                            
-                            # Save PLY
-                            ply_path = output_dir / "slam_reconstruction.ply"
-                            await loop.run_in_executor(
-                                None, 
-                                lambda: slam_processor.save_pointcloud_ply(ply_path)
-                            )
-                            
-                            slam_processor.stop_session()
-                            
-                            print(f"[Reconstruct] ✅ {mode_name} complete: {frame_count} frames, {keyframe_count} keyframes")
-                            return True
-                            
-                        else:
-                            # === DA3 RECONSTRUCTION ===
-                            print(f"[Reconstruct] 🟢 STARTING DA3 INCREMENTAL RECONSTRUCTION (RealtimeDA3)")
-
-                            # Frame quality analysis (blur detection)
-                            from frame_quality import analyze_frames, save_manifest
-                            fq_result = analyze_frames(str(images_dir))
-                            if "error" not in fq_result:
-                                save_manifest(str(images_dir), fq_result)
-
-                            # Visual novelty frame selection (H/F ratio keyframe filter)
-                            frame_sel_cfg = cfg.get("frame_selection", {})
-                            if frame_sel_cfg.get("enabled", False):
-                                try:
-                                    from frame_selector import select_keyframes
-                                    sel_result = select_keyframes(str(images_dir), frame_sel_cfg)
-                                    print(f"[Reconstruct] 🎯 Selected {sel_result['selected_count']}/{sel_result['total_frames']} keyframes")
-                                except Exception as e:
-                                    print(f"[Reconstruct] ⚠️ Frame selection failed, using stride fallback: {e}")
-
-                            # Create DA3 Config (all from config.yaml + HF cache)
-                            from da3_config_builder import build_da3_config
-                            da3_config = build_da3_config(cfg)
-
-                            # 3. Create RealtimeDA3 instance
-                            print(f"[Reconstruct] Initializing RealtimeDA3...")
-                            da3 = RealtimeDA3(
-                                image_dir=str(images_dir),
-                                save_dir=str(output_dir),
-                                config=da3_config,
-                                alignment_manager=alignment_manager
-                            )
-
-                            # 4. No-op callback (no real-time streaming — only CloudCompPy at end)
-                            async def on_chunk_complete(chunk_id, sim3_transform):
-                                print(f"[Reconstruct] Chunk {chunk_id} saved (not streaming)")
-
-                            # 5. Run DA3
-                            print(f"[Reconstruct] Processing {len(da3.img_list)} images...")
-                            await da3.process_long_sequence_async(callback=on_chunk_complete)
-
-                            print(f"[Reconstruct] ✅ DA3 complete!")
-                            return True
-
-                    except Exception as e:
-                        print(f"[Reconstruct] Error: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        return False
-
-                # Wrapper to run internally and handle completion
-                async def _background_reconstruction():
-                    success = await _reconstruct_geometry_only()
-
-                    # Helper: send to websocket if still alive (never crash)
-                    async def _safe_ws_send(msg: dict):
-                        try:
-                            await websocket.send_text(json.dumps(msg))
-                        except Exception:
-                            pass  # Client disconnected, ignore
-
+                # Completion callback: send cloud + segmentation data
+                async def _on_pipeline_complete(sid, success):
                     if not success:
-                        await _safe_ws_send({"type": "error", "message": "Geometry reconstruction failed. Check server logs."})
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "error",
+                                "message": f"Pipeline failed for {sid}. Check server logs."
+                            }))
+                        except Exception:
+                            pass
                         return
 
-                    session = frame_storage.current_session
-
-                    # ── Step 1: CloudCompPy Post-Processing ──
+                    # Convert to Potree octree and notify viewer
                     try:
-                        postproc_config = cfg.get("postprocessing", {})
-                        if postproc_config.get("enabled", False):
-                            await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
+                        session_path = SCANS_DIR / sid
+                        await websocket.send_text(json.dumps({
+                            "type": "status",
+                            "message": "Building LOD octree..."
+                        }))
+                        success = await convert_ply_to_potree_async(session_path)
+                        if success:
+                            potree_meta_path = session_path / "output" / "potree" / "metadata.json"
+                            potree_meta = json.loads(potree_meta_path.read_text())
+                            
+                            # Load floor transform if available
+                            floor_transform_4x4 = None
+                            ft_path = session_path / "output" / "floor_transform.npz"
+                            if ft_path.exists():
+                                try:
+                                    data = np.load(ft_path)
+                                    s_val = float(data['s'])
+                                    R = data['R']
+                                    t = data['t']
+                                    M = np.eye(4)
+                                    M[:3, :3] = s_val * R
+                                    M[:3, 3] = t
+                                    floor_transform_4x4 = M.T.flatten().tolist()
+                                except Exception:
+                                    pass
+                            
+                            pipe_msg = {
+                                "type": "potree_ready",
+                                "session_id": sid,
+                                "url": f"/potree/{sid}/",
+                                "points": potree_meta.get("points", 0),
+                            }
+                            if floor_transform_4x4:
+                                pipe_msg["floorTransform"] = floor_transform_4x4
+                            await websocket.send_text(json.dumps(pipe_msg))
+                            print(f"[Pipeline] ✅ Potree ready for {sid}")
+                        else:
+                            print(f"[Pipeline] ⚠️ Potree conversion failed, sending raw cloud")
+                            await _send_cleaned_cloud(websocket, sid)
                     except Exception as e:
-                        print(f"[Reconstruct] CloudComPy error (non-fatal): {e}")
+                        print(f"[Pipeline] Send cloud error: {e}")
 
-                    # ── Step 2: Send cleaned cloud to viewer ──
+                    # Broadcast segmentation if available
                     try:
-                        await _send_cleaned_cloud(websocket, session_id)
+                        seg_path = Path(__file__).parent / "scans" / sid / "output" / "seg_broadcast.json"
+                        if seg_path.exists():
+                            seg_data = json.loads(seg_path.read_text())
+                            if seg_data.get("instances"):
+                                await viewer_manager.broadcast_text(json.dumps(seg_data))
+                                print(f"[Pipeline] Broadcast {len(seg_data['instances'])} segments")
                     except Exception as e:
-                        print(f"[Reconstruct] Send cloud error (client disconnected?): {e}")
+                        print(f"[Pipeline] Broadcast error: {e}")
 
-                    await _safe_ws_send({"type": "status", "message": f"Geometry reconstruction complete for {session_id}"})
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "status",
+                            "message": f"Pipeline complete for {sid}"
+                        }))
+                    except Exception:
+                        pass
 
-                    # ── Step 3: Auto-Segmentation (VLM → SAM3) ──
-                    # This runs regardless of websocket state — results are saved to disk
-                    if session:
-                        try:
-                            print(f"[AutoSeg] Starting automatic segmentation for {session_id}...")
+                # Start pipeline
+                replace = cmd.get("replace", True)
+                await pipeline_manager.start_pipeline(
+                    session_id=session_id,
+                    stages=stages,
+                    config=dict(cfg),
+                    on_progress=_on_pipeline_progress,
+                    on_complete=_on_pipeline_complete,
+                    replace=replace,
+                )
 
-                            # Unload DA3 to free VRAM before VLM + SAM3
-                            print("[AutoSeg] Unloading DA3 to free VRAM...")
-                            chunk_processor.unload_model()
-                            gc.collect()
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
+                await websocket.send_text(json.dumps({
+                    "type": "info",
+                    "message": f"Pipeline started for {session_id}"
+                }))
 
-                            # VLM analyzes keyframes → generates prompts automatically
-                            prompt, frame_ranges = _resolve_segmentation_prompt("auto", str(session.frames_dir))
-                            print(f"[AutoSeg] Prompt resolved: '{prompt}'")
+            elif cmd.get("type") == "cancel_pipeline":
+                session_id = cmd.get("session_id")
+                await pipeline_manager.cancel_pipeline(session_id)
+                await websocket.send_text(json.dumps({
+                    "type": "info",
+                    "message": f"Pipeline cancelled for {session_id}"
+                }))
 
-                            # Run SAM3 segmentation with auto-generated prompts
-                            from segmentation_pipeline import run_segmentation
-                            result = run_segmentation(
-                                frames_dir=str(session.frames_dir),
-                                output_dir=str(session.output_dir),
-                                prompt=prompt,
-                                frame_ranges=frame_ranges
-                            )
-
-                            if "error" in result:
-                                print(f"[AutoSeg] ❌ Segmentation failed: {result['error']}")
-                            else:
-                                print(f"[AutoSeg] ✅ Segmentation complete: {len(result['instances'])} instances")
-
-                                # Apply to cloud and broadcast to ALL connected viewers
-                                from segmentation_pipeline import apply_segmentation_to_cloud
-                                seg_data = apply_segmentation_to_cloud(session.output_dir)
-                                if seg_data.get("instances"):
-                                    await viewer_manager.broadcast_text(json.dumps(seg_data))
-                                    print(f"[AutoSeg] Broadcast {len(seg_data['instances'])} segmented instances")
-
-                                await _safe_ws_send({
-                                    "type": "status",
-                                    "message": f"Auto-segmentation complete: {len(result['instances'])} objects detected"
-                                })
-
-                        except Exception as e:
-                            print(f"[AutoSeg] ❌ Error: {e}")
-                            import traceback
-                            traceback.print_exc()
-
-                # Fire and forget (don't await)
-                asyncio.create_task(_background_reconstruction())
-                print(f"[Viewer] Background task started for session {session_id}")
+            elif cmd.get("type") == "get_pipeline_status":
+                session_id = cmd.get("session_id")
+                status = pipeline_manager.get_status(session_id)
+                await websocket.send_text(json.dumps({
+                    "type": "pipeline_status",
+                    "session_id": session_id,
+                    "status": status,
+                }))
 
     except Exception as e:
         print(f"[Viewer] ❌ WebSocket Error: {e}")
@@ -2073,6 +2121,154 @@ async def viewer_websocket(websocket: WebSocket):
         traceback.print_exc()
         viewer_manager.disconnect_viewer(websocket)
 
+# ─── Team WebSocket: presence, messaging, WebRTC signaling ────
+
+# Track connected team users: {user_id: {"ws": WebSocket, "username": str, "task": str}}
+_team_connections: dict[int, dict] = {}
+
+
+async def _broadcast_presence():
+    """Broadcast online users list to all connected team WS clients."""
+    online = [
+        {"user_id": uid, "username": info["username"], "task": info.get("task", "")}
+        for uid, info in _team_connections.items()
+    ]
+    msg = json.dumps({"type": "presence_update", "online": online})
+    dead = []
+    for uid, info in _team_connections.items():
+        try:
+            await info["ws"].send_text(msg)
+        except Exception:
+            dead.append(uid)
+    for uid in dead:
+        _team_connections.pop(uid, None)
+
+
+@app.websocket("/ws/team")
+async def ws_team(websocket: WebSocket):
+    """
+    Team WebSocket — handles:
+    - presence (online/offline broadcast)
+    - team_message (real-time chat relay)
+    - WebRTC signaling (call_invite, rtc_offer, rtc_answer, rtc_ice, call_end)
+    """
+    await websocket.accept()
+    user_id: int | None = None
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = msg.get("type", "")
+
+            # ── Auth / connect ─────────────────────────────
+            if msg_type == "team_auth":
+                from auth import decode_token
+                try:
+                    payload = decode_token(msg.get("token", ""))
+                    user_id = int(payload["sub"])
+                    username = payload.get("username", "")
+                    _team_connections[user_id] = {
+                        "ws": websocket,
+                        "username": username,
+                        "task": "",
+                    }
+                    await websocket.send_text(json.dumps({
+                        "type": "team_auth_ok", "user_id": user_id,
+                    }))
+                    await _broadcast_presence()
+                except Exception as e:
+                    await websocket.send_text(json.dumps({
+                        "type": "team_auth_fail", "error": str(e),
+                    }))
+                continue
+
+            if not user_id:
+                await websocket.send_text(json.dumps({
+                    "type": "error", "message": "Not authenticated. Send team_auth first.",
+                }))
+                continue
+
+            # ── Presence: update task ──────────────────────
+            if msg_type == "update_task":
+                if user_id in _team_connections:
+                    _team_connections[user_id]["task"] = msg.get("task", "")
+                    await _broadcast_presence()
+
+            # ── Team message (chat) ────────────────────────
+            elif msg_type == "team_message":
+                team_id = msg.get("team_id")
+                content = msg.get("content", "")
+                if team_id and content and user_id in _team_connections:
+                    username = _team_connections[user_id]["username"]
+                    # Persist
+                    from db_team import TeamMessage
+                    from db import async_session_factory as _asf
+                    async with _asf() as session:
+                        tm = TeamMessage(
+                            team_id=team_id,
+                            user_id=user_id,
+                            username=username,
+                            content=content,
+                        )
+                        session.add(tm)
+                        await session.commit()
+                        await session.refresh(tm)
+
+                    # Broadcast to all connected users
+                    relay = json.dumps({
+                        "type": "team_message",
+                        "message": tm.to_dict(),
+                    })
+                    for uid, info in list(_team_connections.items()):
+                        try:
+                            await info["ws"].send_text(relay)
+                        except Exception:
+                            pass
+
+            # ── WebRTC signaling ───────────────────────────
+            elif msg_type in ("call_invite", "call_accept", "call_decline",
+                              "call_end", "rtc_offer", "rtc_answer", "rtc_ice"):
+                target_id = msg.get("to")
+                if target_id and target_id in _team_connections:
+                    # Forward to target, adding 'from' field
+                    relay = {**msg, "from": user_id}
+                    try:
+                        await _team_connections[target_id]["ws"].send_text(
+                            json.dumps(relay)
+                        )
+                    except Exception:
+                        pass
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[Team WS] Error: {e}")
+    finally:
+        if user_id and user_id in _team_connections:
+            _team_connections.pop(user_id, None)
+            await _broadcast_presence()
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host=HOST, port=PORT, log_level="info")
+
+    # Suppress /health spam from access logs
+    class HealthCheckFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            msg = record.getMessage()
+            if "GET /health" in msg:
+                return False
+            return True
+
+    logging.getLogger("uvicorn.access").addFilter(HealthCheckFilter())
+
+    uvicorn.run(
+        "main:app", host=HOST, port=PORT, log_level="info",
+        ws_ping_interval=30,    # Send ping every 30s
+        ws_ping_timeout=300,    # Allow 5min without pong (for long reconstructions)
+    )

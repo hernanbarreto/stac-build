@@ -30,7 +30,7 @@ logger = logging.getLogger("SegPipeline")
 
 
 def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
-                     frame_ranges: dict = None) -> dict:
+                     frame_map: dict = None) -> dict:
     """
     Full segmentation pipeline: batched SAM3 → IoU ID matching → mask-to-point mapping.
     
@@ -39,8 +39,8 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
     Valid frames are copied to frames_valid/ with sequential numbering, then cleaned up.
     
     Args:
-        frame_ranges: Optional dict mapping category label → [start_frame, end_frame].
-                      If provided, SAM3 only processes frames in each category's range.
+        frame_map: Optional dict mapping category label → list of frame filenames.
+                   If provided, SAM3 only processes frames where each category was detected.
     """
     from config import cfg
     
@@ -79,7 +79,7 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
             seg_frames_dir, frame_files, categories,
             batch_size, batch_overlap, iou_threshold,
             output_dir=output_dir, cfg=cfg,
-            frame_ranges=frame_ranges
+            frame_map=frame_map
         )
         
         if not all_masks:
@@ -205,14 +205,15 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                       batch_size: int, batch_overlap: int,
                       iou_threshold: float,
                       output_dir: Path = None, cfg: dict = None,
-                      frame_ranges: dict = None) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, str]]:
+                      frame_map: dict = None) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, str]]:
     """
     Process frames in overlapping batches, one category at a time.
     Each category gets its own SAM3 pass; obj_ids are remapped to avoid collisions.
     Saves incrementally after each category if output_dir and cfg are provided.
     
-    If frame_ranges is provided, each category only processes frames within its
-    VLM-detected range, significantly reducing SAM3 computation.
+    If frame_map is provided, each category only processes the frames listed
+    for that category (from VLM analysis), creating a temp directory with
+    consecutive numbering for SAM3 propagation.
     
     Returns:
         (all_masks, obj_labels)
@@ -224,19 +225,18 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
     total_frames = len(frame_files)
     batch_step = batch_size - batch_overlap
     
-    # Default batch boundaries (all frames) — may be overridden per category
-    default_batches = []
-    start = 0
-    while start < total_frames:
-        end = min(start + batch_size, total_frames)
-        default_batches.append((start, end))
-        if end >= total_frames:
-            break
-        start += batch_step
+    # Build a lookup: frame filename → sequential index in frame_files
+    frame_name_to_idx = {}
+    for idx, fname in enumerate(frame_files):
+        # Map both the sequential name (000000.jpg) and try to find original name
+        frame_name_to_idx[fname] = idx
+        # Also map without leading zeros for fuzzy matching
+        base = os.path.splitext(fname)[0].lstrip('0') or '0'
+        frame_name_to_idx[base] = idx
     
-    print(f"[SegPipeline] Processing {total_frames} frames in {len(default_batches)} batches x {len(categories)} categories")
-    if frame_ranges:
-        print(f"[SegPipeline] VLM frame ranges available for {len(frame_ranges)} categories")
+    print(f"[SegPipeline] Processing {total_frames} frames x {len(categories)} categories")
+    if frame_map:
+        print(f"[SegPipeline] VLM frame_map available for {len(frame_map)} categories")
     
     def _log_vram(label):
         """Diagnostic: log GPU memory state at a given point."""
@@ -264,31 +264,62 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         print(f"\n[SegPipeline] === Category {cat_idx+1}/{len(categories)}: '{category}' ===")
         _log_vram(f"cat {cat_idx+1} START")
         
-        # ── Per-category frame range from VLM ──
-        # If VLM detected this category's frame range, only process those frames
-        cat_frame_files = frame_files
-        cat_frame_offset = 0  # offset to map back to original frame indices
+        # ── Per-category frame selection from VLM frame_map ──
+        cat_frame_files = frame_files  # Default: all frames
+        cat_frame_indices = list(range(total_frames))  # Maps local index → original index in frame_files
         cat_label = category.split(";")[0].strip().lower() if ";" in category else category.strip().lower()
         
-        if frame_ranges:
-            # Try to match category label to frame_ranges keys
-            matched_range = None
-            for range_label, fr in frame_ranges.items():
-                if range_label.lower() == cat_label or cat_label in range_label.lower() or range_label.lower() in cat_label:
-                    matched_range = fr
+        if frame_map:
+            # Find matching frame_map entry for this category
+            matched_frames = None
+            for map_label, map_frames in frame_map.items():
+                if (map_label.lower() == cat_label or 
+                    cat_label in map_label.lower() or 
+                    map_label.lower() in cat_label):
+                    matched_frames = map_frames
                     break
             
-            if matched_range:
-                fr_start, fr_end = matched_range
-                fr_start = max(0, fr_start)
-                fr_end = min(total_frames - 1, fr_end)
-                cat_frame_files = frame_files[fr_start:fr_end + 1]
-                cat_frame_offset = fr_start
-                pct_saved = (1 - len(cat_frame_files) / total_frames) * 100
-                print(f"[SegPipeline]   VLM range: frames {fr_start}-{fr_end} "
-                      f"({len(cat_frame_files)}/{total_frames} frames, {pct_saved:.0f}% saved)")
+            if matched_frames and len(matched_frames) > 0:
+                # Filter frame_files to only include those detected by VLM
+                # matched_frames contains original filenames (e.g., "00012.jpg")
+                # frame_files contains sequential filenames (e.g., "000000.jpg")
+                # We need to find which sequential frames correspond to the VLM frames
+                cat_frame_files = []
+                cat_frame_indices = []
+                
+                for seq_idx, seq_fname in enumerate(frame_files):
+                    # Check if this sequential frame corresponds to any VLM-detected frame
+                    # The valid frames were renumbered sequentially, so we check by index
+                    for vlm_fname in matched_frames:
+                        vlm_base = os.path.splitext(vlm_fname)[0]
+                        seq_base = os.path.splitext(seq_fname)[0]
+                        # Direct match (same filename)
+                        if vlm_fname == seq_fname or vlm_base == seq_base:
+                            cat_frame_files.append(seq_fname)
+                            cat_frame_indices.append(seq_idx)
+                            break
+                        # Index-based match: VLM frame "00012" matches sequential frame at position 12
+                        try:
+                            vlm_idx = int(vlm_base)
+                            seq_idx_val = int(seq_base)
+                            if vlm_idx == seq_idx_val:
+                                cat_frame_files.append(seq_fname)
+                                cat_frame_indices.append(seq_idx)
+                                break
+                        except ValueError:
+                            pass
+                
+                if cat_frame_files:
+                    pct_saved = (1 - len(cat_frame_files) / total_frames) * 100
+                    print(f"[SegPipeline]   VLM frame_map: {len(cat_frame_files)}/{total_frames} frames "
+                          f"({pct_saved:.0f}% saved)")
+                else:
+                    # VLM frames don't match any valid frames — use all
+                    print(f"[SegPipeline]   VLM frame_map: no matching frames found, using all {total_frames}")
+                    cat_frame_files = frame_files
+                    cat_frame_indices = list(range(total_frames))
             else:
-                print(f"[SegPipeline]   No VLM range for '{cat_label}', processing all {total_frames} frames")
+                print(f"[SegPipeline]   No VLM frame_map for '{cat_label}', processing all {total_frames} frames")
         
         # Compute batches for this category's frame subset
         cat_total = len(cat_frame_files)
@@ -440,10 +471,16 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             cat_id_remap[local_id] = global_id
             obj_labels[global_id] = category
         
-        # Merge into all_masks with remapped global IDs and offset frame indices
-        for frame_idx, frame_masks in cat_masks.items():
-            # Remap local frame index back to global (when using per-category ranges)
-            global_frame_idx = frame_idx + cat_frame_offset
+        # Merge into all_masks with remapped global IDs
+        # Map local category frame indices back to global frame_files indices
+        for local_frame_idx, frame_masks in cat_masks.items():
+            # local_frame_idx is an index into cat_frame_files
+            # We need to map it back to the global frame_files index
+            if local_frame_idx < len(cat_frame_indices):
+                global_frame_idx = cat_frame_indices[local_frame_idx]
+            else:
+                global_frame_idx = local_frame_idx  # Fallback
+            
             if global_frame_idx not in all_masks:
                 all_masks[global_frame_idx] = {}
             for local_id, mask in frame_masks.items():
@@ -519,14 +556,25 @@ def _parse_raw_masks(raw_results: Dict[int, dict]) -> Dict[int, Dict[int, np.nda
     Output: {orig_frame_idx: {obj_id: binary_mask_2d}}
     """
     structured = {}
+    no_key_count = 0
+    empty_mask_count = 0
+    total_frames = len(raw_results)
     
     for frame_idx, outputs in raw_results.items():
         if "out_binary_masks" not in outputs:
+            no_key_count += 1
             continue
         
         masks = outputs["out_binary_masks"]
         if hasattr(masks, 'cpu'):
             masks = masks.cpu().numpy()
+        
+        # Squeeze singleton dimensions: (N,1,H,W) → (N,H,W) or (1,H,W) → (H,W)
+        while masks.ndim > 3:
+            masks = masks.squeeze(1)
+        # Handle (1,H,W) → could be single object
+        if masks.ndim == 1:
+            continue
         
         obj_ids = outputs.get("out_obj_ids", None)
         if obj_ids is not None and hasattr(obj_ids, 'cpu'):
@@ -545,8 +593,26 @@ def _parse_raw_masks(raw_results: Dict[int, dict]) -> Dict[int, Dict[int, np.nda
         
         if frame_masks:
             structured[frame_idx] = frame_masks
+        else:
+            empty_mask_count += 1
+    
+    # Debug logging
+    if no_key_count > 0:
+        print(f"[SegPipeline] _parse_raw_masks: {no_key_count}/{total_frames} frames had no 'out_binary_masks' key")
+    if empty_mask_count > 0:
+        print(f"[SegPipeline] _parse_raw_masks: {empty_mask_count}/{total_frames} frames had all-zero masks (SAM3 found nothing)")
+    if total_frames > 0 and len(structured) == 0:
+        # Log the first frame's mask shape for debugging
+        first_key = next(iter(raw_results))
+        first_out = raw_results[first_key]
+        if "out_binary_masks" in first_out:
+            m = first_out["out_binary_masks"]
+            shape = m.shape if hasattr(m, 'shape') else 'N/A'
+            dtype = m.dtype if hasattr(m, 'dtype') else 'N/A'
+            print(f"[SegPipeline] _parse_raw_masks: 0 valid masks! First frame mask shape={shape}, dtype={dtype}")
     
     return structured
+
 
 
 def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
@@ -1096,17 +1162,31 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
     cloud_label = ply_path.stem
     print(f"[SegPipeline] Matching masks against {cloud_label} ({n_pts:,} points)...")
     
-    # Apply floor alignment to xyz (same transform the viewer applies)
+    # Apply SAME floor alignment the viewer uses (from saved transform)
     xyz_display = xyz  # default: use raw xyz
-    try:
-        from alignment_manager import get_alignment_manager
-        am = get_alignment_manager()
-        s, R, t = am.compute_leveling_from_points(xyz)
-        if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
-            xyz_display = s * (xyz @ R.T) + t
-            print(f"[SegPipeline]   Floor alignment applied to OBB coordinates")
-    except Exception as e:
-        print(f"[SegPipeline]   ⚠️ Floor alignment unavailable for OBB: {e}")
+    transform_path = output_dir / "floor_transform.npz"
+    if transform_path.exists():
+        try:
+            data = np.load(transform_path)
+            s = float(data["s"])
+            R = data["R"]
+            t = data["t"]
+            if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+                xyz_display = s * (xyz @ R.T) + t
+                print(f"[SegPipeline]   Floor alignment loaded from {transform_path.name}")
+        except Exception as e:
+            print(f"[SegPipeline]   ⚠️ Could not load floor_transform.npz: {e}")
+    else:
+        # Fallback: compute alignment (for legacy sessions without saved transform)
+        try:
+            from alignment_manager import get_alignment_manager
+            am = get_alignment_manager()
+            s, R, t = am.compute_leveling_from_points(xyz)
+            if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+                xyz_display = s * (xyz @ R.T) + t
+                print(f"[SegPipeline]   Floor alignment computed (no saved transform)")
+        except Exception as e:
+            print(f"[SegPipeline]   ⚠️ Floor alignment unavailable for OBB: {e}")
     
     # Group cloud points by frame for efficient lookup
     frame_groups = {}  # frame_idx → array of point indices
@@ -1237,6 +1317,65 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
         filter_info = f" (filtered {removed} outliers)" if removed > 0 else ""
         print(f"[SegPipeline]   Object '{label}' #{iid}: "
               f"{len(all_matched):,} points{filter_info}")
+    
+    # ── Phase 3: Cross-category Re-ID — merge instances with high 3D overlap ──
+    # If VLM produced synonyms (e.g., "chair" + "wooden chair"), SAM3 may have
+    # segmented the same physical object twice. Detect and merge by 3D point overlap.
+    if len(instances) > 1:
+        merge_threshold = 0.5  # If >50% of smaller set overlaps → merge
+        merged_away = set()  # indices of instances absorbed by others
+        
+        for i in range(len(instances)):
+            if i in merged_away:
+                continue
+            set_i = set(instances[i]["globalIndices"])
+            
+            for j in range(i + 1, len(instances)):
+                if j in merged_away:
+                    continue
+                set_j = set(instances[j]["globalIndices"])
+                
+                intersection = len(set_i & set_j)
+                if intersection == 0:
+                    continue
+                
+                smaller_size = min(len(set_i), len(set_j))
+                overlap_ratio = intersection / smaller_size
+                
+                if overlap_ratio >= merge_threshold:
+                    # Merge: smaller into larger
+                    if len(set_i) >= len(set_j):
+                        # i absorbs j
+                        set_i |= set_j
+                        instances[i]["globalIndices"] = sorted(set_i)
+                        instances[i]["total_points"] = len(set_i)
+                        merged_away.add(j)
+                        print(f"[SegPipeline]   🔗 Merged '{instances[j]['label']}' #{instances[j]['id']} "
+                              f"into '{instances[i]['label']}' #{instances[i]['id']} "
+                              f"(overlap={overlap_ratio:.0%})")
+                    else:
+                        # j absorbs i
+                        set_j |= set_i
+                        instances[j]["globalIndices"] = sorted(set_j)
+                        instances[j]["total_points"] = len(set_j)
+                        merged_away.add(i)
+                        print(f"[SegPipeline]   🔗 Merged '{instances[i]['label']}' #{instances[i]['id']} "
+                              f"into '{instances[j]['label']}' #{instances[j]['id']} "
+                              f"(overlap={overlap_ratio:.0%})")
+                        break  # i is merged away, stop inner loop
+        
+        if merged_away:
+            pre_merge = len(instances)
+            instances = [inst for idx, inst in enumerate(instances) if idx not in merged_away]
+            # Recompute total_segmented and OBBs for merged instances
+            total_segmented = 0
+            for inst in instances:
+                matched = np.array(inst["globalIndices"], dtype=np.int64)
+                inst["total_points"] = len(matched)
+                total_segmented += len(matched)
+                if len(matched) >= 4:
+                    inst["obb"] = _compute_obb(xyz_display[matched])
+            print(f"[SegPipeline]   Cross-category merge: {pre_merge} → {len(instances)} instances")
     
     coverage = round(total_segmented / max(1, n_pts), 4)
     

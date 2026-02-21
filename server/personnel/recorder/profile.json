@@ -1,0 +1,14 @@
+{
+  "id": 5,
+  "username": "recorder",
+  "full_name": null,
+  "email": null,
+  "role": "recorder",
+  "is_active": true,
+  "created_at": "2026-02-19T12:09:33.840535",
+  "last_login": null,
+  "updated_at": "2026-02-19T12:33:28.169993Z",
+  "teams": [
+    1
+  ]
+}

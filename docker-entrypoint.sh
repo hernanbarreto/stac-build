@@ -51,4 +51,6 @@ cd /app/server
 
 exec python3 -m uvicorn main:app --host 0.0.0.0 --port "$PORT" \
     --ssl-keyfile "$KEY_FILE" \
-    --ssl-certfile "$CERT_FILE"
+    --ssl-certfile "$CERT_FILE" \
+    --ws-ping-interval 30 \
+    --ws-ping-timeout 300

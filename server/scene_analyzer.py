@@ -2,27 +2,29 @@
 Scene Analyzer — InternVL3-based automatic scene inventory.
 =============================================================
 
-Analyzes representative frames from a scan to automatically detect
-equipment/object categories, eliminating the need for manual prompt input.
+Analyzes ALL keyframes from a scan to automatically detect every object/surface
+category visible, eliminating the need for manual prompt input.
 
 Integration:
     Pipeline calls `analyze_scene(frames_dir)` BEFORE segmentation.
-    Returns a semicolon-separated category string compatible with SAM3 prompts.
+    Returns (prompt, frame_map) where frame_map maps category → list of frame filenames.
 
 Model: OpenGVLab/InternVL3-8B (MIT license)
-    - FP16 on >=16GB VRAM
-    - INT8 on >=8GB VRAM
-    - INT4 on <8GB VRAM
+    - BF16 on >=16GB VRAM
+    - BF16 on <16GB VRAM (2B model)
+    - FP32 on CPU (2B model, slow)
 """
 
 import os
 import sys
 import json
+import re
 import time
 import logging
 import gc
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
+from collections import Counter
 
 import torch
 import numpy as np
@@ -129,7 +131,7 @@ def _select_model_and_dtype(model_id: str = None):
     """
     Auto-select model size and dtype based on available GPU memory.
 
-    ≥16GB VRAM → InternVL3-8B in BF16 (~16GB)
+    >=16GB VRAM → InternVL3-8B in BF16 (~16GB)
     <16GB VRAM → InternVL3-2B in BF16 (~4GB) — fits comfortably
     No GPU     → InternVL3-2B in FP32 on CPU (slow but works)
 
@@ -213,112 +215,116 @@ def _load_model(model_id: str = None, precision: dict = None):
     return model, tokenizer
 
 
-# ── Frame sampling ───────────────────────────────────────────────────
+# ── Keyframe loading ─────────────────────────────────────────────────
 
-def _sample_representative_frames(frames_dir: Path, n_frames: int = 5) -> List[str]:
+def _load_keyframes(frames_dir: Path) -> List[str]:
     """
-    Sample N representative frames evenly distributed across the scan.
-
-    Strategy: Take frames at 0%, 25%, 50%, 75%, 100% of the sequence.
-    This ensures coverage of start, middle, and end of the space being scanned.
+    Load the exact keyframes used for 3D reconstruction.
+    
+    REQUIRES selected_frames.json (visual novelty H/F keyframe filter).
+    This file is produced by the frame_selector during DA3 processing and
+    contains the "selected_files" list — the keyframes used for the point cloud.
+    
+    Raises:
+        FileNotFoundError: if selected_frames.json is missing
+        ValueError: if the file is empty or cannot be parsed
+    
+    Returns:
+        List of absolute frame paths (sorted)
     """
-    exts = {".jpg", ".jpeg", ".png"}
-    all_frames = sorted([
-        f for f in frames_dir.iterdir()
-        if f.suffix.lower() in exts
-    ])
+    selected_json = frames_dir / "selected_frames.json"
+    
+    if not selected_json.exists():
+        raise FileNotFoundError(
+            f"selected_frames.json not found in {frames_dir}. "
+            f"DA3 must run first to produce keyframes before VLM analysis."
+        )
+    
+    try:
+        with open(selected_json) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError, PermissionError) as e:
+        raise ValueError(
+            f"Cannot read selected_frames.json: {e}. "
+            f"Check that the file is not locked by another process."
+        )
+    
+    # FIX: The JSON uses "selected_files", NOT "selected_frames"
+    selected_names = data.get("selected_files", [])
+    
+    if not selected_names:
+        raise ValueError(
+            f"selected_frames.json has no 'selected_files' entries. "
+            f"File may be corrupted or from an incompatible version."
+        )
+    
+    frame_paths = []
+    for name in selected_names:
+        fp = frames_dir / name
+        if fp.exists():
+            frame_paths.append(str(fp))
+        else:
+            logger.warning(f"Keyframe listed but missing on disk: {name}")
+    
+    if not frame_paths:
+        raise ValueError(
+            f"selected_frames.json lists {len(selected_names)} keyframes "
+            f"but none exist on disk in {frames_dir}"
+        )
+    
+    logger.info(f"Loaded {len(frame_paths)}/{len(selected_names)} keyframes from selected_frames.json")
+    return sorted(frame_paths)
 
-    if len(all_frames) == 0:
-        logger.warning(f"No frames found in {frames_dir}")
-        return []
 
-    if len(all_frames) <= n_frames:
-        return [str(f) for f in all_frames]
+# ── Default prompts (used when config.yaml doesn't specify them) ─────
 
-    # Evenly spaced indices
-    indices = np.linspace(0, len(all_frames) - 1, n_frames, dtype=int)
-    selected = [str(all_frames[i]) for i in indices]
+_DEFAULT_SCENE_PROMPT = """<image>
+You are an expert visual analyst for 3D scanning. Identify every UNIQUE physical object
+and surface visible in this image.
 
-    logger.info(f"Sampled {len(selected)} representative frames from {len(all_frames)} total")
-    return selected
+MANDATORY categories (ALWAYS include if visible):
+- floor (with material), wall (with material), ceiling, door, window
 
-
-# ── Prompt engineering for construction + industrial scenes ───────────
-
-SCENE_ANALYSIS_PROMPT = """<image>
-You are an expert AEC (Architecture, Engineering, Construction) inspector analyzing a photo from a 3D LiDAR/photogrammetry scan of a building or construction site.
-
-Your task: Identify ALL distinct segmentable elements visible in this image.
-For each element, provide a SHORT DESCRIPTIVE PHRASE that would help a segmentation model isolate it precisely.
-
-Cover ALL of these domains:
-
-CONSTRUCTION & ARCHITECTURE:
-- Surfaces: walls, floors, ceilings (describe material if visible: concrete wall, tiled floor, drop ceiling, drywall partition, exposed concrete slab, brick wall)
-- Openings: doors, windows, skylights, hatches (describe type: glass door, fire door, sliding window, curtain wall)
-- Structure: columns, beams, slabs, foundations, stairs, railings, ramps
-- Finishes: baseboards, moldings, paint, tiles, carpeting
-
-MEP (Mechanical, Electrical, Plumbing):
-- Pipes: water pipes, drainage pipes, gas pipes, conduits (describe: exposed copper pipe, PVC drain pipe, insulated pipe)
-- Ducts: air ducts, exhaust ducts, ductwork (describe: rectangular sheet metal duct, round flexible duct, insulated duct)
-- Electrical: panels, cable trays, junction boxes, conduits, switches, outlets, light fixtures
-- Plumbing: sinks, faucets, toilets, drains, water heaters
-- HVAC: air handling units, diffusers, grilles, thermostats, split AC units, radiators
-
-EQUIPMENT & OBJECTS:
-- Industrial: pumps, motors, compressors, tanks, generators, transformers
-- Safety: fire extinguishers, smoke detectors, sprinkler heads, exit signs, fire alarm panels
-- Furniture: tables, chairs, desks, cabinets, shelving units
-- Other: signage, access panels, hatches, ladders
+For each element provide:
+- "label": short name (1-3 words, lowercase)
+- "description": 2-5 word descriptive phrase for a segmentation model
 
 Rules:
-1. Return a JSON array of objects, each with "label" (short name) and "description" (2-5 word descriptive phrase for segmentation)
-2. The "description" should be visual and specific enough for a segmentation AI to find the exact object
-3. Include construction surfaces (walls, floor, ceiling) — they ARE important for BIM comparison
-4. Maximum 25 entries
-5. If multiple instances of same type exist with different materials, list them separately
-
-Example output:
-[
-  {"label": "concrete wall", "description": "exposed gray concrete wall surface"},
-  {"label": "floor", "description": "polished concrete floor"},
-  {"label": "drop ceiling", "description": "suspended acoustic tile ceiling"},
-  {"label": "pipe", "description": "exposed copper pipe running along ceiling"},
-  {"label": "cable tray", "description": "metal cable tray with cables"},
-  {"label": "electrical panel", "description": "gray metal electrical distribution panel"},
-  {"label": "fire extinguisher", "description": "red fire extinguisher on wall mount"},
-  {"label": "duct", "description": "rectangular sheet metal air duct"},
-  {"label": "door", "description": "metal fire-rated door with push bar"},
-  {"label": "column", "description": "reinforced concrete structural column"},
-  {"label": "light fixture", "description": "fluorescent light fixture on ceiling"}
-]
+1. Return a JSON array of {"label": "...", "description": "..."} objects
+2. NEVER duplicate — same object = one entry
+3. Maximum 20 entries per image
+4. Structural elements (floor, wall, ceiling) are MANDATORY
 
 Output ONLY the JSON array, nothing else."""
 
-MERGE_PROMPT = """Merge the following category lists from {n_frames} scan views into one unified inventory.
+_DEFAULT_MERGE_PROMPT = """Merge the following category lists from {n_frames} scan views into one unified inventory.
 
 {categories_per_frame}
 
 Rules:
-1. Merge duplicates, keep the most descriptive version
-2. Max 25 entries, prioritize most frequently seen
-3. Return JSON array of {{"label": "...", "description": "..."}} objects
+1. Merge duplicates and synonyms (e.g., "wooden chair" + "chair" = "chair")
+2. Max {max_categories} entries — prioritize items seen in most frames
+3. MANDATORY: floor, wall, ceiling must be in the final list if detected in any frame
+4. Return JSON array of {{"label": "...", "description": "..."}} objects
 
 Output ONLY the JSON array."""
-
 
 
 # ── Core analysis logic ──────────────────────────────────────────────
 
 def _analyze_single_frame(model, tokenizer, image_path: str,
-                           max_tiles: int = 6) -> List[Dict[str, str]]:
+                           max_tiles: int = 6,
+                           prompt: str = None) -> List[Dict[str, str]]:
     """
     Analyze a single frame and extract object categories with descriptions.
+
+    Args:
+        prompt: VLM prompt to use (from config). Falls back to default.
 
     Returns:
         List of dicts: [{"label": "...", "description": "..."}, ...]
     """
+    prompt = prompt or _DEFAULT_SCENE_PROMPT
     pixel_values = _load_image(image_path, max_num=max_tiles)
     dtype = next(model.parameters()).dtype
     device = next(model.parameters()).device
@@ -329,7 +335,7 @@ def _analyze_single_frame(model, tokenizer, image_path: str,
     try:
         response = model.chat(
             tokenizer, pixel_values,
-            SCENE_ANALYSIS_PROMPT,
+            prompt,
             generation_config
         )
 
@@ -341,25 +347,56 @@ def _analyze_single_frame(model, tokenizer, image_path: str,
 
     except Exception as e:
         logger.error(f"Error analyzing {image_path}: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 
+def _normalize_label(label: str) -> str:
+    """Normalize a label for comparison: lowercase, strip, remove articles."""
+    label = label.lower().strip()
+    # Remove leading articles/adjectives that cause false splits
+    for prefix in ["a ", "an ", "the ", "some "]:
+        if label.startswith(prefix):
+            label = label[len(prefix):]
+    return label
+
+
+def _labels_are_synonyms(a: str, b: str) -> bool:
+    """Check if two labels refer to the same object (substring match).
+    
+    Examples:
+        'wooden chair' and 'chair' → True
+        'office desk' and 'desk' → True
+        'floor' and 'wooden floor' → True
+        'chair' and 'table' → False
+    """
+    a, b = _normalize_label(a), _normalize_label(b)
+    if a == b:
+        return True
+    # One contains the other as a complete word
+    return a in b or b in a
+
+
 def _merge_categories(model, tokenizer,
-                      categories_per_frame: Dict[str, List[Dict[str, str]]]) -> List[Dict[str, str]]:
+                      categories_per_frame: Dict[str, List[Dict[str, str]]],
+                      max_categories: int = 25,
+                      required_categories: list = None) -> List[Dict[str, str]]:
     """
     Merge categories from multiple frames, deduplicating by label.
-    Keeps the most descriptive version for each label.
+    Uses substring matching to detect synonyms.
+    Force-injects required categories if missing.
     """
-    from collections import Counter
-
     # Collect all categories
     all_items = []
     for cats in categories_per_frame.values():
         all_items.extend(cats)
 
     # Group by normalized label, keep the longest description
-    label_map = {}  # normalized_label → {"label": ..., "description": ...}
+    label_map = {}  # canonical_label → {"label": ..., "description": ...}
     label_counts = Counter()
+    # Map from any detected label → canonical label
+    synonym_map = {}
 
     for item in all_items:
         label = item.get("label", "").lower().strip()
@@ -367,214 +404,233 @@ def _merge_categories(model, tokenizer,
         if not label:
             continue
 
-        label_counts[label] += 1
+        # Check if this label is a synonym of an existing canonical label
+        canonical = None
+        for existing in label_map:
+            if _labels_are_synonyms(label, existing):
+                canonical = existing
+                break
 
-        if label not in label_map:
-            label_map[label] = {"label": label, "description": desc}
+        if canonical is None:
+            # New canonical label — use the shorter, simpler form
+            canonical = label
+            label_map[canonical] = {"label": canonical, "description": desc}
         else:
-            # Keep the longer/more descriptive one
-            if len(desc) > len(label_map[label]["description"]):
-                label_map[label]["description"] = desc
+            # Synonym found — keep the shorter label as canonical
+            if len(label) < len(canonical):
+                # New label is shorter → adopt it as canonical
+                old_data = label_map.pop(canonical)
+                old_count = label_counts.pop(canonical, 0)
+                label_map[label] = {
+                    "label": label,
+                    "description": old_data["description"] if len(old_data["description"]) > len(desc) else desc
+                }
+                label_counts[label] = old_count
+                canonical = label
+            else:
+                # Keep existing canonical, but maybe update description
+                if len(desc) > len(label_map[canonical]["description"]):
+                    label_map[canonical]["description"] = desc
 
-    # Sort by frequency (most common first), cap at 25
+        synonym_map[label] = canonical
+        label_counts[canonical] += 1
+
+    # Sort by frequency (most common first), cap at max_categories
     sorted_labels = sorted(label_map.keys(),
-                          key=lambda x: label_counts[x], reverse=True)[:25]
+                          key=lambda x: label_counts[x], reverse=True)[:max_categories]
 
     merged = [label_map[lbl] for lbl in sorted_labels]
 
-    logger.info(f"Merged {len(all_items)} raw → {len(merged)} unique categories")
+    # Force-inject required categories if missing
+    if required_categories:
+        existing_labels = {_normalize_label(m["label"]) for m in merged}
+        for req in required_categories:
+            req_label = _normalize_label(req.get("label", ""))
+            # Check if any existing label is a synonym
+            already_present = any(_labels_are_synonyms(req_label, el) for el in existing_labels)
+            if not already_present:
+                merged.append({
+                    "label": req.get("label", req_label),
+                    "description": req.get("description", req_label)
+                })
+                logger.info(f"Force-injected required category: {req_label}")
+
+    logger.info(f"Merged {len(all_items)} raw → {len(merged)} unique categories "
+                f"(synonym groups: {len(synonym_map)} → {len(label_map)})")
     return merged
 
 
-# ── Lightweight presence prompt for frame scanning ────────────────────
-
-PRESENCE_PROMPT_TEMPLATE = """<image>
-Given these object categories:
-{categories}
-
-Which of these objects are VISIBLE in this image?
-Return ONLY a JSON array of the labels that are visible. Example: ["sofa", "door", "wall"]
-If none are visible, return an empty array: []
-Output ONLY the JSON array, nothing else."""
-
-
-def _scan_frames_for_presence(model, tokenizer, frames_dir: Path,
-                               categories: List[Dict[str, str]],
-                               scan_stride: int = 3,
-                               max_tiles: int = 4) -> Dict[str, List[int]]:
+def _build_frame_map(categories_per_frame: Dict[str, List[Dict[str, str]]],
+                     merged: List[Dict[str, str]]) -> Dict[str, List[str]]:
     """
-    Scan all frames (at stride intervals) to determine which frames
-    contain each category. Returns frame_ranges per category.
+    Build frame_map: for each merged category, list exactly which frame files
+    contain it.
     
-    Uses a lightweight VLM prompt (just yes/no per category) which is
-    much faster than full scene analysis.
-    
-    Args:
-        model, tokenizer: loaded InternVL3
-        frames_dir: directory with all frames
-        categories: list of {"label": ..., "description": ...}
-        scan_stride: check every Nth frame (higher = faster, less precise)
-        max_tiles: fewer tiles = faster inference per frame
+    Uses fuzzy matching: a frame's detected category matches a merged category
+    if the labels are equal after normalization, or if one contains the other.
     
     Returns:
-        Dict mapping category label → [first_frame_idx, last_frame_idx]
+        Dict mapping category label → sorted list of frame filenames
     """
-    exts = {".jpg", ".jpeg", ".png"}
-    all_frames = sorted([
-        f for f in frames_dir.iterdir()
-        if f.suffix.lower() in exts
-    ])
+    merged_labels = {item["label"].lower().strip() for item in merged}
     
-    if not all_frames:
-        return {}
+    # For each frame, see which merged labels its detections match
+    frame_map = {item["label"]: [] for item in merged}
     
-    # Build category list string for prompt
-    cat_labels = [c["label"] for c in categories]
-    cat_list_str = "\n".join(f"  - {lbl}" for lbl in cat_labels)
-    prompt = PRESENCE_PROMPT_TEMPLATE.format(categories=cat_list_str)
-    
-    # Track first/last frame index per category
-    first_seen = {}  # label → frame_idx
-    last_seen = {}   # label → frame_idx
-    
-    # Sample frames at stride
-    scan_indices = list(range(0, len(all_frames), scan_stride))
-    # Always include first and last frame
-    if 0 not in scan_indices:
-        scan_indices.insert(0, 0)
-    if len(all_frames) - 1 not in scan_indices:
-        scan_indices.append(len(all_frames) - 1)
-    
-    dtype = next(model.parameters()).dtype
-    device = next(model.parameters()).device
-    generation_config = dict(max_new_tokens=512, do_sample=False)
-    
-    print(f"[SceneAnalyzer] Scanning {len(scan_indices)} frames for object presence "
-          f"(stride={scan_stride}, {len(cat_labels)} categories)...")
-    
-    for i, frame_idx in enumerate(scan_indices):
-        frame_path = str(all_frames[frame_idx])
+    for frame_path, frame_cats in categories_per_frame.items():
+        frame_name = Path(frame_path).name
+        detected_labels = {c.get("label", "").lower().strip() for c in frame_cats}
         
-        try:
-            pixel_values = _load_image(frame_path, max_num=max_tiles)
-            pixel_values = pixel_values.to(dtype).to(device)
+        for item in merged:
+            merged_lbl = item["label"].lower().strip()
+            # Check if any detected label matches this merged label
+            matched = False
+            for det_lbl in detected_labels:
+                if det_lbl == merged_lbl:
+                    matched = True
+                    break
+                # Fuzzy: one contains the other (e.g., "concrete wall" matches "wall")
+                if det_lbl in merged_lbl or merged_lbl in det_lbl:
+                    matched = True
+                    break
             
-            response = model.chat(tokenizer, pixel_values, prompt, generation_config)
-            
-            # Parse response — expect JSON array of visible labels
-            visible = _parse_presence_response(response, cat_labels)
-            
-            for lbl in visible:
-                if lbl not in first_seen:
-                    first_seen[lbl] = frame_idx
-                last_seen[lbl] = frame_idx
-            
-            if (i + 1) % 10 == 0 or i == len(scan_indices) - 1:
-                print(f"[SceneAnalyzer]   [{i+1}/{len(scan_indices)}] "
-                      f"frame {frame_idx}: {len(visible)} objects visible")
-        
-        except Exception as e:
-            logger.warning(f"Presence scan failed for frame {frame_idx}: {e}")
-            continue
+            if matched:
+                frame_map[item["label"]].append(frame_name)
     
-    # Build frame_ranges with margin (±stride to account for sampling gaps)
-    frame_ranges = {}
-    margin = scan_stride  # extend range by stride to catch gaps
-    for lbl in cat_labels:
-        if lbl in first_seen:
-            start = max(0, first_seen[lbl] - margin)
-            end = min(len(all_frames) - 1, last_seen[lbl] + margin)
-            frame_ranges[lbl] = [start, end]
-        # If not seen in any frame, don't add — SAM3 will skip it
+    # Sort frame lists
+    for label in frame_map:
+        frame_map[label] = sorted(set(frame_map[label]))
     
-    # Summary
-    print(f"[SceneAnalyzer] Frame ranges:")
-    for lbl in cat_labels:
-        if lbl in frame_ranges:
-            r = frame_ranges[lbl]
-            span = r[1] - r[0] + 1
-            pct = span / len(all_frames) * 100
-            print(f"  {lbl:30s} frames {r[0]:4d}–{r[1]:4d} ({span} frames, {pct:.0f}%)")
-        else:
-            print(f"  {lbl:30s} NOT DETECTED in any frame")
-    
-    return frame_ranges
+    return frame_map
 
 
-def _parse_presence_response(response: str, valid_labels: List[str]) -> List[str]:
-    """Parse VLM response for presence check — returns list of visible labels."""
-    response = response.strip()
-    
-    # Try JSON parse
-    try:
-        # Find JSON array in response
-        start = response.find('[')
-        end = response.rfind(']')
-        if start >= 0 and end > start:
-            import ast
-            parsed = json.loads(response[start:end+1])
-            if isinstance(parsed, list):
-                # Normalize and validate against known labels
-                valid_set = {lbl.lower() for lbl in valid_labels}
-                return [lbl for lbl in valid_labels 
-                        if lbl.lower() in {str(p).lower().strip() for p in parsed}]
-    except (json.JSONDecodeError, ValueError):
-        pass
-    
-    # Fallback: check which labels appear as substrings in the response
-    response_lower = response.lower()
-    return [lbl for lbl in valid_labels if lbl.lower() in response_lower]
-
+# ── Parse VLM responses ──────────────────────────────────────────────
 
 def _parse_categories(response: str) -> List[Dict[str, str]]:
     """
     Parse VLM response into a list of category dicts.
     Handles:
+      - JSON wrapped in markdown code fences (```json ... ```)
+      - Nested JSON objects like {"objects": [...]}
       - JSON array of {"label": ..., "description": ...} objects
       - JSON array of plain strings (legacy)
       - Comma-separated fallback
     """
     response = response.strip()
 
-    # Try JSON array first
+    # ── Step 1: Strip markdown code fences ────────────────────
+    # VLM often wraps response in ```json ... ```
+    fence_pattern = re.compile(r'```(?:json)?\s*\n?(.*?)\n?\s*```', re.DOTALL)
+    fence_match = fence_pattern.search(response)
+    if fence_match:
+        response = fence_match.group(1).strip()
+
+    # ── Step 2: Try to parse as JSON ─────────────────────────
+    parsed = None
+
+    # Try full response as JSON first
     try:
-        start = response.find('[')
-        end = response.rfind(']')
-        if start != -1 and end != -1:
-            parsed = json.loads(response[start:end + 1])
-            if isinstance(parsed, list):
-                items = []
-                for entry in parsed:
-                    if isinstance(entry, dict):
-                        label = str(entry.get("label", "")).strip()
-                        desc = str(entry.get("description", label)).strip()
-                        if label:
-                            items.append({"label": label, "description": desc})
-                    elif isinstance(entry, str) and entry.strip():
-                        # Legacy plain string format
-                        items.append({"label": entry.strip(), "description": entry.strip()})
-                return items
+        parsed = json.loads(response)
     except json.JSONDecodeError:
         pass
 
-    # Fallback: comma-separated strings
+    # If that failed, try to extract JSON array or object
+    if parsed is None:
+        # Find the first { or [ to start of JSON
+        for i, ch in enumerate(response):
+            if ch in ('{', '['):
+                try:
+                    parsed = json.loads(response[i:])
+                    break
+                except json.JSONDecodeError:
+                    # Try finding matching bracket from the end
+                    closer = '}' if ch == '{' else ']'
+                    j = response.rfind(closer)
+                    if j > i:
+                        try:
+                            parsed = json.loads(response[i:j + 1])
+                            break
+                        except json.JSONDecodeError:
+                            continue
+
+    # ── Step 3: Extract items from parsed JSON ───────────────
+    if parsed is not None:
+        items_list = None
+
+        # If it's already a list, use it directly
+        if isinstance(parsed, list):
+            items_list = parsed
+        elif isinstance(parsed, dict):
+            # Look for common nested keys: "objects", "categories", "items", "elements"
+            for key in ("objects", "categories", "items", "elements", "results"):
+                if key in parsed and isinstance(parsed[key], list):
+                    items_list = parsed[key]
+                    break
+            # If no known key, try the first list value in the dict
+            if items_list is None:
+                for v in parsed.values():
+                    if isinstance(v, list):
+                        items_list = v
+                        break
+
+        if items_list:
+            items = []
+            for entry in items_list:
+                if isinstance(entry, dict):
+                    label = str(entry.get("label", "")).strip()
+                    desc = str(entry.get("description", label)).strip()
+                    # Validate label — skip if it looks like JSON garbage
+                    if label and _is_valid_label(label):
+                        items.append({"label": label, "description": desc})
+                elif isinstance(entry, str) and entry.strip():
+                    cleaned = entry.strip()
+                    if _is_valid_label(cleaned):
+                        items.append({"label": cleaned, "description": cleaned})
+            if items:
+                return items
+
+    # ── Step 4: Fallback — comma-separated strings ───────────
     if ',' in response:
         parts = response.split(',')
-        return [{"label": p.strip().strip('"\'[]'), "description": p.strip().strip('"\'[]')}
-                for p in parts if p.strip().strip('"\'[]')]
+        items = []
+        for p in parts:
+            cleaned = p.strip().strip("\"'[]{}()")
+            if cleaned and _is_valid_label(cleaned):
+                items.append({"label": cleaned, "description": cleaned})
+        if items:
+            return items
 
-    # Fallback: newline-separated
+    # ── Step 5: Fallback — newline-separated ─────────────────
     lines = response.split('\n')
     items = []
     for line in lines:
         line = line.strip().lstrip('-•*0123456789.)')
-        line = line.strip().strip('"\'')
-        if line and len(line) < 80:
+        line = line.strip().strip("\"'")
+        if line and _is_valid_label(line):
             items.append({"label": line, "description": line})
 
     return items
 
 
+def _is_valid_label(label: str) -> bool:
+    """Check if a string looks like a valid category label (not JSON garbage)."""
+    label = label.strip()
+    if not label or len(label) > 60:
+        return False
+    # Reject if it contains any JSON-related characters
+    for ch in label:
+        if ch in ('"', '\\', '{', '}', '[', ']'):
+            return False
+    # Reject markdown fences, JSON literals, colon patterns
+    label_lower = label.lower()
+    for tok in ('```', 'true', 'false', 'null', '":'):
+        if tok in label_lower:
+            return False
+    # Reject if mostly punctuation
+    punct_count = sum(1 for c in label if c in ':,;()/')
+    if punct_count > len(label) * 0.3:
+        return False
+    return True
 # ── Public API ───────────────────────────────────────────────────────
 
 def analyze_scene(frames_dir: str, config: dict = None) -> tuple:
@@ -582,25 +638,22 @@ def analyze_scene(frames_dir: str, config: dict = None) -> tuple:
     Analyze a scene and return auto-detected segmentation categories.
 
     This is the main entry point. It:
-    1. Samples 3-5 representative frames
-    2. Loads InternVL3 with adaptive precision
-    3. Analyzes each frame for object categories + descriptions
-    4. Merges and deduplicates categories
-    4c. Scans ALL frames for per-category presence → frame ranges
-    5. Unloads the model to free VRAM for DA3/SAM3
-    6. Returns (prompt, frame_ranges) for SAM3
-
-    The descriptions are used as SAM3 text prompts (SAM3 understands
-    descriptive phrases like "exposed concrete wall" or "rectangular metal duct").
+    1. Loads keyframes from selected_frames.json (REQUIRED — errors if missing)
+    3. Loads InternVL3 with adaptive precision
+    4. Analyzes each keyframe using the configurable prompt
+    5. Merges and deduplicates categories (synonym-aware + required_categories)
+    6. Builds frame_map: category → list of frame filenames where detected
+    7. Unloads the model to free VRAM for SAM3
+    8. Returns (prompt, frame_map) for SAM3
 
     Args:
         frames_dir: Path to directory containing extracted frames
-        config: Optional scene_analysis config dict
+        config: Optional scene_analysis config dict (from config.yaml)
 
     Returns:
-        (prompt, frame_ranges) tuple where:
+        (prompt, frame_map) tuple where:
           - prompt: semicolon-separated description string for SAM3
-          - frame_ranges: dict mapping category label → [first_frame, last_frame]
+          - frame_map: dict mapping category label → list of frame filenames
         Returns ("", {}) if analysis fails
     """
     config = config or {}
@@ -615,84 +668,64 @@ def analyze_scene(frames_dir: str, config: dict = None) -> tuple:
         return "", {}
 
     model_id = config.get("model_id", DEFAULT_MODEL_ID)
-    n_frames = config.get("sample_frames", 5)
     max_tiles = config.get("max_tiles", 6)
 
+
+    max_merged_categories = config.get("max_merged_categories", 25)
+    vlm_prompt = config.get("prompt", None)  # None → use default
+    required_categories = config.get("required_categories", [])
+
+    # ── Step 1: Load keyframes (STRICT — errors if selected_frames.json missing) ──
+    keyframes = _load_keyframes(frames_dir)
+
+
+
     print(f"\n{'═' * 60}")
-    print(f"  🔍 SCENE ANALYZER — InternVL3 Auto-Inventory")
+    print(f"  🔍 SCENE ANALYZER — InternVL3 Configurable Inventory")
     print(f"{'═' * 60}")
     print(f"  Model:  {model_id}")
-    print(f"  Frames: {n_frames} representative samples")
-    print(f"  Scope:  Construction + MEP + Equipment")
+    print(f"  Frames: {len(keyframes)} keyframes (from selected_frames.json)")
+    print(f"  Caps:   {max_merged_categories} merged categories max")
+    print(f"  Prompt: {'config.yaml' if vlm_prompt else 'default'}")
+    print(f"  Required categories: {[r.get('label') for r in required_categories]}")
     print(f"{'═' * 60}\n")
 
     t0 = time.time()
 
-    # ── Step 1: Sample frames ──
-    selected_frames = _sample_representative_frames(frames_dir, n_frames)
-    if not selected_frames:
-        logger.error("No frames available for analysis")
-        return "", {}
-
     # ── Step 2: Load model ──
     model, tokenizer = _load_model(model_id)
 
-    # ── Step 3: Analyze each frame ──
+    # ── Step 3: Analyze EACH keyframe ──
     categories_per_frame = {}
-    for i, frame_path in enumerate(selected_frames):
-        print(f"  [{i + 1}/{len(selected_frames)}] Analyzing {Path(frame_path).name}...")
-        cats = _analyze_single_frame(model, tokenizer, frame_path, max_tiles)
-        categories_per_frame[frame_path] = cats
-
-    # ── Step 4: Merge categories ──
-    merged = _merge_categories(model, tokenizer, categories_per_frame)
-
-    # ── Step 4b: Ensure mandatory structural categories are always present ──
-    # The smaller VLM model may miss obvious surfaces. These are always relevant
-    # for construction/BIM scenes and SAM3 will simply skip categories not visible.
-    MANDATORY_STRUCTURAL = [
-        {"label": "floor", "description": "floor surface"},
-        {"label": "wall", "description": "wall surface"},
-        {"label": "ceiling", "description": "ceiling surface"},
-        {"label": "stairs", "description": "staircase or steps"},
-        {"label": "door", "description": "door"},
-    ]
-    existing_labels = {item["label"].lower() for item in merged}
-    # Also check descriptions for substring match (e.g., VLM detected "concrete wall" covers "wall")
-    existing_text = " ".join(f"{item['label']} {item.get('description','')}" for item in merged).lower()
-    for mandatory in MANDATORY_STRUCTURAL:
-        # Skip if the mandatory keyword appears anywhere in existing labels/descriptions
-        if any(mandatory["label"] in lbl for lbl in existing_labels) or mandatory["label"] in existing_text:
-            continue
-        merged.append(mandatory)
-        logger.info(f"  Added mandatory structural: {mandatory['label']}")
-
-    # ── Step 4c: Scan ALL frames for per-category presence ──
-    scan_stride = config.get("presence_scan_stride", 3)
-    frame_ranges = {}
-    try:
-        frame_ranges = _scan_frames_for_presence(
-            model, tokenizer, frames_dir, merged,
-            scan_stride=scan_stride, max_tiles=4
+    for i, frame_path in enumerate(keyframes):
+        fname = Path(frame_path).name
+        print(f"  [{i + 1}/{len(keyframes)}] Analyzing {fname}...", end="", flush=True)
+        cats = _analyze_single_frame(
+            model, tokenizer, frame_path, max_tiles,
+            prompt=vlm_prompt
         )
-        # Attach frame_range to each category
-        for item in merged:
-            lbl = item["label"]
-            if lbl in frame_ranges:
-                item["frame_range"] = frame_ranges[lbl]
-    except Exception as e:
-        logger.warning(f"Frame presence scan failed: {e}")
-        import traceback
-        traceback.print_exc()
+        categories_per_frame[frame_path] = cats
+        if cats:
+            print(f" → {len(cats)} objects")
+        else:
+            print(f" → (no objects detected)")
 
-    # ── Step 5: Unload model (free VRAM for SAM3) ──
-    # Move to CPU first to release GPU tensors, then delete all references
+    # ── Step 4: Merge categories (synonym-aware + required injection) ──
+    merged = _merge_categories(
+        model, tokenizer, categories_per_frame,
+        max_categories=max_merged_categories,
+        required_categories=required_categories
+    )
+
+    # ── Step 5: Build frame_map (category → frame filenames) ──
+    frame_map = _build_frame_map(categories_per_frame, merged)
+
+    # ── Step 6: Unload model (free VRAM for SAM3) ──
     try:
         model.cpu()
     except:
         pass
     del model, tokenizer
-    # Multiple gc.collect passes to break circular references
     for _ in range(3):
         gc.collect()
     if torch.cuda.is_available():
@@ -704,15 +737,17 @@ def analyze_scene(frames_dir: str, config: dict = None) -> tuple:
 
     elapsed = time.time() - t0
 
-    # ── Step 6: Format output ──
-    # SAM3 gets the DESCRIPTIONS (richer text = better segmentation)
-    prompt = ";".join(item["description"] for item in merged)
+    # ── Step 7: Format output ──
+    # SAM3 works best with SHORT category labels (e.g. "cabinet", "wall", "floor")
+    # NOT verbose descriptions (e.g. "blue cabinet to the right of the water cooler")
+    prompt = ";".join(item["label"] for item in merged)
 
     print(f"\n{'─' * 60}")
     print(f"  ✅ Scene analysis complete in {elapsed:.1f}s")
     print(f"  📋 Detected {len(merged)} categories:")
     for i, item in enumerate(merged):
-        print(f"     {i + 1:2d}. {item['label']:25s} → \"{item['description']}\"")
+        n_frames = len(frame_map.get(item["label"], []))
+        print(f"     {i + 1:2d}. {item['label']:25s} → \"{item['description']}\"  ({n_frames} frames)")
     print(f"\n  🏷️  SAM3 prompt ({len(merged)} categories):")
     print(f"     \"{prompt}\"")
     print(f"{'─' * 60}\n")
@@ -720,10 +755,14 @@ def analyze_scene(frames_dir: str, config: dict = None) -> tuple:
     # Save analysis results for reproducibility
     results = {
         "model_id": model_id,
-        "n_frames_analyzed": len(selected_frames),
+        "n_keyframes_analyzed": len(keyframes),
+
+
+        "max_merged_categories": max_merged_categories,
+        "prompt_source": "config.yaml" if vlm_prompt else "default",
         "elapsed_seconds": round(elapsed, 2),
         "categories": merged,
-        "frame_ranges": frame_ranges,
+        "frame_map": frame_map,
         "prompt": prompt,
         "per_frame": {
             Path(k).name: v for k, v in categories_per_frame.items()
@@ -738,51 +777,39 @@ def analyze_scene(frames_dir: str, config: dict = None) -> tuple:
     except Exception as e:
         logger.warning(f"Could not save results: {e}")
 
-    return prompt, frame_ranges
+    return prompt, frame_map
 
 
 # ── CLI interface ────────────────────────────────────────────────────
 
 def main():
-    """CLI: python scene_analyzer.py /path/to/frames [--model MODEL_ID] [--frames N]"""
+    """CLI: python scene_analyzer.py /path/to/frames [--model MODEL_ID]"""
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="InternVL3 Scene Analyzer — Auto-detect segmentation categories"
-    )
-    parser.add_argument("frames_dir", help="Directory containing scan frames")
-    parser.add_argument("--model", default=DEFAULT_MODEL_ID,
-                        help=f"Model ID (default: {DEFAULT_MODEL_ID})")
-    parser.add_argument("--frames", type=int, default=5,
-                        help="Number of representative frames to analyze (default: 5)")
-    parser.add_argument("--max-tiles", type=int, default=6,
-                        help="Max image tiles (6=dev, 12=production)")
-    parser.add_argument("--verbose", action="store_true")
-
+    parser = argparse.ArgumentParser(description="Scene Analyzer — InternVL3")
+    parser.add_argument("frames_dir", help="Path to frames directory")
+    parser.add_argument("--model", default=None, help="Model ID override")
+    parser.add_argument("--max-tiles", type=int, default=6, help="Max tiles per image")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s"
-    )
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
-    config = {
-        "enabled": True,
-        "model_id": args.model,
-        "sample_frames": args.frames,
-        "max_tiles": args.max_tiles,
-    }
+    config = {}
+    if args.model:
+        config["model_id"] = args.model
+    config["max_tiles"] = args.max_tiles
 
-    prompt, frame_ranges = analyze_scene(args.frames_dir, config)
+    prompt, frame_map = analyze_scene(args.frames_dir, config)
 
     if prompt:
-        print(f"\n{'=' * 40}")
-        print(f"RESULT: {prompt}")
-        print(f"{'=' * 40}")
-        # Also print in a format that can be piped
-        sys.exit(0)
+        print(f"\n{'=' * 60}")
+        print(f"PROMPT: {prompt}")
+        print(f"\nFRAME MAP:")
+        for label, frames in frame_map.items():
+            print(f"  {label}: {len(frames)} frames → {frames[:5]}{'...' if len(frames) > 5 else ''}")
+        print(f"{'=' * 60}")
     else:
-        print("ERROR: No categories detected", file=sys.stderr)
+        print("\n❌ No categories detected")
         sys.exit(1)
 
 

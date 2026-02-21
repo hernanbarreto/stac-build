@@ -8,33 +8,34 @@
 /* ── Design Tokens ─────────────────────────────────────────── */
 :root {
   /* Background layers (darkest → lightest) */
-  --bg-base:     #0d1117;
-  --bg-surface:  #161b22;
+  --bg-base: #0d1117;
+  --bg-surface: #161b22;
   --bg-elevated: #1c2333;
-  --bg-hover:    #252d3a;
-  --bg-active:   #2d3748;
+  --bg-hover: #252d3a;
+  --bg-active: #2d3748;
 
   /* Accent colors */
-  --accent:       #e94560;
+  --accent: #e94560;
   --accent-hover: #ff6b81;
   --accent-muted: rgba(233, 69, 96, 0.15);
 
   /* Status colors */
-  --success:  #2ecc71;
-  --warning:  #f39c12;
-  --error:    #e74c3c;
-  --info:     #3498db;
+  --success: #2ecc71;
+  --warning: #f39c12;
+  --error: #e74c3c;
+  --info: #3498db;
 
   /* Text */
-  --text-primary:   #e6edf3;
+  --text-primary: #e6edf3;
   --text-secondary: #8b949e;
-  --text-muted:     #484f58;
+  --text-muted: #484f58;
 
   /* Borders */
-  --border:       #30363d;
+  --border: #30363d;
   --border-light: #21262d;
 
   /* Spacing */
+  --activity-bar-width: 48px;
   --sidebar-width: 240px;
   --toolbar-height: 40px;
   --statusbar-height: 28px;
@@ -54,13 +55,17 @@
 }
 
 /* ── Reset ─────────────────────────────────────────────────── */
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
-html, body, #root {
+html,
+body,
+#root {
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -79,21 +84,41 @@ html, body, #root {
   width: 6px;
   height: 6px;
 }
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
 ::-webkit-scrollbar-thumb {
   background: var(--text-muted);
   border-radius: 3px;
 }
+
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-secondary);
 }
 
 /* ── Utility Classes ───────────────────────────────────────── */
-.text-muted { color: var(--text-secondary); }
-.text-accent { color: var(--accent); }
-.text-success { color: var(--success); }
-.text-warning { color: var(--warning); }
-.text-error { color: var(--error); }
-.font-mono { font-family: var(--font-mono); }
+.text-muted {
+  color: var(--text-secondary);
+}
+
+.text-accent {
+  color: var(--accent);
+}
+
+.text-success {
+  color: var(--success);
+}
+
+.text-warning {
+  color: var(--warning);
+}
+
+.text-error {
+  color: var(--error);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+}

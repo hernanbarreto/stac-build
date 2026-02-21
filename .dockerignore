@@ -1,20 +1,43 @@
-# Docker build context exclusions
-.git
-.gitignore
-*.md
-.vscode/
-.idea/
-__pycache__/
-*.pyc
+# =============================================
+# STAC-Builder — Docker Build Exclusions
+# =============================================
 
-# Don't copy scan data into image
+# Node modules (rebuilt inside container)
+ui/node_modules/
+
+# Build artifacts
+ui/dist/
+ui/dist-electron/
+vendor/PotreeConverter/build/
+
+# Scan data (runtime only)
 server/scans/
 
-# Don't copy weights into image (mounted at runtime)
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+.venv/
+
+# Weights (mounted at runtime)
 weights/
 
-# Vendor large data
-vendor/depth_anything_3/da3_streaming/weights/
-vendor/depth_anything_3/da3_streaming/exps/
-vendor/depth_anything_3/da3_streaming/exps_simple/
-vendor/depth_anything_3/da3_streaming/frames/
+# Temp scripts
+server/rematch_cloud.py
+server/fix_vlm_prompt.py
+server/check_dupes.py
+
+# OS files
+Thumbs.db
+.DS_Store

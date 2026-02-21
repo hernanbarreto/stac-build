@@ -1,0 +1,14 @@
+{
+  "id": 2,
+  "username": "manager",
+  "full_name": "Project Manager",
+  "email": "manager@stac.local",
+  "role": "manager",
+  "is_active": true,
+  "created_at": "2026-02-17T04:40:41.217438",
+  "last_login": "2026-02-19T11:34:30.170622",
+  "updated_at": "2026-02-19T12:33:28.165801Z",
+  "teams": [
+    1
+  ]
+}

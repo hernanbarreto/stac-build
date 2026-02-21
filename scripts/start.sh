@@ -154,4 +154,6 @@ echo ""
 # --reload disabled for GPU models (hot reload causes CUDA issues)
 exec python -m uvicorn main:app --host 0.0.0.0 --port $PORT \
     --ssl-keyfile "$KEY_FILE" \
-    --ssl-certfile "$CERT_FILE"
+    --ssl-certfile "$CERT_FILE" \
+    --ws-ping-interval 30 \
+    --ws-ping-timeout 300
