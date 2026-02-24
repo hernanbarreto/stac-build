@@ -41,6 +41,7 @@ export interface ViewportHandle {
     highlightBIMElement: (meshNames: string[]) => void
     addBIMGroup: (group: THREE.Group) => void
     removeBIMGroup: (filename: string) => void
+    setBIMOpacity: (meshNames: string[], opacity: number) => void
     clearMeasurements: () => void
     resetSectionBox: () => void
     resetCamera: () => void
@@ -1098,6 +1099,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 bimGroup.remove(child)
             }
             console.log(`[Viewport] Removed BIM group: ${groupName} (${toRemove.length} groups)`)
+        },
+        setBIMOpacity: (meshNames: string[], opacity: number) => {
+            const bimGroup = bimGroupRef.current
+            if (!bimGroup) return
+            bimGroup.traverse((child) => {
+                if (child instanceof THREE.Mesh && meshNames.includes(child.name)) {
+                    const mat = child.material as THREE.MeshStandardMaterial
+                    mat.opacity = opacity
+                    mat.transparent = opacity < 1.0
+                    mat.needsUpdate = true
+                }
+            })
         },
         clearMeasurements: clearAllMeasurements,
         resetSectionBox: destroySectionBox,

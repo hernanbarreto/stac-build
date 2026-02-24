@@ -1,7 +1,7 @@
 /**
  * BIM Navigator — Tree panel for exploring IFC model hierarchy.
  * Shows Project → Site → Building → Storey → Elements with
- * search, visibility toggles, and selection highlighting.
+ * search, visibility toggles, opacity control, and selection highlighting.
  */
 import { useState, useMemo, useCallback, useRef } from 'react'
 import type { IFCTreeNode, IFCLoadResult } from './IFCLoader'
@@ -12,6 +12,7 @@ export interface BIMNavigatorProps {
     userRole: string
     onToggleVisibility: (meshNames: string[], visible: boolean) => void
     onSelectElement: (meshNames: string[]) => void
+    onSetOpacity: (meshNames: string[], opacity: number) => void
     onUploadIFC: (file: File) => void
     onDeleteIFC: (filename: string) => void
 }
@@ -24,8 +25,10 @@ interface TreeNodeProps {
     searchText: string
     hiddenNodes: Set<number>
     selectedNode: number | null
+    nodeOpacities: Map<number, number>
     onToggleVisibility: (node: IFCTreeNode, visible: boolean) => void
     onSelect: (node: IFCTreeNode) => void
+    onOpacityChange: (node: IFCTreeNode, opacity: number) => void
 }
 
 function matchesSearch(node: IFCTreeNode, text: string): boolean {
@@ -35,17 +38,17 @@ function matchesSearch(node: IFCTreeNode, text: string): boolean {
     return node.children.some(c => matchesSearch(c, lower))
 }
 
-function TreeNode({ node, depth, searchText, hiddenNodes, selectedNode, onToggleVisibility, onSelect }: TreeNodeProps) {
+function TreeNode({ node, depth, searchText, hiddenNodes, selectedNode, nodeOpacities, onToggleVisibility, onSelect, onOpacityChange }: TreeNodeProps) {
     const [expanded, setExpanded] = useState(depth < 2)
     const hasChildren = node.children.length > 0
     const isHidden = hiddenNodes.has(node.expressID)
     const isSelected = selectedNode === node.expressID
     const childCount = countDescendants(node) - 1
+    const opacity = nodeOpacities.get(node.expressID) ?? 1.0
 
     // Filter by search
     if (searchText && !matchesSearch(node, searchText)) return null
 
-    // Type icon
     const typeIcon = getTypeIcon(node.type)
 
     return (
@@ -74,15 +77,39 @@ function TreeNode({ node, depth, searchText, hiddenNodes, selectedNode, onToggle
                     {childCount > 0 && <span className="bim-tree-count"> ({childCount})</span>}
                 </span>
 
+                {/* Opacity indicator — shows % if not 100% */}
+                {opacity < 1.0 && (
+                    <span className="bim-tree-opacity-badge" title={`${Math.round(opacity * 100)}% opacity`}>
+                        {Math.round(opacity * 100)}%
+                    </span>
+                )}
+
                 {/* Visibility toggle */}
                 <span
                     className={`bim-tree-eye ${isHidden ? 'off' : ''}`}
                     onClick={(e) => { e.stopPropagation(); onToggleVisibility(node, isHidden) }}
-                    title={isHidden ? 'Mostrar' : 'Ocultar'}
+                    title={isHidden ? 'Show' : 'Hide'}
                 >
                     {isHidden ? '👁️‍🗨️' : '👁️'}
                 </span>
             </div>
+
+            {/* Opacity slider — shown when selected */}
+            {isSelected && !isHidden && (
+                <div className="bim-opacity-row" style={{ paddingLeft: `${28 + depth * 16}px` }}>
+                    <span className="bim-opacity-label">Opacity</span>
+                    <input
+                        type="range"
+                        className="bim-opacity-slider"
+                        min="0"
+                        max="100"
+                        value={Math.round(opacity * 100)}
+                        onChange={(e) => onOpacityChange(node, parseInt(e.target.value) / 100)}
+                        onClick={(e) => e.stopPropagation()}
+                    />
+                    <span className="bim-opacity-value">{Math.round(opacity * 100)}%</span>
+                </div>
+            )}
 
             {/* Children */}
             {expanded && hasChildren && (
@@ -95,8 +122,10 @@ function TreeNode({ node, depth, searchText, hiddenNodes, selectedNode, onToggle
                             searchText={searchText}
                             hiddenNodes={hiddenNodes}
                             selectedNode={selectedNode}
+                            nodeOpacities={nodeOpacities}
                             onToggleVisibility={onToggleVisibility}
                             onSelect={onSelect}
+                            onOpacityChange={onOpacityChange}
                         />
                     ))}
                 </div>
@@ -123,6 +152,7 @@ function getTypeIcon(type: string): string {
     if (type.includes('Space')) return '📐'
     if (type.includes('Member')) return '🔩'
     if (type.includes('Plate')) return '🔲'
+    if (type.includes('Curtain')) return '🪟'
     return '📦'
 }
 
@@ -133,12 +163,14 @@ export default function BIMNavigator({
     userRole,
     onToggleVisibility,
     onSelectElement,
+    onSetOpacity,
     onUploadIFC,
     onDeleteIFC,
 }: BIMNavigatorProps) {
     const [searchText, setSearchText] = useState('')
     const [hiddenNodes, setHiddenNodes] = useState<Set<number>>(new Set())
     const [selectedNode, setSelectedNode] = useState<number | null>(null)
+    const [nodeOpacities, setNodeOpacities] = useState<Map<number, number>>(new Map())
     const fileInputRef = useRef<HTMLInputElement>(null)
     const isAdmin = userRole === 'admin' || userRole === 'manager'
 
@@ -146,7 +178,6 @@ export default function BIMNavigator({
         const meshNames = collectMeshNames(node)
         const newHidden = new Set(hiddenNodes)
 
-        // Toggle all descendants
         const toggleAll = (n: IFCTreeNode, hide: boolean) => {
             if (hide) newHidden.add(n.expressID)
             else newHidden.delete(n.expressID)
@@ -154,11 +185,9 @@ export default function BIMNavigator({
         }
 
         if (wasHidden) {
-            // Show
             toggleAll(node, false)
             onToggleVisibility(meshNames, true)
         } else {
-            // Hide
             toggleAll(node, true)
             onToggleVisibility(meshNames, false)
         }
@@ -166,10 +195,24 @@ export default function BIMNavigator({
     }, [hiddenNodes, onToggleVisibility])
 
     const handleSelect = useCallback((node: IFCTreeNode) => {
-        setSelectedNode(node.expressID)
+        setSelectedNode(prev => prev === node.expressID ? null : node.expressID)
         const meshNames = collectMeshNames(node)
         onSelectElement(meshNames)
     }, [onSelectElement])
+
+    const handleOpacityChange = useCallback((node: IFCTreeNode, opacity: number) => {
+        const meshNames = collectMeshNames(node)
+        // Update local opacity state for all descendants
+        const newOpacities = new Map(nodeOpacities)
+        const setAll = (n: IFCTreeNode) => {
+            newOpacities.set(n.expressID, opacity)
+            n.children.forEach(c => setAll(c))
+        }
+        setAll(node)
+        setNodeOpacities(newOpacities)
+        // Apply in 3D
+        onSetOpacity(meshNames, opacity)
+    }, [nodeOpacities, onSetOpacity])
 
     const handleUpload = useCallback(() => {
         fileInputRef.current?.click()
@@ -179,11 +222,10 @@ export default function BIMNavigator({
         const file = e.target.files?.[0]
         if (file) {
             onUploadIFC(file)
-            e.target.value = '' // reset
+            e.target.value = ''
         }
     }, [onUploadIFC])
 
-    // Total BIM element count
     const totalElements = useMemo(() => {
         let count = 0
         for (const model of models) {
@@ -197,7 +239,7 @@ export default function BIMNavigator({
     return (
         <div className="bim-navigator">
             <div className="panel-header">
-                Modelo
+                Model
                 <span className="panel-header-badge">{totalElements}</span>
             </div>
 
@@ -207,7 +249,7 @@ export default function BIMNavigator({
                 <input
                     type="text"
                     className="bim-search-input"
-                    placeholder="Buscar..."
+                    placeholder="Search..."
                     value={searchText}
                     onChange={e => setSearchText(e.target.value)}
                 />
@@ -219,11 +261,10 @@ export default function BIMNavigator({
             {/* Tree */}
             <div className="bim-tree">
                 {models.length === 0 ? (
-                    <div className="bim-empty">No hay modelos BIM cargados</div>
+                    <div className="bim-empty">No BIM models loaded</div>
                 ) : (
                     models.map((model) => (
                         <div key={model.filename} className="bim-model-group">
-                            {/* Model file header */}
                             <div className="bim-model-header">
                                 <span className="bim-model-icon">📄</span>
                                 <span className="bim-model-name">{model.filename}</span>
@@ -231,11 +272,10 @@ export default function BIMNavigator({
                                     <span
                                         className="bim-model-delete"
                                         onClick={() => onDeleteIFC(model.filename)}
-                                        title="Eliminar modelo"
+                                        title="Delete model"
                                     >🗑️</span>
                                 )}
                             </div>
-                            {/* Hierarchy tree */}
                             {model.hierarchy.map(root => (
                                 <TreeNode
                                     key={root.expressID}
@@ -244,8 +284,10 @@ export default function BIMNavigator({
                                     searchText={searchText}
                                     hiddenNodes={hiddenNodes}
                                     selectedNode={selectedNode}
+                                    nodeOpacities={nodeOpacities}
                                     onToggleVisibility={handleToggleVisibility}
                                     onSelect={handleSelect}
+                                    onOpacityChange={handleOpacityChange}
                                 />
                             ))}
                         </div>
@@ -257,7 +299,7 @@ export default function BIMNavigator({
             {isAdmin && (
                 <div className="bim-actions">
                     <button className="bim-action-btn upload" onClick={handleUpload}>
-                        + Cargar IFC
+                        + Load IFC
                     </button>
                     <input
                         ref={fileInputRef}

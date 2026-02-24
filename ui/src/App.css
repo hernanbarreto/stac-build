@@ -197,23 +197,28 @@
   flex: 1;
 }
 
-/* ── Panel (replaces old Sidebar) ─────────────────────────── */
-.panel {
+/* ── Panel Column (panel + resize handle) ─────────────────── */
+.panel-column {
   grid-row: 2 / 3;
   grid-column: 2;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+
+.panel {
   background: var(--bg-surface);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  width: var(--sidebar-width);
-  transition: width var(--transition-normal), opacity var(--transition-normal);
+  flex: 1;
+  min-width: 0;
+  transition: opacity var(--transition-normal);
 }
 
-.panel-collapsed .panel {
-  width: 0;
-  opacity: 0;
-  border-right: none;
+.panel-collapsed .panel-column {
+  display: none;
 }
 
 .panel-header {
@@ -3129,4 +3134,81 @@
 .bim-action-btn.upload {
   background: color-mix(in srgb, var(--accent) 15%, var(--bg-input));
   border-color: var(--accent);
+}
+
+/* ── Panel Resize Handle ───────────────────────────────────── */
+
+.panel-resize-handle {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background var(--transition-fast);
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.panel-resize-handle:hover,
+.panel-resize-handle:active {
+  background: var(--accent);
+}
+
+/* ── BIM Opacity Slider ────────────────────────────────────── */
+
+.bim-opacity-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 6px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-bottom: 1px solid var(--border);
+}
+
+.bim-opacity-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.bim-opacity-slider {
+  flex: 1;
+  height: 3px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--border);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.bim-opacity-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 10px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.bim-opacity-slider::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  background: var(--accent);
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+}
+
+.bim-opacity-value {
+  font-size: 10px;
+  color: var(--text-muted);
+  min-width: 28px;
+  text-align: right;
+}
+
+.bim-tree-opacity-badge {
+  font-size: 9px;
+  color: var(--accent);
+  opacity: 0.7;
+  margin-right: 2px;
+  flex-shrink: 0;
 }

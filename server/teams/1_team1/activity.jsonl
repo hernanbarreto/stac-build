@@ -6,3 +6,5 @@
 {"ts": "2026-02-19T12:57:45.834220Z", "action": "session_unassigned", "actor": "admin", "detail": "Session 'live_1770423147' unassigned"}
 {"ts": "2026-02-19T14:43:36.083147Z", "action": "session_assigned", "actor": "admin", "detail": "Session 'pccr-10022026' assigned"}
 {"ts": "2026-02-19T14:43:40.942250Z", "action": "session_assigned", "actor": "admin", "detail": "Session 'live_1770423147' assigned"}
+{"ts": "2026-02-24T21:08:00.574382Z", "action": "session_unassigned", "actor": "admin", "detail": "Session '2026-01-31-22-23-52' unassigned"}
+{"ts": "2026-02-24T21:08:13.168158Z", "action": "session_assigned", "actor": "admin", "detail": "Session 'test1' assigned"}

@@ -56,6 +56,7 @@ function App() {
   const [serverAlive, setServerAlive] = useState(false)
   const [activePanel, setActivePanel] = useState<'sessions' | 'tools' | 'segments' | 'bim' | 'team' | null>('sessions')
   const [bimModels, setBimModels] = useState<IFCLoadResult[]>([])
+  const [sidebarWidth, setSidebarWidth] = useState(280)
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [pointSize, setPointSize] = useState(2.0)
   const [showAxes, setShowAxes] = useState(true)
@@ -341,7 +342,10 @@ function App() {
   if (!user) return <LoginPage />
 
   return (
-    <div className={`app-layout ${!panelOpen ? 'panel-collapsed' : ''}`}>
+    <div
+      className={`app-layout ${!panelOpen ? 'panel-collapsed' : ''}`}
+      style={panelOpen ? { '--sidebar-width': `${sidebarWidth}px` } as React.CSSProperties : undefined}
+    >
       {/* ── Menu Bar ── */}
       <div className="menubar" ref={menuRef}>
         <span className="menu-app-title"><img src="/favicon.ico" alt="" className="menu-app-logo" /> STAC Build</span>
@@ -578,273 +582,300 @@ function App() {
 
       {/* ── Panel ── */}
       {panelOpen && (
-        <div className="panel">
-          {/* Sessions Panel */}
-          {activePanel === 'sessions' && (
-            <>
-              <div className="panel-header">Sessions</div>
-              <nav className="sidebar-nav">
-                {!connected ? (
-                  <>
-                    <div className="nav-section">Server</div>
-                    <div className="nav-item" onClick={connectToServer}>
-                      <span className="nav-item-icon">🔌</span>
-                      <span className="nav-item-label">Connect to Server</span>
-                    </div>
-                  </>
-                ) : (
-                  <div className="session-list">
-                    {sessions.map(s => (
-                      <div
-                        key={s.id}
-                        className={`session-item ${selectedSession === s.id ? 'active' : ''} ${activeSession === s.id ? 'loaded' : ''}`}
-                        onClick={() => handleSessionSelect(s.id)}
-                      >
-                        <div className="session-header">
-                          <div className={`session-dot ${s.hasCloud ? 'online' : ''} ${activeSession === s.id ? 'loaded' : ''}`} />
-                          <div className="session-name">{s.name}</div>
-                        </div>
-                        <div className="session-meta">
-                          {s.frameCount} frames{s.hasCloud && ` · ${s.cloudSizeMb}MB`}
-                          {s.hasSegments && ' · 🏷️'}
-                          {s.hasBim && ` · 🏗️${s.bimCount > 1 ? ` (${s.bimCount})` : ''}`}
-                          {activeSession === s.id && ' · ⚡ loaded'}
-                        </div>
-                        <div className="session-actions">
-                          <button className="session-action-btn load"
-                            title="Cargar sesión"
-                            onClick={(e) => { e.stopPropagation(); handleSessionLoad(s.id) }}
-                          >📂</button>
-                          <button className="session-action-btn reconstruct"
-                            title="Reconstruir geometría"
-                            onClick={(e) => { e.stopPropagation(); handleReconstruct(s.id) }}
-                          >🔨</button>
-                          {activeSession === s.id && (
-                            <button className="session-action-btn segment"
-                              title="Segmentar objetos"
-                              onClick={(e) => { e.stopPropagation(); handleSegment(s.id) }}
-                            >🏷️</button>
-                          )}
-                          {activeSession === s.id && (
-                            <button className="session-action-btn segment"
-                              title="Manual Interactive SAM3"
-                              onClick={(e) => { e.stopPropagation(); setInteractiveSessionId(s.id) }}
-                            >🎯</button>
-                          )}
-                          {activeSession === s.id && (
-                            <button className="session-action-btn unload"
-                              title="Descargar sesión"
-                              onClick={(e) => { e.stopPropagation(); handleUnload() }}
-                            >⏏</button>
-                          )}
-                        </div>
+        <div className="panel-column">
+          <div className="panel">
+            {/* Sessions Panel */}
+            {activePanel === 'sessions' && (
+              <>
+                <div className="panel-header">Sessions</div>
+                <nav className="sidebar-nav">
+                  {!connected ? (
+                    <>
+                      <div className="nav-section">Server</div>
+                      <div className="nav-item" onClick={connectToServer}>
+                        <span className="nav-item-icon">🔌</span>
+                        <span className="nav-item-label">Connect to Server</span>
                       </div>
-                    ))}
+                    </>
+                  ) : (
+                    <div className="session-list">
+                      {sessions.map(s => (
+                        <div
+                          key={s.id}
+                          className={`session-item ${selectedSession === s.id ? 'active' : ''} ${activeSession === s.id ? 'loaded' : ''}`}
+                          onClick={() => handleSessionSelect(s.id)}
+                        >
+                          <div className="session-header">
+                            <div className={`session-dot ${s.hasCloud ? 'online' : ''} ${activeSession === s.id ? 'loaded' : ''}`} />
+                            <div className="session-name">{s.name}</div>
+                          </div>
+                          <div className="session-meta">
+                            {s.frameCount} frames{s.hasCloud && ` · ${s.cloudSizeMb}MB`}
+                            {s.hasSegments && ' · 🏷️'}
+                            {s.hasBim && ` · 🏗️${s.bimCount > 1 ? ` (${s.bimCount})` : ''}`}
+                            {activeSession === s.id && ' · ⚡ loaded'}
+                          </div>
+                          <div className="session-actions">
+                            <button className="session-action-btn load"
+                              title="Cargar sesión"
+                              onClick={(e) => { e.stopPropagation(); handleSessionLoad(s.id) }}
+                            >📂</button>
+                            <button className="session-action-btn reconstruct"
+                              title="Reconstruir geometría"
+                              onClick={(e) => { e.stopPropagation(); handleReconstruct(s.id) }}
+                            >🔨</button>
+                            {activeSession === s.id && (
+                              <button className="session-action-btn segment"
+                                title="Segmentar objetos"
+                                onClick={(e) => { e.stopPropagation(); handleSegment(s.id) }}
+                              >🏷️</button>
+                            )}
+                            {activeSession === s.id && (
+                              <button className="session-action-btn segment"
+                                title="Manual Interactive SAM3"
+                                onClick={(e) => { e.stopPropagation(); setInteractiveSessionId(s.id) }}
+                              >🎯</button>
+                            )}
+                            {activeSession === s.id && (
+                              <button className="session-action-btn unload"
+                                title="Descargar sesión"
+                                onClick={(e) => { e.stopPropagation(); handleUnload() }}
+                              >⏏</button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </nav>
+              </>
+            )}
+
+            {/* Tools Panel */}
+            {activePanel === 'tools' && hasSession && (
+              <>
+                <div className="panel-header">Tools</div>
+                <nav className="sidebar-nav">
+                  <div className={`nav-item ${activeTool === 'navigate' ? 'active' : ''}`}
+                    onClick={() => setActiveTool('navigate')}>
+                    <span className="nav-item-icon">🔄</span>
+                    <span className="nav-item-label">Navigate</span>
                   </div>
-                )}
-              </nav>
-            </>
-          )}
+                  <div className={`nav-item ${activeTool === 'measure-distance' ? 'active' : ''}`}
+                    onClick={() => setActiveTool('measure-distance')}>
+                    <span className="nav-item-icon">📏</span>
+                    <span className="nav-item-label">Measure Distance</span>
+                  </div>
+                  <div className={`nav-item ${activeTool === 'measure-angle' ? 'active' : ''}`}
+                    onClick={() => setActiveTool('measure-angle')}>
+                    <span className="nav-item-icon">📐</span>
+                    <span className="nav-item-label">Measure Angle</span>
+                  </div>
+                  <div className={`nav-item ${activeTool === 'section-box' ? 'active' : ''}`}
+                    onClick={() => setActiveTool('section-box')}>
+                    <span className="nav-item-icon">✂️</span>
+                    <span className="nav-item-label">Section Box</span>
+                  </div>
+                  <div className={`nav-item ${activeTool === 'align' ? 'active' : ''}`}
+                    onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')}>
+                    <span className="nav-item-icon">⛶</span>
+                    <span className="nav-item-label">Align Cloud</span>
+                  </div>
+                  <div className="nav-section" style={{ marginTop: '16px' }}>Display</div>
+                  <div className="nav-item" style={{ padding: '4px 12px' }}>
+                    <span className="nav-item-icon">🎨</span>
+                    <span className="control-label" style={{ marginRight: '8px' }}>Point Size</span>
+                    <input className="control-slider" type="range"
+                      min="0.5" max="5" step="0.1" value={pointSize}
+                      style={{ flex: 1 }}
+                      onChange={e => setPointSize(parseFloat(e.target.value))} />
+                    <span className="control-value">{pointSize.toFixed(1)}</span>
+                  </div>
+                </nav>
+              </>
+            )}
 
-          {/* Tools Panel */}
-          {activePanel === 'tools' && hasSession && (
-            <>
-              <div className="panel-header">Tools</div>
-              <nav className="sidebar-nav">
-                <div className={`nav-item ${activeTool === 'navigate' ? 'active' : ''}`}
-                  onClick={() => setActiveTool('navigate')}>
-                  <span className="nav-item-icon">🔄</span>
-                  <span className="nav-item-label">Navigate</span>
-                </div>
-                <div className={`nav-item ${activeTool === 'measure-distance' ? 'active' : ''}`}
-                  onClick={() => setActiveTool('measure-distance')}>
-                  <span className="nav-item-icon">📏</span>
-                  <span className="nav-item-label">Measure Distance</span>
-                </div>
-                <div className={`nav-item ${activeTool === 'measure-angle' ? 'active' : ''}`}
-                  onClick={() => setActiveTool('measure-angle')}>
-                  <span className="nav-item-icon">📐</span>
-                  <span className="nav-item-label">Measure Angle</span>
-                </div>
-                <div className={`nav-item ${activeTool === 'section-box' ? 'active' : ''}`}
-                  onClick={() => setActiveTool('section-box')}>
-                  <span className="nav-item-icon">✂️</span>
-                  <span className="nav-item-label">Section Box</span>
-                </div>
-                <div className={`nav-item ${activeTool === 'align' ? 'active' : ''}`}
-                  onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')}>
-                  <span className="nav-item-icon">⛶</span>
-                  <span className="nav-item-label">Align Cloud</span>
-                </div>
-                <div className="nav-section" style={{ marginTop: '16px' }}>Display</div>
-                <div className="nav-item" style={{ padding: '4px 12px' }}>
-                  <span className="nav-item-icon">🎨</span>
-                  <span className="control-label" style={{ marginRight: '8px' }}>Point Size</span>
-                  <input className="control-slider" type="range"
-                    min="0.5" max="5" step="0.1" value={pointSize}
-                    style={{ flex: 1 }}
-                    onChange={e => setPointSize(parseFloat(e.target.value))} />
-                  <span className="control-value">{pointSize.toFixed(1)}</span>
-                </div>
-              </nav>
-            </>
-          )}
-
-          {/* Segments Panel */}
-          {activePanel === 'segments' && segments.length > 0 && (
-            <>
-              <div className="panel-header">
-                Segments
-                <span style={{ float: 'right', display: 'flex', gap: '4px' }}>
-                  <button className="segment-toggle-btn" title="Select All"
-                    onClick={() => {
-                      setSegments(prev => prev.map(s => ({ ...s, visible: true })))
-                      segments.forEach(s => viewportRef.current?.toggleOBB(s.key, true))
-                    }}>☑</button>
-                  <button className="segment-toggle-btn" title="Deselect All"
-                    onClick={() => {
-                      setSegments(prev => prev.map(s => ({ ...s, visible: false })))
-                      segments.forEach(s => viewportRef.current?.toggleOBB(s.key, false))
-                    }}>☐</button>
-                </span>
-              </div>
-              <div style={{ padding: '8px 12px', fontSize: '12px', color: '#aaa', background: 'rgba(0,0,0,0.2)' }}>
-                Mark instances to EXCLUDE them from the next 3D DA3 reconstruction.
-              </div>
-              <div className="segments-list">
-                {segments.map(seg => (
-                  <div key={seg.key} className="segment-item" style={{ opacity: seg.excluded ? 0.5 : 1 }}>
-                    <input
-                      type="checkbox"
-                      checked={seg.visible}
-                      title="Toggle Visibility in 3D"
-                      className="segment-checkbox"
-                      onChange={() => {
-                        const newVis = !seg.visible
-                        setSegments(prev => prev.map(s =>
-                          s.key === seg.key ? { ...s, visible: newVis } : s
-                        ))
-                        viewportRef.current?.toggleOBB(seg.key, newVis)
-                      }}
-                    />
-                    <span
-                      className="segment-color-dot"
-                      style={{ background: seg.color }}
-                    />
-                    <span className="segment-label" style={{ flex: 1 }}>{seg.label}</span>
-                    <span className="segment-count" style={{ marginRight: '8px' }}>
-                      ({seg.totalPoints.toLocaleString()})
-                    </span>
-                    <button
-                      title="Exclude from Reconstruction"
-                      style={{
-                        background: seg.excluded ? '#ff4444' : 'transparent',
-                        border: '1px solid #ff4444',
-                        color: seg.excluded ? '#fff' : '#ff4444',
-                        borderRadius: '4px',
-                        padding: '2px 6px',
-                        fontSize: '10px',
-                        cursor: 'pointer'
-                      }}
+            {/* Segments Panel */}
+            {activePanel === 'segments' && segments.length > 0 && (
+              <>
+                <div className="panel-header">
+                  Segments
+                  <span style={{ float: 'right', display: 'flex', gap: '4px' }}>
+                    <button className="segment-toggle-btn" title="Select All"
                       onClick={() => {
-                        setSegments(prev => prev.map(s => s.key === seg.key ? { ...s, excluded: !s.excluded } : s))
-                      }}
-                    >
-                      {seg.excluded ? 'Excluded' : 'Exclude'}
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <div style={{ padding: '12px' }}>
-                <button
-                  className="pipeline-btn-run"
-                  style={{ width: '100%' }}
-                  onClick={() => {
-                    const excludedKeys = segments.filter(s => s.excluded).map(s => s.key)
-                    viewportRef.current?.sendCommand({
-                      type: 'save_exclusions',
-                      session_id: activeSession,
-                      excluded_keys: excludedKeys
+                        setSegments(prev => prev.map(s => ({ ...s, visible: true })))
+                        segments.forEach(s => viewportRef.current?.toggleOBB(s.key, true))
+                      }}>☑</button>
+                    <button className="segment-toggle-btn" title="Deselect All"
+                      onClick={() => {
+                        setSegments(prev => prev.map(s => ({ ...s, visible: false })))
+                        segments.forEach(s => viewportRef.current?.toggleOBB(s.key, false))
+                      }}>☐</button>
+                  </span>
+                </div>
+                <div style={{ padding: '8px 12px', fontSize: '12px', color: '#aaa', background: 'rgba(0,0,0,0.2)' }}>
+                  Mark instances to EXCLUDE them from the next 3D DA3 reconstruction.
+                </div>
+                <div className="segments-list">
+                  {segments.map(seg => (
+                    <div key={seg.key} className="segment-item" style={{ opacity: seg.excluded ? 0.5 : 1 }}>
+                      <input
+                        type="checkbox"
+                        checked={seg.visible}
+                        title="Toggle Visibility in 3D"
+                        className="segment-checkbox"
+                        onChange={() => {
+                          const newVis = !seg.visible
+                          setSegments(prev => prev.map(s =>
+                            s.key === seg.key ? { ...s, visible: newVis } : s
+                          ))
+                          viewportRef.current?.toggleOBB(seg.key, newVis)
+                        }}
+                      />
+                      <span
+                        className="segment-color-dot"
+                        style={{ background: seg.color }}
+                      />
+                      <span className="segment-label" style={{ flex: 1 }}>{seg.label}</span>
+                      <span className="segment-count" style={{ marginRight: '8px' }}>
+                        ({seg.totalPoints.toLocaleString()})
+                      </span>
+                      <button
+                        title="Exclude from Reconstruction"
+                        style={{
+                          background: seg.excluded ? '#ff4444' : 'transparent',
+                          border: '1px solid #ff4444',
+                          color: seg.excluded ? '#fff' : '#ff4444',
+                          borderRadius: '4px',
+                          padding: '2px 6px',
+                          fontSize: '10px',
+                          cursor: 'pointer'
+                        }}
+                        onClick={() => {
+                          setSegments(prev => prev.map(s => s.key === seg.key ? { ...s, excluded: !s.excluded } : s))
+                        }}
+                      >
+                        {seg.excluded ? 'Excluded' : 'Exclude'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ padding: '12px' }}>
+                  <button
+                    className="pipeline-btn-run"
+                    style={{ width: '100%' }}
+                    onClick={() => {
+                      const excludedKeys = segments.filter(s => s.excluded).map(s => s.key)
+                      viewportRef.current?.sendCommand({
+                        type: 'save_exclusions',
+                        session_id: activeSession,
+                        excluded_keys: excludedKeys
+                      })
+                      setStatusMessage(`Saved ${excludedKeys.length} exclusions for next reconstruction.`)
+                    }}
+                  >
+                    Save Exclusions
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* BIM Navigator Panel */}
+            {activePanel === 'bim' && (
+              <BIMNavigator
+                models={bimModels}
+                userRole={user?.role || 'viewer'}
+                onToggleVisibility={(meshNames, visible) => viewportRef.current?.toggleBIMVisibility(meshNames, visible)}
+                onSelectElement={(meshNames) => viewportRef.current?.highlightBIMElement(meshNames)}
+                onSetOpacity={(meshNames, opacity) => viewportRef.current?.setBIMOpacity(meshNames, opacity)}
+                onUploadIFC={async (file) => {
+                  if (!activeSession || !token) return
+                  const formData = new FormData()
+                  formData.append('file', file)
+                  try {
+                    const res = await fetch(`/api/sessions/${activeSession}/bim/upload`, {
+                      method: 'POST',
+                      headers: { 'Authorization': `Bearer ${token}` },
+                      body: formData,
                     })
-                    setStatusMessage(`Saved ${excludedKeys.length} exclusions for next reconstruction.`)
-                  }}
-                >
-                  Save Exclusions
-                </button>
-              </div>
-            </>
-          )}
-
-          {/* BIM Navigator Panel */}
-          {activePanel === 'bim' && (
-            <BIMNavigator
-              models={bimModels}
-              userRole={user?.role || 'viewer'}
-              onToggleVisibility={(meshNames, visible) => viewportRef.current?.toggleBIMVisibility(meshNames, visible)}
-              onSelectElement={(meshNames) => viewportRef.current?.highlightBIMElement(meshNames)}
-              onUploadIFC={async (file) => {
-                if (!activeSession || !token) return
-                const formData = new FormData()
-                formData.append('file', file)
-                try {
-                  const res = await fetch(`/api/sessions/${activeSession}/bim/upload`, {
-                    method: 'POST',
-                    headers: { 'Authorization': `Bearer ${token}` },
-                    body: formData,
-                  })
-                  if (res.ok) {
-                    setStatusMessage(`BIM uploaded: ${file.name}, loading...`)
-                    // Load the uploaded IFC into the 3D viewer
-                    const { loadIFC } = await import('./components/IFCLoader')
-                    const url = `/api/sessions/${activeSession}/bim/${file.name}`
-                    const result = await loadIFC(url, file.name)
-                    // Add to 3D scene
-                    viewportRef.current?.addBIMGroup(result.group)
-                    // Update navigator tree
-                    setBimModels(prev => [...prev, result])
-                    setStatusMessage(`BIM loaded: ${file.name} (${result.group.children.length} elements)`)
-                    // Refresh session list to update has_bim indicator
-                    connectToServer()
-                  } else {
-                    setStatusMessage(`Upload failed: ${(await res.json()).detail}`)
+                    if (res.ok) {
+                      setStatusMessage(`BIM uploaded: ${file.name}, loading...`)
+                      // Load the uploaded IFC into the 3D viewer
+                      const { loadIFC } = await import('./components/IFCLoader')
+                      const url = `/api/sessions/${activeSession}/bim/${file.name}`
+                      const result = await loadIFC(url, file.name)
+                      // Add to 3D scene
+                      viewportRef.current?.addBIMGroup(result.group)
+                      // Update navigator tree
+                      setBimModels(prev => [...prev, result])
+                      setStatusMessage(`BIM loaded: ${file.name} (${result.group.children.length} elements)`)
+                      // Refresh session list to update has_bim indicator
+                      connectToServer()
+                    } else {
+                      setStatusMessage(`Upload failed: ${(await res.json()).detail}`)
+                    }
+                  } catch (err: any) {
+                    setStatusMessage(`Upload error: ${err.message}`)
                   }
-                } catch (err: any) {
-                  setStatusMessage(`Upload error: ${err.message}`)
-                }
-              }}
-              onDeleteIFC={async (filename) => {
-                if (!activeSession || !token) return
-                if (!confirm(`Delete ${filename}?`)) return
-                try {
-                  const res = await fetch(`/api/sessions/${activeSession}/bim/${filename}`, {
-                    method: 'DELETE',
-                    headers: { 'Authorization': `Bearer ${token}` },
-                  })
-                  if (res.ok) {
-                    setStatusMessage(`BIM deleted: ${filename}`)
-                    // Remove 3D meshes from the scene
-                    viewportRef.current?.removeBIMGroup(filename)
-                    // Remove from navigator tree
-                    setBimModels(prev => prev.filter(m => m.filename !== filename))
-                    connectToServer()
-                  } else {
-                    setStatusMessage(`Delete failed: ${(await res.json()).detail}`)
+                }}
+                onDeleteIFC={async (filename) => {
+                  if (!activeSession || !token) return
+                  if (!confirm(`Delete ${filename}?`)) return
+                  try {
+                    const res = await fetch(`/api/sessions/${activeSession}/bim/${filename}`, {
+                      method: 'DELETE',
+                      headers: { 'Authorization': `Bearer ${token}` },
+                    })
+                    if (res.ok) {
+                      setStatusMessage(`BIM deleted: ${filename}`)
+                      // Remove 3D meshes from the scene
+                      viewportRef.current?.removeBIMGroup(filename)
+                      // Remove from navigator tree
+                      setBimModels(prev => prev.filter(m => m.filename !== filename))
+                      connectToServer()
+                    } else {
+                      setStatusMessage(`Delete failed: ${(await res.json()).detail}`)
+                    }
+                  } catch (err: any) {
+                    setStatusMessage(`Delete error: ${err.message}`)
                   }
-                } catch (err: any) {
-                  setStatusMessage(`Delete error: ${err.message}`)
-                }
-              }}
-            />
-          )}
+                }}
+              />
+            )}
 
-          {/* Team Panel */}
-          {activePanel === 'team' && (
-            <TeamPanel
-              onCallUser={(userId, username) => setCallTarget({ userId, username })}
-            />
-          )}
+            {/* Team Panel */}
+            {activePanel === 'team' && (
+              <TeamPanel
+                onCallUser={(userId, username) => setCallTarget({ userId, username })}
+              />
+            )}
 
 
+          </div>
+          {/* Resize handle */}
+          <div
+            className="panel-resize-handle"
+            onMouseDown={(e) => {
+              e.preventDefault()
+              const startX = e.clientX
+              const startW = sidebarWidth
+              const onMove = (ev: MouseEvent) => {
+                const delta = ev.clientX - startX
+                const newW = Math.max(180, Math.min(600, startW + delta))
+                setSidebarWidth(newW)
+              }
+              const onUp = () => {
+                document.removeEventListener('mousemove', onMove)
+                document.removeEventListener('mouseup', onUp)
+                document.body.style.cursor = ''
+                document.body.style.userSelect = ''
+              }
+              document.addEventListener('mousemove', onMove)
+              document.addEventListener('mouseup', onUp)
+              document.body.style.cursor = 'col-resize'
+              document.body.style.userSelect = 'none'
+            }}
+          />
         </div>
       )}
 
@@ -978,61 +1009,63 @@ function App() {
       </main>
 
       {/* Pipeline Config Dialog */}
-      {pipelineDialogOpen && (
-        <div className="pipeline-dialog-backdrop" onClick={() => setPipelineDialogOpen(false)}>
-          <div className="pipeline-dialog" onClick={e => e.stopPropagation()}>
-            <h3>Configure Pipeline</h3>
-            <p className="pipeline-dialog-session">Session: {pipelineDialogSession}</p>
-            <div className="pipeline-dialog-stages">
-              <p style={{ fontSize: '11px', color: '#888', marginBottom: '10px' }}>Pipeline stages (fixed order):</p>
-              {pipelineOrder.map((stageId) => {
-                const def = STAGE_DEF[stageId]
-                // CloudCompy is always coupled with DA3 — can't be toggled independently
-                const isCoupled = stageId === 'cloudcompy'
-                const isDisabled = isCoupled
-                return (
-                  <div key={stageId}
-                    style={{ display: 'flex', alignItems: 'center', padding: '8px', background: 'rgba(255,255,255,0.05)', marginBottom: '4px', borderRadius: '6px' }}
-                  >
-                    <span style={{ marginRight: '10px', color: '#555', fontSize: '12px', width: '16px', textAlign: 'center' }}>•</span>
-                    <label className="pipeline-stage-toggle" style={{ margin: 0, padding: 0, flex: 1, background: 'transparent', opacity: isDisabled ? 0.5 : 1 }}>
-                      <input
-                        type="checkbox"
-                        checked={pipelineEnabled[stageId] ?? true}
-                        disabled={isDisabled}
-                        onChange={e => {
-                          const checked = e.target.checked
-                          setPipelineEnabled(prev => {
-                            const next = { ...prev, [stageId]: checked }
-                            // Couple: DA3 on → CloudCompy on
-                            if (stageId === 'da3') next.cloudcompy = checked
-                            return next
-                          })
-                        }}
-                      />
-                      <span className="pipeline-stage-check-icon">{def?.icon}</span>
-                      <span>{def?.label || stageId}</span>
-                      {isCoupled && <span style={{ fontSize: '10px', color: '#666', marginLeft: '8px' }}>(auto with DA3)</span>}
-                    </label>
-                  </div>
-                )
-              })}
-              <label className="pipeline-replace-toggle">
-                <input
-                  type="checkbox"
-                  checked={pipelineReplace}
-                  onChange={e => setPipelineReplace(e.target.checked)}
-                />
-                <span>Replace existing outputs</span>
-              </label>
-            </div>
-            <div className="pipeline-dialog-actions">
-              <button className="pipeline-btn-cancel" onClick={() => setPipelineDialogOpen(false)}>Cancel</button>
-              <button className="pipeline-btn-run" onClick={handlePipelineRun}>▶ Run Pipeline</button>
+      {
+        pipelineDialogOpen && (
+          <div className="pipeline-dialog-backdrop" onClick={() => setPipelineDialogOpen(false)}>
+            <div className="pipeline-dialog" onClick={e => e.stopPropagation()}>
+              <h3>Configure Pipeline</h3>
+              <p className="pipeline-dialog-session">Session: {pipelineDialogSession}</p>
+              <div className="pipeline-dialog-stages">
+                <p style={{ fontSize: '11px', color: '#888', marginBottom: '10px' }}>Pipeline stages (fixed order):</p>
+                {pipelineOrder.map((stageId) => {
+                  const def = STAGE_DEF[stageId]
+                  // CloudCompy is always coupled with DA3 — can't be toggled independently
+                  const isCoupled = stageId === 'cloudcompy'
+                  const isDisabled = isCoupled
+                  return (
+                    <div key={stageId}
+                      style={{ display: 'flex', alignItems: 'center', padding: '8px', background: 'rgba(255,255,255,0.05)', marginBottom: '4px', borderRadius: '6px' }}
+                    >
+                      <span style={{ marginRight: '10px', color: '#555', fontSize: '12px', width: '16px', textAlign: 'center' }}>•</span>
+                      <label className="pipeline-stage-toggle" style={{ margin: 0, padding: 0, flex: 1, background: 'transparent', opacity: isDisabled ? 0.5 : 1 }}>
+                        <input
+                          type="checkbox"
+                          checked={pipelineEnabled[stageId] ?? true}
+                          disabled={isDisabled}
+                          onChange={e => {
+                            const checked = e.target.checked
+                            setPipelineEnabled(prev => {
+                              const next = { ...prev, [stageId]: checked }
+                              // Couple: DA3 on → CloudCompy on
+                              if (stageId === 'da3') next.cloudcompy = checked
+                              return next
+                            })
+                          }}
+                        />
+                        <span className="pipeline-stage-check-icon">{def?.icon}</span>
+                        <span>{def?.label || stageId}</span>
+                        {isCoupled && <span style={{ fontSize: '10px', color: '#666', marginLeft: '8px' }}>(auto with DA3)</span>}
+                      </label>
+                    </div>
+                  )
+                })}
+                <label className="pipeline-replace-toggle">
+                  <input
+                    type="checkbox"
+                    checked={pipelineReplace}
+                    onChange={e => setPipelineReplace(e.target.checked)}
+                  />
+                  <span>Replace existing outputs</span>
+                </label>
+              </div>
+              <div className="pipeline-dialog-actions">
+                <button className="pipeline-btn-cancel" onClick={() => setPipelineDialogOpen(false)}>Cancel</button>
+                <button className="pipeline-btn-run" onClick={handlePipelineRun}>▶ Run Pipeline</button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )
+      }
 
       {/* ── Status Bar ── */}
       <div className="statusbar">
@@ -1061,52 +1094,56 @@ function App() {
       {adminOpen && <AdminPage onClose={() => setAdminOpen(false)} />}
 
       {/* WebRTC Call Overlay */}
-      {(callTarget || incomingCall) && user && (
-        <WebRTCCall
-          wsRef={teamWsRef}
-          userId={user.id}
-          callTarget={callTarget}
-          incomingCall={incomingCall}
-          onClose={() => { setCallTarget(null); setIncomingCall(null) }}
-          onIncomingHandled={() => setIncomingCall(null)}
-        />
-      )}
+      {
+        (callTarget || incomingCall) && user && (
+          <WebRTCCall
+            wsRef={teamWsRef}
+            userId={user.id}
+            callTarget={callTarget}
+            incomingCall={incomingCall}
+            onClose={() => { setCallTarget(null); setIncomingCall(null) }}
+            onIncomingHandled={() => setIncomingCall(null)}
+          />
+        )
+      }
 
       {/* Segmentation Manager Overlay */}
-      {interactiveSessionId && (
-        <SegmentationManager
-          sessionId={interactiveSessionId}
-          onClose={() => setInteractiveSessionId(null)}
-          onUpdate={async () => {
-            if (!activeSession) return
-            try {
-              const res = await fetch(`/api/sessions/${activeSession}/segmentation`)
-              if (res.ok) {
-                const data = await res.json()
-                if (Array.isArray(data.instances)) {
-                  setSegments(data.instances.map((inst: any) => ({
-                    key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
-                    label: `${inst.label}`,
-                    color: inst.color || '#00d4ff',
-                    totalPoints: inst.total_points || 0,
-                    visible: true,
-                    excluded: inst.excluded || false,
-                  })))
+      {
+        interactiveSessionId && (
+          <SegmentationManager
+            sessionId={interactiveSessionId}
+            onClose={() => setInteractiveSessionId(null)}
+            onUpdate={async () => {
+              if (!activeSession) return
+              try {
+                const res = await fetch(`/api/sessions/${activeSession}/segmentation`)
+                if (res.ok) {
+                  const data = await res.json()
+                  if (Array.isArray(data.instances)) {
+                    setSegments(data.instances.map((inst: any) => ({
+                      key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
+                      label: `${inst.label}`,
+                      color: inst.color || '#00d4ff',
+                      totalPoints: inst.total_points || 0,
+                      visible: true,
+                      excluded: inst.excluded || false,
+                    })))
+                  }
                 }
+              } catch { /* silent */ }
+            }}
+            onSuccess={(newInstances) => {
+              setStatusMessage(`Successfully propagated ${newInstances.length} instances.`)
+              setInteractiveSessionId(null)
+              // Refresh segments in sidebar
+              if (activeSession) {
+                viewportRef.current?.sendCommand({ type: 'refresh_segments', session_id: activeSession })
               }
-            } catch { /* silent */ }
-          }}
-          onSuccess={(newInstances) => {
-            setStatusMessage(`Successfully propagated ${newInstances.length} instances.`)
-            setInteractiveSessionId(null)
-            // Refresh segments in sidebar
-            if (activeSession) {
-              viewportRef.current?.sendCommand({ type: 'refresh_segments', session_id: activeSession })
-            }
-          }}
-        />
-      )}
-    </div>
+            }}
+          />
+        )
+      }
+    </div >
   )
 }
 
