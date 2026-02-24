@@ -7,6 +7,8 @@ import './App.css'
 import Viewport, { ViewportHandle, SegmentInstance } from './components/Viewport'
 import TeamPanel from './components/TeamPanel'
 import WebRTCCall from './components/WebRTCCall'
+import BIMNavigator from './components/BIMNavigator'
+import type { IFCLoadResult } from './components/IFCLoader'
 import { useAuth } from './context/AuthContext'
 import LoginPage from './pages/LoginPage'
 import AdminPage from './pages/AdminPage'
@@ -20,6 +22,8 @@ interface SessionInfo {
   chunkCount: number
   hasCloud: boolean
   hasSegments: boolean
+  hasBim: boolean
+  bimCount: number
   cloudSizeMb: number
 }
 
@@ -50,7 +54,8 @@ function App() {
   const [activeTool, setActiveTool] = useState<Tool>('navigate')
   const [connected, setConnected] = useState(false)
   const [serverAlive, setServerAlive] = useState(false)
-  const [activePanel, setActivePanel] = useState<'sessions' | 'tools' | 'segments' | 'team' | null>('sessions')
+  const [activePanel, setActivePanel] = useState<'sessions' | 'tools' | 'segments' | 'bim' | 'team' | null>('sessions')
+  const [bimModels, setBimModels] = useState<IFCLoadResult[]>([])
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [pointSize, setPointSize] = useState(2.0)
   const [showAxes, setShowAxes] = useState(true)
@@ -130,6 +135,7 @@ function App() {
       setActiveSession(null)
       setSelectedSession(null)
       setSegments([])
+      setBimModels([])
       setPointCount(0)
       setStatusMessage('Server disconnected')
       // Dispose Potree data from GPU to free memory and stop LOD updates
@@ -211,6 +217,8 @@ function App() {
         chunkCount: s.chunk_count || 0,
         hasCloud: s.has_cloud || false,
         hasSegments: s.has_segments || false,
+        hasBim: s.has_bim || false,
+        bimCount: s.bim_count || 0,
         cloudSizeMb: s.cloud_size_mb || 0,
       }))
       setSessions(sessionList)
@@ -231,6 +239,7 @@ function App() {
   const handleSessionLoad = useCallback((sessionId: string) => {
     // Clear React state from previous session
     setSegments([])
+    setBimModels([])
     setPointCount(0)
     setStatusMessage('')
     setActiveSession(sessionId)
@@ -297,6 +306,7 @@ function App() {
     viewportRef.current?.sendCommand({ type: 'cleared' })
     setActiveSession(null)
     setSegments([])
+    setBimModels([])
     setPointCount(0)
     setStatusMessage('')
   }, [])
@@ -356,6 +366,7 @@ function App() {
                     setActiveSession(null)
                     setSelectedSession(null)
                     setSegments([])
+                    setBimModels([])
                     setPointCount(0)
                     setActiveTool('navigate')
                     setStatusMessage('')
@@ -517,6 +528,7 @@ function App() {
                   setActiveSession(null)
                   setSelectedSession(null)
                   setSegments([])
+                  setBimModels([])
                   setPointCount(0)
                   setActiveTool('navigate')
                   setStatusMessage('')
@@ -544,6 +556,11 @@ function App() {
           onClick={() => togglePanel('segments')} title="Segments" disabled={segments.length === 0}>
           🏷️
           {segments.length > 0 && <span className="activity-badge">{segments.length}</span>}
+        </button>
+        <button className={`activity-btn ${activePanel === 'bim' ? 'active' : ''}`}
+          onClick={() => togglePanel('bim')} title="BIM Navigator" disabled={!hasSession}>
+          🏗️
+          {bimModels.length > 0 && <span className="activity-badge">{bimModels.length}</span>}
         </button>
         <button className={`activity-btn ${activePanel === 'team' ? 'active' : ''}`}
           onClick={() => togglePanel('team')} title="Team">
@@ -590,6 +607,7 @@ function App() {
                         <div className="session-meta">
                           {s.frameCount} frames{s.hasCloud && ` · ${s.cloudSizeMb}MB`}
                           {s.hasSegments && ' · 🏷️'}
+                          {s.hasBim && ` · 🏗️${s.bimCount > 1 ? ` (${s.bimCount})` : ''}`}
                           {activeSession === s.id && ' · ⚡ loaded'}
                         </div>
                         <div className="session-actions">
@@ -757,6 +775,68 @@ function App() {
             </>
           )}
 
+          {/* BIM Navigator Panel */}
+          {activePanel === 'bim' && (
+            <BIMNavigator
+              models={bimModels}
+              userRole={user?.role || 'viewer'}
+              onToggleVisibility={(meshNames, visible) => viewportRef.current?.toggleBIMVisibility(meshNames, visible)}
+              onSelectElement={(meshNames) => viewportRef.current?.highlightBIMElement(meshNames)}
+              onUploadIFC={async (file) => {
+                if (!activeSession || !token) return
+                const formData = new FormData()
+                formData.append('file', file)
+                try {
+                  const res = await fetch(`/api/sessions/${activeSession}/bim/upload`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}` },
+                    body: formData,
+                  })
+                  if (res.ok) {
+                    setStatusMessage(`BIM uploaded: ${file.name}, loading...`)
+                    // Load the uploaded IFC into the 3D viewer
+                    const { loadIFC } = await import('./components/IFCLoader')
+                    const url = `/api/sessions/${activeSession}/bim/${file.name}`
+                    const result = await loadIFC(url, file.name)
+                    // Add to 3D scene
+                    viewportRef.current?.addBIMGroup(result.group)
+                    // Update navigator tree
+                    setBimModels(prev => [...prev, result])
+                    setStatusMessage(`BIM loaded: ${file.name} (${result.group.children.length} elements)`)
+                    // Refresh session list to update has_bim indicator
+                    connectToServer()
+                  } else {
+                    setStatusMessage(`Upload failed: ${(await res.json()).detail}`)
+                  }
+                } catch (err: any) {
+                  setStatusMessage(`Upload error: ${err.message}`)
+                }
+              }}
+              onDeleteIFC={async (filename) => {
+                if (!activeSession || !token) return
+                if (!confirm(`Delete ${filename}?`)) return
+                try {
+                  const res = await fetch(`/api/sessions/${activeSession}/bim/${filename}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${token}` },
+                  })
+                  if (res.ok) {
+                    setStatusMessage(`BIM deleted: ${filename}`)
+                    // Remove 3D meshes from the scene
+                    viewportRef.current?.removeBIMGroup(filename)
+                    // Remove from navigator tree
+                    setBimModels(prev => prev.filter(m => m.filename !== filename))
+                    connectToServer()
+                  } else {
+                    setStatusMessage(`Delete failed: ${(await res.json()).detail}`)
+                  }
+                } catch (err: any) {
+                  setStatusMessage(`Delete error: ${err.message}`)
+                }
+              }}
+            />
+          )}
+
           {/* Team Panel */}
           {activePanel === 'team' && (
             <TeamPanel
@@ -814,6 +894,7 @@ function App() {
             onStatusMessage={setStatusMessage}
             onSegments={setSegments}
             onPipelineProgress={handlePipelineProgress}
+            onBimLoaded={(models) => { setBimModels(models); if (models.length > 0) setActivePanel('bim') }}
           />
 
           {/* Welcome screen — shown when no session */}

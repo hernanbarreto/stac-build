@@ -23,7 +23,7 @@ class _HealthCheckFilter(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
 
 from typing import Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -901,6 +901,20 @@ async def serve_potree_files(session_id: str, file_path: str):
         headers={"Cache-Control": "public, max-age=3600"},  # Cache 1h
     )
 
+@app.get("/api/sessions/{session_id}/bim/{filename}")
+async def serve_bim_file(session_id: str, filename: str):
+    """Serve BIM GLB/JSON files for a session."""
+    from fastapi.responses import FileResponse
+    full_path = SCANS_DIR / session_id / filename
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"BIM file not found: {filename}")
+    content_type = "model/gltf-binary" if filename.endswith(".glb") else "application/json"
+    return FileResponse(
+        str(full_path),
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
 # Mount auth routes
 from routes_auth import router as auth_router
 app.include_router(auth_router)
@@ -1096,6 +1110,10 @@ async def get_sessions(
                 if has_cloud:
                     cloud_size_mb = round((output_dir / "cleaned_cloud.ply").stat().st_size / (1024*1024), 1)
                 
+                # BIM / IFC files
+                ifc_files = list(d.glob("*.ifc"))
+                has_bim = len(ifc_files) > 0
+                
                 sessions.append({
                     "id": d.name,
                     "date": d.name,
@@ -1104,6 +1122,8 @@ async def get_sessions(
                     "has_cloud": has_cloud,
                     "has_segments": has_segments,
                     "cloud_size_mb": cloud_size_mb,
+                    "has_bim": has_bim,
+                    "bim_count": len(ifc_files),
                 })
         return sessions
     except Exception as e:
@@ -1575,6 +1595,72 @@ async def save_alignment(session_id: str, request: Request):
     return {"ok": True, "scale": s}
 
 
+# ── BIM / IFC file management ──────────────────────────────────
+
+@app.post("/api/sessions/{session_id}/bim/upload")
+async def upload_bim(
+    session_id: str,
+    file: UploadFile = File(...),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Upload an IFC file to a session. Admin/manager only."""
+    from auth import decode_token
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = decode_token(credentials.credentials)
+    role = payload.get("role", "viewer")
+    if role not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    if not file.filename or not file.filename.lower().endswith(".ifc"):
+        raise HTTPException(status_code=400, detail="Only .ifc files are accepted")
+
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    session_dir = scans_dir / session_id
+    if not session_dir.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Save file
+    dest = session_dir / file.filename
+    content = await file.read()
+    dest.write_bytes(content)
+    print(f"[BIM] ✅ Uploaded {file.filename} ({len(content)/1024:.0f} KB) to {session_id}")
+
+    # Return updated list of IFC files
+    ifc_files = [f.name for f in sorted(session_dir.glob("*.ifc"))]
+    return {"ok": True, "filename": file.filename, "ifc_files": ifc_files}
+
+
+@app.delete("/api/sessions/{session_id}/bim/{filename}")
+async def delete_bim(
+    session_id: str,
+    filename: str,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Delete an IFC file from a session. Admin/manager only."""
+    from auth import decode_token
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = decode_token(credentials.credentials)
+    role = payload.get("role", "viewer")
+    if role not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    if not filename.lower().endswith(".ifc"):
+        raise HTTPException(status_code=400, detail="Only .ifc files can be deleted")
+
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    filepath = scans_dir / session_id / filename
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    filepath.unlink()
+    print(f"[BIM] 🗑️ Deleted {filename} from {session_id}")
+
+    # Return updated list of IFC files
+    session_dir = scans_dir / session_id
+    ifc_files = [f.name for f in sorted(session_dir.glob("*.ifc"))]
+    return {"ok": True, "ifc_files": ifc_files}
 @app.post("/api/segmentation/propagate")
 async def propagate_interactive_segmentation(request: Request):
     """
@@ -2935,9 +3021,12 @@ async def viewer_websocket(websocket: WebSocket):
                                             print(f"[Viewer] No floor plane detected")
                                     except Exception as e:
                                         print(f"[Viewer] ⚠️ Floor alignment fallback failed: {e}")
-                            return potree_meta, floor_transform_4x4
+                            # Detect IFC files in session directory
+                            session_path = SCANS_DIR / session_id
+                            ifc_files = [f.name for f in sorted(session_path.glob('*.ifc'))]
+                            return potree_meta, floor_transform_4x4, ifc_files
                         
-                        potree_meta, floor_transform_4x4 = await loop.run_in_executor(None, _load_metadata)
+                        potree_meta, floor_transform_4x4, ifc_files = await loop.run_in_executor(None, _load_metadata)
                         
                         msg = {
                             "type": "potree_ready",
@@ -2947,6 +3036,8 @@ async def viewer_websocket(websocket: WebSocket):
                         }
                         if floor_transform_4x4:
                             msg["floorTransform"] = floor_transform_4x4
+                        if ifc_files:
+                            msg["bimFiles"] = ifc_files
                         await websocket.send_text(json.dumps(msg))
                         print(f"[Viewer] ✅ Sent potree_ready for {session_id} ({potree_meta.get('points', 0):,} pts)")
                         
@@ -2958,6 +3049,19 @@ async def viewer_websocket(websocket: WebSocket):
                         if seg_data.get("instances"):
                             await websocket.send_text(json.dumps(seg_data))
                             print(f"[Viewer] Sent segmentation ({len(seg_data['instances'])} instances)")
+                        
+                        # Notify frontend about BIM files (raw IFC — parsed on frontend by web-ifc)
+                        if ifc_files:
+                            bim_models = [
+                                {'name': name, 'url': f'/api/sessions/{session_id}/bim/{name}'}
+                                for name in ifc_files
+                            ]
+                            await websocket.send_text(json.dumps({
+                                'type': 'bim_ready',
+                                'session_id': session_id,
+                                'models': bim_models,
+                            }))
+                            print(f"[Viewer] ✅ Sent bim_ready ({len(bim_models)} IFC files)")
                     else:
                         await websocket.send_text(json.dumps({"type": "error", "message": "Failed to build cleaned cloud"}))
 

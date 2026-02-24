@@ -22,6 +22,7 @@ interface ViewportProps {
     onStatusMessage?: (msg: string) => void
     onSegments?: (segments: SegmentInstance[]) => void
     onPipelineProgress?: (data: Record<string, unknown>) => void
+    onBimLoaded?: (models: import('./IFCLoader').IFCLoadResult[]) => void
 }
 
 export interface SegmentInstance {
@@ -36,6 +37,10 @@ export interface SegmentInstance {
 export interface ViewportHandle {
     sendCommand: (cmd: Record<string, unknown>) => void
     toggleOBB: (key: string, visible: boolean) => void
+    toggleBIMVisibility: (meshNames: string[], visible: boolean) => void
+    highlightBIMElement: (meshNames: string[]) => void
+    addBIMGroup: (group: THREE.Group) => void
+    removeBIMGroup: (filename: string) => void
     clearMeasurements: () => void
     resetSectionBox: () => void
     resetCamera: () => void
@@ -167,7 +172,7 @@ interface Measurement {
 }
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, activeSession, activeTool, showAxes = true, showGrid = true, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress },
+    { pointSize, activeSession, activeTool, showAxes = true, showGrid = true, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -183,6 +188,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const geometryRef = useRef<THREE.BufferGeometry | null>(null)
     const obbGroupRef = useRef<THREE.Group | null>(null)
     const obbMapRef = useRef<Map<string, THREE.Object3D>>(new Map())
+    const bimGroupRef = useRef<THREE.Group | null>(null)
 
     // Measurement state
     const measureGroupRef = useRef<THREE.Group | null>(null)
@@ -1039,6 +1045,60 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const mesh = obbMapRef.current.get(key)
             if (mesh) mesh.visible = visible
         },
+        toggleBIMVisibility: (meshNames: string[], visible: boolean) => {
+            const bimGroup = bimGroupRef.current
+            if (!bimGroup) return
+            bimGroup.traverse((child) => {
+                if (meshNames.includes(child.name)) {
+                    child.visible = visible
+                }
+            })
+        },
+        highlightBIMElement: (meshNames: string[]) => {
+            const bimGroup = bimGroupRef.current
+            if (!bimGroup) return
+            // Reset all BIM materials, then highlight selected
+            bimGroup.traverse((child) => {
+                if (child instanceof THREE.Mesh && child.userData?.expressID) {
+                    const mat = child.material as any
+                    if (mat._originalEmissive !== undefined) {
+                        mat.emissive.setHex(mat._originalEmissive)
+                    }
+                }
+            })
+            bimGroup.traverse((child) => {
+                if (child instanceof THREE.Mesh && meshNames.includes(child.name)) {
+                    const mat = child.material as any
+                    if (mat._originalEmissive === undefined) {
+                        mat._originalEmissive = mat.emissive.getHex()
+                    }
+                    mat.emissive.setHex(0x335599)
+                }
+            })
+        },
+        addBIMGroup: (group: THREE.Group) => {
+            const bimGroup = bimGroupRef.current
+            if (bimGroup) bimGroup.add(group)
+        },
+        removeBIMGroup: (filename: string) => {
+            const bimGroup = bimGroupRef.current
+            if (!bimGroup) return
+            const groupName = `ifc_${filename}`
+            const toRemove = bimGroup.children.filter(c => c.name === groupName)
+            for (const child of toRemove) {
+                child.traverse((obj) => {
+                    if (obj instanceof THREE.Mesh) {
+                        obj.geometry?.dispose()
+                        if (obj.material) {
+                            if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose())
+                            else obj.material.dispose()
+                        }
+                    }
+                })
+                bimGroup.remove(child)
+            }
+            console.log(`[Viewport] Removed BIM group: ${groupName} (${toRemove.length} groups)`)
+        },
         clearMeasurements: clearAllMeasurements,
         resetSectionBox: destroySectionBox,
         resetCamera: () => {
@@ -1078,11 +1138,27 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         scene.fog = new THREE.FogExp2(0x0d1117, 0.002)
         sceneRef.current = scene
 
+        // Lights for BIM/mesh rendering (PBR materials need lights)
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
+        scene.add(ambientLight)
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8)
+        dirLight.position.set(10, 20, 10)
+        scene.add(dirLight)
+        const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.3)
+        dirLight2.position.set(-10, -5, -10)
+        scene.add(dirLight2)
+
         // OBB group for segmentation bounding boxes
         const obbGroup = new THREE.Group()
         obbGroup.name = 'obbGroup'
         scene.add(obbGroup)
         obbGroupRef.current = obbGroup
+
+        // BIM group for IFC models
+        const bimGroup = new THREE.Group()
+        bimGroup.name = 'bimGroup'
+        scene.add(bimGroup)
+        bimGroupRef.current = bimGroup
 
         // Measurement overlay group
         const measureGroup = new THREE.Group()
@@ -1397,6 +1473,21 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             group.matrixAutoUpdate = true
             group.matrixWorldNeedsUpdate = true
         }
+        // Clear BIM models
+        const bimGroup = bimGroupRef.current
+        if (bimGroup) {
+            while (bimGroup.children.length > 0) {
+                const child = bimGroup.children[0]
+                bimGroup.remove(child)
+                child.traverse((obj: any) => {
+                    if (obj.geometry) obj.geometry.dispose()
+                    if (obj.material) {
+                        if (Array.isArray(obj.material)) obj.material.forEach((m: any) => m.dispose())
+                        else obj.material.dispose()
+                    }
+                })
+            }
+        }
     }, [onPointCount])
 
     // Handle binary point cloud data from server
@@ -1548,7 +1639,44 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         if (msg.type === 'pipeline_progress' && onPipelineProgress) {
             onPipelineProgress(msg)
         }
-    }, [onStatusMessage, onSegments, onPipelineProgress, onPointCount])
+        // ── BIM: load IFC models via web-ifc ──
+        if (msg.type === 'bim_ready') {
+            const models = msg.models as Array<{ name: string; url: string }>
+            if (!models || models.length === 0) return
+            const bimGroup = bimGroupRef.current
+            if (!bimGroup) return
+
+            import('./IFCLoader').then(({ loadIFC }) => {
+                const loadedResults: import('./IFCLoader').IFCLoadResult[] = []
+                let remaining = models.length
+                for (const model of models) {
+                    console.log(`[Viewport] Loading BIM: ${model.name}`)
+                    if (onStatusMessage) onStatusMessage(`Loading BIM: ${model.name}...`)
+                    loadIFC(model.url, model.name).then((result) => {
+                        bimGroup.add(result.group)
+                        const box = new THREE.Box3().setFromObject(result.group)
+                        const size = box.getSize(new THREE.Vector3())
+                        const center = box.getCenter(new THREE.Vector3())
+                        console.log(`[Viewport] BIM bbox: size=(${size.x.toFixed(2)}, ${size.y.toFixed(2)}, ${size.z.toFixed(2)}) center=(${center.x.toFixed(2)}, ${center.y.toFixed(2)}, ${center.z.toFixed(2)})`)
+                        console.log(`[Viewport] ✅ BIM loaded: ${model.name} (${result.group.children.length} elements, ${result.hierarchy.length} hierarchy roots)`)
+                        if (onStatusMessage) onStatusMessage(`BIM loaded: ${model.name} (${result.group.children.length} elements)`)
+                        loadedResults.push(result)
+                        remaining--
+                        if (remaining === 0 && onBimLoaded) {
+                            onBimLoaded(loadedResults)
+                        }
+                    }).catch((err) => {
+                        console.error(`[Viewport] BIM load error: ${model.name}`, err)
+                        if (onStatusMessage) onStatusMessage(`BIM error: ${err.message}`)
+                        remaining--
+                        if (remaining === 0 && onBimLoaded && loadedResults.length > 0) {
+                            onBimLoaded(loadedResults)
+                        }
+                    })
+                }
+            })
+        }
+    }, [onStatusMessage, onSegments, onPipelineProgress, onPointCount, onBimLoaded])
 
     // Render OBB wireframe boxes for segmentation instances
     const renderOBBs = useCallback((instances: Array<Record<string, unknown>>) => {
