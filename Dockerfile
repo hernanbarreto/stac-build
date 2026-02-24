@@ -131,6 +131,7 @@ RUN python3 -c "import numba; print('✅ numba:', numba.__version__)" && \
     python3 -c "import pypose; print('✅ pypose:', pypose.__version__)" && \
     python3 -c "import e3nn; print('✅ e3nn:', e3nn.__version__)" && \
     python3 -c "from sam3.model_builder import build_sam3_video_predictor; print('✅ SAM3 importable')" && \
+    python3 -c "import ifcopenshell; print('✅ ifcopenshell:', ifcopenshell.version)" && \
     echo '✅ All critical dependencies verified'
 
 # ── CloudComPy runtime setup ────────────────────────────────────────

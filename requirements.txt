@@ -73,6 +73,12 @@ scipy>=1.10
 scikit-learn>=1.3
 laspy>=2.5
 
+# ── BIM Integration ──────────────────────────────────────────────────
+ifcopenshell>=0.7
+pygltflib>=1.16
+reportlab>=4.0
+openpyxl>=3.1
+
 # ── Utilities ────────────────────────────────────────────────────────
 requests>=2.31
 typer>=0.9.0
