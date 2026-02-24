@@ -1514,6 +1514,65 @@ async def add_interactive_prompt(request: Request):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/sessions/{session_id}/alignment")
+async def save_alignment(session_id: str, request: Request):
+    """Save a new floor alignment transform from the 3D viewer gizmo."""
+    body = await request.json()
+    transform = body.get("transform")
+
+    if not transform or len(transform) != 16:
+        raise HTTPException(status_code=400, detail="Missing or invalid transform (need 16 floats)")
+
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    output_dir = scans_dir / session_id / "output"
+    if not output_dir.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    import numpy as np
+
+    # Parse column-major 4x4 matrix (Three.js format)
+    M = np.array(transform, dtype=np.float64).reshape(4, 4, order='F')
+
+    # Decompose into s, R, t
+    # M[:3,:3] = s * R, M[:3,3] = t
+    upper = M[:3, :3]
+    s = float(np.linalg.det(upper) ** (1.0/3.0))
+    if abs(s) < 1e-10:
+        raise HTTPException(status_code=400, detail="Degenerate transform (scale ≈ 0)")
+
+    R = upper / s
+    t = M[:3, 3]
+
+    # Ensure R is a proper rotation (orthonormalize via SVD)
+    U, _, Vt = np.linalg.svd(R)
+    R = U @ Vt
+    if np.linalg.det(R) < 0:
+        R = -R
+
+    # Save to floor_transform.npz
+    transform_path = output_dir / "floor_transform.npz"
+    np.savez(transform_path, s=np.array(s), R=R, t=t)
+    print(f"[Alignment] ✅ Saved floor_transform.npz for {session_id}")
+    print(f"[Alignment]   s={s:.6f}")
+    print(f"[Alignment]   R=\n{R}")
+    print(f"[Alignment]   t={t}")
+    # Verify round-trip: reconstruct M and compare
+    M_check = np.eye(4)
+    M_check[:3, :3] = s * R
+    M_check[:3, 3] = t
+    print(f"[Alignment]   Original M:\n{M}")
+    print(f"[Alignment]   Reconstructed M:\n{M_check}")
+    print(f"[Alignment]   Max diff: {np.max(np.abs(M - M_check)):.8f}")
+
+    # segmentation_result.json cache will auto-invalidate on next load
+    # (apply_segmentation_to_cloud checks if floor_transform.npz is newer)
+    seg_result_path = output_dir / "segmentation_result.json"
+    if seg_result_path.exists():
+        print(f"[Alignment] ℹ️ segmentation_result.json will auto-invalidate on next session load")
+
+    return {"ok": True, "scale": s}
+
+
 @app.post("/api/segmentation/propagate")
 async def propagate_interactive_segmentation(request: Request):
     """

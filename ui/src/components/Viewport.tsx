@@ -3,12 +3,13 @@
  * Three.js-based point cloud renderer
  * Hernán Barreto — Ingerop IN3
  */
-import { useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
+import { useRef, useEffect, useCallback, forwardRef, useImperativeHandle, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
 import { PotreeOctreeLoader } from './PotreeLoader'
 
-type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box'
+type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align'
 
 interface ViewportProps {
     pointSize: number
@@ -199,6 +200,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const gridRef = useRef<THREE.GridHelper | null>(null)
     const axesRef = useRef<THREE.Group | null>(null)
 
+    // Alignment gizmo state
+    const transformControlsRef = useRef<TransformControls | null>(null)
+    const alignPivotRef = useRef<THREE.Group | null>(null)
+    const alignSavedRef = useRef(false)  // tracks if alignment was saved during this session
+    const [alignMode, setAlignMode] = useState<'translate' | 'rotate'>('rotate')
+    const [alignDirty, setAlignDirty] = useState(false)
+
     // Keep activeToolRef in sync with prop
     useEffect(() => { activeToolRef.current = activeTool }, [activeTool])
 
@@ -210,7 +218,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => {
         const controls = controlsRef.current
         if (!controls) return
-        if (activeTool === 'measure-distance' || activeTool === 'measure-angle' || activeTool === 'section-box') {
+        if (activeTool === 'measure-distance' || activeTool === 'measure-angle' || activeTool === 'section-box' || activeTool === 'align') {
             controls.mouseButtons.LEFT = undefined as unknown as THREE.MOUSE
         } else {
             controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE
@@ -844,6 +852,180 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
     }, [activeTool, createSectionBox])
 
+    // ── Alignment gizmo effect ──────────────────────────────────
+    useEffect(() => {
+        const scene = sceneRef.current
+        const camera = cameraRef.current
+        const renderer = rendererRef.current
+        const controls = controlsRef.current
+        if (!scene || !camera || !renderer || !controls) return
+
+        if (activeTool === 'align') {
+            // Create a pivot at the octree center
+            const loader = potreeLoaderRef.current
+            const obbGroup = obbGroupRef.current
+            if (!loader) return
+
+            const pivot = new THREE.Group()
+            pivot.name = 'alignPivot'
+
+            // Compute cloud center for pivot position
+            const bbox = loader.getBoundingBox()
+            if (bbox) {
+                // If there's a floor transform, apply it to bbox
+                if (floorTransformRef.current) {
+                    bbox.applyMatrix4(floorTransformRef.current)
+                }
+                const center = new THREE.Vector3()
+                bbox.getCenter(center)
+                pivot.position.copy(center)
+            }
+
+            scene.add(pivot)
+            alignPivotRef.current = pivot
+
+            // Create TransformControls
+            const tc = new TransformControls(camera, renderer.domElement)
+            tc.attach(pivot)
+            tc.setMode('rotate')
+            tc.setSize(1.2)
+            scene.add(tc.getHelper())
+            transformControlsRef.current = tc
+
+            // Disable orbit while dragging gizmo
+            tc.addEventListener('dragging-changed', (event: any) => {
+                controls.enabled = !event.value
+            })
+
+            // ── Simulated parenting: compute relative matrices ──
+            // Instead of complex pivot delta math, we compute how each group
+            // is positioned RELATIVE to the pivot. Then on each objectChange,
+            // we just apply: groupMatrix = pivotWorldMatrix * relativeMatrix
+            // This is what Three.js parenting does, without actually reparenting.
+            const pivotInitialM = new THREE.Matrix4().compose(pivot.position, pivot.quaternion, pivot.scale)
+            const pivotInitialInv = pivotInitialM.clone().invert()
+
+            const octreeGroup = loader.getOctreeGroup()
+            const octreeInitialM = floorTransformRef.current ? floorTransformRef.current.clone() : new THREE.Matrix4()
+            const octreeRelative = pivotInitialInv.clone().multiply(octreeInitialM)
+
+            const obbInitialM = obbGroup ? obbGroup.matrix.clone() : new THREE.Matrix4()
+            const obbRelative = pivotInitialInv.clone().multiply(obbInitialM)
+
+            // Track changes
+            tc.addEventListener('objectChange', () => {
+                setAlignDirty(true)
+                // Compute current pivot world matrix
+                const pivotWorld = new THREE.Matrix4().compose(pivot.position, pivot.quaternion, pivot.scale)
+
+                // Apply to octreeGroup: pivotWorld * octreeRelative
+                if (octreeGroup) {
+                    octreeGroup.matrix.copy(pivotWorld.clone().multiply(octreeRelative))
+                    octreeGroup.matrixAutoUpdate = false
+                    octreeGroup.matrixWorldNeedsUpdate = true
+                }
+                // Apply to obbGroup: pivotWorld * obbRelative
+                if (obbGroup) {
+                    obbGroup.matrix.copy(pivotWorld.clone().multiply(obbRelative))
+                    obbGroup.matrixAutoUpdate = false
+                    obbGroup.matrixWorldNeedsUpdate = true
+                }
+            })
+
+            setAlignDirty(false)
+            alignSavedRef.current = false
+            if (onStatusMessage) onStatusMessage('⛶ Align mode: drag gizmo to rotate/translate')
+
+            return () => {
+                // Cleanup gizmo
+                scene.remove(tc.getHelper())
+                tc.detach()
+                tc.dispose()
+                transformControlsRef.current = null
+
+                // Restore octreeGroup from floorTransformRef (which is updated on save)
+                const octreeGroup = loader.getOctreeGroup()
+                if (octreeGroup) {
+                    if (floorTransformRef.current) {
+                        // Use setTransform to properly decompose into pos/quat/scale
+                        loader.setTransform(floorTransformRef.current.toArray())
+                    } else {
+                        octreeGroup.matrix.identity()
+                        octreeGroup.matrixAutoUpdate = true
+                    }
+                    octreeGroup.matrixWorldNeedsUpdate = true
+                }
+                // If alignment was saved, KEEP the OBB group transform
+                // (OBBs are in old display-space and need the delta to match new cloud)
+                // If NOT saved (user cancelled), reset OBBs to identity
+                if (obbGroup && !alignSavedRef.current) {
+                    obbGroup.matrix.identity()
+                    obbGroup.matrixAutoUpdate = true
+                    obbGroup.matrixWorldNeedsUpdate = true
+                }
+                scene.remove(pivot)
+                alignPivotRef.current = null
+                setAlignDirty(false)
+                controls.enabled = true
+            }
+        }
+    }, [activeTool, onStatusMessage])
+
+    // Sync gizmo mode with alignMode state
+    useEffect(() => {
+        if (transformControlsRef.current) {
+            transformControlsRef.current.setMode(alignMode)
+        }
+    }, [alignMode])
+
+    // Save alignment function — NO session reload, instant
+    const saveAlignment = useCallback(async () => {
+        const loader = potreeLoaderRef.current
+        if (!loader) return
+
+        // Read the octreeGroup's current matrix — already has correct composed transform
+        const octreeGroup = loader.getOctreeGroup()
+        octreeGroup.updateMatrixWorld(true)
+        const composedM = octreeGroup.matrixWorld.clone()
+        const arr = composedM.toArray() // column-major
+
+        try {
+            if (onStatusMessage) onStatusMessage('💾 Saving alignment...')
+            const res = await fetch(`/api/sessions/${activeSession}/alignment`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ transform: arr })
+            })
+            if (!res.ok) throw new Error('Failed to save alignment')
+
+            // Update stored floor transform to the new composed matrix
+            floorTransformRef.current = composedM.clone()
+
+            // Apply permanently to Potree loader (decompose into pos/quat/scale)
+            loader.setTransform(arr)
+
+            // Reset gizmo pivot to new cloud center
+            const pivot = alignPivotRef.current
+            if (pivot) {
+                const bbox = loader.getBoundingBox()
+                if (bbox) {
+                    bbox.applyMatrix4(composedM)
+                    const center = new THREE.Vector3()
+                    bbox.getCenter(center)
+                    pivot.position.copy(center)
+                }
+                pivot.quaternion.identity()
+                pivot.scale.set(1, 1, 1)
+            }
+
+            alignSavedRef.current = true
+            setAlignDirty(false)
+            if (onStatusMessage) onStatusMessage('✅ Alignment saved! OBBs will realign on next session load.')
+        } catch (e: any) {
+            if (onStatusMessage) onStatusMessage(`Error saving alignment: ${e.message}`)
+        }
+    }, [activeSession, onStatusMessage])
+
     // Expose sendCommand + toggleOBB + clearMeasurements + resetSectionBox to parent via ref
     useImperativeHandle(ref, () => ({
         sendCommand: (cmd: Record<string, unknown>) => {
@@ -1472,7 +1654,38 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         if (onSegments) onSegments(segmentList)
     }, [onSegments])
 
-    return <div ref={containerRef} className="viewport-canvas" />
+    return (
+        <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+            <div ref={containerRef} className="viewport-canvas" style={{ width: '100%', height: '100%' }} />
+            {activeTool === 'align' && (
+                <div style={{
+                    position: 'absolute', top: 12, right: 12, background: 'rgba(20,20,30,0.92)',
+                    borderRadius: 10, padding: '14px 18px', color: '#fff', fontSize: 13,
+                    display: 'flex', flexDirection: 'column', gap: 10, minWidth: 180,
+                    border: '1px solid rgba(255,255,255,0.12)', backdropFilter: 'blur(8px)',
+                    zIndex: 100
+                }}>
+                    <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 2 }}>⛶ Align Cloud</div>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                        <button
+                            style={{ flex: 1, padding: '6px 0', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: alignMode === 'rotate' ? '#f39c12' : '#444', color: '#fff' }}
+                            onClick={() => setAlignMode('rotate')}
+                        >🔄 Rotate</button>
+                        <button
+                            style={{ flex: 1, padding: '6px 0', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: alignMode === 'translate' ? '#3498db' : '#444', color: '#fff' }}
+                            onClick={() => setAlignMode('translate')}
+                        >↔️ Move</button>
+                    </div>
+                    <hr style={{ border: 'none', borderTop: '1px solid rgba(255,255,255,0.1)', margin: '2px 0' }} />
+                    <button
+                        style={{ padding: '8px 0', border: 'none', borderRadius: 6, cursor: alignDirty ? 'pointer' : 'not-allowed', fontSize: 13, fontWeight: 700, background: alignDirty ? '#2ecc71' : '#333', color: '#fff', opacity: alignDirty ? 1 : 0.5 }}
+                        onClick={saveAlignment}
+                        disabled={!alignDirty}
+                    >💾 Save Alignment</button>
+                </div>
+            )}
+        </div>
+    )
 })
 
 export default Viewport

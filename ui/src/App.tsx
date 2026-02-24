@@ -41,7 +41,7 @@ interface PipelineState {
   stages: PipelineStageInfo[]
 }
 
-type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box'
+type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align'
 
 function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([])
@@ -449,6 +449,11 @@ function App() {
                 ✂️ Section Box
                 <span className="menu-shortcut">X</span>
               </button>
+              <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align'))}>
+                ⛶ Align Cloud
+                <span className="menu-shortcut">G</span>
+              </button>
               <div className="menu-separator" />
               <div className="menu-dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 🎨 Point Size
@@ -576,16 +581,16 @@ function App() {
                       <div
                         key={s.id}
                         className={`session-item ${selectedSession === s.id ? 'active' : ''} ${activeSession === s.id ? 'loaded' : ''}`}
+                        onClick={() => handleSessionSelect(s.id)}
                       >
-                        <div className={`session-dot ${s.hasCloud ? 'online' : ''} ${activeSession === s.id ? 'loaded' : ''}`} />
-                        <div className="session-info" onClick={() => handleSessionSelect(s.id)}>
+                        <div className="session-header">
+                          <div className={`session-dot ${s.hasCloud ? 'online' : ''} ${activeSession === s.id ? 'loaded' : ''}`} />
                           <div className="session-name">{s.name}</div>
-                          <div className="session-meta">
-                            {s.frameCount} frames
-                            {s.hasCloud && ` · ${s.cloudSizeMb}MB`}
-                            {s.hasSegments && ' · 🏷️'}
-                            {activeSession === s.id && ' · ⚡ loaded'}
-                          </div>
+                        </div>
+                        <div className="session-meta">
+                          {s.frameCount} frames{s.hasCloud && ` · ${s.cloudSizeMb}MB`}
+                          {s.hasSegments && ' · 🏷️'}
+                          {activeSession === s.id && ' · ⚡ loaded'}
                         </div>
                         <div className="session-actions">
                           <button className="session-action-btn load"
@@ -595,7 +600,7 @@ function App() {
                           <button className="session-action-btn reconstruct"
                             title="Reconstruir geometría"
                             onClick={(e) => { e.stopPropagation(); handleReconstruct(s.id) }}
-                          >🔧</button>
+                          >🔨</button>
                           {activeSession === s.id && (
                             <button className="session-action-btn segment"
                               title="Segmentar objetos"
@@ -647,6 +652,11 @@ function App() {
                   onClick={() => setActiveTool('section-box')}>
                   <span className="nav-item-icon">✂️</span>
                   <span className="nav-item-label">Section Box</span>
+                </div>
+                <div className={`nav-item ${activeTool === 'align' ? 'active' : ''}`}
+                  onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')}>
+                  <span className="nav-item-icon">⛶</span>
+                  <span className="nav-item-label">Align Cloud</span>
                 </div>
                 <div className="nav-section" style={{ marginTop: '16px' }}>Display</div>
                 <div className="nav-item" style={{ padding: '4px 12px' }}>
@@ -772,6 +782,8 @@ function App() {
                 onClick={() => setActiveTool('measure-angle')} title="Measure Angle">📐</button>
               <button className={`tool-btn ${activeTool === 'section-box' ? 'active' : ''}`}
                 onClick={() => setActiveTool('section-box')} title="Section Box">✂️</button>
+              <button className={`tool-btn ${activeTool === 'align' ? 'active' : ''}`}
+                onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')} title="Align Cloud">⛶</button>
               <button className="tool-btn" onClick={() => viewportRef.current?.clearMeasurements()}
                 title="Clear Measurements">🗑️</button>
               <button className="tool-btn" onClick={() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') }}

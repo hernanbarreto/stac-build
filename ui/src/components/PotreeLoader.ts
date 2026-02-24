@@ -125,6 +125,11 @@ export class PotreeOctreeLoader {
         console.log('[PotreeLoader] Applied floor alignment transform')
     }
 
+    /** Get the octree Group for direct matrix manipulation (alignment tool) */
+    getOctreeGroup(): THREE.Group {
+        return this.octreeGroup
+    }
+
     setPointBudget(budget: number): void {
         this.pointBudget = budget
     }
