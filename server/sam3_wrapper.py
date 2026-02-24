@@ -27,6 +27,7 @@ class SAM3Wrapper:
         self.predictor = None
         self.is_loaded = False
         self.lock = Lock()
+        self._interactive_sessions: Dict[str, dict] = {}  # state_id → session info dict
         logger.info("SAM3 Wrapper initialized (Lazy Loading Enabled: Model will load on first prompt).")
         
     def load_model(self):
@@ -507,6 +508,314 @@ class SAM3Wrapper:
         
         return results
     
+    # ── Interactive Segmentation (point-based prompts) ──────────────────
+
+    def init_interactive_session(self, frames_dir: str,
+                                  keyframes: List[str] = None) -> str:
+        """
+        Initialize an interactive SAM3 session for manual point-based segmentation.
+
+        Args:
+            frames_dir: Path to the directory containing frames (e.g. .../frames/)
+            keyframes: Optional list of keyframe filenames (e.g. ['00010.jpg', '00016.jpg', ...]).
+                       When provided, only these frames are loaded into SAM3 (via a temp dir
+                       with sequential numbering), matching the batch pipeline approach.
+
+        Returns:
+            state_id (same as SAM3 session_id) used to reference this session.
+        """
+        import tempfile
+        import shutil
+
+        if not self.is_loaded:
+            self.load_model()
+
+        frames_path = Path(frames_dir)
+        load_dir = frames_dir  # Default: load all frames
+        keyframe_mapping = None  # SAM3 frame index → original filename
+
+        # If keyframes provided, create temp dir with only those files
+        if keyframes and len(keyframes) > 0:
+            keyframes_sorted = sorted(keyframes)
+            temp_dir = tempfile.mkdtemp(prefix="sam3_kf_")
+            keyframe_mapping = {}
+            for i, kf_name in enumerate(keyframes_sorted):
+                src = frames_path / kf_name
+                if src.exists():
+                    # Sequential naming: 000000.jpg, 000001.jpg, ...
+                    ext = src.suffix
+                    dst = Path(temp_dir) / f"{i:06d}{ext}"
+                    os.symlink(str(src), str(dst))
+                    keyframe_mapping[i] = kf_name
+            load_dir = temp_dir
+            logger.info(f"[SAM3-Interactive] Created keyframe temp dir with {len(keyframe_mapping)} frames")
+        
+        logger.info(f"[SAM3-Interactive] Starting session for {load_dir}")
+        
+        # Cast model to float32 BEFORE loading frames.
+        # The backbone caches features during start_session; if the model is in
+        # BFloat16 those cached tensors will be BFloat16, causing type mismatches
+        # later when conv layers (float32 bias) consume them.
+        self.predictor.model.float()
+        logger.info("[SAM3-Interactive] Cast model to float32")
+        
+        response = self.predictor.handle_request(
+            request=dict(
+                type="start_session",
+                resource_path=load_dir,
+            )
+        )
+        session_id = response["session_id"]
+        
+        # Seed empty cached_frame_outputs for all frames.
+        # SAM3's add_tracker_new_points requires cached outputs to exist
+        # (populated normally by propagate_in_video). For interactive prompts
+        # on a fresh session we need to pre-seed them as empty dicts.
+        try:
+            session = self.predictor._ALL_INFERENCE_STATES.get(session_id, {})
+            inference_state = session.get("state", {})
+            num_frames = inference_state.get("num_frames", 0)
+            if num_frames > 0 and "cached_frame_outputs" in inference_state:
+                for fidx in range(num_frames):
+                    if fidx not in inference_state["cached_frame_outputs"]:
+                        inference_state["cached_frame_outputs"][fidx] = {}
+                logger.info(f"[SAM3-Interactive] Seeded cache for {num_frames} frames")
+        except Exception as e:
+            logger.warning(f"[SAM3-Interactive] Could not seed cache: {e}")
+        
+        # Track the session with metadata for cleanup and frame mapping
+        self._interactive_sessions[session_id] = {
+            "session_id": session_id,
+            "keyframe_mapping": keyframe_mapping,  # SAM3 idx → original filename
+            "keyframe_temp_dir": load_dir if keyframes else None,
+        }
+        logger.info(f"[SAM3-Interactive] Session started: {session_id} "
+                     f"({num_frames} frames, keyframes={'yes' if keyframes else 'no'})")
+        return session_id
+
+    def get_interactive_session_info(self, state_id: str) -> Optional[dict]:
+        """Get session info including keyframe mapping, if available."""
+        return self._interactive_sessions.get(state_id)
+
+    def add_interactive_prompt(
+        self,
+        state_id: str,
+        frame_idx: int,
+        obj_id: int,
+        points: np.ndarray,
+        labels: np.ndarray,
+    ) -> dict:
+        """
+        Add a point-based prompt (positive or negative click) to a specific frame.
+
+        Args:
+            state_id: Session ID from init_interactive_session
+            frame_idx: Frame index to add the prompt to
+            obj_id: Object ID (allows multiple objects)
+            points: [N, 2] array of (x, y) coordinates
+            labels: [N] array of 1 (positive) or 0 (negative)
+
+        Returns:
+            Dict with 'success' and optionally 'mask' (binary mask as [H, W] numpy)
+        """
+        if not self.is_loaded or self.predictor is None:
+            raise RuntimeError("SAM3 model not loaded")
+
+        try:
+            logger.info(
+                f"[SAM3-Interactive] Adding {len(points)} point(s) to frame {frame_idx}, "
+                f"obj_id={obj_id}, labels={labels.tolist()}"
+            )
+            # SAM3 API uses 'point_labels', not 'labels'
+            pts = points.tolist() if hasattr(points, 'tolist') else points
+            pt_labels = labels.tolist() if hasattr(labels, 'tolist') else labels
+
+            response = self.predictor.handle_request(
+                request=dict(
+                    type="add_prompt",
+                    session_id=state_id,
+                    frame_index=frame_idx,
+                    obj_id=obj_id,
+                    points=pts,
+                    point_labels=pt_labels,
+                )
+            )
+
+            # Mark the frame as having outputs so propagate_in_video sees it.
+            # Tracker add_new_points doesn't set previous_stages_out (only the
+            # SAM3 detection stage does), so propagation fails with
+            # "No prompts received on any frames" without this.
+            try:
+                session = self.predictor._ALL_INFERENCE_STATES.get(state_id, {})
+                inference_state = session.get("state", {})
+                pso = inference_state.get("previous_stages_out")
+                if pso is not None and frame_idx < len(pso):
+                    pso[frame_idx] = "_THIS_FRAME_HAS_OUTPUTS_"
+                    logger.info(f"[SAM3-Interactive] Marked frame {frame_idx} as having outputs for propagation")
+            except Exception as e:
+                logger.warning(f"[SAM3-Interactive] Could not mark frame for propagation: {e}")
+
+            # Extract mask from response for preview
+            result = {"success": True}
+            if response and "outputs" in response:
+                outputs = response["outputs"]
+                if "out_binary_masks" in outputs:
+                    mask = outputs["out_binary_masks"]
+                    if hasattr(mask, 'cpu'):
+                        mask = mask.cpu().numpy()
+                    # Shape is typically [N_obj, H, W] — take first object union
+                    if mask.ndim == 3:
+                        if mask.shape[0] == 0:
+                            # Empty mask (e.g. negative-only prompt removed all objects)
+                            mask = None
+                        else:
+                            mask = np.max(mask, axis=0)
+                    if mask is not None:
+                        result["mask"] = mask  # [H, W] binary
+
+                    # Also cache the mask in the inference state for propagation
+                    try:
+                        cached = inference_state.get("cached_frame_outputs", {})
+                        cached[frame_idx] = {obj_id: mask}
+                    except Exception:
+                        pass
+
+            return result
+        except Exception as e:
+            logger.error(f"[SAM3-Interactive] Failed to add prompt: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": str(e)}
+
+    def add_text_prompt(
+        self,
+        state_id: str,
+        frame_idx: int,
+        text: str,
+        obj_id: int = 1,
+    ) -> dict:
+        """
+        Add a text-based prompt to a specific frame in an interactive session.
+
+        Args:
+            state_id: Session ID from init_interactive_session
+            frame_idx: Frame index to add the prompt to
+            text: Text description of the object to segment
+            obj_id: Object ID (allows multiple objects)
+
+        Returns:
+            Dict with 'success' and optionally 'mask' (binary mask as [H, W] numpy)
+        """
+        if not self.is_loaded or self.predictor is None:
+            raise RuntimeError("SAM3 model not loaded")
+
+        try:
+            logger.info(
+                f"[SAM3-Interactive] Text prompt on frame {frame_idx}: '{text}', obj_id={obj_id}"
+            )
+            response = self.predictor.handle_request(
+                request=dict(
+                    type="add_prompt",
+                    session_id=state_id,
+                    frame_index=frame_idx,
+                    obj_id=obj_id,
+                    text=text,
+                )
+            )
+
+            result = {"success": True}
+            if response and "outputs" in response:
+                outputs = response["outputs"]
+                if "out_binary_masks" in outputs:
+                    mask = outputs["out_binary_masks"]
+                    if hasattr(mask, 'cpu'):
+                        mask = mask.cpu().numpy()
+                    if mask.ndim == 3:
+                        mask = np.max(mask, axis=0)
+                    result["mask"] = mask
+
+            return result
+        except Exception as e:
+            logger.error(f"[SAM3-Interactive] Text prompt failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": str(e)}
+
+    def propagate_interactive_session(self, state_id: str) -> Dict[int, Any]:
+        """
+        Propagate the interactive prompts across the whole video.
+        Returns all results at once (non-streaming).
+        """
+        results = {}
+        for frame_idx, num_frames, outputs in self.propagate_interactive_stream(state_id):
+            results[frame_idx] = outputs
+        return results
+
+    def propagate_interactive_stream(self, state_id: str):
+        """
+        Generator that yields (frame_idx, num_frames, outputs) per frame.
+        Enables SSE streaming of per-frame progress.
+        """
+        if not self.is_loaded or self.predictor is None:
+            raise RuntimeError("SAM3 model not loaded")
+
+        # Get num_frames for progress calculation
+        session = self.predictor._ALL_INFERENCE_STATES.get(state_id, {})
+        inference_state = session.get("state", {})
+        num_frames = inference_state.get("num_frames", 0)
+        # Fallback from session metadata
+        if num_frames == 0:
+            sess_meta = self._interactive_sessions.get(state_id, {})
+            kf_map = sess_meta.get("keyframe_mapping", {})
+            if kf_map:
+                num_frames = len(kf_map)
+
+        try:
+            logger.info(f"[SAM3-Interactive] Propagating session {state_id} ({num_frames} frames)...")
+            for response in self.predictor.handle_stream_request(
+                request=dict(
+                    type="propagate_in_video",
+                    session_id=state_id,
+                )
+            ):
+                frame_idx = response["frame_index"]
+                outputs = response["outputs"]
+
+                # Convert tensors to numpy
+                if "out_binary_masks" in outputs:
+                    mask = outputs["out_binary_masks"]
+                    if hasattr(mask, 'cpu'):
+                        outputs["out_binary_masks"] = mask.cpu().numpy()
+                if "out_obj_ids" in outputs:
+                    oids = outputs["out_obj_ids"]
+                    if hasattr(oids, 'cpu'):
+                        outputs["out_obj_ids"] = oids.cpu().numpy()
+
+                yield frame_idx, num_frames, outputs
+
+            logger.info(f"[SAM3-Interactive] Propagation complete")
+        except Exception as e:
+            logger.error(f"[SAM3-Interactive] Propagation failed: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Reset the session to free VRAM
+            try:
+                self.predictor.handle_request(
+                    request=dict(type="reset_session", session_id=state_id)
+                )
+                # Cleanup temp keyframe dir if it exists
+                session_info = self._interactive_sessions.pop(state_id, None)
+                if session_info and isinstance(session_info, dict):
+                    temp_dir = session_info.get("keyframe_temp_dir")
+                    if temp_dir and os.path.exists(temp_dir):
+                        import shutil
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        logger.info(f"[SAM3-Interactive] Cleaned up temp dir: {temp_dir}")
+                logger.info(f"[SAM3-Interactive] Session {state_id} reset")
+            except Exception as e:
+                logger.error(f"[SAM3-Interactive] Error resetting session: {e}")
+
     def load_cached_masks(self, session_dir: Path, frame_indices: List[int] = None) -> Dict[int, Any]:
         """
         Cargar máscaras pre-calculadas desde masks/.

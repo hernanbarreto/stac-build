@@ -37,7 +37,7 @@ from sam3_wrapper import get_sam3_wrapper
 from config import cfg
 from da3_native_wrapper import RealtimeDA3
 from slam_processor import get_slam_processor, SLAMProcessor, SLAMFrame
-from pipeline_manager import PipelineManager, PipelineStage, StageId, build_default_stages
+from pipeline_manager import PipelineManager, PipelineStage, StageId
 
 # --- Helper for Chunking ---
 def chunk_data(data, chunk_size=1048572): # approx 1MB, multiple of 28 bytes (7 floats * 4)
@@ -334,75 +334,79 @@ async def _send_cleaned_cloud(websocket, session_id: str):
         file_size_mb = ply_path.stat().st_size / (1024 * 1024)
         print(f"[SendCloud] Loading {label} ({file_size_mb:.1f} MB)...")
         
-        # Read PLY (detect ASCII vs binary, detect origin fields)
-        with open(ply_path, "rb") as f:
-            n_pts = 0
-            is_binary = False
-            has_origins = False
-            while True:
-                line = f.readline()
-                if line.startswith(b"element vertex"):
-                    n_pts = int(line.split()[-1])
-                if line.startswith(b"format binary"):
-                    is_binary = True
-                if b"frame_global" in line:
-                    has_origins = True
-                if line.startswith(b"end_header"):
-                    break
-            
-            if is_binary:
-                # Build dtype matching the PLY properties
-                if has_origins:
-                    ply_dtype = np.dtype([
-                        ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-                        ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
-                        ('frame_global', '<i4'),
-                        ('pixel_row', '<i2'), ('pixel_col', '<i2')
-                    ])
-                else:
-                    ply_dtype = np.dtype([
-                        ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-                        ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
-                    ])
-                raw_data = np.frombuffer(f.read(), dtype=ply_dtype)
-                point_count = len(raw_data)
-                output_data = np.zeros((point_count, 7), dtype=np.float32)
-                output_data[:, 0] = raw_data['x']
-                output_data[:, 1] = raw_data['y']
-                output_data[:, 2] = raw_data['z']
-                output_data[:, 3] = raw_data['r'] / 255.0
-                output_data[:, 4] = raw_data['g'] / 255.0
-                output_data[:, 5] = raw_data['b'] / 255.0
-            else:
-                # ASCII PLY
-                points = []
-                for line_bytes in f:
-                    parts = line_bytes.decode('ascii').strip().split()
-                    if len(parts) >= 6:
-                        x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
-                        r, g, b = float(parts[3])/255.0, float(parts[4])/255.0, float(parts[5])/255.0
-                        points.append([x, y, z, r, g, b, 0.0])
-                output_data = np.array(points, dtype=np.float32)
-                point_count = len(output_data)
+        # Offload heavy PLY parsing + floor alignment to thread pool
+        session_dir = Path(__file__).parent / "scans" / session_id
         
-        if point_count == 0:
+        def _load_and_align():
+            """Heavy sync: read PLY, parse, align floor."""
+            with open(ply_path, "rb") as f:
+                n_pts = 0
+                is_binary = False
+                has_origins = False
+                while True:
+                    line = f.readline()
+                    if line.startswith(b"element vertex"):
+                        n_pts = int(line.split()[-1])
+                    if line.startswith(b"format binary"):
+                        is_binary = True
+                    if b"frame_global" in line:
+                        has_origins = True
+                    if line.startswith(b"end_header"):
+                        break
+                
+                if is_binary:
+                    if has_origins:
+                        ply_dtype = np.dtype([
+                            ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                            ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+                            ('frame_global', '<i4'),
+                            ('pixel_row', '<i2'), ('pixel_col', '<i2')
+                        ])
+                    else:
+                        ply_dtype = np.dtype([
+                            ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                            ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
+                        ])
+                    raw_data = np.frombuffer(f.read(), dtype=ply_dtype)
+                    point_count = len(raw_data)
+                    output_data = np.zeros((point_count, 7), dtype=np.float32)
+                    output_data[:, 0] = raw_data['x']
+                    output_data[:, 1] = raw_data['y']
+                    output_data[:, 2] = raw_data['z']
+                    output_data[:, 3] = raw_data['r'] / 255.0
+                    output_data[:, 4] = raw_data['g'] / 255.0
+                    output_data[:, 5] = raw_data['b'] / 255.0
+                else:
+                    points = []
+                    for line_bytes in f:
+                        parts = line_bytes.decode('ascii').strip().split()
+                        if len(parts) >= 6:
+                            x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+                            r, g, b = float(parts[3])/255.0, float(parts[4])/255.0, float(parts[5])/255.0
+                            points.append([x, y, z, r, g, b, 0.0])
+                    output_data = np.array(points, dtype=np.float32)
+                    point_count = len(output_data)
+            
+            if point_count == 0:
+                return None, 0, False
+            
+            if output_data.shape[1] != 7:
+                tmp = np.zeros((point_count, 7), dtype=np.float32)
+                tmp[:, :6] = output_data[:, :6]
+                output_data = tmp
+            
+            # Floor alignment
+            output_data = _align_cloud_to_floor(output_data, session_dir=session_dir)
+            return output_data.tobytes(), point_count, has_origins
+        
+        loop = asyncio.get_event_loop()
+        binary_bytes, point_count, has_origins = await loop.run_in_executor(None, _load_and_align)
+        
+        if binary_bytes is None:
             print(f"[SendCloud] ⚠️ Empty cloud")
             return False
         
-        if output_data.shape[1] == 7:
-            pass  # Already has classId column
-        else:
-            tmp = np.zeros((point_count, 7), dtype=np.float32)
-            tmp[:, :6] = output_data[:, :6]
-            output_data = tmp
-        
-        # ── Floor Alignment ──
-        session_dir = Path(__file__).parent / "scans" / session_id
-        output_data = _align_cloud_to_floor(output_data, session_dir=session_dir)
-        
-        binary_bytes = output_data.tobytes()
-        
-        # Send via proper viewer protocol
+        # Send via proper viewer protocol (async, already non-blocking)
         await websocket.send_text(json.dumps({
             "type": "status",
             "message": f"Sending {label} ({point_count:,} points, {file_size_mb:.1f} MB)..."
@@ -1333,6 +1337,896 @@ async def process_session_with_slam(session_id: str):
         traceback.print_exc()
         return {"error": str(e)}
 
+# --- Frame Image Serving ---
+
+@app.get("/api/sessions/{session_id}/frames/{filename}")
+async def serve_session_frame(session_id: str, filename: str):
+    """Serve individual frame images from a session's frames directory."""
+    from fastapi.responses import FileResponse
+
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    frame_path = scans_dir / session_id / "frames" / filename
+
+    if not frame_path.exists():
+        raise HTTPException(status_code=404, detail=f"Frame not found: {filename}")
+
+    return FileResponse(str(frame_path), media_type="image/jpeg")
+
+@app.get("/api/sessions/{session_id}/keyframes")
+async def get_session_keyframes(session_id: str):
+    """Return the list of keyframe filenames from selected_frames.json."""
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    frames_dir = scans_dir / session_id / "frames"
+    selected_json = frames_dir / "selected_frames.json"
+
+    if not selected_json.exists():
+        raise HTTPException(status_code=404, detail="selected_frames.json not found (DA3 must run first)")
+
+    try:
+        with open(selected_json) as f:
+            data = json.load(f)
+        selected_files = data.get("selected_files", [])
+        # Filter to only files that exist on disk
+        existing = [fn for fn in selected_files if (frames_dir / fn).exists()]
+        return {"keyframes": sorted(existing), "total": len(existing)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Interactive Segmentation Endpoints ---
+
+@app.post("/api/segmentation/start_session/{session_id}")
+async def start_interactive_segmentation(session_id: str):
+    """
+    Initializes SAM3 video predictor for manual, interactive segmentation.
+    Loads only keyframes (from selected_frames.json) for faster processing.
+    """
+    from sam3_wrapper import get_sam3_wrapper
+    sam3 = get_sam3_wrapper()
+    
+    # Needs to run in executor
+    loop = asyncio.get_event_loop()
+    
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    session_dir = scans_dir / session_id
+    frames_dir = session_dir / "frames"
+    
+    if not frames_dir.exists():
+        raise HTTPException(status_code=404, detail="Frames directory not found")
+
+    # Read keyframes from selected_frames.json (same as the keyframes API endpoint)
+    keyframes = None
+    selected_frames_path = frames_dir / "selected_frames.json"
+    if selected_frames_path.exists():
+        with open(selected_frames_path) as f:
+            sf_data = json.load(f)
+        keyframes = sf_data.get("selected_files", [])
+        # Filter to only files that exist
+        keyframes = [fn for fn in keyframes if (frames_dir / fn).exists()]
+        if keyframes:
+            print(f"[InteractiveSeg] Using {len(keyframes)} keyframes from selected_frames.json")
+    
+    if not keyframes:
+        # Fallback: use all frames
+        keyframes = sorted([f.name for f in frames_dir.iterdir() 
+                           if f.suffix.lower() in ('.jpg', '.jpeg', '.png')])
+        print(f"[InteractiveSeg] No selected_frames.json, using all {len(keyframes)} frames")
+
+    try:
+        def _init():
+            return sam3.init_interactive_session(str(frames_dir), keyframes=keyframes)
+        
+        state_id = await loop.run_in_executor(None, _init)
+        
+        # Build kf_index → original filename mapping for the frontend
+        keyframes_sorted = sorted(keyframes)
+        kf_mapping = {i: name for i, name in enumerate(keyframes_sorted)}
+        
+        return {
+            "ok": True, 
+            "state_id": state_id, 
+            "session_id": session_id,
+            "num_keyframes": len(keyframes_sorted),
+            "kf_mapping": kf_mapping,  # SAM3 idx → original filename
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/segmentation/add_prompt")
+async def add_interactive_prompt(request: Request):
+    """
+    Apply a positive or negative click to a specific frame.
+    Returns the predicted mask as base64 PNG for live overlay.
+    """
+    body = await request.json()
+    state_id = body.get("state_id")
+    session_id = body.get("session_id")  # needed to find segmentation.json for resize
+    frame_idx = body.get("frame_idx")
+    obj_id = body.get("obj_id", 1)
+    points = body.get("points")      # list of [x, y]
+    labels = body.get("labels")      # list of 1 (positive) or 0 (negative)
+    
+    if not all([state_id, frame_idx is not None, points, labels]):
+        raise HTTPException(status_code=400, detail="Missing required parameters")
+        
+    from sam3_wrapper import get_sam3_wrapper
+    sam3 = get_sam3_wrapper()
+    loop = asyncio.get_event_loop()
+    
+    # Read original resolution from segmentation.json (so we can resize the mask)
+    original_res = None
+    if session_id:
+        scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+        seg_path = scans_dir / session_id / "output" / "segmentation.json"
+        if seg_path.exists():
+            with open(seg_path) as f:
+                seg_data = json.load(f)
+            original_res = seg_data.get("resolution", {}).get("original")  # [H, W]
+    
+    try:
+        def _prompt():
+            result = sam3.add_interactive_prompt(
+                state_id=state_id,
+                frame_idx=frame_idx,
+                obj_id=obj_id,
+                points=np.array(points, dtype=np.float32),
+                labels=np.array(labels, dtype=np.int32)
+            )
+            
+            # Encode mask as base64 PNG for frontend overlay
+            mask_b64 = None
+            if result.get("mask") is not None:
+                import cv2
+                import base64
+                mask = result["mask"]
+                
+                # Resize mask to original resolution (SAM3 returns scaled resolution)
+                if original_res and len(original_res) == 2:
+                    orig_h, orig_w = original_res  # format is [H, W]
+                    mask = cv2.resize(mask.astype(np.uint8),
+                                      (orig_w, orig_h),
+                                      interpolation=cv2.INTER_NEAREST)
+                
+                # Convert binary mask [H, W] to RGBA PNG with semi-transparent green
+                h, w = mask.shape[:2]
+                rgba = np.zeros((h, w, 4), dtype=np.uint8)
+                mask_bool = mask > 0
+                rgba[mask_bool, 1] = 200  # Green
+                rgba[mask_bool, 3] = 128  # 50% alpha
+                _, png_buf = cv2.imencode('.png', rgba)
+                mask_b64 = base64.b64encode(png_buf.tobytes()).decode('ascii')
+            
+            return result["success"], mask_b64
+            
+        success, mask_b64 = await loop.run_in_executor(None, _prompt)
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to add prompt")
+        
+        resp = {"ok": True}
+        if mask_b64:
+            resp["mask_png"] = mask_b64
+        return resp
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/segmentation/propagate")
+async def propagate_interactive_segmentation(request: Request):
+    """
+    SSE streaming propagation — sends per-frame progress events.
+    Events:
+      - progress: {frame, total, pct, mask_png}
+      - saving: {status}
+      - done: {instances}
+      - error: {message}
+    """
+    from starlette.responses import StreamingResponse
+    
+    body = await request.json()
+    state_id = body.get("state_id")
+    session_id = body.get("session_id")
+    label_name = body.get("label_name", "manual_object")
+    
+    if not state_id or not session_id:
+        raise HTTPException(status_code=400, detail="Missing state_id or session_id")
+    
+    from sam3_wrapper import get_sam3_wrapper
+    sam3 = get_sam3_wrapper()
+    
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    output_dir = scans_dir / session_id / "output"
+    
+    def sse_generator():
+        import base64, cv2
+        all_masks = {}  # frame_idx → outputs
+        
+        try:
+            for frame_idx, num_frames, outputs in sam3.propagate_interactive_stream(state_id):
+                all_masks[frame_idx] = outputs
+                pct = round((len(all_masks) / max(1, num_frames)) * 100)
+                
+                # Generate a small mask preview PNG for this frame
+                mask_b64 = ""
+                if "out_binary_masks" in outputs:
+                    mask = outputs["out_binary_masks"]
+                    if mask.ndim == 3:
+                        mask = np.max(mask, axis=0) if mask.shape[0] > 0 else np.zeros((1,1), dtype=np.uint8)
+                    h, w = mask.shape[:2]
+                    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+                    mask_bool = mask > 0
+                    rgba[mask_bool, 1] = 200
+                    rgba[mask_bool, 3] = 128
+                    _, png_buf = cv2.imencode('.png', rgba)
+                    mask_b64 = base64.b64encode(png_buf.tobytes()).decode('ascii')
+                
+                event = json.dumps({
+                    "frame": int(frame_idx), "total": int(num_frames),
+                    "pct": pct, "mask_png": mask_b64
+                })
+                yield f"event: progress\ndata: {event}\n\n"
+            
+            # All frames done — save results
+            yield f"event: saving\ndata: {{\"status\": \"Saving masks...\"}}\n\n"
+            
+            from segmentation_pipeline import _save_masks, _parse_raw_masks, _match_and_save_result
+            
+            structured_masks = _parse_raw_masks(all_masks)
+            
+            from time import time
+            temp_global_id = int(time() % 10000)
+            
+            remapped_masks = {}
+            for f_idx, frame_masks in structured_masks.items():
+                remapped_masks[f_idx] = {}
+                for l_id, mask in frame_masks.items():
+                    remapped_masks[f_idx][temp_global_id] = mask
+            
+            obj_labels = {temp_global_id: label_name}
+            
+            stale_result = output_dir / "segmentation_result.json"
+            if stale_result.exists():
+                stale_result.unlink()
+            
+            _save_masks(output_dir, remapped_masks, [label_name], obj_labels, cfg)
+            
+            yield f"event: saving\ndata: {{\"status\": \"Computing 3D matching...\"}}\n\n"
+            
+            result = _match_and_save_result(output_dir)
+            
+            done_event = json.dumps({
+                "ok": True,
+                "instances": result.get("instances", [])
+            })
+            yield f"event: done\ndata: {done_event}\n\n"
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"event: error\ndata: {{\"message\": \"{str(e)}\"}}\n\n"
+    
+    return StreamingResponse(
+        sse_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
+
+# --- Segmentation Manager Endpoints ---
+
+@app.get("/api/sessions/{session_id}/segmentation")
+async def get_segmentation_instances(session_id: str):
+    """Return all existing segmentation instances for a session.
+    Prefers segmentation_result.json (grouped by instance_id, with OBBs)
+    over segmentation.json (raw obj_ids from SAM3).
+    """
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    output_dir = scans_dir / session_id / "output"
+    
+    # Prefer the grouped result (has real instance count, OBBs, point_indices)
+    result_path = output_dir / "segmentation_result.json"
+    seg_path = output_dir / "segmentation.json"
+
+    if not seg_path.exists():
+        return {"instances": [], "prompts": []}
+
+    try:
+        # Load prompts from segmentation.json (always)
+        with open(seg_path) as f:
+            seg_data = json.load(f)
+        prompts = seg_data.get("prompts", [])
+        resolution = seg_data.get("resolution", {})
+        
+        # Load instances from segmentation_result.json if available
+        if result_path.exists():
+            with open(result_path) as f:
+                result_data = json.load(f)
+            instances = result_data.get("instances", [])
+        else:
+            # Fallback to raw segmentation.json
+            instances = seg_data.get("instances", [])
+        
+        return {
+            "instances": instances,
+            "prompts": prompts,
+            "resolution": resolution,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sessions/{session_id}/segmentation/mask/{instance_id}")
+async def get_instance_mask(session_id: str, instance_id: int, frame: str = "", kf_index: int = -1):
+    """Render a colored mask PNG for a specific instance on a specific frame.
+    
+    instance_id can be either:
+      - A grouped instance_id from segmentation_result.json (groups obj_ids by instance_id)
+      - A raw obj_id from NPZ
+    
+    Query params:
+        frame: frame filename (e.g. '000042.jpg') — fallback for numeric index
+        kf_index: sequential keyframe index (0-based) — preferred, matches NPZ frame indices
+    """
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    output_dir = scans_dir / session_id / "output"
+    masks_path = output_dir / "seg_masks.npz"
+    seg_path = output_dir / "segmentation.json"
+
+    if not masks_path.exists():
+        # Return transparent 1x1 PNG instead of 404 to avoid console spam
+        import io as _io
+        buf = _io.BytesIO()
+        Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(buf, format="PNG")
+        buf.seek(0)
+        return Response(content=buf.getvalue(), media_type="image/png")
+
+    loop = asyncio.get_event_loop()
+
+    try:
+        def _render():
+            npz = np.load(masks_path, allow_pickle=True)
+
+            # Get color from segmentation_result.json or segmentation.json
+            color_hex = "#00FF00"  # default green
+            original_res = None
+            
+            # Try segmentation_result.json first (grouped instances)
+            result_path = output_dir / "segmentation_result.json"
+            if result_path.exists():
+                with open(result_path) as f:
+                    result_data = json.load(f)
+                for inst in result_data.get("instances", []):
+                    if inst.get("id") == instance_id:
+                        color_hex = inst.get("color", color_hex)
+                        break
+            
+            if seg_path.exists():
+                with open(seg_path) as f:
+                    seg_data = json.load(f)
+                res_info = seg_data.get("resolution", {})
+                original_res = res_info.get("original")  # [H, W]
+                
+                # Build mapping: instance_id → [obj_ids] from raw segmentation.json
+                # Each entry has "id" (obj_id in NPZ) and "instance_id" (logical group)
+                iid_to_obj_ids = {}
+                for inst in seg_data.get("instances", []):
+                    iid = inst.get("instance_id", inst.get("id"))
+                    oid = inst.get("id")
+                    if iid not in iid_to_obj_ids:
+                        iid_to_obj_ids[iid] = []
+                    iid_to_obj_ids[iid].append(oid)
+            else:
+                iid_to_obj_ids = {}
+
+            # Parse color hex to RGB
+            color_hex = color_hex.lstrip('#')
+            r = int(color_hex[0:2], 16)
+            g = int(color_hex[2:4], 16)
+            b = int(color_hex[4:6], 16)
+
+            # Determine frame index for NPZ lookup
+            if kf_index >= 0:
+                frame_idx = kf_index
+            elif frame:
+                import re
+                nums = re.findall(r'\d+', frame.split('.')[0])
+                frame_idx = int(nums[-1]) if nums else 0
+            else:
+                frame_idx = 0
+
+            # Find all obj_ids for this instance_id
+            obj_ids_to_check = iid_to_obj_ids.get(instance_id, [instance_id])
+            
+            # Try to find mask in NPZ (combine all obj_ids for this instance)
+            mask = None
+            for oid in obj_ids_to_check:
+                key = f"f{frame_idx}_o{oid}"
+                if key in npz:
+                    m = npz[key]
+                    if mask is None:
+                        mask = m.copy()
+                    else:
+                        mask = np.maximum(mask, m)
+                else:
+                    # Try nearest frame
+                    stored_frames = npz.get("frames", np.array([]))
+                    if len(stored_frames) > 0:
+                        diffs = np.abs(stored_frames.astype(int) - frame_idx)
+                        closest_idx = stored_frames[np.argmin(diffs)]
+                        alt_key = f"f{closest_idx}_o{oid}"
+                        if alt_key in npz:
+                            m = npz[alt_key]
+                            if mask is None:
+                                mask = m.copy()
+                            else:
+                                mask = np.maximum(mask, m)
+
+            if mask is None:
+                return None
+
+            import cv2, base64
+
+            # Resize mask to original resolution so it aligns with the displayed image
+            if original_res and len(original_res) == 2:
+                orig_h, orig_w = original_res  # format is [H, W] (confirmed by numpy shape)
+                mask = cv2.resize(mask.astype(np.uint8),
+                                  (orig_w, orig_h),
+                                  interpolation=cv2.INTER_NEAREST)
+
+            # Build RGBA image with instance color
+            h, w = mask.shape[:2]
+            rgba = np.zeros((h, w, 4), dtype=np.uint8)
+            mask_bool = mask > 0
+            rgba[mask_bool, 0] = b  # OpenCV uses BGR
+            rgba[mask_bool, 1] = g
+            rgba[mask_bool, 2] = r
+            rgba[mask_bool, 3] = 140  # Semi-transparent
+
+            _, png_buf = cv2.imencode('.png', rgba)
+            return base64.b64encode(png_buf.tobytes()).decode('ascii')
+
+        mask_b64 = await loop.run_in_executor(None, _render)
+
+        if mask_b64 is None:
+            return {"ok": True, "mask_png": None, "message": "No mask found for this frame"}
+
+        return {"ok": True, "mask_png": mask_b64}
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/segmentation/rename")
+async def rename_segmentation_instance(request: Request):
+    """Rename an instance label and optionally toggle its exclusion flag.
+    Updates both segmentation.json and segmentation_result.json."""
+    body = await request.json()
+    session_id = body.get("session_id")
+    instance_id = body.get("instance_id")
+    new_label = body.get("label")
+    excluded = body.get("excluded")
+
+    if not session_id or instance_id is None:
+        raise HTTPException(status_code=400, detail="Missing session_id or instance_id")
+
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    output_dir = scans_dir / session_id / "output"
+    seg_path = output_dir / "segmentation.json"
+    result_path = output_dir / "segmentation_result.json"
+
+    if not seg_path.exists():
+        raise HTTPException(status_code=404, detail="No segmentation.json")
+
+    try:
+        # Update segmentation.json (raw instances)
+        with open(seg_path) as f:
+            data = json.load(f)
+
+        updated = False
+        for inst in data.get("instances", []):
+            if inst.get("id") == instance_id or inst.get("instance_id") == instance_id:
+                if new_label is not None:
+                    inst["label"] = new_label
+                if excluded is not None:
+                    inst["excluded"] = excluded
+                updated = True
+
+        if updated:
+            with open(seg_path, "w") as f:
+                json.dump(data, f, indent=2)
+
+        # Also update segmentation_result.json (grouped instances)
+        if result_path.exists():
+            with open(result_path) as f:
+                result_data = json.load(f)
+            for inst in result_data.get("instances", []):
+                if inst.get("id") == instance_id:
+                    if new_label is not None:
+                        inst["label"] = new_label
+                    if excluded is not None:
+                        inst["excluded"] = excluded
+            with open(result_path, "w") as f:
+                json.dump(result_data, f, indent=2)
+
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/segmentation/delete")
+async def delete_segmentation_instance(request: Request):
+    """Delete an instance from segmentation.json, segmentation_result.json, and seg_masks.npz."""
+    body = await request.json()
+    session_id = body.get("session_id")
+    instance_id = body.get("instance_id")
+
+    if not session_id or instance_id is None:
+        raise HTTPException(status_code=400, detail="Missing session_id or instance_id")
+
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    output_dir = scans_dir / session_id / "output"
+    seg_path = output_dir / "segmentation.json"
+    result_path = output_dir / "segmentation_result.json"
+    masks_path = output_dir / "seg_masks.npz"
+
+    if not seg_path.exists():
+        raise HTTPException(status_code=404, detail="No segmentation.json")
+
+    try:
+        loop = asyncio.get_event_loop()
+
+        def _delete():
+            # 1) Find all raw obj_ids for this instance_id in segmentation.json
+            with open(seg_path) as f:
+                seg_data = json.load(f)
+
+            obj_ids_to_remove = set()
+            remaining_instances = []
+            for inst in seg_data.get("instances", []):
+                if inst.get("instance_id") == instance_id or inst.get("id") == instance_id:
+                    obj_ids_to_remove.add(inst.get("id"))
+                else:
+                    remaining_instances.append(inst)
+
+            seg_data["instances"] = remaining_instances
+            with open(seg_path, "w") as f:
+                json.dump(seg_data, f, indent=2)
+
+            # 2) Remove from segmentation_result.json
+            if result_path.exists():
+                with open(result_path) as f:
+                    result_data = json.load(f)
+                result_data["instances"] = [
+                    inst for inst in result_data.get("instances", [])
+                    if inst.get("id") != instance_id
+                ]
+                with open(result_path, "w") as f:
+                    json.dump(result_data, f, indent=2)
+
+            # 3) Remove masks from NPZ
+            if masks_path.exists() and obj_ids_to_remove:
+                npz = np.load(masks_path, allow_pickle=True)
+                new_data = {}
+                removed_keys = 0
+                remaining_obj_ids = set()
+
+                for key in npz.files:
+                    # Check if this key belongs to a removed obj_id
+                    skip = False
+                    if key.startswith("f") and "_o" in key:
+                        parts = key.split("_o")
+                        try:
+                            oid = int(parts[1])
+                            if oid in obj_ids_to_remove:
+                                skip = True
+                                removed_keys += 1
+                            else:
+                                remaining_obj_ids.add(oid)
+                        except (ValueError, IndexError):
+                            pass
+
+                    if not skip:
+                        new_data[key] = npz[key]
+
+                # Update obj_ids array
+                if "obj_ids" in new_data:
+                    old_ids = new_data["obj_ids"].tolist()
+                    new_data["obj_ids"] = np.array(
+                        [oid for oid in old_ids if oid not in obj_ids_to_remove],
+                        dtype=np.int32
+                    )
+
+                import tempfile
+                tmp_fd, tmp_path = tempfile.mkstemp(suffix='.npz', dir=str(masks_path.parent))
+                os.close(tmp_fd)
+                np.savez_compressed(tmp_path, **new_data)
+                os.replace(tmp_path, str(masks_path))
+                return {"removed_masks": removed_keys, "removed_obj_ids": list(obj_ids_to_remove)}
+
+            return {"removed_masks": 0, "removed_obj_ids": list(obj_ids_to_remove)}
+
+        result = await loop.run_in_executor(None, _delete)
+        return {"ok": True, **result}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/segmentation/paint_mask")
+async def paint_mask(request: Request):
+    """Paint on an instance's mask for a specific frame.
+    
+    Body: {session_id, instance_id, kf_index, x, y, radius, action: 'add'|'remove'}
+    x, y: normalized 0-1 coordinates
+    radius: in pixels (in mask space)
+    Returns: updated mask PNG
+    """
+    body = await request.json()
+    session_id = body.get("session_id")
+    instance_id = body.get("instance_id")
+    kf_index = body.get("kf_index", 0)
+    x = body.get("x", 0)  # normalized 0-1
+    y = body.get("y", 0)  # normalized 0-1
+    radius = body.get("radius", 15)
+    action = body.get("action", "add")  # 'add' or 'remove'
+
+    if not session_id or instance_id is None:
+        raise HTTPException(status_code=400, detail="Missing session_id or instance_id")
+
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    output_dir = scans_dir / session_id / "output"
+    masks_path = output_dir / "seg_masks.npz"
+    seg_path = output_dir / "segmentation.json"
+
+    if not masks_path.exists():
+        raise HTTPException(status_code=404, detail="No mask data")
+
+    loop = asyncio.get_event_loop()
+
+    def _paint():
+        import cv2, base64
+        npz = dict(np.load(masks_path, allow_pickle=True))
+
+        # Build instance_id → [obj_ids] mapping
+        obj_ids_for_instance = [instance_id]
+        if seg_path.exists():
+            with open(seg_path) as f:
+                seg_data = json.load(f)
+            for inst in seg_data.get("instances", []):
+                iid = inst.get("instance_id", inst.get("id"))
+                if iid == instance_id and inst.get("id") != instance_id:
+                    obj_ids_for_instance.append(inst.get("id"))
+
+        # Find the NPZ key for this frame+instance
+        target_key = None
+        for oid in obj_ids_for_instance:
+            key = f"f{kf_index}_o{oid}"
+            if key in npz:
+                target_key = key
+                break
+
+        if target_key is None:
+            # No existing mask? Create one if action is 'add'
+            if action != 'add':
+                return None
+            # Determine mask shape from any existing mask
+            for k in npz:
+                if k.startswith("f") and "_o" in k:
+                    shape = npz[k].shape
+                    break
+            else:
+                return None
+            mask = np.zeros(shape, dtype=np.uint8)
+            target_key = f"f{kf_index}_o{obj_ids_for_instance[0]}"
+        else:
+            mask = npz[target_key].astype(np.uint8).copy()
+
+        h, w = mask.shape[:2]
+        cx = int(x * w)
+        cy = int(y * h)
+
+        # Apply circular brush
+        yy, xx = np.ogrid[:h, :w]
+        circle = ((xx - cx) ** 2 + (yy - cy) ** 2) <= radius ** 2
+
+        if action == 'add':
+            mask[circle] = 1
+        else:
+            mask[circle] = 0
+
+        npz[target_key] = mask
+        # Atomic write: save to temp file, then rename to prevent corruption
+        import tempfile
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix='.npz', dir=str(masks_path.parent))
+        os.close(tmp_fd)
+        np.savez_compressed(tmp_path, **npz)
+        os.replace(tmp_path, str(masks_path))
+
+        # Generate updated mask PNG
+        # Get instance color
+        color_hex = "#00FF00"
+        result_path = output_dir / "segmentation_result.json"
+        if result_path.exists():
+            with open(result_path) as f:
+                result_data = json.load(f)
+            for inst in result_data.get("instances", []):
+                if inst.get("id") == instance_id:
+                    color_hex = inst.get("color", color_hex)
+                    break
+
+        color_hex = color_hex.lstrip('#')
+        r = int(color_hex[0:2], 16)
+        g = int(color_hex[2:4], 16)
+        b = int(color_hex[4:6], 16)
+
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        mask_bool = mask > 0
+        rgba[mask_bool, 0] = r
+        rgba[mask_bool, 1] = g
+        rgba[mask_bool, 2] = b
+        rgba[mask_bool, 3] = 128
+
+        # Resize to original resolution if needed
+        if seg_path.exists():
+            with open(seg_path) as f:
+                sd = json.load(f)
+            orig_res = sd.get("resolution", {}).get("original")
+            if orig_res and (orig_res[0] != h or orig_res[1] != w):
+                rgba = cv2.resize(rgba, (orig_res[1], orig_res[0]), interpolation=cv2.INTER_NEAREST)
+
+        _, png_buf = cv2.imencode('.png', rgba)
+        return base64.b64encode(png_buf.tobytes()).decode('ascii')
+
+    result = await loop.run_in_executor(None, _paint)
+    if result is None:
+        return {"mask_png": None}
+    return {"mask_png": result}
+
+
+@app.post("/api/segmentation/text_prompt")
+async def add_text_prompt_endpoint(request: Request):
+    """Add a text-based prompt to a SAM3 interactive session. Returns mask preview."""
+    body = await request.json()
+    state_id = body.get("state_id")
+    frame_idx = body.get("frame_idx")
+    text = body.get("text", "")
+    obj_id = body.get("obj_id", 1)
+
+    if not state_id or frame_idx is None or not text:
+        raise HTTPException(status_code=400, detail="Missing state_id, frame_idx, or text")
+
+    from sam3_wrapper import get_sam3_wrapper
+    sam3 = get_sam3_wrapper()
+    loop = asyncio.get_event_loop()
+
+    try:
+        def _prompt():
+            result = sam3.add_text_prompt(
+                state_id=state_id, frame_idx=frame_idx, text=text, obj_id=obj_id,
+            )
+            mask_b64 = None
+            if result.get("mask") is not None:
+                import cv2, base64
+                mask = result["mask"]
+                h, w = mask.shape[:2]
+                rgba = np.zeros((h, w, 4), dtype=np.uint8)
+                mask_bool = mask > 0
+                rgba[mask_bool, 1] = 200
+                rgba[mask_bool, 3] = 128
+                _, png_buf = cv2.imencode('.png', rgba)
+                mask_b64 = base64.b64encode(png_buf.tobytes()).decode('ascii')
+            return result["success"], mask_b64
+
+        success, mask_b64 = await loop.run_in_executor(None, _prompt)
+        if not success:
+            raise HTTPException(status_code=500, detail="Text prompt failed")
+        resp = {"ok": True}
+        if mask_b64:
+            resp["mask_png"] = mask_b64
+        return resp
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/segmentation/auto/{session_id}")
+async def run_auto_segmentation(session_id: str):
+    """Full auto-segmentation: VLM scene analysis → SAM3 pipeline."""
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    session_dir = scans_dir / session_id
+    frames_dir = session_dir / "frames"
+    output_dir = session_dir / "output"
+
+    if not frames_dir.exists():
+        raise HTTPException(status_code=404, detail="Frames directory not found")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    loop = asyncio.get_event_loop()
+
+    try:
+        def _auto():
+            from scene_analyzer import analyze_scene
+            vlm_result = analyze_scene(str(frames_dir), str(output_dir))
+            categories = vlm_result.get("categories", [])
+            frame_map = vlm_result.get("frame_map", {})
+            if not categories:
+                return {"error": "VLM found no categories", "instances": []}
+            labels = [c["label"] if isinstance(c, dict) else c for c in categories]
+            prompt = ";".join(labels)
+            from segmentation_pipeline import run_segmentation
+            return run_segmentation(str(frames_dir), str(output_dir), prompt, frame_map=frame_map)
+
+        result = await loop.run_in_executor(None, _auto)
+        return {"ok": True, "instances": result.get("instances", []), "error": result.get("error")}
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/segmentation/clean_instance")
+async def clean_segmentation_instance(request: Request):
+    """Run DBSCAN on a single segmented instance to isolate the largest cluster."""
+    body = await request.json()
+    session_id = body.get("session_id")
+    instance_id = body.get("instance_id")
+
+    if not session_id or instance_id is None:
+        raise HTTPException(status_code=400, detail="Missing session_id or instance_id")
+
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    output_dir = scans_dir / session_id / "output"
+    seg_path = output_dir / "segmentation.json"
+    cloud_path = output_dir / "cleaned_cloud.ply"
+
+    if not seg_path.exists():
+        raise HTTPException(status_code=404, detail="No segmentation data")
+    if not cloud_path.exists():
+        raise HTTPException(status_code=404, detail="No cleaned cloud")
+
+    loop = asyncio.get_event_loop()
+
+    try:
+        def _clean():
+            with open(seg_path) as f:
+                seg_data = json.load(f)
+            inst = next((i for i in seg_data.get("instances", []) if i.get("id") == instance_id), None)
+            if not inst:
+                return {"error": f"Instance {instance_id} not found"}
+            indices = inst.get("point_indices", [])
+            if not indices:
+                return {"error": "Instance has no point_indices"}
+            from workers.instance_cleaner_worker import _run_dbscan, _load_ply
+            cloud_pts, cloud_colors = _load_ply(cloud_path)
+            inst_pts = cloud_pts[indices]
+            inst_cols = cloud_colors[indices] if cloud_colors is not None else np.zeros_like(inst_pts)
+            inst_cloud = np.hstack((inst_pts, inst_cols))
+            inst_cfg = cfg.get("instance_cleaning", {})
+            cleaned = _run_dbscan(inst_cloud, eps=inst_cfg.get("dbscan_eps", 0.05),
+                                  min_samples=inst_cfg.get("dbscan_min_samples", 10))
+            return {"ok": True, "original_points": len(indices), "cleaned_points": len(cleaned),
+                    "removed": len(indices) - len(cleaned)}
+
+        result = await loop.run_in_executor(None, _clean)
+        return result
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.websocket("/ws/slam")
 async def slam_websocket(websocket: WebSocket):
     """
@@ -1724,9 +2618,9 @@ async def viewer_websocket(websocket: WebSocket):
                                  # Resend the cleaned cloud
                                  sent = await _send_cleaned_cloud(websocket, session_id)
                                  
-                                 # Apply segmentation against current cloud
+                                 # Apply segmentation against current cloud (offloaded)
                                  from segmentation_pipeline import apply_segmentation_to_cloud
-                                 seg_data = apply_segmentation_to_cloud(frame_storage.current_session.output_dir)
+                                 seg_data = await loop.run_in_executor(None, apply_segmentation_to_cloud, frame_storage.current_session.output_dir)
                                  if seg_data.get("instances"):
                                      await websocket.send_text(json.dumps(seg_data))
                                  
@@ -1750,46 +2644,49 @@ async def viewer_websocket(websocket: WebSocket):
                                 if not session: return False
 
                                 print(f"[Retro-Offline] 🟢 STARTING DA3 INCREMENTAL RECONSTRUCTION (RealtimeDA3)")
+                                _loop = asyncio.get_event_loop()
 
                                 # 1. Prepare Paths
                                 images_dir = session.frames_dir.resolve()
                                 output_dir = session.output_dir.resolve()
 
-                                # 1.5. Frame quality analysis (blur detection)
-                                from frame_quality import analyze_frames, save_manifest
-                                fq_result = analyze_frames(str(images_dir))
-                                if "error" not in fq_result:
-                                    save_manifest(str(images_dir), fq_result)
+                                # 1.5-2. Run sync init steps in thread pool to not block event loop
+                                def _init_da3():
+                                    from frame_quality import analyze_frames, save_manifest
+                                    fq_result = analyze_frames(str(images_dir))
+                                    if "error" not in fq_result:
+                                        save_manifest(str(images_dir), fq_result)
 
-                                # 1.6. Visual novelty frame selection (H/F ratio keyframe filter)
-                                frame_sel_cfg = cfg.get("frame_selection", {})
-                                if frame_sel_cfg.get("enabled", False):
-                                    try:
-                                        from frame_selector import select_keyframes
-                                        sel_result = select_keyframes(str(images_dir), frame_sel_cfg)
-                                        print(f"[Retro-Offline] 🎯 Selected {sel_result['selected_count']}/{sel_result['total_frames']} keyframes")
-                                    except Exception as e:
-                                        print(f"[Retro-Offline] ⚠️ Frame selection failed, using stride fallback: {e}")
+                                    frame_sel_cfg = cfg.get("frame_selection", {})
+                                    if frame_sel_cfg.get("enabled", False):
+                                        try:
+                                            from frame_selector import select_keyframes
+                                            sel_result = select_keyframes(str(images_dir), frame_sel_cfg)
+                                            print(f"[Retro-Offline] 🎯 Selected {sel_result['selected_count']}/{sel_result['total_frames']} keyframes")
+                                        except Exception as e:
+                                            print(f"[Retro-Offline] ⚠️ Frame selection failed, using stride fallback: {e}")
 
-                                # 2. Create DA3 Config (all from config.yaml + HF cache)
-                                from da3_config_builder import build_da3_config
-                                da3_config = build_da3_config(cfg)
+                                    from da3_config_builder import build_da3_config
+                                    da3_config = build_da3_config(cfg)
 
-                                # 3. Create RealtimeDA3 instance with AlignmentManagerr for gravity correction
-                                print(f"[Retro-Offline] Initializing RealtimeDA3...")
-                                alignment_manager.reset()  # Reset to compute fresh gravity for this session
-                                da3 = RealtimeDA3(
-                                    image_dir=str(images_dir),
-                                    save_dir=str(output_dir),
-                                    config=da3_config,
-                                    alignment_manager=alignment_manage
-                                )
+                                    print(f"[Retro-Offline] Initializing RealtimeDA3...")
+                                    alignment_manager.reset()
+                                    da3 = RealtimeDA3(
+                                        image_dir=str(images_dir),
+                                        save_dir=str(output_dir),
+                                        config=da3_config,
+                                        alignment_manager=alignment_manage
+                                    )
+                                    return da3
 
-                                # 4. No-op callback (no streaming during processing)
+                                da3 = await _loop.run_in_executor(None, _init_da3)
+
+                                # 3. No-op callback (no streaming during processing)
                                 async def on_chunk_complete(chunk_id, sim3_transform):
                                     print(f"[Retro-Offline] Chunk {chunk_id} saved (not streaming)")
+                                    await asyncio.sleep(0)  # Yield for pings
 
-                                # 5. Run DA3
+                                # 4. Run DA3 (already uses asyncio.to_thread internally)
                                 print(f"[Retro-Offline] Processing {len(da3.img_list)} images...")
                                 await da3.process_long_sequence_async(callback=on_chunk_complete)
                                 print(f"[Retro-Offline] ✅ DA3 complete!")
@@ -1801,101 +2698,93 @@ async def viewer_websocket(websocket: WebSocket):
                                 traceback.print_exc()
                                 return False
                         
-                        # Run DA3 then CloudCompPy then segment then send
-                        success = await _retro_process_offline()
-                        
-                        if success:
-                            session_id = frame_storage.current_session.session_id if frame_storage.current_session else None
-                            if session_id:
-                                # Run CloudCompPy post-processing
-                                postproc_config = cfg.get("postprocessing", {})
-                                if postproc_config.get("enabled", False):
-                                    await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
+                        # Run ENTIRE pipeline as background task so WS loop stays responsive
+                        async def _run_offline_pipeline():
+                            try:
+                                success = await _retro_process_offline()
                                 
-                                # Run segmentation pipeline if prompt was set
-                                if prompt:
-                                    session = frame_storage.current_session
-                                    try:
-                                        # Resolve prompt (auto-detect if needed)
-                                        prompt, frame_map = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
+                                if success:
+                                    session_id = frame_storage.current_session.session_id if frame_storage.current_session else None
+                                    if session_id:
+                                        postproc_config = cfg.get("postprocessing", {})
+                                        if postproc_config.get("enabled", False):
+                                            await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
+                                        
+                                        if prompt:
+                                            session = frame_storage.current_session
+                                            try:
+                                                _p, frame_map = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
+                                                from segmentation_pipeline import run_segmentation
+                                                _seg_loop = asyncio.get_event_loop()
+                                                result = await _seg_loop.run_in_executor(None, lambda: run_segmentation(
+                                                    frames_dir=str(session.frames_dir),
+                                                    output_dir=str(session.output_dir),
+                                                    prompt=_p,
+                                                    frame_map=frame_map
+                                                ))
+                                                print(f"[Retro-Offline] Segmentation: {len(result.get('instances', []))} instances")
+                                            except Exception as e:
+                                                print(f"[Retro-Offline] Segmentation error: {e}")
+                                        
+                                        await _send_cleaned_cloud(websocket, session_id)
+                                        
+                                        output_dir = Path(__file__).parent / "scans" / session_id / "output"
+                                        from segmentation_pipeline import apply_segmentation_to_cloud
+                                        _seg_loop2 = asyncio.get_event_loop()
+                                        seg_data = await _seg_loop2.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
+                                        if seg_data.get("instances"):
+                                            await websocket.send_text(json.dumps(seg_data))
+                                    
+                                    await websocket.send_text(json.dumps({
+                                        "type": "status",
+                                        "message": "Offline processing complete"
+                                    }))
+                                    print("[Viewer] Offline Processing Complete.")
+                            except Exception as e:
+                                print(f"[Retro-Offline] Pipeline error: {e}")
+                                import traceback
+                                traceback.print_exc()
 
-                                        from segmentation_pipeline import run_segmentation
-                                        result = run_segmentation(
-                                            frames_dir=str(session.frames_dir),
-                                            output_dir=str(session.output_dir),
-                                            prompt=prompt,
-                                            frame_map=frame_map
-                                        )
-                                        print(f"[Retro-Offline] Segmentation: {len(result.get('instances', []))} instances")
-                                    except Exception as e:
-                                        print(f"[Retro-Offline] Segmentation error: {e}")
-                                
-                                # Send cleaned cloud to viewer
-                                await _send_cleaned_cloud(websocket, session_id)
-                                
-                                # Apply segmentation against current cloud
-                                output_dir = Path(__file__).parent / "scans" / session_id / "output"
-                                from segmentation_pipeline import apply_segmentation_to_cloud
-                                seg_data = apply_segmentation_to_cloud(output_dir)
-                                if seg_data.get("instances"):
-                                    await websocket.send_text(json.dumps(seg_data))
-                            
-                            await websocket.send_text(json.dumps({
-                                "type": "status",
-                                "message": "Offline processing complete"
-                            }))
-                            print("[Viewer] Offline Processing Complete.")
+                        asyncio.create_task(_run_offline_pipeline())
 
             elif cmd.get("type") == "load_session":
                 session_id = cmd.get("session_id")
                 print(f"[Viewer] Loading session {session_id}...")
+                loop = asyncio.get_event_loop()
                 
-                # Clear current view
+                # Clear current view (lightweight, no I/O)
                 alignment_manager.reset()
                 frame_storage.stop_session()
                 
-                # Re-activate session in FrameStorage (Offline Mode)
-                # This enables _retro_process to find files if needed
+                # Offload disk I/O to thread pool
                 if frame_storage:
-                    frame_storage.load_session_from_disk(session_id)
+                    await loop.run_in_executor(None, frame_storage.load_session_from_disk, session_id)
                 
                 await websocket.send_text(json.dumps({"type": "cleared"}))
-                
-                # Get chunks to stream
-                history = []
-                if alignment_manager and alignment_manager.get_chunk_count() > 0:
-                     history = alignment_manager.aligned_chunks
-                elif frame_storage and frame_storage.current_session:
-                     # Fallback if alignment manager reset but session loaded (though offline re-proc fills align-mgr)
-                     # Actually offline re-proc fills it. But initial load might trigger this before re-proc?
-                     # No, 'load_session' just loads PLY.
-                     # But we need to know how many.
-                     pass
-                
-                # If we just loaded from disk, alignment_manager is empty until re-proc OR untill we manually load PLYs into it?
-                # Wait, 'load_session' below streams from 'frame_storage.save_ply' locations?
-                # The original code streamed from `alignment_manager.aligned_chunks`.
-                # If we use `load_session_from_disk`, `alignment_manager` is RESET.
-                # So `history` is EMPTY.
-                # But the code below (lines 352+) iterates `history`!
-                # Logic Fix: We need to populate `history` from DISK if alignment_manager is empty.
-                
-                # Actually, the original 'load_session' loop (now at line ~415 in file) reads from disk?
-                # No, it iterates `alignment_manager.aligned_chunks`. 
-                # !!! If `alignment_manager` is reset, we stream NOTHING.
-                # Use FrameStorage to get file list effectively.
+                await asyncio.sleep(0)  # Yield to process pings
                 
                 total_chunks = 0
                 if frame_storage and frame_storage.current_session:
                     total_chunks = len(frame_storage.current_session.chunks)
 
-                # Send Metadata
                 await websocket.send_text(json.dumps({
                     "type": "session_info",
                     "session_id": session_id,
                     "mode": "Offline",
                     "total_chunks": total_chunks
                 }))
+
+                # Auto-send pipeline status if running
+                status = pipeline_manager.get_status(session_id)
+                if status and status.get("status") in ("queued", "running"):
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "pipeline_progress",
+                            "session_id": session_id,
+                            **status
+                        }))
+                    except Exception:
+                        pass
                 
                 # Stream saved point clouds
                 try:
@@ -1907,7 +2796,6 @@ async def viewer_websocket(websocket: WebSocket):
                     potree_metadata = output_dir / "potree" / "metadata.json"
                     
                     if not cleaned_ply.exists():
-                        # No cleaned cloud yet — check if chunks exist to run CloudCompPy
                         chunk_plys = sorted(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
                         if chunk_plys:
                             print(f"[Viewer] No cleaned_cloud.ply found. Running CloudCompPy on {len(chunk_plys)} chunks...")
@@ -1920,6 +2808,8 @@ async def viewer_websocket(websocket: WebSocket):
                         else:
                             await websocket.send_text(json.dumps({"type": "error", "message": "No point clouds found for this session"}))
                             raise Exception("No PLY data")
+                    
+                    await asyncio.sleep(0)  # Yield to process pings
                     
                     if cleaned_ply.exists():
                         # Ensure Potree octree exists (convert if needed)
@@ -1937,28 +2827,56 @@ async def viewer_websocket(websocket: WebSocket):
                                 await websocket.send_text(json.dumps({"type": "error", "message": "Potree conversion failed"}))
                                 raise Exception("Potree conversion failed")
                         
-                        # Send potree_ready message — UI loads via HTTP, not WebSocket binary
-                        potree_meta = json.loads(potree_metadata.read_text())
+                        await asyncio.sleep(0)  # Yield to process pings
                         
-                        # Load floor transform if available
-                        floor_transform_4x4 = None
-                        transform_path = output_dir / "floor_transform.npz"
-                        if transform_path.exists():
-                            try:
-                                data = np.load(transform_path)
-                                s_val = float(data['s'])
-                                R = data['R']       # 3x3 rotation
-                                t = data['t']       # 3 translation
-                                # Build 4x4 matrix: P' = s*(R@P) + t
-                                # Three.js uses column-major: elements[0..3]=col0, [4..7]=col1, etc.
-                                M = np.eye(4)
-                                M[:3, :3] = s_val * R
-                                M[:3, 3] = t
-                                # Column-major flatten for Three.js
-                                floor_transform_4x4 = M.T.flatten().tolist()
-                                print(f"[Viewer] Floor transform loaded for Potree cloud")
-                            except Exception as e:
-                                print(f"[Viewer] ⚠️ Could not load floor_transform: {e}")
+                        # Offload file reads to thread pool
+                        def _load_metadata():
+                            potree_meta = json.loads(potree_metadata.read_text())
+                            floor_transform_4x4 = None
+                            transform_path = output_dir / "floor_transform.npz"
+                            if transform_path.exists():
+                                try:
+                                    data = np.load(transform_path)
+                                    s_val = float(data['s'])
+                                    R = data['R']
+                                    t = data['t']
+                                    M = np.eye(4)
+                                    M[:3, :3] = s_val * R
+                                    M[:3, 3] = t
+                                    floor_transform_4x4 = M.T.flatten().tolist()
+                                    print(f"[Viewer] Floor transform loaded for Potree cloud")
+                                except Exception as e:
+                                    print(f"[Viewer] ⚠️ Could not load floor_transform: {e}")
+                            else:
+                                # Fallback: compute from cleaned_cloud.ply if available
+                                cleaned_path = output_dir / "cleaned_cloud.ply"
+                                if cleaned_path.exists():
+                                    try:
+                                        from alignment_manager import get_alignment_manager
+                                        from plyfile import PlyData
+                                        plydata = PlyData.read(str(cleaned_path))
+                                        vx = plydata['vertex']
+                                        xyz = np.column_stack([
+                                            np.array(vx['x'], dtype=np.float64),
+                                            np.array(vx['y'], dtype=np.float64),
+                                            np.array(vx['z'], dtype=np.float64),
+                                        ])
+                                        am = get_alignment_manager()
+                                        s_val, R, t = am.compute_leveling_from_points(xyz)
+                                        if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+                                            np.savez(transform_path, s=np.array(s_val), R=R, t=t)
+                                            M = np.eye(4)
+                                            M[:3, :3] = s_val * R
+                                            M[:3, 3] = t
+                                            floor_transform_4x4 = M.T.flatten().tolist()
+                                            print(f"[Viewer] Floor transform computed and saved")
+                                        else:
+                                            print(f"[Viewer] No floor plane detected")
+                                    except Exception as e:
+                                        print(f"[Viewer] ⚠️ Floor alignment fallback failed: {e}")
+                            return potree_meta, floor_transform_4x4
+                        
+                        potree_meta, floor_transform_4x4 = await loop.run_in_executor(None, _load_metadata)
                         
                         msg = {
                             "type": "potree_ready",
@@ -1971,9 +2889,11 @@ async def viewer_websocket(websocket: WebSocket):
                         await websocket.send_text(json.dumps(msg))
                         print(f"[Viewer] ✅ Sent potree_ready for {session_id} ({potree_meta.get('points', 0):,} pts)")
                         
-                        # Apply segmentation if available
+                        await asyncio.sleep(0)  # Yield to process pings
+                        
+                        # Offload segmentation loading to thread pool
                         from segmentation_pipeline import apply_segmentation_to_cloud
-                        seg_data = apply_segmentation_to_cloud(output_dir)
+                        seg_data = await loop.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
                         if seg_data.get("instances"):
                             await websocket.send_text(json.dumps(seg_data))
                             print(f"[Viewer] Sent segmentation ({len(seg_data['instances'])} instances)")
@@ -1991,10 +2911,10 @@ async def viewer_websocket(websocket: WebSocket):
 
                 # Build stages from client config or defaults
                 stages_config = cmd.get("stages", None)  # e.g. {"da3": true, "vlm": false}
-                if stages_config:
-                    stages = build_default_stages(enabled=stages_config)
-                else:
-                    stages = build_default_stages()  # all enabled
+                ordered_stages = cmd.get("ordered_stages", None) # e.g. ["vlm", "sam3", "da3", "cloudcompy"]
+                
+                from pipeline_manager import build_pipeline_stages
+                stages = build_pipeline_stages(ordered_stages=ordered_stages, enabled=stages_config)
 
                 # Progress callback: relay to this websocket + broadcast
                 async def _on_pipeline_progress(sid, job_dict):
@@ -2026,26 +2946,30 @@ async def viewer_websocket(websocket: WebSocket):
                             "type": "status",
                             "message": "Building LOD octree..."
                         }))
-                        success = await convert_ply_to_potree_async(session_path)
+                        success = await convert_ply_to_potree_async(session_path, force=True)
                         if success:
-                            potree_meta_path = session_path / "output" / "potree" / "metadata.json"
-                            potree_meta = json.loads(potree_meta_path.read_text())
+                            # Offload file reads to thread pool
+                            _pipe_loop = asyncio.get_event_loop()
+                            def _load_pipe_metadata():
+                                potree_meta_path = session_path / "output" / "potree" / "metadata.json"
+                                potree_meta = json.loads(potree_meta_path.read_text())
+                                floor_transform_4x4 = None
+                                ft_path = session_path / "output" / "floor_transform.npz"
+                                if ft_path.exists():
+                                    try:
+                                        data = np.load(ft_path)
+                                        s_val = float(data['s'])
+                                        R = data['R']
+                                        t = data['t']
+                                        M = np.eye(4)
+                                        M[:3, :3] = s_val * R
+                                        M[:3, 3] = t
+                                        floor_transform_4x4 = M.T.flatten().tolist()
+                                    except Exception:
+                                        pass
+                                return potree_meta, floor_transform_4x4
                             
-                            # Load floor transform if available
-                            floor_transform_4x4 = None
-                            ft_path = session_path / "output" / "floor_transform.npz"
-                            if ft_path.exists():
-                                try:
-                                    data = np.load(ft_path)
-                                    s_val = float(data['s'])
-                                    R = data['R']
-                                    t = data['t']
-                                    M = np.eye(4)
-                                    M[:3, :3] = s_val * R
-                                    M[:3, 3] = t
-                                    floor_transform_4x4 = M.T.flatten().tolist()
-                                except Exception:
-                                    pass
+                            potree_meta, floor_transform_4x4 = await _pipe_loop.run_in_executor(None, _load_pipe_metadata)
                             
                             pipe_msg = {
                                 "type": "potree_ready",
@@ -2063,14 +2987,19 @@ async def viewer_websocket(websocket: WebSocket):
                     except Exception as e:
                         print(f"[Pipeline] Send cloud error: {e}")
 
-                    # Broadcast segmentation if available
+                    # Send segmentation result (with floor-aligned OBBs) if available
+                    # Use apply_segmentation_to_cloud (same as session reload) to ensure
+                    # proper cache invalidation and OBB recalculation
                     try:
-                        seg_path = Path(__file__).parent / "scans" / sid / "output" / "seg_broadcast.json"
-                        if seg_path.exists():
-                            seg_data = json.loads(seg_path.read_text())
-                            if seg_data.get("instances"):
-                                await viewer_manager.broadcast_text(json.dumps(seg_data))
-                                print(f"[Pipeline] Broadcast {len(seg_data['instances'])} segments")
+                        from segmentation_pipeline import apply_segmentation_to_cloud
+                        _pipe_loop = asyncio.get_event_loop()
+                        _seg_output_dir = Path(__file__).parent / "scans" / sid / "output"
+                        seg_data = await _pipe_loop.run_in_executor(
+                            None, apply_segmentation_to_cloud, _seg_output_dir
+                        )
+                        if seg_data and seg_data.get("instances"):
+                            await websocket.send_text(json.dumps(seg_data))
+                            print(f"[Pipeline] Sent {len(seg_data['instances'])} segments")
                     except Exception as e:
                         print(f"[Pipeline] Broadcast error: {e}")
 

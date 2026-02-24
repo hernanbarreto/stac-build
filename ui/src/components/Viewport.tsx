@@ -14,6 +14,8 @@ interface ViewportProps {
     pointSize: number
     activeSession: string | null
     activeTool: Tool
+    showAxes?: boolean
+    showGrid?: boolean
     onPointCount: (count: number) => void
     onFps: (fps: number) => void
     onStatusMessage?: (msg: string) => void
@@ -27,6 +29,7 @@ export interface SegmentInstance {
     color: string
     totalPoints: number
     visible: boolean
+    excluded?: boolean
 }
 
 export interface ViewportHandle {
@@ -35,6 +38,7 @@ export interface ViewportHandle {
     clearMeasurements: () => void
     resetSectionBox: () => void
     resetCamera: () => void
+    clearScene: () => void
 }
 
 // Vertex shader — matches FusionRenderer.js point size formula
@@ -56,7 +60,7 @@ const vertexShader = `
     // Same formula as standalone viewer: pointScale / depth
     float depth = -mvPosition.z;
     float size = pointSize / depth;
-    gl_PointSize = clamp(size, 1.0, 5.0);
+    gl_PointSize = clamp(size, 1.0, 25.0);
   }
 `
 
@@ -95,23 +99,21 @@ const fragmentShader = `
 // ── Measurement helpers (outside component) ──
 function createTextSprite(text: string, color: string = '#ffffff'): THREE.Sprite {
     const canvas = document.createElement('canvas')
+    canvas.width = 128; canvas.height = 32
     const ctx = canvas.getContext('2d')!
-    canvas.width = 256
-    canvas.height = 64
+    ctx.font = 'bold 22px sans-serif'
     ctx.fillStyle = 'rgba(0,0,0,0.7)'
-    ctx.roundRect(0, 0, 256, 64, 8)
+    ctx.roundRect(0, 0, 128, 32, 4)
     ctx.fill()
-    ctx.font = 'bold 28px Inter, Arial, sans-serif'
     ctx.fillStyle = color
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText(text, 128, 32)
-
+    ctx.fillText(text, 64, 16)
     const texture = new THREE.CanvasTexture(canvas)
-    texture.needsUpdate = true
     const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false, sizeAttenuation: true })
     const sprite = new THREE.Sprite(mat)
-    sprite.scale.set(0.4, 0.1, 1)
+    sprite.scale.set(0.12, 0.03, 1)
+    sprite.renderOrder = 1000
     return sprite
 }
 
@@ -164,7 +166,7 @@ interface Measurement {
 }
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, activeSession, activeTool, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress },
+    { pointSize, activeSession, activeTool, showAxes = true, showGrid = true, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -186,6 +188,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const pendingPointsRef = useRef<THREE.Vector3[]>([])
     const pendingMarkersRef = useRef<THREE.Mesh[]>([])
     const pendingLineRef = useRef<THREE.Line | null>(null)
+    const livePreviewRef = useRef<THREE.Group | null>(null)
     const measurementsRef = useRef<Measurement[]>([])
     const raycasterRef = useRef(new THREE.Raycaster())
     const activeToolRef = useRef(activeTool)
@@ -193,9 +196,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const potreeLoaderRef = useRef<PotreeOctreeLoader | null>(null)
     const lastLodUpdateRef = useRef(0)
     const floorTransformRef = useRef<THREE.Matrix4 | null>(null)
+    const gridRef = useRef<THREE.GridHelper | null>(null)
+    const axesRef = useRef<THREE.Group | null>(null)
 
     // Keep activeToolRef in sync with prop
     useEffect(() => { activeToolRef.current = activeTool }, [activeTool])
+
+    // Toggle grid and axes visibility
+    useEffect(() => { if (gridRef.current) gridRef.current.visible = showGrid }, [showGrid])
+    useEffect(() => { if (axesRef.current) axesRef.current.visible = showAxes }, [showAxes])
 
     // Toggle OrbitControls left-button based on active tool
     useEffect(() => {
@@ -247,6 +256,19 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         pendingPointsRef.current = []
         pendingMarkersRef.current = []
+        // Remove live preview
+        if (livePreviewRef.current) {
+            group.remove(livePreviewRef.current)
+            livePreviewRef.current.traverse(c => {
+                if ((c as any).geometry) (c as any).geometry.dispose()
+                if ((c as any).material) {
+                    const m = (c as any).material
+                    if (m.map) m.map.dispose()
+                    m.dispose()
+                }
+            })
+            livePreviewRef.current = null
+        }
     }, [])
 
     // Finalize a distance measurement
@@ -271,10 +293,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         measurementsRef.current.push(measurement)
 
-        // Reset pending
+        // Reset pending + clean up live preview
         pendingPointsRef.current = []
         pendingMarkersRef.current = []
         pendingLineRef.current = null
+        if (livePreviewRef.current) {
+            group.remove(livePreviewRef.current)
+            livePreviewRef.current.traverse(c => {
+                if ((c as any).geometry) (c as any).geometry.dispose()
+                if ((c as any).material) { const m = (c as any).material; if (m.map) m.map.dispose(); m.dispose() }
+            })
+            livePreviewRef.current = null
+        }
 
         if (onStatusMessage) onStatusMessage(`Distance: ${label}`)
     }, [onStatusMessage])
@@ -312,6 +342,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         pendingPointsRef.current = []
         pendingMarkersRef.current = []
         pendingLineRef.current = null
+        if (livePreviewRef.current) {
+            group.remove(livePreviewRef.current)
+            livePreviewRef.current.traverse(c => {
+                if ((c as any).geometry) (c as any).geometry.dispose()
+                if ((c as any).material) { const m = (c as any).material; if (m.map) m.map.dispose(); m.dispose() }
+            })
+            livePreviewRef.current = null
+        }
 
         if (onStatusMessage) onStatusMessage(`Angle: ${label}`)
     }, [onStatusMessage])
@@ -395,6 +433,66 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         hl.visible = true
         // Billboard — always face camera
         hl.quaternion.copy(camera.quaternion)
+
+        // Live preview line + distance from first pending point to hover
+        const pending = pendingPointsRef.current
+        const group = measureGroupRef.current
+        if (pending.length >= 1 && group) {
+            // Remove old preview
+            if (livePreviewRef.current) {
+                group.remove(livePreviewRef.current)
+                livePreviewRef.current.traverse(c => {
+                    if ((c as any).geometry) (c as any).geometry.dispose()
+                    if ((c as any).material) {
+                        const m = (c as any).material
+                        if (m.map) m.map.dispose()
+                        m.dispose()
+                    }
+                })
+            }
+
+            const previewGroup = new THREE.Group()
+            const lastPt = pending[pending.length - 1]
+            const lineColor = tool === 'measure-distance' ? 0x00ff88 : 0xffaa00
+
+            // Dashed line
+            const lineGeom = new THREE.BufferGeometry().setFromPoints([lastPt, hitPoint])
+            const lineMat = new THREE.LineDashedMaterial({
+                color: lineColor, dashSize: 0.03, gapSize: 0.02,
+                transparent: true, opacity: 0.7, depthTest: false
+            })
+            const dashedLine = new THREE.Line(lineGeom, lineMat)
+            dashedLine.computeLineDistances()
+            dashedLine.renderOrder = 999
+            previewGroup.add(dashedLine)
+
+            // Distance label sprite
+            const dist = lastPt.distanceTo(hitPoint)
+            const distStr = dist < 1 ? `${(dist * 100).toFixed(1)} cm` : `${dist.toFixed(3)} m`
+            const lCanvas = document.createElement('canvas')
+            lCanvas.width = 128; lCanvas.height = 32
+            const lCtx = lCanvas.getContext('2d')!
+            lCtx.font = 'bold 22px sans-serif'
+            lCtx.fillStyle = 'rgba(0,0,0,0.7)'
+            lCtx.roundRect(0, 0, 128, 32, 4)
+            lCtx.fill()
+            lCtx.fillStyle = '#ffffff'
+            lCtx.textAlign = 'center'
+            lCtx.textBaseline = 'middle'
+            lCtx.fillText(distStr, 64, 16)
+            const lTex = new THREE.CanvasTexture(lCanvas)
+            const lMat = new THREE.SpriteMaterial({ map: lTex, depthTest: false })
+            const lSprite = new THREE.Sprite(lMat)
+            const mid = new THREE.Vector3().lerpVectors(lastPt, hitPoint, 0.5)
+            lSprite.position.copy(mid)
+            lSprite.position.y += 0.04
+            lSprite.scale.set(0.12, 0.03, 1)
+            lSprite.renderOrder = 1000
+            previewGroup.add(lSprite)
+
+            group.add(previewGroup)
+            livePreviewRef.current = previewGroup
+        }
     }, [])
 
     // Handle click for measurement
@@ -770,7 +868,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 ctrl.target.set(0, 0, 0)
                 ctrl.update()
             }
-        }
+        },
+        clearScene,
     }))
 
     // FPS counter
@@ -810,10 +909,35 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // Grid helper
         const gridHelper = new THREE.GridHelper(20, 40, 0x252d3a, 0x1c2333)
         scene.add(gridHelper)
+        gridRef.current = gridHelper
 
-        // Axes helper
+        // Axes helper with XYZ labels
+        const axesGroup = new THREE.Group()
         const axesHelper = new THREE.AxesHelper(2)
-        scene.add(axesHelper)
+        axesGroup.add(axesHelper)
+
+        // Create text sprite labels for X, Y, Z
+        const makeLabel = (text: string, color: string, pos: [number, number, number]) => {
+            const canvas = document.createElement('canvas')
+            canvas.width = 64; canvas.height = 64
+            const ctx = canvas.getContext('2d')!
+            ctx.font = 'bold 48px sans-serif'
+            ctx.fillStyle = color
+            ctx.textAlign = 'center'
+            ctx.textBaseline = 'middle'
+            ctx.fillText(text, 32, 32)
+            const tex = new THREE.CanvasTexture(canvas)
+            const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false })
+            const sprite = new THREE.Sprite(mat)
+            sprite.position.set(...pos)
+            sprite.scale.set(0.15, 0.15, 0.15)
+            return sprite
+        }
+        axesGroup.add(makeLabel('X', '#ff4444', [2.15, 0, 0]))
+        axesGroup.add(makeLabel('Y', '#44ff44', [0, 2.15, 0]))
+        axesGroup.add(makeLabel('Z', '#4488ff', [0, 0, 2.15]))
+        scene.add(axesGroup)
+        axesRef.current = axesGroup
 
         // Camera
         const camera = new THREE.PerspectiveCamera(
@@ -1291,7 +1415,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const mat = new THREE.LineBasicMaterial({ color: hexColor, linewidth: 2 })
             const wireframe = new THREE.LineSegments(edges, mat)
 
-            wireframe.position.set(center[0], center[1], center[2])
+            // Create a group for wireframe + label
+            const obbContainer = new THREE.Group()
+            obbContainer.position.set(center[0], center[1], center[2])
 
             // Apply rotation from 3x3 matrix
             if (rotation && rotation.length === 3) {
@@ -1302,11 +1428,37 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     rotation[2][0], rotation[2][1], rotation[2][2], 0,
                     0, 0, 0, 1
                 )
-                wireframe.setRotationFromMatrix(rotMatrix)
+                obbContainer.setRotationFromMatrix(rotMatrix)
             }
 
-            group.add(wireframe)
-            obbMapRef.current.set(globalKey, wireframe)
+            obbContainer.add(wireframe)
+
+            // Text label sprite at top of box
+            const labelCanvas = document.createElement('canvas')
+            const ctx = labelCanvas.getContext('2d')!
+            ctx.font = 'bold 28px sans-serif'
+            const textWidth = ctx.measureText(label).width
+            labelCanvas.width = Math.max(textWidth + 20, 64)
+            labelCanvas.height = 36
+            ctx.font = 'bold 28px sans-serif'
+            ctx.fillStyle = 'rgba(0,0,0,0.6)'
+            ctx.roundRect(0, 0, labelCanvas.width, labelCanvas.height, 6)
+            ctx.fill()
+            ctx.fillStyle = colorStr
+            ctx.textAlign = 'center'
+            ctx.textBaseline = 'middle'
+            ctx.fillText(label, labelCanvas.width / 2, labelCanvas.height / 2)
+            const labelTex = new THREE.CanvasTexture(labelCanvas)
+            const labelMat = new THREE.SpriteMaterial({ map: labelTex, depthTest: false })
+            const labelSprite = new THREE.Sprite(labelMat)
+            const aspect = labelCanvas.width / labelCanvas.height
+            const spriteH = 0.08
+            labelSprite.scale.set(spriteH * aspect, spriteH, 1)
+            labelSprite.position.set(0, halfExtents[1] + spriteH * 0.7, 0)
+            obbContainer.add(labelSprite)
+
+            group.add(obbContainer)
+            obbMapRef.current.set(globalKey, obbContainer)
             geom.dispose()
         }
 

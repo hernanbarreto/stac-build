@@ -138,20 +138,21 @@ def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, config: dict)
     )
 
     total = max(len(da3.img_list), 1)
-    processed = [0]  # mutable for closure
+    chunk_size = config.get("server", {}).get("chunk_size", 20)
+    chunk_overlap = config.get("server", {}).get("chunk_overlap", 4)
+    chunk_step = max(chunk_size - chunk_overlap, 1)
+    num_chunks = max((total - chunk_overlap) // chunk_step, 1)
 
-    # Override DA3's internal loop to add progress reporting
-    original_process = da3._process_single_image if hasattr(da3, '_process_single_image') else None
-
-    pipe.send_progress(15, f"Processing {total} images...", stage="da3")
+    pipe.send_progress(15, f"Processing {total} images in ~{num_chunks} chunks...", stage="da3")
 
     # DA3 uses process_long_sequence — we run it synchronously here
     import asyncio
 
     async def _on_chunk(chunk_id, sim3):
-        processed[0] += 1
-        pct = 15 + (processed[0] / total) * 75
-        pipe.send_progress(pct, f"Chunk {chunk_id} saved", stage="da3")
+        # Calculate progress based on estimated images processed
+        images_done = min((chunk_id + 1) * chunk_step + chunk_overlap, total)
+        pct = 15 + (images_done / total) * 80
+        pipe.send_progress(pct, f"Chunk {chunk_id} complete ({images_done}/{total} images)", stage="da3")
         if pipe.check_cancel():
             raise KeyboardInterrupt("Cancelled")
 

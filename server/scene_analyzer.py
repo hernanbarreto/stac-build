@@ -287,10 +287,11 @@ MANDATORY categories (ALWAYS include if visible):
 
 For each element provide:
 - "label": short name (1-3 words, lowercase)
-- "description": 2-5 word descriptive phrase for a segmentation model
+- "sam3_hint": 2-3 word specific phrase for a segmentation model
+  (include material or color, e.g. "ceramic floor", "white wall")
 
 Rules:
-1. Return a JSON array of {"label": "...", "description": "..."} objects
+1. Return a JSON array of {"label": "...", "sam3_hint": "..."} objects
 2. NEVER duplicate — same object = one entry
 3. Maximum 20 entries per image
 4. Structural elements (floor, wall, ceiling) are MANDATORY
@@ -305,7 +306,8 @@ Rules:
 1. Merge duplicates and synonyms (e.g., "wooden chair" + "chair" = "chair")
 2. Max {max_categories} entries — prioritize items seen in most frames
 3. MANDATORY: floor, wall, ceiling must be in the final list if detected in any frame
-4. Return JSON array of {{"label": "...", "description": "..."}} objects
+4. Keep the best sam3_hint for each merged category
+5. Return JSON array of {{"label": "...", "sam3_hint": "..."}} objects
 
 Output ONLY the JSON array."""
 
@@ -392,15 +394,15 @@ def _merge_categories(model, tokenizer,
     for cats in categories_per_frame.values():
         all_items.extend(cats)
 
-    # Group by normalized label, keep the longest description
-    label_map = {}  # canonical_label → {"label": ..., "description": ...}
+    # Group by normalized label, keep the best sam3_hint
+    label_map = {}  # canonical_label → {"label": ..., "sam3_hint": ...}
     label_counts = Counter()
     # Map from any detected label → canonical label
     synonym_map = {}
 
     for item in all_items:
         label = item.get("label", "").lower().strip()
-        desc = item.get("description", label)
+        hint = item.get("sam3_hint", item.get("description", label))
         if not label:
             continue
 
@@ -414,7 +416,7 @@ def _merge_categories(model, tokenizer,
         if canonical is None:
             # New canonical label — use the shorter, simpler form
             canonical = label
-            label_map[canonical] = {"label": canonical, "description": desc}
+            label_map[canonical] = {"label": canonical, "sam3_hint": hint}
         else:
             # Synonym found — keep the shorter label as canonical
             if len(label) < len(canonical):
@@ -423,14 +425,14 @@ def _merge_categories(model, tokenizer,
                 old_count = label_counts.pop(canonical, 0)
                 label_map[label] = {
                     "label": label,
-                    "description": old_data["description"] if len(old_data["description"]) > len(desc) else desc
+                    "sam3_hint": old_data["sam3_hint"] if len(old_data["sam3_hint"]) > len(hint) else hint
                 }
                 label_counts[label] = old_count
                 canonical = label
             else:
-                # Keep existing canonical, but maybe update description
-                if len(desc) > len(label_map[canonical]["description"]):
-                    label_map[canonical]["description"] = desc
+                # Keep existing canonical, but maybe update hint if more specific
+                if len(hint) > len(label_map[canonical]["sam3_hint"]):
+                    label_map[canonical]["sam3_hint"] = hint
 
         synonym_map[label] = canonical
         label_counts[canonical] += 1
@@ -451,7 +453,7 @@ def _merge_categories(model, tokenizer,
             if not already_present:
                 merged.append({
                     "label": req.get("label", req_label),
-                    "description": req.get("description", req_label)
+                    "sam3_hint": req.get("sam3_hint", req.get("description", req_label))
                 })
                 logger.info(f"Force-injected required category: {req_label}")
 
@@ -578,14 +580,15 @@ def _parse_categories(response: str) -> List[Dict[str, str]]:
             for entry in items_list:
                 if isinstance(entry, dict):
                     label = str(entry.get("label", "")).strip()
-                    desc = str(entry.get("description", label)).strip()
+                    # Support both sam3_hint (new) and description (legacy) fields
+                    sam3_hint = str(entry.get("sam3_hint", entry.get("description", label))).strip()
                     # Validate label — skip if it looks like JSON garbage
                     if label and _is_valid_label(label):
-                        items.append({"label": label, "description": desc})
+                        items.append({"label": label, "sam3_hint": sam3_hint})
                 elif isinstance(entry, str) and entry.strip():
                     cleaned = entry.strip()
                     if _is_valid_label(cleaned):
-                        items.append({"label": cleaned, "description": cleaned})
+                        items.append({"label": cleaned, "sam3_hint": cleaned})
             if items:
                 return items
 
@@ -596,7 +599,7 @@ def _parse_categories(response: str) -> List[Dict[str, str]]:
         for p in parts:
             cleaned = p.strip().strip("\"'[]{}()")
             if cleaned and _is_valid_label(cleaned):
-                items.append({"label": cleaned, "description": cleaned})
+                items.append({"label": cleaned, "sam3_hint": cleaned})
         if items:
             return items
 
@@ -607,7 +610,7 @@ def _parse_categories(response: str) -> List[Dict[str, str]]:
         line = line.strip().lstrip('-•*0123456789.)')
         line = line.strip().strip("\"'")
         if line and _is_valid_label(line):
-            items.append({"label": line, "description": line})
+            items.append({"label": line, "sam3_hint": line})
 
     return items
 
@@ -633,7 +636,7 @@ def _is_valid_label(label: str) -> bool:
     return True
 # ── Public API ───────────────────────────────────────────────────────
 
-def analyze_scene(frames_dir: str, config: dict = None) -> tuple:
+def analyze_scene(frames_dir: str, config: dict = None, on_progress=None) -> tuple:
     """
     Analyze a scene and return auto-detected segmentation categories.
 
@@ -693,12 +696,17 @@ def analyze_scene(frames_dir: str, config: dict = None) -> tuple:
     t0 = time.time()
 
     # ── Step 2: Load model ──
+    if on_progress:
+        on_progress(10, "Loading InternVL3 model...")
     model, tokenizer = _load_model(model_id)
 
     # ── Step 3: Analyze EACH keyframe ──
     categories_per_frame = {}
     for i, frame_path in enumerate(keyframes):
         fname = Path(frame_path).name
+        pct = 20 + int(70 * i / max(len(keyframes), 1))
+        if on_progress:
+            on_progress(pct, f"Analyzing frame {i+1}/{len(keyframes)}: {fname}")
         print(f"  [{i + 1}/{len(keyframes)}] Analyzing {fname}...", end="", flush=True)
         cats = _analyze_single_frame(
             model, tokenizer, frame_path, max_tiles,
@@ -711,6 +719,8 @@ def analyze_scene(frames_dir: str, config: dict = None) -> tuple:
             print(f" → (no objects detected)")
 
     # ── Step 4: Merge categories (synonym-aware + required injection) ──
+    if on_progress:
+        on_progress(90, "Merging and deduplicating categories...")
     merged = _merge_categories(
         model, tokenizer, categories_per_frame,
         max_categories=max_merged_categories,
@@ -738,16 +748,18 @@ def analyze_scene(frames_dir: str, config: dict = None) -> tuple:
     elapsed = time.time() - t0
 
     # ── Step 7: Format output ──
-    # SAM3 works best with SHORT category labels (e.g. "cabinet", "wall", "floor")
-    # NOT verbose descriptions (e.g. "blue cabinet to the right of the water cooler")
-    prompt = ";".join(item["label"] for item in merged)
+    # SAM3 works best with SHORT specific hints (2-3 words):
+    #   e.g. "checkered armchair", "ceramic floor", "white wall"
+    # NOT just generic labels ("chair", "floor") or verbose descriptions
+    prompt = ";".join(item.get("sam3_hint", item["label"]) for item in merged)
 
     print(f"\n{'─' * 60}")
     print(f"  ✅ Scene analysis complete in {elapsed:.1f}s")
     print(f"  📋 Detected {len(merged)} categories:")
     for i, item in enumerate(merged):
         n_frames = len(frame_map.get(item["label"], []))
-        print(f"     {i + 1:2d}. {item['label']:25s} → \"{item['description']}\"  ({n_frames} frames)")
+        hint = item.get('sam3_hint', item['label'])
+        print(f"     {i + 1:2d}. {item['label']:25s} → \"{hint}\"  ({n_frames} frames)")
     print(f"\n  🏷️  SAM3 prompt ({len(merged)} categories):")
     print(f"     \"{prompt}\"")
     print(f"{'─' * 60}\n")

@@ -1,7 +1,7 @@
 // STAC-BUILD: Login Page
 // Premium dark login screen
 
-import { useState, FormEvent } from 'react'
+import { useState, useEffect, FormEvent } from 'react'
 import { useAuth } from '../context/AuthContext'
 
 export default function LoginPage() {
@@ -10,6 +10,23 @@ export default function LoginPage() {
     const [password, setPassword] = useState('')
     const [error, setError] = useState('')
     const [loading, setLoading] = useState(false)
+    const [serverUp, setServerUp] = useState<boolean | null>(null) // null = checking
+
+    // Poll server health
+    useEffect(() => {
+        let timer: ReturnType<typeof setTimeout> | null = null
+        const check = async () => {
+            try {
+                const r = await fetch('/health', { signal: AbortSignal.timeout(15000) })
+                setServerUp(r.ok)
+            } catch {
+                setServerUp(false)
+            }
+            timer = setTimeout(check, serverUp === false ? 8000 : 5000)
+        }
+        check()
+        return () => { if (timer) clearTimeout(timer) }
+    }, [])
 
     const handleSubmit = async (e: FormEvent) => {
         e.preventDefault()
@@ -25,9 +42,24 @@ export default function LoginPage() {
     return (
         <div className="login-page">
             <div className="login-card">
-                <div className="login-logo">S</div>
-                <h1 className="login-title">STAC Build</h1>
-                <p className="login-subtitle">Spatio-Temporal Awareness Core</p>
+                <img src="/logo.png" alt="STAC Build" className="login-logo-img" />
+                <p className="login-subtitle">Ingerop IN3 — Spatio-Temporal Awareness Core</p>
+
+                {/* Server status indicator */}
+                <div style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    gap: 6, margin: '8px 0 12px', fontSize: 12, opacity: 0.85
+                }}>
+                    <span style={{
+                        width: 8, height: 8, borderRadius: '50%',
+                        background: serverUp === null ? '#888' : serverUp ? '#2ecc71' : '#e74c3c',
+                        boxShadow: serverUp ? '0 0 6px #2ecc71' : serverUp === false ? '0 0 6px #e74c3c' : 'none',
+                        display: 'inline-block',
+                    }} />
+                    <span style={{ color: serverUp === null ? '#888' : serverUp ? '#2ecc71' : '#e74c3c' }}>
+                        {serverUp === null ? 'Checking server…' : serverUp ? 'Server online' : 'Server offline'}
+                    </span>
+                </div>
 
                 <form className="login-form" onSubmit={handleSubmit}>
                     <div className="login-field">
@@ -62,9 +94,9 @@ export default function LoginPage() {
                     <button
                         type="submit"
                         className="login-btn"
-                        disabled={loading || !username || !password}
+                        disabled={loading || !username || !password || serverUp === false}
                     >
-                        {loading ? 'Signing in…' : 'Sign In'}
+                        {loading ? 'Signing in…' : serverUp === false ? 'Server offline' : 'Sign In'}
                     </button>
                 </form>
 

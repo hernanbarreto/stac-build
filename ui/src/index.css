@@ -15,9 +15,9 @@
   --bg-active: #2d3748;
 
   /* Accent colors */
-  --accent: #e94560;
-  --accent-hover: #ff6b81;
-  --accent-muted: rgba(233, 69, 96, 0.15);
+  --accent: #e99d28;
+  --accent-hover: #f0b04a;
+  --accent-muted: rgba(233, 157, 40, 0.15);
 
   /* Status colors */
   --success: #2ecc71;

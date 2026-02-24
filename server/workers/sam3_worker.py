@@ -43,13 +43,19 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     from segmentation_pipeline import run_segmentation
 
-    pipe.send_progress(15, "Running segmentation...", stage="sam3")
+    pipe.send_progress(10, "Running segmentation...", stage="sam3")
+
+    def _seg_progress(pct, msg):
+        # Map internal 0-100% to pipeline range 10-80%
+        mapped_pct = 10 + (pct / 100) * 70
+        pipe.send_progress(mapped_pct, msg, stage="sam3")
 
     result = run_segmentation(
         frames_dir=str(frames_dir),
         output_dir=str(output_dir),
         prompt=prompt,
         frame_map=frame_map,
+        on_progress=_seg_progress,
     )
 
     if pipe.check_cancel():

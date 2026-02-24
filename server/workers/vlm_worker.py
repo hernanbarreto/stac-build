@@ -31,9 +31,11 @@ def _vlm_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     from scene_analyzer import analyze_scene
 
-    pipe.send_progress(20, "Analyzing frames...", stage="vlm")
+    def _on_progress(pct, msg):
+        pipe.send_progress(pct, msg, stage="vlm")
+        pipe.send_log(msg)
 
-    auto_prompt, frame_map = analyze_scene(str(frames_dir), scene_cfg)
+    auto_prompt, frame_map = analyze_scene(str(frames_dir), scene_cfg, on_progress=_on_progress)
 
     if pipe.check_cancel():
         return

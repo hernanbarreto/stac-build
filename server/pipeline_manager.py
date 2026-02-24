@@ -26,13 +26,15 @@ class StageId(str, Enum):
     CLOUDCOMPY = "cloudcompy"
     VLM = "vlm"
     SAM3 = "sam3"
+    INSTANCE_CLEANER = "instance_cleaner"
 
 
 STAGE_REGISTRY = {
-    StageId.DA3:       {"label": "3D Reconstruction", "icon": "🔨", "module": "workers.da3_worker"},
-    StageId.CLOUDCOMPY: {"label": "Cloud Cleaning",   "icon": "🧹", "module": "workers.cloudcompy_worker"},
-    StageId.VLM:       {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker"},
-    StageId.SAM3:      {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
+    StageId.DA3:              {"label": "3D Reconstruction", "icon": "🔨", "module": "workers.da3_worker"},
+    StageId.CLOUDCOMPY:       {"label": "Cloud Cleaning",    "icon": "🧹", "module": "workers.cloudcompy_worker"},
+    StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker"},
+    StageId.SAM3:             {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
+    StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
 }
 
 DEFAULT_STAGE_ORDER: List[StageId] = [
@@ -40,6 +42,7 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
     StageId.CLOUDCOMPY,
     StageId.VLM,
     StageId.SAM3,
+    StageId.INSTANCE_CLEANER,
 ]
 
 
@@ -212,11 +215,12 @@ class PipelineManager:
 
     # Files each stage produces — used by replace mode to clean up before re-running
     STAGE_OUTPUT_FILES: Dict[StageId, List[str]] = {
-        StageId.DA3: ["chunk_*.ply"],
+        StageId.DA3: ["chunk_*.ply", "slam_reconstruction.ply"],
         StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "floor_transform.npz"],
         StageId.VLM: ["scene_analysis.json", "vlm_analysis.json"],
         StageId.SAM3: ["segmentation.json", "segmentation_result.json",
                        "seg_masks.npz", "seg_broadcast.json"],
+        StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
     }
 
     @staticmethod
@@ -372,6 +376,10 @@ class PipelineManager:
                     level = msg.get("level", "info")
                     log_msg = f"[{stage_id.value}] {msg.get('msg', '')}"
                     getattr(logger, level, logger.info)(log_msg)
+                    # Forward log to UI via progress callback
+                    stage_state.message = msg.get("msg", "")
+                    if on_progress:
+                        await on_progress(job.session_id, job.to_dict())
 
                 elif msg_type == "done":
                     done = True
@@ -414,18 +422,34 @@ class PipelineManager:
 
 # ── Helpers ──────────────────────────────────────────────────
 
-def build_default_stages(
+def build_pipeline_stages(
+    ordered_stages: Optional[List[str]] = None,
     enabled: Optional[Dict[str, bool]] = None,
 ) -> List[PipelineStage]:
-    """Build the default pipeline stage list.
+    """Build the pipeline stage list.
     
     Args:
+        ordered_stages: Optional list of stage IDs (e.g., ["vlm", "sam3", "da3", "cloudcompy"]).
+                        If not provided, defaults to DEFAULT_STAGE_ORDER.
         enabled: Optional dict like {"da3": True, "vlm": False, ...}
-                 to override which stages are enabled.
+                 to override which stages are actually executed.
     """
-    enabled = enabled or {}
+    if ordered_stages is None:
+        stage_order = DEFAULT_STAGE_ORDER
+    else:
+        # Convert strings back to Enums, ignoring invalid ones
+        stage_order = []
+        for s in ordered_stages:
+            try:
+                stage_order.append(StageId(s))
+            except ValueError:
+                logger.warning(f"Unknown stage: {s}")
+
+    enabled_dict = enabled or {}
     stages = []
-    for stage_id in DEFAULT_STAGE_ORDER:
-        is_enabled = enabled.get(stage_id.value, True)  # all enabled by default
+    
+    for stage_id in stage_order:
+        is_enabled = enabled_dict.get(stage_id.value, True)  # all enabled by default
         stages.append(PipelineStage(id=stage_id, enabled=is_enabled))
+        
     return stages

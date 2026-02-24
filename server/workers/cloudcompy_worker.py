@@ -67,12 +67,14 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # Look for lines like "[Step 2/5]" or percentage patterns
     step_pattern = re.compile(r"\[Step\s+(\d+)/(\d+)\]")
     pct_pattern = re.compile(r"(\d+(?:\.\d+)?)%")
+    line_count = 0
 
     for line in iter(proc.stdout.readline, ""):
         line = line.strip()
         if not line:
             continue
 
+        line_count += 1
         pipe.send_log(line)
 
         # Try to extract progress
@@ -85,6 +87,10 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
             m2 = pct_pattern.search(line)
             if m2:
                 pipe.send_progress(float(m2.group(1)), line, stage="cloudcompy")
+            elif line_count % 5 == 0:
+                # Report progress every 5 lines even without patterns
+                estimated_pct = min(5 + line_count * 2, 90)
+                pipe.send_progress(estimated_pct, line, stage="cloudcompy")
 
         if pipe.check_cancel():
             proc.terminate()
@@ -99,6 +105,38 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if output_ply.exists():
         size_mb = output_ply.stat().st_size / (1024 * 1024)
         pipe.send_log(f"Cleaned cloud: {size_mb:.1f} MB")
+
+        # Compute and save floor alignment transform
+        pipe.send_progress(95, "Computing floor alignment...", stage="cloudcompy")
+        try:
+            import sys
+            server_dir_str = str(Path(__file__).resolve().parent.parent)
+            if server_dir_str not in sys.path:
+                sys.path.insert(0, server_dir_str)
+
+            import numpy as np
+            from plyfile import PlyData
+
+            plydata = PlyData.read(str(output_ply))
+            vx = plydata['vertex']
+            xyz = np.column_stack([
+                np.array(vx['x'], dtype=np.float64),
+                np.array(vx['y'], dtype=np.float64),
+                np.array(vx['z'], dtype=np.float64),
+            ])
+
+            from alignment_manager import get_alignment_manager
+            am = get_alignment_manager()
+            s, R, t = am.compute_leveling_from_points(xyz)
+
+            if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+                transform_path = output_dir / "floor_transform.npz"
+                np.savez(transform_path, s=np.array(s), R=R, t=t)
+                pipe.send_log(f"Floor transform saved to {transform_path.name}")
+            else:
+                pipe.send_log("No floor plane detected, skipping alignment", level="warning")
+        except Exception as e:
+            pipe.send_log(f"Floor alignment computation failed: {e}", level="warning")
     else:
         pipe.send_log("Warning: cleaned_cloud.ply not created", level="warning")
 

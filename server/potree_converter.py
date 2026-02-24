@@ -107,6 +107,7 @@ def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
         "-i", str(las_path),
         "-o", str(output_dir),
         "--encoding", "UNCOMPRESSED",
+        "-m", "poisson",
     ]
 
     logger.info(f"[Potree] Running: {' '.join(cmd)}")
@@ -132,11 +133,12 @@ def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
     return True
 
 
-def convert_ply_to_potree(session_dir: Path) -> bool:
+def convert_ply_to_potree(session_dir: Path, force: bool = False) -> bool:
     """Full pipeline: cleaned_cloud.ply → LAS → Potree octree.
     
     Args:
         session_dir: Path to session dir (e.g. server/scans/live_xxx)
+        force: If True, skip mtime cache check and always reconvert.
     
     Returns:
         True if potree/ directory was created successfully.
@@ -149,8 +151,8 @@ def convert_ply_to_potree(session_dir: Path) -> bool:
         logger.warning(f"[Potree] No cleaned_cloud.ply found in {output_dir}")
         return False
 
-    # Skip if already converted and PLY hasn't changed
-    if potree_dir.exists() and (potree_dir / "metadata.json").exists():
+    # Skip if already converted and PLY hasn't changed (unless forced)
+    if not force and potree_dir.exists() and (potree_dir / "metadata.json").exists():
         potree_mtime = (potree_dir / "metadata.json").stat().st_mtime
         ply_mtime = ply_path.stat().st_mtime
         if potree_mtime > ply_mtime:
@@ -188,13 +190,14 @@ def convert_ply_to_potree(session_dir: Path) -> bool:
 async def convert_ply_to_potree_async(
     session_dir: Path,
     on_progress: Optional[Callable[[str], Awaitable[None]]] = None,
+    force: bool = False,
 ) -> bool:
     """Async wrapper — runs conversion in executor to avoid blocking event loop."""
     if on_progress:
         await on_progress("Converting point cloud to LOD octree...")
 
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, convert_ply_to_potree, session_dir)
+    result = await loop.run_in_executor(None, convert_ply_to_potree, session_dir, force)
 
     if result and on_progress:
         await on_progress("LOD octree ready")

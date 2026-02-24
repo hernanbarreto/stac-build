@@ -10,6 +10,7 @@ import WebRTCCall from './components/WebRTCCall'
 import { useAuth } from './context/AuthContext'
 import LoginPage from './pages/LoginPage'
 import AdminPage from './pages/AdminPage'
+import SegmentationManager from './components/InteractiveSegmentation'
 
 interface SessionInfo {
   id: string
@@ -34,6 +35,7 @@ interface PipelineStageInfo {
 }
 
 interface PipelineState {
+  session_id?: string
   status: string
   current_stage_idx: number
   stages: PipelineStageInfo[]
@@ -51,6 +53,8 @@ function App() {
   const [activePanel, setActivePanel] = useState<'sessions' | 'tools' | 'segments' | 'team' | null>('sessions')
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [pointSize, setPointSize] = useState(2.0)
+  const [showAxes, setShowAxes] = useState(true)
+  const [showGrid, setShowGrid] = useState(true)
   const [pointCount, setPointCount] = useState(0)
   const [fps, setFps] = useState(0)
   const [consoleLogs, setConsoleLogs] = useState<{ ts: string; level: string; msg: string }[]>([])
@@ -68,34 +72,59 @@ function App() {
   // Pipeline state
   const [pipelineDialogOpen, setPipelineDialogOpen] = useState(false)
   const [pipelineDialogSession, setPipelineDialogSession] = useState<string | null>(null)
-  const [pipelineStages, setPipelineStages] = useState<Record<string, boolean>>({
-    da3: true, cloudcompy: true, vlm: true, sam3: true
+
+  const STAGE_DEF: Record<string, { label: string, icon: string }> = {
+    vlm: { label: 'Scene Analysis', icon: '🔍' },
+    sam3: { label: 'Segmentation', icon: '🏷️' },
+    da3: { label: '3D Reconstruction', icon: '🔨' },
+    cloudcompy: { label: 'Global Cloud Cleaning', icon: '🧹' },
+    instance_cleaner: { label: 'Instance Isolation & Erosion', icon: '🧼' },
+  }
+  const [pipelineOrder] = useState<string[]>(['da3', 'cloudcompy', 'vlm', 'sam3', 'instance_cleaner'])
+  const [pipelineEnabled, setPipelineEnabled] = useState<Record<string, boolean>>({
+    da3: true, cloudcompy: true, vlm: true, sam3: true, instance_cleaner: true
   })
+
   const [pipelineReplace, setPipelineReplace] = useState(true)
   const [pipelineRunning, setPipelineRunning] = useState<PipelineState | null>(null)
+  const [interactiveSessionId, setInteractiveSessionId] = useState<string | null>(null)
 
   const { user, token, loading: authLoading, logout } = useAuth()
 
   // Periodic server health check — updates indicator only
+  const failCountRef = useRef(0)
+  const FAIL_THRESHOLD = 3 // Require 3 consecutive failures before declaring dead
   useEffect(() => {
+    let intervalMs = 3000
+    let timerId: ReturnType<typeof setTimeout> | null = null
     const checkHealth = async () => {
       try {
-        const resp = await fetch('/health', { signal: AbortSignal.timeout(3000) })
-        setServerAlive(resp.ok)
+        const resp = await fetch('/health', { signal: AbortSignal.timeout(15000) })
+        if (resp.ok) {
+          failCountRef.current = 0
+          setServerAlive(true)
+          intervalMs = 5000
+        } else {
+          failCountRef.current++
+          if (failCountRef.current >= FAIL_THRESHOLD) setServerAlive(false)
+          intervalMs = 3000
+        }
       } catch {
-        setServerAlive(false)
+        failCountRef.current++
+        if (failCountRef.current >= FAIL_THRESHOLD) setServerAlive(false)
+        intervalMs = failCountRef.current >= FAIL_THRESHOLD ? 10000 : 3000
       }
+      timerId = setTimeout(checkHealth, intervalMs)
     }
     checkHealth()
-    const id = setInterval(checkHealth, 3000)
-    return () => clearInterval(id)
+    return () => { if (timerId) clearTimeout(timerId) }
   }, [])
 
   // When server goes down, clear session state
   const prevAliveRef = useRef(serverAlive)
   useEffect(() => {
     if (prevAliveRef.current && !serverAlive) {
-      // Server just went from alive → dead
+      // Server just went from alive → dead (after 3 consecutive failures)
       setConnected(false)
       setSessions([])
       setActiveSession(null)
@@ -103,6 +132,8 @@ function App() {
       setSegments([])
       setPointCount(0)
       setStatusMessage('Server disconnected')
+      // Dispose Potree data from GPU to free memory and stop LOD updates
+      viewportRef.current?.clearScene()
     }
     if (!prevAliveRef.current && serverAlive) {
       // Server just went from dead → alive: clear stale message
@@ -214,30 +245,34 @@ function App() {
 
   const handlePipelineRun = useCallback(() => {
     if (!pipelineDialogSession) return
-    // Don't load cloud — pipeline completion callback will send the cloud
+    // Load the session immediately so the websocket connects for progress
+    setActiveSession(pipelineDialogSession)
     setSelectedSession(pipelineDialogSession)
     setPipelineDialogOpen(false)
-    setPipelineRunning({ status: 'queued', current_stage_idx: -1, stages: [] })
+    setPipelineRunning({ session_id: pipelineDialogSession, status: 'queued', current_stage_idx: -1, stages: [] })
     setTimeout(() => {
       viewportRef.current?.sendCommand({
         type: 'run_pipeline',
         session_id: pipelineDialogSession,
-        stages: pipelineStages,
+        ordered_stages: pipelineOrder,
+        stages: pipelineEnabled,
         replace: pipelineReplace,
       })
       setStatusMessage(`Pipeline started for ${pipelineDialogSession}...`)
     }, 500)
-  }, [pipelineDialogSession, pipelineStages, pipelineReplace])
+  }, [pipelineDialogSession, pipelineOrder, pipelineEnabled, pipelineReplace])
 
   const handlePipelineCancel = useCallback(() => {
-    if (!activeSession) return
-    viewportRef.current?.sendCommand({ type: 'cancel_pipeline', session_id: activeSession })
+    const targetSession = pipelineRunning?.session_id || activeSession
+    if (!targetSession) return
+    viewportRef.current?.sendCommand({ type: 'cancel_pipeline', session_id: targetSession })
     setPipelineRunning(null)
     setStatusMessage('Pipeline cancelled')
-  }, [activeSession])
+  }, [activeSession, pipelineRunning])
 
   const handlePipelineProgress = useCallback((data: Record<string, unknown>) => {
     const state: PipelineState = {
+      session_id: (data.session_id as string) || undefined,
       status: (data.status as string) || 'running',
       current_stage_idx: (data.current_stage_idx as number) ?? -1,
       stages: (data.stages as PipelineStageInfo[]) || [],
@@ -299,7 +334,7 @@ function App() {
     <div className={`app-layout ${!panelOpen ? 'panel-collapsed' : ''}`}>
       {/* ── Menu Bar ── */}
       <div className="menubar" ref={menuRef}>
-        <span className="menu-app-title">⚡ STAC Build</span>
+        <span className="menu-app-title"><img src="/favicon.ico" alt="" className="menu-app-logo" /> STAC Build</span>
 
         {/* File Menu */}
         <div className="menu-item">
@@ -375,6 +410,15 @@ function App() {
                 {consoleOpen ? '🖥️ Console ✓' : '🖥️ Console'}
                 <span className="menu-shortcut">Ctrl+`</span>
               </button>
+              <div className="menu-separator" />
+              <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => setShowAxes(prev => !prev))}>
+                {showAxes ? '📌 Axes ✓' : '📌 Axes'}
+              </button>
+              <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => setShowGrid(prev => !prev))}>
+                {showGrid ? '▦ Grid ✓' : '▦ Grid'}
+              </button>
             </div>
           )}
         </div>
@@ -396,14 +440,24 @@ function App() {
                 <span className="menu-shortcut">M</span>
               </button>
               <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => setActiveTool('measure-angle'))}>
+                📐 Measure Angle
+                <span className="menu-shortcut">A</span>
+              </button>
+              <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setActiveTool('section-box'))}>
                 ✂️ Section Box
                 <span className="menu-shortcut">X</span>
               </button>
               <div className="menu-separator" />
-              <button className="menu-dropdown-item">
+              <div className="menu-dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 🎨 Point Size
-              </button>
+                <input type="range" min="0.5" max="5" step="0.1" value={pointSize}
+                  onChange={e => setPointSize(parseFloat(e.target.value))}
+                  onClick={e => e.stopPropagation()}
+                  style={{ width: 80, accentColor: 'var(--accent)' }} />
+                <span style={{ fontSize: 11, color: '#aaa', minWidth: 24 }}>{pointSize.toFixed(1)}</span>
+              </div>
             </div>
           )}
         </div>
@@ -549,6 +603,12 @@ function App() {
                             >🏷️</button>
                           )}
                           {activeSession === s.id && (
+                            <button className="session-action-btn segment"
+                              title="Manual Interactive SAM3"
+                              onClick={(e) => { e.stopPropagation(); setInteractiveSessionId(s.id) }}
+                            >🎯</button>
+                          )}
+                          {activeSession === s.id && (
                             <button className="session-action-btn unload"
                               title="Descargar sesión"
                               onClick={(e) => { e.stopPropagation(); handleUnload() }}
@@ -620,12 +680,16 @@ function App() {
                     }}>☐</button>
                 </span>
               </div>
+              <div style={{ padding: '8px 12px', fontSize: '12px', color: '#aaa', background: 'rgba(0,0,0,0.2)' }}>
+                Mark instances to EXCLUDE them from the next 3D DA3 reconstruction.
+              </div>
               <div className="segments-list">
                 {segments.map(seg => (
-                  <div key={seg.key} className="segment-item">
+                  <div key={seg.key} className="segment-item" style={{ opacity: seg.excluded ? 0.5 : 1 }}>
                     <input
                       type="checkbox"
                       checked={seg.visible}
+                      title="Toggle Visibility in 3D"
                       className="segment-checkbox"
                       onChange={() => {
                         const newVis = !seg.visible
@@ -639,12 +703,46 @@ function App() {
                       className="segment-color-dot"
                       style={{ background: seg.color }}
                     />
-                    <span className="segment-label">{seg.label}</span>
-                    <span className="segment-count">
+                    <span className="segment-label" style={{ flex: 1 }}>{seg.label}</span>
+                    <span className="segment-count" style={{ marginRight: '8px' }}>
                       ({seg.totalPoints.toLocaleString()})
                     </span>
+                    <button
+                      title="Exclude from Reconstruction"
+                      style={{
+                        background: seg.excluded ? '#ff4444' : 'transparent',
+                        border: '1px solid #ff4444',
+                        color: seg.excluded ? '#fff' : '#ff4444',
+                        borderRadius: '4px',
+                        padding: '2px 6px',
+                        fontSize: '10px',
+                        cursor: 'pointer'
+                      }}
+                      onClick={() => {
+                        setSegments(prev => prev.map(s => s.key === seg.key ? { ...s, excluded: !s.excluded } : s))
+                      }}
+                    >
+                      {seg.excluded ? 'Excluded' : 'Exclude'}
+                    </button>
                   </div>
                 ))}
+              </div>
+              <div style={{ padding: '12px' }}>
+                <button
+                  className="pipeline-btn-run"
+                  style={{ width: '100%' }}
+                  onClick={() => {
+                    const excludedKeys = segments.filter(s => s.excluded).map(s => s.key)
+                    viewportRef.current?.sendCommand({
+                      type: 'save_exclusions',
+                      session_id: activeSession,
+                      excluded_keys: excludedKeys
+                    })
+                    setStatusMessage(`Saved ${excludedKeys.length} exclusions for next reconstruction.`)
+                  }}
+                >
+                  Save Exclusions
+                </button>
               </div>
             </>
           )}
@@ -697,6 +795,8 @@ function App() {
             pointSize={pointSize}
             activeSession={activeSession}
             activeTool={activeTool}
+            showAxes={showAxes}
+            showGrid={showGrid}
             onPointCount={setPointCount}
             onFps={setFps}
             onStatusMessage={setStatusMessage}
@@ -707,8 +807,7 @@ function App() {
           {/* Welcome screen — shown when no session */}
           {!hasSession && (
             <div className="welcome-screen">
-              <div className="welcome-logo">S</div>
-              <div className="welcome-title">STAC Build</div>
+              <img src="/logo.png" alt="STAC Build" className="welcome-logo-img" />
               <div className="welcome-subtitle">
                 {!connected
                   ? 'Connect to a STAC server to browse and visualize your 3D scan sessions.'
@@ -792,22 +891,39 @@ function App() {
             <h3>Configure Pipeline</h3>
             <p className="pipeline-dialog-session">Session: {pipelineDialogSession}</p>
             <div className="pipeline-dialog-stages">
-              {[
-                { id: 'da3', label: '3D Reconstruction', icon: '🔨' },
-                { id: 'cloudcompy', label: 'Cloud Cleaning', icon: '🧹' },
-                { id: 'vlm', label: 'Scene Analysis', icon: '🔍' },
-                { id: 'sam3', label: 'Segmentation', icon: '🏷️' },
-              ].map(stage => (
-                <label key={stage.id} className="pipeline-stage-toggle">
-                  <input
-                    type="checkbox"
-                    checked={pipelineStages[stage.id] ?? true}
-                    onChange={e => setPipelineStages(prev => ({ ...prev, [stage.id]: e.target.checked }))}
-                  />
-                  <span className="pipeline-stage-check-icon">{stage.icon}</span>
-                  <span>{stage.label}</span>
-                </label>
-              ))}
+              <p style={{ fontSize: '11px', color: '#888', marginBottom: '10px' }}>Pipeline stages (fixed order):</p>
+              {pipelineOrder.map((stageId) => {
+                const def = STAGE_DEF[stageId]
+                // CloudCompy is always coupled with DA3 — can't be toggled independently
+                const isCoupled = stageId === 'cloudcompy'
+                const isDisabled = isCoupled
+                return (
+                  <div key={stageId}
+                    style={{ display: 'flex', alignItems: 'center', padding: '8px', background: 'rgba(255,255,255,0.05)', marginBottom: '4px', borderRadius: '6px' }}
+                  >
+                    <span style={{ marginRight: '10px', color: '#555', fontSize: '12px', width: '16px', textAlign: 'center' }}>•</span>
+                    <label className="pipeline-stage-toggle" style={{ margin: 0, padding: 0, flex: 1, background: 'transparent', opacity: isDisabled ? 0.5 : 1 }}>
+                      <input
+                        type="checkbox"
+                        checked={pipelineEnabled[stageId] ?? true}
+                        disabled={isDisabled}
+                        onChange={e => {
+                          const checked = e.target.checked
+                          setPipelineEnabled(prev => {
+                            const next = { ...prev, [stageId]: checked }
+                            // Couple: DA3 on → CloudCompy on
+                            if (stageId === 'da3') next.cloudcompy = checked
+                            return next
+                          })
+                        }}
+                      />
+                      <span className="pipeline-stage-check-icon">{def?.icon}</span>
+                      <span>{def?.label || stageId}</span>
+                      {isCoupled && <span style={{ fontSize: '10px', color: '#666', marginLeft: '8px' }}>(auto with DA3)</span>}
+                    </label>
+                  </div>
+                )
+              })}
               <label className="pipeline-replace-toggle">
                 <input
                   type="checkbox"
@@ -860,6 +976,41 @@ function App() {
           incomingCall={incomingCall}
           onClose={() => { setCallTarget(null); setIncomingCall(null) }}
           onIncomingHandled={() => setIncomingCall(null)}
+        />
+      )}
+
+      {/* Segmentation Manager Overlay */}
+      {interactiveSessionId && (
+        <SegmentationManager
+          sessionId={interactiveSessionId}
+          onClose={() => setInteractiveSessionId(null)}
+          onUpdate={async () => {
+            if (!activeSession) return
+            try {
+              const res = await fetch(`/api/sessions/${activeSession}/segmentation`)
+              if (res.ok) {
+                const data = await res.json()
+                if (Array.isArray(data.instances)) {
+                  setSegments(data.instances.map((inst: any) => ({
+                    key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
+                    label: `${inst.label}`,
+                    color: inst.color || '#00d4ff',
+                    totalPoints: inst.total_points || 0,
+                    visible: true,
+                    excluded: inst.excluded || false,
+                  })))
+                }
+              }
+            } catch { /* silent */ }
+          }}
+          onSuccess={(newInstances) => {
+            setStatusMessage(`Successfully propagated ${newInstances.length} instances.`)
+            setInteractiveSessionId(null)
+            // Refresh segments in sidebar
+            if (activeSession) {
+              viewportRef.current?.sendCommand({ type: 'refresh_segments', session_id: activeSession })
+            }
+          }}
         />
       )}
     </div>

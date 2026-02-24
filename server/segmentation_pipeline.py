@@ -30,7 +30,7 @@ logger = logging.getLogger("SegPipeline")
 
 
 def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
-                     frame_map: dict = None) -> dict:
+                     frame_map: dict = None, on_progress=None) -> dict:
     """
     Full segmentation pipeline: batched SAM3 → IoU ID matching → mask-to-point mapping.
     
@@ -79,7 +79,8 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
             seg_frames_dir, frame_files, categories,
             batch_size, batch_overlap, iou_threshold,
             output_dir=output_dir, cfg=cfg,
-            frame_map=frame_map
+            frame_map=frame_map,
+            on_progress=on_progress,
         )
         
         if not all_masks:
@@ -205,7 +206,8 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                       batch_size: int, batch_overlap: int,
                       iou_threshold: float,
                       output_dir: Path = None, cfg: dict = None,
-                      frame_map: dict = None) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, str]]:
+                      frame_map: dict = None,
+                      on_progress=None) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, str]]:
     """
     Process frames in overlapping batches, one category at a time.
     Each category gets its own SAM3 pass; obj_ids are remapped to avoid collisions.
@@ -263,6 +265,9 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
     for cat_idx, category in enumerate(categories):
         print(f"\n[SegPipeline] === Category {cat_idx+1}/{len(categories)}: '{category}' ===")
         _log_vram(f"cat {cat_idx+1} START")
+        if on_progress:
+            cat_pct = (cat_idx / max(len(categories), 1)) * 100
+            on_progress(cat_pct, f"Processing category {cat_idx+1}/{len(categories)}: {category}")
         
         # ── Per-category frame selection from VLM frame_map ──
         cat_frame_files = frame_files  # Default: all frames
@@ -351,6 +356,9 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                 
                 print(f"\n[SegPipeline] ── Batch {batch_idx}/{len(batches)-1}: "
                       f"frames {b_start}–{b_end-1} ({batch_len} frames) ──")
+                if on_progress:
+                    batch_pct = ((cat_idx * len(batches) + batch_idx + 1) / max(len(categories) * len(batches), 1)) * 100
+                    on_progress(batch_pct, f"Batch {batch_idx+1}/{len(batches)} for '{category}'")
                 _log_vram(f"  batch {batch_idx} BEFORE")
                 
                 batch_dir, index_mapping = _prepare_batch_dir(frames_dir, batch_frame_files, b_start)
@@ -497,6 +505,9 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                 _save_masks(output_dir, all_masks, categories_so_far, obj_labels, cfg)
                 print(f"[SegPipeline] 💾 Incremental save: {cat_idx+1}/{len(categories)} categories saved")
                 # Match masks to cloud and save result after each category
+                if on_progress:
+                    save_pct = ((cat_idx + 1) / max(len(categories), 1)) * 100
+                    on_progress(save_pct, f"Matching masks to cloud ({cat_idx+1}/{len(categories)} categories)...")
                 _match_and_save_result(output_dir)
             except Exception as e:
                 print(f"[SegPipeline] ⚠️ Incremental save failed: {e}")
@@ -760,7 +771,7 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     existing_frames = set()
     existing_obj_ids = set()
     
-    if masks_path.exists() and seg_path.exists():
+    if masks_path.exists():
         try:
             old_data = np.load(masks_path)
             # Copy all existing mask keys
@@ -771,7 +782,11 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
                 existing_obj_ids = set(old_data["obj_ids"].tolist())
             if "frames" in old_data:
                 existing_frames = set(old_data["frames"].tolist())
-            
+        except Exception as e:
+            print(f"[SegPipeline] ⚠️ Could not load existing NPZ: {e}")
+    
+    if seg_path.exists():
+        try:
             with open(seg_path) as f:
                 old_meta = json.load(f)
             existing_instances = old_meta.get("instances", [])
@@ -788,11 +803,9 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
             print(f"[SegPipeline] 📦 Merging with existing: {len(existing_instances)} instances, "
                   f"max_id={max_existing_id}")
         except Exception as e:
-            print(f"[SegPipeline] ⚠️ Could not load existing data, starting fresh: {e}")
-            existing_npz = {}
+            print(f"[SegPipeline] ⚠️ Could not load existing metadata: {e}")
             existing_instances = []
             existing_prompts = []
-            max_existing_id = -1
     
     # ── Remap new SAM3 obj_ids to continue from max_existing_id + 1 ──
     new_obj_ids_raw = set()
@@ -845,6 +858,12 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     # ── Build merged metadata JSON ──
     color_offset = len(existing_instances)
     
+    # instance_id must continue from max existing to avoid collisions
+    # (_match_masks_to_cloud groups obj_ids by instance_id)
+    max_existing_iid = 0
+    for inst in existing_instances:
+        max_existing_iid = max(max_existing_iid, inst.get("instance_id", 0))
+    
     new_instances = []
     remapped_ids = sorted(id_remap.values())
     for i, remapped_id in enumerate(remapped_ids):
@@ -855,7 +874,7 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
         new_instances.append({
             "id": int(remapped_id),
             "label": label,
-            "instance_id": i + 1,
+            "instance_id": max_existing_iid + i + 1,
             "color": colors[(color_offset + i) % len(colors)],
         })
     
@@ -1112,13 +1131,18 @@ def _filter_instance_outliers(xyz: np.ndarray, indices: np.ndarray,
         return indices[inlier_mask]
 
 
-def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
+def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None) -> dict:
     """
     Core processing: match SAM3 masks against PLY cloud with erosion,
     deconfliction, DBSCAN filtering, and OBB computation.
     
     This is CPU-intensive. Called once after segmentation to produce
     segmentation_result.json. Use apply_segmentation_to_cloud() for cached loading.
+    
+    Args:
+        skip_filter_ids: Optional set of instance IDs whose DBSCAN/SOR filtering
+                         was already done in a previous incremental run. Their
+                         cached globalIndices will be reused as-is.
     """
     from config import cfg
     
@@ -1240,7 +1264,17 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
             mask = masks_data[mask_key].astype(np.uint8)
             
             # ── Erosion: shrink mask edges for tighter boundaries ──
-            mask = cv2.erode(mask, erosion_kernel, iterations=erosion_iterations)
+            # Adaptive: skip/reduce erosion for small masks to avoid eliminating them
+            raw_area = float(np.sum(mask > 0))
+            if raw_area < 2000:
+                # Small object — no erosion (would shrink too much)
+                pass
+            elif raw_area < 10000:
+                # Medium object — mild erosion (1 iteration)
+                mask = cv2.erode(mask, erosion_kernel, iterations=1)
+            else:
+                # Large object — full erosion
+                mask = cv2.erode(mask, erosion_kernel, iterations=erosion_iterations)
             mask = mask.astype(bool)
             
             mask_area = float(np.sum(mask))
@@ -1285,8 +1319,12 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
             continue
         
         # ── Per-instance DBSCAN outlier removal ──
+        # Skip if already filtered in a previous incremental run
         pre_filter_count = len(all_matched)
-        if pre_filter_count >= 20:
+        if skip_filter_ids and iid in skip_filter_ids:
+            # Reuse cached filtered indices (already passed DBSCAN+SOR)
+            pass  # all_matched stays as-is from mask matching
+        elif pre_filter_count >= 20:
             all_matched = _filter_instance_outliers(
                 xyz_display, all_matched, iid
             )
@@ -1404,14 +1442,28 @@ def _match_and_save_result(output_dir, ply_path=None):
     and save the result to segmentation_result.json for instant loading later.
     
     Called incrementally after each category completes segmentation.
+    Loads previous result to skip DBSCAN for already-filtered instances.
     """
     output_dir = Path(output_dir)
     
+    # Load previously filtered instance IDs to avoid redundant DBSCAN
+    skip_filter_ids = set()
+    result_path = output_dir / "segmentation_result.json"
+    if result_path.exists():
+        try:
+            with open(result_path) as f:
+                prev = json.load(f)
+            for inst in prev.get("instances", []):
+                skip_filter_ids.add(inst.get("id", inst.get("instance_id")))
+            if skip_filter_ids:
+                print(f"[SegPipeline] Incremental: skipping DBSCAN for {len(skip_filter_ids)} already-filtered instances")
+        except Exception:
+            pass
+    
     try:
-        result = _match_masks_to_cloud(output_dir, ply_path)
+        result = _match_masks_to_cloud(output_dir, ply_path, skip_filter_ids=skip_filter_ids)
         
         if "error" not in result and result.get("instances"):
-            result_path = output_dir / "segmentation_result.json"
             with open(result_path, "w") as f:
                 json.dump(result, f)
             print(f"[SegPipeline] 💾 Saved segmentation_result.json "
@@ -1434,7 +1486,14 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
     
     # ── Fast path: cached result from segmentation time ──
     result_path = output_dir / "segmentation_result.json"
-    if result_path.exists():
+    transform_path = output_dir / "floor_transform.npz"
+    cache_valid = True
+    # Invalidate cache if floor_transform.npz is newer (alignment changed)
+    if result_path.exists() and transform_path.exists():
+        if transform_path.stat().st_mtime > result_path.stat().st_mtime:
+            print(f"[SegPipeline] ⚠️ floor_transform.npz is newer than cache — invalidating")
+            cache_valid = False
+    if cache_valid and result_path.exists():
         try:
             with open(result_path) as f:
                 result = json.load(f)

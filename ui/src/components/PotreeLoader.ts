@@ -112,9 +112,16 @@ export class PotreeOctreeLoader {
         if (matrix4.length !== 16) return
         const m = new THREE.Matrix4()
         m.fromArray(matrix4)
-        this.octreeGroup.matrixAutoUpdate = false
-        this.octreeGroup.matrix.copy(m)
-        this.octreeGroup.matrixWorldNeedsUpdate = true
+        // Decompose and apply to position/quaternion/scale so that
+        // matrixAutoUpdate keeps working for newly added child nodes
+        const pos = new THREE.Vector3()
+        const quat = new THREE.Quaternion()
+        const scl = new THREE.Vector3()
+        m.decompose(pos, quat, scl)
+        this.octreeGroup.position.copy(pos)
+        this.octreeGroup.quaternion.copy(quat)
+        this.octreeGroup.scale.copy(scl)
+        this.octreeGroup.updateMatrixWorld(true)
         console.log('[PotreeLoader] Applied floor alignment transform')
     }
 
@@ -313,10 +320,10 @@ export class PotreeOctreeLoader {
             const childIdx = parseInt(name[i])
             size.multiplyScalar(0.5)
 
-            // Octant index: bit0=X, bit1=Y, bit2=Z
-            if (childIdx & 1) min.x += size.x
+            // Octant index in Potree 2: bit0=Z, bit1=Y, bit2=X
+            if (childIdx & 1) min.z += size.z
             if (childIdx & 2) min.y += size.y
-            if (childIdx & 4) min.z += size.z
+            if (childIdx & 4) min.x += size.x
         }
 
         return new THREE.Box3(min, min.clone().add(size))
@@ -351,8 +358,9 @@ export class PotreeOctreeLoader {
         const fovRad = (this.camera.fov * Math.PI) / 180
         const slope = Math.tan(fovRad / 2)
 
-        // Minimum projected pixel size for a child to be queued (Potree default: 150)
-        const minimumNodePixelSize = 30
+        // Minimum projected pixel size for a child to be queued (Potree default: 15-30)
+        // Set to 15 to ensure the deepest LOD nodes load properly when zoomed in.
+        const minimumNodePixelSize = 15;
 
         // Priority queue: [weight, nodeName] — process highest weight first
         // Using simple sorted array (adequate for ~500 nodes)
@@ -367,7 +375,7 @@ export class PotreeOctreeLoader {
         let numVisiblePoints = 0
 
         while (queue.length > 0) {
-            // Pop highest weight
+            // Pop highest weight (parents should always have higher weight than children)
             let bestIdx = 0
             for (let i = 1; i < queue.length; i++) {
                 if (queue[i].weight > queue[bestIdx].weight) bestIdx = i
@@ -384,10 +392,10 @@ export class PotreeOctreeLoader {
             // Skip if not in frustum
             if (!insideFrustum) continue
 
-            // Budget check: skip this node if it would exceed budget,
-            // but continue processing queue (smaller high-priority nodes may still fit)
+            // Budget check: stop the entire traversal if this node exceeds budget.
+            // Potree stops evaluating entirely instead of skipping around and causing gaps.
             if (numVisiblePoints + node.numPoints > this.pointBudget) {
-                continue
+                break;
             }
 
             // ---- This node IS visible: show it ----

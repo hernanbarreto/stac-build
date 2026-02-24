@@ -383,6 +383,82 @@ class RealtimeDA3(DA3_Streaming):
             # Apply confidence threshold filtering
             conf_threshold = max(0.0, np.mean(confs_flat) * conf_threshold_coef)
             valid_mask = confs_flat >= conf_threshold
+            
+            # --- APPLY INSTANCE EXCLUSION MASKING ---
+            deselection_path = os.path.join(os.path.dirname(self.save_dir), "output", "segmentation_deselection.json")
+            seg_masks_path = os.path.join(os.path.dirname(self.save_dir), "output", "seg_masks.npz")
+            
+            if os.path.exists(deselection_path) and os.path.exists(seg_masks_path):
+                try:
+                    with open(deselection_path, "r") as f:
+                        deselection = json.load(f)
+                    
+                    excluded_instances = set(deselection.get("excluded_instances", [])) # Assuming UI sends instance IDs
+                    
+                    if excluded_instances:
+                        print(f"[DA3 Exclusion] Excluding instances: {excluded_instances}")
+                        
+                        # Load SAM3 masks (Binary masks for each instance ID across all frames)
+                        masks_data = np.load(seg_masks_path)
+                        # Expecting format: masks_data[inst_id] = sparse/dense mask representation
+                        # Let's assume it has an 'exclude_mask' which is a boolean array of shape (N_global_frames, H_orig, W_orig)
+                        # OR if it's per-instance, we build the exclude mask
+                        
+                        # Fallback: if seg_masks.npz is large, this might be slow.
+                        # For now, let's look for a pre-computed "combined_exclude_mask" if we can,
+                        # or build it from excluded_instances.
+                        
+                        if 'combined_exclude_mask' in masks_data:
+                            combined_exclude = masks_data['combined_exclude_mask'] # (N_global, H_orig, W_orig) bool
+                            
+                            H_orig, W_orig = combined_exclude.shape[1], combined_exclude.shape[2]
+                            
+                            N_frames = cur_predictions.depth.shape[0]
+                            H_scaled = cur_predictions.depth.shape[-2] if cur_predictions.depth.ndim >= 3 else cur_predictions.depth.shape[0]
+                            W_scaled = cur_predictions.depth.shape[-1]
+                            HW_scaled = H_scaled * W_scaled
+                            
+                            from config import cfg as _cfg
+                            chunk_size = _cfg["server"]["chunk_size"]
+                            chunk_overlap = _cfg["server"]["chunk_overlap"]
+                            chunk_step = chunk_size - chunk_overlap
+                            
+                            all_indices = np.arange(len(confs_flat))
+                            frame_local = all_indices // HW_scaled
+                            frame_global = frame_local + chunk_idx * chunk_step
+                            
+                            pixel_row_scaled = (all_indices % HW_scaled) // W_scaled
+                            pixel_col_scaled = all_indices % W_scaled
+                            
+                            # Map scaled pixels to original pixels
+                            row_ratio = H_orig / H_scaled
+                            col_ratio = W_orig / W_scaled
+                            
+                            pixel_row_orig = np.clip((pixel_row_scaled * row_ratio).astype(int), 0, H_orig - 1)
+                            pixel_col_orig = np.clip((pixel_col_scaled * col_ratio).astype(int), 0, W_orig - 1)
+                            
+                            # Lookup exclude mask
+                            # Ensure frame_global doesn't exceed bounds
+                            valid_frames = frame_global < combined_exclude.shape[0]
+                            safe_frame_global = np.clip(frame_global, 0, combined_exclude.shape[0] - 1)
+                            
+                            is_excluded = combined_exclude[safe_frame_global, pixel_row_orig, pixel_col_orig]
+                            
+                            # Only exclude if the frame was actually valid
+                            is_excluded = is_excluded & valid_frames
+                            
+                            valid_mask = valid_mask & (~is_excluded)
+                            
+                            print(f"[DA3 Exclusion] Dropped {np.sum(is_excluded)} points due to exclusion.")
+                        else:
+                            print(f"[DA3 Exclusion] 'combined_exclude_mask' not found in seg_masks.npz. Skipping exclusion for now.")
+                            
+                except Exception as e:
+                    print(f"[DA3 Exclusion] Failed to apply deselection: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            # Filter valid points
             valid_indices = np.where(valid_mask)[0]
 
             points_filtered = points_flat[valid_indices]

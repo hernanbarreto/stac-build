@@ -380,9 +380,9 @@ class Sam3VideoBase(nn.Module):
         backbone_cache = {}
         sam_mask_decoder = self.tracker.sam_mask_decoder
         tracker_backbone_fpn = [
-            sam_mask_decoder.conv_s0(sam3_image_out["tracker_backbone_fpn_0"]),
-            sam_mask_decoder.conv_s1(sam3_image_out["tracker_backbone_fpn_1"]),
-            sam3_image_out["tracker_backbone_fpn_2"],  # fpn_2 doesn't need conv
+            sam_mask_decoder.conv_s0(sam3_image_out["tracker_backbone_fpn_0"].float()),
+            sam_mask_decoder.conv_s1(sam3_image_out["tracker_backbone_fpn_1"].float()),
+            sam3_image_out["tracker_backbone_fpn_2"].float(),  # fpn_2 doesn't need conv
         ]
         tracker_backbone_out = {
             "vision_features": tracker_backbone_fpn[-1],  # top-level feature
