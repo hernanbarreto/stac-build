@@ -933,6 +933,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             })
 
             setAlignDirty(false)
+            setAlignMode('rotate')
             alignSavedRef.current = false
             if (onStatusMessage) onStatusMessage('⛶ Align mode: drag gizmo to rotate/translate')
 
@@ -947,7 +948,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const octreeGroup = loader.getOctreeGroup()
                 if (octreeGroup) {
                     if (floorTransformRef.current) {
-                        // Use setTransform to properly decompose into pos/quat/scale
+                        // Re-enable auto matrix before setTransform (objectChange set it to false)
+                        octreeGroup.matrixAutoUpdate = true
                         loader.setTransform(floorTransformRef.current.toArray())
                     } else {
                         octreeGroup.matrix.identity()
