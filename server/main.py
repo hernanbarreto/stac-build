@@ -1564,11 +1564,13 @@ async def save_alignment(session_id: str, request: Request):
     print(f"[Alignment]   Reconstructed M:\n{M_check}")
     print(f"[Alignment]   Max diff: {np.max(np.abs(M - M_check)):.8f}")
 
-    # segmentation_result.json cache will auto-invalidate on next load
-    # (apply_segmentation_to_cloud checks if floor_transform.npz is newer)
+    # Touch segmentation_result.json so its mtime is newer than floor_transform.npz.
+    # This prevents unnecessary DBSCAN recomputation on next session load.
+    # (The gizmo alignment only changes display transform, not the underlying segmentation)
     seg_result_path = output_dir / "segmentation_result.json"
     if seg_result_path.exists():
-        print(f"[Alignment] ℹ️ segmentation_result.json will auto-invalidate on next session load")
+        seg_result_path.touch()
+        print(f"[Alignment] ✅ Touched segmentation_result.json to preserve cache")
 
     return {"ok": True, "scale": s}
 

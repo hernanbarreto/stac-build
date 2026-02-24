@@ -1487,9 +1487,13 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
     # ── Fast path: cached result from segmentation time ──
     result_path = output_dir / "segmentation_result.json"
     transform_path = output_dir / "floor_transform.npz"
-    # Note: we no longer invalidate cache on floor_transform changes.
-    # The alignment gizmo handles OBB transforms visually in the frontend.
-    # To recompute OBBs from scratch, re-run segmentation explicitly.
+    # Invalidate cache if floor_transform.npz is newer (pipeline re-ran)
+    # Note: gizmo alignment save touches segmentation_result.json to prevent
+    # unnecessary DBSCAN recomputation in that case.
+    if result_path.exists() and transform_path.exists():
+        if transform_path.stat().st_mtime > result_path.stat().st_mtime:
+            print(f"[SegPipeline] ⚠️ floor_transform.npz is newer than cache — invalidating")
+            result_path.unlink()
     if result_path.exists():
         try:
             with open(result_path) as f:

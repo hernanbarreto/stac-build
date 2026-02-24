@@ -1387,6 +1387,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 if ((child as THREE.Mesh).geometry) (child as THREE.Mesh).geometry.dispose()
             }
             obbMapRef.current.clear()
+            // Reset group transform (gizmo may have left a rotation on it)
+            group.matrix.identity()
+            group.position.set(0, 0, 0)
+            group.quaternion.identity()
+            group.scale.set(1, 1, 1)
+            group.matrixAutoUpdate = true
+            group.matrixWorldNeedsUpdate = true
         }
     }, [onPointCount])
 
