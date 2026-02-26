@@ -5,6 +5,7 @@
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAuth } from '../context/AuthContext'
+import { useConfirmDialog } from './ConfirmDialog'
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -66,6 +67,7 @@ interface TeamPanelProps {
 
 export default function TeamPanel({ onCallUser }: TeamPanelProps) {
     const { user, token } = useAuth()
+    const { confirmDanger, dialogElement } = useConfirmDialog()
     const [teams, setTeams] = useState<TeamData[]>([])
     const [selectedTeam, setSelectedTeam] = useState<number | null>(null)
     const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([])
@@ -197,7 +199,8 @@ export default function TeamPanel({ onCallUser }: TeamPanelProps) {
 
     const removeMember = useCallback(async (userId: number) => {
         if (!selectedTeam) return
-        if (!confirm('Remove this member from the team?')) return
+        const ok = await confirmDanger('Remove this member from the team?', 'Remove Member')
+        if (!ok) return
         try {
             await fetch(`/api/teams/${selectedTeam}/members/${userId}`, {
                 method: 'DELETE',
@@ -431,6 +434,7 @@ export default function TeamPanel({ onCallUser }: TeamPanelProps) {
                     <div className="team-empty-hint">Ask your administrator to create a team and assign you.</div>
                 </div>
             )}
+            {dialogElement}
         </div>
     )
 }

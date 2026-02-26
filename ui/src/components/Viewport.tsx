@@ -42,10 +42,14 @@ export interface ViewportHandle {
     addBIMGroup: (group: THREE.Group) => void
     removeBIMGroup: (filename: string) => void
     setBIMOpacity: (meshNames: string[], opacity: number) => void
+    applyDeviationSurface: (faceColorsByElement: Record<string, { colors: number[], centroids: number[] }>) => void
+    clearDeviationSurface: () => void
+    applyRegistrationTransform: (transform: number[][]) => void
     clearMeasurements: () => void
     resetSectionBox: () => void
     resetCamera: () => void
     clearScene: () => void
+    refreshSegmentOBBs: (sessionId: string) => void
 }
 
 // Vertex shader — matches FusionRenderer.js point size formula
@@ -1112,6 +1116,178 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 }
             })
         },
+        applyDeviationSurface: (faceColorsByElement: Record<string, { colors: number[], centroids: number[] }>) => {
+            const bimGroup = bimGroupRef.current
+            if (!bimGroup) return
+            const elementKeys = Object.keys(faceColorsByElement)
+
+            bimGroup.traverse((child) => {
+                if (!(child instanceof THREE.Mesh)) return
+                const meshName = child.name || ''
+                // Match: mesh name contains ":elementKey_" or ":elementKey"
+                let matchedKey = ''
+                for (const key of elementKeys) {
+                    if (meshName.includes(`:${key}_`) || meshName.includes(`:${key}`)) {
+                        matchedKey = key
+                        break
+                    }
+                }
+                if (!matchedKey) return
+                const data = faceColorsByElement[matchedKey]
+                if (!data || !data.colors || data.colors.length < 3) return
+                const { colors: srcColors, centroids: srcCentroids } = data
+
+                // Store original material + geometry for later restoration
+                if (!child.userData._originalMaterial) {
+                    child.userData._originalMaterial = child.material
+                    child.userData._originalGeometry = child.geometry
+                }
+
+                // Convert to non-indexed geometry so each face has its own 3 vertices
+                let geom = child.geometry
+                if (geom.index) {
+                    geom = geom.toNonIndexed()
+                    child.geometry = geom
+                }
+
+                const posAttr = geom.getAttribute('position')
+                const nVerts = posAttr.count
+                const actualFaces = Math.floor(nVerts / 3)
+                const colors = new Float32Array(nVerts * 4)  // RGBA
+
+                // Parse backend centroids
+                const nSrcFaces = Math.floor(srcCentroids.length / 3)
+                const srcCentroidArr: [number, number, number][] = []
+                for (let i = 0; i < nSrcFaces; i++) {
+                    srcCentroidArr.push([
+                        srcCentroids[i * 3],
+                        srcCentroids[i * 3 + 1],
+                        srcCentroids[i * 3 + 2],
+                    ])
+                }
+
+                // Detect if this is an unmatched (all-gray) element
+                const isGray = srcColors.every((v: number) => Math.abs(v - srcColors[0]) < 0.01)
+
+                // For each frontend face, match to nearest backend centroid
+                const pos = posAttr.array as Float32Array
+                for (let f = 0; f < actualFaces; f++) {
+                    const i0 = f * 9
+                    const cx = (pos[i0] + pos[i0 + 3] + pos[i0 + 6]) / 3
+                    const cy = (pos[i0 + 1] + pos[i0 + 4] + pos[i0 + 7]) / 3
+                    const cz = (pos[i0 + 2] + pos[i0 + 5] + pos[i0 + 8]) / 3
+
+                    let bestDist = Infinity
+                    let bestIdx = 0
+                    for (let s = 0; s < nSrcFaces; s++) {
+                        const dx = cx - srcCentroidArr[s][0]
+                        const dy = cy - srcCentroidArr[s][1]
+                        const dz = cz - srcCentroidArr[s][2]
+                        const d2 = dx * dx + dy * dy + dz * dz
+                        if (d2 < bestDist) {
+                            bestDist = d2
+                            bestIdx = s
+                        }
+                    }
+
+                    const r = srcColors[bestIdx * 3]
+                    const g = srcColors[bestIdx * 3 + 1]
+                    const b = srcColors[bestIdx * 3 + 2]
+
+                    // Is this face "no data" (gray ~0.3)?
+                    const isNoData = !isGray && (Math.abs(r - 0.3) < 0.05 && Math.abs(g - 0.3) < 0.05 && Math.abs(b - 0.3) < 0.05)
+                    const alpha = isNoData ? 0.0 : (isGray ? 0.25 : 0.85)
+
+                    for (let v = 0; v < 3; v++) {
+                        const vi = (f * 3 + v) * 4
+                        colors[vi] = r
+                        colors[vi + 1] = g
+                        colors[vi + 2] = b
+                        colors[vi + 3] = alpha
+                    }
+                }
+
+                geom.setAttribute('color', new THREE.BufferAttribute(colors, 4))
+
+                // Custom shader: uses vertex RGBA for per-face transparency
+                child.material = new THREE.ShaderMaterial({
+                    vertexShader: `
+                        attribute vec4 color;
+                        varying vec4 vColor;
+                        void main() {
+                            vColor = color;
+                            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                        }
+                    `,
+                    fragmentShader: `
+                        varying vec4 vColor;
+                        void main() {
+                            if (vColor.a < 0.01) discard;
+                            gl_FragColor = vColor;
+                        }
+                    `,
+                    transparent: true,
+                    side: THREE.DoubleSide,
+                    depthWrite: !isGray,
+                })
+                child.material.needsUpdate = true
+                console.log(`[Viewport] Sábana: ${meshName} → ${actualFaces} faces (${isGray ? 'gray/unmatched' : 'evaluated'})`)
+            })
+        },
+        clearDeviationSurface: () => {
+            const bimGroup = bimGroupRef.current
+            if (!bimGroup) return
+            bimGroup.traverse((child) => {
+                if (!(child instanceof THREE.Mesh)) return
+                if (child.userData._originalMaterial) {
+                    // Dispose the deviation material
+                    if (child.material !== child.userData._originalMaterial) {
+                        (child.material as THREE.Material).dispose()
+                    }
+                    child.material = child.userData._originalMaterial
+                    delete child.userData._originalMaterial
+                    // Restore original geometry (we converted to non-indexed)
+                    if (child.userData._originalGeometry) {
+                        child.geometry.dispose()
+                        child.geometry = child.userData._originalGeometry
+                        delete child.userData._originalGeometry
+                    } else {
+                        child.geometry.deleteAttribute('color')
+                    }
+                }
+            })
+            console.log('[Viewport] Deviation surface cleared')
+        },
+        applyRegistrationTransform: (transform: number[][]) => {
+            // Convert row-major 4x4 from backend to Three.js column-major Matrix4
+            const m = new THREE.Matrix4()
+            m.set(
+                transform[0][0], transform[0][1], transform[0][2], transform[0][3],
+                transform[1][0], transform[1][1], transform[1][2], transform[1][3],
+                transform[2][0], transform[2][1], transform[2][2], transform[2][3],
+                transform[3][0], transform[3][1], transform[3][2], transform[3][3],
+            )
+            const loader = potreeLoaderRef.current
+            if (loader) {
+                // Compute delta for OBBs: OBBs are in viewer space (floor_transform applied)
+                // delta = T_registration × T_floor_inverse
+                const currentTransform = floorTransformRef.current
+                if (currentTransform) {
+                    const invFloor = currentTransform.clone().invert()
+                    const delta = m.clone().multiply(invFloor)
+                    const obbGroup = obbGroupRef.current
+                    if (obbGroup) {
+                        obbGroup.matrix.copy(delta)
+                        obbGroup.matrixAutoUpdate = false
+                        obbGroup.matrixWorldNeedsUpdate = true
+                    }
+                }
+                // Apply full transform to point cloud
+                loader.setTransform(m.toArray())
+                floorTransformRef.current = m.clone()
+                console.log('[Viewport] Registration transform applied to point cloud')
+            }
+        },
         clearMeasurements: clearAllMeasurements,
         resetSectionBox: destroySectionBox,
         resetCamera: () => {
@@ -1127,6 +1303,20 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
         },
         clearScene,
+        refreshSegmentOBBs: async (sessionId: string) => {
+            try {
+                const res = await fetch(`/api/sessions/${sessionId}/segmentation`)
+                if (res.ok) {
+                    const data = await res.json()
+                    if (Array.isArray(data.instances)) {
+                        renderOBBs(data.instances)
+                        console.log(`[Viewport] Refreshed ${data.instances.length} segment OBBs`)
+                    }
+                }
+            } catch (err) {
+                console.error('[Viewport] Failed to refresh segment OBBs:', err)
+            }
+        },
     }))
 
     // FPS counter

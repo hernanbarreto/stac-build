@@ -3,6 +3,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useAuth, AuthUser } from '../context/AuthContext'
+import { useConfirmDialog } from '../components/ConfirmDialog'
 
 interface Props {
     onClose: () => void
@@ -21,6 +22,7 @@ interface TeamData {
 
 export default function AdminPage({ onClose }: Props) {
     const { token, user: currentUser } = useAuth()
+    const { confirmDanger, alert, dialogElement } = useConfirmDialog()
     const [activeTab, setActiveTab] = useState<'users' | 'teams'>('users')
 
     // ── Users state ───────────────────────────────────────────
@@ -109,7 +111,7 @@ export default function AdminPage({ onClose }: Props) {
             fetchUsers()
         } else {
             const err = await res.json().catch(() => ({}))
-            alert(err.detail || 'Failed to create user')
+            alert(err.detail || 'Failed to create user', 'Error')
         }
     }
 
@@ -152,12 +154,13 @@ export default function AdminPage({ onClose }: Props) {
             fetchUsers()
         } else {
             const err = await res.json().catch(() => ({}))
-            alert(err.detail || 'Failed to update user')
+            alert(err.detail || 'Failed to update user', 'Error')
         }
     }
 
     const handleDelete = async (u: AuthUser) => {
-        if (!confirm(`Delete user "${u.username}"? This cannot be undone.`)) return
+        const ok = await confirmDanger(`Delete user "${u.username}"? This cannot be undone.`, 'Delete User')
+        if (!ok) return
         await fetch(`/api/auth/users/${u.id}`, { method: 'DELETE', headers })
         fetchUsers()
     }
@@ -175,12 +178,13 @@ export default function AdminPage({ onClose }: Props) {
             fetchTeams()
         } else {
             const err = await res.json().catch(() => ({}))
-            alert(err.detail || 'Failed to create team')
+            alert(err.detail || 'Failed to create team', 'Error')
         }
     }
 
     const handleDeleteTeam = async (teamId: number, name: string) => {
-        if (!confirm(`Delete team "${name}"? This removes all members and session assignments.`)) return
+        const ok = await confirmDanger(`Delete team "${name}"? This removes all members and session assignments.`, 'Delete Team')
+        if (!ok) return
         await fetch(`/api/teams/${teamId}`, { method: 'DELETE', headers })
         fetchTeams()
     }
@@ -196,12 +200,13 @@ export default function AdminPage({ onClose }: Props) {
             fetchTeams()
         } else {
             const err = await res.json().catch(() => ({}))
-            alert(err.detail || 'Failed to add member')
+            alert(err.detail || 'Failed to add member', 'Error')
         }
     }
 
     const handleRemoveMember = async (teamId: number, userId: number, username: string) => {
-        if (!confirm(`Remove ${username} from this team?`)) return
+        const ok = await confirmDanger(`Remove ${username} from this team?`, 'Remove Member')
+        if (!ok) return
         await fetch(`/api/teams/${teamId}/members/${userId}`, { method: 'DELETE', headers })
         fetchTeams()
     }
@@ -217,7 +222,7 @@ export default function AdminPage({ onClose }: Props) {
             fetchTeams()
         } else {
             const err = await res.json().catch(() => ({}))
-            alert(err.detail || 'Failed to assign session')
+            alert(err.detail || 'Failed to assign session', 'Error')
         }
     }
 
@@ -245,7 +250,7 @@ export default function AdminPage({ onClose }: Props) {
             fetchAllSessions()
         } else {
             const err = await res.json().catch(() => ({}))
-            alert(err.detail || 'Failed to create session')
+            alert(err.detail || 'Failed to create session', 'Error')
         }
     }
 
@@ -567,6 +572,7 @@ export default function AdminPage({ onClose }: Props) {
                     </>
                 )}
             </div>
+            {dialogElement}
         </div>
     )
 }

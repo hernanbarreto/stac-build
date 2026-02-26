@@ -1,0 +1,295 @@
+/* ═══════════════════════════════════════════════════════════════
+   STAC Build — Deviation Analysis Overlay
+   BIM vs Scan heatmap controls, histogram, stats, legend
+   ═══════════════════════════════════════════════════════════════ */
+
+.deviation-panel {
+    position: absolute;
+    bottom: 80px;
+    right: 16px;
+    width: 340px;
+    background: rgba(18, 20, 28, 0.95);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(0, 212, 255, 0.25);
+    border-radius: 12px;
+    color: #e0e6f0;
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+    z-index: 200;
+    overflow: hidden;
+}
+
+.deviation-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, rgba(0, 212, 255, 0.12), rgba(139, 92, 246, 0.08));
+    border-bottom: 1px solid rgba(0, 212, 255, 0.15);
+}
+
+.deviation-panel-header h3 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: #00d4ff;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.deviation-close-btn {
+    background: none;
+    border: none;
+    color: #8892a4;
+    cursor: pointer;
+    font-size: 18px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.deviation-close-btn:hover {
+    color: #ff4466;
+    background: rgba(255, 68, 102, 0.1);
+}
+
+/* ── Stats Grid ── */
+.deviation-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 6px;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.deviation-stat {
+    text-align: center;
+    padding: 6px 4px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 6px;
+}
+
+.deviation-stat-value {
+    font-size: 16px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.deviation-stat-label {
+    font-size: 9px;
+    color: #8892a4;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 2px;
+}
+
+/* ── Pass Rate ── */
+.deviation-pass-rate {
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.deviation-pass-bar {
+    height: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+
+.deviation-pass-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.6s ease;
+}
+
+.deviation-pass-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: #8892a4;
+}
+
+.deviation-pass-pct {
+    font-weight: 600;
+}
+
+/* ── Histogram ── */
+.deviation-histogram {
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.deviation-histogram-title {
+    font-size: 10px;
+    color: #8892a4;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+}
+
+.deviation-histogram-canvas {
+    width: 100%;
+    height: 60px;
+    background: rgba(255, 255, 255, 0.02);
+    border-radius: 4px;
+}
+
+/* ── Color Legend ── */
+.deviation-legend {
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.deviation-legend-gradient {
+    flex: 1;
+    height: 12px;
+    border-radius: 3px;
+    background: linear-gradient(to right, #00ff88, #aaff00, #ffcc00, #ff6600, #ff0044);
+}
+
+.deviation-legend-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: #8892a4;
+    margin-top: 2px;
+}
+
+.deviation-legend-label {
+    font-size: 9px;
+    color: #8892a4;
+    white-space: nowrap;
+}
+
+/* ── Tolerance Slider ── */
+.deviation-tolerance {
+    padding: 10px 16px 14px;
+}
+
+.deviation-tolerance-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.deviation-tolerance-label {
+    font-size: 10px;
+    color: #8892a4;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.deviation-tolerance-value {
+    font-size: 12px;
+    font-weight: 600;
+    color: #00d4ff;
+    font-variant-numeric: tabular-nums;
+}
+
+.deviation-tolerance input[type="range"] {
+    width: 100%;
+    -webkit-appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: linear-gradient(to right, #00ff88, #ffcc00, #ff0044);
+    outline: none;
+}
+
+.deviation-tolerance input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #00d4ff;
+    border: 2px solid #12141c;
+    cursor: pointer;
+    box-shadow: 0 0 6px rgba(0, 212, 255, 0.5);
+}
+
+/* ── Element Results List ── */
+.deviation-elements {
+    max-height: 160px;
+    overflow-y: auto;
+    padding: 6px 8px;
+}
+
+.deviation-element {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.deviation-element:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.deviation-element-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.deviation-element-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.deviation-element-value {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    font-size: 10px;
+}
+
+/* ── Run Button ── */
+.deviation-run-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: calc(100% - 24px);
+    margin: 8px 12px 12px;
+    padding: 10px;
+    background: linear-gradient(135deg, #00d4ff, #8b5cf6);
+    border: none;
+    border-radius: 8px;
+    color: white;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.deviation-run-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 16px rgba(0, 212, 255, 0.3);
+}
+
+.deviation-run-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+/* ── Scrollbar ── */
+.deviation-elements::-webkit-scrollbar {
+    width: 4px;
+}
+
+.deviation-elements::-webkit-scrollbar-thumb {
+    background: rgba(0, 212, 255, 0.3);
+    border-radius: 2px;
+}

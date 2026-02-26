@@ -1672,6 +1672,7 @@ async def propagate_interactive_segmentation(request: Request):
       - error: {message}
     """
     from starlette.responses import StreamingResponse
+    from task_manager import task_manager
     
     body = await request.json()
     state_id = body.get("state_id")
@@ -1687,6 +1688,8 @@ async def propagate_interactive_segmentation(request: Request):
     scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
     output_dir = scans_dir / session_id / "output"
     
+    tid = task_manager.start(session_id, "propagation", f'Propagating "{label_name}"')
+    
     def sse_generator():
         import base64, cv2
         all_masks = {}  # frame_idx → outputs
@@ -1695,6 +1698,7 @@ async def propagate_interactive_segmentation(request: Request):
             for frame_idx, num_frames, outputs in sam3.propagate_interactive_stream(state_id):
                 all_masks[frame_idx] = outputs
                 pct = round((len(all_masks) / max(1, num_frames)) * 100)
+                task_manager.update(tid, pct=pct, detail=f"Frame {len(all_masks)}/{num_frames}")
                 
                 # Generate a small mask preview PNG for this frame
                 mask_b64 = ""
@@ -1717,6 +1721,7 @@ async def propagate_interactive_segmentation(request: Request):
                 yield f"event: progress\ndata: {event}\n\n"
             
             # All frames done — save results
+            task_manager.update(tid, pct=100, detail="Saving masks...")
             yield f"event: saving\ndata: {{\"status\": \"Saving masks...\"}}\n\n"
             
             from segmentation_pipeline import _save_masks, _parse_raw_masks, _match_and_save_result
@@ -1740,10 +1745,12 @@ async def propagate_interactive_segmentation(request: Request):
             
             _save_masks(output_dir, remapped_masks, [label_name], obj_labels, cfg)
             
+            task_manager.update(tid, detail="Computing 3D matching...")
             yield f"event: saving\ndata: {{\"status\": \"Computing 3D matching...\"}}\n\n"
             
             result = _match_and_save_result(output_dir)
             
+            task_manager.finish(tid)
             done_event = json.dumps({
                 "ok": True,
                 "instances": result.get("instances", [])
@@ -1753,6 +1760,7 @@ async def propagate_interactive_segmentation(request: Request):
         except Exception as e:
             import traceback
             traceback.print_exc()
+            task_manager.fail(tid, str(e))
             yield f"event: error\ndata: {{\"message\": \"{str(e)}\"}}\n\n"
     
     return StreamingResponse(
@@ -2029,42 +2037,53 @@ async def delete_segmentation_instance(request: Request):
         loop = asyncio.get_event_loop()
 
         def _delete():
-            # 1) Find all raw obj_ids for this instance_id in segmentation.json
+            print(f"[SegDelete] Deleting instance_id={instance_id} from session {session_id}")
+
+            # 1) Collect ALL obj_ids to remove from segmentation.json
             with open(seg_path) as f:
                 seg_data = json.load(f)
 
             obj_ids_to_remove = set()
+            instance_ids_to_remove = set()
             remaining_instances = []
             for inst in seg_data.get("instances", []):
-                if inst.get("instance_id") == instance_id or inst.get("id") == instance_id:
-                    obj_ids_to_remove.add(inst.get("id"))
+                iid = inst.get("instance_id")
+                oid = inst.get("id")
+                if iid == instance_id or oid == instance_id:
+                    obj_ids_to_remove.add(oid)
+                    if iid is not None:
+                        instance_ids_to_remove.add(iid)
                 else:
                     remaining_instances.append(inst)
 
+            print(f"[SegDelete]   segmentation.json: removing {len(seg_data.get('instances', [])) - len(remaining_instances)} entries, "
+                  f"obj_ids={obj_ids_to_remove}, instance_ids={instance_ids_to_remove}")
             seg_data["instances"] = remaining_instances
             with open(seg_path, "w") as f:
                 json.dump(seg_data, f, indent=2)
 
-            # 2) Remove from segmentation_result.json
+            # 2) Remove from segmentation_result.json (just delete the entry)
+            fresh_instances = []
             if result_path.exists():
                 with open(result_path) as f:
                     result_data = json.load(f)
-                result_data["instances"] = [
+                fresh_instances = [
                     inst for inst in result_data.get("instances", [])
-                    if inst.get("id") != instance_id
+                    if inst.get("id") not in instance_ids_to_remove
+                       and inst.get("instance_id") not in instance_ids_to_remove
                 ]
+                result_data["instances"] = fresh_instances
                 with open(result_path, "w") as f:
-                    json.dump(result_data, f, indent=2)
+                    json.dump(result_data, f)
+                print(f"[SegDelete]   segmentation_result.json: {len(fresh_instances)} instances remaining")
 
             # 3) Remove masks from NPZ
             if masks_path.exists() and obj_ids_to_remove:
                 npz = np.load(masks_path, allow_pickle=True)
                 new_data = {}
                 removed_keys = 0
-                remaining_obj_ids = set()
 
                 for key in npz.files:
-                    # Check if this key belongs to a removed obj_id
                     skip = False
                     if key.startswith("f") and "_o" in key:
                         parts = key.split("_o")
@@ -2073,15 +2092,12 @@ async def delete_segmentation_instance(request: Request):
                             if oid in obj_ids_to_remove:
                                 skip = True
                                 removed_keys += 1
-                            else:
-                                remaining_obj_ids.add(oid)
                         except (ValueError, IndexError):
                             pass
 
                     if not skip:
                         new_data[key] = npz[key]
 
-                # Update obj_ids array
                 if "obj_ids" in new_data:
                     old_ids = new_data["obj_ids"].tolist()
                     new_data["obj_ids"] = np.array(
@@ -2094,9 +2110,14 @@ async def delete_segmentation_instance(request: Request):
                 os.close(tmp_fd)
                 np.savez_compressed(tmp_path, **new_data)
                 os.replace(tmp_path, str(masks_path))
-                return {"removed_masks": removed_keys, "removed_obj_ids": list(obj_ids_to_remove)}
+                print(f"[SegDelete]   seg_masks.npz: removed {removed_keys} mask keys")
 
-            return {"removed_masks": 0, "removed_obj_ids": list(obj_ids_to_remove)}
+            print(f"[SegDelete]   ✅ Done: {len(fresh_instances)} instances remaining")
+
+            return {
+                "removed_obj_ids": list(obj_ids_to_remove),
+                "instances": fresh_instances,
+            }
 
         result = await loop.run_in_executor(None, _delete)
         return {"ok": True, **result}
@@ -2108,6 +2129,160 @@ async def delete_segmentation_instance(request: Request):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/api/segmentation/refresh")
+async def refresh_segmentation(body: dict):
+    """Delete segmentation_result.json and regenerate with full DBSCAN + matching."""
+    from task_manager import task_manager
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(400, "session_id required")
+    output_dir = Path(f"scans/{session_id}/output")
+    result_path = output_dir / "segmentation_result.json"
+
+    loop = asyncio.get_event_loop()
+    tid = task_manager.start(session_id, "dbscan_refresh", "Refreshing segmentation (DBSCAN)")
+
+    def _refresh():
+        try:
+            if result_path.exists():
+                result_path.unlink()
+                print(f"[SegRefresh] Deleted stale segmentation_result.json for {session_id}")
+            from segmentation_pipeline import _match_and_save_result
+            task_manager.update(tid, pct=10, detail="Running DBSCAN + cloud matching...")
+            print(f"[SegRefresh] Regenerating segmentation_result.json...")
+            result = _match_and_save_result(output_dir)
+            instances = result.get("instances", [])
+            print(f"[SegRefresh] ✅ Done: {len(instances)} instances")
+            task_manager.finish(tid)
+            return {"instances": instances}
+        except Exception as e:
+            task_manager.fail(tid, str(e))
+            raise
+
+    result = await loop.run_in_executor(None, _refresh)
+    return {"ok": True, **result}
+
+
+@app.get("/api/tasks/{session_id}")
+async def get_active_tasks(session_id: str):
+    """Return all active (running) tasks for a session."""
+    from task_manager import task_manager
+    tasks = task_manager.get_active(session_id)
+    return {"tasks": tasks}
+
+
+@app.get("/api/bim/auto_match/{session_id}")
+async def bim_auto_match(session_id: str):
+    """
+    Automatically match segment labels to IFC element name suffixes.
+    Returns all discovered matches for this session.
+    """
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    session_dir = scans_dir / session_id
+    output_dir = session_dir / "output"
+    
+    # Load segmentation
+    seg_result_path = output_dir / "segmentation_result.json"
+    seg_path = output_dir / "segmentation.json"
+    if seg_result_path.exists():
+        seg_data = json.loads(seg_result_path.read_text())
+    elif seg_path.exists():
+        seg_data = json.loads(seg_path.read_text())
+    else:
+        return {"matches": [], "error": "No segmentation data"}
+    
+    seg_labels = {str(inst.get("label", "")) for inst in seg_data.get("instances", [])}
+    
+    # Find IFC file and build name index
+    ifc_files = list(session_dir.glob("*.ifc"))
+    if not ifc_files:
+        return {"matches": [], "error": "No IFC file found"}
+    
+    import ifcopenshell
+    ifc_file = ifcopenshell.open(str(ifc_files[0]))
+    
+    # Build name suffix → element info map
+    ifc_elements = {}
+    for el in ifc_file.by_type('IfcProduct'):
+        name = getattr(el, 'Name', None)
+        if not name:
+            continue
+        name = str(name)
+        parts = name.split(':')
+        suffix = parts[-1].strip()
+        if suffix.isdigit():
+            ifc_elements[suffix] = {
+                "element_key": suffix,
+                "ifc_type": el.is_a(),
+                "ifc_name": name,
+                "ifc_id": el.id(),
+            }
+    
+    # Find matches
+    matches = []
+    for label in seg_labels:
+        if label in ifc_elements:
+            matches.append({
+                "segment_label": label,
+                **ifc_elements[label],
+            })
+    
+    return {
+        "matches": matches,
+        "total_segments": len(seg_labels),
+        "total_ifc_elements": len(ifc_elements),
+    }
+
+
+@app.post("/api/bim/compare")
+async def bim_compare(request: Request):
+    """
+    Run Cloud-to-Mesh deviation analysis.
+    Body: { session_id, matches: [{ segment_label, element_key }], tolerance_mm?: number }
+    """
+    from task_manager import task_manager
+    body = await request.json()
+    session_id = body.get("session_id")
+    matches = body.get("matches", [])
+    tolerance_mm = body.get("tolerance_mm", 15.0)
+    
+    if not session_id or not matches:
+        raise HTTPException(400, "session_id and matches required")
+    
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    session_dir = str(scans_dir / session_id)
+    
+    loop = asyncio.get_event_loop()
+    tid = task_manager.start(session_id, "bim_compare", "BIM vs Scan Comparison")
+    
+    try:
+        def _compare():
+            try:
+                from bim_comparison import run_comparison
+                
+                def on_progress(pct, detail=""):
+                    task_manager.update(tid, pct=pct, detail=detail)
+                
+                result = run_comparison(
+                    session_dir,
+                    matches,
+                    tolerance=tolerance_mm / 1000.0,
+                    progress_callback=on_progress,
+                )
+                task_manager.finish(tid)
+                return result
+            except Exception as e:
+                task_manager.fail(tid, str(e))
+                raise
+        
+        result = await loop.run_in_executor(None, _compare)
+        return result
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
 
 @app.post("/api/segmentation/paint_mask")
 async def paint_mask(request: Request):
@@ -2291,6 +2466,7 @@ async def add_text_prompt_endpoint(request: Request):
 @app.post("/api/segmentation/auto/{session_id}")
 async def run_auto_segmentation(session_id: str):
     """Full auto-segmentation: VLM scene analysis → SAM3 pipeline."""
+    from task_manager import task_manager
     scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
     session_dir = scans_dir / session_id
     frames_dir = session_dir / "frames"
@@ -2300,19 +2476,29 @@ async def run_auto_segmentation(session_id: str):
         raise HTTPException(status_code=404, detail="Frames directory not found")
     output_dir.mkdir(parents=True, exist_ok=True)
     loop = asyncio.get_event_loop()
+    tid = task_manager.start(session_id, "auto_seg", "Auto-segmentation (VLM + SAM3)")
 
     try:
         def _auto():
-            from scene_analyzer import analyze_scene
-            vlm_result = analyze_scene(str(frames_dir), str(output_dir))
-            categories = vlm_result.get("categories", [])
-            frame_map = vlm_result.get("frame_map", {})
-            if not categories:
-                return {"error": "VLM found no categories", "instances": []}
-            labels = [c["label"] if isinstance(c, dict) else c for c in categories]
-            prompt = ";".join(labels)
-            from segmentation_pipeline import run_segmentation
-            return run_segmentation(str(frames_dir), str(output_dir), prompt, frame_map=frame_map)
+            try:
+                task_manager.update(tid, pct=10, detail="Analyzing scene with VLM...")
+                from scene_analyzer import analyze_scene
+                vlm_result = analyze_scene(str(frames_dir), str(output_dir))
+                categories = vlm_result.get("categories", [])
+                frame_map = vlm_result.get("frame_map", {})
+                if not categories:
+                    task_manager.finish(tid)
+                    return {"error": "VLM found no categories", "instances": []}
+                labels = [c["label"] if isinstance(c, dict) else c for c in categories]
+                prompt = ";".join(labels)
+                task_manager.update(tid, pct=40, detail=f"Segmenting {len(labels)} categories...")
+                from segmentation_pipeline import run_segmentation
+                result = run_segmentation(str(frames_dir), str(output_dir), prompt, frame_map=frame_map)
+                task_manager.finish(tid)
+                return result
+            except Exception as e:
+                task_manager.fail(tid, str(e))
+                raise
 
         result = await loop.run_in_executor(None, _auto)
         return {"ok": True, "instances": result.get("instances", []), "error": result.get("error")}
@@ -2326,6 +2512,7 @@ async def run_auto_segmentation(session_id: str):
 @app.post("/api/segmentation/clean_instance")
 async def clean_segmentation_instance(request: Request):
     """Run DBSCAN on a single segmented instance to isolate the largest cluster."""
+    from task_manager import task_manager
     body = await request.json()
     session_id = body.get("session_id")
     instance_id = body.get("instance_id")
@@ -2344,27 +2531,36 @@ async def clean_segmentation_instance(request: Request):
         raise HTTPException(status_code=404, detail="No cleaned cloud")
 
     loop = asyncio.get_event_loop()
+    tid = task_manager.start(session_id, "instance_clean", f"Cleaning instance {instance_id}")
 
     try:
         def _clean():
-            with open(seg_path) as f:
-                seg_data = json.load(f)
-            inst = next((i for i in seg_data.get("instances", []) if i.get("id") == instance_id), None)
-            if not inst:
-                return {"error": f"Instance {instance_id} not found"}
-            indices = inst.get("point_indices", [])
-            if not indices:
-                return {"error": "Instance has no point_indices"}
-            from workers.instance_cleaner_worker import _run_dbscan, _load_ply
-            cloud_pts, cloud_colors = _load_ply(cloud_path)
-            inst_pts = cloud_pts[indices]
-            inst_cols = cloud_colors[indices] if cloud_colors is not None else np.zeros_like(inst_pts)
-            inst_cloud = np.hstack((inst_pts, inst_cols))
-            inst_cfg = cfg.get("instance_cleaning", {})
-            cleaned = _run_dbscan(inst_cloud, eps=inst_cfg.get("dbscan_eps", 0.05),
-                                  min_samples=inst_cfg.get("dbscan_min_samples", 10))
-            return {"ok": True, "original_points": len(indices), "cleaned_points": len(cleaned),
-                    "removed": len(indices) - len(cleaned)}
+            try:
+                with open(seg_path) as f:
+                    seg_data = json.load(f)
+                inst = next((i for i in seg_data.get("instances", []) if i.get("id") == instance_id), None)
+                if not inst:
+                    task_manager.finish(tid)
+                    return {"error": f"Instance {instance_id} not found"}
+                indices = inst.get("point_indices", [])
+                if not indices:
+                    task_manager.finish(tid)
+                    return {"error": "Instance has no point_indices"}
+                task_manager.update(tid, pct=20, detail="Running DBSCAN...")
+                from workers.instance_cleaner_worker import _run_dbscan, _load_ply
+                cloud_pts, cloud_colors = _load_ply(cloud_path)
+                inst_pts = cloud_pts[indices]
+                inst_cols = cloud_colors[indices] if cloud_colors is not None else np.zeros_like(inst_pts)
+                inst_cloud = np.hstack((inst_pts, inst_cols))
+                inst_cfg = cfg.get("instance_cleaning", {})
+                cleaned = _run_dbscan(inst_cloud, eps=inst_cfg.get("dbscan_eps", 0.05),
+                                      min_samples=inst_cfg.get("dbscan_min_samples", 10))
+                task_manager.finish(tid)
+                return {"ok": True, "original_points": len(indices), "cleaned_points": len(cleaned),
+                        "removed": len(indices) - len(cleaned)}
+            except Exception as e:
+                task_manager.fail(tid, str(e))
+                raise
 
         result = await loop.run_in_executor(None, _clean)
         return result
@@ -3082,8 +3278,15 @@ async def viewer_websocket(websocket: WebSocket):
                 stages = build_pipeline_stages(ordered_stages=ordered_stages, enabled=stages_config)
 
                 # Progress callback: relay to this websocket + broadcast
+                from task_manager import task_manager as _tm
+                _pipeline_tid = _tm.start(session_id, "pipeline", "Running Pipeline")
+
                 async def _on_pipeline_progress(sid, job_dict):
                     try:
+                        # Update task manager with pipeline progress
+                        stage = job_dict.get("current_stage", "")
+                        pct = job_dict.get("pct", 0)
+                        _tm.update(_pipeline_tid, pct=pct, detail=f"Stage: {stage}")
                         await websocket.send_text(json.dumps({
                             "type": "pipeline_progress",
                             "session_id": sid,
@@ -3095,6 +3298,7 @@ async def viewer_websocket(websocket: WebSocket):
                 # Completion callback: send cloud + segmentation data
                 async def _on_pipeline_complete(sid, success):
                     if not success:
+                        _tm.fail(_pipeline_tid, "Pipeline failed")
                         try:
                             await websocket.send_text(json.dumps({
                                 "type": "error",
@@ -3169,6 +3373,7 @@ async def viewer_websocket(websocket: WebSocket):
                         print(f"[Pipeline] Broadcast error: {e}")
 
                     try:
+                        _tm.finish(_pipeline_tid)
                         await websocket.send_text(json.dumps({
                             "type": "status",
                             "message": f"Pipeline complete for {sid}"

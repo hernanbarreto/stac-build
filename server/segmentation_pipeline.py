@@ -742,11 +742,9 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
                 categories: List[str], obj_labels: Dict[int, str], cfg: dict):
     """
     Save SAM3 masks as compressed NPZ + metadata JSON.
-    CUMULATIVE: merges with existing data if seg_masks.npz/segmentation.json exist.
-    
-    Args:
-        categories: List of category labels used in this run
-        obj_labels: Dict mapping obj_id → category label
+    Upsert logic: if an obj_id already exists in the NPZ (same object from a
+    previous incremental save), keep its ID and overwrite its masks.
+    If it's genuinely new, assign a new ID.
     """
     colors = cfg["visualization"]["segment_colors"]
     
@@ -760,13 +758,13 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
             scaled_res = meta.get("scaled_resolution", scaled_res)
             original_res = meta.get("original_resolution", original_res)
     
-    # ── Load existing data (if any) for cumulative merge ──
+    # ── Load existing data ──
     masks_path = output_dir / "seg_masks.npz"
     seg_path = output_dir / "segmentation.json"
     
     existing_npz = {}
     existing_instances = []
-    existing_prompts = []  # track all prompts used
+    existing_prompts = []
     max_existing_id = -1
     existing_frames = set()
     existing_obj_ids = set()
@@ -774,7 +772,6 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     if masks_path.exists():
         try:
             old_data = np.load(masks_path)
-            # Copy all existing mask keys
             for key in old_data.files:
                 if key.startswith("f") and "_o" in key:
                     existing_npz[key] = old_data[key]
@@ -793,21 +790,16 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
             existing_prompts = old_meta.get("prompts", [])
             if not existing_prompts and old_meta.get("prompt"):
                 existing_prompts = [old_meta["prompt"]]
-            
-            # Find max existing object ID
             for inst in existing_instances:
                 max_existing_id = max(max_existing_id, inst.get("id", -1))
             for oid in existing_obj_ids:
                 max_existing_id = max(max_existing_id, oid)
-            
-            print(f"[SegPipeline] 📦 Merging with existing: {len(existing_instances)} instances, "
-                  f"max_id={max_existing_id}")
         except Exception as e:
             print(f"[SegPipeline] ⚠️ Could not load existing metadata: {e}")
             existing_instances = []
             existing_prompts = []
     
-    # ── Remap new SAM3 obj_ids to continue from max_existing_id + 1 ──
+    # ── Upsert: keep existing IDs, only remap genuinely new ones ──
     new_obj_ids_raw = set()
     for fm in all_masks.values():
         new_obj_ids_raw.update(fm.keys())
@@ -815,9 +807,20 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     
     id_remap = {}
     next_id = max_existing_id + 1
+    reused = 0
     for raw_id in new_obj_ids_raw:
-        id_remap[raw_id] = next_id
-        next_id += 1
+        if raw_id in existing_obj_ids:
+            # Same object already saved — keep its ID, overwrite masks
+            id_remap[raw_id] = raw_id
+            reused += 1
+        else:
+            # Genuinely new object — assign new ID
+            id_remap[raw_id] = next_id
+            next_id += 1
+    
+    if reused > 0:
+        print(f"[SegPipeline] Upsert: {reused} existing objects updated, "
+              f"{len(new_obj_ids_raw) - reused} new objects added")
     
     # ── Build merged NPZ data ──
     # Start with existing masks
@@ -855,30 +858,34 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
           f"({new_count} new masks, {len(all_obj_ids)} total objects, "
           f"{len(all_frames)} frames, {masks_mb:.1f} MB)")
     
-    # ── Build merged metadata JSON ──
-    color_offset = len(existing_instances)
+    # ── Build metadata JSON (upsert: update existing, add new) ──
+    existing_by_id = {inst["id"]: inst for inst in existing_instances}
     
-    # instance_id must continue from max existing to avoid collisions
-    # (_match_masks_to_cloud groups obj_ids by instance_id)
     max_existing_iid = 0
     for inst in existing_instances:
         max_existing_iid = max(max_existing_iid, inst.get("instance_id", 0))
     
-    new_instances = []
-    remapped_ids = sorted(id_remap.values())
-    for i, remapped_id in enumerate(remapped_ids):
-        # Look up the original obj_id to get its label
-        raw_id = [k for k, v in id_remap.items() if v == remapped_id][0]
+    color_offset = len(existing_instances)
+    new_count = 0
+    for raw_id in sorted(new_obj_ids_raw):
+        remapped_id = id_remap[raw_id]
         label = obj_labels.get(raw_id, categories[0] if categories else "object")
         
-        new_instances.append({
-            "id": int(remapped_id),
-            "label": label,
-            "instance_id": max_existing_iid + i + 1,
-            "color": colors[(color_offset + i) % len(colors)],
-        })
+        if remapped_id in existing_by_id:
+            # Update existing entry (label may have changed)
+            existing_by_id[remapped_id]["label"] = label
+        else:
+            # New entry
+            max_existing_iid += 1
+            existing_by_id[remapped_id] = {
+                "id": int(remapped_id),
+                "label": label,
+                "instance_id": max_existing_iid,
+                "color": colors[(color_offset + new_count) % len(colors)],
+            }
+            new_count += 1
     
-    all_instances = existing_instances + new_instances
+    all_instances = list(existing_by_id.values())
     
     # Track all prompts used
     all_prompts = list(existing_prompts)
@@ -898,7 +905,7 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     with open(seg_path, 'w') as f:
         json.dump(segmentation, f, indent=2)
     print(f"[SegPipeline] ✅ Saved metadata: {seg_path.name} "
-          f"({len(new_instances)} new + {len(existing_instances)} existing = "
+          f"({new_count} new + {len(existing_instances)} existing = "
           f"{len(all_instances)} total instances)")
     
     return segmentation
@@ -1235,6 +1242,15 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None) -> di
     for inst in metadata.get("instances", []):
         instance_meta[inst["id"]] = inst
     
+    # ── Filter out orphaned obj_ids (exist in NPZ but deleted from segmentation.json) ──
+    # MUST happen before Phase 1: orphaned obj_ids in deconfliction would "steal" points
+    # from valid objects, then get discarded in Phase 2, leaving those points unassigned.
+    valid_obj_ids = [oid for oid in obj_ids if oid in instance_meta]
+    if len(valid_obj_ids) < len(obj_ids):
+        removed = len(obj_ids) - len(valid_obj_ids)
+        print(f"[SegPipeline]   Skipping {removed} orphaned obj_ids (deleted from segmentation.json)")
+        obj_ids = valid_obj_ids
+    
     # Erosion kernel (configurable)
     erosion_iterations = 2
     erosion_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -1301,10 +1317,14 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None) -> di
     
     # ── Phase 2: Build instances by merging obj_ids with the same instance_id ──
     # Each logical object may have multiple obj_ids (one per batch), merge them.
+    # Skip orphaned obj_ids that have no metadata in segmentation.json (deleted).
     from collections import defaultdict
     instance_groups = defaultdict(list)  # instance_id → [obj_id, ...]
     for obj_id in obj_ids:
-        meta = instance_meta.get(obj_id, {})
+        meta = instance_meta.get(obj_id)
+        if meta is None:
+            # Orphaned obj_id: exists in NPZ but was deleted from segmentation.json
+            continue
         iid = meta.get("instance_id", obj_id)
         instance_groups[iid].append(obj_id)
     

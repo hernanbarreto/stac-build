@@ -628,6 +628,13 @@
   background: var(--bg-base);
 }
 
+.viewport-container.viewport-hidden canvas,
+.viewport-container.viewport-hidden .viewport-overlay,
+.viewport-container.viewport-hidden .viewport-canvas {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 .viewport-canvas {
   width: 100%;
   height: 100%;
@@ -732,6 +739,324 @@
 }
 
 /* ── Welcome Screen ────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════
+   Session Loading Overlay
+   ═══════════════════════════════════════════════════════════════ */
+.session-loading-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-base);
+  z-index: 50;
+  animation: slo-fade-in 300ms ease;
+  overflow: hidden;
+}
+
+@keyframes slo-fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+/* Particle field — 20 dots orbiting around the logo */
+.slo-particles {
+  position: absolute;
+  width: 260px;
+  height: 260px;
+}
+
+.slo-dot {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+  top: 50%;
+  left: 50%;
+  transform-origin: 0 0;
+  animation: slo-orbit linear infinite;
+  opacity: 0;
+}
+
+@keyframes slo-orbit {
+  0% {
+    opacity: 0;
+    transform: rotate(var(--angle)) translateX(40px) scale(0.3);
+  }
+
+  15% {
+    opacity: 1;
+  }
+
+  85% {
+    opacity: 0.7;
+  }
+
+  100% {
+    opacity: 0;
+    transform: rotate(calc(var(--angle) + 360deg)) translateX(var(--radius)) scale(1);
+  }
+}
+
+/* Generate 20 dots with staggered delays and varied radii */
+.slo-dot:nth-child(1) {
+  --angle: 0deg;
+  --radius: 80px;
+  animation-duration: 4.0s;
+  animation-delay: 0.0s;
+}
+
+.slo-dot:nth-child(2) {
+  --angle: 18deg;
+  --radius: 100px;
+  animation-duration: 3.5s;
+  animation-delay: 0.2s;
+}
+
+.slo-dot:nth-child(3) {
+  --angle: 36deg;
+  --radius: 90px;
+  animation-duration: 5.0s;
+  animation-delay: 0.3s;
+}
+
+.slo-dot:nth-child(4) {
+  --angle: 54deg;
+  --radius: 110px;
+  animation-duration: 4.2s;
+  animation-delay: 0.5s;
+}
+
+.slo-dot:nth-child(5) {
+  --angle: 72deg;
+  --radius: 70px;
+  animation-duration: 3.8s;
+  animation-delay: 0.1s;
+}
+
+.slo-dot:nth-child(6) {
+  --angle: 90deg;
+  --radius: 120px;
+  animation-duration: 4.5s;
+  animation-delay: 0.7s;
+}
+
+.slo-dot:nth-child(7) {
+  --angle: 108deg;
+  --radius: 85px;
+  animation-duration: 3.3s;
+  animation-delay: 0.4s;
+}
+
+.slo-dot:nth-child(8) {
+  --angle: 126deg;
+  --radius: 105px;
+  animation-duration: 4.8s;
+  animation-delay: 0.6s;
+}
+
+.slo-dot:nth-child(9) {
+  --angle: 144deg;
+  --radius: 95px;
+  animation-duration: 3.6s;
+  animation-delay: 0.8s;
+}
+
+.slo-dot:nth-child(10) {
+  --angle: 162deg;
+  --radius: 75px;
+  animation-duration: 5.2s;
+  animation-delay: 0.2s;
+}
+
+.slo-dot:nth-child(11) {
+  --angle: 180deg;
+  --radius: 115px;
+  animation-duration: 4.1s;
+  animation-delay: 0.9s;
+}
+
+.slo-dot:nth-child(12) {
+  --angle: 198deg;
+  --radius: 88px;
+  animation-duration: 3.7s;
+  animation-delay: 0.3s;
+}
+
+.slo-dot:nth-child(13) {
+  --angle: 216deg;
+  --radius: 108px;
+  animation-duration: 4.6s;
+  animation-delay: 0.5s;
+}
+
+.slo-dot:nth-child(14) {
+  --angle: 234deg;
+  --radius: 72px;
+  animation-duration: 3.4s;
+  animation-delay: 0.1s;
+}
+
+.slo-dot:nth-child(15) {
+  --angle: 252deg;
+  --radius: 125px;
+  animation-duration: 5.1s;
+  animation-delay: 0.7s;
+}
+
+.slo-dot:nth-child(16) {
+  --angle: 270deg;
+  --radius: 82px;
+  animation-duration: 4.3s;
+  animation-delay: 0.4s;
+}
+
+.slo-dot:nth-child(17) {
+  --angle: 288deg;
+  --radius: 100px;
+  animation-duration: 3.9s;
+  animation-delay: 0.6s;
+}
+
+.slo-dot:nth-child(18) {
+  --angle: 306deg;
+  --radius: 68px;
+  animation-duration: 4.7s;
+  animation-delay: 0.8s;
+}
+
+.slo-dot:nth-child(19) {
+  --angle: 324deg;
+  --radius: 112px;
+  animation-duration: 3.2s;
+  animation-delay: 0.2s;
+}
+
+.slo-dot:nth-child(20) {
+  --angle: 342deg;
+  --radius: 92px;
+  animation-duration: 4.4s;
+  animation-delay: 0.9s;
+}
+
+/* Vary colors — some dots are text-secondary for depth */
+.slo-dot:nth-child(odd) {
+  background: var(--accent);
+}
+
+.slo-dot:nth-child(even) {
+  background: rgba(233, 157, 40, 0.4);
+  width: 2px;
+  height: 2px;
+}
+
+.slo-dot:nth-child(3n) {
+  background: rgba(255, 255, 255, 0.3);
+  width: 2px;
+  height: 2px;
+}
+
+/* Logo container with pulsing ring */
+.slo-logo-wrap {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.slo-logo-ring {
+  position: absolute;
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  border: 2px solid rgba(233, 157, 40, 0.15);
+  animation: slo-pulse 2s ease-in-out infinite;
+}
+
+.slo-logo-ring:nth-child(2) {
+  width: 180px;
+  height: 180px;
+  animation-delay: 0.4s;
+  border-color: rgba(233, 157, 40, 0.08);
+}
+
+.slo-logo-ring:nth-child(3) {
+  width: 220px;
+  height: 220px;
+  animation-delay: 0.8s;
+  border-color: rgba(233, 157, 40, 0.04);
+}
+
+@keyframes slo-pulse {
+
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+
+  50% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+}
+
+.slo-logo-img {
+  width: 90px;
+  height: auto;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 14px;
+  padding: 10px 14px;
+  filter: drop-shadow(0 4px 24px rgba(233, 157, 40, 0.4));
+  z-index: 3;
+}
+
+.slo-text {
+  z-index: 2;
+  margin-top: 28px;
+  text-align: center;
+}
+
+.slo-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.3px;
+}
+
+.slo-status {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.slo-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(233, 157, 40, 0.2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: slo-spin 0.8s linear infinite;
+}
+
+@keyframes slo-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .welcome-screen {
   position: absolute;
   inset: 0;

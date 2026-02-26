@@ -13,6 +13,8 @@ import { useAuth } from './context/AuthContext'
 import LoginPage from './pages/LoginPage'
 import AdminPage from './pages/AdminPage'
 import SegmentationManager from './components/InteractiveSegmentation'
+import { useConfirmDialog } from './components/ConfirmDialog'
+import DeviationOverlay from './components/DeviationOverlay'
 
 interface SessionInfo {
   id: string
@@ -48,6 +50,7 @@ interface PipelineState {
 type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align'
 
 function App() {
+  const { confirmDanger, dialogElement: appDialog } = useConfirmDialog()
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSession, setActiveSession] = useState<string | null>(null)
   const [selectedSession, setSelectedSession] = useState<string | null>(null)
@@ -55,6 +58,7 @@ function App() {
   const [connected, setConnected] = useState(false)
   const [serverAlive, setServerAlive] = useState(false)
   const [activePanel, setActivePanel] = useState<'sessions' | 'tools' | 'segments' | 'bim' | 'team' | null>('sessions')
+  const [showDeviation, setShowDeviation] = useState(false)
   const [bimModels, setBimModels] = useState<IFCLoadResult[]>([])
   const [sidebarWidth, setSidebarWidth] = useState(280)
   const [consoleOpen, setConsoleOpen] = useState(false)
@@ -62,6 +66,7 @@ function App() {
   const [showAxes, setShowAxes] = useState(true)
   const [showGrid, setShowGrid] = useState(true)
   const [pointCount, setPointCount] = useState(0)
+  const [sessionLoading, setSessionLoading] = useState<string | null>(null)
   const [fps, setFps] = useState(0)
   const [consoleLogs, setConsoleLogs] = useState<{ ts: string; level: string; msg: string }[]>([])
   const consoleEndRef = useRef<HTMLDivElement>(null)
@@ -243,10 +248,76 @@ function App() {
     setBimModels([])
     setPointCount(0)
     setStatusMessage('')
+    setSessionLoading(sessionId)
     setActiveSession(sessionId)
     setSelectedSession(sessionId)
     setActiveTool('navigate')
   }, [])
+
+  // Dismiss loading overlay when points arrive (session load only, not refresh)
+  const prevPointCount = useRef(0)
+  useEffect(() => {
+    if (prevPointCount.current === 0 && pointCount > 0 && sessionLoading) {
+      setSessionLoading(null)
+    }
+    prevPointCount.current = pointCount
+  }, [pointCount, sessionLoading])
+
+  // Poll server for active tasks (survives reconnect)
+  useEffect(() => {
+    if (!activeSession || !connected) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const poll = async () => {
+      if (cancelled) return
+      try {
+        const res = await fetch(`/api/tasks/${activeSession}`)
+        if (!res.ok || cancelled) return
+        const data = await res.json()
+        const tasks = data.tasks as { label: string; pct: number; detail: string }[]
+        if (tasks && tasks.length > 0) {
+          const t = tasks[0]  // show the first active task
+          const msg = t.detail ? `${t.label} — ${t.detail}` : t.label
+          setSessionLoading(msg)
+          // Keep polling while tasks are active
+          timer = setTimeout(poll, 3000)
+        } else {
+          // Tasks done — if overlay was showing a server task, dismiss it
+          if (sessionLoading && pointCount > 0) {
+            setSessionLoading(null)
+            // Refresh segments in case segmentation tasks finished
+            try {
+              const segRes = await fetch(`/api/sessions/${activeSession}/segmentation`)
+              if (segRes.ok) {
+                const segData = await segRes.json()
+                if (Array.isArray(segData.instances)) {
+                  setSegments(segData.instances.map((inst: any) => ({
+                    key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
+                    label: `${inst.label}`,
+                    color: inst.color || '#00d4ff',
+                    totalPoints: inst.total_points || 0,
+                    visible: true,
+                    excluded: inst.excluded || false,
+                  })))
+                }
+              }
+              viewportRef.current?.refreshSegmentOBBs(activeSession)
+            } catch { /* silent */ }
+          }
+        }
+      } catch { /* server unreachable, stop polling */ }
+    }
+
+    // Check immediately on session load / reconnect
+    const initialDelay = setTimeout(poll, 500)
+
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+      clearTimeout(initialDelay)
+    }
+  }, [activeSession, connected]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleReconstruct = useCallback((sessionId: string) => {
     setPipelineDialogSession(sessionId)
@@ -617,16 +688,16 @@ function App() {
                           </div>
                           <div className="session-actions">
                             <button className="session-action-btn load"
-                              title="Cargar sesión"
+                              title="Load Session"
                               onClick={(e) => { e.stopPropagation(); handleSessionLoad(s.id) }}
                             >📂</button>
                             <button className="session-action-btn reconstruct"
-                              title="Reconstruir geometría"
+                              title="Reconstruct Geometry"
                               onClick={(e) => { e.stopPropagation(); handleReconstruct(s.id) }}
                             >🔨</button>
                             {activeSession === s.id && (
                               <button className="session-action-btn segment"
-                                title="Segmentar objetos"
+                                title="Segment Objects"
                                 onClick={(e) => { e.stopPropagation(); handleSegment(s.id) }}
                               >🏷️</button>
                             )}
@@ -638,7 +709,7 @@ function App() {
                             )}
                             {activeSession === s.id && (
                               <button className="session-action-btn unload"
-                                title="Descargar sesión"
+                                title="Unload Session"
                                 onClick={(e) => { e.stopPropagation(); handleUnload() }}
                               >⏏</button>
                             )}
@@ -782,65 +853,71 @@ function App() {
 
             {/* BIM Navigator Panel */}
             {activePanel === 'bim' && (
-              <BIMNavigator
-                models={bimModels}
-                userRole={user?.role || 'viewer'}
-                onToggleVisibility={(meshNames, visible) => viewportRef.current?.toggleBIMVisibility(meshNames, visible)}
-                onSelectElement={(meshNames) => viewportRef.current?.highlightBIMElement(meshNames)}
-                onSetOpacity={(meshNames, opacity) => viewportRef.current?.setBIMOpacity(meshNames, opacity)}
-                onUploadIFC={async (file) => {
-                  if (!activeSession || !token) return
-                  const formData = new FormData()
-                  formData.append('file', file)
-                  try {
-                    const res = await fetch(`/api/sessions/${activeSession}/bim/upload`, {
-                      method: 'POST',
-                      headers: { 'Authorization': `Bearer ${token}` },
-                      body: formData,
-                    })
-                    if (res.ok) {
-                      setStatusMessage(`BIM uploaded: ${file.name}, loading...`)
-                      // Load the uploaded IFC into the 3D viewer
-                      const { loadIFC } = await import('./components/IFCLoader')
-                      const url = `/api/sessions/${activeSession}/bim/${file.name}`
-                      const result = await loadIFC(url, file.name)
-                      // Add to 3D scene
-                      viewportRef.current?.addBIMGroup(result.group)
-                      // Update navigator tree
-                      setBimModels(prev => [...prev, result])
-                      setStatusMessage(`BIM loaded: ${file.name} (${result.group.children.length} elements)`)
-                      // Refresh session list to update has_bim indicator
-                      connectToServer()
-                    } else {
-                      setStatusMessage(`Upload failed: ${(await res.json()).detail}`)
+              <>
+                <BIMNavigator
+                  models={bimModels}
+                  userRole={user?.role || 'viewer'}
+                  onToggleVisibility={(meshNames, visible) => viewportRef.current?.toggleBIMVisibility(meshNames, visible)}
+                  onSelectElement={(meshNames) => viewportRef.current?.highlightBIMElement(meshNames)}
+                  onSetOpacity={(meshNames, opacity) => viewportRef.current?.setBIMOpacity(meshNames, opacity)}
+                  onUploadIFC={async (file) => {
+                    if (!activeSession || !token) return
+                    const formData = new FormData()
+                    formData.append('file', file)
+                    try {
+                      const res = await fetch(`/api/sessions/${activeSession}/bim/upload`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${token}` },
+                        body: formData,
+                      })
+                      if (res.ok) {
+                        setStatusMessage(`BIM uploaded: ${file.name}, loading...`)
+                        const { loadIFC } = await import('./components/IFCLoader')
+                        const url = `/api/sessions/${activeSession}/bim/${file.name}`
+                        const result = await loadIFC(url, file.name)
+                        viewportRef.current?.addBIMGroup(result.group)
+                        setBimModels(prev => [...prev, result])
+                        setStatusMessage(`BIM loaded: ${file.name} (${result.group.children.length} elements)`)
+                        connectToServer()
+                      } else {
+                        setStatusMessage(`Upload failed: ${(await res.json()).detail}`)
+                      }
+                    } catch (err: any) {
+                      setStatusMessage(`Upload error: ${err.message}`)
                     }
-                  } catch (err: any) {
-                    setStatusMessage(`Upload error: ${err.message}`)
-                  }
-                }}
-                onDeleteIFC={async (filename) => {
-                  if (!activeSession || !token) return
-                  if (!confirm(`Delete ${filename}?`)) return
-                  try {
-                    const res = await fetch(`/api/sessions/${activeSession}/bim/${filename}`, {
-                      method: 'DELETE',
-                      headers: { 'Authorization': `Bearer ${token}` },
-                    })
-                    if (res.ok) {
-                      setStatusMessage(`BIM deleted: ${filename}`)
-                      // Remove 3D meshes from the scene
-                      viewportRef.current?.removeBIMGroup(filename)
-                      // Remove from navigator tree
-                      setBimModels(prev => prev.filter(m => m.filename !== filename))
-                      connectToServer()
-                    } else {
-                      setStatusMessage(`Delete failed: ${(await res.json()).detail}`)
+                  }}
+                  onDeleteIFC={async (filename) => {
+                    if (!activeSession || !token) return
+                    const ok = await confirmDanger(`Delete ${filename}?`, 'Delete BIM File')
+                    if (!ok) return
+                    try {
+                      const res = await fetch(`/api/sessions/${activeSession}/bim/${filename}`, {
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${token}` },
+                      })
+                      if (res.ok) {
+                        setStatusMessage(`BIM deleted: ${filename}`)
+                        viewportRef.current?.removeBIMGroup(filename)
+                        setBimModels(prev => prev.filter(m => m.filename !== filename))
+                        connectToServer()
+                      } else {
+                        setStatusMessage(`Delete failed: ${(await res.json()).detail}`)
+                      }
+                    } catch (err: any) {
+                      setStatusMessage(`Delete error: ${err.message}`)
                     }
-                  } catch (err: any) {
-                    setStatusMessage(`Delete error: ${err.message}`)
-                  }
-                }}
-              />
+                  }}
+                />
+                {activeSession && segments.length > 0 && (
+                  <button
+                    className="deviation-run-btn"
+                    style={{ margin: '8px 0' }}
+                    onClick={() => setShowDeviation(true)}
+                  >
+                    ⊿ Deviation Analysis
+                  </button>
+                )}
+              </>
             )}
 
             {/* Team Panel */}
@@ -881,8 +958,8 @@ function App() {
 
       {/* ── Main Content ── */}
       <main className="main-content">
-        {/* Toolbar — only with active session */}
-        {hasSession && (
+        {/* Toolbar — only with active session, hide during loading */}
+        {hasSession && !sessionLoading && (
           <div className="toolbar">
             <div className="toolbar-group">
               <button className={`tool-btn ${activeTool === 'navigate' ? 'active' : ''}`}
@@ -912,7 +989,7 @@ function App() {
         )}
 
         {/* 3D Viewport */}
-        <div className="viewport-container">
+        <div className={`viewport-container${sessionLoading ? ' viewport-hidden' : ''}`}>
           <Viewport
             ref={viewportRef}
             pointSize={pointSize}
@@ -928,8 +1005,44 @@ function App() {
             onBimLoaded={(models) => { setBimModels(models); if (models.length > 0) setActivePanel('bim') }}
           />
 
+          {/* Session Loading Overlay */}
+          {sessionLoading && (
+            <div className="session-loading-overlay">
+              <div className="slo-particles">
+                {Array.from({ length: 20 }, (_, i) => (
+                  <div key={i} className="slo-dot" />
+                ))}
+              </div>
+              <div className="slo-logo-wrap">
+                <div className="slo-logo-ring" />
+                <div className="slo-logo-ring" />
+                <div className="slo-logo-ring" />
+                <img src="/logo.png" alt="STAC Build" className="slo-logo-img" />
+              </div>
+              <div className="slo-text">
+                <div className="slo-title">Loading Session</div>
+                <div className="slo-status">
+                  <div className="slo-spinner" />
+                  <span>{sessionLoading}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Deviation Analysis Overlay */}
+          {showDeviation && activeSession && (
+            <DeviationOverlay
+              sessionId={activeSession}
+              viewportRef={viewportRef}
+              onClose={() => {
+                setShowDeviation(false)
+                viewportRef.current?.clearDeviationSurface()
+              }}
+            />
+          )}
+
           {/* Welcome screen — shown when no session */}
-          {!hasSession && (
+          {!hasSession && !sessionLoading && (
             <div className="welcome-screen">
               <img src="/logo.png" alt="STAC Build" className="welcome-logo-img" />
               <div className="welcome-subtitle">
@@ -1112,7 +1225,39 @@ function App() {
         interactiveSessionId && (
           <SegmentationManager
             sessionId={interactiveSessionId}
-            onClose={() => setInteractiveSessionId(null)}
+            onClose={async () => {
+              const sid = interactiveSessionId
+              setInteractiveSessionId(null)
+              // Regenerate DBSCAN + OBBs in background
+              if (sid) {
+                setSessionLoading('Refreshing segmentation…')
+                setStatusMessage('Refreshing segmentation (DBSCAN)...')
+                try {
+                  const res = await fetch('/api/segmentation/refresh', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sid }),
+                  })
+                  if (res.ok) {
+                    const data = await res.json()
+                    setStatusMessage(`Segmentation refreshed: ${data.instances?.length || 0} instances`)
+                    // Update sidebar segments
+                    if (Array.isArray(data.instances)) {
+                      setSegments(data.instances.map((inst: any) => ({
+                        key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
+                        label: `${inst.label}`,
+                        color: inst.color || '#00d4ff',
+                        totalPoints: inst.total_points || 0,
+                        visible: true,
+                        excluded: inst.excluded || false,
+                      })))
+                    }
+                    viewportRef.current?.refreshSegmentOBBs(sid)
+                  }
+                } catch { /* silent */ }
+                finally { setSessionLoading(null) }
+              }
+            }}
             onUpdate={async () => {
               if (!activeSession) return
               try {
@@ -1130,6 +1275,8 @@ function App() {
                     })))
                   }
                 }
+                // Also refresh 3D OBBs in the viewport
+                viewportRef.current?.refreshSegmentOBBs(activeSession)
               } catch { /* silent */ }
             }}
             onSuccess={(newInstances) => {
@@ -1143,6 +1290,7 @@ function App() {
           />
         )
       }
+      {appDialog}
     </div >
   )
 }

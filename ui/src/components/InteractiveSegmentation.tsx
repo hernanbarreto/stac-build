@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { useConfirmDialog } from './ConfirmDialog'
 
 interface InstanceInfo {
     id: number
@@ -24,6 +25,7 @@ const INSTANCE_COLORS = [
 ]
 
 export default function SegmentationManager({ sessionId, onClose, onUpdate }: Props) {
+    const { confirmDanger, dialogElement } = useConfirmDialog()
     // State
     const [loading, setLoading] = useState(true)
     const [stateId, setStateId] = useState<string | null>(null)
@@ -568,7 +570,8 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
 
     // ── Delete instance ──────────────────────────────────
     const handleDelete = useCallback(async (instId: number, label: string) => {
-        if (!confirm(`Delete "${label}"? This removes all masks and 3D data.`)) return
+        const ok = await confirmDanger(`Delete "${label}"? This removes all masks and 3D data.`, 'Delete Instance')
+        if (!ok) return
         try {
             setStatus(`Deleting "${label}"...`)
             const res = await fetch(`/api/segmentation/delete`, {
@@ -852,6 +855,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                     </div>
                 </div>
             </div>
+            {dialogElement}
         </div>
     )
 }
