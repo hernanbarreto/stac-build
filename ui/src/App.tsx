@@ -462,6 +462,8 @@ function App() {
       if (!ok) return
     }
     setSabanaLoading(true)
+    setSabanaMetrics(null)
+    setSabanaFullMeta(null)
     setStatusMessage('Running BIM comparison...')
     try {
       // Step 1: auto-match segments to IFC elements

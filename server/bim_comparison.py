@@ -862,6 +862,18 @@ def run_comparison(
     session_path = Path(session_dir)
     output_dir = session_path / "output"
     
+    # Clean up previous sábana artifacts before regenerating
+    import shutil
+    for old_file in ["sabana.npz", "sabana_cloud.ply", "sabana_meta.json"]:
+        p = session_path / old_file
+        if p.exists():
+            p.unlink()
+            print(f"[BIM] 🗑️ Deleted old {old_file}")
+    sabana_potree_dir = session_path / "sabana_potree"
+    if sabana_potree_dir.exists():
+        shutil.rmtree(sabana_potree_dir)
+        print("[BIM] 🗑️ Deleted old sabana_potree/")
+    
     # Find IFC file
     ifc_files = list(session_path.glob("*.ifc"))
     if not ifc_files:
