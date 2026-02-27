@@ -464,12 +464,12 @@ function App() {
     setSabanaLoading(true)
     setSabanaMetrics(null)
     setSabanaFullMeta(null)
-    // Unload sábana: switch back to BIM + scan cloud view
+    // Reset view: reload scan cloud + full-opacity BIM (clearing old sábana)
     if (sabanaVisible) {
       setSabanaVisible(false)
-      viewportRef.current?.sendCommand({ type: 'load_session', session_id: activeSession })
-      viewportRef.current?.setOBBsVisible(true)
     }
+    viewportRef.current?.sendCommand({ type: 'load_session', session_id: activeSession })
+    viewportRef.current?.setOBBsVisible(true)
     setActivePanel('bim')
     setStatusMessage('Running BIM comparison...')
     try {
@@ -1165,7 +1165,7 @@ function App() {
                     title="Generate BIM vs Scan comparison">
                     {sabanaLoading ? <Loader2 size={16} className="spin" /> : <Scale size={16} />}
                   </button>
-                  {sessions.find(s => s.id === activeSession)?.hasSabana && (
+                  {!sabanaLoading && sessions.find(s => s.id === activeSession)?.hasSabana && (
                     <button className={`tool-btn ${sabanaVisible ? 'active' : ''}`}
                       onClick={handleToggleSabana}
                       disabled={sabanaLoading}

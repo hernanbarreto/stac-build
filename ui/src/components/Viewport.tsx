@@ -1938,33 +1938,38 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
                 // Keep camera where it is — user navigates from current position
 
+                // 3) Dim BIM meshes to 20% opacity
+                const bimGroup = bimGroupRef.current
+                if (bimGroup) {
+                    let dimmed = 0
+                    bimGroup.traverse((child) => {
+                        if (!(child instanceof THREE.Mesh)) return
+                        if (!child.userData._originalMaterial) {
+                            child.userData._originalMaterial = child.material
+                        }
+                        child.material = new THREE.MeshBasicMaterial({
+                            color: 0x888888,
+                            transparent: true,
+                            opacity: 0.20,
+                            side: THREE.DoubleSide,
+                            depthWrite: false,
+                        })
+                        dimmed++
+                    })
+                    console.log(`[Viewport] Dimmed ${dimmed} BIM meshes`)
+                } else {
+                    console.warn('[Viewport] No bimGroup to dim!')
+                }
+
+                // 4) Hide OBB wireframes (segmentation bboxes are noise in sábana mode)
+                const obbGroup = obbGroupRef.current
+                if (obbGroup) obbGroup.visible = false
+
                 if (onSabanaLoaded) onSabanaLoaded(loadedPts)
             }).catch((err) => {
                 console.error('[Viewport] Sábana Potree load error:', err)
                 if (onStatusMessage) onStatusMessage(`Sábana load error: ${err.message}`)
             })
-
-            // 3) Dim BIM meshes to 20% opacity
-            const bimGroup = bimGroupRef.current
-            if (bimGroup) {
-                bimGroup.traverse((child) => {
-                    if (!(child instanceof THREE.Mesh)) return
-                    if (!child.userData._originalMaterial) {
-                        child.userData._originalMaterial = child.material
-                    }
-                    child.material = new THREE.MeshBasicMaterial({
-                        color: 0x888888,
-                        transparent: true,
-                        opacity: 0.20,
-                        side: THREE.DoubleSide,
-                        depthWrite: false,
-                    })
-                })
-            }
-
-            // 4) Hide OBB wireframes (segmentation bboxes are noise in sábana mode)
-            const obbGroup = obbGroupRef.current
-            if (obbGroup) obbGroup.visible = false
         }
         // ── BIM: load IFC models via web-ifc ──
         if (msg.type === 'bim_ready') {

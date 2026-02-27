@@ -630,35 +630,62 @@ def compute_coverage_pct(
     """
     Estimate what % of the BIM mesh surface is covered by scan points.
     
-    Uses mesh-to-cloud distance: sample the mesh centroids and check
-    how many have at least one scan point within `proximity_m`.
-    
-    `proximity_m` comes from config.yaml bim.deviation.coverage_proximity_m.
-    It should be generous enough to detect construction on the opposite
-    side of thick elements (slabs, walls).
+    Samples the mesh surface uniformly (not just centroids) to handle
+    large triangles correctly. Uses KDTree for efficient proximity check.
     """
     if len(scan_points) == 0 or len(mesh_faces) == 0:
         return 0.0
     
-    # Face centroids weighted by area
     v0 = mesh_verts[mesh_faces[:, 0]]
     v1 = mesh_verts[mesh_faces[:, 1]]
     v2 = mesh_verts[mesh_faces[:, 2]]
-    centroids = (v0 + v1 + v2) / 3.0
     areas = np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1) * 0.5
-    
-    # KDTree on scan points → query face centroids
-    tree = KDTree(scan_points)
-    dists, _ = tree.query(centroids)
-    
-    # Coverage: weighted by face area
-    covered_area = np.sum(areas[dists <= proximity_m])
     total_area = np.sum(areas)
     
     if total_area < 1e-10:
         return 0.0
     
-    return round(float(covered_area / total_area * 100), 1)
+    # Sample mesh surface: ~4 samples per m² (min 1 per face, cap at 50k total)
+    samples_per_m2 = 4.0
+    all_samples = []
+    all_weights = []
+    
+    for i in range(len(mesh_faces)):
+        n = max(1, int(areas[i] * samples_per_m2))
+        # Random barycentric coordinates for uniform sampling
+        r1 = np.sqrt(np.random.rand(n))
+        r2 = np.random.rand(n)
+        pts = ((1 - r1)[:, None] * v0[i] +
+               (r1 * (1 - r2))[:, None] * v1[i] +
+               (r1 * r2)[:, None] * v2[i])
+        all_samples.append(pts)
+        all_weights.append(np.full(n, areas[i] / n))
+    
+    sample_pts = np.vstack(all_samples)
+    sample_wts = np.concatenate(all_weights)
+    
+    # Cap at 50k samples for performance
+    if len(sample_pts) > 50000:
+        idx = np.random.choice(len(sample_pts), 50000, replace=False)
+        sample_pts = sample_pts[idx]
+        sample_wts = sample_wts[idx]
+        # Re-normalize weights
+        sample_wts *= total_area / np.sum(sample_wts)
+    
+    # KDTree on scan points → query surface samples
+    tree = KDTree(scan_points)
+    dists, _ = tree.query(sample_pts)
+    
+    covered_area = np.sum(sample_wts[dists <= proximity_m])
+    result = round(float(covered_area / total_area * 100), 1)
+    
+    print(f"[Coverage] {len(mesh_faces)} faces → {len(sample_pts)} samples, "
+          f"{len(scan_points)} scan pts, proximity={proximity_m:.3f}m")
+    print(f"[Coverage]   dist min={np.min(dists):.4f} median={np.median(dists):.4f} "
+          f"max={np.max(dists):.4f} | covered: {np.sum(dists <= proximity_m)}/{len(sample_pts)}")
+    print(f"[Coverage]   covered_area={covered_area:.2f}/{total_area:.2f} m² → {result}%")
+    
+    return result
 
 
 def save_sabana(
