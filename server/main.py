@@ -2346,9 +2346,9 @@ async def bim_compare(request: Request):
     body = await request.json()
     session_id = body.get("session_id")
     matches = body.get("matches", [])
-    # Tolerance from config.yaml (default 50mm)
+    # Tolerance from config.yaml bim.deviation.tolerance_mm (mm)
     bim_cfg = cfg.get("bim", {}).get("deviation", {})
-    tolerance_mm = bim_cfg.get("warning_threshold", 50.0)
+    tolerance_mm = bim_cfg.get("tolerance_mm", 50.0)
     
     if not session_id or not matches:
         raise HTTPException(400, "session_id and matches required")

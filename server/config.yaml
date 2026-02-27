@@ -303,9 +303,11 @@ bim:
     
   # Deviation detection
   deviation:
+    # Comparison tolerance (mm) — points within this distance from BIM surface count as "correct"
+    tolerance_mm: 50              # 50mm default — the main C2M deviation threshold
     # Method: "point_to_surface", "point_to_point"
     method: "point_to_surface"
-    # Classification thresholds (mm)
+    # Display classification thresholds (mm) — for color heatmap only
     warning_threshold: 10.0
     error_threshold: 20.0
     critical_threshold: 30.0
