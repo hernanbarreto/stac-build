@@ -464,6 +464,13 @@ function App() {
     setSabanaLoading(true)
     setSabanaMetrics(null)
     setSabanaFullMeta(null)
+    // Unload sábana: switch back to BIM + scan cloud view
+    if (sabanaVisible) {
+      setSabanaVisible(false)
+      viewportRef.current?.sendCommand({ type: 'load_session', session_id: activeSession })
+      viewportRef.current?.setOBBsVisible(true)
+    }
+    setActivePanel('bim')
     setStatusMessage('Running BIM comparison...')
     try {
       // Step 1: auto-match segments to IFC elements
@@ -505,7 +512,7 @@ function App() {
       setStatusMessage(`Comparison error: ${e.message}`)
     }
     setSabanaLoading(false)
-  }, [activeSession, sessions, confirmDanger])
+  }, [activeSession, sessions, confirmDanger, sabanaVisible])
 
   // ── Sábana: Toggle visibility via Potree streaming ──
   const handleToggleSabana = useCallback(() => {
