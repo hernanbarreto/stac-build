@@ -1,0 +1,229 @@
+/* BIM Analysis Panel — Construction progress report */
+
+.bap-container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow-y: auto;
+    color: #e2e8f0;
+    font-size: 12px;
+    scrollbar-width: thin;
+    scrollbar-color: #475569 transparent;
+}
+
+/* ── Header ── */
+.bap-header {
+    padding: 12px 14px 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.bap-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #f8fafc;
+    letter-spacing: 0.5px;
+    margin-bottom: 10px;
+}
+
+.bap-meta-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 12px;
+}
+
+.bap-meta-item {
+    display: flex;
+    flex-direction: column;
+}
+
+.bap-meta-label {
+    font-size: 10px;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.bap-meta-value {
+    color: #cbd5e1;
+    font-weight: 500;
+}
+
+/* ── Global Progress ── */
+.bap-global {
+    padding: 12px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.bap-global-label {
+    font-size: 11px;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+}
+
+.bap-global-bar-container {
+    height: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 4px;
+}
+
+.bap-global-bar {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.5s ease;
+}
+
+.bap-global-value {
+    font-size: 22px;
+    font-weight: 800;
+    text-align: center;
+    margin-top: 4px;
+}
+
+/* ── Summary Chips ── */
+.bap-summary {
+    display: flex;
+    gap: 6px;
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.bap-chip {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 6px 4px;
+    border: 1px solid;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.bap-chip-count {
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.bap-chip-label {
+    font-size: 9px;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+/* ── Elements List ── */
+.bap-elements-header {
+    padding: 8px 14px 4px;
+    font-size: 11px;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+}
+
+.bap-elements-list {
+    padding: 0 14px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.bap-element {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    padding: 8px 10px;
+}
+
+.bap-element-unbuilt {
+    opacity: 0.5;
+}
+
+.bap-el-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.bap-el-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+}
+
+.bap-el-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.bap-el-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #e2e8f0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.bap-el-type {
+    font-size: 10px;
+    color: #64748b;
+}
+
+.bap-el-quality {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    flex-shrink: 0;
+}
+
+.bap-el-stats {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+}
+
+.bap-el-bar-container {
+    flex: 1;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.bap-el-bar {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s ease;
+}
+
+.bap-el-advance {
+    font-size: 11px;
+    font-weight: 700;
+    color: #cbd5e1;
+    min-width: 32px;
+    text-align: right;
+}
+
+.bap-el-details {
+    display: flex;
+    gap: 10px;
+    margin-top: 4px;
+    font-size: 10px;
+    color: #64748b;
+}
+
+.bap-section-divider {
+    padding: 8px 0 4px;
+    font-size: 10px;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    margin-top: 4px;
+}

@@ -431,6 +431,91 @@ async def _send_cleaned_cloud(websocket, session_id: str):
         traceback.print_exc()
         return False
 
+
+async def _send_sabana_cloud(websocket, session_id: str):
+    """Stream sábana PLY via same binary protocol as cleaned_cloud.
+    The sábana PLY is already in registered BIM space with deviation colors.
+    No floor alignment needed.
+    """
+    scans_dir = Path(__file__).parent / "scans" / session_id
+    ply_path = scans_dir / "sabana_cloud.ply"
+    
+    if not ply_path.exists():
+        print(f"[SendSabana] ⚠️ sabana_cloud.ply not found for {session_id}")
+        return False
+    
+    try:
+        file_size_mb = ply_path.stat().st_size / (1024 * 1024)
+        print(f"[SendSabana] Loading sábana ({file_size_mb:.1f} MB)...")
+        
+        def _load():
+            """Read the sábana PLY (binary, XYZRGB)."""
+            with open(ply_path, "rb") as f:
+                n_pts = 0
+                while True:
+                    line = f.readline()
+                    if line.startswith(b"element vertex"):
+                        n_pts = int(line.split()[-1])
+                    if line.startswith(b"end_header"):
+                        break
+                
+                ply_dtype = np.dtype([
+                    ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                    ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
+                ])
+                raw_data = np.frombuffer(f.read(), dtype=ply_dtype)
+                point_count = len(raw_data)
+                # Convert to N×7 float32 (same format as cleaned cloud)
+                output_data = np.zeros((point_count, 7), dtype=np.float32)
+                output_data[:, 0] = raw_data['x']
+                output_data[:, 1] = raw_data['y']
+                output_data[:, 2] = raw_data['z']
+                output_data[:, 3] = raw_data['r'] / 255.0
+                output_data[:, 4] = raw_data['g'] / 255.0
+                output_data[:, 5] = raw_data['b'] / 255.0
+            
+            if point_count == 0:
+                return None, 0
+            
+            return output_data.tobytes(), point_count
+        
+        loop = asyncio.get_event_loop()
+        binary_bytes, point_count = await loop.run_in_executor(None, _load)
+        
+        if binary_bytes is None:
+            print("[SendSabana] ⚠️ Empty sábana cloud")
+            return False
+        
+        await websocket.send_text(json.dumps({
+            "type": "status",
+            "message": f"Sending sábana ({point_count:,} points, {file_size_mb:.1f} MB)..."
+        }))
+        # Use sabana_start so frontend knows to apply transparency
+        await websocket.send_text(json.dumps({
+            "type": "sabana_start",
+            "chunk_id": 0,
+            "point_count": point_count
+        }))
+        
+        for sub in chunk_data(binary_bytes):
+            await websocket.send_bytes(sub)
+            await asyncio.sleep(0.001)
+        
+        # Signal completion
+        await websocket.send_text(json.dumps({
+            "type": "sabana_loaded",
+            "point_count": point_count
+        }))
+        
+        print(f"[SendSabana] ✅ Sent {point_count:,} sábana points")
+        return True
+    
+    except Exception as e:
+        print(f"[SendSabana] ❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 async def _send_cleaned_cloud_broadcast(session_id: str):
     """Load and broadcast cleaned_cloud.ply to ALL connected viewers."""
     scans_dir = Path(__file__).parent / "scans" / session_id / "output"
@@ -901,6 +986,20 @@ async def serve_potree_files(session_id: str, file_path: str):
         headers={"Cache-Control": "public, max-age=3600"},  # Cache 1h
     )
 
+@app.get("/potree_sabana/{session_id}/{file_path:path}")
+async def serve_sabana_potree_files(session_id: str, file_path: str):
+    """Serve sábana Potree octree files for a session."""
+    from fastapi.responses import FileResponse
+    full_path = SCANS_DIR / session_id / "sabana_potree" / file_path
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+    content_type = "application/json" if file_path.endswith(".json") else "application/octet-stream"
+    return FileResponse(
+        str(full_path),
+        media_type=content_type,
+        headers={"Cache-Control": "no-cache"},  # No cache — may be regenerated
+    )
+
 @app.get("/api/sessions/{session_id}/bim/{filename}")
 async def serve_bim_file(session_id: str, filename: str):
     """Serve BIM GLB/JSON files for a session."""
@@ -1113,6 +1212,7 @@ async def get_sessions(
                 # BIM / IFC files
                 ifc_files = list(d.glob("*.ifc"))
                 has_bim = len(ifc_files) > 0
+                has_sabana = (d / "sabana.npz").exists()
                 
                 sessions.append({
                     "id": d.name,
@@ -1124,6 +1224,7 @@ async def get_sessions(
                     "cloud_size_mb": cloud_size_mb,
                     "has_bim": has_bim,
                     "bim_count": len(ifc_files),
+                    "has_sabana": has_sabana,
                 })
         return sessions
     except Exception as e:
@@ -2245,7 +2346,9 @@ async def bim_compare(request: Request):
     body = await request.json()
     session_id = body.get("session_id")
     matches = body.get("matches", [])
-    tolerance_mm = body.get("tolerance_mm", 15.0)
+    # Tolerance from config.yaml (default 50mm)
+    bim_cfg = cfg.get("bim", {}).get("deviation", {})
+    tolerance_mm = bim_cfg.get("warning_threshold", 50.0)
     
     if not session_id or not matches:
         raise HTTPException(400, "session_id and matches required")
@@ -2283,6 +2386,64 @@ async def bim_compare(request: Request):
         import traceback
         traceback.print_exc()
         raise HTTPException(500, str(e))
+
+
+@app.get("/api/sessions/{session_id}/sabana/exists")
+async def sabana_exists(session_id: str):
+    """Check if a sábana has been generated for this session."""
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    session_dir = scans_dir / session_id
+    npz_path = session_dir / "sabana.npz"
+    meta_path = session_dir / "sabana_meta.json"
+    
+    if not npz_path.exists():
+        return {"exists": False}
+    
+    # Return metadata if available
+    meta = None
+    if meta_path.exists():
+        import json as _json
+        meta = _json.loads(meta_path.read_text())
+    
+    return {"exists": True, "meta": meta}
+
+
+@app.get("/api/sessions/{session_id}/sabana/meta")
+async def sabana_meta(session_id: str):
+    """Serve full sabana_meta.json for the BIM Analysis Panel."""
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    meta_path = scans_dir / session_id / "sabana_meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="No sábana metadata found")
+    import json as _json
+    return _json.loads(meta_path.read_text())
+
+
+@app.get("/api/sessions/{session_id}/sabana")
+async def sabana_load(session_id: str):
+    """Serve saved sábana as raw binary (positions + colors as Float32)."""
+    from starlette.responses import Response
+    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    session_dir = scans_dir / session_id
+    pos_path = session_dir / "sabana_positions.bin"
+    col_path = session_dir / "sabana_colors.bin"
+    
+    if not pos_path.exists() or not col_path.exists():
+        raise HTTPException(404, "No sábana found for this session")
+    
+    pos_data = pos_path.read_bytes()
+    col_data = col_path.read_bytes()
+    n_points = len(pos_data) // (3 * 4)  # 3 floats × 4 bytes
+    
+    # Header: 4 bytes uint32 nPoints, then positions, then colors
+    import struct
+    header = struct.pack('<I', n_points)
+    
+    return Response(
+        content=header + pos_data + col_data,
+        media_type="application/octet-stream",
+        headers={"X-Sabana-Points": str(n_points)},
+    )
 
 @app.post("/api/segmentation/paint_mask")
 async def paint_mask(request: Request):
@@ -3264,6 +3425,34 @@ async def viewer_websocket(websocket: WebSocket):
                 except Exception as e:
                     print(f"Error loading session: {e}")
                     await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
+
+            elif cmd.get("type") == "load_sabana":
+                session_id = cmd.get("session_id")
+                print(f"[Viewer] Loading sábana for {session_id}...")
+                session_dir = SCANS_DIR / session_id
+
+                # Step 1: Convert sábana PLY → Potree octree (cached)
+                from potree_converter import convert_sabana_to_potree_async
+                success = await convert_sabana_to_potree_async(
+                    session_dir,
+                    on_progress=lambda msg: websocket.send_text(json.dumps({"type": "status", "message": msg})),
+                )
+                if not success:
+                    await websocket.send_text(json.dumps({"type": "error", "message": "Sábana Potree conversion failed"}))
+                else:
+                    # Read metadata
+                    potree_meta_path = session_dir / "sabana_potree" / "metadata.json"
+                    potree_meta = json.loads(potree_meta_path.read_text()) if potree_meta_path.exists() else {}
+                    n_pts = potree_meta.get("points", 0)
+
+                    # Send sabana_potree_ready (NOT cleared — keeps BIM + OBBs)
+                    await websocket.send_text(json.dumps({
+                        "type": "sabana_potree_ready",
+                        "session_id": session_id,
+                        "url": f"/potree_sabana/{session_id}/",
+                        "points": n_pts,
+                    }))
+                    print(f"[Viewer] ✅ Sábana Potree ready ({n_pts:,} pts)")
 
             elif cmd.get("type") in ("reconstruct_geometry", "run_pipeline"):
                 # Pipeline-based reconstruction (subprocess workers)

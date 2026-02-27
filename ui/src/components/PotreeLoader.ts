@@ -122,7 +122,7 @@ export class PotreeOctreeLoader {
         this.octreeGroup.quaternion.copy(quat)
         this.octreeGroup.scale.copy(scl)
         this.octreeGroup.updateMatrixWorld(true)
-        console.log('[PotreeLoader] Applied floor alignment transform')
+        // console.log('[PotreeLoader] Applied floor alignment transform')
     }
 
     /** Get the octree Group for direct matrix manipulation (alignment tool) */
@@ -145,7 +145,7 @@ export class PotreeOctreeLoader {
             if (!metaResp.ok) throw new Error(`Failed to load metadata: ${metaResp.status}`)
             this.metadata = await metaResp.json()
 
-            console.log(`[PotreeLoader] Loaded metadata: ${this.metadata!.points.toLocaleString()} points, depth ${this.metadata!.hierarchy.depth}`)
+            // console.log(`[PotreeLoader] Loaded metadata: ${this.metadata!.points.toLocaleString()} points, depth ${this.metadata!.hierarchy.depth}`)
 
             // 2. Load hierarchy (node index)
             const hierResp = await fetch(this.baseUrl + 'hierarchy.bin')
@@ -160,7 +160,7 @@ export class PotreeOctreeLoader {
             if (!octreeResp.ok) throw new Error(`Failed to load octree: ${octreeResp.status}`)
             this.octreeData = await octreeResp.arrayBuffer()
 
-            console.log(`[PotreeLoader] Loaded octree: ${(this.octreeData.byteLength / 1024 / 1024).toFixed(1)} MB`)
+            // console.log(`[PotreeLoader] Loaded octree: ${(this.octreeData.byteLength / 1024 / 1024).toFixed(1)} MB`)
 
             // 5. Initial visibility update — load root + nearby nodes
             this.updateVisibility()
@@ -264,7 +264,7 @@ export class PotreeOctreeLoader {
 
         const firstChunkSize = this.metadata.hierarchy.firstChunkSize
         const parseSize = Math.min(firstChunkSize, this.hierarchyData.byteLength)
-        console.log(`[PotreeLoader] Parsing hierarchy: firstChunkSize=${firstChunkSize}, totalHierarchySize=${this.hierarchyData.byteLength}, entries=${Math.floor(parseSize / 22)}`)
+        // console.log(`[PotreeLoader] Parsing hierarchy: firstChunkSize=${firstChunkSize}, totalHierarchySize=${this.hierarchyData.byteLength}, entries=${Math.floor(parseSize / 22)}`)
         this.parseHierarchyChunk(this.hierarchyData, 0, parseSize, 'r')
 
         // Detailed stats per level
@@ -276,11 +276,11 @@ export class PotreeOctreeLoader {
             if (n.nodeType === 2) s.proxies++
             levelStats.set(n.level, s)
         }
-        console.log(`[PotreeLoader] Hierarchy stats:`)
-        for (const [level, s] of Array.from(levelStats.entries()).sort((a, b) => a[0] - b[0])) {
-            console.log(`  Level ${level}: ${s.count} nodes, ${s.points.toLocaleString()} pts${s.proxies > 0 ? `, ${s.proxies} proxies` : ''}`)
-        }
-        console.log(`[PotreeLoader] Total: ${this.nodes.size} nodes`)
+        // console.log(`[PotreeLoader] Hierarchy stats:`)
+        // for (const [level, s] of Array.from(levelStats.entries()).sort((a, b) => a[0] - b[0])) {
+        //     console.log(`  Level ${level}: ${s.count} nodes, ${s.points.toLocaleString()} pts${s.proxies > 0 ? `, ${s.proxies} proxies` : ''}`)
+        // }
+        // console.log(`[PotreeLoader] Total: ${this.nodes.size} nodes`)
     }
 
     /** Load a proxy node's hierarchy chunk via HTTP Range request */
@@ -308,7 +308,7 @@ export class PotreeOctreeLoader {
             node.hierarchyLoading = false
 
             const proxyCount = Array.from(this.nodes.values()).filter(n => n.nodeType === 2 && !n.hierarchyLoaded).length
-            console.log(`[PotreeLoader] Expanded proxy '${node.name}' → ${this.nodes.size} total nodes (${proxyCount} proxies remaining)`)
+            // console.log(`[PotreeLoader] Expanded proxy '${node.name}' → ${this.nodes.size} total nodes (${proxyCount} proxies remaining)`)
         } catch (e) {
             node.hierarchyLoading = false
             console.error(`[PotreeLoader] Failed to load hierarchy for proxy '${node.name}':`, e)
@@ -470,7 +470,7 @@ export class PotreeOctreeLoader {
             }
             const levels = Array.from(levelCounts.entries()).sort((a, b) => a[0] - b[0])
                 .map(([l, c]) => `L${l}:${c}`).join(' ')
-            console.log(`[LOD] Visible: ${renderSet.size} nodes (${levels}), pts: ${numVisiblePoints.toLocaleString()}/${this.pointBudget.toLocaleString()}, totalKnown: ${this.nodes.size}`)
+            // console.log(`[LOD] Visible: ${renderSet.size} nodes (${levels}), pts: ${numVisiblePoints.toLocaleString()}/${this.pointBudget.toLocaleString()}, totalKnown: ${this.nodes.size}`)
         }
     }
     private _lastLogTime = 0

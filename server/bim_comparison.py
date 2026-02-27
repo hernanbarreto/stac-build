@@ -10,13 +10,15 @@ Hernán Barreto — Ingerop IN3
 """
 
 import numpy as np
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import json
 import time
+from scipy.spatial import KDTree
 
-# Default tolerance (meters) — will be configurable per element type later
-DEFAULT_TOLERANCE = 0.015  # 15 mm
+# Default tolerance (meters) — configurable via config.yaml bim.deviation
+DEFAULT_TOLERANCE = 0.050  # 50 mm
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -351,15 +353,80 @@ def compute_c2m_distances(
     return distances
 
 
+def compute_c2m_with_projections(
+    scan_points: np.ndarray,
+    mesh_verts: np.ndarray,
+    mesh_faces: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute C2M distances AND projected positions on the mesh surface.
+    
+    For each scan point, finds the closest point on the nearest mesh triangle.
+    Returns both the distances and the projected positions (on the BIM surface).
+    
+    Returns:
+        distances: (N,) C2M distances
+        projections: (N, 3) positions on the mesh surface
+    """
+    from scipy.spatial import KDTree
+    
+    n_points = len(scan_points)
+    n_faces = len(mesh_faces)
+    
+    print(f"[BIM-Compare] Computing C2M + projections: {n_points} points")
+    t0 = time.time()
+    
+    centroids = mesh_verts[mesh_faces].mean(axis=1)
+    centroid_tree = KDTree(centroids)
+    k = min(8, n_faces)
+    
+    chunk_size = 10000
+    distances = np.empty(n_points, dtype=np.float64)
+    projections = np.empty((n_points, 3), dtype=np.float64)
+    
+    for start in range(0, n_points, chunk_size):
+        end = min(start + chunk_size, n_points)
+        chunk = scan_points[start:end]
+        n_chunk = end - start
+        
+        _, tri_indices = centroid_tree.query(chunk, k=k)
+        if k == 1:
+            tri_indices = tri_indices.reshape(-1, 1)
+        
+        chunk_dists = np.full(n_chunk, np.inf)
+        chunk_proj = np.zeros((n_chunk, 3))
+        
+        for j in range(k):
+            face_idx = tri_indices[:, j]
+            v0 = mesh_verts[mesh_faces[face_idx, 0]]
+            v1 = mesh_verts[mesh_faces[face_idx, 1]]
+            v2 = mesh_verts[mesh_faces[face_idx, 2]]
+            
+            d, proj = _point_to_tri_batch(chunk, v0, v1, v2, return_closest=True)
+            better = d < chunk_dists
+            chunk_dists[better] = d[better]
+            chunk_proj[better] = proj[better]
+        
+        distances[start:end] = chunk_dists
+        projections[start:end] = chunk_proj
+    
+    elapsed = time.time() - t0
+    print(f"[BIM-Compare] C2M+proj done: {elapsed:.1f}s, "
+          f"mean={np.mean(distances)*1000:.1f}mm")
+    
+    return distances, projections
+
+
 def _point_to_tri_batch(
     P: np.ndarray,  # (N, 3)
     A: np.ndarray,  # (N, 3) - vertex 0 per point
     B: np.ndarray,  # (N, 3) - vertex 1 per point
     C: np.ndarray,  # (N, 3) - vertex 2 per point
+    return_closest: bool = False,
 ) -> np.ndarray:
     """
     Vectorized closest-point-on-triangle for N points vs N triangles.
-    Returns (N,) distances.
+    Returns (N,) distances. If return_closest=True, also returns (N,3) projected positions.
     
     Implementation of the Ericson real-time collision detection algorithm,
     fully vectorized with numpy.
@@ -430,7 +497,10 @@ def _point_to_tri_batch(
                                 + v_in[mask_inside, None] * AB[mask_inside]
                                 + w_in[mask_inside, None] * AC[mask_inside])
     
-    return np.linalg.norm(P - closest, axis=1)
+    dists = np.linalg.norm(P - closest, axis=1)
+    if return_closest:
+        return dists, closest
+    return dists
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -498,68 +568,248 @@ def deviation_to_rgb(distance_mm: float, tolerance_mm: float) -> Tuple[float, fl
     return (r, g, 0.0)
 
 
-def compute_per_face_deviation(
+def compute_sabana_cloud(
     scan_points: np.ndarray,
-    mesh_verts: np.ndarray,
-    mesh_faces: np.ndarray,
+    distances: np.ndarray,
     tolerance: float = DEFAULT_TOLERANCE,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Compute per-face deviation for the 'sábana' visualization.
+    Generate deviation-colored point cloud for the 'sábana' visualization.
     
-    Inverted approach: for each scan point, find its nearest face centroid,
-    then use C2M distances (already computed) to assign deviation per face.
-    Uses vectorized numpy — handles 1M+ points efficiently.
+    Each scan point gets an RGBA color based on its C2M distance.
+    This IS the sábana — no mesh subdivision, no interpolation.
+    Point-level precision matching the scanner's native resolution.
+    
+    Args:
+        scan_points: (N, 3) scan point positions (world space, meters)
+        distances: (N,) C2M distances per point (meters)
+        tolerance: deviation tolerance threshold (meters)
     
     Returns:
-        face_distances: (F,) average distance per face (-1 = no data)
-        face_colors: (F, 3) RGB colors per face
+        positions: (N, 3) point positions
+        colors: (N, 4) RGBA colors per point
     """
-    from scipy.spatial import KDTree
-    
-    n_faces = len(mesh_faces)
     n_pts = len(scan_points)
     
-    if n_pts == 0 or n_faces == 0:
-        return np.full(n_faces, -1.0), np.full((n_faces, 3), 0.3)
+    if n_pts == 0:
+        return np.empty((0, 3)), np.empty((0, 4))
     
-    # Compute face centroids → KDTree
-    face_centroids = mesh_verts[mesh_faces].mean(axis=1)  # (F, 3)
-    face_tree = KDTree(face_centroids)
-    
-    # Assign each scan point to its nearest face centroid
-    _, face_indices = face_tree.query(scan_points, k=1)  # (N,)
-    face_indices = face_indices.ravel().astype(np.int32)
-    
-    # Compute per-point C2M distance to its assigned face
-    # Batch: get triangle vertices for each point's assigned face
-    v0 = mesh_verts[mesh_faces[face_indices, 0]]  # (N, 3)
-    v1 = mesh_verts[mesh_faces[face_indices, 1]]  # (N, 3)
-    v2 = mesh_verts[mesh_faces[face_indices, 2]]  # (N, 3)
-    
-    pt_dists = _point_to_tri_batch(scan_points, v0, v1, v2)  # (N,)
-    
-    # Aggregate per face using bincount
-    face_sum = np.bincount(face_indices, weights=pt_dists, minlength=n_faces)
-    face_count = np.bincount(face_indices, minlength=n_faces)
-    
-    # Compute averages and colors
-    face_distances = np.full(n_faces, -1.0)
-    face_colors = np.full((n_faces, 3), 0.3)  # gray = no data
+    # Vectorized color mapping: green → yellow → red
     tolerance_mm = tolerance * 1000
+    dist_mm = distances * 1000
+    t = np.clip(dist_mm / max(tolerance_mm, 0.1), 0, 2.0)
     
-    covered_mask = face_count > 0
-    face_distances[covered_mask] = face_sum[covered_mask] / face_count[covered_mask]
+    r = np.where(t <= 1.0, t, 1.0)
+    g = np.where(t <= 1.0, 1.0, np.clip(2.0 - t, 0, 1))
+    b = np.zeros(n_pts)
+    a = np.full(n_pts, 0.85)
     
-    for i in np.where(covered_mask)[0]:
-        face_colors[i] = deviation_to_rgb(face_distances[i] * 1000, tolerance_mm)
+    colors = np.column_stack([r, g, b, a])
     
-    covered = int(covered_mask.sum())
-    print(f"[BIM-Compare] Per-face deviation: "
-          f"{covered}/{n_faces} faces covered "
-          f"({covered/max(n_faces,1)*100:.0f}%)")
+    print(f"[BIM-Compare] Sábana cloud: {n_pts} points, "
+          f"mean={np.mean(dist_mm):.1f}mm, max={np.max(dist_mm):.1f}mm")
     
-    return face_distances, face_colors, face_centroids
+    return scan_points, colors
+
+
+def compute_mesh_area(verts: np.ndarray, faces: np.ndarray) -> float:
+    """Compute total surface area of a triangle mesh in m²."""
+    v0 = verts[faces[:, 0]]
+    v1 = verts[faces[:, 1]]
+    v2 = verts[faces[:, 2]]
+    crosses = np.cross(v1 - v0, v2 - v0)
+    return float(np.sum(np.linalg.norm(crosses, axis=1)) * 0.5)
+
+
+def compute_coverage_pct(
+    mesh_verts: np.ndarray,
+    mesh_faces: np.ndarray,
+    scan_points: np.ndarray,
+    proximity_m: float,
+) -> float:
+    """
+    Estimate what % of the BIM mesh surface is covered by scan points.
+    
+    Uses mesh-to-cloud distance: sample the mesh centroids and check
+    how many have at least one scan point within `proximity_m`.
+    
+    `proximity_m` comes from config.yaml bim.deviation.coverage_proximity_m.
+    It should be generous enough to detect construction on the opposite
+    side of thick elements (slabs, walls).
+    """
+    if len(scan_points) == 0 or len(mesh_faces) == 0:
+        return 0.0
+    
+    # Face centroids weighted by area
+    v0 = mesh_verts[mesh_faces[:, 0]]
+    v1 = mesh_verts[mesh_faces[:, 1]]
+    v2 = mesh_verts[mesh_faces[:, 2]]
+    centroids = (v0 + v1 + v2) / 3.0
+    areas = np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1) * 0.5
+    
+    # KDTree on scan points → query face centroids
+    tree = KDTree(scan_points)
+    dists, _ = tree.query(centroids)
+    
+    # Coverage: weighted by face area
+    covered_area = np.sum(areas[dists <= proximity_m])
+    total_area = np.sum(areas)
+    
+    if total_area < 1e-10:
+        return 0.0
+    
+    return round(float(covered_area / total_area * 100), 1)
+
+
+def save_sabana(
+    session_dir: str,
+    results: list,
+    tolerance: float,
+    summary: dict,
+):
+    """
+    Save sábana data to sabana.npz for later loading.
+    Combines all evaluated element positions/colors into one cloud.
+    """
+    import json
+    
+    all_pos = []
+    all_col = []
+    metrics = []
+    
+    for r in results:
+        if r.get("status") != "evaluated":
+            metrics.append({
+                "element_key": r["element_key"],
+                "label": r.get("label", ""),
+                "ifc_type": r.get("ifc_type", ""),
+                "status": r["status"],
+            })
+            continue
+        
+        n = r["sabana_n_points"]
+        if n > 0:
+            pos = np.array(r["sabana_positions"]).reshape(-1, 3)
+            col = np.array(r["sabana_colors"]).reshape(-1, 4)
+            all_pos.append(pos)
+            all_col.append(col)
+        
+        metrics.append({
+            "element_key": r["element_key"],
+            "label": r.get("label", ""),
+            "ifc_type": r.get("ifc_type", ""),
+            "status": "evaluated",
+            "coverage_pct": r.get("coverage_pct", 0),
+            "correctness_pct": r.get("stats", {}).get("pass_rate", 0),
+            "total_points": r.get("total_points", 0),
+            "mean_mm": r.get("stats", {}).get("mean_mm", 0),
+            "bim_surface_m2": r.get("bim_surface_m2", 0),
+        })
+    
+    if all_pos:
+        positions = np.concatenate(all_pos, axis=0).astype(np.float32)
+        colors = np.concatenate(all_col, axis=0).astype(np.float32)
+    else:
+        positions = np.empty((0, 3), dtype=np.float32)
+        colors = np.empty((0, 4), dtype=np.float32)
+    
+    # Save compressed npz (archival)
+    out_path = os.path.join(session_dir, "sabana.npz")
+    np.savez_compressed(
+        out_path,
+        positions=positions,
+        colors=colors,
+    )
+    
+    # Save as binary PLY for Potree streaming (same format as cleaned_cloud.ply)
+    ply_path = os.path.join(session_dir, "sabana_cloud.ply")
+    n = len(positions)
+    # Convert RGBA float (0-1) → RGB uint8
+    rgb = np.clip(colors[:, :3] * 255, 0, 255).astype(np.uint8)
+    # Build structured array: x,y,z (float32) + r,g,b (uint8)
+    ply_dtype = np.dtype([
+        ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+        ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+    ])
+    ply_data = np.empty(n, dtype=ply_dtype)
+    ply_data['x'] = positions[:, 0]
+    ply_data['y'] = positions[:, 1]
+    ply_data['z'] = positions[:, 2]
+    ply_data['r'] = rgb[:, 0]
+    ply_data['g'] = rgb[:, 1]
+    ply_data['b'] = rgb[:, 2]
+    
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {n}\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+        "end_header\n"
+    )
+    with open(ply_path, "wb") as f:
+        f.write(header.encode("ascii"))
+        f.write(ply_data.tobytes())
+    
+    print(f"[BIM-Compare] Saved sábana PLY: {n} points → {ply_path}")
+    
+    # Save metadata JSON alongside
+    # Load quality thresholds from config
+    try:
+        import yaml
+        cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        quality_cfg = cfg.get("bim", {}).get("deviation", {}).get("quality", {})
+    except Exception:
+        quality_cfg = {}
+    good_thresh = quality_cfg.get("good_threshold", 80)
+    regular_thresh = quality_cfg.get("regular_threshold", 50)
+    
+    # Compute quality + advance for each element
+    advance_values = []
+    for m in metrics:
+        if m["status"] != "evaluated":
+            m["quality"] = "not_built"
+            m["advance_pct"] = 0.0
+            advance_values.append(0.0)
+            continue
+        
+        cpct = m.get("correctness_pct", 0)
+        coverage = m.get("coverage_pct", 0)
+        
+        if cpct >= good_thresh:
+            m["quality"] = "good"
+            m["advance_pct"] = round(coverage, 1)
+        elif cpct >= regular_thresh:
+            m["quality"] = "regular"
+            m["advance_pct"] = round(coverage, 1)
+        else:
+            m["quality"] = "bad"
+            m["advance_pct"] = 0.0  # Bad quality = no accepted advance
+        
+        advance_values.append(m["advance_pct"])
+    
+    global_advance = round(sum(advance_values) / len(advance_values), 1) if advance_values else 0.0
+    
+    meta = {
+        "date": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "tolerance_mm": round(tolerance * 1000, 1),
+        "total_points": len(positions),
+        "quality_thresholds": {
+            "good_pct": good_thresh,
+            "regular_pct": regular_thresh,
+        },
+        "global_advance_pct": global_advance,
+        "summary": summary,
+        "elements": metrics,
+    }
+    meta_path = os.path.join(session_dir, "sabana_meta.json")
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    
+    print(f"[BIM-Compare] Saved sábana: {len(positions)} points → {out_path}")
+    print(f"[BIM-Compare] Global advance: {global_advance}% ({len(advance_values)} elements)")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -601,6 +851,13 @@ def run_comparison(
     matches: [{"segment_label": "292127", "element_key": "292127", "ifc_type": "..."}]
     """
     from bim_registration import register, transform_points, _load_cloud_and_segments
+    import yaml as _yaml
+    
+    # Read coverage proximity from config (once, not per element)
+    _cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+    with open(_cfg_path) as _f:
+        _cfg = _yaml.safe_load(_f)
+    proximity_m = _cfg.get("bim", {}).get("deviation", {}).get("coverage_proximity_m", 0.15)
     
     session_path = Path(session_dir)
     output_dir = session_path / "output"
@@ -672,8 +929,6 @@ def run_comparison(
                     "element_key": key, "label": elem_name,
                     "ifc_type": ifc_type, "status": "error",
                     "error": "Segment not found",
-                    "face_colors": [0.3, 0.3, 0.3] * n_faces,
-                    "n_faces": n_faces,
                 })
                 continue
             
@@ -683,22 +938,33 @@ def run_comparison(
                     "element_key": key, "label": elem_name,
                     "ifc_type": ifc_type, "status": "error",
                     "error": "No point indices",
-                    "face_colors": [0.3, 0.3, 0.3] * n_faces,
-                    "n_faces": n_faces,
                 })
                 continue
             
             # Transform segment points with registration
             scan_points = transform_points(xyz_all[indices], T)
             
-            # C2M distances for statistics
+            # C2M distances: how far each constructed point is from the BIM design
             distances = compute_c2m_distances(scan_points, mesh_verts, mesh_faces)
             report = build_deviation_report(distances, tolerance)
             
-            # Per-face deviation for sábana coloring
-            face_dists, face_colors, face_centroids = compute_per_face_deviation(
-                scan_points, mesh_verts, mesh_faces, tolerance
+            # Sábana: scan points at their real positions, colored by C2M deviation
+            # Shows the CONSTRUCTION, colored by how well it matches the design
+            sabana_pos, sabana_colors = compute_sabana_cloud(
+                scan_points, distances, tolerance
             )
+            
+            # Coverage: what % of this BIM element's surface has scan data
+            coverage = compute_coverage_pct(
+                mesh_verts, mesh_faces, scan_points, proximity_m
+            )
+            
+            # BIM element surface area (m²)
+            v0 = mesh_verts[mesh_faces[:, 0]]
+            v1 = mesh_verts[mesh_faces[:, 1]]
+            v2 = mesh_verts[mesh_faces[:, 2]]
+            face_areas = np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1) * 0.5
+            bim_surface_m2 = float(np.sum(face_areas))
             
             results.append({
                 "element_key": key,
@@ -706,23 +972,20 @@ def run_comparison(
                 "ifc_type": ifc_type,
                 "status": "evaluated",
                 "total_points": len(distances),
+                "coverage_pct": coverage,
+                "bim_surface_m2": round(bim_surface_m2, 4),
                 **report,
-                "face_colors": face_colors.flatten().round(3).tolist(),
-                "face_centroids": face_centroids.flatten().round(4).tolist(),
-                "n_faces": n_faces,
+                "sabana_positions": sabana_pos.flatten().round(4).tolist(),
+                "sabana_colors": sabana_colors.flatten().round(3).tolist(),
+                "sabana_n_points": len(sabana_pos),
             })
         else:
             # ── UNMATCHED: not built / not identified ──
-            # Gray transparent — no segment for this BIM element
-            # Send centroids so frontend can match by proximity
-            centroids = mesh_verts[mesh_faces].mean(axis=1)
             results.append({
                 "element_key": key,
                 "label": elem_name,
                 "ifc_type": ifc_type,
                 "status": "unmatched",
-                "face_colors": [0.4, 0.4, 0.4] * n_faces,
-                "face_centroids": centroids.flatten().round(4).tolist(),
                 "n_faces": n_faces,
             })
         
@@ -742,16 +1005,22 @@ def run_comparison(
     if progress_callback:
         progress_callback(100, "Comparison complete")
     
+    summary = {
+        "total_elements": total,
+        "evaluated": n_evaluated,
+        "unmatched": n_unmatched,
+        "errors": n_error,
+    }
+    
+    # Save sábana to session for later loading
+    save_sabana(session_dir, results, tolerance, summary)
+    
     return {
         "ok": True,
+        "date": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "tolerance_mm": round(tolerance * 1000, 1),
         "transform": T.tolist(),
-        "summary": {
-            "total_elements": total,
-            "evaluated": n_evaluated,
-            "unmatched": n_unmatched,
-            "errors": n_error,
-        },
+        "summary": summary,
         "results": results,
     }
 

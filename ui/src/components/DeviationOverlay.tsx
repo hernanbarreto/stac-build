@@ -24,8 +24,9 @@ export interface DeviationElementResult {
     distances_mm?: number[]
     point_indices?: number[]
     total_points?: number
-    face_colors?: number[]
-    face_centroids?: number[]
+    sabana_positions?: number[]
+    sabana_colors?: number[]
+    sabana_n_points?: number
     n_faces?: number
     stats?: {
         min_mm: number
@@ -48,6 +49,7 @@ export interface DeviationElementResult {
 
 export interface DeviationResult {
     ok: boolean
+    date?: string
     tolerance_mm: number
     transform?: number[][]
     results: DeviationElementResult[]
@@ -104,23 +106,27 @@ export default function DeviationOverlay({ sessionId, viewportRef, onClose, onHe
             const data: DeviationResult = await res.json()
             setResult(data)
             onHeatmapData?.(data)
-            // Apply sábana to BIM mesh + move cloud
+            // Apply sábana + move cloud
             if (viewportRef?.current && data.results) {
                 // Apply registration transform to point cloud
                 if (data.transform) {
                     viewportRef.current.applyRegistrationTransform(data.transform)
                 }
-                // Apply per-face colors to BIM mesh (with centroids for spatial matching)
-                const faceColorMap: Record<string, { colors: number[], centroids: number[] }> = {}
+                // Collect sábana point clouds per evaluated element
+                const sabanaData: Record<string, { positions: number[], colors: number[] }> = {}
+                const unmatchedKeys: string[] = []
                 for (const r of data.results) {
-                    if (r.face_colors && r.face_colors.length > 0 && r.face_centroids) {
-                        faceColorMap[r.element_key] = {
-                            colors: r.face_colors,
-                            centroids: r.face_centroids,
+                    if (r.sabana_positions && r.sabana_positions.length > 0) {
+                        sabanaData[r.element_key] = {
+                            positions: r.sabana_positions,
+                            colors: r.sabana_colors || [],
                         }
                     }
+                    if (r.status === 'unmatched') {
+                        unmatchedKeys.push(r.element_key)
+                    }
                 }
-                viewportRef.current.applyDeviationSurface(faceColorMap)
+                viewportRef.current.applyDeviationSurface(sabanaData, unmatchedKeys)
             }
         } catch (e: any) {
             setError(e.message || 'Comparison failed')

@@ -3,8 +3,10 @@
  * Hernán Barreto — Ingerop IN3
  */
 import { useState, useCallback, useEffect, useRef } from 'react'
+import type { ReactNode } from 'react'
 import './App.css'
 import Viewport, { ViewportHandle, SegmentInstance } from './components/Viewport'
+import { BIMAnalysisPanel } from './components/BIMAnalysisPanel'
 import TeamPanel from './components/TeamPanel'
 import WebRTCCall from './components/WebRTCCall'
 import BIMNavigator from './components/BIMNavigator'
@@ -14,7 +16,14 @@ import LoginPage from './pages/LoginPage'
 import AdminPage from './pages/AdminPage'
 import SegmentationManager from './components/InteractiveSegmentation'
 import { useConfirmDialog } from './components/ConfirmDialog'
-import DeviationOverlay from './components/DeviationOverlay'
+import {
+  Search, Tag, Hammer, Brush, Sparkles, Plug, Upload, Settings, Crosshair,
+  Maximize, Monitor, Pin, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
+  Move, Palette, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Wrench,
+  Building2, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
+  Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
+  Scale, Thermometer, Loader2, BarChart3,
+} from 'lucide-react'
 
 interface SessionInfo {
   id: string
@@ -27,6 +36,7 @@ interface SessionInfo {
   hasBim: boolean
   bimCount: number
   cloudSizeMb: number
+  hasSabana: boolean
 }
 
 interface PipelineStageInfo {
@@ -57,8 +67,8 @@ function App() {
   const [activeTool, setActiveTool] = useState<Tool>('navigate')
   const [connected, setConnected] = useState(false)
   const [serverAlive, setServerAlive] = useState(false)
-  const [activePanel, setActivePanel] = useState<'sessions' | 'tools' | 'segments' | 'bim' | 'team' | null>('sessions')
-  const [showDeviation, setShowDeviation] = useState(false)
+  const [activePanel, setActivePanel] = useState<'sessions' | 'tools' | 'segments' | 'bim' | 'team' | 'analysis' | null>('sessions')
+
   const [bimModels, setBimModels] = useState<IFCLoadResult[]>([])
   const [sidebarWidth, setSidebarWidth] = useState(280)
   const [consoleOpen, setConsoleOpen] = useState(false)
@@ -75,6 +85,12 @@ function App() {
   const viewportRef = useRef<ViewportHandle>(null)
   const [adminOpen, setAdminOpen] = useState(false)
 
+  // ── Sábana state ──
+  const [sabanaVisible, setSabanaVisible] = useState(false)
+  const [sabanaLoading, setSabanaLoading] = useState(false)
+  const [sabanaMetrics, setSabanaMetrics] = useState<any>(null)
+  const [sabanaFullMeta, setSabanaFullMeta] = useState<any>(null)
+
   // Team / WebRTC state
   const teamWsRef = useRef<WebSocket | null>(null)
   const [callTarget, setCallTarget] = useState<{ userId: number; username: string } | null>(null)
@@ -84,12 +100,12 @@ function App() {
   const [pipelineDialogOpen, setPipelineDialogOpen] = useState(false)
   const [pipelineDialogSession, setPipelineDialogSession] = useState<string | null>(null)
 
-  const STAGE_DEF: Record<string, { label: string, icon: string }> = {
-    vlm: { label: 'Scene Analysis', icon: '🔍' },
-    sam3: { label: 'Segmentation', icon: '🏷️' },
-    da3: { label: '3D Reconstruction', icon: '🔨' },
-    cloudcompy: { label: 'Global Cloud Cleaning', icon: '🧹' },
-    instance_cleaner: { label: 'Instance Isolation & Erosion', icon: '🧼' },
+  const STAGE_DEF: Record<string, { label: string, icon: ReactNode }> = {
+    vlm: { label: 'Scene Analysis', icon: <Search size={14} /> },
+    sam3: { label: 'Segmentation', icon: <Tag size={14} /> },
+    da3: { label: '3D Reconstruction', icon: <Hammer size={14} /> },
+    cloudcompy: { label: 'Global Cloud Cleaning', icon: <Brush size={14} /> },
+    instance_cleaner: { label: 'Instance Isolation & Erosion', icon: <Sparkles size={14} /> },
   }
   const [pipelineOrder] = useState<string[]>(['da3', 'cloudcompy', 'vlm', 'sam3', 'instance_cleaner'])
   const [pipelineEnabled, setPipelineEnabled] = useState<Record<string, boolean>>({
@@ -226,10 +242,11 @@ function App() {
         hasBim: s.has_bim || false,
         bimCount: s.bim_count || 0,
         cloudSizeMb: s.cloud_size_mb || 0,
+        hasSabana: s.has_sabana || false,
       }))
       setSessions(sessionList)
       setConnected(true)
-      console.log(`[STAC] Connected. ${sessionList.length} sessions found.`)
+      // console.log(`[STAC] Connected. ${sessionList.length} sessions found.`)
     } catch (err) {
       console.error('[STAC] Failed to connect:', err)
       setConnected(false)
@@ -243,7 +260,10 @@ function App() {
 
   // Load session — actually loads the cloud in the viewport
   const handleSessionLoad = useCallback((sessionId: string) => {
-    // Clear React state from previous session
+    // Unload current session if any
+    viewportRef.current?.clearScene()
+    viewportRef.current?.sendCommand({ type: 'cleared' })
+    // Clear React state
     setSegments([])
     setBimModels([])
     setPointCount(0)
@@ -252,16 +272,61 @@ function App() {
     setActiveSession(sessionId)
     setSelectedSession(sessionId)
     setActiveTool('navigate')
+    // Clear sábana state
+    setSabanaVisible(false)
+    setSabanaMetrics(null)
+    setSabanaFullMeta(null)
+    // Reset OBBs visibility
+    viewportRef.current?.setOBBsVisible(true)
   }, [])
 
   // Dismiss loading overlay when points arrive (session load only, not refresh)
   const prevPointCount = useRef(0)
   useEffect(() => {
     if (prevPointCount.current === 0 && pointCount > 0 && sessionLoading) {
-      setSessionLoading(null)
+      // If session has BIM, don't dismiss yet — wait for BIM load + sábana check
+      const sess = sessions.find(s => s.id === activeSession)
+      if (!sess?.hasBim) {
+        setSessionLoading(null)
+      }
     }
     prevPointCount.current = pointCount
-  }, [pointCount, sessionLoading])
+  }, [pointCount, sessionLoading, sessions, activeSession])
+
+  // Auto-detect sábana when BIM models first appear after session load
+  const prevBimCount = useRef(0)
+  useEffect(() => {
+    const wasZero = prevBimCount.current === 0
+    prevBimCount.current = bimModels.length
+    // Only trigger when transitioning from 0 → N models (fresh session load)
+    if (!wasZero || bimModels.length === 0 || !activeSession) return
+    fetch(`/api/sessions/${activeSession}/sabana/exists`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.exists) {
+          setSabanaVisible(true)
+          setSabanaLoading(true)
+          setSessionLoading('Loading sábana comparison...')
+          setStatusMessage('Loading sábana comparison...')
+          viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: activeSession })
+          viewportRef.current?.setOBBsVisible(false)
+          fetch(`/api/sessions/${activeSession}/sabana/meta`)
+            .then(r2 => r2.ok ? r2.json() : null)
+            .then(fullMeta => {
+              if (fullMeta) {
+                setSabanaMetrics(fullMeta)
+                setSabanaFullMeta(fullMeta)
+                setActivePanel('analysis')
+              }
+            })
+            .catch(() => { })
+        } else {
+          setActivePanel('bim')
+          setSessionLoading(null)
+        }
+      })
+      .catch(() => { setActivePanel('bim'); setSessionLoading(null) })
+  }, [bimModels, activeSession])
 
   // Poll server for active tasks (survives reconnect)
   useEffect(() => {
@@ -375,6 +440,7 @@ function App() {
   }, [])
 
   const handleUnload = useCallback(() => {
+    viewportRef.current?.clearScene()
     viewportRef.current?.sendCommand({ type: 'cleared' })
     setActiveSession(null)
     setSegments([])
@@ -382,6 +448,94 @@ function App() {
     setPointCount(0)
     setStatusMessage('')
   }, [])
+
+  // ── Sábana: Generate comparison (auto_match → compare → show via Potree) ──
+  const handleGenerateComparison = useCallback(async () => {
+    if (!activeSession) return
+    // If sábana already exists, ask before regenerating
+    const session = sessions.find(s => s.id === activeSession)
+    if (session?.hasSabana) {
+      const ok = await confirmDanger(
+        'Existing sábana data will be deleted and replaced. Continue?',
+        'Regenerate Comparison?'
+      )
+      if (!ok) return
+    }
+    setSabanaLoading(true)
+    setStatusMessage('Running BIM comparison...')
+    try {
+      // Step 1: auto-match segments to IFC elements
+      const matchRes = await fetch(`/api/bim/auto_match/${activeSession}`)
+      const matchData = await matchRes.json()
+      if (!matchData.matches?.length) {
+        setStatusMessage('No matches found between segments and IFC elements')
+        setSabanaLoading(false)
+        return
+      }
+      // Step 2: run comparison (saves sabana_cloud.ply on server)
+      const compareRes = await fetch('/api/bim/compare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: activeSession, matches: matchData.matches }),
+      })
+      const compareData = await compareRes.json()
+      if (!compareData.ok) {
+        setStatusMessage(`Comparison failed: ${compareData.error || 'unknown'}`)
+        setSabanaLoading(false)
+        return
+      }
+      // Step 3: load sábana via Potree pipeline (WS binary streaming)
+      viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: activeSession })
+      viewportRef.current?.setOBBsVisible(false)
+      setSabanaVisible(true)
+      setSessions(prev => prev.map(s => s.id === activeSession ? { ...s, hasSabana: true } : s))
+      // Fetch full metadata + switch to analysis panel
+      try {
+        const metaRes = await fetch(`/api/sessions/${activeSession}/sabana/meta`)
+        if (metaRes.ok) {
+          const fullMeta = await metaRes.json()
+          setSabanaMetrics(fullMeta)
+          setSabanaFullMeta(fullMeta)
+          setActivePanel('analysis')
+        }
+      } catch { /* ignore */ }
+    } catch (e: any) {
+      setStatusMessage(`Comparison error: ${e.message}`)
+    }
+    setSabanaLoading(false)
+  }, [activeSession, sessions, confirmDanger])
+
+  // ── Sábana: Toggle visibility via Potree streaming ──
+  const handleToggleSabana = useCallback(() => {
+    if (!activeSession) return
+    if (sabanaVisible) {
+      // Toggle OFF → reload original scan cloud + show OBBs
+      viewportRef.current?.sendCommand({ type: 'load_session', session_id: activeSession })
+      viewportRef.current?.setOBBsVisible(true)
+      setSabanaVisible(false)
+      setSabanaMetrics(null)
+      setSabanaFullMeta(null)
+      setStatusMessage('Reloading scan cloud...')
+      setActivePanel('bim')
+      return
+    }
+    // Toggle ON → load sábana + hide OBBs + fetch analysis meta
+    setStatusMessage('Loading sábana...')
+    viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: activeSession })
+    viewportRef.current?.setOBBsVisible(false)
+    setSabanaVisible(true)
+    // Fetch full metadata → show analysis panel
+    fetch(`/api/sessions/${activeSession}/sabana/meta`)
+      .then(r => r.ok ? r.json() : null)
+      .then(fullMeta => {
+        if (fullMeta) {
+          setSabanaMetrics(fullMeta)
+          setSabanaFullMeta(fullMeta)
+          setActivePanel('analysis')
+        }
+      })
+      .catch(() => { })
+  }, [activeSession, sabanaVisible])
 
   const toggleMenu = (menu: string) => {
     setOpenMenu(openMenu === menu ? null : menu)
@@ -430,7 +584,7 @@ function App() {
               {!connected ? (
                 <button className="menu-dropdown-item"
                   onClick={() => menuAction(connectToServer)}>
-                  🔌 Connect to Server
+                  <Plug size={14} /> Connect to Server
                 </button>
               ) : (
                 <button className="menu-dropdown-item"
@@ -446,17 +600,17 @@ function App() {
                     setActiveTool('navigate')
                     setStatusMessage('')
                   })}>
-                  ⏏️ Disconnect
+                  <ArrowUpFromLine size={14} /> Disconnect
                 </button>
               )}
               <div className="menu-separator" />
               <button className="menu-dropdown-item" disabled={!hasSession}>
-                📤 Export Point Cloud
+                <Upload size={14} /> Export Point Cloud
                 <span className="menu-shortcut">Ctrl+E</span>
               </button>
               <div className="menu-separator" />
               <button className="menu-dropdown-item" disabled>
-                ⚙️ Settings
+                <Settings size={14} /> Settings
                 <span className="menu-shortcut">Ctrl+,</span>
               </button>
             </div>
@@ -471,13 +625,13 @@ function App() {
             <div className="menu-dropdown">
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => togglePanel('sessions'))}>
-                {panelOpen ? '◀ Hide Panel' : '▶ Show Panel'}
+                {panelOpen ? <><ChevronLeft size={14} /> Hide Panel</> : <><ChevronRight size={14} /> Show Panel</>}
                 <span className="menu-shortcut">Ctrl+B</span>
               </button>
               <div className="menu-separator" />
               <button className="menu-dropdown-item" disabled={!hasSession}
                 onClick={() => menuAction(() => viewportRef.current?.resetCamera())}>
-                🎯 Reset Camera
+                <Crosshair size={14} /> Reset Camera
                 <span className="menu-shortcut">Home</span>
               </button>
               <button className="menu-dropdown-item"
@@ -485,7 +639,7 @@ function App() {
                   if (document.fullscreenElement) document.exitFullscreen()
                   else document.documentElement.requestFullscreen()
                 })}>
-                🔲 Fullscreen
+                <Maximize size={14} /> Fullscreen
                 <span className="menu-shortcut">F11</span>
               </button>
               <div className="menu-separator" />
@@ -493,17 +647,17 @@ function App() {
                 onClick={() => menuAction(() => {
                   setConsoleOpen(prev => !prev)
                 })}>
-                {consoleOpen ? '🖥️ Console ✓' : '🖥️ Console'}
+                {consoleOpen ? <><Monitor size={14} /> Console <Check size={12} /></> : <><Monitor size={14} /> Console</>}
                 <span className="menu-shortcut">Ctrl+`</span>
               </button>
               <div className="menu-separator" />
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setShowAxes(prev => !prev))}>
-                {showAxes ? '📌 Axes ✓' : '📌 Axes'}
+                {showAxes ? <><Pin size={14} /> Axes <Check size={12} /></> : <><Pin size={14} /> Axes</>}
               </button>
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setShowGrid(prev => !prev))}>
-                {showGrid ? '▦ Grid ✓' : '▦ Grid'}
+                {showGrid ? <><Grid3X3 size={14} /> Grid <Check size={12} /></> : <><Grid3X3 size={14} /> Grid</>}
               </button>
             </div>
           )}
@@ -517,32 +671,32 @@ function App() {
             <div className="menu-dropdown">
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setActiveTool('navigate'))}>
-                🔄 Navigate
+                <RotateCcw size={14} /> Navigate
                 <span className="menu-shortcut">V</span>
               </button>
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setActiveTool('measure-distance'))}>
-                📏 Measure Distance
+                <Ruler size={14} /> Measure Distance
                 <span className="menu-shortcut">M</span>
               </button>
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setActiveTool('measure-angle'))}>
-                📐 Measure Angle
+                <TriangleRight size={14} /> Measure Angle
                 <span className="menu-shortcut">A</span>
               </button>
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setActiveTool('section-box'))}>
-                ✂️ Section Box
+                <Scissors size={14} /> Section Box
                 <span className="menu-shortcut">X</span>
               </button>
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align'))}>
-                ⛶ Align Cloud
+                <Move size={14} /> Align Cloud
                 <span className="menu-shortcut">G</span>
               </button>
               <div className="menu-separator" />
               <div className="menu-dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                🎨 Point Size
+                <Palette size={14} /> Point Size
                 <input type="range" min="0.5" max="5" step="0.1" value={pointSize}
                   onChange={e => setPointSize(parseFloat(e.target.value))}
                   onClick={e => e.stopPropagation()}
@@ -560,15 +714,15 @@ function App() {
           {openMenu === 'help' && (
             <div className="menu-dropdown">
               <button className="menu-dropdown-item" disabled>
-                📖 Documentation
+                <BookOpen size={14} /> Documentation
               </button>
               <button className="menu-dropdown-item" disabled>
-                ⌨️ Keyboard Shortcuts
+                <Keyboard size={14} /> Keyboard Shortcuts
                 <span className="menu-shortcut">Ctrl+/</span>
               </button>
               <div className="menu-separator" />
               <button className="menu-dropdown-item" disabled>
-                ℹ️ About STAC Build
+                <Info size={14} /> About STAC Build
               </button>
             </div>
           )}
@@ -592,7 +746,7 @@ function App() {
               {user.role === 'admin' && (
                 <button className="menu-dropdown-item"
                   onClick={() => menuAction(() => setAdminOpen(true))}>
-                  👥 User Management
+                  <Users size={14} /> User Management
                 </button>
               )}
               <button className="menu-dropdown-item"
@@ -609,7 +763,7 @@ function App() {
                   setStatusMessage('')
                   logout()
                 })}>
-                🚪 Logout
+                <LogOut size={14} /> Logout
               </button>
             </div>
           )}
@@ -620,34 +774,44 @@ function App() {
       <div className="activity-bar">
         <button className={`activity-btn ${activePanel === 'sessions' ? 'active' : ''}`}
           onClick={() => togglePanel('sessions')} title="Sessions">
-          📂
+          <FolderOpen size={18} />
           {sessions.length > 0 && <span className="activity-badge">{sessions.length}</span>}
         </button>
         <button className={`activity-btn ${activePanel === 'tools' ? 'active' : ''}`}
-          onClick={() => togglePanel('tools')} title="Tools" disabled={!hasSession}>
-          🔧
+          onClick={() => togglePanel('tools')} title="Tools" style={{ display: hasSession ? undefined : 'none' }}>
+          <Wrench size={18} />
         </button>
-        <button className={`activity-btn ${activePanel === 'segments' ? 'active' : ''}`}
-          onClick={() => togglePanel('segments')} title="Segments" disabled={segments.length === 0}>
-          🏷️
-          {segments.length > 0 && <span className="activity-badge">{segments.length}</span>}
-        </button>
-        <button className={`activity-btn ${activePanel === 'bim' ? 'active' : ''}`}
-          onClick={() => togglePanel('bim')} title="BIM Navigator" disabled={!hasSession}>
-          🏗️
-          {bimModels.length > 0 && <span className="activity-badge">{bimModels.length}</span>}
-        </button>
+        {hasSession && (
+          <button className={`activity-btn ${activePanel === 'segments' ? 'active' : ''}`}
+            onClick={() => togglePanel('segments')} title="Segments" disabled={segments.length === 0}>
+            <Tag size={18} />
+            {segments.length > 0 && <span className="activity-badge">{segments.length}</span>}
+          </button>
+        )}
+        {hasSession && (
+          <button className={`activity-btn ${activePanel === 'bim' ? 'active' : ''}`}
+            onClick={() => togglePanel('bim')} title="BIM Navigator">
+            <Building2 size={18} />
+            {bimModels.length > 0 && <span className="activity-badge">{bimModels.length}</span>}
+          </button>
+        )}
+        {hasSession && sabanaFullMeta && (
+          <button className={`activity-btn ${activePanel === 'analysis' ? 'active' : ''}`}
+            onClick={() => togglePanel('analysis')} title="BIM Analysis">
+            <BarChart3 size={18} />
+          </button>
+        )}
         <button className={`activity-btn ${activePanel === 'team' ? 'active' : ''}`}
           onClick={() => togglePanel('team')} title="Team">
-          👥
+          <Users size={18} />
         </button>
         <div className="activity-spacer" />
         <button className={`activity-btn ${consoleOpen ? 'active' : ''}`}
           onClick={() => setConsoleOpen(prev => !prev)} title="Console">
-          🖥️
+          <Monitor size={18} />
         </button>
         <button className="activity-btn" disabled title="Settings">
-          ⚙️
+          <Settings size={18} />
         </button>
       </div>
 
@@ -664,7 +828,7 @@ function App() {
                     <>
                       <div className="nav-section">Server</div>
                       <div className="nav-item" onClick={connectToServer}>
-                        <span className="nav-item-icon">🔌</span>
+                        <span className="nav-item-icon"><Plug size={14} /></span>
                         <span className="nav-item-label">Connect to Server</span>
                       </div>
                     </>
@@ -682,36 +846,36 @@ function App() {
                           </div>
                           <div className="session-meta">
                             {s.frameCount} frames{s.hasCloud && ` · ${s.cloudSizeMb}MB`}
-                            {s.hasSegments && ' · 🏷️'}
-                            {s.hasBim && ` · 🏗️${s.bimCount > 1 ? ` (${s.bimCount})` : ''}`}
-                            {activeSession === s.id && ' · ⚡ loaded'}
+                            {s.hasSegments && <> · <Tag size={11} /></>}
+                            {s.hasBim && <> · <Building2 size={11} />{s.bimCount > 1 ? ` (${s.bimCount})` : ''}</>}
+                            {activeSession === s.id && <> · <Circle size={8} fill="var(--accent)" stroke="none" /> loaded</>}
                           </div>
                           <div className="session-actions">
                             <button className="session-action-btn load"
                               title="Load Session"
                               onClick={(e) => { e.stopPropagation(); handleSessionLoad(s.id) }}
-                            >📂</button>
+                            ><FolderOpen size={14} /></button>
                             <button className="session-action-btn reconstruct"
                               title="Reconstruct Geometry"
                               onClick={(e) => { e.stopPropagation(); handleReconstruct(s.id) }}
-                            >🔨</button>
+                            ><Hammer size={14} /></button>
                             {activeSession === s.id && (
                               <button className="session-action-btn segment"
                                 title="Segment Objects"
                                 onClick={(e) => { e.stopPropagation(); handleSegment(s.id) }}
-                              >🏷️</button>
+                              ><Tag size={14} /></button>
                             )}
                             {activeSession === s.id && (
                               <button className="session-action-btn segment"
                                 title="Manual Interactive SAM3"
                                 onClick={(e) => { e.stopPropagation(); setInteractiveSessionId(s.id) }}
-                              >🎯</button>
+                              ><Crosshair size={14} /></button>
                             )}
                             {activeSession === s.id && (
                               <button className="session-action-btn unload"
                                 title="Unload Session"
                                 onClick={(e) => { e.stopPropagation(); handleUnload() }}
-                              >⏏</button>
+                              ><ArrowUpFromLine size={14} /></button>
                             )}
                           </div>
                         </div>
@@ -729,32 +893,32 @@ function App() {
                 <nav className="sidebar-nav">
                   <div className={`nav-item ${activeTool === 'navigate' ? 'active' : ''}`}
                     onClick={() => setActiveTool('navigate')}>
-                    <span className="nav-item-icon">🔄</span>
+                    <span className="nav-item-icon"><RotateCcw size={14} /></span>
                     <span className="nav-item-label">Navigate</span>
                   </div>
                   <div className={`nav-item ${activeTool === 'measure-distance' ? 'active' : ''}`}
                     onClick={() => setActiveTool('measure-distance')}>
-                    <span className="nav-item-icon">📏</span>
+                    <span className="nav-item-icon"><Ruler size={14} /></span>
                     <span className="nav-item-label">Measure Distance</span>
                   </div>
                   <div className={`nav-item ${activeTool === 'measure-angle' ? 'active' : ''}`}
                     onClick={() => setActiveTool('measure-angle')}>
-                    <span className="nav-item-icon">📐</span>
+                    <span className="nav-item-icon"><TriangleRight size={14} /></span>
                     <span className="nav-item-label">Measure Angle</span>
                   </div>
                   <div className={`nav-item ${activeTool === 'section-box' ? 'active' : ''}`}
                     onClick={() => setActiveTool('section-box')}>
-                    <span className="nav-item-icon">✂️</span>
+                    <span className="nav-item-icon"><Scissors size={14} /></span>
                     <span className="nav-item-label">Section Box</span>
                   </div>
                   <div className={`nav-item ${activeTool === 'align' ? 'active' : ''}`}
                     onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')}>
-                    <span className="nav-item-icon">⛶</span>
+                    <span className="nav-item-icon"><Move size={14} /></span>
                     <span className="nav-item-label">Align Cloud</span>
                   </div>
                   <div className="nav-section" style={{ marginTop: '16px' }}>Display</div>
                   <div className="nav-item" style={{ padding: '4px 12px' }}>
-                    <span className="nav-item-icon">🎨</span>
+                    <span className="nav-item-icon"><Palette size={14} /></span>
                     <span className="control-label" style={{ marginRight: '8px' }}>Point Size</span>
                     <input className="control-slider" type="range"
                       min="0.5" max="5" step="0.1" value={pointSize}
@@ -776,12 +940,12 @@ function App() {
                       onClick={() => {
                         setSegments(prev => prev.map(s => ({ ...s, visible: true })))
                         segments.forEach(s => viewportRef.current?.toggleOBB(s.key, true))
-                      }}>☑</button>
+                      }}><CheckSquare size={13} /></button>
                     <button className="segment-toggle-btn" title="Deselect All"
                       onClick={() => {
                         setSegments(prev => prev.map(s => ({ ...s, visible: false })))
                         segments.forEach(s => viewportRef.current?.toggleOBB(s.key, false))
-                      }}>☐</button>
+                      }}><Square size={13} /></button>
                   </span>
                 </div>
                 <div style={{ padding: '8px 12px', fontSize: '12px', color: '#aaa', background: 'rgba(0,0,0,0.2)' }}>
@@ -908,15 +1072,7 @@ function App() {
                     }
                   }}
                 />
-                {activeSession && segments.length > 0 && (
-                  <button
-                    className="deviation-run-btn"
-                    style={{ margin: '8px 0' }}
-                    onClick={() => setShowDeviation(true)}
-                  >
-                    ⊿ Deviation Analysis
-                  </button>
-                )}
+                {/* Deviation buttons will be added in toolbar redesign */}
               </>
             )}
 
@@ -927,6 +1083,10 @@ function App() {
               />
             )}
 
+            {/* Analysis Panel (Sábana) */}
+            {activePanel === 'analysis' && sabanaFullMeta && activeSession && (
+              <BIMAnalysisPanel meta={sabanaFullMeta} sessionId={activeSession} />
+            )}
 
           </div>
           {/* Resize handle */}
@@ -963,19 +1123,19 @@ function App() {
           <div className="toolbar">
             <div className="toolbar-group">
               <button className={`tool-btn ${activeTool === 'navigate' ? 'active' : ''}`}
-                onClick={() => setActiveTool('navigate')} title="Navigate">🔄</button>
+                onClick={() => setActiveTool('navigate')} title="Navigate"><RotateCcw size={16} /></button>
               <button className={`tool-btn ${activeTool === 'measure-distance' ? 'active' : ''}`}
-                onClick={() => setActiveTool('measure-distance')} title="Measure Distance">📏</button>
+                onClick={() => setActiveTool('measure-distance')} title="Measure Distance"><Ruler size={16} /></button>
               <button className={`tool-btn ${activeTool === 'measure-angle' ? 'active' : ''}`}
-                onClick={() => setActiveTool('measure-angle')} title="Measure Angle">📐</button>
+                onClick={() => setActiveTool('measure-angle')} title="Measure Angle"><TriangleRight size={16} /></button>
               <button className={`tool-btn ${activeTool === 'section-box' ? 'active' : ''}`}
-                onClick={() => setActiveTool('section-box')} title="Section Box">✂️</button>
+                onClick={() => setActiveTool('section-box')} title="Section Box"><Scissors size={16} /></button>
               <button className={`tool-btn ${activeTool === 'align' ? 'active' : ''}`}
-                onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')} title="Align Cloud">⛶</button>
+                onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')} title="Align Cloud"><Move size={16} /></button>
               <button className="tool-btn" onClick={() => viewportRef.current?.clearMeasurements()}
-                title="Clear Measurements">🗑️</button>
+                title="Clear Measurements"><Trash2 size={16} /></button>
               <button className="tool-btn" onClick={() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') }}
-                title="Reset Section Box">🔓</button>
+                title="Reset Section Box"><Unlock size={16} /></button>
             </div>
             <div className="toolbar-separator" />
             <div className="toolbar-group">
@@ -985,6 +1145,33 @@ function App() {
                 onChange={e => setPointSize(parseFloat(e.target.value))} />
               <span className="control-value">{pointSize.toFixed(1)}</span>
             </div>
+            {/* ── Sábana / BIM Comparison ── */}
+            {bimModels.length > 0 && segments.length > 0 && (
+              <>
+                <div className="toolbar-separator" />
+                <div className="toolbar-group">
+                  <button className="tool-btn"
+                    onClick={handleGenerateComparison}
+                    disabled={sabanaLoading}
+                    title="Generate BIM vs Scan comparison">
+                    {sabanaLoading ? <Loader2 size={16} className="spin" /> : <Scale size={16} />}
+                  </button>
+                  {sessions.find(s => s.id === activeSession)?.hasSabana && (
+                    <button className={`tool-btn ${sabanaVisible ? 'active' : ''}`}
+                      onClick={handleToggleSabana}
+                      disabled={sabanaLoading}
+                      title={sabanaVisible ? 'Hide Sábana' : 'Show Sábana'}>
+                      <Thermometer size={16} />
+                    </button>
+                  )}
+                  {sabanaVisible && sabanaMetrics && (
+                    <span className="toolbar-chip" title="Overall pass rate">
+                      {sabanaMetrics.elements?.filter((e: any) => e.status === 'evaluated').length || 0}/{sabanaMetrics.summary?.total_elements || 0} elements
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -1002,7 +1189,18 @@ function App() {
             onStatusMessage={setStatusMessage}
             onSegments={setSegments}
             onPipelineProgress={handlePipelineProgress}
-            onBimLoaded={(models) => { setBimModels(models); if (models.length > 0) setActivePanel('bim') }}
+            onBimLoaded={(models) => {
+              setBimModels(models)
+              if (models.length > 0) {
+                setShowAxes(false)
+                setShowGrid(false)
+              }
+            }}
+            onSabanaLoaded={(nPts) => {
+              setSabanaLoading(false)
+              setSessionLoading(null)
+              setStatusMessage(`Sábana: ${nPts?.toLocaleString()} deviation points`)
+            }}
           />
 
           {/* Session Loading Overlay */}
@@ -1029,17 +1227,7 @@ function App() {
             </div>
           )}
 
-          {/* Deviation Analysis Overlay */}
-          {showDeviation && activeSession && (
-            <DeviationOverlay
-              sessionId={activeSession}
-              viewportRef={viewportRef}
-              onClose={() => {
-                setShowDeviation(false)
-                viewportRef.current?.clearDeviationSurface()
-              }}
-            />
-          )}
+          {/* Deviation Analysis — will be redesigned as toolbar buttons */}
 
           {/* Welcome screen — shown when no session */}
           {!hasSession && !sessionLoading && (
@@ -1052,7 +1240,7 @@ function App() {
               </div>
               {!connected && (
                 <button className="welcome-btn" onClick={connectToServer}>
-                  🔌 Connect to Server
+                  <Plug size={14} /> Connect to Server
                 </button>
               )}
               <div className="welcome-hint">
@@ -1078,7 +1266,7 @@ function App() {
             <div className="console-panel">
               <div className="console-header">
                 <span>Console</span>
-                <button className="console-close" onClick={() => setConsoleOpen(false)} title="Close console">✕</button>
+                <button className="console-close" onClick={() => setConsoleOpen(false)} title="Close console"><X size={14} /></button>
               </div>
               <div className="console-body">
                 {consoleLogs.map((entry, i) => (
@@ -1097,7 +1285,7 @@ function App() {
             <div className="pipeline-progress-overlay">
               <div className="pipeline-progress-card">
                 <div className="pipeline-progress-header">
-                  <span>Pipeline {pipelineRunning.status === 'running' ? '⏳' : pipelineRunning.status === 'done' ? '✅' : pipelineRunning.status === 'failed' ? '❌' : '🚫'}</span>
+                  <span>Pipeline {pipelineRunning.status === 'running' ? <Clock size={14} /> : pipelineRunning.status === 'done' ? <CheckCircle2 size={14} color="#4ade80" /> : pipelineRunning.status === 'failed' ? <XCircle size={14} color="#f87171" /> : <Ban size={14} />}</span>
                   {pipelineRunning.status === 'running' && (
                     <button className="pipeline-cancel-btn" onClick={handlePipelineCancel}>Cancel</button>
                   )}
@@ -1173,7 +1361,7 @@ function App() {
               </div>
               <div className="pipeline-dialog-actions">
                 <button className="pipeline-btn-cancel" onClick={() => setPipelineDialogOpen(false)}>Cancel</button>
-                <button className="pipeline-btn-run" onClick={handlePipelineRun}>▶ Run Pipeline</button>
+                <button className="pipeline-btn-run" onClick={handlePipelineRun}><Play size={14} /> Run Pipeline</button>
               </div>
             </div>
           </div>
@@ -1183,11 +1371,11 @@ function App() {
       {/* ── Status Bar ── */}
       <div className="statusbar">
         <div className="statusbar-item">
-          <span>{serverAlive ? '🟢' : '🔴'}</span>
+          <span><Circle size={8} fill={serverAlive ? '#4ade80' : '#f87171'} stroke="none" /></span>
           <span>STAC Server</span>
         </div>
         <div className="statusbar-item">
-          <span>{connected ? '🟢' : '🔴'}</span>
+          <span><Circle size={8} fill={connected ? '#4ade80' : '#f87171'} stroke="none" /></span>
           <span>{connected ? 'Connected' : 'Disconnected'}</span>
         </div>
         <div className="statusbar-spacer" />

@@ -203,3 +203,60 @@ async def convert_ply_to_potree_async(
         await on_progress("LOD octree ready")
 
     return result
+
+
+def convert_sabana_to_potree(session_dir: Path, force: bool = False) -> bool:
+    """Convert sabana_cloud.ply → LAS → Potree octree in sabana_potree/.
+
+    The sábana PLY lives in the session root (not output/).
+    """
+    ply_path = session_dir / "sabana_cloud.ply"
+    potree_dir = session_dir / "sabana_potree"
+
+    if not ply_path.exists():
+        logger.warning(f"[Potree] No sabana_cloud.ply found in {session_dir}")
+        return False
+
+    # Skip if already converted and PLY hasn't changed
+    if not force and potree_dir.exists() and (potree_dir / "metadata.json").exists():
+        potree_mtime = (potree_dir / "metadata.json").stat().st_mtime
+        ply_mtime = ply_path.stat().st_mtime
+        if potree_mtime > ply_mtime:
+            logger.info("[Potree] Sábana octree already up-to-date, skipping conversion")
+            return True
+
+    logger.info("[Potree] 🌲 Starting sábana PLY → Potree conversion...")
+
+    las_path = session_dir / "sabana_cloud.las"
+
+    try:
+        n_points = _ply_to_las(ply_path, las_path)
+        logger.info(f"[Potree] Converted {n_points:,} sábana points to LAS")
+        success = _run_potree_converter(las_path, potree_dir)
+        return success
+    except Exception as e:
+        logger.error(f"[Potree] ❌ Sábana conversion failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    finally:
+        if las_path.exists():
+            las_path.unlink()
+
+
+async def convert_sabana_to_potree_async(
+    session_dir: Path,
+    on_progress: Optional[Callable[[str], Awaitable[None]]] = None,
+    force: bool = False,
+) -> bool:
+    """Async wrapper for sábana Potree conversion."""
+    if on_progress:
+        await on_progress("Converting sábana to LOD octree...")
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, convert_sabana_to_potree, session_dir, force)
+
+    if result and on_progress:
+        await on_progress("Sábana LOD octree ready")
+
+    return result

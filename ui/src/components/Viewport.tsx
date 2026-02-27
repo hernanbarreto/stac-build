@@ -23,6 +23,7 @@ interface ViewportProps {
     onSegments?: (segments: SegmentInstance[]) => void
     onPipelineProgress?: (data: Record<string, unknown>) => void
     onBimLoaded?: (models: import('./IFCLoader').IFCLoadResult[]) => void
+    onSabanaLoaded?: (pointCount: number) => void
 }
 
 export interface SegmentInstance {
@@ -42,7 +43,8 @@ export interface ViewportHandle {
     addBIMGroup: (group: THREE.Group) => void
     removeBIMGroup: (filename: string) => void
     setBIMOpacity: (meshNames: string[], opacity: number) => void
-    applyDeviationSurface: (faceColorsByElement: Record<string, { colors: number[], centroids: number[] }>) => void
+    applyDeviationSurface: (sabanaData: Record<string, { positions: number[], colors: number[] }>, unmatchedKeys: string[]) => void
+    applySabanaFromSaved: (positions: Float32Array, colors: Float32Array, nPoints: number) => void
     clearDeviationSurface: () => void
     applyRegistrationTransform: (transform: number[][]) => void
     clearMeasurements: () => void
@@ -50,6 +52,7 @@ export interface ViewportHandle {
     resetCamera: () => void
     clearScene: () => void
     refreshSegmentOBBs: (sessionId: string) => void
+    setOBBsVisible: (visible: boolean) => void
 }
 
 // Vertex shader — matches FusionRenderer.js point size formula
@@ -81,6 +84,7 @@ const fragmentShader = `
   varying vec3 vColor;
   varying vec3 vWorldPos;
   uniform float highlightIntensity;
+  uniform float uOpacity;
   uniform bool sectionBoxEnabled;
   uniform vec3 sectionBoxMin;
   uniform vec3 sectionBoxMax;
@@ -103,7 +107,7 @@ const fragmentShader = `
     
     vec3 finalColor = vColor * 0.85;
     
-    gl_FragColor = vec4(finalColor, alpha);
+    gl_FragColor = vec4(finalColor, alpha * uOpacity);
   }
 `
 
@@ -177,7 +181,7 @@ interface Measurement {
 }
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, activeSession, activeTool, showAxes = true, showGrid = true, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded },
+    { pointSize, activeSession, activeTool, showAxes = true, showGrid = true, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -194,6 +198,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const obbGroupRef = useRef<THREE.Group | null>(null)
     const obbMapRef = useRef<Map<string, THREE.Object3D>>(new Map())
     const bimGroupRef = useRef<THREE.Group | null>(null)
+    const sabanaGroupRef = useRef<THREE.Group | null>(null)
 
     // Measurement state
     const measureGroupRef = useRef<THREE.Group | null>(null)
@@ -1050,6 +1055,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const mesh = obbMapRef.current.get(key)
             if (mesh) mesh.visible = visible
         },
+        setOBBsVisible: (visible: boolean) => {
+            const group = obbGroupRef.current
+            if (group) group.visible = visible
+        },
         toggleBIMVisibility: (meshNames: string[], visible: boolean) => {
             const bimGroup = bimGroupRef.current
             if (!bimGroup) return
@@ -1116,147 +1125,197 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 }
             })
         },
-        applyDeviationSurface: (faceColorsByElement: Record<string, { colors: number[], centroids: number[] }>) => {
+        applyDeviationSurface: (sabanaData: Record<string, { positions: number[], colors: number[] }>, unmatchedKeys: string[]) => {
+            const scene = sceneRef.current
             const bimGroup = bimGroupRef.current
-            if (!bimGroup) return
-            const elementKeys = Object.keys(faceColorsByElement)
+            if (!scene || !bimGroup) return
 
+            // Clean up previous sábana
+            if (sabanaGroupRef.current) {
+                scene.remove(sabanaGroupRef.current)
+                sabanaGroupRef.current.traverse((c) => {
+                    if (c instanceof THREE.Points) {
+                        c.geometry.dispose()
+                            ; (c.material as THREE.Material).dispose()
+                    }
+                })
+            }
+
+            const sabanaGroup = new THREE.Group()
+            sabanaGroup.name = 'sabana'
+            sabanaGroupRef.current = sabanaGroup
+
+            // ── Evaluated elements: render as colored point cloud ──
+            let totalPoints = 0
+            for (const [key, data] of Object.entries(sabanaData)) {
+                const nPts = Math.floor(data.positions.length / 3)
+                if (nPts === 0) continue
+
+                const posArr = new Float32Array(data.positions)
+                const colArr = new Float32Array(nPts * 3)
+
+                // Convert RGBA → RGB for PointsMaterial (alpha is uniform)
+                for (let i = 0; i < nPts; i++) {
+                    colArr[i * 3] = data.colors[i * 4]
+                    colArr[i * 3 + 1] = data.colors[i * 4 + 1]
+                    colArr[i * 3 + 2] = data.colors[i * 4 + 2]
+                }
+
+                const geom = new THREE.BufferGeometry()
+                geom.setAttribute('position', new THREE.BufferAttribute(posArr, 3))
+                geom.setAttribute('color', new THREE.BufferAttribute(colArr, 3))
+
+                const mat = new THREE.PointsMaterial({
+                    size: 0.003,  // 3mm — matches DA3 scan spacing
+                    vertexColors: true,
+                    sizeAttenuation: true,
+                    depthWrite: true,
+                })
+
+                const points = new THREE.Points(geom, mat)
+                points.name = `sabana_${key}`
+                sabanaGroup.add(points)
+                totalPoints += nPts
+            }
+
+            // ── Make ALL BIM meshes semi-transparent so sábana stands out ──
             bimGroup.traverse((child) => {
                 if (!(child instanceof THREE.Mesh)) return
+                if (!child.userData._originalMaterial) {
+                    child.userData._originalMaterial = child.material
+                }
                 const meshName = child.name || ''
-                // Match: mesh name contains ":elementKey_" or ":elementKey"
-                let matchedKey = ''
-                for (const key of elementKeys) {
-                    if (meshName.includes(`:${key}_`) || meshName.includes(`:${key}`)) {
-                        matchedKey = key
+                const ifcName = child.userData?.ifc_name || ''
+                // Check if this is an unmatched element → more transparent
+                let isUnmatched = false
+                for (const key of unmatchedKeys) {
+                    if (ifcName.endsWith(':' + key) || ifcName === key ||
+                        meshName.includes(':' + key + '_') || meshName.includes(':' + key)) {
+                        isUnmatched = true
                         break
                     }
                 }
-                if (!matchedKey) return
-                const data = faceColorsByElement[matchedKey]
-                if (!data || !data.colors || data.colors.length < 3) return
-                const { colors: srcColors, centroids: srcCentroids } = data
-
-                // Store original material + geometry for later restoration
-                if (!child.userData._originalMaterial) {
-                    child.userData._originalMaterial = child.material
-                    child.userData._originalGeometry = child.geometry
-                }
-
-                // Convert to non-indexed geometry so each face has its own 3 vertices
-                let geom = child.geometry
-                if (geom.index) {
-                    geom = geom.toNonIndexed()
-                    child.geometry = geom
-                }
-
-                const posAttr = geom.getAttribute('position')
-                const nVerts = posAttr.count
-                const actualFaces = Math.floor(nVerts / 3)
-                const colors = new Float32Array(nVerts * 4)  // RGBA
-
-                // Parse backend centroids
-                const nSrcFaces = Math.floor(srcCentroids.length / 3)
-                const srcCentroidArr: [number, number, number][] = []
-                for (let i = 0; i < nSrcFaces; i++) {
-                    srcCentroidArr.push([
-                        srcCentroids[i * 3],
-                        srcCentroids[i * 3 + 1],
-                        srcCentroids[i * 3 + 2],
-                    ])
-                }
-
-                // Detect if this is an unmatched (all-gray) element
-                const isGray = srcColors.every((v: number) => Math.abs(v - srcColors[0]) < 0.01)
-
-                // For each frontend face, match to nearest backend centroid
-                const pos = posAttr.array as Float32Array
-                for (let f = 0; f < actualFaces; f++) {
-                    const i0 = f * 9
-                    const cx = (pos[i0] + pos[i0 + 3] + pos[i0 + 6]) / 3
-                    const cy = (pos[i0 + 1] + pos[i0 + 4] + pos[i0 + 7]) / 3
-                    const cz = (pos[i0 + 2] + pos[i0 + 5] + pos[i0 + 8]) / 3
-
-                    let bestDist = Infinity
-                    let bestIdx = 0
-                    for (let s = 0; s < nSrcFaces; s++) {
-                        const dx = cx - srcCentroidArr[s][0]
-                        const dy = cy - srcCentroidArr[s][1]
-                        const dz = cz - srcCentroidArr[s][2]
-                        const d2 = dx * dx + dy * dy + dz * dz
-                        if (d2 < bestDist) {
-                            bestDist = d2
-                            bestIdx = s
-                        }
-                    }
-
-                    const r = srcColors[bestIdx * 3]
-                    const g = srcColors[bestIdx * 3 + 1]
-                    const b = srcColors[bestIdx * 3 + 2]
-
-                    // Is this face "no data" (gray ~0.3)?
-                    const isNoData = !isGray && (Math.abs(r - 0.3) < 0.05 && Math.abs(g - 0.3) < 0.05 && Math.abs(b - 0.3) < 0.05)
-                    const alpha = isNoData ? 0.0 : (isGray ? 0.25 : 0.85)
-
-                    for (let v = 0; v < 3; v++) {
-                        const vi = (f * 3 + v) * 4
-                        colors[vi] = r
-                        colors[vi + 1] = g
-                        colors[vi + 2] = b
-                        colors[vi + 3] = alpha
-                    }
-                }
-
-                geom.setAttribute('color', new THREE.BufferAttribute(colors, 4))
-
-                // Custom shader: uses vertex RGBA for per-face transparency
-                child.material = new THREE.ShaderMaterial({
-                    vertexShader: `
-                        attribute vec4 color;
-                        varying vec4 vColor;
-                        void main() {
-                            vColor = color;
-                            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                        }
-                    `,
-                    fragmentShader: `
-                        varying vec4 vColor;
-                        void main() {
-                            if (vColor.a < 0.01) discard;
-                            gl_FragColor = vColor;
-                        }
-                    `,
+                child.material = new THREE.MeshBasicMaterial({
+                    color: isUnmatched ? 0x808080 : 0xaaaaaa,
                     transparent: true,
+                    opacity: isUnmatched ? 0.15 : 0.20,
                     side: THREE.DoubleSide,
-                    depthWrite: !isGray,
+                    depthWrite: false,
                 })
-                child.material.needsUpdate = true
-                console.log(`[Viewport] Sábana: ${meshName} → ${actualFaces} faces (${isGray ? 'gray/unmatched' : 'evaluated'})`)
             })
+
+            // ── Dim Potree scan cloud via shared material uniform ──
+            const sharedMat = materialRef.current
+            if (sharedMat) {
+                sharedMat.uniforms.uOpacity.value = 0.15
+            }
+
+            scene.add(sabanaGroup)
+            console.log(`[Viewport] Sábana: ${totalPoints} points, ${Object.keys(sabanaData).length} evaluated, ${unmatchedKeys.length} unmatched`)
+        },
+        applySabanaFromSaved: (positions: Float32Array, colors: Float32Array, nPoints: number) => {
+            const scene = sceneRef.current
+            if (!scene) return
+
+            // Clear previous
+            if (sabanaGroupRef.current) {
+                scene.remove(sabanaGroupRef.current)
+                sabanaGroupRef.current.traverse((c) => {
+                    if (c instanceof THREE.Points) {
+                        c.geometry.dispose()
+                            ; (c.material as THREE.Material).dispose()
+                    }
+                })
+            }
+
+            const sabanaGroup = new THREE.Group()
+            sabanaGroup.name = 'sabana-group'
+            sabanaGroupRef.current = sabanaGroup
+
+            // Build geometry from flat arrays
+            const posArr = positions
+            const colArr = colors
+            const geo = new THREE.BufferGeometry()
+            geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3))
+            geo.setAttribute('color', new THREE.BufferAttribute(colArr, 4))
+
+            const mat = new THREE.PointsMaterial({
+                size: 0.008,
+                vertexColors: true,
+                transparent: true,
+                depthWrite: false,
+                sizeAttenuation: true,
+            })
+            // Use vertex alpha
+            mat.onBeforeCompile = (shader) => {
+                shader.fragmentShader = shader.fragmentShader.replace(
+                    'vec4 diffuseColor = vec4( diffuse, opacity );',
+                    'vec4 diffuseColor = vec4( diffuse, opacity * vColor.a );'
+                )
+            }
+
+            const pts = new THREE.Points(geo, mat)
+            sabanaGroup.add(pts)
+
+            // ── Dim BIM meshes ──
+            const bimGroup = bimGroupRef.current
+            if (bimGroup) {
+                bimGroup.traverse((child) => {
+                    if (!(child instanceof THREE.Mesh)) return
+                    if (!child.userData._originalMaterial) {
+                        child.userData._originalMaterial = child.material
+                    }
+                    child.material = new THREE.MeshBasicMaterial({
+                        color: 0x888888,
+                        transparent: true,
+                        opacity: 0.20,
+                        side: THREE.DoubleSide,
+                        depthWrite: false,
+                    })
+                })
+            }
+
+            // ── Dim Potree scan cloud ──
+            const sharedMat = materialRef.current
+            if (sharedMat) {
+                sharedMat.uniforms.uOpacity.value = 0.15
+            }
+
+            scene.add(sabanaGroup)
+            console.log(`[Viewport] Sábana loaded from saved: ${nPoints} points`)
         },
         clearDeviationSurface: () => {
+            const scene = sceneRef.current
+            // Remove sábana point cloud
+            if (sabanaGroupRef.current && scene) {
+                scene.remove(sabanaGroupRef.current)
+                sabanaGroupRef.current.traverse((c) => {
+                    if (c instanceof THREE.Points) {
+                        c.geometry.dispose()
+                            ; (c.material as THREE.Material).dispose()
+                    }
+                })
+                sabanaGroupRef.current = null
+            }
+            // Restore BIM mesh materials
             const bimGroup = bimGroupRef.current
-            if (!bimGroup) return
-            bimGroup.traverse((child) => {
-                if (!(child instanceof THREE.Mesh)) return
-                if (child.userData._originalMaterial) {
-                    // Dispose the deviation material
-                    if (child.material !== child.userData._originalMaterial) {
-                        (child.material as THREE.Material).dispose()
+            if (bimGroup) {
+                bimGroup.traverse((child) => {
+                    if (!(child instanceof THREE.Mesh)) return
+                    if (child.userData._originalMaterial) {
+                        if (child.material !== child.userData._originalMaterial) {
+                            (child.material as THREE.Material).dispose()
+                        }
+                        child.material = child.userData._originalMaterial
+                        delete child.userData._originalMaterial
                     }
-                    child.material = child.userData._originalMaterial
-                    delete child.userData._originalMaterial
-                    // Restore original geometry (we converted to non-indexed)
-                    if (child.userData._originalGeometry) {
-                        child.geometry.dispose()
-                        child.geometry = child.userData._originalGeometry
-                        delete child.userData._originalGeometry
-                    } else {
-                        child.geometry.deleteAttribute('color')
-                    }
-                }
-            })
-            console.log('[Viewport] Deviation surface cleared')
+                })
+            }
+            // Restore Potree scan cloud opacity
+            const sharedMat = materialRef.current
+            if (sharedMat) {
+                sharedMat.uniforms.uOpacity.value = 1.0
+            }
         },
         applyRegistrationTransform: (transform: number[][]) => {
             // Convert row-major 4x4 from backend to Three.js column-major Matrix4
@@ -1431,6 +1490,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             uniforms: {
                 pointSize: { value: pointSize },
                 highlightIntensity: { value: 0.5 },
+                uOpacity: { value: 1.0 },
                 time: { value: 0 },
                 sectionBoxEnabled: { value: false },
                 sectionBoxMin: { value: new THREE.Vector3(-100, -100, -100) },
@@ -1562,14 +1622,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (unmounted) return
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
             const wsUrl = `${wsProtocol}//${window.location.host}/ws/viewer`
-            console.log(`[Viewport] Connecting to ${wsUrl}`)
+            // console.log(`[Viewport] Connecting to ${wsUrl}`)
 
             const ws = new WebSocket(wsUrl)
             ws.binaryType = 'arraybuffer'
             wsRef.current = ws
 
             ws.onopen = () => {
-                console.log('[Viewport] WebSocket connected')
+                // console.log('[Viewport] WebSocket connected')
                 // If session was selected before WS was ready, load it now
                 if (activeSessionRef.current) {
                     clearScene()
@@ -1586,7 +1646,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 } else {
                     try {
                         const msg = JSON.parse(event.data)
-                        console.log('[Viewport] Message:', msg.type || msg)
+                        // console.log('[Viewport] Message:', msg.type || msg)
 
                         // Handle 'cleared' — clean scene for next session
                         if (msg.type === 'cleared') {
@@ -1605,7 +1665,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
 
             ws.onclose = () => {
-                console.log('[Viewport] WebSocket disconnected')
+                // console.log('[Viewport] WebSocket disconnected')
                 // Only clear ref if this is still the active WS instance
                 // (prevents React StrictMode cleanup from nulling the new WS)
                 if (wsRef.current === ws) {
@@ -1775,7 +1835,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const url = msg.url as string
             const pts = msg.points as number
             const floorTransform = msg.floorTransform as number[] | undefined
-            console.log(`[Viewport] Potree ready: ${pts?.toLocaleString()} points at ${url}`)
+            // console.log(`[Viewport] Potree ready: ${pts?.toLocaleString()} points at ${url}`)
             if (onStatusMessage) onStatusMessage(`Loading LOD octree (${pts?.toLocaleString()} points)...`)
 
             // Create loader with existing material for section-box/segmentation compat
@@ -1793,7 +1853,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             potreeLoaderRef.current = loader
 
             loader.load(url).then((loadedPts) => {
-                console.log(`[Viewport] Potree loaded: ${loadedPts.toLocaleString()} points`)
+                // console.log(`[Viewport] Potree loaded: ${loadedPts.toLocaleString()} points`)
                 if (onStatusMessage) onStatusMessage(`LOD octree loaded — ${pts?.toLocaleString()} total points`)
                 onPointCount(loadedPts)
 
@@ -1842,6 +1902,70 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         if (msg.type === 'pipeline_progress' && onPipelineProgress) {
             onPipelineProgress(msg)
         }
+        // ── Sábana: load via Potree, dim BIM, hide OBBs ──
+        if (msg.type === 'sabana_potree_ready') {
+            const url = msg.url as string
+            const nPts = msg.points as number
+            console.log(`[Viewport] Sábana Potree ready: ${nPts?.toLocaleString()} points at ${url}`)
+            if (onStatusMessage) onStatusMessage(`Loading sábana LOD octree (${nPts?.toLocaleString()} points)...`)
+
+            const scene = sceneRef.current
+            const camera = cameraRef.current
+            const mat = materialRef.current
+            if (!scene || !camera || !mat) return
+
+            // 1) Clear only the scan cloud (not BIM, not OBBs)
+            if (potreeLoaderRef.current) {
+                potreeLoaderRef.current.dispose()
+                potreeLoaderRef.current = null
+            }
+            // Clear legacy geometry (non-Potree binary streaming)
+            const geo = geometryRef.current
+            if (geo) {
+                geo.deleteAttribute('position')
+                geo.deleteAttribute('color')
+                geo.deleteAttribute('classId')
+            }
+            totalPointsRef.current = 0
+
+            // 2) Load sábana via PotreeOctreeLoader (same as scan)
+            const loader = new PotreeOctreeLoader(scene, camera, mat)
+            potreeLoaderRef.current = loader
+            loader.load(url).then((loadedPts) => {
+                console.log(`[Viewport] Sábana Potree loaded: ${loadedPts.toLocaleString()} points`)
+                if (onStatusMessage) onStatusMessage(`Sábana: ${nPts?.toLocaleString()} deviation points`)
+                onPointCount(loadedPts)
+
+                // Keep camera where it is — user navigates from current position
+
+                if (onSabanaLoaded) onSabanaLoaded(loadedPts)
+            }).catch((err) => {
+                console.error('[Viewport] Sábana Potree load error:', err)
+                if (onStatusMessage) onStatusMessage(`Sábana load error: ${err.message}`)
+            })
+
+            // 3) Dim BIM meshes to 20% opacity
+            const bimGroup = bimGroupRef.current
+            if (bimGroup) {
+                bimGroup.traverse((child) => {
+                    if (!(child instanceof THREE.Mesh)) return
+                    if (!child.userData._originalMaterial) {
+                        child.userData._originalMaterial = child.material
+                    }
+                    child.material = new THREE.MeshBasicMaterial({
+                        color: 0x888888,
+                        transparent: true,
+                        opacity: 0.20,
+                        side: THREE.DoubleSide,
+                        depthWrite: false,
+                    })
+                })
+            }
+
+            // 4) Hide OBB wireframes (segmentation bboxes are noise in sábana mode)
+            const obbGroup = obbGroupRef.current
+            if (obbGroup) obbGroup.visible = false
+        }
         // ── BIM: load IFC models via web-ifc ──
         if (msg.type === 'bim_ready') {
             const models = msg.models as Array<{ name: string; url: string }>
@@ -1853,14 +1977,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const loadedResults: import('./IFCLoader').IFCLoadResult[] = []
                 let remaining = models.length
                 for (const model of models) {
-                    console.log(`[Viewport] Loading BIM: ${model.name}`)
+                    // console.log(`[Viewport] Loading BIM: ${model.name}`)
                     if (onStatusMessage) onStatusMessage(`Loading BIM: ${model.name}...`)
                     loadIFC(model.url, model.name).then((result) => {
                         bimGroup.add(result.group)
                         const box = new THREE.Box3().setFromObject(result.group)
                         const size = box.getSize(new THREE.Vector3())
                         const center = box.getCenter(new THREE.Vector3())
-                        console.log(`[Viewport] BIM bbox: size=(${size.x.toFixed(2)}, ${size.y.toFixed(2)}, ${size.z.toFixed(2)}) center=(${center.x.toFixed(2)}, ${center.y.toFixed(2)}, ${center.z.toFixed(2)})`)
+                        // console.log(`[Viewport] BIM bbox: ...`)
                         console.log(`[Viewport] ✅ BIM loaded: ${model.name} (${result.group.children.length} elements, ${result.hierarchy.length} hierarchy roots)`)
                         if (onStatusMessage) onStatusMessage(`BIM loaded: ${model.name} (${result.group.children.length} elements)`)
                         loadedResults.push(result)
@@ -1879,7 +2003,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 }
             })
         }
-    }, [onStatusMessage, onSegments, onPipelineProgress, onPointCount, onBimLoaded])
+    }, [onStatusMessage, onSegments, onPipelineProgress, onPointCount, onBimLoaded, onSabanaLoaded])
 
     // Render OBB wireframe boxes for segmentation instances
     const renderOBBs = useCallback((instances: Array<Record<string, unknown>>) => {
@@ -1988,7 +2112,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // (segmentation_pipeline.py applies floor transform to xyz_display before
         // computing OBBs). No additional transform needed here.
 
-        console.log(`[Viewport] Rendered ${group.children.length} OBBs`)
+        // console.log(`[Viewport] Rendered ${group.children.length} OBBs`)
 
         // Notify parent with segment list
         if (onSegments) onSegments(segmentList)

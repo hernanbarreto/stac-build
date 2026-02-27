@@ -434,6 +434,7 @@
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
   transition: all var(--transition-fast);
@@ -593,6 +594,32 @@
   height: 20px;
   background: var(--border);
   margin: 0 6px;
+}
+
+.toolbar-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
 }
 
 .tool-btn {
@@ -1070,7 +1097,7 @@
 }
 
 .welcome-logo-img {
-  width: 120px;
+  width: 200px;
   height: auto;
   background: rgba(255, 255, 255, 0.92);
   border-radius: 12px;

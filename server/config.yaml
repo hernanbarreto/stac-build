@@ -309,6 +309,19 @@ bim:
     warning_threshold: 10.0
     error_threshold: 20.0
     critical_threshold: 30.0
+    # Sábana (deviation heatmap) — rendered as colored point cloud
+    sabana:
+      point_size_mm: 3.0        # Render point size (matches DA3 scan spacing)
+      uncovered_alpha: 0.25     # Alpha for non-scanned BIM mesh areas
+      subsample_mm: 1.0         # Subsample cloud to this spacing (0 = raw, 1 = DA3 precision)
+    # Coverage: "is there construction near this BIM face?" — separate from deviation accuracy
+    coverage_proximity_m: 0.15  # 15cm — generous radius for detecting construction presence
+                                # Handles thick slabs/walls where scan only sees one side
+    # Quality classification thresholds (% of scan points within tolerance)
+    quality:
+      good_threshold: 80        # >=80% within tolerance = GOOD (green)
+      regular_threshold: 50     # >=50% within tolerance = REGULAR (yellow)
+                                # <50% = BAD (red) — advance counts as 0
 
 # --- SLAM Backend Selection ---
 # Options: "da3", "mast3r", "hybrid"

@@ -254,11 +254,11 @@ export async function loadIFC(url: string, name: string): Promise<IFCLoadResult>
     const buffer = await response.arrayBuffer()
     const data = new Uint8Array(buffer)
 
-    console.log(`[IFC] Parsing ${name} (${(data.byteLength / 1024).toFixed(0)} KB)...`)
+    // console.log(`[IFC] Parsing ${name} (${(data.byteLength / 1024).toFixed(0)} KB)...`)
 
     const modelID = api.OpenModel(data)
     const unitScale = getLengthUnitScale(api, modelID)
-    console.log(`[IFC] Unit scale: ${unitScale} (1 model unit = ${unitScale} meters)`)
+    // console.log(`[IFC] Unit scale: ${unitScale} (1 model unit = ${unitScale} meters)`)
 
     const allMeshes = api.LoadAllGeometry(modelID)
 
