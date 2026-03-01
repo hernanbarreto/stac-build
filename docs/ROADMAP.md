@@ -238,9 +238,16 @@ Everything here is implemented and working.
   - [ ] NCR workflow: OPEN → REVIEW → CORRECTIVE → VERIFIED → CLOSED
   - [ ] Quality KPIs (first-pass yield, NCR rate, rework %)
 
-- [ ] **6.2 Safety Management**
-  - [ ] Safety observation reports
-  - [ ] VLM hazard detection (InternVL3 with safety-specific prompts)
+- [ ] **6.2 Worker Safety & PPE Detection**
+  - [ ] SAM3 body segmentation (detect human silhouettes, NOT identities)
+  - [ ] Face anonymization pipeline (auto-blur before storage)
+  - [ ] VLM PPE verification prompts (hard hat, vest, harness, gloves, glasses)
+  - [ ] Work-at-height detection (DA3 elevation + VLM harness check)
+  - [ ] Restricted zone violation (3D worker position vs BIM hazard zones)
+  - [ ] Improper tool usage detection (VLM context analysis)
+  - [ ] Safety NCR auto-generation from detected violations
+  - [ ] Safety KPIs dashboard (PPE compliance rate, violations trend)
+  - [ ] GDPR compliance: no biometric data, no individual tracking
   - [ ] Permit management (work permits, hot work, confined space)
 
 - [ ] **6.3 Environmental Management**
@@ -349,6 +356,6 @@ Tier 0 (DONE)
 | **Tier 1 + 3** | Certification backed by both scan evidence AND contract requirements |
 | **Tier 4** (BIM 5D) | S-curve, payment certificates, delay analysis |
 | **Tier 5** (Eng. Docs) | Drawing-to-BIM linking, version control, compliance |
-| **Tier 6** (QSE) | Auto-NCRs from deviations, safety detection by VLM |
+| **Tier 6** (QSE) | Auto-NCRs from deviations, **worker safety detection (PPE, hazards)** |
 | **Tier 7** (Comms) | Meeting minutes, agreement tracking, project chat |
 | **Tier 8** (Blockchain) | Immutable audit trail, legal-grade evidence, public transparency |

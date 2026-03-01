@@ -267,13 +267,49 @@ Integrated management of quality control, occupational safety, environmental com
   - Workflow: `OPEN → UNDER_REVIEW → CORRECTIVE_ACTION → VERIFIED → CLOSED`
 - **Quality KPIs**: First-pass yield, NCR rate, rework percentage
 
-### Safety Management
+### Safety Management — Worker Protection
 
-- **Safety observation reports**: Log incidents, near-misses, observations
-- **Hazard identification**: AI analysis of scan images for safety violations
+> **Principle:** STAC sees workers in every scan. Treating them as background — the same as debris or scaffolding — is an ethical failure. If we can detect a wall that's 5mm off-spec, we can and must detect a worker without a hard hat.
+
+- **Worker detection (SAM3 body segmentation)**:
+  - SAM3 segments human silhouettes in the 3D scan
+  - Does NOT identify individuals — only detects presence and body pose
+  - All stored imagery is **automatically anonymized** (face blur/mask)
+  - **GDPR compliant**: no biometric data stored, no facial recognition
+  - Legal basis: GDPR Art. 6.1(f) — legitimate interest in workplace safety
+
+- **PPE verification (InternVL3 VLM)**:
+  - VLM analyzes each detected worker for personal protective equipment:
+
+  | PPE Item | Detection Method | Confidence |
+  |----------|-----------------|------------|
+  | Hard hat | VLM: head region analysis | High |
+  | Safety vest | VLM: color/reflective pattern | High |
+  | Safety harness | VLM + height context from DA3 | Medium-High |
+  | Gloves | VLM: hand region analysis | Medium |
+  | Safety glasses | VLM: face region analysis | Medium |
+  | Safety boots | VLM: footwear analysis | Medium |
+
+- **Hazard detection**:
   - Missing guardrails, unsecured scaffolding, blocked exits
-  - VLM (InternVL3) prompted for safety-specific analysis
+  - Work at height without fall protection (DA3 elevation + VLM harness check)
+  - Workers in restricted/dangerous zones (3D position vs BIM hazard zones)
+  - Improper tool usage (VLM: tool identification + context analysis)
+
+- **Safety NCR generation**:
+  - Auto-generated safety non-conformance when violation detected
+  - Includes: anonymized frame, violation type, location (3D), timestamp
+  - Same workflow as construction NCR: OPEN → REVIEW → CORRECTIVE → CLOSED
+  - Safety KPIs: violations per scan, PPE compliance rate, trend analysis
+
 - **Permit management**: Work permits, hot work permits, confined space
+
+- **GDPR / Privacy safeguards**:
+  - Face anonymization applied before any image is stored
+  - No individual tracking or identification
+  - No biometric data processing
+  - Data stored: `{location_3D, timestamp, violation_type, anonymized_thumbnail}`
+  - Worker count statistics (anonymous) per zone for occupancy monitoring
 
 ### Environmental Management
 
