@@ -9,7 +9,7 @@
 
 ## The Vision
 
-STAC evolves from a dimensional control tool into a **complete, AI-powered construction project management platform** that unifies:
+STAC evolves from a dimensional control tool into a **complete, AI-powered construction and asset lifecycle platform** that unifies:
 
 - Physical verification (3D scanning, BIM comparison)
 - Contract and tender documentation
@@ -18,6 +18,7 @@ STAC evolves from a dimensional control tool into a **complete, AI-powered const
 - Engineering document control
 - Team communication and meeting governance
 - Blockchain-backed immutable audit trail
+- **Full asset lifecycle maintenance (STAC Maintain)**
 
 The core principle: **every claim, certificate, and payment is backed by verifiable, AI-audited physical evidence, cryptographically sealed and immutable.** This creates an unprecedented level of transparency for public works, where every dollar spent can be traced to demonstrated construction progress and quality compliance.
 
@@ -68,6 +69,20 @@ The platform is organized into three interdependent layers, where each upper lay
 
 **Layer 1 is the defensive moat.** Layers 2 and 3 are enormously valuable but theoretically replicable with enough engineering effort. Layer 1 — reconstructing reality from a phone video with AI precision — is what no competitor can replicate today. Combined with everything above it, it creates a platform that is both technically unique and commercially unassailable.
 
+### The Lifecycle Dimension
+
+```
+DESIGN ──→ CONSTRUCTION ──→ HANDOVER ──→ OPERATION ──→ MAINTENANCE ──→ END OF LIFE
+              │                  │                        │
+         STAC Build         Digital Twin            STAC Maintain
+         3D scanning        complete               periodic re-scan
+         deviations         as-built               deterioration vs baseline
+         certification      + docs                 preventive/corrective
+         progress           + history              technician traceability
+```
+
+**STAC doesn't end when construction ends.** The as-built record, verified deviations, documentation, and BIM model become the foundation for operations and maintenance — for the entire useful life of the asset. The license isn't just for the project; it's for the life of what was built.
+
 ---
 
 ## Module Map
@@ -97,7 +112,8 @@ The platform is organized into three interdependent layers, where each upper lay
 │  ├─ ✅ Quality, Safety & Environment (QSE + RAMS)                      │
 │  ├─ 💬 Communication & Meeting Governance                              │
 │  ├─ 📏 Regulatory & Standards Engine                                   │
-│  └─ 🔗 Blockchain Audit Trail                                          │
+│  ├─ 🔗 Blockchain Audit Trail                                          │
+│  └─ 🔧 STAC Maintain: Asset Lifecycle & Maintenance                    │
 │                                                                        │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -449,6 +465,98 @@ Verification API
 
 ---
 
+## 8. STAC Maintain: Asset Lifecycle & Maintenance
+
+### Purpose
+
+Transition seamlessly from construction to operations. STAC has the complete as-built record — the BIM model, verified deviations, construction history, documentation, equipment specs. This is exactly what maintenance teams need and what traditional CMMS systems (SAP PM, Maximo, Ultimo) lack because they start from zero at handover.
+
+> **Principle:** STAC is like a birth certificate for a building. It records how it was born, how it grew, and stays with it for life. The license isn't for the project — it's for the life of what was built.
+
+### Digital Twin Handover
+
+At project completion, STAC automatically generates the operations package:
+
+```
+STAC Build (Construction) ──→ STAC Maintain (Operations)
+    │                              │
+    ├─ BIM model (as-built)        ├─ Asset register (auto-populated)
+    ├─ 3D scan history             ├─ Baseline condition (day-zero reference)
+    ├─ Deviation records           ├─ Known deviations to monitor
+    ├─ Equipment inventory         ├─ Maintenance schedules per asset
+    ├─ Technical documentation     ├─ Specs, manuals, warranties
+    ├─ Certificates                ├─ Construction quality records
+    └─ Blockchain trail            └─ Continues recording maintenance events
+```
+
+### Capabilities
+
+#### Preventive Maintenance
+
+- **Auto-generated maintenance plans**: STAC knows what was installed (SAM3 inventory) and when → calculates maintenance intervals from manufacturer specs
+- **BIM-aware scheduling**: MEP elements (ducts, pipes, equipment) have maintenance requirements → STAC schedules inspections, filter changes, calibrations
+- **Calendar + alerts**: Upcoming maintenance tasks per zone, per system, per equipment
+- **Compliance tracking**: Which maintenance tasks are overdue, completed, or skipped
+
+#### Corrective Maintenance & Repairs
+
+- **Full context for repairs**: Technician queries STAC → gets drawings, specs, construction method, original materials, known deviations
+- **No more "open the wall to see what's inside"**: STAC has the verified 3D model showing exactly what's behind every surface
+- **Work order management**: Create, assign, track, close maintenance work orders
+- **Parts and materials linking**: What was installed → what's needed for replacement
+
+#### Deterioration Monitoring (Re-Scanning)
+
+- **Periodic maintenance scans**: Same phone-based scanning used during construction
+- **Baseline comparison**: Compare current state vs as-built (day-zero reference)
+  - "This floor sank 3mm since completion" → measured, not guessed
+  - "This crack is new since the last scan" → progression tracking
+  - "This facade tile shifted 2mm" → early warning before failure
+- **Structural health monitoring**: Track deviations over time for critical elements
+- **Trend analysis**: Is deterioration accelerating? Stable? Improving after repair?
+
+#### Technician Traceability
+
+- **Who did the work**: Technician ID, company, date, duration
+- **Qualifications**: Active licenses, certifications, training records
+- **Tools & calibrations**: What tools were used, calibration dates, validity
+- **Materials**: What was installed/replaced, batch numbers, warranties
+- **All recorded in blockchain**: Immutable record of every maintenance intervention
+
+#### Warranty Management
+
+- **Warranty tracking**: Each installed element has warranty dates and conditions
+- **Auto-alerts**: Warranty expiration warnings
+- **Claim support**: If something fails under warranty, STAC has the complete construction and maintenance history as evidence
+
+### Technology
+
+- **Asset register**: Auto-populated from SAM3 segmentation + BIM elements
+- **Maintenance scheduling**: Calendar engine with recurrence rules
+- **Re-scanning**: Same DA3 pipeline, comparison against historical baseline
+- **Work orders**: Lightweight task management with assignment and tracking
+- **Mobile-first**: Technicians use the same phone app to scan, view docs, and close work orders
+
+### Business Model Impact
+
+```
+Traditional software:
+    Project license → 2-3 years → done
+    Revenue: one-time
+
+STAC with Maintain:
+    Build license (construction) → 2-3 years
+    + Maintain license (operations) → 20-50+ years
+    Revenue: recurring for the life of the asset
+
+A metro line lasts 100 years.
+A hospital lasts 50 years.
+A commercial building lasts 30 years.
+STAC stays with all of them.
+```
+
+---
+
 ## Integration Architecture
 
 All future modules connect through the existing STAC core:
@@ -476,7 +584,14 @@ All future modules connect through the existing STAC core:
                     ┌────────▼────────┐
                     │   REGULATORY    │
                     │    ENGINE       │
-                    └─────────────────┘
+                    └────────┬────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+    ┌─────────▼──┐  ┌───────▼───────┐  ┌──▼──────────┐
+    │ BLOCKCHAIN │  │ STAC MAINTAIN │  │  HANDOVER   │
+    │ AUDIT TRAIL│  │ (Operations)  │  │  PACKAGE    │
+    └────────────┘  └───────────────┘  └─────────────┘
 ```
 
 ### Data Flow Example: Wall Construction
@@ -513,6 +628,9 @@ All future modules connect through the existing STAC core:
 | **P10** | Regulatory engine | P3 | 2-3 weeks |
 | **P11** | RAMS (if applicable) | P8 | 2-3 weeks |
 | **P12** | Blockchain audit trail | P6 | 3-4 weeks |
+| **P13** | STAC Maintain: lifecycle handover | P6 + P8 | 4-6 weeks |
+| **P14** | STAC Maintain: preventive maintenance | P13 | 3-4 weeks |
+| **P15** | STAC Maintain: deterioration monitoring | P13 + Core | 3-4 weeks |
 
 ---
 
@@ -520,10 +638,10 @@ All future modules connect through the existing STAC core:
 
 | Model | Current Use | Future Use |
 |-------|------------|------------|
-| **DA3** | 3D reconstruction | Same |
-| **SAM3** | Instance segmentation | Safety hazard detection |
-| **InternVL3** | Scene inventory | Occlusion classification, safety analysis |
-| **LLM (TBD)** | — | Contract chat (RAG), contradiction detection, meeting minutes, requirement extraction |
+| **DA3** | 3D reconstruction | Same + deterioration re-scanning |
+| **SAM3** | Instance segmentation | Safety hazard detection + asset inventory for maintenance |
+| **InternVL3** | Scene inventory | Occlusion classification, safety analysis, equipment condition |
+| **LLM (TBD)** | — | Contract chat (RAG), contradiction detection, meeting minutes, requirement extraction, maintenance chat |
 | **Whisper** | — | Meeting audio transcription |
 | **Embedding model** | — | Document vectorization for RAG |
 
@@ -546,6 +664,8 @@ No existing platform combines ALL of these:
 | Requirements traceability | ❌ | ❌ | ❌ | Partial | 🔜 |
 | QSE/RAMS management | ❌ | ❌ | ❌ | Partial | 🔜 |
 | Blockchain audit trail | ❌ | ❌ | ❌ | ❌ | 🔜 |
+| Asset lifecycle maintenance | ❌ | ❌ | ❌ | ❌ | 🔜 |
+| Deterioration monitoring | ❌ | ❌ | ❌ | ❌ | 🔜 |
 
 > **STAC's unique differentiator**: Physical reality verification (3D scanning) is the foundation for everything else. Certificates, payments, and compliance are backed by AI-verified evidence — not self-reported progress.
 
@@ -629,3 +749,28 @@ Bank requires STAC → Lower interest rate → Project saves money
 ```
 
 > **The system pays for itself.** A 0.5% reduction in a project's interest rate on a $200M loan saves more than any STAC license would ever cost. Banks, insurers, and investors become the sales channel — not governments.
+
+### Recurring Revenue: The Lifecycle License
+
+```
+Construction phase: STAC Build license
+    └─ 2-3 years of active scanning, BIM comparison, certification
+    └─ Revenue: project-based
+
+Handover: automatic transition to STAC Maintain
+    └─ Asset register, digital twin, documentation package
+    └─ One-time handover fee
+
+Operations phase: STAC Maintain license (annual/monthly)
+    └─ 20-50+ years of maintenance management
+    └─ Periodic re-scanning for deterioration
+    └─ Revenue: RECURRING for the life of the asset
+
+Total addressable lifetime per project:
+    └─ Metro: 100 years
+    └─ Hospital: 50 years
+    └─ Commercial building: 30 years
+    └─ Residential: 50+ years
+```
+
+> **STAC doesn't end when construction ends.** The most valuable part of the platform may be what comes after — decades of recurring revenue from every asset ever built with STAC.

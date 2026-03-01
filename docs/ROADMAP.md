@@ -317,6 +317,51 @@ Everything here is implemented and working.
 
 ---
 
+## 🔧 Tier 9: STAC Maintain — Asset Lifecycle
+
+**Why ninth:** The crown jewel. After everything is built, verified, documented, and sealed with blockchain — STAC transitions to maintenance mode for the life of the asset.
+
+**Depends on:** Tier 4 (certification) + Tier 6 (QSE) + Tier 8 (blockchain)
+
+- [ ] **9.1 Digital Twin Handover**
+  - [ ] Auto-generate operations package at project completion
+  - [ ] Asset register from SAM3 segmentation + BIM elements
+  - [ ] Baseline condition snapshot (day-zero 3D reference)
+  - [ ] Documentation package: specs, drawings, certificates, warranties
+  - [ ] Project mode → Maintenance mode transition in UI
+
+- [ ] **9.2 Preventive Maintenance**
+  - [ ] Maintenance plan auto-generation from installed equipment
+  - [ ] BIM-aware scheduling (MEP systems, intervals, calibrations)
+  - [ ] Calendar + alerts for upcoming tasks
+  - [ ] Compliance tracking: overdue, completed, skipped
+
+- [ ] **9.3 Corrective Maintenance & Work Orders**
+  - [ ] Work order creation, assignment, tracking, closure
+  - [ ] Full context: drawings, specs, construction method, materials
+  - [ ] Parts/materials linking (installed → replacement needed)
+  - [ ] Repair history per element
+
+- [ ] **9.4 Deterioration Monitoring (Re-Scanning)**
+  - [ ] Periodic maintenance scans (same DA3 pipeline)
+  - [ ] Compare current state vs as-built baseline
+  - [ ] Crack/deformation progression tracking
+  - [ ] Structural health trend analysis
+  - [ ] Early warning alerts for degradation thresholds
+
+- [ ] **9.5 Technician Traceability**
+  - [ ] Technician profiles: ID, company, licenses, certifications
+  - [ ] Tool/equipment tracking with calibration dates
+  - [ ] Materials used: batch numbers, specs, warranties
+  - [ ] All interventions recorded in blockchain
+
+- [ ] **9.6 Warranty Management**
+  - [ ] Warranty dates and conditions per element
+  - [ ] Expiration alerts
+  - [ ] Claim support: full construction + maintenance history as evidence
+
+---
+
 ## Dependency Graph
 
 ```
@@ -326,9 +371,13 @@ Tier 0 (DONE)
   │       │
   │       ├──→ Tier 4: BIM 5D (Gantt, S-Curve, Certification)
   │       │       │
-  │       │       └──→ Tier 8: Blockchain Audit Trail
+  │       │       ├──→ Tier 8: Blockchain Audit Trail
+  │       │       │
+  │       │       └──→ Tier 9: STAC Maintain (lifecycle + maintenance)
   │       │
-  │       └──→ Tier 6: QSE + RAMS
+  │       └──→ Tier 6: QSE + RAMS + Worker Safety
+  │               │
+  │               └──→ Tier 9: STAC Maintain
   │
   ├──→ Tier 2: Long-Range + Multi-Source  (parallel with Tier 1)
   │
@@ -359,3 +408,4 @@ Tier 0 (DONE)
 | **Tier 6** (QSE) | Auto-NCRs from deviations, **worker safety detection (PPE, hazards)** |
 | **Tier 7** (Comms) | Meeting minutes, agreement tracking, project chat |
 | **Tier 8** (Blockchain) | Immutable audit trail, legal-grade evidence, public transparency |
+| **Tier 9** (Maintain) | **Lifecycle maintenance, deterioration monitoring, recurring revenue** |
