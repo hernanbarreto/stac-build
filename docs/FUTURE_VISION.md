@@ -17,8 +17,56 @@ STAC evolves from a dimensional control tool into a **complete, AI-powered const
 - Quality, safety, and environmental management
 - Engineering document control
 - Team communication and meeting governance
+- Blockchain-backed immutable audit trail
 
-The core principle: **every claim, certificate, and payment is backed by verifiable, AI-audited physical evidence.** This creates an unprecedented level of transparency for public works, where every dollar spent can be traced to demonstrated construction progress and quality compliance.
+The core principle: **every claim, certificate, and payment is backed by verifiable, AI-audited physical evidence, cryptographically sealed and immutable.** This creates an unprecedented level of transparency for public works, where every dollar spent can be traced to demonstrated construction progress and quality compliance.
+
+---
+
+## Platform Architecture: 3 Layers
+
+The platform is organized into three interdependent layers, where each upper layer draws its authority from the layer below:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  LAYER 3: GOVERNANCE & TRANSPARENCY                     │
+│                                                         │
+│  🔗 Blockchain audit trail (immutable records)          │
+│  📄 Contract RAG + contradiction detection              │
+│  📜 Certification with physical evidence                │
+│  🤝 Meeting governance + digital signatures             │
+│  📏 Regulatory compliance engine                        │
+│                                                         │
+│  "Nothing is claimed without proof."                    │
+└──────────────────────┬──────────────────────────────────┘
+                       │ feeds from ↓
+┌──────────────────────┴──────────────────────────────────┐
+│  LAYER 2: PROJECT MANAGEMENT                            │
+│                                                         │
+│  📊 BIM 5D (Gantt + S-Curve + cost)                     │
+│  ✅ Requirements matrix                                 │
+│  📐 Engineering document control                        │
+│  🛡️ QSE + RAMS                                         │
+│  👥 Multi-source / multi-team                           │
+│                                                         │
+│  "Every activity is tracked and measured."              │
+└──────────────────────┬──────────────────────────────────┘
+                       │ feeds from ↓
+┌──────────────────────┴──────────────────────────────────┐
+│  LAYER 1: PHYSICAL REALITY (Core)          ← WORKING   │
+│                                                         │
+│  🧠 DA3 dense 3D reconstruction                         │
+│  🔍 SAM3 instance segmentation                          │
+│  💬 InternVL3 scene analysis (VLM)                      │
+│  📐 BIM comparison + sábana de desviaciones             │
+│  🌐 Potree level-of-detail visualization                │
+│  👁️ Occlusion-aware spatio-temporal coverage            │
+│                                                         │
+│  "The physical truth that cannot be faked."             │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Layer 1 is the defensive moat.** Layers 2 and 3 are enormously valuable but theoretically replicable with enough engineering effort. Layer 1 — reconstructing reality from a phone video with AI precision — is what no competitor can replicate today. Combined with everything above it, it creates a platform that is both technically unique and commercially unassailable.
 
 ---
 
@@ -48,7 +96,8 @@ The core principle: **every claim, certificate, and payment is backed by verifia
 │  ├─ 📐 Engineering Document Control                                    │
 │  ├─ ✅ Quality, Safety & Environment (QSE + RAMS)                      │
 │  ├─ 💬 Communication & Meeting Governance                              │
-│  └─ 📏 Regulatory & Standards Engine                                   │
+│  ├─ 📏 Regulatory & Standards Engine                                   │
+│  └─ 🔗 Blockchain Audit Trail                                          │
 │                                                                        │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -304,6 +353,66 @@ Centralized repository of applicable standards, codes, and norms, linked to proj
 
 ---
 
+## 7. Blockchain Audit Trail
+
+### Purpose
+
+Create an **immutable, cryptographically sealed record** of every critical event in the project lifecycle. This ensures that evidence cannot be tampered with — even years after project completion. A prosecutor, auditor, or judge can verify that records are authentic and unaltered.
+
+### What Gets Recorded
+
+Every critical event is hashed and registered on an immutable ledger:
+
+| Event | Data Hashed | Why It Matters |
+|-------|------------|----------------|
+| **Scan performed** | Point cloud hash, date, coverage %, deviations | Proves physical state at a point in time |
+| **Certificate issued** | Amount, elements verified, scan hash that backs it | Every payment tied to physical evidence |
+| **Contract amendment** | Hash of original, hash of amendment, date | Proves what changed and when |
+| **Meeting minutes signed** | Agreements, attendees, audio hash | Proves what was agreed |
+| **NCR opened/closed** | Deviation data, corrective action, verification | Proves quality issues were addressed |
+| **Drawing approved** | Drawing hash, approver, date | Proves engineering was reviewed |
+| **Requirement status change** | Requirement ID, old/new status, evidence | Proves compliance tracking |
+
+### Architecture
+
+```
+Event occurs in STAC
+    │
+    ▼
+Hash generated (SHA-256 of event data)
+    │
+    ▼
+Record written to blockchain
+    ├─ Transaction: { event_type, hash, timestamp, signer }
+    ├─ Previous block hash → chain integrity
+    └─ Digital signature of responsible party
+    │
+    ▼
+Verification API
+    ├─ "Was this certificate really issued on this date?" → verify hash
+    ├─ "Has this scan data been modified?" → compare hashes
+    └─ "Did this person approve this?" → verify signature
+```
+
+### Technology Options
+
+| Option | Pros | Cons | Best For |
+|--------|------|------|----------|
+| **Hyperledger Fabric** | Private, permissioned, enterprise-grade | Complex setup | Large organizations |
+| **Polygon private chain** | EVM compatible, proven | Requires blockchain expertise | If Ethereum ecosystem desired |
+| **Merkle tree + TSA** | Simple, no blockchain infra needed | Less "blockchain marketing" | MVP, quick implementation |
+| **Hedera Hashgraph** | Fast, low cost, public verifiable | Less known | Public transparency focus |
+
+> **Recommended MVP approach**: Start with a simple Merkle tree with Trusted Timestamp Authority (TSA) signatures. This provides cryptographic immutability without the complexity of running blockchain infrastructure. Upgrade to Hyperledger or public chain when the market demands "blockchain" branding.
+
+### Legal Value
+
+- In many jurisdictions, cryptographically signed timestamps with TSA are legally admissible as evidence
+- The audit trail creates a **chain of custody** for all project data
+- For public works: enables transparent auditing by oversight bodies, anti-corruption agencies, and the public
+
+---
+
 ## Integration Architecture
 
 All future modules connect through the existing STAC core:
@@ -367,6 +476,7 @@ All future modules connect through the existing STAC core:
 | **P9** | Meeting governance + chat | — | 4-5 weeks |
 | **P10** | Regulatory engine | P3 | 2-3 weeks |
 | **P11** | RAMS (if applicable) | P8 | 2-3 weeks |
+| **P12** | Blockchain audit trail | P6 | 3-4 weeks |
 
 ---
 
@@ -399,5 +509,87 @@ No existing platform combines ALL of these:
 | Meeting auto-minutes | ❌ | ❌ | ❌ | ❌ | 🔜 |
 | Requirements traceability | ❌ | ❌ | ❌ | Partial | 🔜 |
 | QSE/RAMS management | ❌ | ❌ | ❌ | Partial | 🔜 |
+| Blockchain audit trail | ❌ | ❌ | ❌ | ❌ | 🔜 |
 
 > **STAC's unique differentiator**: Physical reality verification (3D scanning) is the foundation for everything else. Certificates, payments, and compliance are backed by AI-verified evidence — not self-reported progress.
+
+---
+
+## Why This Doesn't Exist Yet
+
+The construction industry solved each problem with a separate tool, sold by a separate company, to a separate buyer:
+
+| Problem | Tool | Buyer |
+|---------|------|-------|
+| BIM design | Revit, ArchiCAD | Architect/Engineer |
+| Document management | Aconex, Newforma | Project Director |
+| Scheduling | Primavera, MS Project | Planner |
+| 3D scanning | Leica, FARO ($100K+ hardware) | Surveyor |
+| Quality | Procore, PlanGrid | QC/QA manager |
+| Certification | Excel | ...everyone |
+
+Four reasons nobody integrated them:
+
+1. **AI/vision experts don't know construction.** Google, Meta, ByteDance publish DA3, SAM3 — they don't know what a tender specification is.
+2. **Construction experts don't know AI.** Traditional contech uses $100K LiDAR scanners and manual processing. They can't assemble a DA3+SAM3+VLM pipeline.
+3. **Incumbents are too big to pivot.** Procore has 15 years of technical debt. Autodesk is busy selling Revit licenses.
+4. **Phone-based 3D was impossible until 2024.** DA3 (2025), SAM3 (2024), InternVL3 (2025) — the pieces literally didn't exist 2 years ago.
+
+---
+
+## Market Strategy: Follow the Money
+
+STAC doesn't need to convince corrupt governments. It needs to convince the **entities that lend them money**.
+
+### The Financial Argument
+
+```
+Global construction cost overruns: 20-40% average (McKinsey)
+
+A $500M public works project:
+├─ Typical overrun: $100-200M (waste, fraud, inefficiency)
+├─ If STAC reduces overrun by 10%: $50M saved
+├─ STAC license cost: irrelevant in comparison
+└─ ROI: effectively infinite
+```
+
+### Who Demands STAC
+
+| Entity | Why They Care | What They Do |
+|--------|--------------|-------------|
+| **Development banks** (IDB, World Bank, EBRD, CAF) | Lose billions to overruns on projects they finance | Require STAC as a loan condition |
+| **Insurers** | Issue performance bonds; high-risk exposure | Require STAC to reduce premiums |
+| **Private investors** (pension funds, PE) | Need verifiable progress for disbursements | Require STAC for lower risk assessment |
+| **Export credit agencies** | Finance overseas infrastructure | Require STAC for monitoring |
+
+### Go-to-Market
+
+```
+Phase 1: France (Ingerop + Impulse Partners)
+    └─ Prove on real projects, build case studies
+
+Phase 2: European expansion
+    └─ EU BIM mandate creates natural demand
+    └─ Partner with European development banks
+
+Phase 3: Global public works
+    └─ IDB / World Bank mandate for Latin America
+    └─ African Development Bank for infrastructure boom
+
+Phase 4: Private sector
+    └─ Insurers offer lower premiums with STAC
+    └─ Banks offer lower interest rates with STAC monitoring
+    └─ "STAC-verified" becomes an industry standard
+```
+
+### The Self-Selling Loop
+
+```
+Bank requires STAC → Lower interest rate → Project saves money
+    → Builder adopts STAC → More projects use it
+    → Insurer requires STAC → Lower premium → More savings
+    → Government mandates STAC → Standard for public works
+    → STAC becomes infrastructure, not software
+```
+
+> **The system pays for itself.** A 0.5% reduction in a project's interest rate on a $200M loan saves more than any STAC license would ever cost. Banks, insurers, and investors become the sales channel — not governments.
