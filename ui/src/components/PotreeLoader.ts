@@ -621,13 +621,52 @@ export class PotreeOctreeLoader {
         this._loading = false
     }
 
-    /** Get bounding box of the whole cloud */
+    /** Get bounding box of the whole cloud (local space, from metadata) */
     getBoundingBox(): THREE.Box3 | null {
         if (!this.metadata) return null
         return new THREE.Box3(
             new THREE.Vector3(...this.metadata.boundingBox.min),
             new THREE.Vector3(...this.metadata.boundingBox.max),
         )
+    }
+
+    /** Get world-space TIGHT bounding box.
+     *  Uses the position attribute's min/max from metadata (actual point extent),
+     *  NOT the octree boundingBox which is always a perfect cube. */
+    getWorldBoundingBox(): THREE.Box3 | null {
+        if (!this.metadata) return null
+
+        // Find position attribute — its min/max is the tight bbox
+        const posAttr = this.metadata.attributes.find(a => a.name === 'position')
+        let localBox: THREE.Box3
+        if (posAttr?.min && posAttr?.max) {
+            localBox = new THREE.Box3(
+                new THREE.Vector3(posAttr.min[0], posAttr.min[1], posAttr.min[2]),
+                new THREE.Vector3(posAttr.max[0], posAttr.max[1], posAttr.max[2]),
+            )
+        } else {
+            // Fallback to octree cube if position attr has no min/max
+            localBox = this.getBoundingBox()!
+        }
+
+        // Transform through the octreeGroup's world matrix (floor transform)
+        const m = this.octreeGroup.matrixWorld
+        const corners = [
+            new THREE.Vector3(localBox.min.x, localBox.min.y, localBox.min.z),
+            new THREE.Vector3(localBox.min.x, localBox.min.y, localBox.max.z),
+            new THREE.Vector3(localBox.min.x, localBox.max.y, localBox.min.z),
+            new THREE.Vector3(localBox.min.x, localBox.max.y, localBox.max.z),
+            new THREE.Vector3(localBox.max.x, localBox.min.y, localBox.min.z),
+            new THREE.Vector3(localBox.max.x, localBox.min.y, localBox.max.z),
+            new THREE.Vector3(localBox.max.x, localBox.max.y, localBox.min.z),
+            new THREE.Vector3(localBox.max.x, localBox.max.y, localBox.max.z),
+        ]
+        const worldBox = new THREE.Box3()
+        for (const c of corners) {
+            c.applyMatrix4(m)
+            worldBox.expandByPoint(c)
+        }
+        return worldBox
     }
 
     /** Get visible point count (after LOD culling) */

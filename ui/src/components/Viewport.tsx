@@ -180,6 +180,56 @@ interface Measurement {
     objects: THREE.Object3D[]  // markers, lines, labels, arcs
 }
 
+// ── frameCloud: isometric view framing the full point cloud extent ──
+function frameCloud(bbox: THREE.Box3, cam: THREE.PerspectiveCamera, ctrl: { target: THREE.Vector3; update: () => void }) {
+    const center = new THREE.Vector3()
+    const size = new THREE.Vector3()
+    bbox.getCenter(center)
+    bbox.getSize(size)
+    const maxDim = Math.max(size.x, size.y, size.z)
+    // Distance to fit entire AABB — rotation inflation of the AABB
+    // naturally provides visual margin so no extra factor needed
+    const fov = cam.fov * (Math.PI / 180)
+    const dist = (maxDim / 2) / Math.tan(fov / 2)
+    // Isometric-like angle: 45° azimuth, 35° elevation (classic ISO)
+    const phi = Math.PI / 180 * 35   // elevation
+    const theta = Math.PI / 180 * 45 // azimuth
+    cam.position.set(
+        center.x + dist * Math.cos(phi) * Math.sin(theta),
+        center.y + dist * Math.sin(phi),
+        center.z + dist * Math.cos(phi) * Math.cos(theta)
+    )
+    ctrl.target.copy(center)
+    ctrl.update()
+}
+
+// ── adaptGrid: resize grid to match cloud extents ──
+function adaptGrid(
+    bbox: THREE.Box3,
+    scene: THREE.Scene,
+    gridRef: React.MutableRefObject<THREE.GridHelper | null>,
+    visible: boolean
+) {
+    if (gridRef.current) {
+        scene.remove(gridRef.current)
+        gridRef.current.geometry.dispose()
+            ; (gridRef.current.material as THREE.Material).dispose()
+    }
+    const center = new THREE.Vector3()
+    const size = new THREE.Vector3()
+    bbox.getCenter(center)
+    bbox.getSize(size)
+    // Grid covers the XZ footprint of the cloud with slight margin
+    const gridSize = Math.max(size.x, size.z) * 1.1
+    const divisions = Math.max(10, Math.min(80, Math.round(gridSize / 0.5)))
+    const grid = new THREE.GridHelper(gridSize, divisions, 0x252d3a, 0x1c2333)
+    // Grid at Y=0 (floor level) — floor transform aligns floor to Y=0
+    grid.position.set(center.x, 0, center.z)
+    grid.visible = visible
+    scene.add(grid)
+    gridRef.current = grid
+}
+
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     { pointSize, activeSession, activeTool, showAxes = true, showGrid = true, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded },
     ref
@@ -214,7 +264,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const lastLodUpdateRef = useRef(0)
     const floorTransformRef = useRef<THREE.Matrix4 | null>(null)
     const gridRef = useRef<THREE.GridHelper | null>(null)
+    const cloudBBoxRef = useRef<THREE.Box3 | null>(null)
     const axesRef = useRef<THREE.Group | null>(null)
+    const showGridRef = useRef(showGrid)
 
     // Alignment gizmo state
     const transformControlsRef = useRef<TransformControls | null>(null)
@@ -227,7 +279,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => { activeToolRef.current = activeTool }, [activeTool])
 
     // Toggle grid and axes visibility
-    useEffect(() => { if (gridRef.current) gridRef.current.visible = showGrid }, [showGrid])
+    useEffect(() => { if (gridRef.current) gridRef.current.visible = showGrid; showGridRef.current = showGrid }, [showGrid])
     useEffect(() => { if (axesRef.current) axesRef.current.visible = showAxes }, [showAxes])
 
     // Toggle OrbitControls left-button based on active tool
@@ -1352,11 +1404,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         resetCamera: () => {
             const cam = cameraRef.current
             const ctrl = controlsRef.current
-            if (cam) {
+            if (!cam || !ctrl) return
+            const bbox = cloudBBoxRef.current
+            if (bbox && !bbox.isEmpty()) {
+                frameCloud(bbox, cam, ctrl)
+            } else {
                 cam.position.set(5, 5, 5)
                 cam.lookAt(0, 0, 0)
-            }
-            if (ctrl) {
                 ctrl.target.set(0, 0, 0)
                 ctrl.update()
             }
@@ -1429,8 +1483,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         scene.add(measureGroup)
         measureGroupRef.current = measureGroup
 
-        // Grid helper
+        // Grid helper (will be replaced when cloud loads)
         const gridHelper = new THREE.GridHelper(20, 40, 0x252d3a, 0x1c2333)
+        gridHelper.visible = showGrid
         scene.add(gridHelper)
         gridRef.current = gridHelper
 
@@ -1460,6 +1515,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         axesGroup.add(makeLabel('Y', '#44ff44', [0, 2.15, 0]))
         axesGroup.add(makeLabel('Z', '#4488ff', [0, 0, 2.15]))
         scene.add(axesGroup)
+        axesGroup.visible = showAxes
         axesRef.current = axesGroup
 
         // Camera
@@ -1882,24 +1938,24 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     floorTransformRef.current = new THREE.Matrix4().fromArray(floorTransform)
                 }
 
-                // Auto-center camera on cloud bounding box
-                const bbox = loader.getBoundingBox()
+                // Auto-center camera on cloud bounding box (world-space)
+                const bbox = loader.getWorldBoundingBox()
                 if (bbox && cameraRef.current && controlsRef.current) {
-                    // If transform was applied, transform the bbox too
-                    if (floorTransform && floorTransform.length === 16) {
-                        const m = new THREE.Matrix4().fromArray(floorTransform)
-                        bbox.applyMatrix4(m)
+                    // Store for resetCamera
+                    cloudBBoxRef.current = bbox.clone()
+                    // If BIM already loaded (race: BIM resolved before cloud),
+                    // expand bbox to include BIM geometry
+                    const bimGroup = bimGroupRef.current
+                    if (bimGroup && bimGroup.children.length > 0) {
+                        const bimBox = new THREE.Box3().setFromObject(bimGroup)
+                        if (!bimBox.isEmpty()) {
+                            cloudBBoxRef.current.union(bimBox)
+                        }
                     }
-                    const center = new THREE.Vector3()
-                    bbox.getCenter(center)
-                    const radius = bbox.getSize(new THREE.Vector3()).length() / 2
-                    cameraRef.current.position.set(
-                        center.x + radius * 1.5,
-                        center.y + radius,
-                        center.z + radius * 1.5
-                    )
-                    controlsRef.current.target.copy(center)
-                    controlsRef.current.update()
+                    // Frame with combined bbox (cloud + any BIM)
+                    frameCloud(cloudBBoxRef.current, cameraRef.current, controlsRef.current)
+                    // Adapt grid to combined extents
+                    if (sceneRef.current) adaptGrid(cloudBBoxRef.current, sceneRef.current, gridRef, showGridRef.current)
                 }
             }).catch((err) => {
                 console.error('[Viewport] Potree load failed:', err)
@@ -2003,9 +2059,30 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     if (onStatusMessage) onStatusMessage(`Loading BIM: ${model.name}...`)
                     loadIFC(model.url, model.name).then((result) => {
                         bimGroup.add(result.group)
-                        const box = new THREE.Box3().setFromObject(result.group)
-                        // box.getSize / getCenter available for debugging
-                        void box
+                        const bimBox = new THREE.Box3().setFromObject(result.group)
+                        // Expand scene bbox to include BIM, re-frame + re-grid
+                        if (!bimBox.isEmpty()) {
+                            const bimSize = new THREE.Vector3()
+                            bimBox.getSize(bimSize)
+                            console.log(`[Viewport] BIM bbox: min(${bimBox.min.x.toFixed(2)},${bimBox.min.y.toFixed(2)},${bimBox.min.z.toFixed(2)}) max(${bimBox.max.x.toFixed(2)},${bimBox.max.y.toFixed(2)},${bimBox.max.z.toFixed(2)}) size(${bimSize.x.toFixed(2)},${bimSize.y.toFixed(2)},${bimSize.z.toFixed(2)})`)
+                            if (cloudBBoxRef.current) {
+                                const cloudSize = new THREE.Vector3()
+                                cloudBBoxRef.current.getSize(cloudSize)
+                                console.log(`[Viewport] Cloud bbox before union: min(${cloudBBoxRef.current.min.x.toFixed(2)},${cloudBBoxRef.current.min.y.toFixed(2)},${cloudBBoxRef.current.min.z.toFixed(2)}) max(${cloudBBoxRef.current.max.x.toFixed(2)},${cloudBBoxRef.current.max.y.toFixed(2)},${cloudBBoxRef.current.max.z.toFixed(2)}) size(${cloudSize.x.toFixed(2)},${cloudSize.y.toFixed(2)},${cloudSize.z.toFixed(2)})`)
+                                cloudBBoxRef.current.union(bimBox)
+                                const unionSize = new THREE.Vector3()
+                                cloudBBoxRef.current.getSize(unionSize)
+                                console.log(`[Viewport] Union bbox: min(${cloudBBoxRef.current.min.x.toFixed(2)},${cloudBBoxRef.current.min.y.toFixed(2)},${cloudBBoxRef.current.min.z.toFixed(2)}) max(${cloudBBoxRef.current.max.x.toFixed(2)},${cloudBBoxRef.current.max.y.toFixed(2)},${cloudBBoxRef.current.max.z.toFixed(2)}) size(${unionSize.x.toFixed(2)},${unionSize.y.toFixed(2)},${unionSize.z.toFixed(2)}) maxDim=${Math.max(unionSize.x, unionSize.y, unionSize.z).toFixed(2)}`)
+                            } else {
+                                cloudBBoxRef.current = bimBox.clone()
+                            }
+                            if (cameraRef.current && controlsRef.current) {
+                                frameCloud(cloudBBoxRef.current, cameraRef.current, controlsRef.current)
+                            }
+                            if (sceneRef.current) {
+                                adaptGrid(cloudBBoxRef.current, sceneRef.current, gridRef, showGridRef.current)
+                            }
+                        }
                         console.log(`[Viewport] ✅ BIM loaded: ${model.name} (${result.group.children.length} elements, ${result.hierarchy.length} hierarchy roots)`)
                         if (onStatusMessage) onStatusMessage(`BIM loaded: ${model.name} (${result.group.children.length} elements)`)
                         loadedResults.push(result)

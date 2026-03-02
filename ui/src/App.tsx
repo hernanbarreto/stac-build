@@ -22,7 +22,7 @@ import {
   Move, Palette, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Wrench,
   Building2, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
   Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
-  Scale, Thermometer, Loader2, BarChart3,
+  Scale, Thermometer, Loader2, BarChart3, Home,
 } from 'lucide-react'
 
 interface SessionInfo {
@@ -73,7 +73,7 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(280)
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [pointSize, setPointSize] = useState(2.0)
-  const [showAxes, setShowAxes] = useState(true)
+  const [showAxes, setShowAxes] = useState(false)
   const [showGrid, setShowGrid] = useState(true)
   const [pointCount, setPointCount] = useState(0)
   const [sessionLoading, setSessionLoading] = useState<string | null>(null)
@@ -1145,6 +1145,8 @@ function App() {
                 title="Clear Measurements"><Trash2 size={16} /></button>
               <button className="tool-btn" onClick={() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') }}
                 title="Reset Section Box"><Unlock size={16} /></button>
+              <button className="tool-btn" onClick={() => viewportRef.current?.resetCamera()}
+                title="Reset View (Home)"><Home size={16} /></button>
             </div>
             <div className="toolbar-separator" />
             <div className="toolbar-group">
