@@ -363,6 +363,30 @@ Everything here is implemented and working.
 
 ---
 
+## 📱 Tier 10: STAC Build Capture (Unity)
+
+**Why last for now:** Requires the scanning pipeline (Tiers 0–2) to be mature before standardizing the capture end. Once implemented, becomes the only supported video source — all metadata is controlled.
+
+**Depends on:** Tier 2 (zoom/multi-source stabilized)
+
+- [ ] **10.1 Unity Camera App**
+  - [ ] AR Foundation camera access (iOS/Android)
+  - [ ] Real-time preview with scanning guidance overlays
+  - [ ] Controlled frame rate + resolution settings
+
+- [ ] **10.2 Metadata Injection**
+  - [ ] Per-frame intrinsics (focal length, lens ID, zoom level) baked into video container
+  - [ ] IMU data stream (accelerometer, gyroscope) for motion priors
+  - [ ] GPS/BLE positioning for scan zone mapping
+  - [ ] STAC session metadata header (project ID, operator, zone, timestamp)
+
+- [ ] **10.3 Source Verification**
+  - [ ] Cryptographic signing of video files (STAC Capture signature)
+  - [ ] Pipeline rejects unsigned/external video sources
+  - [ ] Chain of custody: capture → upload → processing is verified end-to-end
+
+---
+
 ## Dependency Graph
 
 ```
@@ -381,6 +405,8 @@ Tier 0 (DONE)
   │               └──→ Tier 9: STAC Maintain
   │
   ├──→ Tier 2: Long-Range + Multi-Source  (parallel with Tier 1)
+  │       │
+  │       └──→ Tier 10: STAC Build Capture (Unity)
   │
   ├──→ Tier 3: Document Intelligence      (parallel with Tier 1)
   │       │
@@ -410,3 +436,4 @@ Tier 0 (DONE)
 | **Tier 7** (Comms) | Meeting minutes, agreement tracking, project chat |
 | **Tier 8** (Blockchain) | Immutable audit trail, legal-grade evidence, public transparency |
 | **Tier 9** (Maintain) | **Lifecycle maintenance, deterioration monitoring, recurring revenue** |
+| **Tier 10** (Capture) | **Standardized metadata, source verification, guided scanning** |

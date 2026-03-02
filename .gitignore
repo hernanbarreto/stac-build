@@ -95,3 +95,7 @@ vendor/depth_anything_3/workspace/
 .cache/huggingface/
 server/stac.db
 server/data/
+
+# Data directories (large point clouds, scans)
+server/projects/
+BIM/

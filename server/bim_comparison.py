@@ -698,6 +698,17 @@ def save_sabana(
     Save sábana data to sabana.npz for later loading.
     Combines all evaluated element positions/colors into one cloud.
     """
+    # Resolve correct output directory for sábana artifacts
+    from project_paths import resolve_session
+    _sd = Path(session_dir)
+    # Detect project slug: new-style = .../projects/{slug}/scans/{date}/src_{name}
+    if 'projects' in _sd.parts:
+        _slug = _sd.parts[_sd.parts.index('projects') + 1]
+    else:
+        _slug = _sd.name
+    _ctx = resolve_session(os.path.dirname(os.path.abspath(__file__)), _slug)
+    sabana_dir = str(_ctx.bim_comparison_dir) if hasattr(_ctx, 'bim_comparison_dir') else session_dir
+    os.makedirs(sabana_dir, exist_ok=True)
     import json
     
     all_pos = []
@@ -741,7 +752,7 @@ def save_sabana(
         colors = np.empty((0, 4), dtype=np.float32)
     
     # Save compressed npz (archival)
-    out_path = os.path.join(session_dir, "sabana.npz")
+    out_path = os.path.join(sabana_dir, "sabana.npz")
     np.savez_compressed(
         out_path,
         positions=positions,
@@ -749,7 +760,7 @@ def save_sabana(
     )
     
     # Save as binary PLY for Potree streaming (same format as cleaned_cloud.ply)
-    ply_path = os.path.join(session_dir, "sabana_cloud.ply")
+    ply_path = os.path.join(sabana_dir, "sabana_cloud.ply")
     n = len(positions)
     # Convert RGBA float (0-1) → RGB uint8
     rgb = np.clip(colors[:, :3] * 255, 0, 255).astype(np.uint8)
@@ -831,7 +842,7 @@ def save_sabana(
         "summary": summary,
         "elements": metrics,
     }
-    meta_path = os.path.join(session_dir, "sabana_meta.json")
+    meta_path = os.path.join(sabana_dir, "sabana_meta.json")
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     
@@ -908,20 +919,38 @@ def run_comparison(
     session_path = Path(session_dir)
     output_dir = session_path / "output"
     
+    # Resolve project-level paths (IFCs, bim_comparison dir)
+    from project_paths import resolve_session
+    _sd = Path(session_dir)
+    if 'projects' in _sd.parts:
+        _slug = _sd.parts[_sd.parts.index('projects') + 1]
+    else:
+        _slug = _sd.name
+    _ctx = resolve_session(os.path.dirname(os.path.abspath(__file__)), _slug)
+    ifcs_dir = _ctx.ifcs_dir if hasattr(_ctx, 'ifcs_dir') else session_path
+    bim_dir = _ctx.bim_comparison_dir if hasattr(_ctx, 'bim_comparison_dir') else session_path
+    
     # Clean up previous sábana artifacts before regenerating
     import shutil
     for old_file in ["sabana.npz", "sabana_cloud.ply", "sabana_meta.json"]:
-        p = session_path / old_file
-        if p.exists():
-            p.unlink()
-            print(f"[BIM] 🗑️ Deleted old {old_file}")
-    sabana_potree_dir = session_path / "sabana_potree"
+        for search_dir in [bim_dir, session_path]:
+            p = search_dir / old_file
+            if p.exists():
+                p.unlink()
+                print(f"[BIM] 🗑️ Deleted old {old_file}")
+    sabana_potree_dir = bim_dir / "sabana_potree"
     if sabana_potree_dir.exists():
         shutil.rmtree(sabana_potree_dir)
         print("[BIM] 🗑️ Deleted old sabana_potree/")
+    # Also check session_path for legacy location
+    legacy_potree = session_path / "sabana_potree"
+    if legacy_potree.exists():
+        shutil.rmtree(legacy_potree)
     
-    # Find IFC file
-    ifc_files = list(session_path.glob("*.ifc"))
+    # Find IFC file (check ifcs_dir first, then session_path for legacy)
+    ifc_files = list(ifcs_dir.glob("*.ifc"))
+    if not ifc_files:
+        ifc_files = list(session_path.glob("*.ifc"))
     if not ifc_files:
         return {"error": "No IFC file found in session"}
     ifc_path = str(ifc_files[0])

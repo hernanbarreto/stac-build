@@ -496,6 +496,7 @@ function App() {
       // Step 3: load sábana via Potree pipeline (WS binary streaming)
       viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: activeSession })
       viewportRef.current?.setOBBsVisible(false)
+      if (activeTool === 'align') setActiveTool('navigate')
       setSabanaVisible(true)
       setSessions(prev => prev.map(s => s.id === activeSession ? { ...s, hasSabana: true } : s))
       // Fetch full metadata + switch to analysis panel
@@ -532,6 +533,7 @@ function App() {
     setStatusMessage('Loading sábana...')
     viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: activeSession })
     viewportRef.current?.setOBBsVisible(false)
+    if (activeTool === 'align') setActiveTool('navigate')
     setSabanaVisible(true)
     // Fetch full metadata → show analysis panel
     fetch(`/api/sessions/${activeSession}/sabana/meta`)
@@ -699,6 +701,8 @@ function App() {
                 <span className="menu-shortcut">X</span>
               </button>
               <button className="menu-dropdown-item"
+                disabled={sabanaVisible}
+                style={sabanaVisible ? { opacity: 0.4, pointerEvents: 'none' } : {}}
                 onClick={() => menuAction(() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align'))}>
                 <Move size={14} /> Align Cloud
                 <span className="menu-shortcut">G</span>
@@ -920,8 +924,9 @@ function App() {
                     <span className="nav-item-icon"><Scissors size={14} /></span>
                     <span className="nav-item-label">Section Box</span>
                   </div>
-                  <div className={`nav-item ${activeTool === 'align' ? 'active' : ''}`}
-                    onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')}>
+                  <div className={`nav-item ${activeTool === 'align' ? 'active' : ''} ${sabanaVisible ? 'disabled' : ''}`}
+                    style={sabanaVisible ? { opacity: 0.4, pointerEvents: 'none' } : {}}
+                    onClick={() => !sabanaVisible && setActiveTool(activeTool === 'align' ? 'navigate' : 'align')}>
                     <span className="nav-item-icon"><Move size={14} /></span>
                     <span className="nav-item-label">Align Cloud</span>
                   </div>
@@ -1140,7 +1145,9 @@ function App() {
               <button className={`tool-btn ${activeTool === 'section-box' ? 'active' : ''}`}
                 onClick={() => setActiveTool('section-box')} title="Section Box"><Scissors size={16} /></button>
               <button className={`tool-btn ${activeTool === 'align' ? 'active' : ''}`}
-                onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')} title="Align Cloud"><Move size={16} /></button>
+                disabled={sabanaVisible}
+                style={sabanaVisible ? { opacity: 0.4 } : {}}
+                onClick={() => !sabanaVisible && setActiveTool(activeTool === 'align' ? 'navigate' : 'align')} title="Align Cloud"><Move size={16} /></button>
               <button className="tool-btn" onClick={() => viewportRef.current?.clearMeasurements()}
                 title="Clear Measurements"><Trash2 size={16} /></button>
               <button className="tool-btn" onClick={() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') }}

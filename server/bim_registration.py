@@ -487,7 +487,18 @@ def register(
         return None
     
     # ── Extract IFC meshes ──
-    ifc_files = list(session_path.glob("*.ifc"))
+    # Resolve IFC location (ifcs_dir for new-style, session_path for legacy)
+    from project_paths import resolve_session
+    _sd = session_path
+    if 'projects' in _sd.parts:
+        _slug = _sd.parts[_sd.parts.index('projects') + 1]
+    else:
+        _slug = _sd.name
+    _ctx = resolve_session(str(Path(__file__).parent), _slug)
+    _ifcs_dir = _ctx.ifcs_dir if hasattr(_ctx, 'ifcs_dir') else session_path
+    ifc_files = list(_ifcs_dir.glob("*.ifc"))
+    if not ifc_files:
+        ifc_files = list(session_path.glob("*.ifc"))
     if not ifc_files:
         print("[Registration] No IFC file found")
         return None

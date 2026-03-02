@@ -212,14 +212,19 @@ class FrameStorage:
     def load_session_from_disk(self, session_id: str) -> Optional[ScanSession]:
         """Re-load an existing session metadata from disk (for offline processing)."""
         with self.lock:
-            base_dir = self.scans_dir / session_id
+            # Use centralized path resolution (supports both projects/ and scans/)
+            from project_paths import resolve_session
+            import os
+            server_dir = os.path.dirname(os.path.abspath(__file__))
+            ctx = resolve_session(server_dir, session_id)
+            base_dir = ctx.session_dir
             if not base_dir.exists():
                 print(f"[FrameStorage] Session {session_id} not found.")
                 return None
                 
-            frames_dir = base_dir / "frames"
+            frames_dir = ctx.frames_dir
             chunks_dir = base_dir / "chunks"
-            output_dir = base_dir / "output"
+            output_dir = ctx.output_dir
             
             # Reconstruct chunks list
             # We assume chunk_000, chunk_001 etc exist

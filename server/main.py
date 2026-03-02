@@ -38,6 +38,14 @@ from config import cfg
 from da3_native_wrapper import RealtimeDA3
 from slam_processor import get_slam_processor, SLAMProcessor, SLAMFrame
 from pipeline_manager import PipelineManager, PipelineStage, StageId
+from project_paths import resolve_session
+
+# --- Centralized path resolution ---
+SERVER_DIR = str(Path(__file__).parent)
+
+def _ctx(session_id: str):
+    """Resolve a session_id to a path context (new-style or legacy)."""
+    return resolve_session(SERVER_DIR, session_id)
 
 # --- Helper for Chunking ---
 def chunk_data(data, chunk_size=1048572): # approx 1MB, multiple of 28 bytes (7 floats * 4)
@@ -156,8 +164,9 @@ async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, we
     """Run CloudCompPy post-processing on DA3 chunk PLYs as subprocess."""
     import subprocess
     
-    scans_dir = Path(__file__).parent / "scans" / session_id / "output"
-    output_ply = scans_dir / "cleaned_cloud.ply"
+    ctx = _ctx(session_id)
+    scans_dir = ctx.output_dir
+    output_ply = ctx.merged_cloud
     script_path = Path(__file__).parent / "run_cloudcompy.sh"
     
     voxel_size = postproc_config.get("voxel_size", 0.001)
@@ -314,10 +323,10 @@ async def _send_cleaned_cloud(websocket, session_id: str):
     Prefers cleaned_cloud.ply; falls back to raw chunk_000.ply.
     Auto-detects origin fields in PLY header for correct binary parsing.
     """
-    scans_dir = Path(__file__).parent / "scans" / session_id / "output"
+    ctx = _ctx(session_id)
     
-    cleaned_ply = scans_dir / "cleaned_cloud.ply"
-    raw_chunk = scans_dir / "chunk_000.ply"
+    cleaned_ply = ctx.merged_cloud
+    raw_chunk = ctx.output_dir / "chunk_000.ply"
     
     # Prefer cleaned cloud, fallback to raw chunk
     if cleaned_ply.exists():
@@ -335,7 +344,7 @@ async def _send_cleaned_cloud(websocket, session_id: str):
         print(f"[SendCloud] Loading {label} ({file_size_mb:.1f} MB)...")
         
         # Offload heavy PLY parsing + floor alignment to thread pool
-        session_dir = Path(__file__).parent / "scans" / session_id
+        session_dir = ctx.session_dir
         
         def _load_and_align():
             """Heavy sync: read PLY, parse, align floor."""
@@ -437,8 +446,10 @@ async def _send_sabana_cloud(websocket, session_id: str):
     The sábana PLY is already in registered BIM space with deviation colors.
     No floor alignment needed.
     """
-    scans_dir = Path(__file__).parent / "scans" / session_id
-    ply_path = scans_dir / "sabana_cloud.ply"
+    ctx = _ctx(session_id)
+    ply_path = ctx.bim_comparison_dir / "sabana_cloud.ply"
+    if not ply_path.exists():
+        ply_path = ctx.session_dir / "sabana_cloud.ply"
     
     if not ply_path.exists():
         print(f"[SendSabana] ⚠️ sabana_cloud.ply not found for {session_id}")
@@ -518,8 +529,8 @@ async def _send_sabana_cloud(websocket, session_id: str):
 
 async def _send_cleaned_cloud_broadcast(session_id: str):
     """Load and broadcast cleaned_cloud.ply to ALL connected viewers."""
-    scans_dir = Path(__file__).parent / "scans" / session_id / "output"
-    cleaned_ply = scans_dir / "cleaned_cloud.ply"
+    ctx = _ctx(session_id)
+    cleaned_ply = ctx.merged_cloud
     
     if not cleaned_ply.exists():
         print(f"[SendCloud] ⚠️ cleaned_cloud.ply not found for broadcast")
@@ -568,8 +579,7 @@ async def _send_cleaned_cloud_broadcast(session_id: str):
         output_data[:, 6] = 0.0
         
         # ── Floor Alignment ──
-        session_dir = Path(__file__).parent / "scans" / session_id
-        output_data = _align_cloud_to_floor(output_data, session_dir=session_dir)
+        output_data = _align_cloud_to_floor(output_data, session_dir=ctx.session_dir)
         
         binary_bytes = output_data.tobytes()
         
@@ -969,13 +979,17 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # Serves pre-built LOD octree files (metadata.json, octree.bin, hierarchy.bin)
 from potree_converter import convert_ply_to_potree, convert_ply_to_potree_async
 
-SCANS_DIR = Path(__file__).parent / "scans"
+# SCANS_DIR removed — use _ctx(session_id) for all path resolution
 
 @app.get("/potree/{session_id}/{file_path:path}")
 async def serve_potree_files(session_id: str, file_path: str):
     """Serve Potree octree files for a session."""
     from fastapi.responses import FileResponse
-    full_path = SCANS_DIR / session_id / "output" / "potree" / file_path
+    ctx = _ctx(session_id)
+    full_path = ctx.merged_potree / file_path
+    if not full_path.exists():
+        # Fallback: check output/potree/ (for data not yet in merged/)
+        full_path = ctx.output_dir / "potree" / file_path
     if not full_path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
     # Set proper content type for binary files
@@ -990,7 +1004,11 @@ async def serve_potree_files(session_id: str, file_path: str):
 async def serve_sabana_potree_files(session_id: str, file_path: str):
     """Serve sábana Potree octree files for a session."""
     from fastapi.responses import FileResponse
-    full_path = SCANS_DIR / session_id / "sabana_potree" / file_path
+    ctx = _ctx(session_id)
+    full_path = ctx.bim_comparison_dir / "sabana_potree" / file_path
+    if not full_path.exists():
+        # Fallback: check session_dir (legacy location)
+        full_path = ctx.session_dir / "sabana_potree" / file_path
     if not full_path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
     content_type = "application/json" if file_path.endswith(".json") else "application/octet-stream"
@@ -1004,10 +1022,21 @@ async def serve_sabana_potree_files(session_id: str, file_path: str):
 async def serve_bim_file(session_id: str, filename: str):
     """Serve BIM GLB/JSON files for a session."""
     from fastapi.responses import FileResponse
-    full_path = SCANS_DIR / session_id / filename
+    ctx = _ctx(session_id)
+    # Check ifcs_dir first (migrated IFCs), then project_dir, then bim_comparison_dir
+    full_path = ctx.ifcs_dir / filename
+    if not full_path.exists():
+        full_path = ctx.project_dir / filename
+    if not full_path.exists():
+        full_path = ctx.bim_comparison_dir / filename
     if not full_path.exists():
         raise HTTPException(status_code=404, detail=f"BIM file not found: {filename}")
-    content_type = "model/gltf-binary" if filename.endswith(".glb") else "application/json"
+    if filename.endswith(".glb"):
+        content_type = "model/gltf-binary"
+    elif filename.endswith(".ifc"):
+        content_type = "application/octet-stream"
+    else:
+        content_type = "application/json"
     return FileResponse(
         str(full_path),
         media_type=content_type,
@@ -1183,23 +1212,37 @@ async def get_sessions(
 
     try:
         scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-        if not scans_dir.exists(): return []
+        projects_dir = Path(__file__).parent / "projects"
+        
+        # Collect sessions from both legacy scans/ and new projects/
+        all_dirs = []
+        if scans_dir.exists():
+            all_dirs.extend(sorted(scans_dir.iterdir(), reverse=True))
+        if projects_dir.exists():
+            all_dirs.extend(sorted(projects_dir.iterdir(), reverse=True))
+        if not all_dirs: return []
         
         sessions = []
-        for d in sorted(scans_dir.iterdir(), reverse=True):
+        for d in all_dirs:
             if d.is_dir():
                 # Filter by team assignment (non-admin)
                 if allowed_session_ids is not None and d.name not in allowed_session_ids:
                     continue
 
+                # Use centralized path resolution
+                try:
+                    ctx = _ctx(d.name)
+                except Exception:
+                    continue
+
                 # Count frames
-                frames_dir = d / "frames"
+                frames_dir = ctx.frames_dir
                 frame_count = len(list(frames_dir.glob("*.jpg"))) if frames_dir.exists() else 0
                 
                 # Check output
-                output_dir = d / "output"
-                has_cloud = (output_dir / "cleaned_cloud.ply").exists() if output_dir.exists() else False
-                has_segments = (output_dir / "segmentation.json").exists() if output_dir.exists() else False
+                output_dir = ctx.output_dir
+                has_cloud = ctx.merged_cloud.exists()
+                has_segments = (ctx.segmentation_dir / "segmentation.json").exists() if hasattr(ctx, 'segmentation_dir') else (output_dir / "segmentation.json").exists()
                 
                 # Count PLY chunks
                 ply_files = list(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
@@ -1207,12 +1250,12 @@ async def get_sessions(
                 # Cloud size (MB)
                 cloud_size_mb = 0
                 if has_cloud:
-                    cloud_size_mb = round((output_dir / "cleaned_cloud.ply").stat().st_size / (1024*1024), 1)
+                    cloud_size_mb = round(ctx.merged_cloud.stat().st_size / (1024*1024), 1)
                 
                 # BIM / IFC files
-                ifc_files = list(d.glob("*.ifc"))
+                ifc_files = list(ctx.ifcs_dir.glob("*.ifc")) if ctx.ifcs_dir.exists() else []
                 has_bim = len(ifc_files) > 0
-                has_sabana = (d / "sabana.npz").exists()
+                has_sabana = (ctx.bim_comparison_dir / "sabana.npz").exists() if hasattr(ctx, 'bim_comparison_dir') else False
                 
                 sessions.append({
                     "id": d.name,
@@ -1255,15 +1298,24 @@ async def create_session(
     if not re.match(r'^[a-zA-Z0-9_-]+$', session_name):
         raise HTTPException(status_code=400, detail="Session name can only contain letters, numbers, dashes, and underscores")
 
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    session_dir = scans_dir / session_name
-
-    if session_dir.exists():
+    # Create as new-style project
+    from project_paths import ProjectPaths
+    import time as _time
+    projects_dir = Path(__file__).parent / "projects"
+    paths = ProjectPaths(str(projects_dir), session_name)
+    
+    if paths.project_dir.exists():
         raise HTTPException(status_code=409, detail=f"Session '{session_name}' already exists")
+    
+    # Also check legacy scans/ for conflict
+    legacy_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans") / session_name
+    if legacy_dir.exists():
+        raise HTTPException(status_code=409, detail=f"Session '{session_name}' already exists (legacy)")
 
-    session_dir.mkdir(parents=True, exist_ok=True)
-    (session_dir / "frames").mkdir(exist_ok=True)
-    (session_dir / "output").mkdir(exist_ok=True)
+    paths.ensure_dirs()
+    today = _time.strftime("%Y-%m-%d")
+    paths.ensure_source_dirs(today, "default")
+    paths.init_project_meta(session_name)
 
     return {"ok": True, "session_id": session_name}
 
@@ -1280,8 +1332,8 @@ async def get_mode():
 async def get_segments(session_id: str):
     """Get unified segmentation data for a session."""
     try:
-        scans_dir = Path(__file__).parent / "scans"
-        output_dir = scans_dir / session_id / "output"
+        ctx = _ctx(session_id)
+        output_dir = ctx.output_dir
         
         # Use display-time matching (masks → cloud)
         masks_file = output_dir / "seg_masks.npz"
@@ -1386,10 +1438,9 @@ async def process_session_with_slam(session_id: str):
         return {"error": "SLAM processor not initialized"}
     
     # Get session paths
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    session_dir = scans_dir / session_id
-    frames_dir = session_dir / "frames"
-    output_dir = session_dir / "output"
+    ctx = _ctx(session_id)
+    frames_dir = ctx.frames_dir
+    output_dir = ctx.output_dir
     
     if not frames_dir.exists():
         return {"error": f"Session not found or no frames: {session_id}"}
@@ -1465,8 +1516,8 @@ async def serve_session_frame(session_id: str, filename: str):
     """Serve individual frame images from a session's frames directory."""
     from fastapi.responses import FileResponse
 
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    frame_path = scans_dir / session_id / "frames" / filename
+    ctx = _ctx(session_id)
+    frame_path = ctx.frames_dir / filename
 
     if not frame_path.exists():
         raise HTTPException(status_code=404, detail=f"Frame not found: {filename}")
@@ -1476,8 +1527,8 @@ async def serve_session_frame(session_id: str, filename: str):
 @app.get("/api/sessions/{session_id}/keyframes")
 async def get_session_keyframes(session_id: str):
     """Return the list of keyframe filenames from selected_frames.json."""
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    frames_dir = scans_dir / session_id / "frames"
+    ctx = _ctx(session_id)
+    frames_dir = ctx.frames_dir
     selected_json = frames_dir / "selected_frames.json"
 
     if not selected_json.exists():
@@ -1507,9 +1558,8 @@ async def start_interactive_segmentation(session_id: str):
     # Needs to run in executor
     loop = asyncio.get_event_loop()
     
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    session_dir = scans_dir / session_id
-    frames_dir = session_dir / "frames"
+    ctx = _ctx(session_id)
+    frames_dir = ctx.frames_dir
     
     if not frames_dir.exists():
         raise HTTPException(status_code=404, detail="Frames directory not found")
@@ -1578,8 +1628,8 @@ async def add_interactive_prompt(request: Request):
     # Read original resolution from segmentation.json (so we can resize the mask)
     original_res = None
     if session_id:
-        scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-        seg_path = scans_dir / session_id / "output" / "segmentation.json"
+        ctx_seg = _ctx(session_id)
+        seg_path = ctx_seg.segmentation_dir / "segmentation.json"
         if seg_path.exists():
             with open(seg_path) as f:
                 seg_data = json.load(f)
@@ -1644,8 +1694,8 @@ async def save_alignment(session_id: str, request: Request):
     if not transform or len(transform) != 16:
         raise HTTPException(status_code=400, detail="Missing or invalid transform (need 16 floats)")
 
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    output_dir = scans_dir / session_id / "output"
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
     if not output_dir.exists():
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -1716,19 +1766,20 @@ async def upload_bim(
     if not file.filename or not file.filename.lower().endswith(".ifc"):
         raise HTTPException(status_code=400, detail="Only .ifc files are accepted")
 
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    session_dir = scans_dir / session_id
-    if not session_dir.exists():
+    ctx = _ctx(session_id)
+    if not ctx.ifcs_dir.exists():
+        ctx.ifcs_dir.mkdir(parents=True, exist_ok=True)
+    if not ctx.session_dir.exists():
         raise HTTPException(status_code=404, detail="Session not found")
 
     # Save file
-    dest = session_dir / file.filename
+    dest = ctx.ifcs_dir / file.filename
     content = await file.read()
     dest.write_bytes(content)
     print(f"[BIM] ✅ Uploaded {file.filename} ({len(content)/1024:.0f} KB) to {session_id}")
 
     # Return updated list of IFC files
-    ifc_files = [f.name for f in sorted(session_dir.glob("*.ifc"))]
+    ifc_files = [f.name for f in sorted(ctx.ifcs_dir.glob("*.ifc"))]
     return {"ok": True, "filename": file.filename, "ifc_files": ifc_files}
 
 
@@ -1750,8 +1801,8 @@ async def delete_bim(
     if not filename.lower().endswith(".ifc"):
         raise HTTPException(status_code=400, detail="Only .ifc files can be deleted")
 
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    filepath = scans_dir / session_id / filename
+    ctx = _ctx(session_id)
+    filepath = ctx.ifcs_dir / filename
     if not filepath.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -1759,8 +1810,7 @@ async def delete_bim(
     print(f"[BIM] 🗑️ Deleted {filename} from {session_id}")
 
     # Return updated list of IFC files
-    session_dir = scans_dir / session_id
-    ifc_files = [f.name for f in sorted(session_dir.glob("*.ifc"))]
+    ifc_files = [f.name for f in sorted(ctx.ifcs_dir.glob("*.ifc"))]
     return {"ok": True, "ifc_files": ifc_files}
 @app.post("/api/segmentation/propagate")
 async def propagate_interactive_segmentation(request: Request):
@@ -1786,8 +1836,8 @@ async def propagate_interactive_segmentation(request: Request):
     from sam3_wrapper import get_sam3_wrapper
     sam3 = get_sam3_wrapper()
     
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    output_dir = scans_dir / session_id / "output"
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
     
     tid = task_manager.start(session_id, "propagation", f'Propagating "{label_name}"')
     
@@ -1878,8 +1928,8 @@ async def get_segmentation_instances(session_id: str):
     Prefers segmentation_result.json (grouped by instance_id, with OBBs)
     over segmentation.json (raw obj_ids from SAM3).
     """
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    output_dir = scans_dir / session_id / "output"
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
     
     # Prefer the grouped result (has real instance count, OBBs, point_indices)
     result_path = output_dir / "segmentation_result.json"
@@ -1925,8 +1975,8 @@ async def get_instance_mask(session_id: str, instance_id: int, frame: str = "", 
         frame: frame filename (e.g. '000042.jpg') — fallback for numeric index
         kf_index: sequential keyframe index (0-based) — preferred, matches NPZ frame indices
     """
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    output_dir = scans_dir / session_id / "output"
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
     masks_path = output_dir / "seg_masks.npz"
     seg_path = output_dir / "segmentation.json"
 
@@ -2069,8 +2119,8 @@ async def rename_segmentation_instance(request: Request):
     if not session_id or instance_id is None:
         raise HTTPException(status_code=400, detail="Missing session_id or instance_id")
 
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    output_dir = scans_dir / session_id / "output"
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
     seg_path = output_dir / "segmentation.json"
     result_path = output_dir / "segmentation_result.json"
 
@@ -2125,8 +2175,8 @@ async def delete_segmentation_instance(request: Request):
     if not session_id or instance_id is None:
         raise HTTPException(status_code=400, detail="Missing session_id or instance_id")
 
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    output_dir = scans_dir / session_id / "output"
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
     seg_path = output_dir / "segmentation.json"
     result_path = output_dir / "segmentation_result.json"
     masks_path = output_dir / "seg_masks.npz"
@@ -2238,7 +2288,8 @@ async def refresh_segmentation(body: dict):
     session_id = body.get("session_id")
     if not session_id:
         raise HTTPException(400, "session_id required")
-    output_dir = Path(f"scans/{session_id}/output")
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
     result_path = output_dir / "segmentation_result.json"
 
     loop = asyncio.get_event_loop()
@@ -2279,9 +2330,8 @@ async def bim_auto_match(session_id: str):
     Automatically match segment labels to IFC element name suffixes.
     Returns all discovered matches for this session.
     """
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    session_dir = scans_dir / session_id
-    output_dir = session_dir / "output"
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
     
     # Load segmentation
     seg_result_path = output_dir / "segmentation_result.json"
@@ -2296,7 +2346,7 @@ async def bim_auto_match(session_id: str):
     seg_labels = {str(inst.get("label", "")) for inst in seg_data.get("instances", [])}
     
     # Find IFC file and build name index
-    ifc_files = list(session_dir.glob("*.ifc"))
+    ifc_files = list(ctx.ifcs_dir.glob("*.ifc"))
     if not ifc_files:
         return {"matches": [], "error": "No IFC file found"}
     
@@ -2353,8 +2403,8 @@ async def bim_compare(request: Request):
     if not session_id or not matches:
         raise HTTPException(400, "session_id and matches required")
     
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    session_dir = str(scans_dir / session_id)
+    ctx = _ctx(session_id)
+    session_dir = str(ctx.session_dir)
     
     loop = asyncio.get_event_loop()
     tid = task_manager.start(session_id, "bim_compare", "BIM vs Scan Comparison")
@@ -2391,10 +2441,14 @@ async def bim_compare(request: Request):
 @app.get("/api/sessions/{session_id}/sabana/exists")
 async def sabana_exists(session_id: str):
     """Check if a sábana has been generated for this session."""
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    session_dir = scans_dir / session_id
-    npz_path = session_dir / "sabana.npz"
-    meta_path = session_dir / "sabana_meta.json"
+    ctx = _ctx(session_id)
+    # Check both bim_comparison_dir (migrated) and session_dir (newly generated)
+    npz_path = ctx.bim_comparison_dir / "sabana.npz"
+    if not npz_path.exists():
+        npz_path = ctx.session_dir / "sabana.npz"
+    meta_path = ctx.bim_comparison_dir / "sabana_meta.json"
+    if not meta_path.exists():
+        meta_path = ctx.session_dir / "sabana_meta.json"
     
     if not npz_path.exists():
         return {"exists": False}
@@ -2411,8 +2465,10 @@ async def sabana_exists(session_id: str):
 @app.get("/api/sessions/{session_id}/sabana/meta")
 async def sabana_meta(session_id: str):
     """Serve full sabana_meta.json for the BIM Analysis Panel."""
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    meta_path = scans_dir / session_id / "sabana_meta.json"
+    ctx = _ctx(session_id)
+    meta_path = ctx.bim_comparison_dir / "sabana_meta.json"
+    if not meta_path.exists():
+        meta_path = ctx.session_dir / "sabana_meta.json"
     if not meta_path.exists():
         raise HTTPException(status_code=404, detail="No sábana metadata found")
     import json as _json
@@ -2423,10 +2479,13 @@ async def sabana_meta(session_id: str):
 async def sabana_load(session_id: str):
     """Serve saved sábana as raw binary (positions + colors as Float32)."""
     from starlette.responses import Response
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    session_dir = scans_dir / session_id
-    pos_path = session_dir / "sabana_positions.bin"
-    col_path = session_dir / "sabana_colors.bin"
+    ctx = _ctx(session_id)
+    # Check bim_comparison dir first (migrated), then session_dir (newly generated)
+    pos_path = ctx.bim_comparison_dir / "sabana_positions.bin"
+    col_path = ctx.bim_comparison_dir / "sabana_colors.bin"
+    if not pos_path.exists():
+        pos_path = ctx.session_dir / "sabana_positions.bin"
+        col_path = ctx.session_dir / "sabana_colors.bin"
     
     if not pos_path.exists() or not col_path.exists():
         raise HTTPException(404, "No sábana found for this session")
@@ -2466,8 +2525,8 @@ async def paint_mask(request: Request):
     if not session_id or instance_id is None:
         raise HTTPException(status_code=400, detail="Missing session_id or instance_id")
 
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    output_dir = scans_dir / session_id / "output"
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
     masks_path = output_dir / "seg_masks.npz"
     seg_path = output_dir / "segmentation.json"
 
@@ -2628,10 +2687,9 @@ async def add_text_prompt_endpoint(request: Request):
 async def run_auto_segmentation(session_id: str):
     """Full auto-segmentation: VLM scene analysis → SAM3 pipeline."""
     from task_manager import task_manager
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    session_dir = scans_dir / session_id
-    frames_dir = session_dir / "frames"
-    output_dir = session_dir / "output"
+    ctx = _ctx(session_id)
+    frames_dir = ctx.frames_dir
+    output_dir = ctx.output_dir
 
     if not frames_dir.exists():
         raise HTTPException(status_code=404, detail="Frames directory not found")
@@ -2681,10 +2739,10 @@ async def clean_segmentation_instance(request: Request):
     if not session_id or instance_id is None:
         raise HTTPException(status_code=400, detail="Missing session_id or instance_id")
 
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    output_dir = scans_dir / session_id / "output"
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
     seg_path = output_dir / "segmentation.json"
-    cloud_path = output_dir / "cleaned_cloud.ply"
+    cloud_path = ctx.merged_cloud
 
     if not seg_path.exists():
         raise HTTPException(status_code=404, detail="No segmentation data")
@@ -2750,10 +2808,9 @@ async def slam_websocket(websocket: WebSocket):
     
     # Start new session
     session_id = f"live_{int(time.time())}"
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    session_dir = scans_dir / session_id
-    frames_dir = session_dir / "frames"
-    output_dir = session_dir / "output"
+    ctx = _ctx(session_id)
+    frames_dir = ctx.frames_dir
+    output_dir = ctx.output_dir
     frames_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -2879,10 +2936,9 @@ async def _camera_mast3r_flow(websocket: WebSocket):
     
     # Start session
     session_id = f"live_{int(time.time())}"
-    scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-    session_dir = scans_dir / session_id
-    frames_dir = session_dir / "frames"
-    output_dir = session_dir / "output"
+    ctx = _ctx(session_id)
+    frames_dir = ctx.frames_dir
+    output_dir = ctx.output_dir
     frames_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -3232,7 +3288,8 @@ async def viewer_websocket(websocket: WebSocket):
                                         
                                         await _send_cleaned_cloud(websocket, session_id)
                                         
-                                        output_dir = Path(__file__).parent / "scans" / session_id / "output"
+                                        _viewer_ctx = _ctx(session_id)
+                                        output_dir = _viewer_ctx.output_dir
                                         from segmentation_pipeline import apply_segmentation_to_cloud
                                         _seg_loop2 = asyncio.get_event_loop()
                                         seg_data = await _seg_loop2.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
@@ -3292,12 +3349,15 @@ async def viewer_websocket(websocket: WebSocket):
                 
                 # Stream saved point clouds
                 try:
-                    scans_dir = Path(__file__).parent / "scans"
-                    output_dir = scans_dir / session_id / "output"
+                    _load_ctx = _ctx(session_id)
+                    output_dir = _load_ctx.output_dir
 
                     # ── Potree LOD: always convert before serving ──
                     cleaned_ply = output_dir / "cleaned_cloud.ply"
-                    potree_metadata = output_dir / "potree" / "metadata.json"
+                    # Check both merged/potree (migrated) and output/potree (newly converted)
+                    potree_metadata = _load_ctx.merged_potree / "metadata.json"
+                    if not potree_metadata.exists():
+                        potree_metadata = output_dir / "potree" / "metadata.json"
                     
                     if not cleaned_ply.exists():
                         chunk_plys = sorted(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
@@ -3322,7 +3382,7 @@ async def viewer_websocket(websocket: WebSocket):
                                 "type": "status",
                                 "message": "Building LOD octree (first load)..."
                             }))
-                            session_path = SCANS_DIR / session_id
+                            session_path = _load_ctx.session_dir
                             success = await convert_ply_to_potree_async(
                                 session_path,
                                 on_progress=lambda msg: websocket.send_text(json.dumps({"type": "status", "message": msg}))
@@ -3379,8 +3439,7 @@ async def viewer_websocket(websocket: WebSocket):
                                     except Exception as e:
                                         print(f"[Viewer] ⚠️ Floor alignment fallback failed: {e}")
                             # Detect IFC files in session directory
-                            session_path = SCANS_DIR / session_id
-                            ifc_files = [f.name for f in sorted(session_path.glob('*.ifc'))]
+                            ifc_files = [f.name for f in sorted(_load_ctx.ifcs_dir.glob('*.ifc'))] if _load_ctx.ifcs_dir.exists() else []
                             return potree_meta, floor_transform_4x4, ifc_files
                         
                         potree_meta, floor_transform_4x4, ifc_files = await loop.run_in_executor(None, _load_metadata)
@@ -3429,19 +3488,23 @@ async def viewer_websocket(websocket: WebSocket):
             elif cmd.get("type") == "load_sabana":
                 session_id = cmd.get("session_id")
                 print(f"[Viewer] Loading sábana for {session_id}...")
-                session_dir = SCANS_DIR / session_id
+                _sabana_ctx = _ctx(session_id)
+                sabana_dir = _sabana_ctx.bim_comparison_dir
+                # Fallback to session_dir if sabana files aren't in bim_comparison
+                if not (sabana_dir / "sabana_cloud.ply").exists():
+                    sabana_dir = _sabana_ctx.session_dir
 
                 # Step 1: Convert sábana PLY → Potree octree (cached)
                 from potree_converter import convert_sabana_to_potree_async
                 success = await convert_sabana_to_potree_async(
-                    session_dir,
+                    sabana_dir,
                     on_progress=lambda msg: websocket.send_text(json.dumps({"type": "status", "message": msg})),
                 )
                 if not success:
                     await websocket.send_text(json.dumps({"type": "error", "message": "Sábana Potree conversion failed"}))
                 else:
                     # Read metadata
-                    potree_meta_path = session_dir / "sabana_potree" / "metadata.json"
+                    potree_meta_path = sabana_dir / "sabana_potree" / "metadata.json"
                     potree_meta = json.loads(potree_meta_path.read_text()) if potree_meta_path.exists() else {}
                     n_pts = potree_meta.get("points", 0)
 
@@ -3499,7 +3562,7 @@ async def viewer_websocket(websocket: WebSocket):
 
                     # Convert to Potree octree and notify viewer
                     try:
-                        session_path = SCANS_DIR / sid
+                        session_path = _ctx(sid).session_dir
                         await websocket.send_text(json.dumps({
                             "type": "status",
                             "message": "Building LOD octree..."
@@ -3509,7 +3572,10 @@ async def viewer_websocket(websocket: WebSocket):
                             # Offload file reads to thread pool
                             _pipe_loop = asyncio.get_event_loop()
                             def _load_pipe_metadata():
-                                potree_meta_path = session_path / "output" / "potree" / "metadata.json"
+                                _pipe_ctx = _ctx(sid)
+                                potree_meta_path = _pipe_ctx.merged_potree / "metadata.json"
+                                if not potree_meta_path.exists():
+                                    potree_meta_path = session_path / "output" / "potree" / "metadata.json"
                                 potree_meta = json.loads(potree_meta_path.read_text())
                                 floor_transform_4x4 = None
                                 ft_path = session_path / "output" / "floor_transform.npz"
@@ -3551,7 +3617,8 @@ async def viewer_websocket(websocket: WebSocket):
                     try:
                         from segmentation_pipeline import apply_segmentation_to_cloud
                         _pipe_loop = asyncio.get_event_loop()
-                        _seg_output_dir = Path(__file__).parent / "scans" / sid / "output"
+                        _seg_ctx = _ctx(sid)
+                        _seg_output_dir = _seg_ctx.output_dir
                         seg_data = await _pipe_loop.run_in_executor(
                             None, apply_segmentation_to_cloud, _seg_output_dir
                         )

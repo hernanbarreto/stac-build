@@ -67,6 +67,7 @@ async def init_db():
     """Create tables and bootstrap admin user if not exists."""
     from auth import hash_password  # local import to avoid circular
     import db_team  # noqa: F401 — register Team/TeamMember/etc. models
+    import db_project  # noqa: F401 — register Project/ScanDay/Source/IFC models
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

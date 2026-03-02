@@ -160,9 +160,10 @@ class PipelineManager:
         job = PipelineJob(session_id=session_id, stages=stage_states)
         self._jobs[session_id] = job
 
-        # Resolve session directory
-        scans_dir = Path(__file__).parent / "scans"
-        session_dir = str((scans_dir / session_id).resolve())
+        # Resolve session directory (supports both new-style projects/ and legacy scans/)
+        from project_paths import resolve_session
+        ctx = resolve_session(str(Path(__file__).parent), session_id)
+        session_dir = str(ctx.session_dir)
 
         # Start the orchestration loop as an asyncio task
         job._task = asyncio.create_task(
