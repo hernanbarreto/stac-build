@@ -1473,15 +1473,20 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         camera.lookAt(0, 0, 0)
         cameraRef.current = camera
 
-        // Controls
+        // Controls — using ONLY native OrbitControls features.
+        // CRITICAL: OrbitControls.update() always overwrites camera.position
+        // from internal spherical state. Any external manipulation = bounce.
+        // So we use the built-in zoomToCursor instead of custom handlers.
         const controls = new OrbitControls(camera, renderer.domElement)
         controls.enableDamping = true
-        controls.dampingFactor = 0.08
+        controls.dampingFactor = 0.1
         controls.screenSpacePanning = true
-        controls.minDistance = 0.0001
+        controls.minDistance = 0
         controls.maxDistance = 5000
         controls.maxPolarAngle = Math.PI
-        controls.zoomSpeed = 3.0
+        controls.enableZoom = true
+        controls.zoomSpeed = 8.0          // Fast zoom for large clouds
+        controls.zoomToCursor = true      // Zoom toward mouse pointer + auto-reposition target
         controlsRef.current = controls
 
         // Shader material for point cloud
@@ -1516,6 +1521,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const animate = () => {
             animFrameRef.current = requestAnimationFrame(animate)
             controls.update()
+
+            // Re-anchor target: when zoom brings camera very close to target,
+            // push target forward to maintain minimum orbit radius.
+            // This prevents logarithmic zoom from stalling at close range.
+            // Safe because we modify target AFTER update() wrote camera.position.
+            const orbitDist = camera.position.distanceTo(controls.target)
+            if (orbitDist < 0.5) {
+                const forward = new THREE.Vector3(0, 0, -1)
+                    .transformDirection(camera.matrixWorld)
+                controls.target.copy(camera.position).addScaledVector(forward, 0.5)
+            }
 
             // FPS counter
             fpsFramesRef.current++
