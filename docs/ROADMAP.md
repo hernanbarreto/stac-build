@@ -28,43 +28,44 @@ Everything here is implemented and working.
 
 ---
 
-## 🔨 Tier 1: Coverage Engine
+## ✅ Tier 1: Coverage Engine
 
 **Why first:** This is the foundation for accurate progress tracking. Without cumulative coverage and occlusion handling, all downstream features (certification, S-curve, progress) would report incorrect data.
 
 **Depends on:** Tier 0 (done)
 
-- [ ] **1.1 Coverage Store** (`coverage_store.py`)
-  - [ ] Per-element cumulative coverage data model
-  - [ ] Surface sample persistence (coverage_history.npz)
-  - [ ] Merge logic: new scan + historical → union (coverage only increases)
-  - [ ] Coverage timeline tracking (scan-by-scan snapshots)
+- [x] **1.1 Coverage Store** (`coverage_store.py`)
+  - [x] Per-element cumulative coverage data model
+  - [x] Surface sample persistence (NPZ per element in `coverage_history/`)
+  - [x] Merge logic: `best_covered = old | new` (coverage only increases)
+  - [x] Coverage timeline tracking (`coverage_timeline.json`)
 
-- [ ] **1.2 Occlusion Ray-Caster** (`occlusion_raycaster.py`)
-  - [ ] Extract camera positions from DA3 extrinsics
-  - [ ] Cylindrical ray query (scan_tree along camera→BIM ray)
-  - [ ] Classify BIM surface samples: COVERED | OCCLUDED | NOT_BUILT | NOT_VISIBLE
-  - [ ] Integrate with existing `compute_coverage_pct()` flow
+- [x] **1.2 Occlusion Ray-Caster** (`occlusion_raycaster.py`)
+  - [x] Extract camera positions from DA3 extrinsics (w2c → world)
+  - [x] Cylindrical ray query (scan_tree along camera→BIM ray)
+  - [x] Classify BIM surface samples: COVERED | OCCLUDED | NOT_BUILT | NOT_VISIBLE
+  - [x] Normal-aware: front vs back face detection via dot product
+  - [x] Integrated into `run_comparison()` pipeline
 
-- [ ] **1.3 SAM3 Occluder Identification**
-  - [ ] Map occluding points to SAM3 segment labels
-  - [ ] Report which segment blocks which BIM element
+- [x] **1.3 SAM3 Occluder Identification**
+  - [x] Map occluding points to SAM3 segment labels (majority vote)
+  - [x] Per-point label array built from `segmentation_result.json`
 
-- [ ] **1.4 VLM Occlusion Classifier**
+- [ ] **1.4 VLM Occlusion Classifier** *(deferred — defaults to UNKNOWN)*
   - [ ] Extend `scene_analyzer.py` with occlusion classification prompt
   - [ ] Classify occluders: permanent (furniture, MEP) vs temporary (debris, scaffold)
   - [ ] Store classification per occlusion event
 
-- [ ] **1.5 Element State Machine**
-  - [ ] State model: NOT_STARTED → IN_PROGRESS → COMPLETED → VERIFIED
-  - [ ] Automatic transitions based on coverage + quality thresholds
-  - [ ] OCCLUDED_PERMANENT: freeze coverage at last known value
-  - [ ] OCCLUDED_TEMPORARY: flag for re-scan
+- [x] **1.5 Element State Machine**
+  - [x] State model: NOT_STARTED → IN_PROGRESS → COMPLETED → VERIFIED
+  - [x] Automatic transitions based on coverage + quality thresholds
+  - [x] OCCLUDED_PERMANENT: freeze coverage at last known value
+  - [x] OCCLUDED_TEMPORARY: flag for re-scan
 
-- [ ] **1.6 Pipeline Integration**
-  - [ ] Update `run_comparison()` in `bim_comparison.py` to use coverage engine
-  - [ ] Update `save_sabana()` to include occlusion data in metadata
-  - [ ] Update UI to show element state + occlusion indicators
+- [x] **1.6 Pipeline Integration**
+  - [x] Update `run_comparison()` in `bim_comparison.py` to use coverage engine
+  - [x] Config section `coverage_engine` in `config.yaml`
+  - [ ] Update UI to show element state + occlusion indicators *(Tier 4)*
 
 ---
 

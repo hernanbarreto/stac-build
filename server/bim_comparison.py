@@ -874,17 +874,36 @@ def run_comparison(
       2. Extract ALL BIM element geometry
       3. For matched elements: C2M deviation → green/yellow/red sábana
       4. For unmatched elements: gray transparent (not yet built)
+      5. Cumulative coverage tracking with occlusion detection
     
     matches: [{"segment_label": "292127", "element_key": "292127", "ifc_type": "..."}]
     """
     from bim_registration import register, transform_points, _load_cloud_and_segments
     import yaml as _yaml
     
+    # Coverage engine imports (graceful fallback if not yet available)
+    try:
+        from coverage_store import CoverageStore, SampleStatus, ElementState
+        from occlusion_raycaster import (
+            load_camera_positions, classify_bim_surface, build_segment_labels
+        )
+        COVERAGE_ENGINE_AVAILABLE = True
+    except ImportError as _ce:
+        print(f"[BIM-Compare] Coverage engine not available: {_ce}")
+        COVERAGE_ENGINE_AVAILABLE = False
+    
     # Read coverage proximity from config (once, not per element)
     _cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     with open(_cfg_path) as _f:
         _cfg = _yaml.safe_load(_f)
     proximity_m = _cfg.get("bim", {}).get("deviation", {}).get("coverage_proximity_m", 0.15)
+    
+    # Coverage engine config
+    ce_cfg = _cfg.get("coverage_engine", {})
+    ce_enabled = ce_cfg.get("enabled", True) and COVERAGE_ENGINE_AVAILABLE
+    ray_radius = ce_cfg.get("ray_radius", 0.05)
+    completion_threshold = ce_cfg.get("completion_threshold", 80.0)
+    quality_threshold = ce_cfg.get("quality_threshold", 80.0)
     
     session_path = Path(session_dir)
     output_dir = session_path / "output"
@@ -946,6 +965,33 @@ def run_comparison(
     if xyz_all is None:
         return {"error": "Could not load cleaned_cloud.ply"}
     
+    # ── Step 2b: Coverage engine setup ──
+    cam_positions = None
+    seg_labels = None
+    cov_store = None
+    scan_id = time.strftime("%Y%m%d_%H%M%S")
+    
+    if ce_enabled:
+        if progress_callback:
+            progress_callback(82, "Loading camera poses for coverage engine...")
+        
+        cam_positions = load_camera_positions(session_dir)
+        if len(cam_positions) == 0:
+            print("[BIM-Compare] No camera poses → coverage engine disabled for this run")
+            ce_enabled = False
+        else:
+            # Transform camera positions with registration matrix
+            cam_homo = np.hstack([cam_positions, np.ones((len(cam_positions), 1))])
+            cam_positions = (T @ cam_homo.T).T[:, :3].astype(np.float32)
+            
+            # Build per-point segment labels for occluder identification
+            seg_file = str(seg_result_path if seg_result_path.exists() else seg_path)
+            seg_labels = build_segment_labels(len(xyz_all), seg_file)
+            
+            # Initialize coverage store
+            cov_store = CoverageStore(session_dir)
+            print(f"[BIM-Compare] Coverage engine active: {len(cam_positions)} cameras")
+    
     if progress_callback:
         progress_callback(85, "Computing deviations...")
     
@@ -1005,6 +1051,59 @@ def run_comparison(
             face_areas = np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1) * 0.5
             bim_surface_m2 = float(np.sum(face_areas))
             
+            # ── Coverage engine: cumulative + occlusion ──
+            coverage_cumulative = coverage
+            occluded_pct = 0.0
+            element_state = "IN_PROGRESS" if coverage > 0 else "NOT_STARTED"
+            
+            if ce_enabled and cov_store is not None:
+                try:
+                    # Initialize or load existing coverage for this element
+                    ec = cov_store.init_element(key, mesh_verts, mesh_faces)
+                    
+                    # Transform scan cloud for ray-casting (already registered)
+                    scan_registered = transform_points(xyz_all, T)
+                    
+                    # Classify BIM surface samples with ray-casting
+                    scan_result = classify_bim_surface(
+                        cam_positions=cam_positions,
+                        scan_cloud=scan_registered,
+                        bim_samples=ec.surface_samples,
+                        bim_normals=ec.surface_normals,
+                        proximity_m=proximity_m,
+                        ray_radius=ray_radius,
+                        seg_labels=seg_labels,
+                    )
+                    scan_result.scan_id = scan_id
+                    scan_result.date = time.strftime("%Y-%m-%dT%H:%M:%S")
+                    
+                    # Also store per-sample deviation from C2M
+                    # For COVERED samples, use nearest scan point distance
+                    for si in range(ec.n_samples):
+                        if scan_result.status[si] == SampleStatus.COVERED:
+                            # Find nearest scan point to this BIM sample
+                            d_idx = np.argmin(np.linalg.norm(
+                                scan_points - ec.surface_samples[si], axis=1
+                            )) if len(scan_points) > 0 else -1
+                            if d_idx >= 0 and d_idx < len(distances):
+                                scan_result.deviation[si] = distances[d_idx]
+                    
+                    # Merge into cumulative store
+                    ec = cov_store.update_element(
+                        key, scan_result,
+                        completion_threshold=completion_threshold,
+                        quality_threshold=quality_threshold,
+                    )
+                    cov_store.append_timeline(scan_id, key, ec)
+                    
+                    # Use cumulative values
+                    coverage_cumulative = ec.coverage_cumulative
+                    occluded_pct = ec.occluded_pct
+                    element_state = ElementState(ec.element_state).name
+                    
+                except Exception as _cov_err:
+                    print(f"[BIM-Compare] Coverage engine error for {key}: {_cov_err}")
+            
             results.append({
                 "element_key": key,
                 "label": elem_name,
@@ -1012,6 +1111,9 @@ def run_comparison(
                 "status": "evaluated",
                 "total_points": len(distances),
                 "coverage_pct": coverage,
+                "coverage_cumulative": coverage_cumulative,
+                "occluded_pct": occluded_pct,
+                "element_state": element_state,
                 "bim_surface_m2": round(bim_surface_m2, 4),
                 **report,
                 "sabana_positions": sabana_pos.flatten().round(4).tolist(),

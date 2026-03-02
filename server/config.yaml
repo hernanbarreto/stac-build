@@ -365,3 +365,11 @@ postprocessing:
   # Step 5: Normal estimation (slow on big clouds, not needed for point cloud viewer)
   skip_normals: true
 
+# --- Coverage Engine (Tier 1) ---
+# Cumulative, occlusion-aware coverage tracking per BIM element
+coverage_engine:
+  enabled: true
+  ray_radius: 0.05            # Cylinder radius (m) for occlusion ray query
+  sample_density: 4.0         # BIM surface samples per m²
+  completion_threshold: 80.0  # % coverage to mark element COMPLETED
+  quality_threshold: 80.0     # % of points within tolerance for COMPLETED
