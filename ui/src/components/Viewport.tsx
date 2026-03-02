@@ -1397,7 +1397,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
         // Scene
         const scene = new THREE.Scene()
-        scene.fog = new THREE.FogExp2(0x0d1117, 0.002)
+        // Very subtle fog — only noticeable at 200+ meters, never obscures close-up detail
+        scene.fog = new THREE.FogExp2(0x0d1117, 0.0003)
         sceneRef.current = scene
 
         // Lights for BIM/mesh rendering (PBR materials need lights)
@@ -1465,8 +1466,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const camera = new THREE.PerspectiveCamera(
             60,
             container.clientWidth / container.clientHeight,
-            0.01,
-            1000
+            0.001,   // 1mm near plane — allows extreme close-ups
+            10000    // 10km far plane — handles very large sites
         )
         camera.position.set(5, 5, 5)
         camera.lookAt(0, 0, 0)
@@ -1477,11 +1478,34 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         controls.enableDamping = true
         controls.dampingFactor = 0.08
         controls.screenSpacePanning = true
-        controls.minDistance = 0.00001
-        controls.maxDistance = 500
+        controls.minDistance = 0.0001
+        controls.maxDistance = 5000
         controls.maxPolarAngle = Math.PI
-        controls.zoomSpeed = 3.0
+        controls.zoomSpeed = 1.0  // Base speed — adaptive handler overrides
         controlsRef.current = controls
+
+        // Adaptive zoom: speed proportional to distance-to-target
+        // This prevents the "stuck" feeling when very close to the cloud
+        const onAdaptiveWheel = (e: WheelEvent) => {
+            e.preventDefault()
+            const dist = camera.position.distanceTo(controls.target)
+            // Zoom step = 10% of current distance (minimum 0.5mm step)
+            const step = Math.max(dist * 0.1, 0.0005)
+            const direction = new THREE.Vector3()
+                .subVectors(controls.target, camera.position)
+                .normalize()
+            if (e.deltaY < 0) {
+                // Zoom in
+                camera.position.addScaledVector(direction, step)
+            } else {
+                // Zoom out
+                camera.position.addScaledVector(direction, -step)
+            }
+            controls.update()
+        }
+        renderer.domElement.addEventListener('wheel', onAdaptiveWheel, { passive: false })
+        // Disable OrbitControls built-in zoom (we handle it)
+        controls.enableZoom = false
 
         // Shader material for point cloud
         const material = new THREE.ShaderMaterial({
@@ -1592,6 +1616,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             renderer.domElement.removeEventListener('mousemove', handleMeasureHover)
             renderer.domElement.removeEventListener('mouseup', onSectionUp)
             window.removeEventListener('keydown', onKeyDown)
+            renderer.domElement.removeEventListener('wheel', onAdaptiveWheel)
             controls.dispose()
             renderer.dispose()
             geometry.dispose()
