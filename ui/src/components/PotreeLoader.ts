@@ -307,7 +307,8 @@ export class PotreeOctreeLoader {
             node.hierarchyLoaded = true
             node.hierarchyLoading = false
 
-            const proxyCount = Array.from(this.nodes.values()).filter(n => n.nodeType === 2 && !n.hierarchyLoaded).length
+            // Debug: proxy count
+            // const proxyCount = Array.from(this.nodes.values()).filter(n => n.nodeType === 2 && !n.hierarchyLoaded).length
             // console.log(`[PotreeLoader] Expanded proxy '${node.name}' → ${this.nodes.size} total nodes (${proxyCount} proxies remaining)`)
         } catch (e) {
             node.hierarchyLoading = false
@@ -463,13 +464,14 @@ export class PotreeOctreeLoader {
         const now = performance.now()
         if (!this._lastLogTime || now - this._lastLogTime > 1000) {
             this._lastLogTime = now
-            const levelCounts = new Map<number, number>()
-            for (const name of renderSet) {
-                const level = name.length - 1
-                levelCounts.set(level, (levelCounts.get(level) || 0) + 1)
-            }
-            const levels = Array.from(levelCounts.entries()).sort((a, b) => a[0] - b[0])
-                .map(([l, c]) => `L${l}:${c}`).join(' ')
+            // Debug: per-level stats
+            // const levelCounts = new Map<number, number>()
+            // for (const name of renderSet) {
+            //     const level = name.length - 1
+            //     levelCounts.set(level, (levelCounts.get(level) || 0) + 1
+            // }
+            // const levels = Array.from(levelCounts.entries()).sort((a, b) => a[0] - b[0])
+            //     .map(([l, c]) => `L${l}:${c}`).join(' ')
             // console.log(`[LOD] Visible: ${renderSet.size} nodes (${levels}), pts: ${numVisiblePoints.toLocaleString()}/${this.pointBudget.toLocaleString()}, totalKnown: ${this.nodes.size}`)
         }
     }

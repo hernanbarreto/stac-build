@@ -2012,9 +2012,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     loadIFC(model.url, model.name).then((result) => {
                         bimGroup.add(result.group)
                         const box = new THREE.Box3().setFromObject(result.group)
-                        const size = box.getSize(new THREE.Vector3())
-                        const center = box.getCenter(new THREE.Vector3())
-                        // console.log(`[Viewport] BIM bbox: ...`)
+                        // box.getSize / getCenter available for debugging
+                        void box
                         console.log(`[Viewport] ✅ BIM loaded: ${model.name} (${result.group.children.length} elements, ${result.hierarchy.length} hierarchy roots)`)
                         if (onStatusMessage) onStatusMessage(`BIM loaded: ${model.name} (${result.group.children.length} elements)`)
                         loadedResults.push(result)
