@@ -51,10 +51,10 @@ Everything here is implemented and working.
   - [x] Map occluding points to SAM3 segment labels (majority vote)
   - [x] Per-point label array built from `segmentation_result.json`
 
-- [ ] **1.4 VLM Occlusion Classifier** *(deferred — defaults to UNKNOWN)*
-  - [ ] Extend `scene_analyzer.py` with occlusion classification prompt
-  - [ ] Classify occluders: permanent (furniture, MEP) vs temporary (debris, scaffold)
-  - [ ] Store classification per occlusion event
+- [x] **1.4 VLM Occlusion Classifier**
+  - [x] Extend `scene_analyzer.py` with `classify_occluders()` — 3-tier: heuristic → cache → VLM
+  - [x] Classify occluders: permanent (furniture, MEP) vs temporary (debris, scaffold)
+  - [x] Store classification per occlusion event, update element states
 
 - [x] **1.5 Element State Machine**
   - [x] State model: NOT_STARTED → IN_PROGRESS → COMPLETED → VERIFIED
@@ -65,7 +65,7 @@ Everything here is implemented and working.
 - [x] **1.6 Pipeline Integration**
   - [x] Update `run_comparison()` in `bim_comparison.py` to use coverage engine
   - [x] Config section `coverage_engine` in `config.yaml`
-  - [ ] Update UI to show element state + occlusion indicators *(Tier 4)*
+  - [x] UI: element state badges, occlusion %, cumulative coverage in `BIMAnalysisPanel.tsx`
 
 ---
 

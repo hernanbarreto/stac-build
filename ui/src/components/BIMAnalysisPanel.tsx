@@ -13,6 +13,9 @@ interface ElementMeta {
     quality?: string        // good | regular | bad | not_built
     advance_pct?: number
     coverage_pct?: number
+    coverage_cumulative?: number
+    occluded_pct?: number
+    element_state?: string   // NOT_STARTED | IN_PROGRESS | COMPLETED | VERIFIED | OCCLUDED_FROZEN
     correctness_pct?: number
     mean_mm?: number
     bim_surface_m2?: number
@@ -61,6 +64,30 @@ const QUALITY_ICONS: Record<string, string> = {
     regular: '⚠️',
     bad: '❌',
     not_built: '⬜',
+}
+
+const STATE_COLORS: Record<string, string> = {
+    NOT_STARTED: '#64748b',
+    IN_PROGRESS: '#3b82f6',
+    COMPLETED: '#4ade80',
+    VERIFIED: '#a78bfa',
+    OCCLUDED_FROZEN: '#f97316',
+}
+
+const STATE_LABELS: Record<string, string> = {
+    NOT_STARTED: 'Not Started',
+    IN_PROGRESS: 'In Progress',
+    COMPLETED: 'Completed',
+    VERIFIED: 'Verified',
+    OCCLUDED_FROZEN: 'Occluded',
+}
+
+const STATE_ICONS: Record<string, string> = {
+    NOT_STARTED: '⬜',
+    IN_PROGRESS: '🔨',
+    COMPLETED: '✅',
+    VERIFIED: '🏆',
+    OCCLUDED_FROZEN: '🔒',
 }
 
 function formatDate(dateStr: string): string {
@@ -182,9 +209,39 @@ export function BIMAnalysisPanel({ meta, sessionId }: BIMAnalysisPanelProps) {
                                         backgroundColor: QUALITY_COLORS[el.quality || 'bad'],
                                     }}
                                 />
+                                {el.coverage_cumulative != null && el.coverage_cumulative !== (el.advance_pct || 0) && (
+                                    <div
+                                        className="bap-el-bar bap-el-bar-cumul"
+                                        style={{
+                                            width: `${Math.min(el.coverage_cumulative, 100)}%`,
+                                            backgroundColor: '#60a5fa33',
+                                            position: 'absolute', top: 0, left: 0, height: '100%',
+                                        }}
+                                    />
+                                )}
                             </div>
                             <span className="bap-el-advance">{el.advance_pct || 0}%</span>
                         </div>
+                        {el.element_state && (
+                            <div className="bap-el-state">
+                                <span
+                                    className="bap-el-state-badge"
+                                    style={{ backgroundColor: STATE_COLORS[el.element_state] + '22', color: STATE_COLORS[el.element_state], borderColor: STATE_COLORS[el.element_state] }}
+                                >
+                                    {STATE_ICONS[el.element_state] || '❓'} {STATE_LABELS[el.element_state] || el.element_state}
+                                </span>
+                                {(el.occluded_pct || 0) > 0 && (
+                                    <span className="bap-el-occlusion">
+                                        🔒 {el.occluded_pct?.toFixed(0)}% occluded
+                                    </span>
+                                )}
+                                {el.coverage_cumulative != null && (
+                                    <span className="bap-el-cumul">
+                                        📊 {el.coverage_cumulative.toFixed(0)}% cumulative
+                                    </span>
+                                )}
+                            </div>
+                        )}
                         <div className="bap-el-details">
                             <span>Correctness: {el.correctness_pct?.toFixed(1)}%</span>
                             <span>Mean: {el.mean_mm?.toFixed(1)} mm</span>

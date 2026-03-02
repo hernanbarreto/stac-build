@@ -1139,6 +1139,53 @@ def run_comparison(
     n_unmatched = sum(1 for r in results if r.get("status") == "unmatched")
     n_error = sum(1 for r in results if r.get("status") == "error")
     
+    # ── Post-process: VLM occluder classification ──
+    if ce_enabled and cov_store is not None:
+        try:
+            from scene_analyzer import classify_occluders
+            from coverage_store import OccluderType
+            
+            # Collect unique occluder labels across all elements
+            all_occluder_labels = set()
+            for key in cov_store.get_all_elements():
+                ec = cov_store.load_element(key)
+                if ec is not None:
+                    for lbl in ec.occluder_labels:
+                        if lbl and lbl != "":
+                            all_occluder_labels.add(str(lbl))
+            
+            if all_occluder_labels:
+                print(f"[BIM-Compare] Classifying {len(all_occluder_labels)} occluder labels...")
+                classifications = classify_occluders(
+                    list(all_occluder_labels), session_dir
+                )
+                
+                # Update coverage store with occluder types
+                for key in cov_store.get_all_elements():
+                    ec = cov_store.load_element(key)
+                    if ec is None:
+                        continue
+                    updated = False
+                    for i in range(ec.n_samples):
+                        lbl = str(ec.occluder_labels[i])
+                        if lbl and lbl in classifications:
+                            otype = (OccluderType.TEMPORARY 
+                                    if classifications[lbl] == "temporary"
+                                    else OccluderType.PERMANENT)
+                            if ec.occluder_types[i] != otype:
+                                ec.occluder_types[i] = otype
+                                updated = True
+                    if updated:
+                        # Recompute state with updated occluder types
+                        ec.element_state = CoverageStore._compute_state(
+                            ec, completion_threshold, quality_threshold
+                        )
+                        cov_store.save_element(ec)
+                
+                print(f"[BIM-Compare] Occluder classification: {classifications}")
+        except Exception as _vlm_err:
+            print(f"[BIM-Compare] VLM occluder classification skipped: {_vlm_err}")
+    
     print(f"[BIM-Compare] Summary: {n_evaluated} evaluated, "
           f"{n_unmatched} unmatched (not built), {n_error} errors, "
           f"{total} total elements")
@@ -1152,6 +1199,19 @@ def run_comparison(
         "unmatched": n_unmatched,
         "errors": n_error,
     }
+    
+    # Add coverage engine summary if available
+    if ce_enabled and cov_store is not None:
+        cov_summary = cov_store.get_summary()
+        summary["coverage_engine"] = {
+            "scan_id": scan_id,
+            "elements_tracked": len(cov_summary),
+            "elements_by_state": {},
+        }
+        for key, data in cov_summary.items():
+            state = data["element_state"]
+            summary["coverage_engine"]["elements_by_state"][state] = \
+                summary["coverage_engine"]["elements_by_state"].get(state, 0) + 1
     
     # Save sábana to session for later loading
     save_sabana(session_dir, results, tolerance, summary)

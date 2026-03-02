@@ -634,6 +634,191 @@ def _is_valid_label(label: str) -> bool:
     if punct_count > len(label) * 0.3:
         return False
     return True
+
+
+# ── Occlusion Classification ────────────────────────────────────────
+
+# Known labels that are clearly temporary or permanent (avoid VLM call)
+_KNOWN_TEMPORARY = {
+    "scaffold", "scaffolding", "debris", "rubble", "tools", "tool",
+    "ladder", "bucket", "tarp", "tarpaulin", "wheelbarrow", "pallet",
+    "cone", "barrier", "formwork", "shoring", "temporary wall",
+    "construction fence", "crane", "hoist", "generator", "compressor",
+    "cable reel", "cable drum", "safety net", "protective sheet",
+    "plastic sheet", "cardboard", "packaging", "trash", "waste",
+}
+
+_KNOWN_PERMANENT = {
+    "wall", "floor", "ceiling", "door", "window", "column", "beam",
+    "staircase", "stairs", "railing", "handrail", "cabinet",
+    "kitchen cabinet", "sink", "toilet", "bathtub", "shower",
+    "radiator", "light fixture", "outlet", "switch", "pipe",
+    "duct", "hvac", "air conditioning", "elevator", "lift",
+    "fire extinguisher", "smoke detector", "sprinkler",
+    "countertop", "built-in closet", "partition wall",
+}
+
+_OCCLUSION_PROMPT = """You are a construction site analyst. For each object label below, classify it as either "temporary" or "permanent":
+
+- TEMPORARY: objects that will be removed after construction (scaffolding, debris, tools, formwork, protective covers, construction equipment)
+- PERMANENT: objects that are permanently installed and part of the final building (walls, fixtures, MEP, furniture, installed equipment)
+
+Objects to classify:
+{labels}
+
+Return a JSON object mapping each label to its classification.
+Example: {{"scaffold": "temporary", "kitchen_cabinet": "permanent"}}
+Output ONLY the JSON object."""
+
+
+def classify_occluders(
+    occluder_labels: list,
+    session_dir: str = None,
+) -> dict:
+    """
+    Classify occluder objects as permanent or temporary.
+    
+    Uses a heuristic lookup first (fast, no VLM needed),
+    then falls back to InternVL3 for unknown labels.
+    
+    Args:
+        occluder_labels: unique labels from SAM3 segmentation
+        session_dir: optional, to check cached VLM analysis
+    
+    Returns:
+        {label: "permanent"|"temporary"} for each input label
+    """
+    if not occluder_labels:
+        return {}
+
+    result = {}
+    unknown_labels = []
+
+    # Step 1: Heuristic classification (fast path)
+    for label in occluder_labels:
+        label_lower = label.lower().strip()
+        if not label_lower:
+            continue
+
+        # Check known lists (substring match)
+        is_temp = any(k in label_lower or label_lower in k for k in _KNOWN_TEMPORARY)
+        is_perm = any(k in label_lower or label_lower in k for k in _KNOWN_PERMANENT)
+
+        if is_temp and not is_perm:
+            result[label] = "temporary"
+        elif is_perm and not is_temp:
+            result[label] = "permanent"
+        else:
+            unknown_labels.append(label)
+
+    if not unknown_labels:
+        logger.info(f"[OcclusionClassifier] All {len(result)} labels classified by heuristic")
+        return result
+
+    # Step 2: Check cached VLM analysis (avoid re-loading model)
+    if session_dir:
+        cached = _classify_from_cached_vlm(unknown_labels, session_dir)
+        for label, classification in cached.items():
+            result[label] = classification
+            unknown_labels.remove(label)
+
+    if not unknown_labels:
+        logger.info(f"[OcclusionClassifier] {len(result)} labels classified (heuristic + cache)")
+        return result
+
+    # Step 3: VLM classification for remaining unknowns
+    logger.info(f"[OcclusionClassifier] {len(unknown_labels)} labels need VLM: {unknown_labels}")
+    try:
+        vlm_result = _classify_via_vlm(unknown_labels)
+        result.update(vlm_result)
+    except Exception as e:
+        logger.warning(f"[OcclusionClassifier] VLM classification failed: {e}")
+        # Default unknown labels to "temporary" (safer — triggers re-scan)
+        for label in unknown_labels:
+            if label not in result:
+                result[label] = "temporary"
+
+    logger.info(f"[OcclusionClassifier] Final: {result}")
+    return result
+
+
+def _classify_from_cached_vlm(labels: list, session_dir: str) -> dict:
+    """Try to classify labels using existing scene_analysis.json."""
+    from pathlib import Path
+    analysis_path = Path(session_dir) / "scene_analysis.json"
+    if not analysis_path.exists():
+        return {}
+
+    try:
+        with open(analysis_path) as f:
+            analysis = json.load(f)
+    except Exception:
+        return {}
+
+    # Scene analysis has category descriptions that may hint at permanence
+    categories = {c.get("label", "").lower(): c for c in analysis.get("categories", [])}
+    result = {}
+
+    for label in labels:
+        label_lower = label.lower()
+        if label_lower in categories:
+            cat = categories[label_lower]
+            hint = cat.get("sam3_hint", "").lower()
+            # If the hint mentions construction-related terms, likely temporary
+            temp_keywords = ["scaffold", "debris", "tool", "temporary", "construction"]
+            perm_keywords = ["installed", "fixture", "built", "cabinet", "pipe"]
+            if any(k in hint for k in temp_keywords):
+                result[label] = "temporary"
+            elif any(k in hint for k in perm_keywords):
+                result[label] = "permanent"
+
+    return result
+
+
+def _classify_via_vlm(labels: list) -> dict:
+    """Use InternVL3 to classify occluder labels as permanent/temporary."""
+    model, tokenizer = _load_model()
+    generation_config = dict(max_new_tokens=512, do_sample=False)
+
+    prompt = _OCCLUSION_PROMPT.format(labels=", ".join(labels))
+
+    try:
+        # Use a blank image (VLM needs an image input even for text-only)
+        blank = Image.new("RGB", (448, 448), (128, 128, 128))
+        transform = _build_transform(448)
+        pixel_values = transform(blank).unsqueeze(0)
+        dtype = next(model.parameters()).dtype
+        device = next(model.parameters()).device
+        pixel_values = pixel_values.to(dtype).to(device)
+
+        response = model.chat(tokenizer, pixel_values, prompt, generation_config)
+
+        # Parse JSON response
+        try:
+            parsed = json.loads(response.strip().strip("`").replace("```json", "").replace("```", ""))
+            if isinstance(parsed, dict):
+                result = {}
+                for label in labels:
+                    val = parsed.get(label, parsed.get(label.lower(), "temporary"))
+                    result[label] = "temporary" if "temp" in str(val).lower() else "permanent"
+                return result
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback: default to temporary
+        return {label: "temporary" for label in labels}
+
+    finally:
+        # Unload to free VRAM
+        try:
+            model.cpu()
+        except:
+            pass
+        del model, tokenizer
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 # ── Public API ───────────────────────────────────────────────────────
 
 def analyze_scene(frames_dir: str, config: dict = None, on_progress=None) -> tuple:
