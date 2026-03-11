@@ -107,6 +107,9 @@ def build_da3_config(cfg: dict) -> dict:
             "ref_view_strategy": depth_cfg["ref_view_strategy"],
             "ref_view_strategy_loop": depth_cfg.get("ref_view_strategy_loop", depth_cfg["ref_view_strategy"]),
             "depth_threshold": da3_cfg["depth_threshold"],
+            "conf_threshold": da3_cfg.get("conf_threshold", 1.5),
+            "overlap_s": da3_cfg.get("overlap_s", 0),
+            "seed": da3_cfg.get("seed", 42),
             "save_depth_conf_result": da3_cfg.get("save_depth_conf_result", False),
             "save_debug_info": da3_cfg.get("save_debug_info", False),
             "Sparse_Align": {

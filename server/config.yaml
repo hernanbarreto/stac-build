@@ -119,6 +119,9 @@ models:
   da3:
     loop_chunk_size: 20  # Images of loop chunk = 2 * loop_chunk_size
     depth_threshold: 15.0
+    conf_threshold: 1.5   # DA3 internal confidence threshold (vendor default)
+    overlap_s: 0          # Overlap start offset (vendor default)
+    seed: 42              # Random seed for reproducibility
     pointcloud_save:
       conf_threshold_coef: 0.25    # Lower = keeps more points (0.75 was too aggressive, lost small objects)
       sample_ratio: 1.0
@@ -326,11 +329,25 @@ bim:
                                 # <50% = BAD (red) — advance counts as 0
 
 # --- SLAM Backend Selection ---
-# Options: "da3", "mast3r", "hybrid"
+# Options: "da3", "mast3r", "hybrid", "map"
 # - da3: Depth Anything 3 based reconstruction (fast, dense, ~10% RelErr)
 # - mast3r: MASt3R-SLAM (metric accurate poses, sparse point cloud)
 # - hybrid: MASt3R SLAM for metric poses + DA3 for dense depth (<3cm target)
-slam_backend: da3
+# - map: MapAnything v2 via VGGT-Long (8x faster, Apache 2.0, ~16% RelErr w/o priors)
+slam_backend: map
+
+# --- MapAnything (via VGGT-Long) Configuration ---
+mapanything:
+  conda_env: "mapanything"             # Conda environment with MapAnything installed
+  model_weights: "facebook/map-anything-apache"  # Apache 2.0 (commercial OK)
+  device: "cpu"                        # "cpu" or "cuda"
+  conf_threshold_coef: 0.75            # Higher = stricter, keeps only high-confidence points
+  sample_ratio: 1.0                    # 1.0 = keep all points that pass confidence filter
+  chunk_size: 60                       # Frames per VGGT-Long chunk
+  chunk_overlap: 30                    # Overlap between chunks for alignment
+  reference_frame_mid: true            # Use middle frame as reference (better consistency)
+  loop_closure: true                   # Enable SALAD loop closure
+  use_keyframes: true                  # Use frame_selector keyframes (recommended)
 
 # --- Hybrid Configuration ---
 # MASt3R SLAM (metric poses + loop closure) + DA3 (dense depth, auto-scaled to MASt3R metric)
@@ -364,6 +381,7 @@ postprocessing:
   
   # Step 5: Normal estimation (slow on big clouds, not needed for point cloud viewer)
   skip_normals: true
+
 
 # --- Coverage Engine (Tier 1) ---
 # Cumulative, occlusion-aware coverage tracking per BIM element

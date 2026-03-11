@@ -75,36 +75,31 @@ Everything here is implemented and working.
 
 **Depends on:** Tier 0 (can be started in parallel with Tier 1)
 
-- [ ] **2.1 Zoom Detection** (`zoom_detector.py`)
-  - [ ] EXIF focal length extraction
-  - [ ] Feature density analysis (ORB count per frame)
-  - [ ] FOV estimation from feature distribution
-  - [ ] Output: zoom_level per frame
+- [x] **2.1 Zoom Detection** → REPLACED by zoom-lock capture
+  - [x] Zoom is now per-session metadata in `scan_meta.json`
+  - [x] Capture app locks zoom during recording (enforced by Unity)
+  - [x] Manual zoom_level config for existing captures
 
-- [ ] **2.2 Sequence Splitter**
-  - [ ] Segment video frames by zoom band (1x, 3x, 5x+)
-  - [ ] Handle zoom transitions (ramp detection)
-  - [ ] Generate sub-session manifests per segment
+- [x] **2.2 Sequence Splitter** → REMOVED
+  - [x] No longer needed: each session has invariant zoom
+  - [x] Different zooms = different scan sessions (multi-source)
 
-- [ ] **2.3 Adaptive Frame Quality**
-  - [ ] Scale blur threshold with zoom: `thresh *= (1 + zoom/5)`
-  - [ ] Stricter motion blur rejection for high-zoom frames
-  - [ ] Minimum sharpness requirements per zoom band
+- [x] **2.3 Adaptive Frame Quality** → SIMPLIFIED
+  - [x] Uniform blur threshold per session (no per-frame zoom scaling)
+  - [x] Quality filtering remains in `frame_quality.py`
 
-- [ ] **2.4 DA3 Intrinsics Injection**
-  - [ ] Compute zoom-adjusted intrinsics: `f_zoom = f_base × zoom_factor`
-  - [ ] Pass intrinsics matrix to `model.inference(images, intrinsics=K)`
-  - [ ] Update `da3_native_wrapper.py` to support per-segment intrinsics
+- [x] **2.4 DA3 Zoom Intrinsics Correction**
+  - [x] Session-level: `f_corrected = f_da3_estimated × zoom_level`
+  - [x] Applied uniformly to all frames in `da3_native_wrapper.py` ChunkWrapper
+  - [x] zoom_level loaded from `scan_meta.json`
 
-- [ ] **2.5 Segment Registration**
-  - [ ] ICP alignment of detail segment clouds to context cloud
-  - [ ] Feature matching for coarse alignment
-  - [ ] Merge registered segments into unified cloud
-  - [ ] Handle scale differences between zoom levels
+- [x] **2.5 Segment Registration** → REMOVED
+  - [x] ICP alignment between zoom segments eliminated (failed approach)
+  - [x] Multi-zoom handled by multi-source (Tier 2.6)
 
 - [ ] **2.6 Multi-Source Foundations**
   - [ ] Project data model: Project → N Scans
-  - [ ] Scan metadata: operator, zone, timestamp, source_type
+  - [ ] Scan metadata: operator, zone, timestamp, source_type, zoom_level
   - [ ] Independent processing per scan (existing pipeline)
   - [ ] BIM alignment as common reference frame
   - [ ] Cloud merge with deduplication

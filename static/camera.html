@@ -4,8 +4,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>STAC-BUILD | Camera</title>
+    <title>STAC-BUILD | Scanner</title>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
         * {
             margin: 0;
             padding: 0;
@@ -13,106 +15,285 @@
         }
 
         body {
-            font-family: 'Segoe UI', system-ui, sans-serif;
+            font-family: 'Inter', system-ui, sans-serif;
             background: #0a0a0f;
-            color: #fff;
+            color: #e0e0e0;
             height: 100vh;
             overflow: hidden;
             display: flex;
             flex-direction: column;
         }
 
+        /* ── Header ── */
         #header {
-            background: linear-gradient(90deg, #1a1a2e 0%, #16213e 100%);
+            background: linear-gradient(90deg, #0d1117 0%, #161b22 100%);
             padding: 12px 20px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            border-bottom: 1px solid #2a2a4a;
+            border-bottom: 1px solid rgba(0, 212, 255, 0.15);
+            z-index: 100;
         }
 
         .logo {
-            font-size: 18px;
+            font-size: 17px;
             font-weight: 700;
             background: linear-gradient(135deg, #00d4ff, #7b2ff7);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+            letter-spacing: -0.3px;
         }
 
-        #status {
+        #connection-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: #8b949e;
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #484f58;
+            transition: all 0.3s;
+        }
+
+        .dot.ok {
+            background: #3fb950;
+            box-shadow: 0 0 8px #3fb95080;
+        }
+
+        .dot.err {
+            background: #f85149;
+            box-shadow: 0 0 8px #f8514980;
+        }
+
+        /* ── Screens ── */
+        .screen {
+            flex: 1;
+            display: none;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+
+        .screen.active {
+            display: flex;
+        }
+
+        /* ── Setup Screen ── */
+        #setup-screen {
+            align-items: center;
+            justify-content: center;
+            padding: 30px;
+            gap: 24px;
+        }
+
+        .setup-card {
+            background: linear-gradient(135deg, rgba(22, 27, 34, 0.95), rgba(13, 17, 23, 0.95));
+            border: 1px solid rgba(0, 212, 255, 0.12);
+            border-radius: 16px;
+            padding: 28px;
+            width: 100%;
+            max-width: 420px;
+        }
+
+        .setup-card h2 {
+            font-size: 16px;
+            font-weight: 600;
+            color: #f0f6fc;
+            margin-bottom: 16px;
             display: flex;
             align-items: center;
             gap: 8px;
+        }
+
+        .setup-card h2 .icon {
+            font-size: 20px;
+        }
+
+        .project-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 240px;
+            overflow-y: auto;
+            margin-bottom: 16px;
+        }
+
+        .project-item {
+            padding: 12px 14px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .project-item:hover {
+            background: rgba(0, 212, 255, 0.06);
+            border-color: rgba(0, 212, 255, 0.2);
+        }
+
+        .project-item.selected {
+            background: rgba(0, 212, 255, 0.1);
+            border-color: #00d4ff;
+            box-shadow: 0 0 12px rgba(0, 212, 255, 0.1);
+        }
+
+        .project-item .name {
+            font-weight: 600;
             font-size: 14px;
+            color: #f0f6fc;
         }
 
-        .status-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: #444;
-            transition: background 0.3s;
+        .project-item .meta {
+            font-size: 11px;
+            color: #8b949e;
         }
 
-        .status-dot.connected {
-            background: #00ff88;
-            box-shadow: 0 0 10px #00ff88;
-            animation: pulse 2s infinite;
+        .input-row {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
         }
 
-        @keyframes pulse {
+        input[type="text"] {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: #f0f6fc;
+            font-size: 14px;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.2s;
+        }
 
-            0%,
-            100% {
-                opacity: 1;
-            }
+        input[type="text"]:focus {
+            border-color: #00d4ff;
+        }
 
-            50% {
-                opacity: 0.6;
-            }
+        .btn {
+            padding: 10px 20px;
+            font-size: 14px;
+            font-weight: 600;
+            border: none;
+            border-radius: 10px;
+            color: #fff;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+            white-space: nowrap;
+        }
+
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #00d4ff, #7b2ff7);
+            box-shadow: 0 4px 15px rgba(0, 212, 255, 0.2);
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px rgba(0, 212, 255, 0.3);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #f85149, #da3633);
+            box-shadow: 0 4px 15px rgba(248, 81, 73, 0.2);
+        }
+
+        .btn-lg {
+            padding: 16px 40px;
+            font-size: 16px;
+            border-radius: 30px;
+        }
+
+        .btn-full {
+            width: 100%;
+        }
+
+        /* ── Camera Screen ── */
+        #camera-screen {
+            position: relative;
         }
 
         #video-container {
             flex: 1;
             position: relative;
+            background: #000;
             display: flex;
             align-items: center;
             justify-content: center;
-            background: #000;
         }
 
         #video {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
         }
 
         #canvas {
             display: none;
         }
 
-        #overlay {
+        /* ── HUD Overlays ── */
+        .hud-top {
             position: absolute;
             top: 0;
             left: 0;
             right: 0;
-            bottom: 0;
-            pointer-events: none;
+            padding: 14px 16px;
             display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 20px;
+            justify-content: space-between;
+            align-items: flex-start;
+            pointer-events: none;
+            z-index: 10;
         }
 
-        .recording-indicator {
-            position: absolute;
-            top: 20px;
-            right: 20px;
+        .hud-badge {
+            background: rgba(0, 0, 0, 0.65);
+            backdrop-filter: blur(10px);
+            border-radius: 10px;
+            padding: 8px 12px;
+            font-size: 12px;
+            pointer-events: auto;
+        }
+
+        .hud-badge .label {
+            color: #00d4ff;
+            font-weight: 600;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .hud-badge .value {
+            color: #f0f6fc;
+            font-weight: 600;
+            margin-top: 2px;
+        }
+
+        .rec-indicator {
             display: flex;
             align-items: center;
-            gap: 8px;
-            padding: 8px 16px;
-            background: rgba(255, 0, 0, 0.8);
+            gap: 6px;
+            background: rgba(248, 81, 73, 0.85);
+            padding: 6px 14px;
             border-radius: 20px;
             font-size: 12px;
             font-weight: 600;
@@ -120,7 +301,7 @@
             transition: opacity 0.3s;
         }
 
-        .recording-indicator.active {
+        .rec-indicator.active {
             opacity: 1;
         }
 
@@ -144,386 +325,962 @@
             }
         }
 
-        #stats {
-            position: absolute;
-            bottom: 20px;
-            left: 20px;
-            font-size: 12px;
-            color: rgba(255, 255, 255, 0.7);
-            background: rgba(0, 0, 0, 0.5);
-            padding: 8px 12px;
-            border-radius: 6px;
+        .hud-bottom {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            padding: 20px;
+            padding-bottom: max(30px, env(safe-area-inset-bottom, 30px));
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+            pointer-events: none;
+            z-index: 300;
+            background: linear-gradient(transparent, rgba(0, 0, 0, 0.8));
         }
 
-        .btn {
-            padding: 16px 32px;
-            font-size: 16px;
-            font-weight: 600;
-            border: none;
-            border-radius: 30px;
-            color: #fff;
-            cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
+        .hud-bottom .btn {
             pointer-events: auto;
         }
 
-        #start-btn {
-            background: linear-gradient(135deg, #00d4ff, #7b2ff7);
+
+        /* ── Tracking Status ── */
+        .tracking-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
         }
 
-        #stop-btn {
-            background: linear-gradient(135deg, #ff4444, #cc0000);
+        .tracking-badge .icon {
+            font-size: 14px;
+        }
+
+        /* ── Error Log Panel ── */
+        #error-panel {
+            position: fixed;
+            bottom: 80px;
+            left: 0;
+            right: 0;
+            max-height: 120px;
+            background: rgba(13, 17, 23, 0.95);
+            backdrop-filter: blur(10px);
+            border-top: 1px solid rgba(248, 81, 73, 0.3);
+            overflow-y: auto;
+            padding: 8px 14px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 10px;
+            z-index: 200;
             display: none;
         }
 
-        .btn:hover {
-            transform: scale(1.05);
-            box-shadow: 0 10px 30px rgba(0, 212, 255, 0.3);
+        #error-panel.visible {
+            display: block;
         }
 
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
+        .error-line {
+            padding: 3px 0;
+            color: #f85149;
         }
 
-        .hidden {
-            display: none !important;
+        .warn-line {
+            padding: 3px 0;
+            color: #d29922;
         }
 
-        #chunk-info {
-            position: absolute;
-            top: 20px;
-            left: 20px;
+        .info-line {
+            padding: 3px 0;
+            color: #3fb950;
+        }
+
+        /* ── Capabilities ── */
+        .caps-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            margin-top: 12px;
+        }
+
+        .cap-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
             font-size: 12px;
-            color: rgba(255, 255, 255, 0.9);
-            background: rgba(0, 0, 0, 0.7);
-            padding: 10px 14px;
-            border-radius: 6px;
+            color: #8b949e;
         }
 
-        #chunk-info .label {
-            color: #00d4ff;
-            font-weight: 600;
+        .cap-item .status {
+            font-size: 14px;
+        }
+
+        .cap-ok {
+            color: #3fb950;
+        }
+
+        .cap-no {
+            color: #f85149;
+        }
+
+        .cap-warn {
+            color: #d29922;
+        }
+
+        /* ── Stats row ── */
+        .stats-row {
+            display: flex;
+            gap: 12px;
         }
     </style>
 </head>
 
 <body>
+
+    <!-- ─── Header ─── -->
     <div id="header">
         <div class="logo">STAC-BUILD Scanner</div>
-        <div id="status">
-            <div class="status-dot" id="status-dot"></div>
-            <span id="status-text">Disconnected</span>
+        <div id="connection-badge">
+            <div class="dot" id="conn-dot"></div>
+            <span id="conn-text">Connecting...</span>
         </div>
     </div>
 
-    <div id="video-container">
-        <video id="video" autoplay playsinline muted></video>
-        <canvas id="canvas"></canvas>
+    <!-- ═══════════════════════════════════ SETUP SCREEN ═══════════════════════════════════ -->
+    <div id="setup-screen" class="screen active">
 
-        <div id="overlay">
-            <button id="start-btn" class="btn">Start Scanning</button>
-            <button id="stop-btn" class="btn">Stop & Process</button>
+        <!-- Project Selection -->
+        <div class="setup-card">
+            <h2><span class="icon">📂</span> Select Project</h2>
+            <div id="project-list" class="project-list">
+                <div style="color:#8b949e;font-size:13px;text-align:center;padding:20px;">Loading projects...</div>
+            </div>
+            <div class="input-row">
+                <input type="text" id="new-project-name" placeholder="New project name...">
+                <button class="btn btn-secondary" id="create-project-btn" onclick="createProject()">Create</button>
+            </div>
         </div>
 
-        <div class="recording-indicator" id="recording">
-            <div class="rec-dot"></div>
-            <span>SCANNING</span>
+        <!-- Capabilities Check -->
+        <div class="setup-card">
+            <h2><span class="icon">🔍</span> Device Capabilities</h2>
+            <div id="caps-list" class="caps-list">
+                <div style="color:#8b949e;font-size:12px;">Checking...</div>
+            </div>
         </div>
 
-        <div id="chunk-info" class="hidden">
-            <div><span class="label">Frames:</span> <span id="frame-count">0</span></div>
-            <div><span class="label">Chunks:</span> <span id="chunk-count">0</span> ready</div>
-        </div>
+        <!-- Start Preview -->
+        <button class="btn btn-primary btn-lg" id="preview-btn" disabled onclick="startPreview()">
+            Start Camera Preview
+        </button>
+    </div>
 
-        <div id="stats" class="hidden">
-            <div>FPS: <span id="fps">0</span></div>
-            <div>Sent: <span id="sent">0</span> frames</div>
+    <!-- ═══════════════════════════════════ CAMERA SCREEN ═══════════════════════════════════ -->
+    <div id="camera-screen" class="screen">
+        <div id="video-container">
+            <video id="video" autoplay playsinline muted></video>
+            <canvas id="canvas"></canvas>
+            <canvas id="gl-canvas" style="display:none"></canvas>
+
+            <!-- Top HUD -->
+            <div class="hud-top">
+                <div>
+                    <div class="hud-badge">
+                        <div class="label">Project</div>
+                        <div class="value" id="hud-project">—</div>
+                    </div>
+                    <div class="hud-badge" style="margin-top:6px;">
+                        <div class="label">Frames Captured</div>
+                        <div class="value" id="hud-frames">0</div>
+                    </div>
+                </div>
+                <div>
+                    <div class="rec-indicator" id="rec-indicator">
+                        <div class="rec-dot"></div>
+                        <span>SCANNING</span>
+                    </div>
+                    <div class="hud-badge" style="margin-top:6px;">
+                        <div class="tracking-badge">
+                            <span class="icon" id="tracking-icon">📍</span>
+                            <span id="tracking-text">No AR Tracking</span>
+                        </div>
+                    </div>
+                    <div class="hud-badge" style="margin-top:6px;">
+                        <div class="stats-row">
+                            <div><span class="label">FPS </span><span id="hud-fps">0</span></div>
+                            <div><span class="label">Sent </span><span id="hud-sent">0 KB</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+        <!-- Bottom Controls (fixed, outside video container) -->
+        <div class="hud-bottom" id="camera-controls" style="display:none">
+            <button class="btn btn-secondary btn-lg" id="back-btn" onclick="backToSetup()">✕ Back</button>
+            <button class="btn btn-primary btn-lg" id="capture-btn" onclick="startCapture()">⏺ Start Capture</button>
+            <button class="btn btn-danger btn-lg" id="stop-btn" style="display:none" onclick="stopCapture()">⏹
+                Stop</button>
         </div>
     </div>
 
-    <div id="debug-log"
-        style="position:fixed;bottom:0;left:0;right:0;height:80px;background:rgba(0,0,0,0.8);color:#0f0;font-family:monospace;font-size:10px;overflow-y:auto;padding:5px;display:none;z-index:9999;">
-    </div>
+    <!-- ─── Error Panel ─── -->
+    <div id="error-panel"></div>
 
     <script>
-        // Debug logger
-        const debugLog = document.getElementById('debug-log');
-        function log(msg, type = 'info') {
-            console.log(msg);
-            if (window.location.search.includes('debug')) {
-                debugLog.style.display = 'block';
-                const el = document.createElement('div');
-                el.style.color = type === 'error' ? '#ff5555' : '#00ff88';
-                el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-                debugLog.appendChild(el);
-                debugLog.scrollTop = debugLog.scrollHeight;
-            }
-        }
-
-        // Configuration
-        // Configuration
-        // Detectar si estamos en https para usar wss, si no ws
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const httpProtocol = window.location.protocol; // http: o https:
-        
-        const WS_URL = `${protocol}//${window.location.hostname}:8765/ws/camera`;
-        const CONFIG_URL = `${httpProtocol}//${window.location.hostname}:8765/health`;
-        //const WS_URL = `ws://${window.location.hostname}:8765/ws/camera`;
-        //const CONFIG_URL = `http://${window.location.hostname}:8765/health`;
-        const TARGET_FPS = 30;  // 30 fps capture
-        const FRAME_INTERVAL = 1000 / TARGET_FPS;
-        const JPEG_QUALITY = 0.8;
-        const TARGET_WIDTH = 1280;
-        const TARGET_HEIGHT = 720;
-        let CHUNK_SIZE = 30;  // Default, will be updated from server
-
-        // State
+        // ═══════════════════════════════════════════════════════════════
+        //  STATE
+        // ═══════════════════════════════════════════════════════════════
+        let selectedProject = null;
         let ws = null;
         let video = null;
         let canvas = null;
         let ctx = null;
-        let stream = null;
-        let isScanning = false;
-        let frameCount = 0;
-        let lastFpsTime = Date.now();
-        let fps = 0;
-        let sentFrames = 0;
+        let glCanvas = null;
+        let gl = null;
+        let cameraStream = null;
+        let isCapturing = false;
+        let isPreviewing = false;
+        let frameIndex = 0;
+        let captureTimer = null;
+        let bytesSent = 0;
+        let fpsCounter = 0;
+        let fpsLast = Date.now();
 
-        // DOM elements
-        const startBtn = document.getElementById('start-btn');
-        const stopBtn = document.getElementById('stop-btn');
-        const statusDot = document.getElementById('status-dot');
-        const statusText = document.getElementById('status-text');
-        const recordingIndicator = document.getElementById('recording');
-        const fpsDisplay = document.getElementById('fps');
-        const sentDisplay = document.getElementById('sent');
-        const frameCountDisplay = document.getElementById('frame-count');
-        const chunkCountDisplay = document.getElementById('chunk-count');
-        const chunkInfo = document.getElementById('chunk-info');
-        const stats = document.getElementById('stats');
+        // WebXR state
+        let xrSession = null;
+        let xrRefSpace = null;
+        let xrGLLayer = null;
+        let xrSupported = false;
+        let currentPose = null;
+        let currentIntrinsics = null;
+        let trackingState = 'none'; // none | tracking | lost
+        let pendingFrameCapture = false;
 
-        // Initialize
-        document.addEventListener('DOMContentLoaded', init);
+        // Config
+        const CAPTURE_FPS = 3;   // Frames per second during capture
+        const JPEG_QUALITY = 0.85;
+        const TARGET_WIDTH = 1280;
+        const TARGET_HEIGHT = 720;
 
-        async function init() {
-            log('Initializing Camera Client...');
+        // Server
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const httpBase = `${location.protocol}//${location.hostname}:8765`;
+        const wsUrl = `${protocol}//${location.hostname}:8765/ws/scan`;
 
-            // Fetch server config
-            await fetchConfig();
+        // ═══════════════════════════════════════════════════════════════
+        //  ERROR / LOG DISPLAY
+        // ═══════════════════════════════════════════════════════════════
+        const errorPanel = document.getElementById('error-panel');
+        let logCount = 0;
 
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                log('ERROR: getUserMedia not available!', 'error');
-                startBtn.textContent = 'Camera Unavailable';
-                startBtn.disabled = true;
-                return;
-            }
+        function showLog(msg, type = 'info') {
+            console.log(`[${type}]`, msg);
+            errorPanel.classList.add('visible');
+            const cls = type === 'error' ? 'error-line' : type === 'warn' ? 'warn-line' : 'info-line';
+            const el = document.createElement('div');
+            el.className = cls;
+            const ts = new Date().toLocaleTimeString();
+            el.textContent = `[${ts}] ${msg}`;
+            errorPanel.appendChild(el);
+            errorPanel.scrollTop = errorPanel.scrollHeight;
+            logCount++;
+            // Keep max 50 lines
+            while (errorPanel.children.length > 50) errorPanel.removeChild(errorPanel.firstChild);
+        }
 
+        // ═══════════════════════════════════════════════════════════════
+        //  INIT
+        // ═══════════════════════════════════════════════════════════════
+        document.addEventListener('DOMContentLoaded', async () => {
             video = document.getElementById('video');
             canvas = document.getElementById('canvas');
             ctx = canvas.getContext('2d');
+            glCanvas = document.getElementById('gl-canvas');
 
-            startBtn.addEventListener('click', startScanning);
-            stopBtn.addEventListener('click', stopScanning);
+            await loadProjects();
+            await checkCapabilities();
+        });
 
-            // Connect WebSocket
-            connectWebSocket();
-        }
-
-        async function fetchConfig() {
+        // ═══════════════════════════════════════════════════════════════
+        //  PROJECTS
+        // ═══════════════════════════════════════════════════════════════
+        async function loadProjects() {
             try {
-                const response = await fetch(CONFIG_URL);
-                const data = await response.json();
-                if (data.session && data.session.chunk_size) {
-                    CHUNK_SIZE = data.session.chunk_size;
-                    log(`Server chunk size: ${CHUNK_SIZE}`);
+                // Get auth token from localStorage (set by login page)
+                const token = localStorage.getItem('stac_token');
+                const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+
+                const res = await fetch(`${httpBase}/sessions`, { headers });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const projects = await res.json();
+
+                const list = document.getElementById('project-list');
+                if (projects.length === 0) {
+                    list.innerHTML = '<div style="color:#8b949e;font-size:13px;text-align:center;padding:20px;">No projects yet. Create one below.</div>';
+                    return;
                 }
+
+                list.innerHTML = '';
+                projects.forEach(p => {
+                    const el = document.createElement('div');
+                    el.className = 'project-item';
+                    el.innerHTML = `
+                        <div>
+                            <div class="name">${p.id}</div>
+                            <div class="meta">${p.frame_count} frames · ${p.cloud_size_mb || 0} MB</div>
+                        </div>
+                        <div class="meta">${p.has_cloud ? '☁️' : ''}${p.has_bim ? ' 🏗️' : ''}</div>
+                    `;
+                    el.addEventListener('click', () => selectProject(p.id, el));
+                    list.appendChild(el);
+                });
             } catch (e) {
-                log('Could not fetch config, using defaults');
+                showLog(`Failed to load projects: ${e.message}`, 'error');
+                document.getElementById('project-list').innerHTML =
+                    `<div style="color:#f85149;font-size:12px;padding:10px;">⚠️ Cannot reach server at ${httpBase}</div>`;
             }
         }
 
-        function connectWebSocket() {
-            if (ws && ws.readyState === WebSocket.OPEN) return;
-
-            log(`Connecting to ${WS_URL}`);
-            ws = new WebSocket(WS_URL);
-            ws.binaryType = 'arraybuffer';
-
-            ws.onopen = () => {
-                log('WebSocket connected');
-                statusDot.classList.add('connected');
-                statusText.textContent = 'Connected';
-            };
-
-            ws.onclose = () => {
-                statusDot.classList.remove('connected');
-                statusText.textContent = 'Disconnected';
-                // Reconnect after delay
-                setTimeout(connectWebSocket, 3000);
-            };
-
-            ws.onerror = (error) => {
-                console.error('WebSocket error:', error);
-            };
-
-            ws.onmessage = (event) => {
-                // Handle status messages from server
-                try {
-                    const data = JSON.parse(event.data);
-                    if (data.chunks_queued !== undefined) {
-                        chunkCountDisplay.textContent = data.chunks_queued;
-                    }
-                } catch (e) {
-                    // Binary data, ignore
-                }
-            };
+        function selectProject(id, el) {
+            document.querySelectorAll('.project-item').forEach(e => e.classList.remove('selected'));
+            el.classList.add('selected');
+            selectedProject = id;
+            updatePreviewBtn();
         }
 
-        async function startScanning() {
-            log('Starting scan...');
-            try {
-                startBtn.disabled = true;
-                startBtn.textContent = 'Starting...';
+        async function createProject() {
+            const nameInput = document.getElementById('new-project-name');
+            const name = nameInput.value.trim();
+            if (!name) return;
 
-                // Request camera access
-                stream = await navigator.mediaDevices.getUserMedia({
+            try {
+                const token = localStorage.getItem('stac_token');
+                const res = await fetch(`${httpBase}/sessions`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+                    },
+                    body: JSON.stringify({ name }),
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail || `HTTP ${res.status}`);
+                }
+                showLog(`Project "${name}" created`, 'info');
+                nameInput.value = '';
+                await loadProjects();
+                // Auto-select the new project
+                setTimeout(() => {
+                    const items = document.querySelectorAll('.project-item');
+                    items.forEach(el => {
+                        if (el.querySelector('.name').textContent === name) {
+                            selectProject(name, el);
+                        }
+                    });
+                }, 100);
+            } catch (e) {
+                showLog(`Create project failed: ${e.message}`, 'error');
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  CAPABILITIES CHECK
+        // ═══════════════════════════════════════════════════════════════
+        async function checkCapabilities() {
+            const caps = document.getElementById('caps-list');
+            caps.innerHTML = '';
+
+            // Camera
+            const hasCamera = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+            addCap(caps, hasCamera, 'Camera Access', hasCamera ? 'getUserMedia available' : 'Not available');
+
+            // WebXR AR
+            xrSupported = false;
+            if (navigator.xr) {
+                try {
+                    xrSupported = await navigator.xr.isSessionSupported('immersive-ar');
+                } catch (e) { /* not supported */ }
+            }
+            addCap(caps, xrSupported, 'AR Tracking (WebXR)',
+                xrSupported ? 'ARKit poses + intrinsics available' : 'Not available — frames only (no pose data)');
+
+            // HTTPS
+            const isSecure = location.protocol === 'https:' || location.hostname === 'localhost';
+            addCap(caps, isSecure, 'Secure Context (HTTPS)',
+                isSecure ? 'Required for camera and WebXR' : 'Camera may not work without HTTPS');
+
+            // Server connectivity
+            let serverOk = false;
+            try {
+                const res = await fetch(`${httpBase}/health`);
+                serverOk = res.ok;
+            } catch (e) { /* offline */ }
+            addCap(caps, serverOk, 'Server Connection', serverOk ? httpBase : `Cannot reach ${httpBase}`);
+
+            if (serverOk) {
+                document.getElementById('conn-dot').classList.add('ok');
+                document.getElementById('conn-text').textContent = 'Connected';
+            } else {
+                document.getElementById('conn-dot').classList.add('err');
+                document.getElementById('conn-text').textContent = 'Offline';
+            }
+
+            updatePreviewBtn();
+        }
+
+        function addCap(container, ok, label, detail) {
+            const el = document.createElement('div');
+            el.className = 'cap-item';
+            el.innerHTML = `
+                <span class="status ${ok ? 'cap-ok' : 'cap-no'}">${ok ? '✓' : '✗'}</span>
+                <span><strong>${label}</strong> — ${detail}</span>
+            `;
+            container.appendChild(el);
+        }
+
+        function updatePreviewBtn() {
+            document.getElementById('preview-btn').disabled = !selectedProject;
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  CAMERA PREVIEW (getUserMedia only — no WebXR yet)
+        // ═══════════════════════════════════════════════════════════════
+        async function startPreview() {
+            showLog(`Starting camera preview for project: ${selectedProject}`);
+
+            try {
+                // Request camera via getUserMedia (preview only)
+                cameraStream = await navigator.mediaDevices.getUserMedia({
                     video: {
                         facingMode: { ideal: 'environment' },
                         width: { ideal: TARGET_WIDTH },
-                        height: { ideal: TARGET_HEIGHT }
+                        height: { ideal: TARGET_HEIGHT },
                     },
-                    audio: false
+                    audio: false,
                 });
 
-                log('Camera stream acquired');
-                video.srcObject = stream;
+                video.srcObject = cameraStream;
+                await video.play();
 
-                video.onloadedmetadata = async () => {
-                    try {
-                        await video.play();
-                        log('Video playing');
-                    } catch (e) {
-                        log(`Play error: ${e.message}`, 'error');
-                    }
-                };
+                const vw = video.videoWidth;
+                const vh = video.videoHeight;
+                showLog(`Camera: ${vw}×${vh}`);
 
-                // Wait for video to be ready
-                await new Promise(r => setTimeout(r, 500));
-
-                const videoWidth = video.videoWidth;
-                const videoHeight = video.videoHeight;
-                log(`Resolution: ${videoWidth}x${videoHeight}`);
-
+                // Set canvas size
                 let scale = 1;
-                if (videoWidth > TARGET_WIDTH) {
-                    scale = TARGET_WIDTH / videoWidth;
+                if (vw > TARGET_WIDTH) scale = TARGET_WIDTH / vw;
+                canvas.width = Math.floor(vw * scale);
+                canvas.height = Math.floor(vh * scale);
+
+                // Switch to camera screen
+                document.getElementById('setup-screen').classList.remove('active');
+                document.getElementById('camera-screen').classList.add('active');
+                document.getElementById('hud-project').textContent = selectedProject;
+                isPreviewing = true;
+                document.getElementById('camera-controls').style.display = 'flex';
+
+                // NOTE: WebXR NOT started here — it takes over the camera.
+                // It starts only when user presses Start Capture.
+
+                showLog('Camera preview active. Position yourself and press Start Capture.');
+                if (xrSupported) {
+                    showLog('AR tracking will start when you press Start Capture.');
+                }
+            } catch (e) {
+                showLog(`Camera error: ${e.message}`, 'error');
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  WebXR AR TRACKING (immersive-ar with cloned camera track)
+        // ═══════════════════════════════════════════════════════════════
+        let clonedVideo = null; // Hidden video element for cloned track
+
+        async function startWebXR() {
+            try {
+                // STRATEGY: Clone the camera MediaStreamTrack BEFORE starting
+                // immersive-ar. The clone may survive when XR takes over the camera.
+                // We capture frames from the clone, poses from the XR session.
+
+                if (cameraStream) {
+                    const videoTrack = cameraStream.getVideoTracks()[0];
+                    if (videoTrack) {
+                        const clonedTrack = videoTrack.clone();
+                        const clonedStream = new MediaStream([clonedTrack]);
+
+                        // Create hidden video element for the clone
+                        clonedVideo = document.createElement('video');
+                        clonedVideo.autoplay = true;
+                        clonedVideo.playsInline = true;
+                        clonedVideo.muted = true;
+                        clonedVideo.srcObject = clonedStream;
+                        await clonedVideo.play();
+                        showLog(`Cloned camera track: ${clonedTrack.readyState}, ${clonedVideo.videoWidth}×${clonedVideo.videoHeight}`);
+                    }
                 }
 
-                canvas.width = Math.floor(videoWidth * scale);
-                canvas.height = Math.floor(videoHeight * scale);
+                // Now start immersive-ar for pose tracking
+                gl = glCanvas.getContext('webgl', { xrCompatible: true });
+                xrSession = await navigator.xr.requestSession('immersive-ar', {
+                    requiredFeatures: ['local-floor'],
+                    optionalFeatures: ['dom-overlay'],
+                    domOverlay: { root: document.body },
+                });
+                xrGLLayer = new XRWebGLLayer(xrSession, gl);
+                await xrSession.updateRenderState({ baseLayer: xrGLLayer });
+                xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
 
-                // Update UI
-                startBtn.classList.add('hidden');
-                stopBtn.style.display = 'block';
-                recordingIndicator.classList.add('active');
-                chunkInfo.classList.remove('hidden');
-                stats.classList.remove('hidden');
+                xrSession.addEventListener('end', () => {
+                    showLog('WebXR session ended', 'warn');
+                    xrSession = null;
+                    xrGLLayer = null;
+                    trackingState = 'none';
+                    updateTrackingUI();
+                });
 
-                // Reset counters
-                sentFrames = 0;
-                frameCount = 0;
+                xrSession.requestAnimationFrame(onXRFrame);
+                showLog('WebXR immersive-ar started — ARKit tracking active');
 
-                // Start streaming
-                isScanning = true;
-                streamLoop();
-                log('Scanning started');
+                // Check if cloned track survived
+                if (clonedVideo) {
+                    const clonedTrack = clonedVideo.srcObject.getVideoTracks()[0];
+                    showLog(`Clone after XR: state=${clonedTrack.readyState}, muted=${clonedTrack.muted}`);
+                    if (clonedTrack.readyState === 'ended') {
+                        showLog('Clone track died when XR started. Frames will be from XR GL.', 'warn');
+                        clonedVideo = null;
+                    }
+                }
 
-            } catch (error) {
-                log(`Camera Error: ${error.message}`, 'error');
-                startBtn.disabled = false;
-                startBtn.textContent = 'Retry';
-                alert(`Error: ${error.message}`);
+                trackingState = 'tracking';
+                updateTrackingUI();
+            } catch (e) {
+                showLog(`WebXR failed: ${e.message}. Capturing without AR.`, 'warn');
+                xrSupported = false;
+                trackingState = 'none';
+                updateTrackingUI();
             }
         }
 
-        function stopScanning() {
-            log('Stopping scan...');
-            isScanning = false;
+        function onXRFrame(time, frame) {
+            if (!xrSession) return;
+            xrSession.requestAnimationFrame(onXRFrame);
 
-            // Stop camera stream
-            if (stream) {
-                stream.getTracks().forEach(track => track.stop());
-                stream = null;
-            }
-
-            // Update UI
-            stopBtn.style.display = 'none';
-            recordingIndicator.classList.remove('active');
-
-            startBtn.classList.remove('hidden');
-            startBtn.disabled = false;
-            startBtn.textContent = 'Start New Scan';
-
-            log(`Scan complete: ${sentFrames} frames sent`);
-
-            // Show completion message
-            const chunks = Math.floor(sentFrames / CHUNK_SIZE);
-            alert(`Scan Complete!\n\n${sentFrames} frames captured\n${chunks} chunks will be processed\n\nOpen viewer.html to see results`);
-        }
-
-        function streamLoop() {
-            if (!isScanning) return;
-
-            const now = Date.now();
-
-            // Capture and send frame
-            captureFrame();
-
-            // Update FPS counter
-            frameCount++;
-            if (now - lastFpsTime >= 1000) {
-                fps = frameCount;
-                frameCount = 0;
-                lastFpsTime = now;
-                fpsDisplay.textContent = fps;
-                sentDisplay.textContent = sentFrames;
-                frameCountDisplay.textContent = sentFrames;
-                chunkCountDisplay.textContent = Math.floor(sentFrames / CHUNK_SIZE);
-            }
-
-            // Schedule next frame
-            setTimeout(streamLoop, FRAME_INTERVAL);
-        }
-
-        function captureFrame() {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
+            const pose = frame.getViewerPose(xrRefSpace);
+            if (!pose) {
+                trackingState = 'lost';
+                currentPose = null;
+                currentIntrinsics = null;
+                updateTrackingUI();
                 return;
             }
 
-            try {
-                // Draw video to canvas
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            trackingState = 'tracking';
+            const view = pose.views[0];
 
-                // Convert to JPEG blob and send
-                canvas.toBlob((blob) => {
-                    if (!blob) return;
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(blob);
-                        sentFrames++;
-                    }
-                }, 'image/jpeg', JPEG_QUALITY);
-            } catch (e) {
-                log('Capture error: ' + e.message, 'error');
+            // Extract pose matrix (4×4 column-major, meters)
+            currentPose = Array.from(view.transform.matrix);
+
+            // Extract intrinsics from projection matrix
+            // IMPORTANT: use actual image resolution, not XR viewport
+            const projMat = view.projectionMatrix;
+            const imgW = canvas.width;   // actual captured image width (720)
+            const imgH = canvas.height;  // actual captured image height (1280)
+
+            currentIntrinsics = {
+                fx: (projMat[0] * imgW) / 2.0,
+                fy: (projMat[5] * imgH) / 2.0,
+                cx: imgW / 2.0,
+                cy: imgH / 2.0,
+                width: imgW,
+                height: imgH,
+            };
+
+            updateTrackingUI();
+
+            // Log position every ~30 frames to verify 6DoF tracking
+            if (this._xrLogCount === undefined) this._xrLogCount = 0;
+            this._xrLogCount++;
+            if (this._xrLogCount % 30 === 1) {
+                const pos = view.transform.position;
+                showLog(`Pose: x=${pos.x.toFixed(3)} y=${pos.y.toFixed(3)} z=${pos.z.toFixed(3)}`);
             }
         }
 
-        // Prevent accidental page close during scan
-        window.onbeforeunload = function (e) {
-            if (isScanning) {
+        function updateTrackingUI() {
+            const icon = document.getElementById('tracking-icon');
+            const text = document.getElementById('tracking-text');
+            if (trackingState === 'tracking') {
+                icon.textContent = '🟢';
+                text.textContent = 'AR Tracking Active';
+                text.style.color = '#3fb950';
+            } else if (trackingState === 'lost') {
+                icon.textContent = '🔴';
+                text.textContent = 'Tracking Lost!';
+                text.style.color = '#f85149';
+            } else {
+                icon.textContent = '⚪';
+                text.textContent = 'No AR Tracking';
+                text.style.color = '#8b949e';
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  CAPTURE (rapid alternation: frame → XR pose → frame → ...)
+        // ═══════════════════════════════════════════════════════════════
+        async function startCapture() {
+            if (!selectedProject) return;
+
+            connectWS();
+
+            isCapturing = true;
+            frameIndex = 0;
+            bytesSent = 0;
+
+            // UI
+            document.getElementById('capture-btn').style.display = 'none';
+            document.getElementById('back-btn').style.display = 'none';
+            document.getElementById('stop-btn').style.display = '';
+            document.getElementById('rec-indicator').classList.add('active');
+
+            showLog(`Capture started → project: ${selectedProject}`);
+            if (xrSupported) {
+                showLog('Mode: rapid alternation (frame ↔ XR pose)');
+            } else {
+                showLog('Mode: frames only (no AR tracking available)');
+            }
+
+            // Start the alternation loop
+            alternationLoop();
+        }
+
+        function stopCapture() {
+            isCapturing = false;
+            if (captureTimer) { clearTimeout(captureTimer); captureTimer = null; }
+
+            // End any active XR session
+            if (xrSession) {
+                xrSession.end().catch(() => { });
+                xrSession = null;
+            }
+
+            // Send stop message
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'stop_scan',
+                    total_frames: frameIndex,
+                }));
+            }
+
+            // UI
+            document.getElementById('stop-btn').style.display = 'none';
+            document.getElementById('capture-btn').style.display = '';
+            document.getElementById('capture-btn').textContent = '⏺ Resume Capture';
+            document.getElementById('back-btn').style.display = '';
+            document.getElementById('rec-indicator').classList.remove('active');
+
+            showLog(`Capture stopped: ${frameIndex} frames sent, ${(bytesSent / 1024 / 1024).toFixed(1)} MB total`);
+        }
+
+        async function alternationLoop() {
+            if (!isCapturing) return;
+
+            // ── PHASE 1: Wait for camera to be active and producing real frames ──
+            await waitForRealFrame();
+            if (!isCapturing) return;
+
+            // ── PHASE 2: Capture frame from getUserMedia ──
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // ── PHASE 3: Quick XR session for pose ──
+            if (xrSupported) {
+                try {
+                    await grabOnePose();
+                } catch (e) {
+                    showLog(`Pose grab: ${e.message}`, 'warn');
+                }
+            }
+
+            // ── PHASE 4: Send frame + pose data ──
+            sendFrameFromCanvas();
+
+            // FPS counter
+            fpsCounter++;
+            const now = Date.now();
+            if (now - fpsLast >= 1000) {
+                document.getElementById('hud-fps').textContent = fpsCounter;
+                fpsCounter = 0;
+                fpsLast = now;
+            }
+
+            // ── PHASE 5: Next cycle (camera needs time to recover after XR) ──
+            if (!isCapturing) return;
+            captureTimer = setTimeout(() => alternationLoop(), 200);
+        }
+
+        // Wait until getUserMedia video produces a non-black frame
+        function waitForRealFrame() {
+            return new Promise((resolve) => {
+                let attempts = 0;
+                const maxAttempts = 30; // 30 × 100ms = 3s max wait
+
+                const check = () => {
+                    if (!isCapturing) { resolve(); return; }
+                    attempts++;
+
+                    if (video && video.readyState >= 2) {
+                        // Sample a few pixels to check if frame is black
+                        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                        const sample = ctx.getImageData(
+                            Math.floor(canvas.width / 2),
+                            Math.floor(canvas.height / 2),
+                            10, 10
+                        ).data;
+
+                        // Check if pixels have any real content (not all near-black)
+                        let brightness = 0;
+                        for (let i = 0; i < sample.length; i += 4) {
+                            brightness += sample[i] + sample[i + 1] + sample[i + 2];
+                        }
+                        brightness /= (sample.length / 4 * 3);
+
+                        if (brightness > 5 || attempts >= maxAttempts) {
+                            if (attempts > 1) {
+                                showLog(`Camera recovered after ${attempts * 100}ms (brightness: ${brightness.toFixed(0)})`);
+                            }
+                            resolve();
+                            return;
+                        }
+                    }
+
+                    setTimeout(check, 100);
+                };
+                check();
+            });
+        }
+
+        // Briefly start immersive-ar, let ARKit warm up, grab pose, end session
+        async function grabOnePose() {
+            const XR_WARMUP_FRAMES = 30; // ~500ms at 60fps for ARKit SLAM init
+
+            return new Promise(async (resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    if (xrSession) xrSession.end().catch(() => { });
+                    reject(new Error('XR pose timeout'));
+                }, 4000); // 4s max
+
+                try {
+                    gl = glCanvas.getContext('webgl', { xrCompatible: true });
+                    const session = await navigator.xr.requestSession('immersive-ar', {
+                        requiredFeatures: ['local-floor'],
+                        optionalFeatures: ['dom-overlay'],
+                        domOverlay: { root: document.body },
+                    });
+                    xrSession = session;
+
+                    const glLayer = new XRWebGLLayer(session, gl);
+                    await session.updateRenderState({ baseLayer: glLayer });
+                    const refSpace = await session.requestReferenceSpace('local-floor');
+
+                    let frameCount = 0;
+
+                    // Run multiple XR frames to let ARKit initialize SLAM
+                    function onFrame(time, frame) {
+                        if (!xrSession) return;
+                        frameCount++;
+
+                        const pose = frame.getViewerPose(refSpace);
+                        if (pose && pose.views.length > 0) {
+                            const view = pose.views[0];
+                            currentPose = Array.from(view.transform.matrix);
+
+                            // IMPORTANT: use actual image resolution, not XR viewport
+                            const projMat = view.projectionMatrix;
+                            const imgW = canvas.width;   // 720
+                            const imgH = canvas.height;  // 1280
+                            currentIntrinsics = {
+                                fx: (projMat[0] * imgW) / 2.0,
+                                fy: (projMat[5] * imgH) / 2.0,
+                                cx: imgW / 2.0,
+                                cy: imgH / 2.0,
+                                width: imgW,
+                                height: imgH,
+                            };
+                            trackingState = 'tracking';
+                        }
+
+                        // Keep going until warmup complete
+                        if (frameCount < XR_WARMUP_FRAMES) {
+                            session.requestAnimationFrame(onFrame);
+                            return;
+                        }
+
+                        // Done — end session and return pose
+                        clearTimeout(timeout);
+                        updateTrackingUI();
+                        session.end().then(() => {
+                            xrSession = null;
+                            resolve();
+                        }).catch(() => {
+                            xrSession = null;
+                            resolve();
+                        });
+                    }
+
+                    session.requestAnimationFrame(onFrame);
+                } catch (e) {
+                    clearTimeout(timeout);
+                    xrSession = null;
+                    reject(e);
+                }
+            });
+        }
+
+        // Wait for getUserMedia video to produce real frames again
+        function waitForCameraReady() {
+            return new Promise((resolve) => {
+                const check = () => {
+                    if (video && video.readyState >= 2) {
+                        resolve();
+                    } else {
+                        setTimeout(check, 50);
+                    }
+                };
+                check();
+            });
+        }
+
+        function sendFrameFromCanvas() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+            canvas.toBlob((blob) => {
+                if (!blob || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    const base64 = reader.result.split(',')[1];
+
+                    const payload = {
+                        type: 'frame',
+                        project_id: selectedProject,
+                        frame_index: frameIndex,
+                        timestamp: performance.now(),
+                        has_ar: trackingState === 'tracking',
+                        intrinsics: currentIntrinsics,
+                        pose_matrix: currentPose,
+                        image_base64: base64,
+                        image_width: canvas.width,
+                        image_height: canvas.height,
+                    };
+
+                    ws.send(JSON.stringify(payload));
+                    bytesSent += base64.length;
+                    frameIndex++;
+
+                    document.getElementById('hud-frames').textContent = frameIndex;
+                    document.getElementById('hud-sent').textContent =
+                        bytesSent > 1048576 ? `${(bytesSent / 1048576).toFixed(1)} MB` : `${(bytesSent / 1024).toFixed(0)} KB`;
+                };
+                reader.readAsDataURL(blob);
+            }, 'image/jpeg', JPEG_QUALITY);
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  WEBSOCKET
+        // ═══════════════════════════════════════════════════════════════
+        function connectWS() {
+            if (ws && ws.readyState === WebSocket.OPEN) return;
+
+            const token = localStorage.getItem('stac_token');
+            const url = token ? `${wsUrl}?token=${token}` : wsUrl;
+
+            showLog(`Connecting to ${wsUrl}`);
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                showLog('WebSocket connected');
+                document.getElementById('conn-dot').className = 'dot ok';
+                document.getElementById('conn-text').textContent = 'Connected';
+
+                // Send init
+                ws.send(JSON.stringify({
+                    type: 'init_scan',
+                    project_id: selectedProject,
+                    capture_fps: CAPTURE_FPS,
+                    has_ar: xrSupported && trackingState === 'tracking',
+                }));
+            };
+
+            ws.onclose = () => {
+                document.getElementById('conn-dot').className = 'dot err';
+                document.getElementById('conn-text').textContent = 'Disconnected';
+                if (isCapturing) {
+                    showLog('WebSocket disconnected during capture!', 'error');
+                    // Try to reconnect
+                    setTimeout(connectWS, 2000);
+                }
+            };
+
+            ws.onerror = (e) => {
+                showLog(`WebSocket error: ${e.type}`, 'error');
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'scan_ready') {
+                        showLog(`Scan session created: ${msg.scan_path}`, 'info');
+                    } else if (msg.type === 'frame_ack') {
+                        // Silent ack
+                    } else if (msg.type === 'error') {
+                        showLog(`Server error: ${msg.message}`, 'error');
+                    } else {
+                        showLog(`Server: ${JSON.stringify(msg)}`);
+                    }
+                } catch (e) { /* binary, ignore */ }
+            };
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  NAVIGATION
+        // ═══════════════════════════════════════════════════════════════
+        function backToSetup() {
+            if (isCapturing) stopCapture();
+            isPreviewing = false;
+
+            // Stop camera
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(t => t.stop());
+                cameraStream = null;
+            }
+
+            // Stop WebXR
+            if (xrSession) {
+                xrSession.end();
+                xrSession = null;
+            }
+
+            // Close WS
+            if (ws) { ws.close(); ws = null; }
+
+            document.getElementById('camera-screen').classList.remove('active');
+            document.getElementById('setup-screen').classList.add('active');
+            document.getElementById('camera-controls').style.display = 'none';
+
+            // Reset
+            document.getElementById('capture-btn').style.display = '';
+            document.getElementById('capture-btn').textContent = '⏺ Start Capture';
+            document.getElementById('stop-btn').style.display = 'none';
+            document.getElementById('back-btn').style.display = '';
+            document.getElementById('rec-indicator').classList.remove('active');
+            document.getElementById('hud-frames').textContent = '0';
+        }
+
+        // Prevent accidental close during capture
+        window.onbeforeunload = (e) => {
+            if (isCapturing) {
                 e.preventDefault();
-                e.returnValue = 'Scan in progress. Are you sure you want to leave?';
+                e.returnValue = 'Scan in progress. Leave?';
                 return e.returnValue;
             }
         };

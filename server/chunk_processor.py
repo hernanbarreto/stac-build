@@ -26,7 +26,9 @@ try:
     from da3_streaming.da3_streaming import DA3_Streaming as _DA3_Streaming
     DA3_Streaming = _DA3_Streaming
     DA3_AVAILABLE = True
-    print("[ChunkProcessor] DA3_Streaming loaded successfully")
+    _backend = cfg.get("slam_backend", "da3")
+    if _backend in ("da3", "hybrid"):
+        print("[ChunkProcessor] DA3_Streaming loaded successfully")
     
     try:
         from da3_streaming.da3_streaming import depth_to_point_cloud_vectorized as _depth_to_point_cloud_vectorized

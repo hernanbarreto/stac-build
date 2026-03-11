@@ -17,6 +17,7 @@ interface ViewportProps {
     activeTool: Tool
     showAxes?: boolean
     showGrid?: boolean
+    pipelineRunning?: boolean
     onPointCount: (count: number) => void
     onFps: (fps: number) => void
     onStatusMessage?: (msg: string) => void
@@ -231,7 +232,7 @@ function adaptGrid(
 }
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, activeSession, activeTool, showAxes = true, showGrid = true, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded },
+    { pointSize, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -267,6 +268,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const cloudBBoxRef = useRef<THREE.Box3 | null>(null)
     const axesRef = useRef<THREE.Group | null>(null)
     const showGridRef = useRef(showGrid)
+    const pipelineRunningRef = useRef(pipelineRunning)
 
     // Alignment gizmo state
     const transformControlsRef = useRef<TransformControls | null>(null)
@@ -280,6 +282,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
     // Toggle grid and axes visibility
     useEffect(() => { if (gridRef.current) gridRef.current.visible = showGrid; showGridRef.current = showGrid }, [showGrid])
+    useEffect(() => { pipelineRunningRef.current = pipelineRunning }, [pipelineRunning])
     useEffect(() => { if (axesRef.current) axesRef.current.visible = showAxes }, [showAxes])
 
     // Toggle OrbitControls left-button based on active tool
@@ -1704,7 +1707,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             ws.onopen = () => {
                 // console.log('[Viewport] WebSocket connected')
                 // If session was selected before WS was ready, load it now
-                if (activeSessionRef.current) {
+                // BUT: skip reload if pipeline is running (no PLY data yet, causes grid flicker)
+                if (activeSessionRef.current && !pipelineRunningRef.current) {
                     clearScene()
                     ws.send(JSON.stringify({
                         type: 'load_session',
@@ -1761,8 +1765,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     }, []) // Only setup once on mount
 
     // When activeSession changes, send load command on existing WS
+    // Skip if pipeline is running — no cloud exists yet
     useEffect(() => {
         if (!activeSession) return
+        if (pipelineRunningRef.current) return  // Pipeline in progress, cloud doesn't exist yet
         const ws = wsRef.current
         if (!ws || ws.readyState !== WebSocket.OPEN) return
 

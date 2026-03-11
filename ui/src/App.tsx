@@ -22,7 +22,7 @@ import {
   Move, Palette, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Wrench,
   Building2, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
   Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
-  Scale, Thermometer, Loader2, BarChart3, Home,
+  Scale, Thermometer, Loader2, BarChart3, Home, Pencil,
 } from 'lucide-react'
 
 interface SessionInfo {
@@ -55,6 +55,7 @@ interface PipelineState {
   status: string
   current_stage_idx: number
   stages: PipelineStageInfo[]
+  scans?: string[]  // scan keys being rebuilt
 }
 
 type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align'
@@ -113,8 +114,29 @@ function App() {
   })
 
   const [pipelineReplace, setPipelineReplace] = useState(true)
-  const [pipelineRunning, setPipelineRunning] = useState<PipelineState | null>(null)
+  const [pipelineRunning, setPipelineRunning] = useState<PipelineState | null>(() => {
+    try {
+      const saved = sessionStorage.getItem('pipelineRunning')
+      return saved ? JSON.parse(saved) : null
+    } catch { return null }
+  })
+  const pipelineRunningRef = useRef<PipelineState | null>(pipelineRunning)
+  useEffect(() => {
+    pipelineRunningRef.current = pipelineRunning
+    if (pipelineRunning && pipelineRunning.status !== 'done' && pipelineRunning.status !== 'failed' && pipelineRunning.status !== 'cancelled') {
+      sessionStorage.setItem('pipelineRunning', JSON.stringify(pipelineRunning))
+    } else {
+      sessionStorage.removeItem('pipelineRunning')
+    }
+  }, [pipelineRunning])
   const [interactiveSessionId, setInteractiveSessionId] = useState<string | null>(null)
+  const [creatingProject, setCreatingProject] = useState(false)
+  const [newProjectName, setNewProjectName] = useState('')
+  const [renamingProject, setRenamingProject] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [scansList, setScansList] = useState<{ date: string; source: string; key: string; frame_count: number; has_output: boolean }[]>([])
+  const [selectedScans, setSelectedScans] = useState<string[]>([])
+  const [projectFilter, setProjectFilter] = useState('')
 
   const { user, token, loading: authLoading, logout } = useAuth()
 
@@ -159,6 +181,8 @@ function App() {
       setSegments([])
       setBimModels([])
       setPointCount(0)
+      setPipelineRunning(null)
+      setSessionLoading(null)
       setStatusMessage('Server disconnected')
       // Dispose Potree data from GPU to free memory and stop LOD updates
       viewportRef.current?.clearScene()
@@ -253,6 +277,35 @@ function App() {
     }
   }, [token])
 
+  // Recover active pipeline state after page load/refresh
+  useEffect(() => {
+    if (!connected) return
+    fetch('/api/pipelines/active')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data?.pipelines) {
+          // Server restarted with no active pipelines — clear stale state
+          setPipelineRunning(null)
+          return
+        }
+        const entries = Object.entries(data.pipelines)
+        if (entries.length > 0) {
+          // Restore the first running pipeline
+          const [, job] = entries[0] as [string, any]
+          setPipelineRunning({
+            session_id: job.session_id,
+            status: job.status,
+            current_stage_idx: job.current_stage_idx,
+            stages: job.stages,
+          })
+        } else {
+          // No active pipelines — clear stale state
+          setPipelineRunning(null)
+        }
+      })
+      .catch(() => { })
+  }, [connected])
+
   // Select session — highlight only, no cloud loading
   const handleSessionSelect = useCallback((sessionId: string) => {
     setSelectedSession(sessionId)
@@ -260,6 +313,12 @@ function App() {
 
   // Load session — actually loads the cloud in the viewport
   const handleSessionLoad = useCallback((sessionId: string) => {
+    // Check if session has a cloud to load
+    const sess = sessions.find(s => s.id === sessionId)
+    if (sess && !sess.hasCloud) {
+      setStatusMessage('No cloud available. Run Reconstruct first.')
+      return
+    }
     // Unload current session if any
     viewportRef.current?.clearScene()
     viewportRef.current?.sendCommand({ type: 'cleared' })
@@ -278,7 +337,7 @@ function App() {
     setSabanaFullMeta(null)
     // Reset OBBs visibility
     viewportRef.current?.setOBBsVisible(true)
-  }, [])
+  }, [sessions])
 
   // Dismiss loading overlay when points arrive (session load only, not refresh)
   const prevPointCount = useRef(0)
@@ -292,6 +351,21 @@ function App() {
     }
     prevPointCount.current = pointCount
   }, [pointCount, sessionLoading, sessions, activeSession])
+
+  // Timeout: if loading overlay stays for 15s without points, dismiss with error
+  useEffect(() => {
+    if (!sessionLoading) return
+    const timer = setTimeout(() => {
+      if (pointCount === 0 && sessionLoading) {
+        setSessionLoading(null)
+        // Only show error if no pipeline is running on this session
+        if (!pipelineRunning || pipelineRunning.status !== 'running' || pipelineRunning.session_id !== activeSession) {
+          setStatusMessage('Session has no point cloud data. Run Reconstruct to generate.')
+        }
+      }
+    }, 15000)
+    return () => clearTimeout(timer)
+  }, [sessionLoading, pipelineRunning, activeSession]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-detect sábana when BIM models first appear after session load
   const prevBimCount = useRef(0)
@@ -344,7 +418,12 @@ function App() {
         if (tasks && tasks.length > 0) {
           const t = tasks[0]  // show the first active task
           const msg = t.detail ? `${t.label} — ${t.detail}` : t.label
-          setSessionLoading(msg)
+          // Don't set sessionLoading when pipeline is running — pipeline panel already shows progress
+          const pr = pipelineRunningRef.current
+          const pipelineActive = pr && (pr.status === 'running' || pr.status === 'queued') && pr.session_id === activeSession
+          if (!pipelineActive) {
+            setSessionLoading(msg)
+          }
           // Keep polling while tasks are active
           timer = setTimeout(poll, 3000)
         } else {
@@ -384,18 +463,40 @@ function App() {
     }
   }, [activeSession, connected]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleReconstruct = useCallback((sessionId: string) => {
+  const handleReconstruct = useCallback(async (sessionId: string) => {
     setPipelineDialogSession(sessionId)
+    // Fetch available scans for this project
+    try {
+      const res = await fetch(`/sessions/${sessionId}/scans`)
+      if (res.ok) {
+        const data = await res.json()
+        const scans = data.scans || []
+        setScansList(scans)
+        // Pre-select only scans NOT currently being rebuilt
+        const pr = pipelineRunningRef.current
+        const isActive = pr && (pr.status === 'running' || pr.status === 'queued') && pr.session_id === sessionId
+        // If pipeline is active but scans list is missing, treat ALL as rebuilding
+        const rebuildingKeys = isActive ? (pr.scans || scans.map((s: any) => s.key)) : []
+        setSelectedScans(scans.filter((s: any) => !rebuildingKeys.includes(s.key)).map((s: any) => s.key))
+      } else {
+        setScansList([])
+        setSelectedScans([])
+      }
+    } catch {
+      setScansList([])
+      setSelectedScans([])
+    }
     setPipelineDialogOpen(true)
   }, [])
 
   const handlePipelineRun = useCallback(() => {
     if (!pipelineDialogSession) return
+    if (selectedScans.length === 0) return
     // Load the session immediately so the websocket connects for progress
     setActiveSession(pipelineDialogSession)
     setSelectedSession(pipelineDialogSession)
     setPipelineDialogOpen(false)
-    setPipelineRunning({ session_id: pipelineDialogSession, status: 'queued', current_stage_idx: -1, stages: [] })
+    setPipelineRunning({ session_id: pipelineDialogSession, status: 'queued', current_stage_idx: -1, stages: [], scans: [...selectedScans] })
     setTimeout(() => {
       viewportRef.current?.sendCommand({
         type: 'run_pipeline',
@@ -403,10 +504,12 @@ function App() {
         ordered_stages: pipelineOrder,
         stages: pipelineEnabled,
         replace: pipelineReplace,
+        scans: selectedScans,
       })
-      setStatusMessage(`Pipeline started for ${pipelineDialogSession}...`)
+      const label = selectedScans.length === 1 ? selectedScans[0] : `${selectedScans.length} scans`
+      setStatusMessage(`Pipeline started for ${pipelineDialogSession} (${label})...`)
     }, 500)
-  }, [pipelineDialogSession, pipelineOrder, pipelineEnabled, pipelineReplace])
+  }, [pipelineDialogSession, pipelineOrder, pipelineEnabled, pipelineReplace, selectedScans])
 
   const handlePipelineCancel = useCallback(() => {
     const targetSession = pipelineRunning?.session_id || activeSession
@@ -417,19 +520,22 @@ function App() {
   }, [activeSession, pipelineRunning])
 
   const handlePipelineProgress = useCallback((data: Record<string, unknown>) => {
-    const state: PipelineState = {
+    const newState: PipelineState = {
       session_id: (data.session_id as string) || undefined,
       status: (data.status as string) || 'running',
       current_stage_idx: (data.current_stage_idx as number) ?? -1,
       stages: (data.stages as PipelineStageInfo[]) || [],
     }
-    setPipelineRunning(state)
+    setPipelineRunning(prev => {
+      const merged = { ...newState, scans: prev?.scans }
+      return merged
+    })
     // Update status bar with current stage info
-    const currentStage = state.stages[state.current_stage_idx]
+    const currentStage = newState.stages[newState.current_stage_idx]
     if (currentStage) {
       setStatusMessage(`${currentStage.icon} ${currentStage.label}: ${currentStage.message} (${Math.round(currentStage.pct)}%)`)
     }
-    if (state.status === 'done' || state.status === 'failed' || state.status === 'cancelled') {
+    if (newState.status === 'done' || newState.status === 'failed' || newState.status === 'cancelled') {
       setTimeout(() => setPipelineRunning(null), 5000)
     }
   }, [])
@@ -601,10 +707,12 @@ function App() {
                 <button className="menu-dropdown-item"
                   onClick={() => menuAction(() => {
                     viewportRef.current?.sendCommand({ type: 'cleared' })
+                    viewportRef.current?.clearScene()
                     setConnected(false)
                     setSessions([])
                     setActiveSession(null)
                     setSelectedSession(null)
+                    setSessionLoading(null)
                     setSegments([])
                     setBimModels([])
                     setPointCount(0)
@@ -786,7 +894,7 @@ function App() {
       {/* ── Activity Bar ── */}
       <div className="activity-bar">
         <button className={`activity-btn ${activePanel === 'sessions' ? 'active' : ''}`}
-          onClick={() => togglePanel('sessions')} title="Sessions">
+          onClick={() => togglePanel('sessions')} title="Projects">
           <FolderOpen size={18} />
           {sessions.length > 0 && <span className="activity-badge">{sessions.length}</span>}
         </button>
@@ -835,7 +943,7 @@ function App() {
             {/* Sessions Panel */}
             {activePanel === 'sessions' && (
               <>
-                <div className="panel-header">Sessions</div>
+                <div className="panel-header">Projects</div>
                 <nav className="sidebar-nav">
                   {!connected ? (
                     <>
@@ -847,7 +955,84 @@ function App() {
                     </>
                   ) : (
                     <div className="session-list">
-                      {sessions.map(s => (
+                      {/* Create new project — admin and manager only */}
+                      {user && (user.role === 'admin' || user.role === 'manager') && (
+                        <div className="session-create-bar">
+                          {!creatingProject ? (
+                            <button className="session-create-btn" onClick={() => setCreatingProject(true)}
+                              title="Create New Project">
+                              <span style={{ fontSize: 16, fontWeight: 600 }}>+</span> New Project
+                            </button>
+                          ) : (
+                            <div className="session-create-input">
+                              <input
+                                autoFocus
+                                placeholder="project-name"
+                                value={newProjectName}
+                                onChange={e => setNewProjectName(e.target.value)}
+                                onKeyDown={async e => {
+                                  if (e.key === 'Enter' && newProjectName.trim()) {
+                                    try {
+                                      const headers: HeadersInit = { 'Content-Type': 'application/json' }
+                                      if (token) headers['Authorization'] = `Bearer ${token}`
+                                      const res = await fetch('/sessions', {
+                                        method: 'POST', headers,
+                                        body: JSON.stringify({ name: newProjectName.trim() }),
+                                      })
+                                      if (!res.ok) {
+                                        const err = await res.json().catch(() => ({}))
+                                        setStatusMessage(err.detail || 'Failed to create project')
+                                      } else {
+                                        setNewProjectName('')
+                                        setCreatingProject(false)
+                                        connectToServer() // Refresh session list
+                                      }
+                                    } catch { setStatusMessage('Failed to create project') }
+                                  }
+                                  if (e.key === 'Escape') { setCreatingProject(false); setNewProjectName('') }
+                                }}
+                              />
+                              <button className="session-create-confirm"
+                                disabled={!newProjectName.trim()}
+                                onClick={async () => {
+                                  if (!newProjectName.trim()) return
+                                  try {
+                                    const headers: HeadersInit = { 'Content-Type': 'application/json' }
+                                    if (token) headers['Authorization'] = `Bearer ${token}`
+                                    const res = await fetch('/sessions', {
+                                      method: 'POST', headers,
+                                      body: JSON.stringify({ name: newProjectName.trim() }),
+                                    })
+                                    if (!res.ok) {
+                                      const err = await res.json().catch(() => ({}))
+                                      setStatusMessage(err.detail || 'Failed to create project')
+                                    } else {
+                                      setNewProjectName('')
+                                      setCreatingProject(false)
+                                      connectToServer()
+                                    }
+                                  } catch { setStatusMessage('Failed to create project') }
+                                }}>✓</button>
+                              <button className="session-create-cancel"
+                                onClick={() => { setCreatingProject(false); setNewProjectName('') }}>✕</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {/* Search filter — all users */}
+                      <div className="session-search-bar">
+                        <Search size={14} className="session-search-icon" />
+                        <input
+                          className="session-search-input"
+                          placeholder="Search projects..."
+                          value={projectFilter}
+                          onChange={e => setProjectFilter(e.target.value)}
+                        />
+                        {projectFilter && (
+                          <button className="session-search-clear" onClick={() => setProjectFilter('')}>✕</button>
+                        )}
+                      </div>
+                      {sessions.filter(s => !projectFilter || s.name.toLowerCase().includes(projectFilter.toLowerCase())).map(s => (
                         <div
                           key={s.id}
                           className={`session-item ${selectedSession === s.id ? 'active' : ''} ${activeSession === s.id ? 'loaded' : ''}`}
@@ -855,17 +1040,54 @@ function App() {
                         >
                           <div className="session-header">
                             <div className={`session-dot ${s.hasCloud ? 'online' : ''} ${activeSession === s.id ? 'loaded' : ''}`} />
-                            <div className="session-name">{s.name}</div>
+                            {renamingProject === s.id ? (
+                              <input
+                                className="session-rename-input"
+                                autoFocus
+                                value={renameValue}
+                                onClick={e => e.stopPropagation()}
+                                onChange={e => setRenameValue(e.target.value)}
+                                onKeyDown={async e => {
+                                  if (e.key === 'Escape') { setRenamingProject(null); setRenameValue('') }
+                                  if (e.key === 'Enter' && renameValue.trim() && renameValue.trim() !== s.id) {
+                                    try {
+                                      const headers: HeadersInit = { 'Content-Type': 'application/json' }
+                                      if (token) headers['Authorization'] = `Bearer ${token}`
+                                      const res = await fetch(`/sessions/${s.id}`, {
+                                        method: 'PATCH', headers,
+                                        body: JSON.stringify({ name: renameValue.trim() }),
+                                      })
+                                      if (!res.ok) {
+                                        const err = await res.json().catch(() => ({}))
+                                        setStatusMessage(err.detail || 'Rename failed')
+                                      } else {
+                                        setStatusMessage(`Renamed to "${renameValue.trim()}"`)
+                                        connectToServer()
+                                      }
+                                    } catch { setStatusMessage('Rename failed') }
+                                    setRenamingProject(null); setRenameValue('')
+                                  }
+                                }}
+                                onBlur={() => { setRenamingProject(null); setRenameValue('') }}
+                              />
+                            ) : (
+                              <div className="session-name">{s.name}</div>
+                            )}
                           </div>
                           <div className="session-meta">
                             {s.frameCount} frames{s.hasCloud && ` · ${s.cloudSizeMb}MB`}
                             {s.hasSegments && <> · <Tag size={11} /></>}
                             {s.hasBim && <> · <Building2 size={11} />{s.bimCount > 1 ? ` (${s.bimCount})` : ''}</>}
                             {activeSession === s.id && <> · <Circle size={8} fill="var(--accent)" stroke="none" /> loaded</>}
+                            {pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === s.id && (
+                              <> · <span className="sidebar-pipeline-badge" title="Pipeline running">⚙️ rebuilding</span></>
+                            )}
                           </div>
                           <div className="session-actions">
                             <button className="session-action-btn load"
-                              title="Load Session"
+                              title={s.hasCloud ? 'Load Session' : 'No cloud. Run Reconstruct first.'}
+                              disabled={!s.hasCloud}
+                              style={!s.hasCloud ? { opacity: 0.3 } : undefined}
                               onClick={(e) => { e.stopPropagation(); handleSessionLoad(s.id) }}
                             ><FolderOpen size={14} /></button>
                             <button className="session-action-btn reconstruct"
@@ -889,6 +1111,40 @@ function App() {
                                 title="Unload Session"
                                 onClick={(e) => { e.stopPropagation(); handleUnload() }}
                               ><ArrowUpFromLine size={14} /></button>
+                            )}
+                            {(user?.role === 'admin' || user?.role === 'manager') && (
+                              <button className="session-action-btn reconstruct"
+                                title="Rename Project"
+                                onClick={(e) => { e.stopPropagation(); setRenamingProject(s.id); setRenameValue(s.id) }}
+                              ><Pencil size={14} /></button>
+                            )}
+                            {(user?.role === 'admin' || user?.role === 'manager') && (
+                              <button className="session-action-btn delete"
+                                title="Delete Project"
+                                onClick={async (e) => {
+                                  e.stopPropagation()
+                                  const ok = await confirmDanger(
+                                    `This will permanently delete "${s.id}" and all its data. This cannot be undone.`,
+                                    `Delete ${s.id}?`
+                                  )
+                                  if (!ok) return
+                                  try {
+                                    const headers: HeadersInit = {}
+                                    if (token) headers['Authorization'] = `Bearer ${token}`
+                                    const res = await fetch(`/sessions/${s.id}`, { method: 'DELETE', headers })
+                                    if (!res.ok) {
+                                      const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }))
+                                      setStatusMessage(err.detail || 'Failed to delete project')
+                                    } else {
+                                      if (activeSession === s.id) handleUnload()
+                                      setStatusMessage(`Project "${s.id}" deleted`)
+                                      connectToServer()
+                                    }
+                                  } catch (err: any) {
+                                    setStatusMessage(`Delete failed: ${err?.message || err}`)
+                                  }
+                                }}
+                              ><Trash2 size={14} /></button>
                             )}
                           </div>
                         </div>
@@ -1132,8 +1388,8 @@ function App() {
 
       {/* ── Main Content ── */}
       <main className="main-content">
-        {/* Toolbar — only with active session, hide during loading */}
-        {hasSession && !sessionLoading && (
+        {/* Toolbar — only with loaded cloud, hide during loading */}
+        {hasSession && !sessionLoading && pointCount > 0 && (
           <div className="toolbar">
             <div className="toolbar-group">
               <button className={`tool-btn ${activeTool === 'navigate' ? 'active' : ''}`}
@@ -1193,8 +1449,8 @@ function App() {
           </div>
         )}
 
-        {/* 3D Viewport */}
-        <div className={`viewport-container${sessionLoading ? ' viewport-hidden' : ''}`}>
+        {/* 3D Viewport — don't hide during pipeline runs (pipeline panel shows progress) */}
+        <div className={`viewport-container${sessionLoading && !(pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession) ? ' viewport-hidden' : ''}`}>
           <Viewport
             ref={viewportRef}
             pointSize={pointSize}
@@ -1202,6 +1458,7 @@ function App() {
             activeTool={activeTool}
             showAxes={showAxes}
             showGrid={showGrid}
+            pipelineRunning={!!pipelineRunning && pipelineRunning.status === 'running'}
             onPointCount={setPointCount}
             onFps={setFps}
             onStatusMessage={setStatusMessage}
@@ -1221,8 +1478,8 @@ function App() {
             }}
           />
 
-          {/* Session Loading Overlay */}
-          {sessionLoading && (
+          {/* Session Loading Overlay — hidden when pipeline is running (show pipeline panel instead) */}
+          {sessionLoading && !(pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession) && (
             <div className="session-loading-overlay">
               <div className="slo-particles">
                 {Array.from({ length: 20 }, (_, i) => (
@@ -1247,6 +1504,33 @@ function App() {
 
           {/* Deviation Analysis — will be redesigned as toolbar buttons */}
 
+          {/* Pipeline Loading Overlay — animated logo while building, before cloud exists */}
+          {pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession && pointCount === 0 && (
+            <div className="session-loading-overlay">
+              <div className="slo-particles">
+                {Array.from({ length: 20 }, (_, i) => (
+                  <div key={i} className="slo-dot" />
+                ))}
+              </div>
+              <div className="slo-logo-wrap">
+                <div className="slo-logo-ring" />
+                <div className="slo-logo-ring" />
+                <div className="slo-logo-ring" />
+                <img src="/logo.png" alt="STAC Build" className="slo-logo-img" />
+              </div>
+              <div className="slo-text">
+                <div className="slo-title">Building Point Cloud</div>
+                <div className="slo-status">
+                  <div className="slo-spinner" />
+                  <span>{(() => {
+                    const stage = pipelineRunning.stages[pipelineRunning.current_stage_idx]
+                    return stage ? `${stage.label}: ${stage.message} (${Math.round(stage.pct)}%)` : 'Initializing...'
+                  })()}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Welcome screen — shown when no session */}
           {!hasSession && !sessionLoading && (
             <div className="welcome-screen">
@@ -1254,7 +1538,7 @@ function App() {
               <div className="welcome-subtitle">
                 {!connected
                   ? 'Connect to a STAC server to browse and visualize your 3D scan sessions.'
-                  : 'Select a session from the sidebar to load the point cloud.'}
+                  : 'Select a project from the sidebar.'}
               </div>
               {!connected && (
                 <button className="welcome-btn" onClick={connectToServer}>
@@ -1263,7 +1547,7 @@ function App() {
               )}
               <div className="welcome-hint">
                 {connected
-                  ? `${sessions.length} session${sessions.length !== 1 ? 's' : ''} available`
+                  ? `${sessions.length} project${sessions.length !== 1 ? 's' : ''} available`
                   : 'Default: wss://localhost:8765'}
               </div>
             </div>
@@ -1298,8 +1582,8 @@ function App() {
             </div>
           )}
 
-          {/* Pipeline progress overlay */}
-          {pipelineRunning && pipelineRunning.stages.length > 0 && (
+          {/* Pipeline progress overlay — only for the active session */}
+          {pipelineRunning && pipelineRunning.stages.length > 0 && pipelineRunning.session_id === activeSession && (
             <div className="pipeline-progress-overlay">
               <div className="pipeline-progress-card">
                 <div className="pipeline-progress-header">
@@ -1334,6 +1618,40 @@ function App() {
             <div className="pipeline-dialog" onClick={e => e.stopPropagation()}>
               <h3>Configure Pipeline</h3>
               <p className="pipeline-dialog-session">Session: {pipelineDialogSession}</p>
+
+              {/* Scan Selection */}
+              {scansList.length > 0 && (
+                <div className="pipeline-dialog-scans">
+                  <p style={{ fontSize: '11px', color: '#888', marginBottom: '6px' }}>
+                    {scansList.length === 1 ? 'Scan to reconstruct:' : `Select scans to reconstruct (${selectedScans.length}/${scansList.length}):`}
+                  </p>
+                  {scansList.map(scan => {
+                    const isPipelineActive = !!(pipelineRunning && (pipelineRunning.status === 'running' || pipelineRunning.status === 'queued') && pipelineRunning.session_id === pipelineDialogSession)
+                    const isRebuilding = isPipelineActive && (!pipelineRunning!.scans || pipelineRunning!.scans.includes(scan.key))
+                    return (
+                      <label key={scan.key} className="pipeline-scan-item" style={isRebuilding ? { opacity: 0.5 } : undefined}>
+                        <input
+                          type="checkbox"
+                          checked={selectedScans.includes(scan.key)}
+                          disabled={scansList.length === 1 || isRebuilding}
+                          onChange={e => {
+                            if (e.target.checked) {
+                              setSelectedScans(prev => [...prev, scan.key])
+                            } else {
+                              setSelectedScans(prev => prev.filter(k => k !== scan.key))
+                            }
+                          }}
+                        />
+                        <span className="pipeline-scan-date">{scan.date}</span>
+                        {scan.source !== 'default' && <span className="pipeline-scan-source">{scan.source}</span>}
+                        <span className="pipeline-scan-frames">{scan.frame_count} frames</span>
+                        {scan.has_output && <span className="pipeline-scan-badge">✓ output</span>}
+                        {isRebuilding && <span className="pipeline-scan-badge" style={{ color: 'var(--accent)' }}>⚙️ rebuilding</span>}
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
               <div className="pipeline-dialog-stages">
                 <p style={{ fontSize: '11px', color: '#888', marginBottom: '10px' }}>Pipeline stages (fixed order):</p>
                 {pipelineOrder.map((stageId) => {
@@ -1379,7 +1697,9 @@ function App() {
               </div>
               <div className="pipeline-dialog-actions">
                 <button className="pipeline-btn-cancel" onClick={() => setPipelineDialogOpen(false)}>Cancel</button>
-                <button className="pipeline-btn-run" onClick={handlePipelineRun}><Play size={14} /> Run Pipeline</button>
+                <button className="pipeline-btn-run" onClick={handlePipelineRun} disabled={selectedScans.length === 0}>
+                  <Play size={14} /> Run Pipeline
+                </button>
               </div>
             </div>
           </div>
@@ -1398,7 +1718,7 @@ function App() {
         </div>
         <div className="statusbar-spacer" />
         <div className="statusbar-item">
-          {activeSession ? `Session: ${activeSession}` : 'No session'}
+          {activeSession ? `Project: ${activeSession}` : 'No project'}
         </div>
         {statusMessage && (
           <div className="statusbar-item statusbar-status">

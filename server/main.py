@@ -18,7 +18,8 @@ from contextlib import asynccontextmanager
 # Suppress /health spam from access logs (applies to all uvicorn start modes)
 class _HealthCheckFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        return "GET /health" not in record.getMessage()
+        msg = record.getMessage()
+        return "GET /health" not in msg and "GET /api/tasks/" not in msg
 
 logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
 
@@ -46,6 +47,21 @@ SERVER_DIR = str(Path(__file__).parent)
 def _ctx(session_id: str):
     """Resolve a session_id to a path context (new-style or legacy)."""
     return resolve_session(SERVER_DIR, session_id)
+
+def _audit_log(action: str, session_id: str, user: str = "system", role: str = "", detail: str = ""):
+    """Append an entry to the project audit log (survives project deletion)."""
+    log_dir = Path(__file__).parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "action": action,
+        "session_id": session_id,
+        "user": user,
+        "role": role,
+        "detail": detail,
+    }
+    with open(log_dir / "project_audit.jsonl", "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 # --- Helper for Chunking ---
 def chunk_data(data, chunk_size=1048572): # approx 1MB, multiple of 28 bytes (7 floats * 4)
@@ -1279,14 +1295,14 @@ async def create_session(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ):
-    """Create a new empty session folder. Admin only."""
+    """Create a new empty session folder. Admin and Project Manager only."""
     from auth import decode_token
 
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
     payload = decode_token(credentials.credentials)
-    if payload.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if payload.get("role") not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="Admin or Manager only")
 
     body = await request.json()
     session_name = body.get("name", "").strip()
@@ -1317,7 +1333,188 @@ async def create_session(
     paths.ensure_source_dirs(today, "default")
     paths.init_project_meta(session_name)
 
+    # Audit log
+    username = payload.get("username", payload.get("sub", "unknown"))
+    _audit_log("created", session_name, user=username, role=payload.get("role", ""))
+
     return {"ok": True, "session_id": session_name}
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(
+    session_id: str,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Delete a project permanently. Admin only. Logged to project_audit.jsonl."""
+    from auth import decode_token
+    import shutil
+
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = decode_token(credentials.credentials)
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    # Locate the project/session folder
+    projects_dir = Path(__file__).parent / "projects"
+    project_dir = projects_dir / session_id
+    legacy_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans") / session_id
+
+    target = None
+    if project_dir.exists():
+        target = project_dir
+    elif legacy_dir.exists():
+        target = legacy_dir
+    else:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+
+    # Unload if currently active
+    if frame_storage and frame_storage.current_session and frame_storage.current_session.session_id == session_id:
+        frame_storage.current_session = None
+
+    # Delete
+    username = payload.get("username", payload.get("sub", "unknown"))
+    size_mb = round(sum(f.stat().st_size for f in target.rglob('*') if f.is_file()) / (1024 * 1024), 1)
+    shutil.rmtree(target)
+
+    # Audit log (independent of project, survives deletion)
+    _audit_log("deleted", session_id, user=username, role="admin",
+               detail=f"size={size_mb}MB")
+
+    print(f"[Server] 🗑️ Project '{session_id}' deleted by {username} ({size_mb}MB)")
+    return {"ok": True, "session_id": session_id, "size_mb": size_mb}
+
+
+@app.patch("/sessions/{session_id}")
+async def rename_session(
+    session_id: str,
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Rename a project. Admin and Manager only."""
+    from auth import decode_token
+    import re
+
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = decode_token(credentials.credentials)
+    if payload.get("role") not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="Admin or Manager only")
+
+    body = await request.json()
+    new_name = body.get("name", "").strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="New name is required")
+    if not re.match(r'^[a-zA-Z0-9_-]+$', new_name):
+        raise HTTPException(status_code=400, detail="Name can only contain letters, numbers, dashes, and underscores")
+    if new_name == session_id:
+        return {"ok": True, "old_id": session_id, "new_id": new_name}
+
+    # Locate current directory
+    projects_dir = Path(__file__).parent / "projects"
+    legacy_scans = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    old_dir = None
+    is_legacy = False
+    if (projects_dir / session_id).exists():
+        old_dir = projects_dir / session_id
+    elif (legacy_scans / session_id).exists():
+        old_dir = legacy_scans / session_id
+        is_legacy = True
+    else:
+        raise HTTPException(status_code=404, detail=f"Project '{session_id}' not found")
+
+    # Check new name doesn't conflict
+    new_dir = (legacy_scans if is_legacy else projects_dir) / new_name
+    if new_dir.exists():
+        raise HTTPException(status_code=409, detail=f"Project '{new_name}' already exists")
+    if (projects_dir / new_name).exists() or (legacy_scans / new_name).exists():
+        raise HTTPException(status_code=409, detail=f"Project '{new_name}' already exists")
+
+    # 1. Rename directory
+    old_dir.rename(new_dir)
+
+    # 2. Update DB references
+    try:
+        from db_team import SessionAssignment, ActivityLog
+        from db_project import Project
+        from sqlalchemy import update
+        async with async_session_factory() as db:
+            # SessionAssignment
+            await db.execute(
+                update(SessionAssignment)
+                .where(SessionAssignment.session_id == session_id)
+                .values(session_id=new_name)
+            )
+            # ActivityLog
+            await db.execute(
+                update(ActivityLog)
+                .where(ActivityLog.session_id == session_id)
+                .values(session_id=new_name)
+            )
+            # Project table
+            await db.execute(
+                update(Project)
+                .where(Project.slug == session_id)
+                .values(slug=new_name, name=new_name)
+            )
+            await db.commit()
+    except Exception as e:
+        print(f"[Server] ⚠️ DB update during rename failed: {e}")
+        # Directory already renamed, log but don't fail
+
+    # 3. Update loaded session reference if applicable
+    if frame_storage and frame_storage.current_session and frame_storage.current_session.session_id == session_id:
+        frame_storage.current_session.session_id = new_name
+
+    # Audit
+    username = payload.get("username", payload.get("sub", "unknown"))
+    _audit_log("renamed", new_name, user=username, role=payload.get("role", ""),
+               detail=f"old={session_id}")
+    print(f"[Server] ✏️ Project '{session_id}' renamed to '{new_name}' by {username}")
+    return {"ok": True, "old_id": session_id, "new_id": new_name}
+
+@app.get("/sessions/{session_id}/scans")
+async def get_session_scans(session_id: str):
+    """List all scan days and sources for a project.
+    Returns scan_key identifiers used by the pipeline to target specific scans.
+    """
+    from project_paths import ProjectPaths
+
+    projects_dir = Path(__file__).parent / "projects"
+    project_json = projects_dir / session_id / "project.json"
+
+    if not project_json.exists():
+        # Legacy session: single implicit scan
+        ctx = _ctx(session_id)
+        frame_count = len(list(ctx.frames_dir.glob("*.jpg"))) if ctx.frames_dir.exists() else 0
+        has_output = ctx.merged_cloud.exists()
+        return {
+            "session_id": session_id,
+            "scans": [{
+                "date": "legacy",
+                "source": "default",
+                "key": "legacy/default",
+                "frame_count": frame_count,
+                "has_output": has_output,
+            }]
+        }
+
+    paths = ProjectPaths(str(projects_dir), session_id)
+    scans = []
+    for date in paths.list_scan_days():
+        for source in paths.list_sources(date):
+            ctx = paths.for_source(date, source)
+            frame_count = len(list(ctx.frames_dir.glob("*.jpg"))) if ctx.frames_dir.exists() else 0
+            has_output = ctx.output_dir.exists() and any(ctx.output_dir.glob("chunk_*.ply"))
+            scans.append({
+                "date": date,
+                "source": source,
+                "key": f"{date}/{source}",
+                "frame_count": frame_count,
+                "has_output": has_output,
+            })
+
+    return {"session_id": session_id, "scans": scans}
 
 @app.get("/mode")
 async def get_mode():
@@ -2322,6 +2519,16 @@ async def get_active_tasks(session_id: str):
     from task_manager import task_manager
     tasks = task_manager.get_active(session_id)
     return {"tasks": tasks}
+
+
+@app.get("/api/pipelines/active")
+async def get_active_pipelines():
+    """Return all active pipeline jobs (for UI state recovery after refresh)."""
+    jobs = pipeline_manager.get_all_jobs()
+    # Filter to only running/queued jobs
+    active = {sid: job for sid, job in jobs.items()
+              if job.get("status") in ("running", "queued")}
+    return {"pipelines": active}
 
 
 @app.get("/api/bim/auto_match/{session_id}")
@@ -3637,21 +3844,83 @@ async def viewer_websocket(websocket: WebSocket):
                     except Exception:
                         pass
 
-                # Start pipeline
+                # Start pipeline — support sequential multi-scan
                 replace = cmd.get("replace", True)
-                await pipeline_manager.start_pipeline(
-                    session_id=session_id,
-                    stages=stages,
-                    config=dict(cfg),
-                    on_progress=_on_pipeline_progress,
-                    on_complete=_on_pipeline_complete,
-                    replace=replace,
-                )
+                scan_keys = cmd.get("scans", [])  # e.g. ["2026-03-07/legacy", "2026-03-08/default"]
 
-                await websocket.send_text(json.dumps({
-                    "type": "info",
-                    "message": f"Pipeline started for {session_id}"
-                }))
+                if len(scan_keys) <= 1:
+                    # Single scan or auto-resolve
+                    single_key = scan_keys[0] if scan_keys else None
+                    await pipeline_manager.start_pipeline(
+                        session_id=session_id,
+                        stages=stages,
+                        config=dict(cfg),
+                        on_progress=_on_pipeline_progress,
+                        on_complete=_on_pipeline_complete,
+                        replace=replace,
+                        scan_key=single_key,
+                    )
+                    label = single_key or "auto"
+                    await websocket.send_text(json.dumps({
+                        "type": "info",
+                        "message": f"Pipeline started for {session_id} (scan: {label})"
+                    }))
+                else:
+                    # Sequential multi-scan: run each scan one at a time
+                    async def _run_multi_scan():
+                        total = len(scan_keys)
+                        for i, sk in enumerate(scan_keys):
+                            try:
+                                await websocket.send_text(json.dumps({
+                                    "type": "info",
+                                    "message": f"Starting scan {i+1}/{total}: {sk}"
+                                }))
+                            except Exception:
+                                pass
+
+                            # Use a future to await sequential completion
+                            done_event = asyncio.Event()
+                            scan_success = [True]
+
+                            async def _on_scan_complete(sid, success, _ev=done_event, _ss=scan_success):
+                                _ss[0] = success
+                                await _on_pipeline_complete(sid, success)
+                                _ev.set()
+
+                            await pipeline_manager.start_pipeline(
+                                session_id=session_id,
+                                stages=stages,
+                                config=dict(cfg),
+                                on_progress=_on_pipeline_progress,
+                                on_complete=_on_scan_complete,
+                                replace=replace,
+                                scan_key=sk,
+                            )
+                            await done_event.wait()
+
+                            if not scan_success[0]:
+                                try:
+                                    await websocket.send_text(json.dumps({
+                                        "type": "error",
+                                        "message": f"Scan {sk} failed. Stopping multi-scan pipeline."
+                                    }))
+                                except Exception:
+                                    pass
+                                return
+
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "info",
+                                "message": f"All {total} scans completed for {session_id}"
+                            }))
+                        except Exception:
+                            pass
+
+                    asyncio.create_task(_run_multi_scan())
+                    await websocket.send_text(json.dumps({
+                        "type": "info",
+                        "message": f"Multi-scan pipeline started: {len(scan_keys)} scans for {session_id}"
+                    }))
 
             elif cmd.get("type") == "cancel_pipeline":
                 session_id = cmd.get("session_id")
@@ -3674,6 +3943,7 @@ async def viewer_websocket(websocket: WebSocket):
         print(f"[Viewer] ❌ WebSocket Error: {e}")
         import traceback
         traceback.print_exc()
+    finally:
         viewer_manager.disconnect_viewer(websocket)
 
 # ─── Team WebSocket: presence, messaging, WebRTC signaling ────
@@ -3807,6 +4077,142 @@ async def ws_team(websocket: WebSocket):
         if user_id and user_id in _team_connections:
             _team_connections.pop(user_id, None)
             await _broadcast_presence()
+
+# ═══════════════════════════════════════════════════════════════
+#  WebXR SCAN CAPTURE — receives frames + pose + intrinsics
+# ═══════════════════════════════════════════════════════════════
+
+@app.websocket("/ws/scan")
+async def scan_websocket(websocket: WebSocket):
+    """
+    WebXR Scan WebSocket — receives frames + camera data from camera.html.
+    Saves JPEG frames and camera metadata (pose, intrinsics) to disk.
+    """
+    await websocket.accept()
+    print("[Scan WS] Client connected")
+
+    project_id = None
+    scan_date = None
+    source_name = "webxr"
+    frames_dir = None
+    camera_data_dir = None
+    frame_count = 0
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            msg = json.loads(raw)
+            msg_type = msg.get("type")
+
+            if msg_type == "init_scan":
+                # ── Initialize scan session ──
+                project_id = msg.get("project_id", "").strip()
+                if not project_id:
+                    await websocket.send_json({"type": "error", "message": "Missing project_id"})
+                    continue
+
+                # Verify project exists
+                try:
+                    ctx = _ctx(project_id)
+                except Exception:
+                    await websocket.send_json({"type": "error", "message": f"Project '{project_id}' not found"})
+                    continue
+
+                # Create scan directory for today
+                scan_date = time.strftime("%Y-%m-%d")
+                from project_paths import ProjectPaths
+                projects_dir = Path(__file__).parent / "projects"
+                paths = ProjectPaths(str(projects_dir), project_id)
+                paths.ensure_source_dirs(scan_date, source_name)
+
+                # Resolve frame and camera_data directories
+                source_dir = paths.source_dir(scan_date, source_name)
+                frames_dir = source_dir / "frames"
+                camera_data_dir = source_dir / "camera_data"
+                frames_dir.mkdir(parents=True, exist_ok=True)
+                camera_data_dir.mkdir(parents=True, exist_ok=True)
+
+                # Create scan_meta.json with capture info
+                scan_meta = {
+                    "capture_method": "webxr",
+                    "has_ar": msg.get("has_ar", False),
+                    "capture_fps": msg.get("capture_fps", 3),
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "zoom_level": 1.0,
+                    "source": "webxr_capture",
+                }
+                meta_path = source_dir / "scan_meta.json"
+                with open(meta_path, "w") as f:
+                    json.dump(scan_meta, f, indent=2)
+
+                frame_count = 0
+                print(f"[Scan WS] Initialized: project={project_id}, scan={scan_date}/{source_name}")
+                print(f"[Scan WS]   frames → {frames_dir}")
+                print(f"[Scan WS]   camera → {camera_data_dir}")
+
+                await websocket.send_json({
+                    "type": "scan_ready",
+                    "scan_path": f"scans/{scan_date}/{source_name}",
+                })
+
+            elif msg_type == "frame":
+                if not frames_dir:
+                    await websocket.send_json({"type": "error", "message": "Call init_scan first"})
+                    continue
+
+                idx = msg.get("frame_index", frame_count)
+                filename = f"{idx:06d}"
+
+                # ── Save JPEG frame ──
+                image_b64 = msg.get("image_base64")
+                if image_b64:
+                    import base64
+                    jpg_bytes = base64.b64decode(image_b64)
+                    jpg_path = frames_dir / f"{filename}.jpg"
+                    with open(jpg_path, "wb") as f:
+                        f.write(jpg_bytes)
+
+                # ── Save camera data (pose + intrinsics) ──
+                camera_info = {
+                    "frame_index": idx,
+                    "timestamp": msg.get("timestamp"),
+                    "has_ar": msg.get("has_ar", False),
+                    "intrinsics": msg.get("intrinsics"),     # {fx, fy, cx, cy, width, height}
+                    "pose_matrix": msg.get("pose_matrix"),   # [16 floats] or null
+                    "image_width": msg.get("image_width"),
+                    "image_height": msg.get("image_height"),
+                }
+                cam_path = camera_data_dir / f"{filename}.json"
+                with open(cam_path, "w") as f:
+                    json.dump(camera_info, f)
+
+                frame_count += 1
+
+                # Ack every 10th frame to avoid flooding
+                if frame_count % 10 == 0:
+                    await websocket.send_json({
+                        "type": "frame_ack",
+                        "count": frame_count,
+                    })
+
+            elif msg_type == "stop_scan":
+                total = msg.get("total_frames", frame_count)
+                print(f"[Scan WS] Scan stopped: {total} frames saved to {frames_dir}")
+                await websocket.send_json({
+                    "type": "scan_complete",
+                    "total_frames": total,
+                    "project_id": project_id,
+                    "scan_date": scan_date,
+                })
+
+    except WebSocketDisconnect:
+        print(f"[Scan WS] Client disconnected ({frame_count} frames saved)")
+    except Exception as e:
+        print(f"[Scan WS] Error: {e}")
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

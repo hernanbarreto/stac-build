@@ -99,3 +99,10 @@ server/data/
 # Data directories (large point clouds, scans)
 server/projects/
 BIM/
+
+# Build artifacts
+ui/release/
+
+# Large vendor dirs (not submodules)
+BIM/
+vendor/MapAnything2/

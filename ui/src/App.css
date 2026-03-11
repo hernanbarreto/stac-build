@@ -399,10 +399,42 @@
   word-break: break-word;
 }
 
+.session-rename-input {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  width: 100%;
+  padding: 1px 4px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  outline: none;
+}
+
 .session-meta {
   font-size: 11px;
   color: var(--text-muted);
   padding-left: 16px;
+}
+
+.sidebar-pipeline-badge {
+  color: var(--accent);
+  font-size: 10px;
+  animation: pulse-badge 1.5s infinite;
+}
+
+@keyframes pulse-badge {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.4;
+  }
 }
 
 .session-info {
@@ -459,6 +491,164 @@
 .session-action-btn.unload:hover {
   background: rgba(231, 76, 60, 0.15);
   border-color: rgba(231, 76, 60, 0.3);
+}
+
+.session-action-btn.delete {
+  color: var(--text-muted);
+}
+
+.session-action-btn.delete:hover {
+  background: rgba(231, 76, 60, 0.2);
+  border-color: rgba(231, 76, 60, 0.4);
+  color: var(--error);
+}
+
+/* Create Project inline bar */
+
+.session-create-bar {
+  padding: 4px 0 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.session-create-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: var(--font-family);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.session-create-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.session-create-input {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.session-create-input input {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-family);
+  outline: none;
+}
+
+.session-create-input input:focus {
+  border-color: var(--accent);
+}
+
+.session-create-confirm,
+.session-create-cancel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all var(--transition-fast);
+}
+
+.session-create-confirm {
+  color: var(--success);
+}
+
+.session-create-confirm:hover {
+  background: rgba(46, 204, 113, 0.15);
+}
+
+.session-create-confirm:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.session-create-cancel {
+  color: var(--text-muted);
+}
+
+.session-create-cancel:hover {
+  color: var(--error);
+  background: rgba(231, 76, 60, 0.15);
+}
+
+/* Search / filter bar */
+.session-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+
+.session-search-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.session-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-family);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.session-search-input:focus {
+  border-color: var(--accent);
+}
+
+.session-search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.session-search-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.session-search-clear:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
 }
 
 .statusbar-status {
@@ -1919,6 +2109,67 @@
   font-family: var(--font-mono);
 }
 
+/* Scan selection in pipeline dialog */
+.pipeline-dialog-scans {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.pipeline-scan-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background var(--transition-fast);
+}
+
+.pipeline-scan-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.pipeline-scan-item input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 14px;
+  height: 14px;
+}
+
+.pipeline-scan-date {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.pipeline-scan-source {
+  font-size: 10px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.pipeline-scan-frames {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-left: auto;
+}
+
+.pipeline-scan-badge {
+  font-size: 9px;
+  color: var(--success);
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(46, 204, 113, 0.1);
+}
+
 .pipeline-dialog-stages {
   display: flex;
   flex-direction: column;
@@ -1988,8 +2239,14 @@
   transition: all 0.15s;
 }
 
-.pipeline-btn-run:hover {
+.pipeline-btn-run:hover:not(:disabled) {
   filter: brightness(1.15);
+}
+
+.pipeline-btn-run:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  filter: grayscale(1);
 }
 
 /* ── Pipeline Progress Overlay ── */

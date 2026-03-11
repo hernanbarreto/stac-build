@@ -6,6 +6,7 @@
 
 import os
 import sys
+import json
 from pathlib import Path
 from multiprocessing.connection import Connection
 
@@ -30,7 +31,7 @@ def _da3_work(pipe: WorkerPipe, session_dir: str, config: dict):
         _run_mast3r(pipe, frames_dir, output_dir, backend, config)
     else:
         # ── Pure DA3 path ──
-        _run_da3(pipe, frames_dir, output_dir, config)
+        _run_da3(pipe, frames_dir, output_dir, config, session_path)
 
     pipe.send_progress(100, "Reconstruction complete", stage="da3")
 
@@ -93,15 +94,30 @@ def _run_mast3r(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         import gc; gc.collect()
 
 
-def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, config: dict):
-    """Pure DA3 incremental reconstruction."""
+def _load_scan_zoom(session_path: Path) -> float:
+    """Load zoom_level from scan_meta.json. Returns 1.0 if not found."""
+    scan_meta_path = session_path / "scan_meta.json"
+    if scan_meta_path.exists():
+        try:
+            with open(scan_meta_path) as f:
+                meta = json.load(f)
+            zoom = float(meta.get("zoom_level", 1.0))
+            return zoom
+        except Exception:
+            pass
+    return 1.0
+
+
+def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
+             config: dict, session_path: Path):
+    """Pure DA3 single-sequence reconstruction with session-level zoom correction."""
 
     server_dir = str(Path(__file__).resolve().parent.parent)
     if server_dir not in sys.path:
         sys.path.insert(0, server_dir)
 
-    # Frame quality
-    pipe.send_progress(5, "Analyzing frame quality...", stage="da3")
+    # ── Step 1: Frame quality analysis ──
+    pipe.send_progress(2, "Analyzing frame quality...", stage="da3")
     try:
         from frame_quality import analyze_frames, save_manifest
         fq = analyze_frames(str(frames_dir))
@@ -110,18 +126,27 @@ def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, config: dict)
     except Exception as e:
         pipe.send_log(f"Frame quality analysis skipped: {e}", level="warning")
 
-    # Frame selection
+    # ── Step 2: Load session zoom level ──
+    zoom_level = _load_scan_zoom(session_path)
+    if zoom_level != 1.0:
+        pipe.send_log(f"Session zoom level: {zoom_level}x (from scan_meta.json)")
+    else:
+        pipe.send_log(f"Session zoom level: 1.0x (default)")
+
+    # ── Step 3: Frame selection (visual novelty filter) ──
+    from frame_selector import _load_valid_frame_list, select_keyframes
+    valid_frames = _load_valid_frame_list(frames_dir)
+
     frame_sel_cfg = config.get("frame_selection", {})
     if frame_sel_cfg.get("enabled", False):
         try:
-            pipe.send_progress(8, "Selecting keyframes...", stage="da3")
-            from frame_selector import select_keyframes
+            pipe.send_progress(5, "Selecting keyframes...", stage="da3")
             sel = select_keyframes(str(frames_dir), frame_sel_cfg)
             pipe.send_log(f"Selected {sel['selected_count']}/{sel['total_frames']} keyframes")
         except Exception as e:
             pipe.send_log(f"Frame selection failed: {e}", level="warning")
 
-    # Build DA3 config
+    # ── Step 4: DA3 reconstruction (single sequence) ──
     from da3_config_builder import build_da3_config
     da3_config = build_da3_config(config)
 
@@ -135,6 +160,7 @@ def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, config: dict)
         save_dir=str(output_dir),
         config=da3_config,
         alignment_manager=alignment,
+        zoom_level=zoom_level,
     )
 
     total = max(len(da3.img_list), 1)
@@ -145,11 +171,8 @@ def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, config: dict)
 
     pipe.send_progress(15, f"Processing {total} images in ~{num_chunks} chunks...", stage="da3")
 
-    # DA3 uses process_long_sequence — we run it synchronously here
     import asyncio
-
     async def _on_chunk(chunk_id, sim3):
-        # Calculate progress based on estimated images processed
         images_done = min((chunk_id + 1) * chunk_step + chunk_overlap, total)
         pct = 15 + (images_done / total) * 80
         pipe.send_progress(pct, f"Chunk {chunk_id} complete ({images_done}/{total} images)", stage="da3")
@@ -163,11 +186,8 @@ def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, config: dict)
     finally:
         loop.close()
 
-    pipe.send_log(f"DA3 complete: {total} images processed")
-
-    # Cleanup
-    del da3
-    del alignment
+    pipe.send_log(f"DA3 complete: {total} images processed, zoom={zoom_level}x")
+    del da3, alignment
     import gc; gc.collect()
 
 

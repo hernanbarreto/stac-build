@@ -106,6 +106,44 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         size_mb = output_ply.stat().st_size / (1024 * 1024)
         pipe.send_log(f"Cleaned cloud: {size_mb:.1f} MB")
 
+        # ── Link to project merged/ dir (new-style projects) ──
+        # SourceContext.merged_cloud expects merged/merged_cloud.ply
+        # but the pipeline writes to src_xxx/output/cleaned_cloud.ply.
+        # Create a symlink so the sidebar and viewers find the cloud.
+        try:
+            import os
+            # Walk up from session_dir to find project root with project.json
+            project_root = session_path
+            for _ in range(5):  # max depth guard
+                project_root = project_root.parent
+                if (project_root / "project.json").exists():
+                    break
+            else:
+                project_root = None
+
+            if project_root and (project_root / "project.json").exists():
+                merged_dir = project_root / "merged"
+                merged_dir.mkdir(parents=True, exist_ok=True)
+                merged_cloud = merged_dir / "merged_cloud.ply"
+                # Remove existing symlink/file
+                if merged_cloud.exists() or merged_cloud.is_symlink():
+                    merged_cloud.unlink()
+                # Create relative symlink
+                rel_path = os.path.relpath(str(output_ply), str(merged_dir))
+                os.symlink(rel_path, str(merged_cloud))
+                pipe.send_log(f"Linked merged_cloud.ply → {rel_path}")
+
+                # Also link floor_transform if present
+                floor_src = output_dir / "floor_transform.npz"
+                floor_dst = merged_dir / "floor_transform.npz"
+                if floor_src.exists():
+                    if floor_dst.exists() or floor_dst.is_symlink():
+                        floor_dst.unlink()
+                    rel_ft = os.path.relpath(str(floor_src), str(merged_dir))
+                    os.symlink(rel_ft, str(floor_dst))
+        except Exception as e:
+            pipe.send_log(f"Merged dir symlink failed (non-critical): {e}", level="warning")
+
         # Compute and save floor alignment transform
         pipe.send_progress(95, "Computing floor alignment...", stage="cloudcompy")
         try:

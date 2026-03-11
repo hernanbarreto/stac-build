@@ -140,6 +140,7 @@ class PipelineManager:
         on_progress: Optional[ProgressCallback] = None,
         on_complete: Optional[Callable[[str, bool], Awaitable[None]]] = None,
         replace: bool = True,
+        scan_key: Optional[str] = None,
     ) -> PipelineJob:
         """Start a pipeline for the given session.
         
@@ -150,6 +151,8 @@ class PipelineManager:
             on_progress: Async callback(session_id, job_dict) for progress updates
             on_complete: Async callback(session_id, success) when pipeline finishes
             replace: If True, delete existing outputs before running each stage
+            scan_key: Optional "date/source" key (e.g. "2026-03-07/legacy") to target
+                      a specific scan. If None, resolves to latest scan/first source.
         """
         # Cancel existing job for this session if any
         if session_id in self._jobs:
@@ -161,16 +164,33 @@ class PipelineManager:
         self._jobs[session_id] = job
 
         # Resolve session directory (supports both new-style projects/ and legacy scans/)
-        from project_paths import resolve_session
-        ctx = resolve_session(str(Path(__file__).parent), session_id)
-        session_dir = str(ctx.session_dir)
+        from project_paths import resolve_session, ProjectPaths
+        server_dir = str(Path(__file__).parent)
+
+        if scan_key:
+            # Explicit scan target: "date/source"
+            parts = scan_key.split("/", 1)
+            date = parts[0]
+            source = parts[1] if len(parts) > 1 else "default"
+            projects_dir = Path(__file__).parent / "projects"
+            if (projects_dir / session_id / "project.json").exists():
+                paths = ProjectPaths(str(projects_dir), session_id)
+                ctx = paths.for_source(date, source)
+                session_dir = str(ctx.session_dir)
+            else:
+                # Legacy: scan_key is ignored, use normal resolution
+                ctx = resolve_session(server_dir, session_id)
+                session_dir = str(ctx.session_dir)
+        else:
+            ctx = resolve_session(server_dir, session_id)
+            session_dir = str(ctx.session_dir)
 
         # Start the orchestration loop as an asyncio task
         job._task = asyncio.create_task(
             self._run_pipeline(job, session_dir, config, on_progress, on_complete, replace)
         )
 
-        logger.info(f"[Pipeline] Started for {session_id}: {[s.stage.id.value for s in stage_states if s.stage.enabled]}, replace={replace}")
+        logger.info(f"[Pipeline] Started for {session_id} (scan={scan_key or 'auto'}): {[s.stage.id.value for s in stage_states if s.stage.enabled]}, replace={replace}")
         return job
 
     async def cancel_pipeline(self, session_id: str):
@@ -216,7 +236,8 @@ class PipelineManager:
 
     # Files each stage produces — used by replace mode to clean up before re-running
     STAGE_OUTPUT_FILES: Dict[StageId, List[str]] = {
-        StageId.DA3: ["chunk_*.ply", "slam_reconstruction.ply"],
+        StageId.DA3: ["chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json",
+                      "slam_reconstruction.ply", "maplong_run"],
         StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "floor_transform.npz"],
         StageId.VLM: ["scene_analysis.json", "vlm_analysis.json"],
         StageId.SAM3: ["segmentation.json", "segmentation_result.json",
@@ -232,12 +253,20 @@ class PipelineManager:
         for pattern in patterns:
             if "*" in pattern:
                 for f in output_dir.glob(pattern):
-                    f.unlink(missing_ok=True)
+                    if f.is_dir():
+                        import shutil
+                        shutil.rmtree(f, ignore_errors=True)
+                    else:
+                        f.unlink(missing_ok=True)
                     deleted.append(f.name)
             else:
                 target = output_dir / pattern
                 if target.exists():
-                    target.unlink(missing_ok=True)
+                    if target.is_dir():
+                        import shutil
+                        shutil.rmtree(target, ignore_errors=True)
+                    else:
+                        target.unlink(missing_ok=True)
                     deleted.append(pattern)
         if deleted:
             logger.info(f"[Pipeline] 🗑️ Replace mode: deleted {', '.join(deleted)}")
@@ -323,6 +352,13 @@ class PipelineManager:
         stage_id = stage_state.stage.id
         reg = STAGE_REGISTRY[stage_id]
         module_name = reg["module"]
+
+        # Override worker module for 3D reconstruction based on slam_backend
+        if stage_id == StageId.DA3:
+            backend = config.get("slam_backend", "da3")
+            if backend == "map":
+                module_name = "workers.map_worker"
+                logger.info(f"[Pipeline] 3D Reconstruction using MapAnything (VGGT-Long)")
 
         # Import the worker module dynamically
         import importlib

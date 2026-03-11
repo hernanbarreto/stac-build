@@ -222,7 +222,8 @@ def compute_novelty(img_ref: np.ndarray, img_cand: np.ndarray,
 #                    BATCH KEYFRAME SELECTION
 # ═══════════════════════════════════════════════════════════════════
 
-def select_keyframes(frames_dir: str, config: dict = None) -> Dict:
+def select_keyframes(frames_dir: str, config: dict = None,
+                     file_list: list = None, segment_id: int = None) -> Dict:
     """
     Select geometrically useful keyframes from a frame directory.
     
@@ -233,6 +234,9 @@ def select_keyframes(frames_dir: str, config: dict = None) -> Dict:
         frames_dir: Directory containing frame images (after blur filter)
         config: Configuration dict from config.yaml["frame_selection"]
                 If None, uses sensible defaults.
+        file_list: Optional explicit list of filenames to process
+                   (for zoom-segment mode). If None, scans directory.
+        segment_id: Optional segment index for labeling output.
     
     Returns:
         Dict with:
@@ -257,15 +261,19 @@ def select_keyframes(frames_dir: str, config: dict = None) -> Dict:
     
     frames_dir = Path(frames_dir)
     
-    # Load frame list (respecting frame_quality.json if exists)
-    frame_files = _load_valid_frame_list(frames_dir)
+    # Load frame list (explicit list or directory scan)
+    if file_list is not None:
+        frame_files = file_list
+    else:
+        frame_files = _load_valid_frame_list(frames_dir)
     
     if len(frame_files) == 0:
         return {"selected_files": [], "total_frames": 0, "selected_count": 0,
                 "reduction": 0, "stats": {}, "processing_time": 0}
     
+    seg_label = f" [Seg {segment_id}]" if segment_id is not None else ""
     print(f"\n{'='*65}")
-    print(f"  VISUAL NOVELTY FRAME SELECTOR (H/F Ratio)")
+    print(f"  VISUAL NOVELTY FRAME SELECTOR (H/F Ratio){seg_label}")
     print(f"  Frames: {len(frame_files)}  |  Scale: {process_scale}")
     print(f"  Features: {max_features}  |  H/F threshold: {hf_ratio_threshold}")
     print(f"  Force interval: {force_interval}")
@@ -351,7 +359,7 @@ def select_keyframes(frames_dir: str, config: dict = None) -> Dict:
     reduction = 1.0 - len(selected) / len(frame_files) if frame_files else 0
     
     print(f"\n{'='*65}")
-    print(f"  ✅ SELECTION COMPLETE — {elapsed:.1f}s")
+    print(f"  ✅ SELECTION COMPLETE{seg_label} — {elapsed:.1f}s")
     print(f"{'='*65}")
     print(f"  Input:      {len(frame_files)} frames")
     print(f"  Selected:   {len(selected)} keyframes")
@@ -382,8 +390,9 @@ def select_keyframes(frames_dir: str, config: dict = None) -> Dict:
         "processing_time": round(elapsed, 1),
     }
     
-    # Save to frames directory
-    output_path = frames_dir / "selected_frames.json"
+    # Save to frames directory (with segment suffix if applicable)
+    suffix = f"_seg{segment_id}" if segment_id is not None else ""
+    output_path = frames_dir / f"selected_frames{suffix}.json"
     with open(output_path, 'w') as f:
         json.dump(output, f, indent=2)
     print(f"  Saved: {output_path}")

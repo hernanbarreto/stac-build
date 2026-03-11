@@ -38,7 +38,9 @@ try:
     process_loop_list = _process
     
     DA3_NATIVE_AVAILABLE = True
-    print("[DA3 Native] DA3_Streaming loaded successfully")
+    from config import cfg as _cfg_check
+    if _cfg_check.get("slam_backend", "da3") in ("da3", "hybrid"):
+        print("[DA3 Native] DA3_Streaming loaded successfully")
 except ImportError as e:
     from config import cfg as _cfg
     if _cfg.get("slam_backend", "mast3r") == "da3":
@@ -59,14 +61,17 @@ class RealtimeDA3(DA3_Streaming):
     Wrapper around DA3_Streaming to support real-time feedback via callbacks.
     Inherits 100% of the logic, only injecting the callback hook.
     """
-    def __init__(self, image_dir, save_dir, config, alignment_manager=None):
-        # Initialize the parent class strictly
+    def __init__(self, image_dir, save_dir, config, alignment_manager=None,
+                 zoom_level=1.0):
+
+        # ── Load model from checkpoint ──
         super().__init__(image_dir, save_dir, config)
 
-        # Ensure save_dir is set (parent class might not set it until run() is called)
+        # Ensure save_dir is set
         self.save_dir = save_dir
+        self.chunk_id_offset = 0
 
-        # Initialize img_list immediately (copied from DA3_Streaming.run)
+        # ── Scan & apply frame filters ──
         print(f"Loading images from {self.img_dir}...")
         self.img_list = sorted(
             glob.glob(os.path.join(self.img_dir, "*.jpg"))
@@ -120,6 +125,15 @@ class RealtimeDA3(DA3_Streaming):
 
         self.alignment_manager = alignment_manager
         self.gravity_transform = (1.0, np.eye(3), np.zeros(3))
+
+        # ── Session zoom level (from scan_meta.json) ─────────────────
+        # Uniform zoom for all frames in this session.
+        # Scales DA3-estimated intrinsics: f_corrected = f_est × zoom_level
+        self.zoom_level = zoom_level
+        if zoom_level != 1.0:
+            print(f"[DA3] 🔍 Session zoom level: {zoom_level}x — intrinsics will be scaled")
+        else:
+            print(f"[DA3] Session zoom level: 1.0x (default)")
         
     def _compute_initial_gravity_transform(self, chunk_data):
         # Deprecated: Logic moved to AlignmentManagerr
@@ -128,7 +142,8 @@ class RealtimeDA3(DA3_Streaming):
     def _save_metadata(self, chunk_id, result, alignment_transform, sample_indices=None):
         """Save complete metadata for FrameStorage and segmentation compatibility."""
         try:
-            filename = f"chunk_{chunk_id:03d}_meta.json"
+            global_id = chunk_id + getattr(self, 'chunk_id_offset', 0)
+            filename = f"chunk_{global_id:03d}_meta.json"
             filepath = os.path.join(self.save_dir, filename)
 
             s, R, t = alignment_transform
@@ -189,6 +204,26 @@ class RealtimeDA3(DA3_Streaming):
             print(f"[DA3Wrapper] Failed to save metadata: {e}")
             import traceback
             traceback.print_exc()
+
+    @staticmethod
+    def _ensure_batch_dims(chunk_data):
+        """Ensure all arrays in a reloaded chunk have batch dim (N,...).
+
+        DA3_Streaming.process_single_chunk squeezes outputs, which drops
+        (1,H,W) → (H,W) for single-frame chunks.  All downstream code
+        expects the leading N dimension.  Normalize here once.
+        """
+        if chunk_data.depth.ndim == 2:
+            chunk_data.depth = chunk_data.depth[np.newaxis, :, :]
+        if chunk_data.conf.ndim == 2:
+            chunk_data.conf = chunk_data.conf[np.newaxis, :, :]
+        if chunk_data.extrinsics.ndim == 2:
+            chunk_data.extrinsics = chunk_data.extrinsics[np.newaxis, :, :]
+        if chunk_data.intrinsics.ndim == 2:
+            chunk_data.intrinsics = chunk_data.intrinsics[np.newaxis, :, :]
+        if hasattr(chunk_data, 'processed_images') and chunk_data.processed_images.ndim == 3:
+            chunk_data.processed_images = chunk_data.processed_images[np.newaxis, :, :, :]
+        return chunk_data
 
     async def process_long_sequence_async(self, callback=None):
         """
@@ -278,20 +313,41 @@ class RealtimeDA3(DA3_Streaming):
             aligned_points = None
             final_s, final_R, final_t = current_s, current_R, current_t
             
+            # ── Vendor dimension guard ──────────────────────────────
+            # DA3_Streaming.process_single_chunk does np.squeeze(depth)
+            # which drops (1,H,W) → (H,W) when processing a single frame.
+            # All downstream code expects (N,H,W) batch tensors.
+            # Normalize here at our wrapper boundary, not in vendor code.
+            self._ensure_batch_dims(cur_predictions)
+            
             if self.alignment_manager:
                 # Wrap DA3 predictions into a simple object compatible with AlignmentManagerr
+                da3_self = self  # Capture outer scope for ChunkWrapper closure
                 class ChunkWrapper:
                     def __init__(self, p, frame_count):
-                        self.depths = np.squeeze(p.depth)
+                        self.depths = p.depth  # Already (N,H,W) after normalization above
                         self.confs = p.conf
-                        self.intrinsics = p.intrinsics
+                        self.intrinsics = p.intrinsics.copy()  # Copy before modifying
                         self.extrinsics = p.extrinsics
                         self.images = p.processed_images
                         self.frame_count = frame_count
                         
+                        # ── Zoom intrinsics correction (session-level) ──
+                        # Scale fx, fy uniformly by session zoom factor.
+                        # DA3 estimates intrinsics assuming ~1x FOV.
+                        # If session was captured at different zoom,
+                        # correct the focal length for accurate projection.
+                        if da3_self.zoom_level != 1.0:
+                            zoom = da3_self.zoom_level
+                            for i in range(len(self.intrinsics)):
+                                self.intrinsics[i][0, 0] *= zoom  # fx
+                                self.intrinsics[i][1, 1] *= zoom  # fy
+                            print(f"[DA3] 🔍 Zoom-corrected intrinsics: "
+                                  f"{len(self.intrinsics)} frames × {zoom}x")
+
                         # Generate unaligned XYZ
                         # points shape: (N, H, W, 3)
-                        pts = depth_to_point_cloud_vectorized(p.depth, p.intrinsics, p.extrinsics)
+                        pts = depth_to_point_cloud_vectorized(p.depth, self.intrinsics, self.extrinsics)
                         
                         # Process Images: (N, 3, H, W) -> (N, H, W, 3)
                         # Ensure we handle torch tensor or numpy array
@@ -341,8 +397,6 @@ class RealtimeDA3(DA3_Streaming):
                 if chunk_idx == 0:
                     actual_frame_count = cur_predictions.depth.shape[0]
                     wrapper = ChunkWrapper(cur_predictions, actual_frame_count)
-                    # We need to hack the Manager to JUST compute gravity without storing full history if we don't want double storage?
-                    # Actually Main.py resets manager. So we can use it fully.
                     aligned_chunk = self.alignment_manager.add_chunk(wrapper) # Will compute gravity on chunk 0
                     
                     # Read back the gravity transform
@@ -367,7 +421,8 @@ class RealtimeDA3(DA3_Streaming):
             aligned_points = final_s * (local_points @ final_R.T) + final_t
 
             # 3. Save ALIGNED PLY with manual filtering to capture sample_indices
-            ply_path = os.path.join(self.save_dir, f"chunk_{chunk_idx:03d}.ply")
+            global_cid = chunk_idx + getattr(self, 'chunk_id_offset', 0)
+            ply_path = os.path.join(self.save_dir, f"chunk_{global_cid:03d}.ply")
 
             colors = cur_predictions.processed_images
             confs = cur_predictions.conf
@@ -522,7 +577,8 @@ class RealtimeDA3(DA3_Streaming):
                 
                 # Also map to original resolution pixels (for SAM3 mask lookup)
                 # SAM3 runs on original images, DA3 runs on scaled resolution
-                origin_path = os.path.join(self.save_dir, f"chunk_{chunk_idx:03d}_origins.npz")
+                global_cid = chunk_idx + getattr(self, 'chunk_id_offset', 0)
+                origin_path = os.path.join(self.save_dir, f"chunk_{global_cid:03d}_origins.npz")
                 np.savez_compressed(origin_path,
                     frame_global=frame_global.astype(np.int32),
                     pixel_row=pixel_row.astype(np.int16),
@@ -555,6 +611,7 @@ class RealtimeDA3(DA3_Streaming):
             chunk_data_first = np.load(
                 os.path.join(self.result_unaligned_dir, "chunk_0.npy"), allow_pickle=True
             ).item()
+            self._ensure_batch_dims(chunk_data_first)
             np.save(os.path.join(self.result_aligned_dir, "chunk_0.npy"), chunk_data_first)
             
             points_first = depth_to_point_cloud_vectorized(
@@ -562,7 +619,8 @@ class RealtimeDA3(DA3_Streaming):
                 chunk_data_first.intrinsics,
                 chunk_data_first.extrinsics,
             )
-            ply_path_first = os.path.join(self.save_dir, "chunk_000.ply")
+            offset = getattr(self, 'chunk_id_offset', 0)
+            ply_path_first = os.path.join(self.save_dir, f"chunk_{offset:03d}.ply")
             
             conf_threshold = max(0.0, np.mean(chunk_data_first.conf) * self.config["Model"]["Pointcloud_Save"]["conf_threshold_coef"])
             save_confident_pointcloud_batch(
@@ -582,6 +640,7 @@ class RealtimeDA3(DA3_Streaming):
                 os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx+1}.npy"),
                 allow_pickle=True
             ).item()
+            self._ensure_batch_dims(chunk_data)
 
             aligned_chunk_data = {}
             from loop_utils.alignment_torch import depth_to_point_cloud_optimized_torch, apply_sim3_direct_torch
@@ -602,12 +661,14 @@ class RealtimeDA3(DA3_Streaming):
                  chunk_data_first = np.load(
                     os.path.join(self.result_unaligned_dir, "chunk_0.npy"), allow_pickle=True
                  ).item()
+                 self._ensure_batch_dims(chunk_data_first)
                  np.save(os.path.join(self.result_aligned_dir, "chunk_0.npy"), chunk_data_first)
                  
                  points_first = depth_to_point_cloud_vectorized(
                     chunk_data_first.depth, chunk_data_first.intrinsics, chunk_data_first.extrinsics
                  )
-                 ply_path_first = os.path.join(self.save_dir, "chunk_000.ply")
+                 offset = getattr(self, 'chunk_id_offset', 0)
+                 ply_path_first = os.path.join(self.save_dir, f"chunk_{offset:03d}.ply")
                  save_confident_pointcloud_batch(
                     points=points_first,
                     colors=chunk_data_first.processed_images,
@@ -620,7 +681,8 @@ class RealtimeDA3(DA3_Streaming):
             points = aligned_chunk_data["world_points"].reshape(-1, 3)
             colors = (aligned_chunk_data["images"].reshape(-1, 3)).astype(np.uint8)
             confs = aligned_chunk_data["conf"].reshape(-1)
-            ply_path = os.path.join(self.save_dir, f"chunk_{chunk_idx+1:03d}.ply")
+            offset = getattr(self, 'chunk_id_offset', 0)
+            ply_path = os.path.join(self.save_dir, f"chunk_{chunk_idx+1+offset:03d}.ply")
             
             save_confident_pointcloud_batch(
                 points=points,
