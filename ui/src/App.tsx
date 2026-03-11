@@ -104,13 +104,13 @@ function App() {
   const STAGE_DEF: Record<string, { label: string, icon: ReactNode }> = {
     vlm: { label: 'Scene Analysis', icon: <Search size={14} /> },
     sam3: { label: 'Segmentation', icon: <Tag size={14} /> },
-    da3: { label: '3D Reconstruction', icon: <Hammer size={14} /> },
+    reconstruction: { label: '3D Reconstruction', icon: <Hammer size={14} /> },
     cloudcompy: { label: 'Global Cloud Cleaning', icon: <Brush size={14} /> },
     instance_cleaner: { label: 'Instance Isolation & Erosion', icon: <Sparkles size={14} /> },
   }
-  const [pipelineOrder] = useState<string[]>(['da3', 'cloudcompy', 'vlm', 'sam3', 'instance_cleaner'])
+  const [pipelineOrder] = useState<string[]>(['reconstruction', 'cloudcompy', 'vlm', 'sam3', 'instance_cleaner'])
   const [pipelineEnabled, setPipelineEnabled] = useState<Record<string, boolean>>({
-    da3: true, cloudcompy: true, vlm: true, sam3: true, instance_cleaner: true
+    reconstruction: true, cloudcompy: true, vlm: true, sam3: true, instance_cleaner: true
   })
 
   const [pipelineReplace, setPipelineReplace] = useState(true)
@@ -1102,7 +1102,7 @@ function App() {
                             )}
                             {activeSession === s.id && (
                               <button className="session-action-btn segment"
-                                title="Manual Interactive SAM3"
+                                title="Manual Interactive Segmentation"
                                 onClick={(e) => { e.stopPropagation(); setInteractiveSessionId(s.id) }}
                               ><Crosshair size={14} /></button>
                             )}
@@ -1219,7 +1219,7 @@ function App() {
                   </span>
                 </div>
                 <div style={{ padding: '8px 12px', fontSize: '12px', color: '#aaa', background: 'rgba(0,0,0,0.2)' }}>
-                  Mark instances to EXCLUDE them from the next 3D DA3 reconstruction.
+                  Mark instances to EXCLUDE them from the next 3D reconstruction.
                 </div>
                 <div className="segments-list">
                   {segments.map(seg => (
@@ -1656,7 +1656,7 @@ function App() {
                 <p style={{ fontSize: '11px', color: '#888', marginBottom: '10px' }}>Pipeline stages (fixed order):</p>
                 {pipelineOrder.map((stageId) => {
                   const def = STAGE_DEF[stageId]
-                  // CloudCompy is always coupled with DA3 — can't be toggled independently
+                  // CloudCompy is always coupled with Reconstruction — can't be toggled independently
                   const isCoupled = stageId === 'cloudcompy'
                   const isDisabled = isCoupled
                   return (
@@ -1673,15 +1673,15 @@ function App() {
                             const checked = e.target.checked
                             setPipelineEnabled(prev => {
                               const next = { ...prev, [stageId]: checked }
-                              // Couple: DA3 on → CloudCompy on
-                              if (stageId === 'da3') next.cloudcompy = checked
+                              // Couple: Reconstruction on → CloudCompy on
+                              if (stageId === 'reconstruction') next.cloudcompy = checked
                               return next
                             })
                           }}
                         />
                         <span className="pipeline-stage-check-icon">{def?.icon}</span>
                         <span>{def?.label || stageId}</span>
-                        {isCoupled && <span style={{ fontSize: '10px', color: '#666', marginLeft: '8px' }}>(auto with DA3)</span>}
+                        {isCoupled && <span style={{ fontSize: '10px', color: '#666', marginLeft: '8px' }}>(auto with Reconstruction)</span>}
                       </label>
                     </div>
                   )

@@ -24,7 +24,7 @@ The system captures video from a phone camera, reconstructs a dense 3D point clo
 📱 Capture Video (MP4)
     │
     ▼
-🧠 Dense 3D Reconstruction (DA3 — Depth Anything 3)
+🧠 Dense 3D Reconstruction (Reconstruction — MapAnything)
     ├─ Monocular depth estimation
     ├─ Camera pose tracking (SLAM)
     └─ Aligned point cloud generation
@@ -55,7 +55,7 @@ The system captures video from a phone camera, reconstructs a dense 3D point clo
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| **Depth & SLAM** | [Depth Anything 3](https://github.com/DepthAnything/Depth-Anything-V3) | Dense 3D reconstruction from monocular video |
+| **Depth & SLAM** | [MapAnything](https://github.com/DepthAnything/Depth-Anything-V3) | Dense 3D reconstruction from monocular video |
 | **Segmentation** | [SAM3](https://github.com/facebookresearch/sam2) (Segment Anything 3) | Instance segmentation of construction elements |
 | **Scene Analysis** | [InternVL3](https://github.com/OpenGVLab/InternVL) (Vision-Language Model) | Automatic object identification and labeling |
 | **BIM Parsing** | [IfcOpenShell](https://ifcopenshell.org/) | IFC geometry extraction |
@@ -70,7 +70,7 @@ The system captures video from a phone camera, reconstructs a dense 3D point clo
 ## Features
 
 ### Dense 3D Reconstruction
-- **Depth Anything 3** processes video frames to produce dense depth maps and camera poses
+- **MapAnything** processes video frames to produce dense depth maps and camera poses
 - Chunk-based processing with SIM3 overlap alignment for long sequences
 - Smart frame selection using ORB-SLAM H/F ratio keyframe detection
 - Blur filtering via Laplacian variance analysis
@@ -116,7 +116,7 @@ The system captures video from a phone camera, reconstructs a dense 3D point clo
 stac-builder/
 ├─ server/                    # Python backend
 │   ├─ main.py                # Flask app, WebSocket, API routes
-│   ├─ da3_native_wrapper.py  # DA3 pipeline orchestration
+│   ├─ reconstruction_native_wrapper.py  # Reconstruction pipeline orchestration
 │   ├─ frame_quality.py       # Blur detection (Laplacian)
 │   ├─ frame_selector.py      # Visual novelty filter (H/F ratio)
 │   ├─ alignment_manager.py   # SIM3 alignment + auto-leveling
@@ -138,7 +138,7 @@ stac-builder/
 │           └─ LoginPage.tsx   # Authentication
 │
 ├─ vendor/                    # AI model integrations
-│   ├─ depth_anything_3/      # DA3 streaming inference
+│   ├─ mapanything/      # Reconstruction streaming inference
 │   └─ sam3/                  # SAM3 video segmentation
 │
 ├─ static/                    # Legacy viewer + camera capture
@@ -160,7 +160,7 @@ All pipeline parameters are centralized in `server/config.yaml`:
 ```yaml
 # Key configuration sections
 server:
-  chunk_size: 30              # Frames per DA3 chunk
+  chunk_size: 30              # Frames per Reconstruction chunk
   chunk_overlap: 10           # Overlap frames for alignment
 
 frame_selection:
@@ -169,7 +169,7 @@ frame_selection:
 
 models:
   depth:
-    name: "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
+    name: "depth-anything/ReconstructionNESTED-GIANT-LARGE-1.1"
     device: "cuda"
   segmentation:
     sam3_checkpoint: "sam3_hiera_large.pt"

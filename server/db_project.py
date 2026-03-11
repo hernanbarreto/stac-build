@@ -117,7 +117,7 @@ class ScanDay(Base):
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  SOURCE (one video = one DA3 run)
+#  SOURCE (one video = one reconstruction run)
 # ═══════════════════════════════════════════════════════════════════
 
 class Source(Base):

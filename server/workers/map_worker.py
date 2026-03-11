@@ -27,10 +27,10 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     pipe.send_log("Starting MapAnything reconstruction (VGGT-Long)")
-    pipe.send_progress(0, "Initializing...", stage="da3")
+    pipe.send_progress(0, "Initializing...", stage="reconstruction")
 
     # ── Step 1: Frame quality analysis ──
-    pipe.send_progress(2, "Analyzing frame quality...", stage="da3")
+    pipe.send_progress(2, "Analyzing frame quality...", stage="reconstruction")
     server_dir = str(Path(__file__).resolve().parent.parent)
     if server_dir not in sys.path:
         sys.path.insert(0, server_dir)
@@ -52,7 +52,7 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         frame_sel_cfg = config.get("frame_selection", {})
         if frame_sel_cfg.get("enabled", False):
             try:
-                pipe.send_progress(5, "Selecting keyframes...", stage="da3")
+                pipe.send_progress(5, "Selecting keyframes...", stage="reconstruction")
                 sel = select_keyframes(str(frames_dir), frame_sel_cfg)
                 pipe.send_log(f"Selected {sel['selected_count']}/{sel['total_frames']} keyframes")
             except Exception as e:
@@ -65,7 +65,7 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
             pipe.send_log(f"Using keyframes from {sf_path}")
 
     # ── Step 3: Generate VGGT-Long config ──
-    pipe.send_progress(8, "Generating VGGT-Long config...", stage="da3")
+    pipe.send_progress(8, "Generating VGGT-Long config...", stage="reconstruction")
 
     vggt_config = _build_vggt_config(config)
     
@@ -78,7 +78,7 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     pipe.send_log(f"VGGT-Long config: {vggt_config_path}")
 
     # ── Step 4: Run VGGT-Long as subprocess ──
-    pipe.send_progress(10, "Starting VGGT-Long reconstruction...", stage="da3")
+    pipe.send_progress(10, "Starting VGGT-Long reconstruction...", stage="reconstruction")
 
     # Determine VGGT-Long script path
     project_root = Path(__file__).resolve().parent.parent.parent  # server/workers -> server -> project_root
@@ -145,13 +145,13 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         if match:
             done, total = int(match.group(1)), int(match.group(2))
             pct = 10 + (done / max(total, 1)) * 70
-            pipe.send_progress(pct, f"Chunk {done}/{total}", stage="da3")
+            pipe.send_progress(pct, f"Chunk {done}/{total}", stage="reconstruction")
         elif "Loading model" in line or "Loading MapAnything" in line:
-            pipe.send_progress(12, "Loading MapAnything model...", stage="da3")
+            pipe.send_progress(12, "Loading MapAnything model...", stage="reconstruction")
         elif "Extracting features" in line:
-            pipe.send_progress(15, "Loop detection (feature extraction)...", stage="da3")
+            pipe.send_progress(15, "Loop detection (feature extraction)...", stage="reconstruction")
         elif "Apply alignment" in line:
-            pipe.send_progress(82, "Applying alignment...", stage="da3")
+            pipe.send_progress(82, "Applying alignment...", stage="reconstruction")
 
         # Forward all log lines (same pattern as cloudcompy_worker)
         pipe.send_log(line)
@@ -160,7 +160,7 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if proc.returncode != 0:
         raise RuntimeError(f"VGGT-Long exited with code {proc.returncode}")
 
-    pipe.send_progress(85, "VGGT-Long complete, post-processing...", stage="da3")
+    pipe.send_progress(85, "VGGT-Long complete, post-processing...", stage="reconstruction")
 
     # ── Step 5: Post-process VGGT-Long output ──
     # Copy PLY files to output dir with chunk_XXX.ply naming
@@ -182,11 +182,11 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         pipe.send_log(f"Copied {Path(ply_src).name} → {ply_dst.name}")
 
     # ── Step 6: Generate origin traceability from saved chunk data ──
-    pipe.send_progress(90, "Generating origin traceability...", stage="da3")
+    pipe.send_progress(90, "Generating origin traceability...", stage="reconstruction")
     _generate_origins(vggt_save_dir, output_dir, vggt_config, pipe)
 
     # ── Step 7: Save camera poses metadata ──
-    pipe.send_progress(95, "Saving metadata...", stage="da3")
+    pipe.send_progress(95, "Saving metadata...", stage="reconstruction")
     cam_poses_src = vggt_save_dir / "camera_poses.json"
     if cam_poses_src.exists():
         shutil.copy2(cam_poses_src, output_dir / "camera_poses_mapanything.json")
@@ -196,7 +196,7 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if intrinsic_src.exists():
         shutil.copy2(intrinsic_src, output_dir / "intrinsic.txt")
 
-    pipe.send_progress(100, "MapAnything reconstruction complete", stage="da3")
+    pipe.send_progress(100, "MapAnything reconstruction complete", stage="reconstruction")
     pipe.send_log(f"MapAnything complete: {len(ply_files)} chunks")
 
     # Cleanup: delete heavy temp .npy files now that origins are generated
@@ -264,7 +264,7 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
     The unaligned chunk data contains world_points with shape (S, H, W, 3).
     S = frames in chunk, H/W = image dimensions.
     We reconstruct (frame_global, pixel_row, pixel_col) using the same
-    math as da3_native_wrapper.py.
+    math as alignment pipeline.
     """
     import numpy as np
 

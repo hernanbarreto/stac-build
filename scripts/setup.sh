@@ -38,10 +38,6 @@ USER_HOME="/home/hernan"
 
 echo "   📍 Site Packages: $SITE_PACKAGES"
 
-# Link Depth-Anything-3
-echo "$USER_HOME/Depth-Anything-3/src" > "$SITE_PACKAGES/da3.pth"
-echo "   - Linked Depth-Anything-3"
-
 # Link SAM3
 echo "$USER_HOME/sam3" > "$SITE_PACKAGES/sam3.pth"
 echo "   - Linked SAM3"

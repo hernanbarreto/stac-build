@@ -8,7 +8,7 @@
 
 ## System Overview
 
-STAC-Builder is an AI-powered construction and asset lifecycle platform that transforms phone-based video into accurate 3D reconstructions, performs segmentation, BIM comparison, and coverage analysis. It comprises a **Python/FastAPI backend**, a **React/Three.js frontend**, and **vendored AI models** (DA3, SAM3, InternVL3).
+STAC-Builder is an AI-powered construction and asset lifecycle platform that transforms phone-based video into accurate 3D reconstructions, performs segmentation, BIM comparison, and coverage analysis. It comprises a **Python/FastAPI backend**, a **React/Three.js frontend**, and **vendored AI models** (Reconstruction, SAM3, InternVL3).
 
 ---
 
@@ -33,7 +33,7 @@ graph TB
         PM["pipeline_manager.py — 5-Stage Orchestrator"]
 
         subgraph Workers["Subprocess Workers"]
-            W1["da3_worker.py — 3D Reconstruction"]
+            W1["reconstruction_worker.py — 3D Reconstruction"]
             W2["cloudcompy_worker.py — Cloud Cleaning"]
             W3["vlm_worker.py — Scene Analysis"]
             W4["sam3_worker.py — Segmentation"]
@@ -41,7 +41,7 @@ graph TB
         end
 
         subgraph CoreModules["Core Processing"]
-            DA3W["da3_native_wrapper.py — RealtimeDA3"]
+            ReconstructionW["reconstruction_native_wrapper.py — RealtimeReconstruction"]
             AM["alignment_manager.py"]
             SP["segmentation_pipeline.py"]
             BC["bim_comparison.py"]
@@ -64,7 +64,7 @@ graph TB
     end
 
     subgraph Vendor["Vendored AI Models"]
-        DA3["depth_anything_3 — DA3_Streaming"]
+        Reconstruction["mapanything — Reconstruction_Streaming"]
         SAM3["sam3 — SAM3 Video Predictor"]
         CC["cloudcompy — CloudCompPy"]
         PC["PotreeConverter 2.1"]
@@ -72,7 +72,7 @@ graph TB
 
     UI --> Server
     PM --> Workers
-    W1 --> DA3W --> DA3
+    W1 --> ReconstructionW --> Reconstruction
     W4 --> SP --> SAM3
     W3 --> SA["scene_analyzer.py — InternVL3"]
     W2 --> CC
@@ -87,8 +87,8 @@ graph TB
 | File | Purpose |
 |------|---------|
 | `config.py` | YAML config loader, `DictConfig` wrapper, `get_param()` helper |
-| `config.yaml` | All server/DA3/SAM3/VLM/segmentation/cleaning parameters |
-| `vendor_paths.py` | Resolves DA3/SAM3/CloudCompPy paths, adds to `sys.path` |
+| `config.yaml` | All server/Reconstruction/SAM3/VLM/segmentation/cleaning parameters |
+| `vendor_paths.py` | Resolves Reconstruction/SAM3/CloudCompPy paths, adds to `sys.path` |
 | `project_paths.py` | `ProjectPaths` + `SourceContext` — hierarchical path resolution: `projects/` → scan days → sources → frames/output |
 | `db.py` | SQLite setup + user/auth tables |
 | `auth.py` | JWT token generation + verification |
@@ -100,15 +100,15 @@ The monolithic FastAPI server. Key sections:
 - **PLY utilities**: `cloud_to_binary()`, `load_ply_to_numpy()`, `numpy_to_ply_bytes()`
 - **Cloud processing**: `_run_cloudcompy_postprocess()`, `_align_cloud_to_floor()` (RANSAC), `_send_cleaned_cloud()`, `_send_sabana_cloud()`
 - **Connection managers**: `CameraManager`, `ViewerManager` (WebSocket connection pools)
-- **Online processing**: `chunk_processing_worker()` (real-time DA3 chunk loop), `_resolve_segmentation_prompt()` (VLM auto-prompt)
+- **Online processing**: `chunk_processing_worker()` (real-time Reconstruction chunk loop), `_resolve_segmentation_prompt()` (VLM auto-prompt)
 - **REST endpoints**: Session CRUD, BIM upload/compare, segmentation management, pipeline control, alignment save, mode switching
-- **WebSockets**: Viewer (pipeline trigger, cloud loading, progress callbacks, multi-scan), Camera (MASt3R/DA3 flows), SLAM (real-time frame processing), Team (presence, chat, WebRTC signaling), Logs (real-time server log forwarding)
+- **WebSockets**: Viewer (pipeline trigger, cloud loading, progress callbacks, multi-scan), Camera (MapAnything/Reconstruction flows), SLAM (real-time frame processing), Team (presence, chat, WebRTC signaling), Logs (real-time server log forwarding)
 
 ### Pipeline Manager — `pipeline_manager.py`
 
 Orchestrates the 5-stage reconstruction pipeline sequentially as subprocesses with Pipe IPC:
 
-1. **DA3** → 3D Reconstruction
+1. **Reconstruction** → 3D Reconstruction
 2. **CloudCompPy** → Cloud Cleaning (SOR, voxel, normals)
 3. **VLM** → Scene Analysis (InternVL3)
 4. **SAM3** → Video Segmentation
@@ -123,7 +123,7 @@ All workers share a pattern: `run(conn, session_dir, config)` → `run_worker_sa
 | Worker | What It Does |
 |--------|-------------|
 | `base.py` | `WorkerPipe` (IPC: progress/log/done/error/cancel), `run_worker_safe()` |
-| `da3_worker.py` | Dispatches to `_run_da3_single` or `_run_da3_multi_segment` based on zoom analysis. Multi-segment: per-zoom blur filter → novelty selection → DA3 reconstruction → ICP inter-segment alignment |
+| `reconstruction_worker.py` | Dispatches to `_run_reconstruction_single` or `_run_reconstruction_multi_segment` based on zoom analysis. Multi-segment: per-zoom blur filter → novelty selection → Reconstruction reconstruction → ICP inter-segment alignment |
 | `cloudcompy_worker.py` | Runs `run_cloudcompy.sh`. Creates `cleaned_cloud.ply`, links to `merged/`, computes `floor_transform.npz` |
 | `vlm_worker.py` | InternVL3 scene analysis → `vlm_analysis.json` (prompt + frame_map) |
 | `sam3_worker.py` | SAM3 segmentation using VLM prompt → `segmentation.json` + `seg_masks.npz` |
@@ -133,8 +133,8 @@ All workers share a pattern: `run(conn, session_dir, config)` → `run_worker_sa
 
 | Module | Purpose |
 |--------|---------|
-| `da3_native_wrapper.py` | `RealtimeDA3` wraps `DA3_Streaming`. Per-chunk async processing with callbacks, zoom intrinsics correction, gravity transform management, metadata saving. **Fast path**: skips `super().__init__()` when `preloaded_model` is available |
-| `da3_config_builder.py` | Builds DA3 config dict from `config.yaml` (model checkpoint, weights, chunk_size, overlap, conf_threshold, etc.) |
+| `reconstruction_native_wrapper.py` | `RealtimeReconstruction` wraps `Reconstruction_Streaming`. Per-chunk async processing with callbacks, zoom intrinsics correction, gravity transform management, metadata saving. **Fast path**: skips `super().__init__()` when `preloaded_model` is available |
+| `reconstruction_config_builder.py` | Builds Reconstruction config dict from `config.yaml` (model checkpoint, weights, chunk_size, overlap, conf_threshold, etc.) |
 | `alignment_manager.py` | `AlignmentManager`: RANSAC floor detection, SIM3 gravity correction, chunk-to-chunk alignment, point cloud generation with depth/conf thresholds, segmentation ID continuity mapping |
 | `icp_aligner.py` | Scaled ICP registration: auto voxel sizing, FPFH features, RANSAC global registration, point-to-plane refinement, scale estimation from correspondences |
 | `segmentation_pipeline.py` | Batched SAM3 processing per category, IoU ID matching across batches, NPZ mask storage with upsert logic, display-time point-to-mask matching via PLY origin fields, OBB computation |
@@ -143,7 +143,7 @@ All workers share a pattern: `run(conn, session_dir, config)` → `run_worker_sa
 | `bim_comparison.py` | IFC mesh extraction (Revit UniqueId suffix matching), C2M distance computation (KDTree + exact triangle projection), deviation reports, sábana generation |
 | `bim_registration.py` | Hierarchical BIM–scan registration: floor plane RANSAC alignment (height+tilt 3DOF) → object XZ+yaw sweep (3DOF) → full 6DOF transform |
 | `coverage_store.py` | Per-element cumulative coverage: mesh surface sampling, SampleStatus (COVERED/OCCLUDED/NOT_BUILT/NOT_VISIBLE), persistent NPZ storage, timeline tracking |
-| `occlusion_raycaster.py` | Ray-based BIM surface classification: camera pose loading (from DA3 extrinsics), cylindrical ray queries, best-camera selection, per-sample status classification |
+| `occlusion_raycaster.py` | Ray-based BIM surface classification: camera pose loading (from Reconstruction extrinsics), cylindrical ray queries, best-camera selection, per-sample status classification |
 | `zoom_detector.py` | 3 zoom detection methods (ffprobe focal length, ORB feature density, DCT frequency), segment identification with merging |
 | `frame_quality.py` | Laplacian blur detection with adaptive threshold, inter-frame diff |
 | `frame_selector.py` | ORB-SLAM H/F ratio keyframe selection: symmetric transfer error, Sampson distance, chi-squared scoring |
@@ -202,7 +202,7 @@ Custom Potree 2.0 octree loader:
 
 | Vendor | Purpose |
 |--------|---------|
-| **depth_anything_3** | `DA3_Streaming`: chunk-based monocular depth → 3D reconstruction with SIM3 alignment and loop closure |
+| **mapanything** | `Reconstruction_Streaming`: chunk-based monocular depth → 3D reconstruction with SIM3 alignment and loop closure |
 | **sam3** | SAM3 Video Predictor: text/point-prompt segmentation with video propagation |
 | **cloudcompy** | CloudCompPy: SOR filtering, voxel downsampling, duplicate removal, normal estimation |
 | **PotreeConverter** | Converts PLY point clouds to Potree 2.0 octree format |
@@ -216,7 +216,7 @@ sequenceDiagram
     participant UI as React UI
     participant API as FastAPI
     participant PM as PipelineManager
-    participant DA3W as DA3 Worker
+    participant ReconstructionW as Reconstruction Worker
     participant CCW as CloudCompPy Worker
     participant VLMW as VLM Worker
     participant SAMW as SAM3 Worker
@@ -225,9 +225,9 @@ sequenceDiagram
     UI->>API: Start Pipeline (viewer WebSocket)
     API->>PM: start_pipeline(session_id, stages)
 
-    PM->>DA3W: Stage 1 — 3D Reconstruction
-    Note over DA3W: Zoom detection → segment splitting<br/>Per-segment: blur filter → novelty selection<br/>→ DA3 reconstruction → ICP alignment
-    DA3W-->>PM: done (chunk PLYs)
+    PM->>ReconstructionW: Stage 1 — 3D Reconstruction
+    Note over ReconstructionW: Zoom detection → segment splitting<br/>Per-segment: blur filter → novelty selection<br/>→ Reconstruction reconstruction → ICP alignment
+    ReconstructionW-->>PM: done (chunk PLYs)
 
     PM->>CCW: Stage 2 — Cloud Cleaning
     Note over CCW: CloudCompPy: SOR + voxel + normals<br/>→ cleaned_cloud.ply + floor_transform.npz
@@ -264,7 +264,7 @@ projects/<project-slug>/
 │   │   ├── selected_frames.json   # Novelty-filtered keyframes
 │   │   └── zoom_analysis.json     # Per-frame zoom levels
 │   └── output/
-│       ├── chunk_*.ply            # DA3 raw reconstruction chunks
+│       ├── chunk_*.ply            # Reconstruction raw reconstruction chunks
 │       ├── chunk_*_meta.json      # Per-chunk metadata (cameras, intrinsics)
 │       ├── chunk_*_origins.npz    # Per-point origin traceability
 │       ├── cleaned_cloud.ply      # CloudCompPy cleaned cloud
@@ -290,7 +290,7 @@ projects/<project-slug>/
 
 ## Key Design Decisions
 
-1. **Model caching**: DA3 model is loaded once and reused across zoom segments via `preloaded_model` in `RealtimeDA3.__init__` (fast path skips `super().__init__()`)
+1. **Model caching**: Reconstruction model is loaded once and reused across zoom segments via `preloaded_model` in `RealtimeReconstruction.__init__` (fast path skips `super().__init__()`)
 2. **Zoom segmentation**: Videos with zoom changes are split into segments, each processed independently, then aligned with ICP
 3. **Origin traceability**: Every point in the PLY carries `(frame_global, pixel_row, pixel_col)` — this is how segmentation masks (2D) map to 3D points at display-time
 4. **Gravity alignment**: Computed once from first chunk, shared across all segments. Floor transform persisted to NPZ for consistent loading

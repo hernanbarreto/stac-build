@@ -21,8 +21,8 @@
 
 - **Read before writing.** Before modifying any file, read the relevant code thoroughly. Understand the existing flow, the callers, the call chain, and the side effects.
 - **Trace the full path.** A change in one module may cascade through workers, the pipeline manager, the API, and the frontend. Verify all touchpoints.
-- **Check the config.** Before adding any parameter, verify whether it already exists in `config.yaml`, `da3_config_builder.py`, or other config pathways.
-- **Check the vendor code.** `DA3_Streaming`, SAM3, and CloudCompPy are vendored with specific expectations. Understand their contracts before wrapping.
+- **Check the config.** Before adding any parameter, verify whether it already exists in `config.yaml`, `reconstruction_config_builder.py`, or other config pathways.
+- **Check the vendor code.** `Reconstruction_Streaming`, SAM3, and CloudCompPy are vendored with specific expectations. Understand their contracts before wrapping.
 
 ### 3. Always Consult the User
 
@@ -51,7 +51,7 @@
 
 ### Configuration
 
-- **Single source of truth:** `config.yaml` → read by `config.py` or specific builders (e.g., `da3_config_builder.py`).
+- **Single source of truth:** `config.yaml` → read by `config.py` or specific builders (e.g., `reconstruction_config_builder.py`).
 - **No magic numbers in logic.** Extract to config or to named constants with docstrings.
 - **Defaults must match vendor internals.** When exposing a vendor parameter, the default in `config.yaml` must exactly replicate the vendor's original behavior.
 

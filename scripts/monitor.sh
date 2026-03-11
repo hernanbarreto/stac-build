@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# Real-time monitoring during DA3 processing
+# Real-time monitoring during pipeline processing
 # Run in a SEPARATE terminal: bash monitor.sh
 # ============================================================
 

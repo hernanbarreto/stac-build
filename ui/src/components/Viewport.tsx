@@ -1221,7 +1221,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 geom.setAttribute('color', new THREE.BufferAttribute(colArr, 3))
 
                 const mat = new THREE.PointsMaterial({
-                    size: 0.003,  // 3mm — matches DA3 scan spacing
+                    size: 0.003,  // 3mm — matches scan spacing
                     vertexColors: true,
                     sizeAttenuation: true,
                     depthWrite: true,

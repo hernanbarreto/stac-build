@@ -4,7 +4,7 @@ server:
   port: 8765
   static_dir: "../static"  # Relative to server directory
   chunk_size: 120
-  chunk_overlap: 60 # 50% overlap — original DA3 default
+  chunk_overlap: 60 # 50% overlap
   # Derived: chunk_step = chunk_size - chunk_overlap = 60 frames between chunk starts
   frame_stride: 10  # Take 1 every N valid frames (1 = use all, 10 = 1/10th)
                      # Used as FALLBACK when frame_selection.enabled is false
@@ -81,64 +81,13 @@ frame_selection:
 
 # --- Paths ---
 paths:
-  # Base directory for DA3 models/weights
-  da3_weights_dir: "vendor/depth_anything_3/da3_streaming/weights"  # relative to project root
   # Directory where scan sessions are stored
   scans_dir: "scans"
   # Default output directory name within each session
   output_dir_name: "output"
 
-# --- Depth Anything 3 (DA3) Configuration ---
-da3:
-  # install_path is now resolved automatically by vendor_paths.py
-  install_path: "vendor/depth_anything_3"  # relative to project root
-
 # --- Models ---
 models:
-  depth:
-    # Model Architecture/Name
-    # Options: 
-    #   - "depth-anything/DA3-LARGE-1.1" (Efficient, fit for RTX 3060)
-    #name: "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
-    name: "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
-    #name: "depth-anything/DA3-LARGE-1.1"
-    
-    # Device: "cuda" or "cpu"
-    device: "cpu" 
-    #device: "cuda"
-    
-    # Use ray-based pose estimation (slower but more accurate, especially indoor)
-    use_ray_pose: true
-    # Advanced Inference Settings (Formerly Hardcoded)
-    inference_precision: "float16"        # float16 or float32
-    torch_compile_mode: "reduce-overhead" # reduce-overhead, max-autotune, or default
-    ref_view_strategy: "saddle_balanced"  # saddle_balanced, etc.
-    
-
-  # DA3 Streaming Specific Settings
-  da3:
-    loop_chunk_size: 20  # Images of loop chunk = 2 * loop_chunk_size
-    depth_threshold: 15.0
-    conf_threshold: 1.5   # DA3 internal confidence threshold (vendor default)
-    overlap_s: 0          # Overlap start offset (vendor default)
-    seed: 42              # Random seed for reproducibility
-    pointcloud_save:
-      conf_threshold_coef: 0.25    # Lower = keeps more points (0.75 was too aggressive, lost small objects)
-      sample_ratio: 1.0
-    # Loop closure - SALAD retrieval
-    loop_salad:
-      image_size: [336, 336]
-      batch_size: 32
-      similarity_threshold: 0.85
-      top_k: 5
-      use_nms: true
-      nms_threshold: 25
-    # Loop closure - SIM3 optimizer
-    loop_sim3_optimizer:
-      lang_version: "python"
-      max_iterations: 30
-      lambda_init: 0.000001
-
   segmentation:
     # SAM3 Model
     model_type: "vit_b" # Options: vit_b, vit_l, vit_h
@@ -151,50 +100,16 @@ models:
     pred_iou_thresh: 0.88
     stability_score_thresh: 0.95
 
-    # Prompting Strategy (Formerly Hardcoded)
+    # Prompting Strategy
     prompt_search_frames: [0, 15] # Frames to apply prompt to (Relative to chunk start)
     
     # Batched processing (memory management for long videos)
-    batch_size: 50              # Frames per SAM3 session
+    batch_size: 50              # Frames per segmentation session
     batch_overlap: 10           # Overlap between batches for ID continuity
     iou_match_threshold: 0.3    # Min IoU to consider same object across batches
-    
 
-# --- Point Cloud Generation ---
-point_cloud:
-  generation:
-    sample_ratio: 1.0
-    conf_threshold_coef: 0.75
-    keyframe_interval: 2
-    min_depth: 0.1
-    max_depth: 100.0
-    # Dynamic Thresholding Parameters (Formerly Hardcoded)
-    dynamic_threshold_coef: 0.1
-    dynamic_threshold_min: 0.000001 # 1e-6
-
-# --- Alignment (SIM3 & Auto-Leveling) ---
+# --- Alignment (Auto-Leveling) ---
 alignment:
-  ransac:
-    delta: 0.1
-    max_iters: 2000
-    tolerance: 1e-9
-  
-  # Method: "sim3" (re-opt scale) or "scale+se3" (fix scale from ransac)
-  method: "scale+se3"
-  # Alignment library: "torch" or "numpy"
-  align_lib: "torch"
-  # Scale computation: "auto", "median", "mean"
-  scale_compute_method: "auto"
-  # Alignment type: "dense" or "sparse"
-  align_type: "dense"
-  # Sparse keypoint alignment
-  sparse_align:
-    keypoint_select: "orb"
-    keypoint_num: 5000
-
-  reference_chunk_id: 0
-
-  # Auto-leveling (Floor Detection)
   auto_leveling:
     enabled: true
     ransac_iters: 500
@@ -234,62 +149,7 @@ visualization:
     "#FF8000", "#8000FF", "#FF0080", "#0080FF"
   ]
 
-# --- MASt3R-SLAM Configuration ---
-mast3r_slam:
-  # Installation path
-  install_path: "/home/hernan/mast3r_slam"
-  
-  # Config file (relative to install_path)
-  config_file: "config/base.yaml"
-  
-  # Checkpoint selection (use most accurate model - precision is priority)
-  checkpoint:
-    # Options:
-    # - MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth (most accurate)
-    # - MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval.pth (with retrieval)
-    model_file: "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
-    retrieval_file: "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth"
-    codebook_file: "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl"
-  
-  # Device configuration
-  device: "cuda:0"
-  
-  # Image processing
-  image:
-    size: 512  # MASt3R processes images at this resolution
-    downsample: 1  # Additional downsampling factor
-  
-  # Tracking parameters
-  tracking:
-    keyframe_interval: 10  # Add keyframe every N frames minimum
-    min_confidence: 0.3  # Confidence threshold for tracking quality
-    reloc_attempts: 5  # Relocalization attempts before giving up
-  
-  # Point cloud generation
-  pointcloud:
-    confidence_threshold: 1.0  # Minimum confidence to include point (Higher = less bleeding)
-    sample_ratio: 1.0  # Fraction of points to keep (1.0 = full density)
-    color_source: "frame"  # "frame" or "texture"
-  
-  # Calibration
-  calibration:
-    # If use_intrinsics is false, MASt3R will estimate intrinsics
-    use_intrinsics: false
-    # Default intrinsics (used when use_intrinsics is true and no calibration file)
-    default:
-      fx: 1000.0
-      fy: 1000.0
-      cx: 640.0
-      cy: 360.0
-    # FOV estimation for uncalibrated mode (degrees)
-    assumed_fov: 60.0
-  
-  # Global optimization
-  optimization:
-    enabled: true
-    loop_closure: true
-    retrieval_k: 5  # Number of similar keyframes to retrieve
-    retrieval_min_thresh: 0.5  # Minimum similarity for retrieval
+
 
 # --- BIM/IFC Configuration ---
 bim:
@@ -316,9 +176,9 @@ bim:
     critical_threshold: 30.0
     # Sábana (deviation heatmap) — rendered as colored point cloud
     sabana:
-      point_size_mm: 3.0        # Render point size (matches DA3 scan spacing)
+      point_size_mm: 3.0        # Render point size (matches typical scan spacing)
       uncovered_alpha: 0.25     # Alpha for non-scanned BIM mesh areas
-      subsample_mm: 1.0         # Subsample cloud to this spacing (0 = raw, 1 = DA3 precision)
+      subsample_mm: 1.0         # Subsample cloud to this spacing (0 = raw)
     # Coverage: "is there construction near this BIM face?" — separate from deviation accuracy
     coverage_proximity_m: 0.15  # 15cm — generous radius for detecting construction presence
                                 # Handles thick slabs/walls where scan only sees one side
@@ -328,15 +188,8 @@ bim:
       regular_threshold: 50     # >=50% within tolerance = REGULAR (yellow)
                                 # <50% = BAD (red) — advance counts as 0
 
-# --- SLAM Backend Selection ---
-# Options: "da3", "mast3r", "hybrid", "map"
-# - da3: Depth Anything 3 based reconstruction (fast, dense, ~10% RelErr)
-# - mast3r: MASt3R-SLAM (metric accurate poses, sparse point cloud)
-# - hybrid: MASt3R SLAM for metric poses + DA3 for dense depth (<3cm target)
-# - map: MapAnything v2 via VGGT-Long (8x faster, Apache 2.0, ~16% RelErr w/o priors)
-slam_backend: map
-
 # --- MapAnything (via VGGT-Long) Configuration ---
+# 3D Reconstruction backend — MapAnything v2 (Apache 2.0, commercial OK)
 mapanything:
   conda_env: "mapanything"             # Conda environment with MapAnything installed
   model_weights: "facebook/map-anything-apache"  # Apache 2.0 (commercial OK)
@@ -349,14 +202,8 @@ mapanything:
   loop_closure: true                   # Enable SALAD loop closure
   use_keyframes: true                  # Use frame_selector keyframes (recommended)
 
-# --- Hybrid Configuration ---
-# MASt3R SLAM (metric poses + loop closure) + DA3 (dense depth, auto-scaled to MASt3R metric)
-hybrid:
-  # DA3 chunking inherits server.chunk_size and server.chunk_overlap
-  # Point cloud params inherit from models.da3.pointcloud_save
-
 # --- Post-Processing (CloudCompPy) ---
-# Professional cleaning pipeline for DA3 point clouds
+# Professional cleaning pipeline for reconstructed point clouds
 postprocessing:
   enabled: true
   conda_env: "CloudComPy310"

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ── Stage Definitions ────────────────────────────────────────
 
 class StageId(str, Enum):
-    DA3 = "da3"
+    RECONSTRUCTION = "reconstruction"
     CLOUDCOMPY = "cloudcompy"
     VLM = "vlm"
     SAM3 = "sam3"
@@ -30,7 +30,7 @@ class StageId(str, Enum):
 
 
 STAGE_REGISTRY = {
-    StageId.DA3:              {"label": "3D Reconstruction", "icon": "🔨", "module": "workers.da3_worker"},
+    StageId.RECONSTRUCTION:   {"label": "3D Reconstruction", "icon": "🔨", "module": "workers.map_worker"},
     StageId.CLOUDCOMPY:       {"label": "Cloud Cleaning",    "icon": "🧹", "module": "workers.cloudcompy_worker"},
     StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker"},
     StageId.SAM3:             {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
@@ -38,7 +38,7 @@ STAGE_REGISTRY = {
 }
 
 DEFAULT_STAGE_ORDER: List[StageId] = [
-    StageId.DA3,
+    StageId.RECONSTRUCTION,
     StageId.CLOUDCOMPY,
     StageId.VLM,
     StageId.SAM3,
@@ -236,7 +236,7 @@ class PipelineManager:
 
     # Files each stage produces — used by replace mode to clean up before re-running
     STAGE_OUTPUT_FILES: Dict[StageId, List[str]] = {
-        StageId.DA3: ["chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json",
+        StageId.RECONSTRUCTION: ["chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json",
                       "slam_reconstruction.ply", "maplong_run"],
         StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "floor_transform.npz"],
         StageId.VLM: ["scene_analysis.json", "vlm_analysis.json"],
@@ -353,12 +353,7 @@ class PipelineManager:
         reg = STAGE_REGISTRY[stage_id]
         module_name = reg["module"]
 
-        # Override worker module for 3D reconstruction based on slam_backend
-        if stage_id == StageId.DA3:
-            backend = config.get("slam_backend", "da3")
-            if backend == "map":
-                module_name = "workers.map_worker"
-                logger.info(f"[Pipeline] 3D Reconstruction using MapAnything (VGGT-Long)")
+        # 3D Reconstruction uses MapAnything worker directly
 
         # Import the worker module dynamically
         import importlib
@@ -466,9 +461,9 @@ def build_pipeline_stages(
     """Build the pipeline stage list.
     
     Args:
-        ordered_stages: Optional list of stage IDs (e.g., ["vlm", "sam3", "da3", "cloudcompy"]).
+        ordered_stages: Optional list of stage IDs (e.g., ["vlm", "sam3", "reconstruction", "cloudcompy"]).
                         If not provided, defaults to DEFAULT_STAGE_ORDER.
-        enabled: Optional dict like {"da3": True, "vlm": False, ...}
+        enabled: Optional dict like {"reconstruction": True, "vlm": False, ...}
                  to override which stages are actually executed.
     """
     if ordered_stages is None:

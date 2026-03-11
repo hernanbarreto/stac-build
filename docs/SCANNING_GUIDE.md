@@ -8,7 +8,7 @@
 
 ## 1. Introducción
 
-Este documento establece el procedimiento estándar para la captura de video destinada a la reconstrucción 3D mediante el sistema STAC. El sistema utiliza **estimación monocular de profundidad (DA3)** a partir de un video convencional de smartphone o cámara, sin necesidad de sensores LiDAR ni equipamiento especializado.
+Este documento establece el procedimiento estándar para la captura de video destinada a la reconstrucción 3D mediante el sistema STAC. El sistema utiliza **estimación monocular de profundidad (Reconstruction)** a partir de un video convencional de smartphone o cámara, sin necesidad de sensores LiDAR ni equipamiento especializado.
 
 La calidad de la nube de puntos resultante depende directamente de la técnica de captura. Un escaneo correcto produce nubes densas con precisión centimétrica; un escaneo deficiente genera artefactos, huecos y errores geométricos que ningún post-procesamiento puede corregir.
 
@@ -181,7 +181,7 @@ El sistema incluye un **filtro de novedad visual** (H/F Ratio) que descarta auto
 
 ### 6.1 Error de Profundidad
 
-DA3 tiene un **error relativo de profundidad de ~10%**. Esto significa que el error crece linealmente con la distancia:
+Reconstruction tiene un **error relativo de profundidad de ~10%**. Esto significa que el error crece linealmente con la distancia:
 
 | Distancia al objeto | Error absoluto | Resolución de puntos | Aplicación típica |
 |---------------------|---------------|---------------------|-------------------|
@@ -212,8 +212,8 @@ DA3 tiene un **error relativo de profundidad de ~10%**. Esto significa que el er
 |-----------|-------------|-----------|----------|-------------------|
 | **LiDAR terrestre** (Leica, Faro) | €50,000-150,000 | ±2 mm | 10M pts/scan | 5 min/estación |
 | **LiDAR portátil** (NavVis, GeoSLAM) | €20,000-50,000 | ±10-30 mm | 300K pts/s | Tiempo real |
-| **Fotogrametría clásica** (COLMAP) | €0 (cámara) | ±5-20 mm | Variable | Horas de procesamiento |
-| **STAC (DA3 mono)** | €0 (smartphone) | ±30-100 mm | 15-50M pts | Minutos de procesamiento |
+| **Fotogrametría clásica** (MapAnything) | €0 (cámara) | ±5-20 mm | Variable | Horas de procesamiento |
+| **STAC (Reconstruction mono)** | €0 (smartphone) | ±30-100 mm | 15-50M pts | Minutos de procesamiento |
 | **iPhone LiDAR** (Polycam) | €1,200 (iPhone Pro) | ±10-50 mm | 1-5M pts | Tiempo real |
 
 **Ventaja STAC**: Cero inversión en hardware, procesamiento en GPU convencional, nube ultra-densa, y segmentación con IA integrada.
@@ -316,7 +316,7 @@ Video .mp4
   ↓
 3. Filtro de novedad visual (frame_selector.py) → Selecciona keyframes con parallax
   ↓
-4. Reconstrucción 3D (DA3)                    → Genera chunks de nube de puntos
+4. Reconstrucción 3D (Reconstruction)                    → Genera chunks de nube de puntos
   ↓
 5. Post-procesamiento (CloudComPy)            → Merge, SOR, voxel subsampling
   ↓

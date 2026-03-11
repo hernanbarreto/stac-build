@@ -222,7 +222,7 @@ def _load_keyframes(frames_dir: Path) -> List[str]:
     Load the exact keyframes used for 3D reconstruction.
     
     REQUIRES selected_frames.json (visual novelty H/F keyframe filter).
-    This file is produced by the frame_selector during DA3 processing and
+    This file is produced by the frame_selector during reconstruction processing and
     contains the "selected_files" list — the keyframes used for the point cloud.
     
     Raises:
@@ -237,7 +237,7 @@ def _load_keyframes(frames_dir: Path) -> List[str]:
     if not selected_json.exists():
         raise FileNotFoundError(
             f"selected_frames.json not found in {frames_dir}. "
-            f"DA3 must run first to produce keyframes before VLM analysis."
+            f"Reconstruction must run first to produce keyframes before VLM analysis."
         )
     
     try:

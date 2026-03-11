@@ -1,6 +1,6 @@
 # STAC-BUILD: Frame Storage System
 # Saves incoming frames to disk organized by scan session
-# Manages chunk organization with overlap for DA3-Streaming
+# Manages chunk organization with overlap for reconstruction pipeline
 
 import os
 import cv2
@@ -136,7 +136,7 @@ class ScanSession:
 
 class FrameStorage:
     """
-    Manages frame storage and chunk organization for DA3-Streaming.
+    Manages frame storage and chunk organization for reconstruction pipeline.
     
     Frames are saved to disk as they arrive, organized into overlapping
     chunks for processing.
@@ -450,7 +450,7 @@ class FrameStorage:
             filepath = session.output_dir / filename
             n_pts = len(point_cloud)
             
-            # Try to load origin data from DA3's origins.npz
+            # Try to load origin data from reconstruction.s origins.npz
             origins_path = session.output_dir / f"chunk_{chunk_id:03d}_origins.npz"
             has_origins = False
             if origins_path.exists():
@@ -534,10 +534,10 @@ class FrameStorage:
             filename_legacy = f"chunk_{chunk_id:03d}.ply"
             filepath = session.output_dir / filename_legacy
             
-            # Try new DA3 format: {id}_pcd.ply in output/pcd
+            # Try new reconstruction format: {id}_pcd.ply in output/pcd
             if not filepath.exists():
-                filename_da3 = f"{chunk_id}_pcd.ply"
-                filepath = session.output_dir / "pcd" / filename_da3
+                filename_pcd = f"{chunk_id}_pcd.ply"
+                filepath = session.output_dir / "pcd" / filename_pcd
             
             if not filepath.exists(): return None
             
@@ -615,7 +615,7 @@ class FrameStorage:
                             sample_indices: np.ndarray = None) -> Optional[str]:
         """
         Save chunk metadata (poses, intrinsics) to JSON for offline refinement.
-        Avoids re-running DA3 if we just want to update masks.
+        Avoids re-running reconstruction if we just want to update masks.
 
         alignment_transform: (s, R, t) tuple used for point cloud alignment
         validity_mapping: list of {orig_frame_idx, valid_pixel_indices} for pixel-to-point mapping

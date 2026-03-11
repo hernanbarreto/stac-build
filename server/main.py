@@ -32,12 +32,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 security = HTTPBearer(auto_error=False)
 
 from frame_storage import get_frame_storage, FrameStorage
-from chunk_processor import get_chunk_processor, ChunkProcessor, ChunkResult
 from alignment_manager import get_alignment_manager, AlignmentManager
 from sam3_wrapper import get_sam3_wrapper
 from config import cfg
-from da3_native_wrapper import RealtimeDA3
-from slam_processor import get_slam_processor, SLAMProcessor, SLAMFrame
 from pipeline_manager import PipelineManager, PipelineStage, StageId
 from project_paths import resolve_session
 
@@ -84,7 +81,7 @@ def cloud_to_binary(point_cloud: np.ndarray) -> bytes:
     output_data[:, 1] = point_cloud[:, 1]
     output_data[:, 2] = point_cloud[:, 2]
     
-    # RGB (Assumed float 0-1 or 0-255? DA3 returns 0-1 usually, or 0-255?)
+    # RGB (Assumed float 0-1 or 0-255)
     # AlignmentManagerr._generate_point_cloud uses images_kf which are 0-255, then divides by 255.0. 
     # So point_cloud[:, 3:] is 0-1 float.
     output_data[:, 3] = point_cloud[:, 3]
@@ -177,7 +174,7 @@ def load_ply_to_numpy(ply_path: Path) -> Optional[np.ndarray]:
 
 # --- CloudCompPy Post-Processing ---
 async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, websocket=None):
-    """Run CloudCompPy post-processing on DA3 chunk PLYs as subprocess."""
+    """Run CloudCompPy post-processing on reconstruction chunk PLYs as subprocess."""
     import subprocess
     
     ctx = _ctx(session_id)
@@ -732,126 +729,14 @@ class ViewerManager:
 camera_manager = CameraManager()
 viewer_manager = ViewerManager()
 frame_storage = None
-chunk_processor = None
 alignment_manager = None
-chunk_queue = asyncio.Queue()
-last_chunk_result = None
-is_processing_chunk = False
-server_mode = "offline"  # "online" or "offline" - controls DA3 preloading
-slam_processor = None  # Unified SLAM processor (MASt3R or DA3)
 pipeline_manager = PipelineManager()  # Pipeline orchestrator (subprocess workers)
 
-# --- WORKER: INCREMENTAL SENDING ---
-async def chunk_processing_worker():
-    global last_chunk_result, is_processing_chunk
-    print("[ChunkWorker] Started")
-    
-    while True:
-        try:
-            session, chunk_info = await chunk_queue.get()
-            is_processing_chunk = True
-            chunk_id = chunk_info.chunk_id
-            
-            print(f"[ChunkWorker] Processing chunk {chunk_id}...")
-            frames_dir = session.chunks_dir / f"chunk_{chunk_id:03d}"
-            chunk_info.status = "processing"
-            
-            loop = asyncio.get_event_loop()
-            
-            def _heavy_lifting():
-                if not frames_dir.exists(): return None
-                # 1. AI Inference
-                # KEY FIX: Fetch prompt dynamically from frame_storage to apply to PENDING chunks
-                # This ensures that if user types "sofa", it applies to the next processed chunk immediately.
-                current_live_prompt = frame_storage.current_prompt if frame_storage else None
-                prompt = current_live_prompt if current_live_prompt else (chunk_info.prompt if hasattr(chunk_info, 'prompt') else None)
-                
-                result = chunk_processor.process_chunk(frames_dir, chunk_id, prompt=prompt)
-                if result:
-                    # 2. Point Cloud Gen
-                    chunk_processor.generate_point_cloud(result)
-                    # 3. Alignment
-                    aligned_chunk = alignment_manager.add_chunk(result)
-                    # 4. Save PLY for persistence/replay
-                    if aligned_chunk:
-                        frame_storage.save_ply(session, chunk_id, aligned_chunk.point_cloud)
-                        # Use sample_indices from aligned_chunk (CRITICAL: same indices used for PLY)
-                        align_transform = alignment_manager.gravity_correction if hasattr(alignment_manager, 'gravity_correction') else None
-                        sample_indices = aligned_chunk.sample_indices
-                        frame_storage.save_chunk_metadata(session, chunk_id, result,
-                                                         alignment_transform=align_transform,
-                                                         sample_indices=sample_indices)
-                        # Save segmentation with new format (point_indices)
-                        if result.segmentation_masks:
-                            depth_shape = result.depths[0].shape  # (H, W)
-                            frame_storage.save_chunk_segmentation(
-                                session, chunk_id,
-                                masks=result.segmentation_masks,
-                                prompt=frame_storage.current_prompt or prompt or "",
-                                depth_shape=depth_shape,
-                                frame_count=result.frame_count,
-                                depths=result.depths,  # Pass for validity mask
-                                confs=result.confs,    # Pass for validity mask
-                                sample_indices=sample_indices if sample_indices is not None else None,
-                                point_cloud=aligned_chunk.point_cloud  # For 3D outlier filtering
-                            )
-                return result
-
-            result = await loop.run_in_executor(None, _heavy_lifting)
-            
-            if result is None:
-                print(f"[ChunkWorker] Chunk {chunk_id} failed")
-                chunk_info.status = "failed"
-            else:
-                last_chunk_result = result
-                chunk_info.status = "complete"
-                
-                # No real-time streaming — only log progress
-                latest_chunk = alignment_manager.aligned_chunks[-1]
-                if latest_chunk.point_cloud is not None and len(latest_chunk.point_cloud) > 0:
-                    print(f"[ChunkWorker] Chunk {chunk_id} processed: {len(latest_chunk.point_cloud):,} points (not streaming)")
-                    
-                    # Send progress status to viewers
-                    total_chunks = alignment_manager.get_chunk_count()
-                    await viewer_manager.broadcast_text(json.dumps({
-                        "type": "status",
-                        "message": f"Processing chunk {chunk_id + 1}... ({total_chunks} chunks done)"
-                    }))
-
-            is_processing_chunk = False
-
-            # Check if DA3 is done (queue empty) — trigger CloudCompPy + send cleaned cloud
-            if chunk_queue.qsize() == 0:
-                # Run CloudCompPy post-processing and send cleaned cloud
-                session_id_current = frame_storage.current_session.session_id if frame_storage and frame_storage.current_session else None
-                if session_id_current:
-                    postproc_config = cfg.get("postprocessing", {})
-                    if postproc_config.get("enabled", False):
-                        await _run_cloudcompy_postprocess(session_id_current, postproc_config)
-                    await _send_cleaned_cloud_broadcast(session_id_current)
-                
-                # Also check for pending retroactive segmentation
-                if hasattr(frame_storage, '_pending_retroactive_prompt'):
-                    pending_prompt = getattr(frame_storage, '_pending_retroactive_prompt', None)
-                    if pending_prompt:
-                        print(f"[ChunkWorker] DA3 complete. Running pending retroactive segmentation for '{pending_prompt}'...")
-                        frame_storage._pending_retroactive_prompt = None
-                        asyncio.create_task(_run_pending_retroactive(pending_prompt))
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print(f"[ChunkWorker] Error: {e}")
-            import traceback
-            traceback.print_exc()
-            is_processing_chunk = False
 
 
 def _resolve_segmentation_prompt(prompt: str, frames_dir: str) -> tuple:
     """
     Resolve segmentation prompt: if 'auto' or empty, use InternVL3 scene analyzer.
-    
-    The VLM runs AFTER DA3 unload and BEFORE SAM3 load, so no VRAM conflict.
     
     Returns:
         (prompt, frame_map) where frame_map maps category label → list of frame filenames
@@ -877,116 +762,26 @@ def _resolve_segmentation_prompt(prompt: str, frames_dir: str) -> tuple:
         return "floor;wall;ceiling;door;window;furniture;object", {}
 
 
-async def _run_pending_retroactive(prompt: str):
-    """Execute pending retroactive segmentation after DA3 completes ALL chunks."""
-    try:
-        session = frame_storage.current_session
-        if not session:
-            print("[Retro-Pending] No active session")
-            return
-
-        print(f"[Retro-Pending] DA3 complete. Starting segmentation with prompt: '{prompt}'")
-
-        # Unload DA3 to free VRAM (CRITICAL: DA3 must be fully unloaded before SAM3)
-        print("[Retro-Pending] Unloading DA3 to free VRAM...")
-        chunk_processor.unload_model()
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        # Resolve prompt (auto-detect if needed, VLM runs here before SAM3)
-        prompt, frame_map = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
-
-        # Run new segmentation pipeline
-        from segmentation_pipeline import run_segmentation
-        result = run_segmentation(
-            frames_dir=str(session.frames_dir),
-            output_dir=str(session.output_dir),
-            prompt=prompt,
-            frame_map=frame_map
-        )
-
-        if "error" in result:
-            print(f"[Retro-Pending] Segmentation failed: {result['error']}")
-        else:
-            print(f"[Retro-Pending] ✅ Segmentation complete: {len(result['instances'])} instances")
-
-        # Match masks against current cloud and broadcast
-        from segmentation_pipeline import apply_segmentation_to_cloud
-        seg_data = apply_segmentation_to_cloud(session.output_dir)
-        if seg_data.get("instances"):
-            await viewer_manager.broadcast_text(json.dumps(seg_data))
-            print(f"[Retro-Pending] Broadcast segmentation ({len(seg_data['instances'])} instances)")
-        
-        await viewer_manager.broadcast_text(json.dumps({
-            "type": "info",
-            "message": f"Segmentation complete for '{prompt}': {len(result.get('instances', []))} instances"
-        }))
-
-    except Exception as e:
-        print(f"[Retro-Pending] Error: {e}")
-        import traceback
-        traceback.print_exc()
-
-def cloud_to_binary(cloud: np.ndarray) -> bytes:
-    if cloud is None or len(cloud) == 0: return b""
-    # Input cloud: can be N x 6 (XYZRGB) or N x 7 (XYZRGBC)
-    n_points = len(cloud)
-    n_cols = cloud.shape[1]
-    
-    data = np.zeros((n_points, 7), dtype=np.float32)
-    
-    if n_cols >= 7:
-        data[:, :7] = cloud[:, :7]
-    else:
-        # Default case: Fill first 6, class=0
-        data[:, :6] = cloud[:, :6]
-    
-    # CV to Three.js transform
-    # REMOVED: Data is already aligned by AlignmentManagerr to Y-up (GL compatible)
-    # data[:, 1] *= -1 
-    # data[:, 2] *= -1 
-    
-    return data.tobytes()
-
-def on_chunk_ready(session, chunk_info):
-    asyncio.create_task(chunk_queue.put((session, chunk_info)))
-    print(f"[FrameStorage] Chunk {chunk_info.chunk_id} queued")
-
 # --- Lifecycle ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global frame_storage, chunk_processor, alignment_manager, chunk_queue, slam_processor
+    global frame_storage, alignment_manager
     print("[Server] Starting STAC-BUILD...")
     
     frame_storage = get_frame_storage()
-    frame_storage.on_chunk_ready = on_chunk_ready
-    chunk_processor = get_chunk_processor()
     alignment_manager = get_alignment_manager()
     
     # Initialize SAM3 Wrapper (lazy load, but triggers init log)
     get_sam3_wrapper()
     
-    # Initialize SLAM Processor (lazy loading of backend)
-    slam_backend = cfg.get("slam_backend", "mast3r")
-    slam_processor = get_slam_processor()
-    print(f"[Server] SLAM backend configured: {slam_backend}")
-    
-    # NOTE: Models are NOT loaded here for memory efficiency.
-    # They will be loaded lazily when needed:
-    # - Online streaming: loaded when first frame arrives
-    # - Offline: loaded when processing session
+    print("[Server] Reconstruction backend: MapAnything (VGGT-Long)")
     print("[Server] Models will be loaded on-demand (lazy loading enabled)")
-    
-    worker_task = asyncio.create_task(chunk_processing_worker())
 
     # Initialize auth database
     from db import init_db
     await init_db()
     
     yield
-    
-    worker_task.cancel()
 
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -1177,7 +972,7 @@ async def status():
     return {
         "chunks_aligned": alignment_manager.get_chunk_count() if alignment_manager else 0,
         "unified_cloud_points": total_pts, 
-        "is_processing": is_processing_chunk
+        "is_processing": False
     }
 
 @app.get("/sessions")
@@ -1516,15 +1311,6 @@ async def get_session_scans(session_id: str):
 
     return {"session_id": session_id, "scans": scans}
 
-@app.get("/mode")
-async def get_mode():
-    """Get current server mode and DA3 readiness."""
-    return {
-        "mode": server_mode,
-        "da3_loaded": chunk_processor.is_loaded if chunk_processor else False,
-        "ready_for_streaming": server_mode == "online" and (chunk_processor.is_loaded if chunk_processor else False)
-    }
-
 @app.get("/segments/{session_id}")
 async def get_segments(session_id: str):
     """Get unified segmentation data for a session."""
@@ -1549,164 +1335,7 @@ async def get_segments(session_id: str):
         print(f"Error serving segments: {e}")
         return {"error": str(e)}
 
-@app.post("/mode/{new_mode}")
-async def set_mode(new_mode: str):
-    """
-    Switch server mode between 'online' and 'offline'.
-    - online: Pre-loads DA3 model for real-time streaming
-    - offline: Unloads DA3 to save VRAM (will load on-demand if needed)
-    """
-    global server_mode
-    
-    if new_mode not in ["online", "offline"]:
-        return {"error": "Invalid mode. Use 'online' or 'offline'"}
-    
-    old_mode = server_mode
-    server_mode = new_mode
-    
-    if new_mode == "online":
-        # Pre-load SLAM backend for streaming readiness
-        if not slam_processor.is_initialized:
-            print(f"[Server] 🔌 Switching to ONLINE mode - Loading {slam_processor.backend_name}...")
-            await viewer_manager.broadcast_text(json.dumps({
-                "type": "info",
-                "message": f"Loading {slam_processor.backend_name} model for streaming..."
-            }))
-            
-            # Load in executor to not block
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, slam_processor.initialize)
-            
-            print(f"[Server] ✅ {slam_processor.backend_name} loaded - Ready for streaming!")
-            await viewer_manager.broadcast_text(json.dumps({
-                "type": "mode_ready",
-                "mode": "online",
-                "message": "Ready for streaming"
-            }))
-        else:
-            print(f"[Server] {slam_processor.backend_name} already loaded")
-            
-    elif new_mode == "offline":
-        # Unload DA3 to free VRAM
-        if chunk_processor.is_loaded:
-            print("[Server] 📴 Switching to OFFLINE mode - Unloading DA3...")
-            await viewer_manager.broadcast_text(json.dumps({
-                "type": "info", 
-                "message": "Unloading DA3 to save memory..."
-            }))
-            
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, chunk_processor.unload_model)
-            
-            import gc
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            
-            print("[Server] ✅ DA3 unloaded - VRAM freed")
-            await viewer_manager.broadcast_text(json.dumps({
-                "type": "mode_ready",
-                "mode": "offline",
-                "message": "Offline mode active"
-            }))
-    
-    return {
-        "mode": server_mode,
-        "da3_loaded": chunk_processor.is_loaded,
-        "changed": old_mode != new_mode
-    }
 
-# --- SLAM Processing Endpoints ---
-
-@app.get("/slam/status")
-async def slam_status():
-    """Get SLAM processor status."""
-    if slam_processor is None:
-        return {"initialized": False, "backend": cfg.get("slam_backend", "unknown")}
-    return slam_processor.get_state()
-
-@app.post("/slam/process/{session_id}")
-async def process_session_with_slam(session_id: str):
-    """
-    Process an existing session's frames with SLAM.
-    Uses configured backend (MASt3R or DA3).
-    """
-    if slam_processor is None:
-        return {"error": "SLAM processor not initialized"}
-    
-    # Get session paths
-    ctx = _ctx(session_id)
-    frames_dir = ctx.frames_dir
-    output_dir = ctx.output_dir
-    
-    if not frames_dir.exists():
-        return {"error": f"Session not found or no frames: {session_id}"}
-    
-    # Notify viewers
-    await viewer_manager.broadcast_text(json.dumps({
-        "type": "info",
-        "message": f"Starting SLAM processing for {session_id}..."
-    }))
-    
-    # Process in executor to not block
-    loop = asyncio.get_event_loop()
-    
-    def _process_slam():
-        # Initialize SLAM if not already
-        slam_processor.initialize()
-        
-        # Start session
-        slam_processor.start_session(session_id, frames_dir, output_dir)
-        
-        # Process all frames
-        frame_count = 0
-        keyframe_count = 0
-        
-        for result in slam_processor.process_frames_directory(frames_dir):
-            frame_count += 1
-            if result.is_keyframe:
-                keyframe_count += 1
-                
-        # Get final point cloud
-        points, colors = slam_processor.get_global_pointcloud()
-        
-        # Save PLY
-        output_dir.mkdir(parents=True, exist_ok=True)
-        ply_path = output_dir / "slam_reconstruction.ply"
-        slam_processor.save_pointcloud_ply(ply_path)
-        
-        slam_processor.stop_session()
-        
-        return {
-            "session_id": session_id,
-            "frames_processed": frame_count,
-            "keyframes": keyframe_count,
-            "points": len(points),
-            "output_ply": str(ply_path),
-        }
-    
-    try:
-        result = await loop.run_in_executor(None, _process_slam)
-        
-        # Send point cloud to viewers
-        binary_data = slam_processor.get_pointcloud_binary()
-        if binary_data:
-            for sub_chunk in chunk_data(binary_data):
-                await viewer_manager.broadcast_binary(sub_chunk)
-        
-        await viewer_manager.broadcast_text(json.dumps({
-            "type": "slam_complete",
-            "data": result
-        }))
-        
-        return result
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}
-
-# --- Frame Image Serving ---
 
 @app.get("/api/sessions/{session_id}/frames/{filename}")
 async def serve_session_frame(session_id: str, filename: str):
@@ -1729,7 +1358,7 @@ async def get_session_keyframes(session_id: str):
     selected_json = frames_dir / "selected_frames.json"
 
     if not selected_json.exists():
-        raise HTTPException(status_code=404, detail="selected_frames.json not found (DA3 must run first)")
+        raise HTTPException(status_code=404, detail="selected_frames.json not found (reconstruction must run first)")
 
     try:
         with open(selected_json) as f:
@@ -2996,243 +2625,19 @@ async def clean_segmentation_instance(request: Request):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.websocket("/ws/slam")
-async def slam_websocket(websocket: WebSocket):
-    """
-    Real-time SLAM WebSocket for streaming frame processing.
-    Client sends frames, receives incremental point cloud updates.
-    """
-    await websocket.accept()
-    print("[SLAM WS] Client connected")
-    
-    if slam_processor is None:
-        await websocket.close(code=1011, reason="SLAM not initialized")
-        return
-    
-    # Initialize SLAM on first connection
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, slam_processor.initialize)
-    
-    # Start new session
-    session_id = f"live_{int(time.time())}"
-    ctx = _ctx(session_id)
-    frames_dir = ctx.frames_dir
-    output_dir = ctx.output_dir
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    slam_processor.start_session(session_id, frames_dir, output_dir)
-    
-    await websocket.send_text(json.dumps({
-        "type": "session_started",
-        "session_id": session_id
-    }))
-    
-    frame_idx = 0
-    
-    try:
-        while True:
-            data = await websocket.receive_bytes()
-            
-            # Decode frame
-            import cv2
-            frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if frame is None:
-                continue
-                
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Save frame
-            cv2.imwrite(str(frames_dir / f"{frame_idx:06d}.jpg"), frame)
-            
-            # Process with SLAM
-            def _process_frame():
-                return slam_processor.process_frame(frame_rgb, float(frame_idx))
-            
-            result = await loop.run_in_executor(None, _process_frame)
-            frame_idx += 1
-            
-            # Send status update
-            await websocket.send_text(json.dumps({
-                "type": "frame_processed",
-                "frame_id": result.frame_id,
-                "is_keyframe": result.is_keyframe,
-                "status": result.status,
-            }))
-            
-            # If keyframe, send incremental point cloud
-            if result.is_keyframe and result.points is not None:
-                # Create binary data for this keyframe's points
-                n_pts = len(result.points)
-                if n_pts > 0:
-                    output = np.zeros((n_pts, 7), dtype=np.float32)
-                    output[:, :3] = result.points
-                    output[:, 3:6] = result.colors if result.colors is not None else 0.7
-                    output[:, 6] = 0.0
-                    
-                    # Send to this client
-                    await websocket.send_bytes(output.tobytes())
-                    
-                    # Also broadcast to viewers
-                    await viewer_manager.broadcast_binary(output.tobytes())
-                    
-    except WebSocketDisconnect:
-        print("[SLAM WS] Client disconnected")
-    except Exception as e:
-        print(f"[SLAM WS] Error: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        # Save final reconstruction
-        output_ply = output_dir / "slam_reconstruction.ply"
-        slam_processor.save_pointcloud_ply(output_ply)
-        slam_processor.stop_session()
-        print(f"[SLAM WS] Session saved: {session_id}")
-
 @app.websocket("/ws/camera")
 async def camera_websocket(websocket: WebSocket):
     """
     Camera WebSocket - receives frames from camera.html client.
-    Routes to appropriate SLAM backend (MASt3R or DA3 chunks).
+    Stores frames via frame_storage for later offline pipeline processing.
     """
     await websocket.accept()
-    
-    # Get configured backend
-    slam_backend = cfg.get("slam_backend", "mast3r")
-    
-    # For MASt3R, we can work in online or offline mode
-    # For DA3, we require online mode (existing behavior)
-    if slam_backend != "mast3r" and server_mode != "online":
-        print(f"[Camera] ⛔ Connection rejected: Server is in {server_mode} mode")
-        await websocket.close(code=1008, reason="Server is offline")
-        return
-        
-    # Check if backend is ready (only if online mode is active/requested)
-    if server_mode == "online" and not slam_processor.is_initialized:
-        print("[Camera] ⏳ Connection rejected: Model loading...")
-        await websocket.close(code=1013, reason="Server initializing")
-        return
-
     await camera_manager.connect(websocket)
-    
-    # Initialize based on backend
-    if slam_backend == "mast3r":
-        await _camera_mast3r_flow(websocket)
-    else:
-        await _camera_da3_flow(websocket)
+    await _camera_frame_capture(websocket)
 
 
-async def _camera_mast3r_flow(websocket: WebSocket):
-    """Handle camera frames with MASt3R-SLAM backend."""
-    import cv2
-    
-    # Initialize SLAM
-    loop = asyncio.get_event_loop()
-    
-    print("[Camera/MASt3R] Initializing SLAM processor...")
-    print("[Camera/MASt3R] Initializing SLAM processor...")
-    # Use singleton accessor directly to avoid global state issues
-    from slam_processor import get_slam_processor
-    slam_processor = get_slam_processor()
-    
-    if slam_processor is None:
-        print("❌ CRITICAL ERROR: slam_processor is still None after getter!")
-        return
-
-    await loop.run_in_executor(None, slam_processor.initialize)
-    
-    # Start session
-    session_id = f"live_{int(time.time())}"
-    ctx = _ctx(session_id)
-    frames_dir = ctx.frames_dir
-    output_dir = ctx.output_dir
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    slam_processor.start_session(session_id, frames_dir, output_dir)
-    
-    await viewer_manager.broadcast_text(json.dumps({
-        "type": "session_started",
-        "session_id": session_id,
-        "backend": "mast3r"
-    }))
-    
-    frame_idx = 0
-    
-    try:
-        while True:
-            data = await websocket.receive_bytes()
-            
-            frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if frame is None:
-                continue
-                
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Save frame
-            cv2.imwrite(str(frames_dir / f"{frame_idx:06d}.jpg"), frame)
-            
-            # Process with SLAM in executo
-            def _process():
-                return slam_processor.process_frame(frame_rgb, float(frame_idx))
-            
-            result = await loop.run_in_executor(None, _process)
-            frame_idx += 1
-            camera_manager.frame_count = frame_idx
-            
-            # If keyframe, broadcast point cloud to viewers
-            if result.is_keyframe and result.points is not None:
-                n_pts = len(result.points)
-                if n_pts > 0:
-                    # Transform points from camera space to world space using pose
-                    points_cam = result.points.reshape(-1, 3)
-                    if result.pose is not None:
-                        R = result.pose[:3, :3]
-                        t = result.pose[:3, 3]
-                        points_world = (R @ points_cam.T).T + t
-                    else:
-                        points_world = points_cam
-                    
-                    output = np.zeros((n_pts, 7), dtype=np.float32)
-                    output[:, :3] = points_world
-                    output[:, 3:6] = result.colors if result.colors is not None else 0.7
-                    output[:, 6] = 0.0
-                    
-                    # Broadcast to all viewers
-                    for sub_chunk in chunk_data(output.tobytes()):
-                        await viewer_manager.broadcast_binary(sub_chunk)
-                        
-            # Status update every 30 frames
-            if frame_idx % 30 == 0:
-                state = slam_processor.get_state()
-                await viewer_manager.broadcast_text(json.dumps({
-                    "type": "slam_status",
-                    "frames": frame_idx,
-                    "keyframes": state.get("backend_state", {}).get("num_keyframes", 0),
-                    "fps": state.get("backend_state", {}).get("fps", 0),
-                }))
-                    
-    except Exception as e:
-        print(f"[Camera/MASt3R] Connection closed: {e}")
-    finally:
-        camera_manager.disconnect()
-        
-        # Save final reconstruction
-        print(f"[Camera/MASt3R] Saving session {session_id}...")
-        output_ply = output_dir / "slam_reconstruction.ply"
-        await loop.run_in_executor(None, lambda: slam_processor.save_pointcloud_ply(output_ply))
-        slam_processor.stop_session()
-        
-        await viewer_manager.broadcast_text(json.dumps({
-            "type": "session_complete",
-            "session_id": session_id,
-            "frames": frame_idx,
-            "output": str(output_ply),
-        }))
-
-
-async def _camera_da3_flow(websocket: WebSocket):
-    """Handle camera frames with DA3 chunks backend (original behavior)."""
+async def _camera_frame_capture(websocket: WebSocket):
+    """Capture camera frames and store them for offline pipeline processing."""
     import cv2
     
     try:
@@ -3244,13 +2649,9 @@ async def _camera_da3_flow(websocket: WebSocket):
                 frame_storage.add_frame(frame)
                 camera_manager.frame_count += 1
     except Exception as e:
-        print(f"[Camera/DA3] Connection closed: {e}")
+        print(f"[Camera] Connection closed: {e}")
     finally:
         camera_manager.disconnect()
-        # Finalize Session (Save Poses/Intrinsics)
-        if chunk_processor and chunk_processor.is_loaded:
-             print("[Camera/DA3] Finalizing session...")
-             await asyncio.to_thread(chunk_processor.finalize_session)
 
 @app.websocket("/ws/viewer")
 async def viewer_websocket(websocket: WebSocket):
@@ -3287,11 +2688,9 @@ async def viewer_websocket(websocket: WebSocket):
                 continue
 
             if cmd.get("type") == "status":
-                queue_size = chunk_queue.qsize()
                 await viewer_manager.send_text(websocket, json.dumps({
                     "type": "status",
                     "camera_connected": camera_manager.active_camera is not None,
-                    "chunk_queue": queue_size
                 }))
             elif cmd.get("type") == "clear":
                 alignment_manager.reset()
@@ -3305,12 +2704,8 @@ async def viewer_websocket(websocket: WebSocket):
                 
                 await viewer_manager.send_text(websocket, json.dumps({"type": "prompt_set", "prompt": prompt}))
 
-                # Retroactive Logic - SEQUENTIAL PROCESSING
-                # SAM3 NEVER runs while DA3 is active to avoid VRAM conflicts
+                # Retroactive Segmentation — runs segmentation on existing reconstruction
                 if prompt and alignment_manager:
-                    # Check if DA3 is currently processing chunks
-                    da3_is_active = is_processing_chunk or chunk_queue.qsize() > 0
-
                     # Check if we have PLY files (either in memory OR on disk)
                     has_plys_in_memory = alignment_manager.get_chunk_count() > 0
                     has_plys_on_disk = False
@@ -3318,17 +2713,6 @@ async def viewer_websocket(websocket: WebSocket):
                         output_dir = frame_storage.current_session.output_dir
                         ply_files = list(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
                         has_plys_on_disk = len(ply_files) > 0
-
-                    if da3_is_active:
-                        # DA3 is working - queue the segmentation for late
-                        print(f"[Viewer] DA3 is active (processing={is_processing_chunk}, queue={chunk_queue.qsize()}).")
-                        print(f"[Viewer] Segmentation queued - will run AFTER DA3 completes ALL chunks.")
-                        frame_storage._pending_retroactive_prompt = prompt
-                        await viewer_manager.send_text(websocket, json.dumps({
-                            "type": "info",
-                            "message": "Segmentation queued. Will start after reconstruction completes."
-                        }))
-                        continue  # Don't run now
 
                     if has_plys_in_memory or has_plys_on_disk:
                          source = "Active Memory" if has_plys_in_memory else "Disk (Offline Session)"
@@ -3341,23 +2725,15 @@ async def viewer_websocket(websocket: WebSocket):
                                  session = frame_storage.current_session
                                  if not session: return False
 
-                                 # Unload DA3 if it's lingering from Online Capture
-                                 print("[Retro] Unloading DA3 to free VRAM for SAM3...")
-                                 chunk_processor.unload_model()
-                                 import gc
-                                 gc.collect()
-                                 if torch.cuda.is_available():
-                                     torch.cuda.empty_cache()
-
                                  # Resolve prompt (auto-detect if needed)
-                                 prompt, frame_map = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
+                                 resolved_prompt, frame_map = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
 
-                                 # Run new segmentation pipeline
+                                 # Run segmentation pipeline
                                  from segmentation_pipeline import run_segmentation
                                  result = run_segmentation(
                                      frames_dir=str(session.frames_dir),
                                      output_dir=str(session.output_dir),
-                                     prompt=prompt,
+                                     prompt=resolved_prompt,
                                      frame_map=frame_map
                                  )
 
@@ -3395,125 +2771,12 @@ async def viewer_websocket(websocket: WebSocket):
 
                          asyncio.create_task(_run_retro_active())
                     else:
-                        # MEMORY EMPTY (Loaded Session) -> FULL RE-PROCESS MODE
-                        print(f"[Viewer] ⚠️ Archived session detected. Starting FULL offline re-processing (DA3 + SAM3). This may take time.")
+                        # No reconstruction available — inform user to run pipeline first
+                        print(f"[Viewer] ⚠️ No reconstruction found. Run pipeline first.")
                         await websocket.send_text(json.dumps({
                             "type": "info", 
-                            "message": "Starting Offline Segmentation (Re-running AI)... Please wait."
+                            "message": "No reconstruction found. Please run the pipeline first."
                         }))
-
-                        # CAPTURE LOOP for thread-safe broadcasting
-                        main_loop = asyncio.get_running_loop()
-
-                        async def _retro_process_offline():
-                            try:
-                                session = frame_storage.current_session
-                                if not session: return False
-
-                                print(f"[Retro-Offline] 🟢 STARTING DA3 INCREMENTAL RECONSTRUCTION (RealtimeDA3)")
-                                _loop = asyncio.get_event_loop()
-
-                                # 1. Prepare Paths
-                                images_dir = session.frames_dir.resolve()
-                                output_dir = session.output_dir.resolve()
-
-                                # 1.5-2. Run sync init steps in thread pool to not block event loop
-                                def _init_da3():
-                                    from frame_quality import analyze_frames, save_manifest
-                                    fq_result = analyze_frames(str(images_dir))
-                                    if "error" not in fq_result:
-                                        save_manifest(str(images_dir), fq_result)
-
-                                    frame_sel_cfg = cfg.get("frame_selection", {})
-                                    if frame_sel_cfg.get("enabled", False):
-                                        try:
-                                            from frame_selector import select_keyframes
-                                            sel_result = select_keyframes(str(images_dir), frame_sel_cfg)
-                                            print(f"[Retro-Offline] 🎯 Selected {sel_result['selected_count']}/{sel_result['total_frames']} keyframes")
-                                        except Exception as e:
-                                            print(f"[Retro-Offline] ⚠️ Frame selection failed, using stride fallback: {e}")
-
-                                    from da3_config_builder import build_da3_config
-                                    da3_config = build_da3_config(cfg)
-
-                                    print(f"[Retro-Offline] Initializing RealtimeDA3...")
-                                    alignment_manager.reset()
-                                    da3 = RealtimeDA3(
-                                        image_dir=str(images_dir),
-                                        save_dir=str(output_dir),
-                                        config=da3_config,
-                                        alignment_manager=alignment_manage
-                                    )
-                                    return da3
-
-                                da3 = await _loop.run_in_executor(None, _init_da3)
-
-                                # 3. No-op callback (no streaming during processing)
-                                async def on_chunk_complete(chunk_id, sim3_transform):
-                                    print(f"[Retro-Offline] Chunk {chunk_id} saved (not streaming)")
-                                    await asyncio.sleep(0)  # Yield for pings
-
-                                # 4. Run DA3 (already uses asyncio.to_thread internally)
-                                print(f"[Retro-Offline] Processing {len(da3.img_list)} images...")
-                                await da3.process_long_sequence_async(callback=on_chunk_complete)
-                                print(f"[Retro-Offline] ✅ DA3 complete!")
-                                return True
-
-                            except Exception as e:
-                                print(f"[Retro-Offline] Error: {e}")
-                                import traceback
-                                traceback.print_exc()
-                                return False
-                        
-                        # Run ENTIRE pipeline as background task so WS loop stays responsive
-                        async def _run_offline_pipeline():
-                            try:
-                                success = await _retro_process_offline()
-                                
-                                if success:
-                                    session_id = frame_storage.current_session.session_id if frame_storage.current_session else None
-                                    if session_id:
-                                        postproc_config = cfg.get("postprocessing", {})
-                                        if postproc_config.get("enabled", False):
-                                            await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
-                                        
-                                        if prompt:
-                                            session = frame_storage.current_session
-                                            try:
-                                                _p, frame_map = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
-                                                from segmentation_pipeline import run_segmentation
-                                                _seg_loop = asyncio.get_event_loop()
-                                                result = await _seg_loop.run_in_executor(None, lambda: run_segmentation(
-                                                    frames_dir=str(session.frames_dir),
-                                                    output_dir=str(session.output_dir),
-                                                    prompt=_p,
-                                                    frame_map=frame_map
-                                                ))
-                                                print(f"[Retro-Offline] Segmentation: {len(result.get('instances', []))} instances")
-                                            except Exception as e:
-                                                print(f"[Retro-Offline] Segmentation error: {e}")
-                                        
-                                        await _send_cleaned_cloud(websocket, session_id)
-                                        
-                                        _viewer_ctx = _ctx(session_id)
-                                        output_dir = _viewer_ctx.output_dir
-                                        from segmentation_pipeline import apply_segmentation_to_cloud
-                                        _seg_loop2 = asyncio.get_event_loop()
-                                        seg_data = await _seg_loop2.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
-                                        if seg_data.get("instances"):
-                                            await websocket.send_text(json.dumps(seg_data))
-                                    
-                                    await websocket.send_text(json.dumps({
-                                        "type": "status",
-                                        "message": "Offline processing complete"
-                                    }))
-                                    print("[Viewer] Offline Processing Complete.")
-                            except Exception as e:
-                                print(f"[Retro-Offline] Pipeline error: {e}")
-                                import traceback
-                                traceback.print_exc()
-
-                        asyncio.create_task(_run_offline_pipeline())
 
             elif cmd.get("type") == "load_session":
                 session_id = cmd.get("session_id")
@@ -3730,8 +2993,8 @@ async def viewer_websocket(websocket: WebSocket):
                 print(f"[Pipeline] 🔧 Starting pipeline for session {session_id}")
 
                 # Build stages from client config or defaults
-                stages_config = cmd.get("stages", None)  # e.g. {"da3": true, "vlm": false}
-                ordered_stages = cmd.get("ordered_stages", None) # e.g. ["vlm", "sam3", "da3", "cloudcompy"]
+                stages_config = cmd.get("stages", None)  # e.g. {"reconstruction": true, "vlm": false}
+                ordered_stages = cmd.get("ordered_stages", None) # e.g. ["vlm", "sam3", "reconstruction", "cloudcompy"]
                 
                 from pipeline_manager import build_pipeline_stages
                 stages = build_pipeline_stages(ordered_stages=ordered_stages, enabled=stages_config)

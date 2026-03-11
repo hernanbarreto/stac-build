@@ -35,7 +35,7 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
     Full segmentation pipeline: batched SAM3 → IoU ID matching → mask-to-point mapping.
     
     Supports multiple categories separated by ';' (e.g., "sofa;cushion;table").
-    Uses the same blur-filtered frame set as DA3 to ensure frame_global indices match.
+    Uses the same blur-filtered frame set as reconstruction to ensure frame_global indices match.
     Valid frames are copied to frames_valid/ with sequential numbering, then cleaned up.
     
     Args:
@@ -60,7 +60,7 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
     print(f"[SegPipeline] Starting segmentation for {len(categories)} categories: {categories}")
     print(f"[SegPipeline] Frames: {frames_dir}  |  Batch: {batch_size} frames, {batch_overlap} overlap")
     
-    # ── Step 1: Prepare valid frames (matching DA3's blur + novelty filter) ──
+    # ── Step 1: Prepare valid frames (matching reconstruction's blur + novelty filter) ──
     frame_sel_cfg = cfg.get("frame_selection", {})
     frame_stride = cfg.get("server", {}).get("frame_stride", 1)
     seg_frames_dir, frame_files, frames_valid_dir = _prepare_valid_frames(
@@ -107,7 +107,7 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
                           frame_sel_cfg: dict = None):
     """
     Copy valid frames to frames_valid/ with sequential numbering
-    matching DA3's frame_global indexing.
+    matching reconstruction's frame_global indexing.
     
     Frame selection priority:
       1. selected_frames.json (visual novelty H/F filter) — if available
@@ -179,7 +179,7 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
         shutil.rmtree(str(frames_valid_dir))
     frames_valid_dir.mkdir()
     
-    # Copy valid frames with sequential numbering (matching DA3's frame_global)
+    # Copy valid frames with sequential numbering (matching reconstruction's frame_global)
     index_mapping = {}
     seq_frame_files = []
     

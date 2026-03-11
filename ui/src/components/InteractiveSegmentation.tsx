@@ -94,9 +94,9 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 setKfIndex(0)
 
                 // Start SAM3 session
-                setStatus(`Initializing SAM3 (${kfList.length} keyframes)...`)
+                setStatus(`Initializing segmentation (${kfList.length} keyframes)...`)
                 const res = await fetch(`/api/segmentation/start_session/${sessionId}`, { method: 'POST' })
-                if (!res.ok) throw new Error('Failed to init SAM3')
+                if (!res.ok) throw new Error('Failed to init segmentation')
                 const data = await res.json()
                 setStateId(data.state_id)
 
@@ -517,7 +517,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const handleAutoSegment = useCallback(async () => {
         try {
             setLoading(true)
-            setStatus('🤖 Running VLM analysis + SAM3 auto-segmentation...')
+            setStatus('🤖 Running VLM analysis + auto-segmentation...')
             const res = await fetch(`/api/segmentation/auto/${sessionId}`, { method: 'POST' })
             if (!res.ok) throw new Error('Auto-segmentation failed')
             const data = await res.json()
@@ -827,7 +827,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                             <span className="seg-hint">
                                 {mode === 'manual' && '🖱️ Left = Positive | Right = Negative | Scroll = Zoom | Shift+Drag = Pan'}
                                 {mode === 'text' && '📝 Type a description and press Enter or Segment'}
-                                {mode === 'auto' && '🤖 Auto mode uses VLM + SAM3'}
+                                {mode === 'auto' && '🤖 Auto mode uses VLM + Segmentation'}
                             </span>
                             <div className="seg-actions">
                                 <input

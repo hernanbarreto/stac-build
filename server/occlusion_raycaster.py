@@ -32,14 +32,14 @@ from coverage_store import SampleStatus, ScanCoverageResult, OccluderType
 
 def load_camera_positions(session_dir: str) -> np.ndarray:
     """
-    Load camera world positions from DA3 extrinsics.
+    Load camera world positions from reconstruction extrinsics.
 
-    DA3 stores world-to-camera (w2c) matrices [3, 4].
+    Reconstruction stores world-to-camera (w2c) matrices [3, 4].
     Camera world position = -R^T @ t = c2w[:3, 3]
 
     Tries (in order):
       1. output/chunk_*_meta.json → cameras dict (richest, per-frame)
-      2. output/camera_poses.txt  (saved by DA3_Streaming.save_camera_poses)
+      2. output/camera_poses.txt  (saved by reconstruction pipeline)
 
     Returns:
         (C, 3) array of camera world positions, or empty (0, 3) if none found.

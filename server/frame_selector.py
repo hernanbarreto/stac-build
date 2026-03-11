@@ -16,7 +16,7 @@ Neither H nor F require camera intrinsics (K), making this method
 camera-agnostic and suitable for uncalibrated preprocessing.
 
 Pipeline position:
-  Raw frames → Blur filter → **Visual Novelty Filter** → DA3 / Segmentation
+  Raw frames → Blur filter → **Visual Novelty Filter** → Reconstruction / Segmentation
 
 Usage:
     from frame_selector import select_keyframes

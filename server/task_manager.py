@@ -34,7 +34,7 @@ class TaskManager:
     """Singleton task tracker. Thread-safe via lock."""
 
     _instance: Optional["TaskManager"] = None
-    STALE_TIMEOUT = 4 * 60 * 60  # 4 hours — DA3 CPU inference can take 1h+ per segment
+    STALE_TIMEOUT = 4 * 60 * 60  # 4 hours — reconstruction inference can take 1h+ per segment
 
     def __new__(cls):
         if cls._instance is None:

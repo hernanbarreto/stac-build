@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# WSL System Hardening for Heavy Processing (DA3 Giant on CPU)
+# WSL System Hardening for Heavy Processing (heavy processing)
 # Run BEFORE starting the STAC server: sudo bash harden_wsl.sh
 # ============================================================
 

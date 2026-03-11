@@ -1,6 +1,6 @@
 #!/bin/bash
 # STAC-Builder Startup Script
-# Automatically selects conda environment based on slam_backend in config.yaml
+# Uses MapAnything reconstruction backend
 #
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
@@ -13,10 +13,6 @@ SERVER_DIR="$STAC_ROOT/server"
 CONFIG_FILE="$SERVER_DIR/config.yaml"
 
 # External project paths
-DA3_PATH="$USER_HOME/Depth-Anything-3/src"
-DA3_ROOT="$USER_HOME/Depth-Anything-3"
-DA3_STREAMING_PATH="$DA3_ROOT/da3_streaming"
-MAST3R_SLAM_PATH="$USER_HOME/mast3r_slam"
 SAM3_PATH="$USER_HOME/sam3"
 
 # Script and SSL paths
@@ -24,55 +20,22 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 CERT_FILE="$SCRIPT_DIR/cert.pem"
 KEY_FILE="$SCRIPT_DIR/key.pem"
 
-# ----------------------------------------------------------------------------
-# Detect SLAM backend from config.yaml
-# ----------------------------------------------------------------------------
-get_slam_backend() {
-    if [ -f "$CONFIG_FILE" ]; then
-        # Extract slam_backend value using awk (handles quotes and CRLF)
-        backend=$(awk -F: '/^slam_backend:/ {gsub(/[" \r]/, "", $2); print $2}' "$CONFIG_FILE")
-        if [ -n "$backend" ]; then
-            echo "$backend"
-            return
-        fi
-    fi
-    # Default to mast3r if not found
-    echo "mast3r"
-}
-
-SLAM_BACKEND=$(get_slam_backend)
-
 echo "╔════════════════════════════════════════════════════════════════╗"
 echo "║     Ingerop IN3 - STAC-Builder - Site Scanner [HTTPS MODE]     ║"
 echo "╠════════════════════════════════════════════════════════════════╣"
-echo "║  SLAM Backend: $SLAM_BACKEND"
+echo "║  Backend: MapAnything"
 echo "╚════════════════════════════════════════════════════════════════╝"
 
 # ----------------------------------------------------------------------------
-# Activate appropriate conda environment
+# Activate conda environment
 # ----------------------------------------------------------------------------
-# Use miniforge3 path directly
 CONDA_BASE="$USER_HOME/miniforge3"
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 
-if [ "$SLAM_BACKEND" = "mast3r" ] || [ "$SLAM_BACKEND" = "hybrid" ]; then
-    echo "🔧 Activating MASt3R-SLAM environment (backend: $SLAM_BACKEND)..."
-    CONDA_ENV="mast3r-slam"
-    # MASt3R-SLAM requires multiple paths for its dependencies
-    MAST3R_THIRDPARTY="$MAST3R_SLAM_PATH/thirdparty/mast3r"
-    DUST3R_PATH="$MAST3R_THIRDPARTY/dust3r"
-    CROCO_PATH="$DUST3R_PATH/croco"
-    export PYTHONPATH="$PYTHONPATH:$MAST3R_SLAM_PATH:$MAST3R_THIRDPARTY:$DUST3R_PATH:$CROCO_PATH:$SAM3_PATH"
-    
-    # Note: In hybrid mode, DA3 runs as a subprocess in its own 'da3' conda env.
-    # No DA3 paths needed here — the subprocess sets its own PYTHONPATH.
-else
-    echo "🔧 Activating DA3 environment..."
-    CONDA_ENV="da3"
-    # NOTE: Do NOT add DA3_STREAMING_PATH here — it causes Python to find
-    # da3_streaming.py (file) instead of da3_streaming/ (package directory)
-    export PYTHONPATH="$PYTHONPATH:$DA3_PATH:$DA3_ROOT:$SAM3_PATH"
-fi
+# MapAnything uses the 'stac' conda environment
+CONDA_ENV="stac"
+echo "🔧 Activating $CONDA_ENV environment..."
+export PYTHONPATH="$PYTHONPATH:$SAM3_PATH"
 
 conda activate "$CONDA_ENV"
 
@@ -139,11 +102,11 @@ echo "║  📍 LOCAL (same machine):                                          "
 echo "║     https://localhost:$PORT/static/viewer.html                     "
 echo "║     https://localhost:$PORT/static/camera.html                     "
 echo "║                                                                    "
-echo "║  � EXTERNAL (mobile/other devices on same network):               "
+echo "║  📱 EXTERNAL (mobile/other devices on same network):               "
 echo "║     https://$WIN_IP:$PORT/static/viewer.html"
 echo "║     https://$WIN_IP:$PORT/static/camera.html"
 echo "║                                                                    "
-echo "║  📊 API Status: https://$WIN_IP:$PORT/slam/status"
+echo "║  📊 API Status: https://$WIN_IP:$PORT/status"
 echo "║                                                                    ║"
 echo "╚════════════════════════════════════════════════════════════════════╝"
 echo ""

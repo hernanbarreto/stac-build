@@ -2,7 +2,7 @@
 """
 CloudCompPy Professional Point Cloud Post-Processing
 =====================================================
-Industrial-grade cleaning pipeline for DA3 reconstructed point clouds.
+Industrial-grade cleaning pipeline for reconstructed point clouds.
 Runs in the CloudComPy310 conda environment as a subprocess.
 
 Optimized Pipeline Order:
