@@ -34,7 +34,7 @@ security = HTTPBearer(auto_error=False)
 from frame_storage import get_frame_storage, FrameStorage
 from alignment_manager import get_alignment_manager, AlignmentManager
 from sam3_wrapper import get_sam3_wrapper
-from config import cfg
+from config import cfg, DATA_DIR
 from pipeline_manager import PipelineManager, PipelineStage, StageId
 from project_paths import resolve_session
 
@@ -659,8 +659,8 @@ def apply_gravity_correction(points: np.ndarray, s: float, R: np.ndarray, t: np.
 HOST = cfg["server"]["host"]
 PORT = cfg["server"]["port"]
 STATIC_DIR = Path(__file__).parent / cfg["server"]["static_dir"]
-CHUNK_SIZE = cfg["server"]["chunk_size"]
-CHUNK_OVERLAP = cfg["server"]["chunk_overlap"]
+CHUNK_SIZE = cfg["mapanything"]["chunk_size"]
+CHUNK_OVERLAP = cfg["mapanything"]["chunk_overlap"]
 
 
 # --- Connection Managers ---
@@ -1022,8 +1022,8 @@ async def get_sessions(
                 allowed_session_ids = set(r[0] for r in sa_q.all())
 
     try:
-        scans_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
-        projects_dir = Path(__file__).parent / "projects"
+        scans_dir = Path(__file__).parent / "scans"
+        projects_dir = DATA_DIR / "projects"
         
         # Collect sessions from both legacy scans/ and new projects/
         all_dirs = []
@@ -1112,14 +1112,14 @@ async def create_session(
     # Create as new-style project
     from project_paths import ProjectPaths
     import time as _time
-    projects_dir = Path(__file__).parent / "projects"
+    projects_dir = DATA_DIR / "projects"
     paths = ProjectPaths(str(projects_dir), session_name)
     
     if paths.project_dir.exists():
         raise HTTPException(status_code=409, detail=f"Session '{session_name}' already exists")
     
     # Also check legacy scans/ for conflict
-    legacy_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans") / session_name
+    legacy_dir = Path(__file__).parent / "scans" / session_name
     if legacy_dir.exists():
         raise HTTPException(status_code=409, detail=f"Session '{session_name}' already exists (legacy)")
 
@@ -1151,9 +1151,9 @@ async def delete_session(
         raise HTTPException(status_code=403, detail="Admin only")
 
     # Locate the project/session folder
-    projects_dir = Path(__file__).parent / "projects"
+    projects_dir = DATA_DIR / "projects"
     project_dir = projects_dir / session_id
-    legacy_dir = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans") / session_id
+    legacy_dir = Path(__file__).parent / "scans" / session_id
 
     target = None
     if project_dir.exists():
@@ -1206,8 +1206,8 @@ async def rename_session(
         return {"ok": True, "old_id": session_id, "new_id": new_name}
 
     # Locate current directory
-    projects_dir = Path(__file__).parent / "projects"
-    legacy_scans = Path(__file__).parent / cfg.get("paths", {}).get("scans_dir", "scans")
+    projects_dir = DATA_DIR / "projects"
+    legacy_scans = Path(__file__).parent / "scans"
     old_dir = None
     is_legacy = False
     if (projects_dir / session_id).exists():
@@ -1275,7 +1275,7 @@ async def get_session_scans(session_id: str):
     """
     from project_paths import ProjectPaths
 
-    projects_dir = Path(__file__).parent / "projects"
+    projects_dir = DATA_DIR / "projects"
     project_json = projects_dir / session_id / "project.json"
 
     if not project_json.exists():
@@ -1323,7 +1323,8 @@ async def get_segments(session_id: str):
         seg_file = output_dir / "segmentation.json"
         if masks_file.exists() and seg_file.exists():
             from segmentation_pipeline import apply_segmentation_to_cloud
-            return apply_segmentation_to_cloud(output_dir)
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
         
         # Fallback to legacy formats
         if seg_file.exists():
@@ -2123,9 +2124,18 @@ async def refresh_segmentation(body: dict):
 
     def _refresh():
         try:
+            import time as _time
+            # Freshness guard: if result was just computed (< 120s), skip rebuild
             if result_path.exists():
+                age = _time.time() - result_path.stat().st_mtime
+                if age < 120:
+                    with open(result_path) as f:
+                        result = json.load(f)
+                    print(f"[SegRefresh] Result is fresh ({age:.0f}s old) — skipping rebuild")
+                    task_manager.finish(tid)
+                    return {"instances": result.get("instances", [])}
                 result_path.unlink()
-                print(f"[SegRefresh] Deleted stale segmentation_result.json for {session_id}")
+                print(f"[SegRefresh] Deleted stale segmentation_result.json for {session_id} ({age:.0f}s old)")
             from segmentation_pipeline import _match_and_save_result
             task_manager.update(tid, pct=10, detail="Running DBSCAN + cloud matching...")
             print(f"[SegRefresh] Regenerating segmentation_result.json...")
@@ -3384,7 +3394,7 @@ async def scan_websocket(websocket: WebSocket):
                 # Create scan directory for today
                 scan_date = time.strftime("%Y-%m-%d")
                 from project_paths import ProjectPaths
-                projects_dir = Path(__file__).parent / "projects"
+                projects_dir = DATA_DIR / "projects"
                 paths = ProjectPaths(str(projects_dir), project_id)
                 paths.ensure_source_dirs(scan_date, source_name)
 

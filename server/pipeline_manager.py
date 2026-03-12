@@ -172,7 +172,8 @@ class PipelineManager:
             parts = scan_key.split("/", 1)
             date = parts[0]
             source = parts[1] if len(parts) > 1 else "default"
-            projects_dir = Path(__file__).parent / "projects"
+            from config import DATA_DIR
+            projects_dir = DATA_DIR / "projects"
             if (projects_dir / session_id / "project.json").exists():
                 paths = ProjectPaths(str(projects_dir), session_id)
                 ctx = paths.for_source(date, source)

@@ -32,8 +32,8 @@ echo "╚═══════════════════════�
 CONDA_BASE="$USER_HOME/miniforge3"
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 
-# MapAnything uses the 'stac' conda environment
-CONDA_ENV="stac"
+# Conda environment (contains PyTorch, SAM3 deps, MapAnything deps)
+CONDA_ENV="da3"
 echo "🔧 Activating $CONDA_ENV environment..."
 export PYTHONPATH="$PYTHONPATH:$SAM3_PATH"
 

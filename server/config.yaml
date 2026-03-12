@@ -3,11 +3,6 @@ server:
   host: "0.0.0.0"
   port: 8765
   static_dir: "../static"  # Relative to server directory
-  chunk_size: 120
-  chunk_overlap: 60 # 50% overlap
-  # Derived: chunk_step = chunk_size - chunk_overlap = 60 frames between chunk starts
-  frame_stride: 10  # Take 1 every N valid frames (1 = use all, 10 = 1/10th)
-                     # Used as FALLBACK when frame_selection.enabled is false
 
 # --- Scene Analysis (VLM Auto-Inventory) ---
 # InternVL3 auto-detects object categories from scan frames
@@ -81,8 +76,6 @@ frame_selection:
 
 # --- Paths ---
 paths:
-  # Directory where scan sessions are stored
-  scans_dir: "scans"
   # Default output directory name within each session
   output_dir_name: "output"
 

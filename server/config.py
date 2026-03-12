@@ -7,6 +7,9 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
 
+# Runtime data directory (projects, personnel, teams, logs, stac.db)
+DATA_DIR = BASE_DIR / "data"
+
 def load_config():
     """Load configuration from YAML file."""
     if not CONFIG_PATH.exists():

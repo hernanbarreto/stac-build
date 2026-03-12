@@ -10,9 +10,10 @@ from typing import Any
 from db import async_session_factory
 from db_team import ActivityLog
 
-BASE_DIR = Path(__file__).parent
-PERSONNEL_DIR = BASE_DIR / "personnel"
-TEAMS_DIR = BASE_DIR / "teams"
+from config import DATA_DIR
+
+PERSONNEL_DIR = DATA_DIR / "personnel"
+TEAMS_DIR = DATA_DIR / "teams"
 
 
 # ═══════════════════════════════════════════════════════════════

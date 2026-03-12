@@ -530,10 +530,15 @@ function App() {
       const merged = { ...newState, scans: prev?.scans }
       return merged
     })
-    // Update status bar with current stage info
+    // Update status bar with current stage info (concise: stage + percentage only)
     const currentStage = newState.stages[newState.current_stage_idx]
     if (currentStage) {
-      setStatusMessage(`${currentStage.icon} ${currentStage.label}: ${currentStage.message} (${Math.round(currentStage.pct)}%)`)
+      const pct = Math.round(currentStage.pct)
+      // Short message for status bar; verbose detail stays in Pipeline dialog only
+      const shortMsg = currentStage.message?.length > 60
+        ? currentStage.message.slice(0, 57) + '…'
+        : currentStage.message
+      setStatusMessage(`${currentStage.icon} ${currentStage.label}: ${shortMsg || ''} ${pct}%`)
     }
     if (newState.status === 'done' || newState.status === 'failed' || newState.status === 'cancelled') {
       setTimeout(() => setPipelineRunning(null), 5000)

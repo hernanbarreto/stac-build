@@ -143,12 +143,11 @@ class FrameStorage:
     """
     
     def __init__(self, scans_dir: Optional[Path] = None):
-        self.chunk_size = cfg["server"]["chunk_size"]
-        self.chunk_overlap = cfg["server"]["chunk_overlap"]
-        # Use strict path from config if not provided
-        base_path = Path(cfg["paths"]["scans_dir"])
-        self.scans_dir = scans_dir or base_path
-        self.scans_dir.mkdir(parents=True, exist_ok=True)
+        self.chunk_size = cfg["mapanything"]["chunk_size"]
+        self.chunk_overlap = cfg["mapanything"]["chunk_overlap"]
+        # scans_dir is set per-session from ProjectPaths; fallback only for legacy
+        from config import DATA_DIR
+        self.scans_dir = scans_dir or (DATA_DIR / "projects")
         
         self.current_session: Optional[ScanSession] = None
         self.lock = Lock()
@@ -651,8 +650,8 @@ class FrameStorage:
                         original_resolution = [first_img.shape[0], first_img.shape[1]]
 
             # Get chunk step from config (NOT hardcoded)
-            chunk_size = cfg["server"]["chunk_size"]
-            chunk_overlap = cfg["server"]["chunk_overlap"]
+            chunk_size = cfg["mapanything"]["chunk_size"]
+            chunk_overlap = cfg["mapanything"]["chunk_overlap"]
             chunk_step = chunk_size - chunk_overlap
 
             data = {

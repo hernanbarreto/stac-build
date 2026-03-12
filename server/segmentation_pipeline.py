@@ -319,12 +319,13 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                     print(f"[SegPipeline]   VLM frame_map: {len(cat_frame_files)}/{total_frames} frames "
                           f"({pct_saved:.0f}% saved)")
                 else:
-                    # VLM frames don't match any valid frames — use all
-                    print(f"[SegPipeline]   VLM frame_map: no matching frames found, using all {total_frames}")
-                    cat_frame_files = frame_files
-                    cat_frame_indices = list(range(total_frames))
+                    # VLM didn't find this category in any frame — skip entirely
+                    print(f"[SegPipeline]   VLM frame_map: no matching frames found — skipping category")
+                    continue
             else:
-                print(f"[SegPipeline]   No VLM frame_map for '{cat_label}', processing all {total_frames} frames")
+                # No VLM data at all for this category — skip
+                print(f"[SegPipeline]   No VLM frame_map for '{cat_label}' — skipping category")
+                continue
         
         # Compute batches for this category's frame subset
         cat_total = len(cat_frame_files)
@@ -504,11 +505,15 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                 categories_so_far = categories[:cat_idx + 1]
                 _save_masks(output_dir, all_masks, categories_so_far, obj_labels, cfg)
                 print(f"[SegPipeline] 💾 Incremental save: {cat_idx+1}/{len(categories)} categories saved")
-                # Match masks to cloud and save result after each category
-                if on_progress:
-                    save_pct = ((cat_idx + 1) / max(len(categories), 1)) * 100
-                    on_progress(save_pct, f"Matching masks to cloud ({cat_idx+1}/{len(categories)} categories)...")
-                _match_and_save_result(output_dir)
+                # Only match against cloud if this category found new objects
+                if cat_obj_ids:
+                    new_global_ids = set(cat_id_remap.values())
+                    if on_progress:
+                        save_pct = ((cat_idx + 1) / max(len(categories), 1)) * 100
+                        on_progress(save_pct, f"Matching masks to cloud ({cat_idx+1}/{len(categories)} categories)...")
+                    _match_and_save_result(output_dir, new_obj_ids=new_global_ids)
+                else:
+                    print(f"[SegPipeline] ⏭️ No new objects — skipping cloud matching")
             except Exception as e:
                 print(f"[SegPipeline] ⚠️ Incremental save failed: {e}")
         
@@ -1138,7 +1143,7 @@ def _filter_instance_outliers(xyz: np.ndarray, indices: np.ndarray,
         return indices[inlier_mask]
 
 
-def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None) -> dict:
+def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_obj_ids=None) -> dict:
     """
     Core processing: match SAM3 masks against PLY cloud with erosion,
     deconfliction, DBSCAN filtering, and OBB computation.
@@ -1150,6 +1155,9 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None) -> di
         skip_filter_ids: Optional set of instance IDs whose DBSCAN/SOR filtering
                          was already done in a previous incremental run. Their
                          cached globalIndices will be reused as-is.
+        only_obj_ids: Optional set of obj_ids to process. When set, only these
+                      obj_ids will be matched against the cloud (for incremental
+                      per-category matching). Other obj_ids are skipped entirely.
     """
     from config import cfg
     
@@ -1263,6 +1271,9 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None) -> di
     obj_mask_areas = {}  # obj_id → average mask area (for priority)
     
     for i, obj_id in enumerate(obj_ids):
+        # Skip obj_ids not in the incremental set
+        if only_obj_ids is not None and obj_id not in only_obj_ids:
+            continue
         # Compute average mask area for this object (across all frames)
         frame_areas = []
         
@@ -1456,40 +1467,71 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None) -> di
     return result
 
 
-def _match_and_save_result(output_dir, ply_path=None):
+def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
     """
-    Run full mask→cloud matching (erosion + deconfliction + DBSCAN + OBB)
-    and save the result to segmentation_result.json for instant loading later.
+    Run mask→cloud matching and save to segmentation_result.json.
     
-    Called incrementally after each category completes segmentation.
-    Loads previous result to skip DBSCAN for already-filtered instances.
+    When new_obj_ids is provided (incremental mode), only matches those
+    obj_ids against the cloud and merges them with the existing result.
+    This avoids re-processing all previous instances after each category.
     """
     output_dir = Path(output_dir)
-    
-    # Load previously filtered instance IDs to avoid redundant DBSCAN
-    skip_filter_ids = set()
     result_path = output_dir / "segmentation_result.json"
+    
+    # Load previous result for incremental merge
+    prev_instances = []
+    prev_result = {}
     if result_path.exists():
         try:
             with open(result_path) as f:
-                prev = json.load(f)
-            for inst in prev.get("instances", []):
-                skip_filter_ids.add(inst.get("id", inst.get("instance_id")))
-            if skip_filter_ids:
-                print(f"[SegPipeline] Incremental: skipping DBSCAN for {len(skip_filter_ids)} already-filtered instances")
+                prev_result = json.load(f)
+            prev_instances = prev_result.get("instances", [])
         except Exception:
             pass
     
     try:
-        result = _match_masks_to_cloud(output_dir, ply_path, skip_filter_ids=skip_filter_ids)
+        # Incremental: only match new category's objects
+        result = _match_masks_to_cloud(
+            output_dir, ply_path,
+            only_obj_ids=new_obj_ids
+        )
         
-        if "error" not in result and result.get("instances"):
-            with open(result_path, "w") as f:
-                json.dump(result, f)
-            print(f"[SegPipeline] 💾 Saved segmentation_result.json "
-                  f"({len(result['instances'])} instances, "
-                  f"{result.get('coverage', 0)*100:.1f}% coverage)")
-        return result
+        if "error" in result or not result.get("instances"):
+            # No new matches — keep previous result as-is
+            if prev_instances:
+                return prev_result
+            return result
+        
+        new_instances = result["instances"]
+        new_ids = {inst["id"] for inst in new_instances}
+        
+        # Merge: keep old instances (not replaced by new), add new
+        merged = [inst for inst in prev_instances if inst["id"] not in new_ids]
+        merged.extend(new_instances)
+        
+        # Recompute coverage from merged set
+        total_pts = result.get("total_points", prev_result.get("total_points", 0))
+        total_segmented = sum(inst.get("total_points", 0) for inst in merged)
+        coverage = round(total_segmented / max(1, total_pts), 4)
+        
+        merged_result = {
+            "type": "segmentation",
+            "version": "3.0",
+            "prompt": result.get("prompt", prev_result.get("prompt", "")),
+            "prompts": result.get("prompts", prev_result.get("prompts", [])),
+            "cloud_source": result.get("cloud_source", ""),
+            "total_points": total_pts,
+            "segmented_points": total_segmented,
+            "coverage": coverage,
+            "instances": merged,
+            "resolution": result.get("resolution", {}),
+        }
+        
+        with open(result_path, "w") as f:
+            json.dump(merged_result, f)
+        print(f"[SegPipeline] 💾 Saved segmentation_result.json "
+              f"({len(merged)} instances, {coverage*100:.1f}% coverage)")
+        return merged_result
     except Exception as e:
         print(f"[SegPipeline] ⚠️ Match-and-save failed: {e}")
         import traceback
@@ -1497,14 +1539,32 @@ def _match_and_save_result(output_dir, ply_path=None):
         return {"error": str(e), "instances": []}
 
 
+# Per-session lock to prevent parallel matching runs on the same output dir
+import threading
+_matching_locks: dict = {}  # output_dir_str -> threading.Lock
+_matching_locks_guard = threading.Lock()
+
+def _get_matching_lock(output_dir: Path) -> threading.Lock:
+    """Get or create a lock for a specific session's output directory."""
+    key = str(output_dir)
+    with _matching_locks_guard:
+        if key not in _matching_locks:
+            _matching_locks[key] = threading.Lock()
+        return _matching_locks[key]
+
+
 def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
     """
     Load pre-computed segmentation result (instant) or fall back to
     full processing for backward compatibility with old sessions.
+    
+    Uses a per-session lock to prevent parallel matching runs when
+    multiple callers (viewer WebSocket, /segments/ endpoint, etc.)
+    request segmentation for the same session concurrently.
     """
     output_dir = Path(output_dir)
     
-    # ── Fast path: cached result from segmentation time ──
+    # ── Fast path (no lock needed): cached result from segmentation time ──
     result_path = output_dir / "segmentation_result.json"
     transform_path = output_dir / "floor_transform.npz"
     # Invalidate cache if floor_transform.npz is newer (pipeline re-ran)
@@ -1526,19 +1586,39 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
         except Exception as e:
             print(f"[SegPipeline] ⚠️ Failed to load cached result: {e}")
     
-    # ── Slow path: full processing (backward compat with old sessions) ──
-    print(f"[SegPipeline] No cached result, running full mask matching (will cache for next time)...")
-    result = _match_masks_to_cloud(output_dir, ply_path)
+    # ── Slow path: acquire per-session lock to prevent parallel matching ──
+    lock = _get_matching_lock(output_dir)
+    if not lock.acquire(blocking=False):
+        # Another thread is already matching — wait for it to finish
+        print(f"[SegPipeline] ⏳ Matching already in progress, waiting for result...")
+        lock.acquire()  # Block until the other thread finishes
+        lock.release()
+        # The other thread should have cached the result — try loading it
+        if result_path.exists():
+            try:
+                with open(result_path) as f:
+                    result = json.load(f)
+                print(f"[SegPipeline] ⚡ Loaded result from concurrent match")
+                return result
+            except Exception:
+                pass
+        return {"instances": [], "error": "Concurrent match produced no result"}
     
-    # Cache the result so next load is instant
-    if "error" not in result and result.get("instances"):
-        try:
-            result_path = output_dir / "segmentation_result.json"
-            with open(result_path, "w") as f:
-                json.dump(result, f)
-            print(f"[SegPipeline] 💾 Cached result for instant future loads")
-        except Exception as e:
-            print(f"[SegPipeline] ⚠️ Failed to cache result: {e}")
-    
-    return result
+    try:
+        print(f"[SegPipeline] No cached result, running full mask matching (will cache for next time)...")
+        result = _match_masks_to_cloud(output_dir, ply_path)
+        
+        # Cache the result so next load is instant
+        if "error" not in result and result.get("instances"):
+            try:
+                result_path = output_dir / "segmentation_result.json"
+                with open(result_path, "w") as f:
+                    json.dump(result, f)
+                print(f"[SegPipeline] 💾 Cached result for instant future loads")
+            except Exception as e:
+                print(f"[SegPipeline] ⚠️ Failed to cache result: {e}")
+        
+        return result
+    finally:
+        lock.release()
 

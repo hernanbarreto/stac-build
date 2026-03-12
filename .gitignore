@@ -84,25 +84,21 @@ logs/
 # Model weights (downloaded by setup_weights.sh)
 weights/
 
-# DA3 vendor: exclude experiments, frames, and model weights
-vendor/depth_anything_3/da3_streaming/weights/
-vendor/depth_anything_3/da3_streaming/exps/
-vendor/depth_anything_3/da3_streaming/exps_simple/
-vendor/depth_anything_3/da3_streaming/frames/
-vendor/depth_anything_3/workspace/
-
 # HuggingFace cache
 .cache/huggingface/
+
+# Runtime data
 server/stac.db
 server/data/
 
-# Data directories (large point clouds, scans)
-server/projects/
+# Backward-compat symlinks (point to server/data/)
+server/projects
+server/personnel
+server/teams
+server/logs
+
+# External data
 BIM/
 
 # Build artifacts
 ui/release/
-
-# Large vendor dirs (not submodules)
-BIM/
-vendor/MapAnything2/

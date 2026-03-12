@@ -375,7 +375,7 @@ class BatchSegmentationProcessor:
         """
         # Get config values
         if batch_size is None:
-            batch_size = cfg["server"]["chunk_size"]
+            batch_size = cfg["mapanything"]["chunk_size"]
         if keyframe_interval is None:
             keyframe_interval = cfg["models"]["segmentation"]["keyframe_interval"]
 

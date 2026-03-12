@@ -12,8 +12,9 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker as async_sessionmaker
 
-BASE_DIR = Path(__file__).parent
-DB_PATH = BASE_DIR / "stac.db"
+from config import DATA_DIR
+
+DB_PATH = DATA_DIR / "stac.db"
 DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
 
 Base = declarative_base()
