@@ -9,11 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import User, async_session_factory
-from auth import (
+from auth.core import (
     hash_password, verify_password, create_access_token,
     get_current_user, require_role,
 )
-from activity_logger import log_activity, save_user_profile, _append_user_log
+from auth.activity_logger import log_activity, save_user_profile, _append_user_log
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 

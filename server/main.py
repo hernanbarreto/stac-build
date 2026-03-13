@@ -855,11 +855,11 @@ async def serve_bim_file(session_id: str, filename: str):
     )
 
 # Mount auth routes
-from routes_auth import router as auth_router
+from auth.routes_auth import router as auth_router
 app.include_router(auth_router)
 
 # Mount team routes
-from routes_team import router as team_router
+from auth.routes_team import router as team_router
 app.include_router(team_router)
 
 @app.get("/")
@@ -983,7 +983,7 @@ async def get_sessions(
     Admins see all sessions. Other roles see only sessions assigned to their teams."""
     from auth import decode_token
     from db import async_session_factory
-    from db_team import TeamMember, SessionAssignment, Team
+    from db.team import TeamMember, SessionAssignment, Team
     from sqlalchemy import select
 
     # ── Resolve user ───────────────────────────────────────────
@@ -1230,8 +1230,8 @@ async def rename_session(
 
     # 2. Update DB references
     try:
-        from db_team import SessionAssignment, ActivityLog
-        from db_project import Project
+        from db.team import SessionAssignment, ActivityLog
+        from db.project import Project
         from sqlalchemy import update
         async with async_session_factory() as db:
             # SessionAssignment
@@ -3304,7 +3304,7 @@ async def ws_team(websocket: WebSocket):
                 if team_id and content and user_id in _team_connections:
                     username = _team_connections[user_id]["username"]
                     # Persist
-                    from db_team import TeamMessage
+                    from db.team import TeamMessage
                     from db import async_session_factory as _asf
                     async with _asf() as session:
                         tm = TeamMessage(

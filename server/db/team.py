@@ -6,7 +6,7 @@ from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, Text,
     ForeignKey, UniqueConstraint,
 )
-from db import Base
+from db.models import Base
 
 
 # ─── Team ──────────────────────────────────────────────────────

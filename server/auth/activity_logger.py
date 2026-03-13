@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from db import async_session_factory
-from db_team import ActivityLog
+from db.team import ActivityLog
 
 from config import DATA_DIR
 

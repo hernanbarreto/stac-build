@@ -9,9 +9,9 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import User, async_session_factory
-from db_team import Team, TeamMember, SessionAssignment, ActivityLog, TeamMessage
-from auth import get_current_user, require_role
-from activity_logger import (
+from db.team import Team, TeamMember, SessionAssignment, ActivityLog, TeamMessage
+from auth.core import get_current_user, require_role
+from auth.activity_logger import (
     log_activity, _append_user_log, save_user_profile,
     save_team_file, log_to_team, delete_team_folder, update_user_teams,
 )
