@@ -56,7 +56,7 @@ The platform is organized into three interdependent layers, where each upper lay
 ┌──────────────────────┴──────────────────────────────────┐
 │  LAYER 1: PHYSICAL REALITY (Core)          ← WORKING   │
 │                                                         │
-│  🧠 DA3 dense 3D reconstruction                         │
+│  🧠 MapAnything dense 3D reconstruction                  │
 │  🔍 SAM3 instance segmentation                          │
 │  💬 InternVL3 scene analysis (VLM)                      │
 │  📐 BIM comparison + sábana de desviaciones             │
@@ -93,7 +93,7 @@ DESIGN ──→ CONSTRUCTION ──→ HANDOVER ──→ OPERATION ──→ M
 ├────────────────────────────────────────────────────────────────────────┤
 │                                                                        │
 │  CORE (Current)                                                        │
-│  ├─ 3D Reconstruction (DA3)                                            │
+│  ├─ 3D Reconstruction (MapAnything)                                    │
 │  ├─ Semantic Segmentation (SAM3)                                       │
 │  ├─ Scene Analysis (InternVL3 VLM)                                     │
 │  ├─ BIM Comparison (IFC → sábana)                                      │
@@ -301,14 +301,14 @@ Integrated management of quality control, occupational safety, environmental com
   |----------|-----------------|------------|
   | Hard hat | VLM: head region analysis | High |
   | Safety vest | VLM: color/reflective pattern | High |
-  | Safety harness | VLM + height context from DA3 | Medium-High |
+  | Safety harness | VLM + height context from MapAnything | Medium-High |
   | Gloves | VLM: hand region analysis | Medium |
   | Safety glasses | VLM: face region analysis | Medium |
   | Safety boots | VLM: footwear analysis | Medium |
 
 - **Hazard detection**:
   - Missing guardrails, unsecured scaffolding, blocked exits
-  - Work at height without fall protection (DA3 elevation + VLM harness check)
+  - Work at height without fall protection (MapAnything elevation + VLM harness check)
   - Workers in restricted/dangerous zones (3D position vs BIM hazard zones)
   - Improper tool usage (VLM: tool identification + context analysis)
 
@@ -533,7 +533,7 @@ STAC Build (Construction) ──→ STAC Maintain (Operations)
 
 - **Asset register**: Auto-populated from SAM3 segmentation + BIM elements
 - **Maintenance scheduling**: Calendar engine with recurrence rules
-- **Re-scanning**: Same DA3 pipeline, comparison against historical baseline
+- **Re-scanning**: Same MapAnything pipeline, comparison against historical baseline
 - **Work orders**: Lightweight task management with assignment and tracking
 - **Mobile-first**: Technicians use the same phone app to scan, view docs, and close work orders
 
@@ -638,7 +638,7 @@ All future modules connect through the existing STAC core:
 
 | Model | Current Use | Future Use |
 |-------|------------|------------|
-| **DA3** | 3D reconstruction | Same + deterioration re-scanning |
+| **MapAnything** | 3D reconstruction | Same + deterioration re-scanning |
 | **SAM3** | Instance segmentation | Safety hazard detection + asset inventory for maintenance |
 | **InternVL3** | Scene inventory | Occlusion classification, safety analysis, equipment condition |
 | **LLM (TBD)** | — | Contract chat (RAG), contradiction detection, meeting minutes, requirement extraction, maintenance chat |
@@ -686,10 +686,10 @@ The construction industry solved each problem with a separate tool, sold by a se
 
 Four reasons nobody integrated them:
 
-1. **AI/vision experts don't know construction.** Google, Meta, ByteDance publish DA3, SAM3 — they don't know what a tender specification is.
-2. **Construction experts don't know AI.** Traditional contech uses $100K LiDAR scanners and manual processing. They can't assemble a DA3+SAM3+VLM pipeline.
+1. **AI/vision experts don't know construction.** Google, Meta, ByteDance publish MapAnything, SAM3 — they don't know what a tender specification is.
+2. **Construction experts don't know AI.** Traditional contech uses $100K LiDAR scanners and manual processing. They can't assemble a MapAnything+SAM3+VLM pipeline.
 3. **Incumbents are too big to pivot.** Procore has 15 years of technical debt. Autodesk is busy selling Revit licenses.
-4. **Phone-based 3D was impossible until 2024.** DA3 (2025), SAM3 (2024), InternVL3 (2025) — the pieces literally didn't exist 2 years ago.
+4. **Phone-based 3D was impossible until 2024.** MapAnything (2025), SAM3 (2024), InternVL3 (2025) — the pieces literally didn't exist 2 years ago.
 
 ---
 

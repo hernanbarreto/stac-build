@@ -9,7 +9,7 @@
 
 Everything here is implemented and working.
 
-- [x] DA3 dense 3D reconstruction (chunked, SIM3 overlap)
+- [x] MapAnything dense 3D reconstruction (chunked, SIM3 overlap)
 - [x] Frame quality filtering (Laplacian blur detection)
 - [x] Visual novelty frame selector (H/F ratio, ORB-SLAM inspired)
 - [x] Alignment manager (SIM3 + RANSAC auto-leveling)
@@ -41,7 +41,7 @@ Everything here is implemented and working.
   - [x] Coverage timeline tracking (`coverage_timeline.json`)
 
 - [x] **1.2 Occlusion Ray-Caster** (`occlusion_raycaster.py`)
-  - [x] Extract camera positions from DA3 extrinsics (w2c → world)
+  - [x] Extract camera positions from MapAnything extrinsics (w2c → world)
   - [x] Cylindrical ray query (scan_tree along camera→BIM ray)
   - [x] Classify BIM surface samples: COVERED | OCCLUDED | NOT_BUILT | NOT_VISIBLE
   - [x] Normal-aware: front vs back face detection via dot product
@@ -88,9 +88,9 @@ Everything here is implemented and working.
   - [x] Uniform blur threshold per session (no per-frame zoom scaling)
   - [x] Quality filtering remains in `frame_quality.py`
 
-- [x] **2.4 DA3 Zoom Intrinsics Correction**
-  - [x] Session-level: `f_corrected = f_da3_estimated × zoom_level`
-  - [x] Applied uniformly to all frames in `da3_native_wrapper.py` ChunkWrapper
+- [x] **2.4 MapAnything Zoom Intrinsics Correction**
+  - [x] Session-level: `f_corrected = f_mapanything_estimated × zoom_level`
+  - [x] Applied uniformly to all frames in MapAnything ChunkWrapper
   - [x] zoom_level loaded from `scan_meta.json`
 
 - [x] **2.5 Segment Registration** → REMOVED
@@ -238,7 +238,7 @@ Everything here is implemented and working.
   - [ ] SAM3 body segmentation (detect human silhouettes, NOT identities)
   - [ ] Face anonymization pipeline (auto-blur before storage)
   - [ ] VLM PPE verification prompts (hard hat, vest, harness, gloves, glasses)
-  - [ ] Work-at-height detection (DA3 elevation + VLM harness check)
+  - [ ] Work-at-height detection (MapAnything elevation + VLM harness check)
   - [ ] Restricted zone violation (3D worker position vs BIM hazard zones)
   - [ ] Improper tool usage detection (VLM context analysis)
   - [ ] Safety NCR auto-generation from detected violations
@@ -339,7 +339,7 @@ Everything here is implemented and working.
   - [ ] Repair history per element
 
 - [ ] **9.4 Deterioration Monitoring (Re-Scanning)**
-  - [ ] Periodic maintenance scans (same DA3 pipeline)
+  - [ ] Periodic maintenance scans (same MapAnything pipeline)
   - [ ] Compare current state vs as-built baseline
   - [ ] Crack/deformation progression tracking
   - [ ] Structural health trend analysis
