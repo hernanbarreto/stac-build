@@ -1756,23 +1756,18 @@ function App() {
         interactiveSessionId && (
           <SegmentationManager
             sessionId={interactiveSessionId}
-            onClose={async () => {
+            onClose={async (dirty: boolean) => {
               const sid = interactiveSessionId
               setInteractiveSessionId(null)
-              // Regenerate DBSCAN + OBBs in background
-              if (sid) {
-                setSessionLoading('Refreshing segmentation…')
-                setStatusMessage('Refreshing segmentation (DBSCAN)...')
+              if (!sid) return
+
+              if (!dirty) {
+                // Nothing changed — just reload cached segmentation for sidebar
+                setStatusMessage('Segmentation closed (no changes)')
                 try {
-                  const res = await fetch('/api/segmentation/refresh', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: sid }),
-                  })
-                  if (res.ok) {
-                    const data = await res.json()
-                    setStatusMessage(`Segmentation refreshed: ${data.instances?.length || 0} instances`)
-                    // Update sidebar segments
+                  const segRes = await fetch(`/api/sessions/${sid}/segmentation`)
+                  if (segRes.ok) {
+                    const data = await segRes.json()
                     if (Array.isArray(data.instances)) {
                       setSegments(data.instances.map((inst: any) => ({
                         key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
@@ -1786,8 +1781,35 @@ function App() {
                     viewportRef.current?.refreshSegmentOBBs(sid)
                   }
                 } catch { /* silent */ }
-                finally { setSessionLoading(null) }
+                return
               }
+
+              // Masks changed — regenerate DBSCAN + OBBs
+              setSessionLoading('Refreshing segmentation…')
+              setStatusMessage('Refreshing segmentation (DBSCAN)...')
+              try {
+                const res = await fetch('/api/segmentation/refresh', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ session_id: sid }),
+                })
+                if (res.ok) {
+                  const data = await res.json()
+                  setStatusMessage(`Segmentation refreshed: ${data.instances?.length || 0} instances`)
+                  if (Array.isArray(data.instances)) {
+                    setSegments(data.instances.map((inst: any) => ({
+                      key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
+                      label: `${inst.label}`,
+                      color: inst.color || '#00d4ff',
+                      totalPoints: inst.total_points || 0,
+                      visible: true,
+                      excluded: inst.excluded || false,
+                    })))
+                  }
+                  viewportRef.current?.refreshSegmentOBBs(sid)
+                }
+              } catch { /* silent */ }
+              finally { setSessionLoading(null) }
             }}
             onUpdate={async () => {
               if (!activeSession) return

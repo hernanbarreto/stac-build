@@ -11,7 +11,7 @@ interface InstanceInfo {
 
 interface Props {
     sessionId: string
-    onClose: () => void
+    onClose: (dirty: boolean) => void
     onSuccess?: (instances: any[]) => void
     onUpdate?: () => void
 }
@@ -54,6 +54,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
     const maskImageRef = useRef<HTMLImageElement | null>(null)
     const initRef = useRef(false)
+    const isDirty = useRef(false)
 
     const currentFrame = keyframes[kfIndex] || null
     // SAM3 now loads only keyframes sequentially (via temp dir).
@@ -255,6 +256,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                     const data = await res.json()
                     if (data.mask_png) setMaskOverlay(`data:image/png;base64,${data.mask_png}`)
                     setStatus(`Mask updated (${isPositive ? 'added' : 'removed'} area)`)
+                    isDirty.current = true
                 }
             } catch { setStatus('Error painting mask') }
             return
@@ -437,6 +439,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                 setStatus(data.status || 'Saving...')
                             } else if (eventType === 'done') {
                                 receivedDone = true
+                                isDirty.current = true
                                 setPropagationPct(-1)
                                 setHasPrompts(false)
                                 setMaskOverlay(null)
@@ -521,6 +524,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             const res = await fetch(`/api/segmentation/auto/${sessionId}`, { method: 'POST' })
             if (!res.ok) throw new Error('Auto-segmentation failed')
             const data = await res.json()
+            isDirty.current = true
             setStatus(`✅ Auto-segmentation complete! ${(data.instances || []).length} instances`)
 
             // Reload instances
@@ -580,6 +584,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 body: JSON.stringify({ session_id: sessionId, instance_id: instId })
             })
             if (!res.ok) throw new Error('Delete failed')
+            isDirty.current = true
             setInstances(prev => prev.filter(i => i.id !== instId))
             if (selectedInstance === instId) {
                 setSelectedInstance(null)
@@ -639,7 +644,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 {/* Header */}
                 <div className="admin-header">
                     <h2>🏷️ Segmentation Manager — {sessionId}</h2>
-                    <button className="admin-close" onClick={onClose} disabled={loading}>✕</button>
+                    <button className="admin-close" onClick={() => onClose(isDirty.current)} disabled={loading}>✕</button>
                 </div>
 
                 <div className="seg-manager-body">

@@ -2125,17 +2125,22 @@ async def refresh_segmentation(body: dict):
     def _refresh():
         try:
             import time as _time
-            # Freshness guard: if result was just computed (< 120s), skip rebuild
+            # Content-based freshness: only rebuild if masks have changed
+            masks_file = output_dir / "seg_masks.npz"
             if result_path.exists():
-                age = _time.time() - result_path.stat().st_mtime
-                if age < 120:
-                    with open(result_path) as f:
-                        result = json.load(f)
-                    print(f"[SegRefresh] Result is fresh ({age:.0f}s old) — skipping rebuild")
-                    task_manager.finish(tid)
-                    return {"instances": result.get("instances", [])}
+                if masks_file.exists():
+                    masks_mtime = masks_file.stat().st_mtime
+                    result_mtime = result_path.stat().st_mtime
+                    if result_mtime >= masks_mtime:
+                        # Result was generated AFTER the last mask change — still valid
+                        with open(result_path) as f:
+                            result = json.load(f)
+                        age = _time.time() - result_path.stat().st_mtime
+                        print(f"[SegRefresh] Result is up-to-date (masks unchanged, {age:.0f}s old) — skipping rebuild")
+                        task_manager.finish(tid)
+                        return {"instances": result.get("instances", [])}
                 result_path.unlink()
-                print(f"[SegRefresh] Deleted stale segmentation_result.json for {session_id} ({age:.0f}s old)")
+                print(f"[SegRefresh] Masks changed — deleted stale segmentation_result.json for {session_id}")
             from segmentation_pipeline import _match_and_save_result
             task_manager.update(tid, pct=10, detail="Running DBSCAN + cloud matching...")
             print(f"[SegRefresh] Regenerating segmentation_result.json...")
