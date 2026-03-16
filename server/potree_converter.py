@@ -22,8 +22,9 @@ POTREE_BIN = Path(__file__).parent.parent / "vendor" / "PotreeConverter" / "buil
 
 
 def _ply_to_las(ply_path: Path, las_path: Path) -> int:
-    """Convert binary PLY (with or without origin fields) to LAS 1.4 with RGB.
+    """Convert binary PLY (with or without origin/confidence fields) to LAS 1.4 with RGB.
     
+    If PLY contains a `confidence` field, it is mapped to LAS `intensity` (uint16, 0–65535).
     Returns the number of points converted.
     """
     import laspy
@@ -32,35 +33,40 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
     with open(ply_path, "rb") as f:
         n_pts = 0
         has_origins = False
+        has_confidence = False
         while True:
             line = f.readline()
             if line.startswith(b"element vertex"):
                 n_pts = int(line.split()[-1])
             if b"frame_global" in line:
                 has_origins = True
+            if b"confidence" in line:
+                has_confidence = True
             if line.startswith(b"end_header"):
                 break
 
         # Build numpy dtype matching PLY binary layout
+        fields = [
+            ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+            ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+        ]
+        if has_confidence:
+            fields.append(('confidence', '<f4'))
         if has_origins:
-            ply_dtype = np.dtype([
-                ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-                ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+            fields.extend([
                 ('frame_global', '<i4'),
                 ('pixel_row', '<i2'), ('pixel_col', '<i2')
             ])
-        else:
-            ply_dtype = np.dtype([
-                ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-                ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
-            ])
 
+        ply_dtype = np.dtype(fields)
         data = np.frombuffer(f.read(), dtype=ply_dtype)
 
     if len(data) == 0:
         raise ValueError(f"Empty point cloud: {ply_path}")
 
     logger.info(f"[Potree] Read {len(data):,} points from {ply_path.name}")
+    if has_confidence:
+        logger.info(f"[Potree] Confidence field detected — mapping to LAS intensity")
 
     # ── Write LAS 1.4 (point format 2 = XYZ + RGB) ──
     header = laspy.LasHeader(point_format=2, version="1.4")
@@ -79,6 +85,15 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
     las.red = data['r'].astype(np.uint16) * 256
     las.green = data['g'].astype(np.uint16) * 256
     las.blue = data['b'].astype(np.uint16) * 256
+
+    # Confidence is already normalized to [0, 1] by VGGT-Long — map directly to uint16 intensity.
+    if has_confidence:
+        conf = data['confidence'].astype(np.float32)
+        # Clamp to [0, 1] as safety (should already be in range)
+        conf = np.clip(conf, 0.0, 1.0)
+        las.intensity = (conf * 65535).astype(np.uint16)
+        n = len(conf)
+        logger.info(f"[Potree] Confidence [0-1] mapped to intensity ({n:,} pts)")
 
     las.write(las_path)
     logger.info(f"[Potree] Written LAS: {las_path} ({las_path.stat().st_size / 1024**2:.1f} MB)")

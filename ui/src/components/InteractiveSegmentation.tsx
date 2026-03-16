@@ -40,6 +40,8 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const [labelName, setLabelName] = useState('')
     const [textPrompt, setTextPrompt] = useState('')
     const [promptPoints, setPromptPoints] = useState<{ x: number, y: number, label: number }[]>([])
+    const promptPointsMapRef = useRef<Map<number, { x: number, y: number, label: number }[]>>(new Map())
+    const maskCacheRef = useRef<Map<number, string>>(new Map())
 
     // Zoom/Pan state
     const [zoom, setZoom] = useState(1)
@@ -55,6 +57,24 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const maskImageRef = useRef<HTMLImageElement | null>(null)
     const initRef = useRef(false)
     const isDirty = useRef(false)
+    const stateIdRef = useRef<string | null>(null)
+
+    // Keep ref in sync with state for cleanup
+    useEffect(() => { stateIdRef.current = stateId }, [stateId])
+
+    // Cleanup SAM3 session on unmount (free VRAM)
+    useEffect(() => {
+        return () => {
+            const sid = stateIdRef.current
+            if (sid) {
+                fetch('/api/segmentation/reset_session', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ state_id: sid })
+                }).catch(() => { })  // fire-and-forget
+            }
+        }
+    }, [])
 
     const currentFrame = keyframes[kfIndex] || null
     // SAM3 now loads only keyframes sequentially (via temp dir).
@@ -111,17 +131,34 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         init()
     }, [sessionId])
 
-    // Fetch mask for selected instance when frame changes
+    // Save current frame's prompts before navigating, restore target frame's prompts
+    const prevKfIndexRef = useRef(kfIndex)
     useEffect(() => {
+        const prev = prevKfIndexRef.current
+        // Save current frame's prompt points
+        if (promptPoints.length > 0) {
+            promptPointsMapRef.current.set(prev, [...promptPoints])
+        }
+        prevKfIndexRef.current = kfIndex
+
         if (selectedInstance !== null && currentFrame) {
             fetchInstanceMask(selectedInstance, currentFrame, kfIndex)
-        } else if (promptPoints.length === 0) {
+            return
+        }
+
+        // Restore target frame's prompts & cached mask
+        const savedPoints = promptPointsMapRef.current.get(kfIndex) || []
+        setPromptPoints(savedPoints)
+        const cachedMask = maskCacheRef.current.get(kfIndex)
+        if (cachedMask) {
+            setMaskOverlay(cachedMask)
+        } else if (savedPoints.length === 0) {
             setMaskOverlay(null)
         }
     }, [kfIndex, selectedInstance])
 
-    // Clear prompt points when frame or mode changes
-    useEffect(() => { setPromptPoints([]) }, [kfIndex, mode])
+    // Clear prompt points only when mode changes (not frame)
+    useEffect(() => { setPromptPoints([]); promptPointsMapRef.current.clear(); maskCacheRef.current.clear() }, [mode])
 
     // ── Canvas overlay sync & redraw ──────────────────────────
     const redrawCanvas = useCallback(() => {
@@ -333,7 +370,12 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             })
             if (!res.ok) throw new Error('Failed to add prompt')
             const data = await res.json()
-            if (data.mask_png) setMaskOverlay(`data:image/png;base64,${data.mask_png}`)
+            if (data.mask_png) {
+                const maskUrl = `data:image/png;base64,${data.mask_png}`
+                setMaskOverlay(maskUrl)
+                maskCacheRef.current.set(kfIndex, maskUrl)
+            }
+            promptPointsMapRef.current.set(kfIndex, newPoints)
             setHasPrompts(true)
             setStatus('Prompt applied. Add more or propagate.')
         } catch (e: any) {
@@ -845,13 +887,39 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                 />
                                 <button
                                     style={{ background: '#555', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13 }}
-                                    onClick={() => {
+                                    onClick={async () => {
+                                        // Clear UI state
                                         setPromptPoints([])
                                         setMaskOverlay(null)
                                         setHasPrompts(false)
-                                        setStatus('Prompts cleared.')
+                                        promptPointsMapRef.current.clear()
+                                        maskCacheRef.current.clear()
+                                        // Reset SAM3 backend session and start fresh
+                                        if (stateId) {
+                                            try {
+                                                setLoading(true)
+                                                setStatus('Resetting session...')
+                                                await fetch('/api/segmentation/reset_session', {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ state_id: stateId })
+                                                })
+                                                // Re-init fresh session
+                                                const res = await fetch(`/api/segmentation/start_session/${sessionId}`, { method: 'POST' })
+                                                if (res.ok) {
+                                                    const data = await res.json()
+                                                    setStateId(data.state_id)
+                                                    setStatus('Session reset — ready for new prompts.')
+                                                } else {
+                                                    setStatus('Warning: could not restart session')
+                                                }
+                                            } catch { setStatus('Error resetting session') }
+                                            finally { setLoading(false) }
+                                        } else {
+                                            setStatus('Prompts cleared.')
+                                        }
                                     }}
-                                    disabled={loading || promptPoints.length === 0}
+                                    disabled={loading || (promptPoints.length === 0 && promptPointsMapRef.current.size === 0)}
                                 >✕ Clear</button>
                                 <button className="admin-save-btn" onClick={handlePropagate}
                                     disabled={loading || !stateId || !hasPrompts}>▶ Propagate</button>

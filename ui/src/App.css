@@ -3821,3 +3821,95 @@
   margin-right: 2px;
   flex-shrink: 0;
 }
+
+/* ── BIM Alignment Mode Toggle ── */
+.bim-alignment-option {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.compare-dialog-option {
+  padding: 12px 24px;
+  background: rgba(255, 255, 255, 0.03);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.bim-alignment-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: default;
+}
+
+.bim-alignment-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.toggle-switch-container {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toggle-option-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  transition: color 0.2s;
+  user-select: none;
+}
+
+.toggle-option-label.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.toggle-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  border: none;
+  background: #21262d;
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.25s ease;
+  outline: none;
+}
+
+.toggle-switch:hover {
+  background: #30363d;
+}
+
+.toggle-switch.on {
+  background: var(--accent);
+}
+
+.toggle-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.toggle-switch.on .toggle-switch-knob {
+  transform: translateX(16px);
+}
+
+.bim-alignment-hint {
+  display: block;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-style: italic;
+}

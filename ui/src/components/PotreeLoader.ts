@@ -86,6 +86,8 @@ export class PotreeOctreeLoader {
     private hierarchyData: ArrayBuffer | null = null
     private totalLoadedPoints = 0
     private _loading = false
+    private _smallCloudLogged = false
+    private _hasConfidence = false
 
     constructor(
         scene: THREE.Scene,
@@ -342,9 +344,28 @@ export class PotreeOctreeLoader {
      *  3. Add its children to queue IF their projected pixel size >= threshold
      *  4. Stop when budget is reached
      *  Parents are always shown BEFORE children, ensuring base coverage.
+     *
+     *  OPTIMIZATION: For small clouds that fit entirely within the point budget,
+     *  we load ALL nodes and skip LOD culling. This prevents the "disappearing
+     *  chunks" issue that occurs when the LOD algorithm unloads nodes during
+     *  camera movement. A regular PLY viewer shows all points all the time —
+     *  for small clouds, we do the same.
      */
     updateVisibility(): void {
         if (!this.metadata || !this.octreeData) return
+
+        // ── Small cloud bypass ─────────────────────────────────
+        // If the cloud has fewer points than the budget, load EVERYTHING
+        // and skip frustum culling/unloading entirely. This matches the
+        // behavior of a standard viewer while keeping LOD for large clouds.
+        if (this.metadata.points <= this.pointBudget) {
+            this._updateVisibilityLoadAll()
+            if (!this._smallCloudLogged) {
+                console.log(`[PotreeLoader] ✅ Small cloud bypass: ${this.metadata.points.toLocaleString()} pts <= budget ${this.pointBudget.toLocaleString()}, loading ALL nodes (${this.nodes.size} nodes)`)
+                this._smallCloudLogged = true
+            }
+            return
+        }
 
         const frustum = new THREE.Frustum()
         const projScreenMatrix = new THREE.Matrix4()
@@ -459,23 +480,28 @@ export class PotreeOctreeLoader {
         }
 
         this.visiblePoints = numVisiblePoints
-
-        // Periodic diagnostic logging (max once per second)
-        const now = performance.now()
-        if (!this._lastLogTime || now - this._lastLogTime > 1000) {
-            this._lastLogTime = now
-            // Debug: per-level stats
-            // const levelCounts = new Map<number, number>()
-            // for (const name of renderSet) {
-            //     const level = name.length - 1
-            //     levelCounts.set(level, (levelCounts.get(level) || 0) + 1
-            // }
-            // const levels = Array.from(levelCounts.entries()).sort((a, b) => a[0] - b[0])
-            //     .map(([l, c]) => `L${l}:${c}`).join(' ')
-            // console.log(`[LOD] Visible: ${renderSet.size} nodes (${levels}), pts: ${numVisiblePoints.toLocaleString()}/${this.pointBudget.toLocaleString()}, totalKnown: ${this.nodes.size}`)
-        }
     }
-    private _lastLogTime = 0
+
+    /** Small cloud path: load ALL nodes, no frustum culling, no unloading.
+     *  Behaves exactly like a regular PLY viewer — all points always visible.
+     */
+    private _updateVisibilityLoadAll(): void {
+        let numVisible = 0
+        for (const [, node] of this.nodes) {
+            // Expand any proxy nodes
+            if (node.nodeType === 2 && !node.hierarchyLoaded && !node.hierarchyLoading) {
+                this.loadProxyHierarchy(node)
+            }
+            // Load every real node
+            if (!node.loaded && !node.loading && node.nodeType !== 2) {
+                this.loadNode(node)
+            }
+            if (node.loaded) {
+                numVisible += node.numPoints
+            }
+        }
+        this.visiblePoints = numVisible
+    }
 
     /** Load a single octree node's point data into the scene */
     private loadNode(node: OctreeNode): void {
@@ -515,10 +541,12 @@ export class PotreeOctreeLoader {
         // Find attribute offsets
         let posOffset = -1
         let rgbOffset = -1
+        let intensityOffset = -1
         let attrOffset = 0
         for (const attr of meta.attributes) {
             if (attr.name === 'position') posOffset = attrOffset
             if (attr.name === 'rgb') rgbOffset = attrOffset
+            if (attr.name === 'intensity') intensityOffset = attrOffset
             attrOffset += attr.size
         }
 
@@ -532,6 +560,7 @@ export class PotreeOctreeLoader {
         const positions = new Float32Array(numPoints * 3)
         const colors = new Float32Array(numPoints * 3)
         const classIds = new Float32Array(numPoints)
+        const confidences = intensityOffset >= 0 ? new Float32Array(numPoints) : null
 
         const scale = meta.scale
         const offset = meta.offset
@@ -570,6 +599,13 @@ export class PotreeOctreeLoader {
             }
 
             classIds[validPoints] = 0
+
+            // Intensity → confidence [0..1] (normalized from uint16 0..65535)
+            if (intensityOffset >= 0 && confidences) {
+                const intensity = nodeData.getUint16(base + intensityOffset, true)
+                confidences[validPoints] = intensity / 65535
+            }
+
             validPoints++
         }
 
@@ -583,11 +619,22 @@ export class PotreeOctreeLoader {
         geometry.setAttribute('position', new THREE.BufferAttribute(positions.subarray(0, validPoints * 3), 3))
         geometry.setAttribute('color', new THREE.BufferAttribute(colors.subarray(0, validPoints * 3), 3))
         geometry.setAttribute('classId', new THREE.BufferAttribute(classIds.subarray(0, validPoints), 1))
+        if (confidences) {
+            geometry.setAttribute('confidence', new THREE.BufferAttribute(confidences.subarray(0, validPoints), 1))
+            this._hasConfidence = true
+        }
         geometry.computeBoundingSphere()
 
         // Use the shared material from the Viewport
         const points = new THREE.Points(geometry, this.material)
         points.name = `potree-node-${node.name}`
+
+        // For small clouds (< pointBudget): disable Three.js frustum culling.
+        // Three.js culls by bounding sphere which is unreliable after transforms
+        // (floor rotation). Since we load all nodes anyway, let the GPU handle it.
+        if (this.metadata && this.metadata.points <= this.pointBudget) {
+            points.frustumCulled = false
+        }
 
         this.octreeGroup.add(points)
         node.points = points
@@ -672,5 +719,10 @@ export class PotreeOctreeLoader {
     /** Get visible point count (after LOD culling) */
     getVisiblePointCount(): number {
         return this.visiblePoints
+    }
+
+    /** Whether the loaded cloud has per-point confidence data */
+    get hasConfidence(): boolean {
+        return this._hasConfidence
     }
 }

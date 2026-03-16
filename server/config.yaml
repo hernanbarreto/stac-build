@@ -63,16 +63,23 @@ scene_analysis:
     - { label: "ceiling" }
 
 # --- Frame Selection (Visual Novelty Filter) ---
-# ORB-SLAM style H/F ratio keyframe selection (no camera intrinsics needed)
-# Replaces fixed frame_stride with intelligent parallax-based selection
+# Dual-mode keyframe selection: DINO cosine (default) or ORB-SLAM H/F ratio (fallback)
+# DINO uses DINOv2 embeddings to detect visual scene changes
+# H/F ratio uses feature matching to detect geometric parallax
 frame_selection:
   enabled: true
-  max_features: 2000          # ORB features per frame
-  sigma: 1.0                  # Reprojection error std dev (pixels)
-  process_scale: 0.25         # Process at 25% resolution (speed)
-  hf_ratio_threshold: 0.45    # H/(H+F) ratio: < 0.45 = parallax present (ORB-SLAM default)
-  min_displacement: 3.0       # Minimum median pixel displacement
-  force_accept_interval: 30   # Safety: force accept every N frames even if no parallax
+  method: "dino"                # "dino" (DINO cosine similarity) or "hf_ratio" (legacy ORB-SLAM)
+  # DINO settings (used when method=dino)
+  dino_model: "dinov2_vitb14"   # ViT-B/14 (~330MB, same model VGGT-Long uses for loop closure)
+  dino_threshold: 0.92          # Cosine similarity threshold (higher = more keyframes accepted)
+  dino_device: "cuda"           # "cuda" or "cpu" (auto-falls back to CPU if no GPU)
+  # Legacy H/F settings (used when method=hf_ratio, or as fallback if DINO fails)
+  max_features: 2000            # ORB features per frame
+  sigma: 1.0                    # Reprojection error std dev (pixels)
+  process_scale: 0.25           # Process at 25% resolution (speed)
+  hf_ratio_threshold: 0.45      # H/(H+F) ratio: < 0.45 = parallax present (ORB-SLAM default)
+  min_displacement: 3.0         # Minimum median pixel displacement
+  force_accept_interval: 30     # Safety: force accept every N frames even if no parallax
 
 # --- Paths ---
 paths:

@@ -319,6 +319,15 @@ def main():
     if has_origins:
         print(f"  ✅ Origin fields preserved ({n_pts} points with frame_global, pixel_row, pixel_col)")
     
+    # Check for confidence scalar field
+    has_confidence = 'confidence' in sf_dic
+    conf_array = None
+    if has_confidence:
+        sf_idx = sf_dic['confidence']
+        sf = current.getScalarField(sf_idx)
+        conf_array = sf.toNpArray()
+        print(f"  ✅ Confidence field preserved ({n_pts} points)")
+    
     # Write binary PLY
     with open(output_path, 'wb') as f:
         # Header
@@ -332,6 +341,8 @@ def main():
             header += "property uchar red\n"
             header += "property uchar green\n"
             header += "property uchar blue\n"
+        if has_confidence:
+            header += "property float confidence\n"
         if has_origins:
             header += "property int frame_global\n"
             header += "property short pixel_row\n"
@@ -343,6 +354,8 @@ def main():
         fields = [('x','<f4'),('y','<f4'),('z','<f4')]
         if has_colors:
             fields += [('r','u1'),('g','u1'),('b','u1')]
+        if has_confidence:
+            fields += [('confidence','<f4')]
         if has_origins:
             fields += [('frame_global','<i4'),('pixel_row','<i2'),('pixel_col','<i2')]
         
@@ -355,6 +368,8 @@ def main():
             packed['r'] = rgb[:, 0]
             packed['g'] = rgb[:, 1]
             packed['b'] = rgb[:, 2]
+        if has_confidence:
+            packed['confidence'] = conf_array.astype(np.float32)
         if has_origins:
             packed['frame_global'] = origin_fields['frame_global'].astype(np.int32)
             packed['pixel_row'] = origin_fields['pixel_row'].astype(np.int16)

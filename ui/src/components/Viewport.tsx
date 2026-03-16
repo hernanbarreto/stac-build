@@ -13,6 +13,7 @@ type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 
 
 interface ViewportProps {
     pointSize: number
+    confidenceThreshold: number
     activeSession: string | null
     activeTool: Tool
     showAxes?: boolean
@@ -25,6 +26,7 @@ interface ViewportProps {
     onPipelineProgress?: (data: Record<string, unknown>) => void
     onBimLoaded?: (models: import('./IFCLoader').IFCLoadResult[]) => void
     onSabanaLoaded?: (pointCount: number) => void
+    onHasConfidence?: (has: boolean) => void
 }
 
 export interface SegmentInstance {
@@ -59,13 +61,16 @@ export interface ViewportHandle {
 // Vertex shader — matches FusionRenderer.js point size formula
 const vertexShader = `
   attribute float classId;
+  attribute float confidence;
   varying float vClassId;
+  varying float vConfidence;
   varying vec3 vColor;
   varying vec3 vWorldPos;
   uniform float pointSize;
 
   void main() {
     vClassId = classId;
+    vConfidence = confidence;
     vColor = color;
     vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
     
@@ -73,24 +78,33 @@ const vertexShader = `
     gl_Position = projectionMatrix * mvPosition;
     
     // Same formula as standalone viewer: pointScale / depth
+    // Higher minimum (2.0) prevents vanishing at distance for sparser clouds
     float depth = -mvPosition.z;
     float size = pointSize / depth;
-    gl_PointSize = clamp(size, 1.0, 25.0);
+    gl_PointSize = clamp(size, 2.0, 30.0);
   }
 `
 
 // Fragment shader — circular points with EDL-like shading + section box clipping
 const fragmentShader = `
   varying float vClassId;
+  varying float vConfidence;
   varying vec3 vColor;
   varying vec3 vWorldPos;
   uniform float highlightIntensity;
   uniform float uOpacity;
+  uniform float uConfidenceThreshold;
   uniform bool sectionBoxEnabled;
   uniform vec3 sectionBoxMin;
   uniform vec3 sectionBoxMax;
 
   void main() {
+    // Confidence filter: discard points below threshold
+    // vConfidence defaults to 0.0 when attribute is absent; threshold 0.0 shows everything
+    if (uConfidenceThreshold > 0.0 && vConfidence < uConfidenceThreshold) {
+      discard;
+    }
+
     // Section box clipping
     if (sectionBoxEnabled) {
       if (vWorldPos.x < sectionBoxMin.x || vWorldPos.x > sectionBoxMax.x ||
@@ -232,7 +246,7 @@ function adaptGrid(
 }
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded },
+    { pointSize, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -1093,7 +1107,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
             alignSavedRef.current = true
             setAlignDirty(false)
-            if (onStatusMessage) onStatusMessage('✅ Alignment saved! OBBs will realign on next session load.')
+            if (onStatusMessage) onStatusMessage('✅ Alignment saved! Reload session to see updated OBBs.')
         } catch (e: any) {
             if (onStatusMessage) onStatusMessage(`Error saving alignment: ${e.message}`)
         }
@@ -1556,6 +1570,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 pointSize: { value: pointSize },
                 highlightIntensity: { value: 0.5 },
                 uOpacity: { value: 1.0 },
+                uConfidenceThreshold: { value: 0.0 },
                 time: { value: 0 },
                 sectionBoxEnabled: { value: false },
                 sectionBoxMin: { value: new THREE.Vector3(-100, -100, -100) },
@@ -1684,6 +1699,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             materialRef.current.uniforms.pointSize.value = pointSize
         }
     }, [pointSize])
+
+    // Update confidence threshold when prop changes
+    useEffect(() => {
+        if (materialRef.current) {
+            materialRef.current.uniforms.uConfidenceThreshold.value = confidenceThreshold
+        }
+    }, [confidenceThreshold])
 
     // Track activeSession in a ref for the WS onopen handler
     const activeSessionRef = useRef(activeSession)
@@ -1914,6 +1936,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const url = msg.url as string
             const pts = msg.points as number
             const floorTransform = msg.floorTransform as number[] | undefined
+            const serverHasConfidence = msg.hasConfidence as boolean | undefined
             // console.log(`[Viewport] Potree ready: ${pts?.toLocaleString()} points at ${url}`)
             if (onStatusMessage) onStatusMessage(`Loading LOD octree (${pts?.toLocaleString()} points)...`)
 
@@ -1935,6 +1958,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 // console.log(`[Viewport] Potree loaded: ${loadedPts.toLocaleString()} points`)
                 if (onStatusMessage) onStatusMessage(`LOD octree loaded — ${pts?.toLocaleString()} total points`)
                 onPointCount(loadedPts)
+                if (onHasConfidence) onHasConfidence(!!serverHasConfidence)
 
                 // Apply floor alignment transform if provided
                 if (floorTransform && floorTransform.length === 16) {

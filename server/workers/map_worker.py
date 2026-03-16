@@ -282,7 +282,6 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
     chunk_size = vggt_config["Model"]["chunk_size"]
     overlap = vggt_config["Model"]["overlap"]
     chunk_step = chunk_size - overlap
-    conf_coef = vggt_config["Model"]["Pointcloud_Save"]["conf_threshold_coef"]
     sample_ratio = vggt_config["Model"]["Pointcloud_Save"]["sample_ratio"]
 
     for chunk_idx, npy_path in enumerate(chunk_npy_files):
@@ -293,34 +292,23 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
             wp = chunk_data['world_points']
             if wp.ndim == 5:
                 wp = wp[0]  # Remove batch dim
-            
-            confs = chunk_data['world_points_conf']
-            if confs.ndim == 4:
-                confs = confs[0]  # Remove batch dim
 
             S, H, W = wp.shape[:3]
             HW = H * W
+            total_points = S * HW
 
-            # Flatten
-            points_flat = wp.reshape(-1, 3)
-            confs_flat = confs.reshape(-1)
-
-            # Apply same confidence filtering as save_confident_pointcloud_batch
-            # MUST match exactly: (conf >= threshold) & (conf > 1e-5)
-            conf_threshold = max(0.0, np.mean(confs_flat) * conf_coef)
-            valid_mask = (confs_flat >= conf_threshold) & (confs_flat > 1e-5)
-
-            valid_indices = np.where(valid_mask)[0]
+            # All points are kept (no confidence filtering — matches VGGT-Long behavior)
+            all_indices = np.arange(total_points)
 
             # Apply sampling
-            if sample_ratio < 1.0 and len(valid_indices) > 0:
-                n_samples = int(len(valid_indices) * sample_ratio)
+            if sample_ratio < 1.0 and len(all_indices) > 0:
+                n_samples = int(len(all_indices) * sample_ratio)
                 sample_local = np.sort(np.random.choice(
-                    len(valid_indices), n_samples, replace=False
+                    len(all_indices), n_samples, replace=False
                 ))
-                final_indices = valid_indices[sample_local]
+                final_indices = all_indices[sample_local]
             else:
-                final_indices = valid_indices
+                final_indices = all_indices
 
             if len(final_indices) == 0:
                 pipe.send_log(f"Chunk {chunk_idx}: no valid points for origins", level="warning")

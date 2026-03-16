@@ -64,13 +64,6 @@ def _vlm_work(pipe: WorkerPipe, session_dir: str, config: dict):
     pipe.send_log(f"VLM result saved to {result_path.name}")
     pipe.send_progress(100, f"Scene analysis complete: {auto_prompt}", stage="vlm")
 
-    # Explicitly unload model
-    try:
-        from scene_analyzer import _unload_model
-        _unload_model()
-    except (ImportError, AttributeError):
-        pass
-
 
 # ── Process entry point ──────────────────────────────────────
 

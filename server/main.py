@@ -1382,6 +1382,11 @@ async def start_interactive_segmentation(session_id: str):
     from sam3_wrapper import get_sam3_wrapper
     sam3 = get_sam3_wrapper()
     
+    # Unload any previous SAM3 model to free VRAM before loading new session
+    if sam3.is_loaded:
+        print("[InteractiveSeg] Unloading previous SAM3 model to free VRAM...")
+        await asyncio.get_event_loop().run_in_executor(None, sam3.unload_model)
+    
     # Needs to run in executor
     loop = asyncio.get_event_loop()
     
@@ -1430,6 +1435,40 @@ async def start_interactive_segmentation(session_id: str):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/segmentation/reset_session")
+async def reset_interactive_segmentation(request: Request):
+    """
+    Reset/close an interactive SAM3 session to free VRAM.
+    Called when the SegmentationManager is closed.
+    """
+    from sam3_wrapper import get_sam3_wrapper
+    body = await request.json()
+    state_id = body.get("state_id")
+    if not state_id:
+        raise HTTPException(status_code=400, detail="Missing state_id")
+
+    sam3 = get_sam3_wrapper()
+    loop = asyncio.get_event_loop()
+
+    def _reset():
+        try:
+            sam3.predictor.handle_request(
+                request=dict(type="reset_session", session_id=state_id)
+            )
+            # Cleanup temp keyframe dir if it exists
+            session_info = sam3._interactive_sessions.pop(state_id, None)
+            if session_info and isinstance(session_info, dict):
+                import shutil
+                temp_dir = session_info.get("keyframe_temp_dir")
+                if temp_dir and os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            print(f"[InteractiveSeg] Session {state_id} reset, VRAM freed")
+        except Exception as e:
+            print(f"[InteractiveSeg] Reset session error (non-fatal): {e}")
+
+    await loop.run_in_executor(None, _reset)
+    return {"ok": True}
 
 @app.post("/api/segmentation/add_prompt")
 async def add_interactive_prompt(request: Request):
@@ -1562,13 +1601,14 @@ async def save_alignment(session_id: str, request: Request):
     print(f"[Alignment]   Reconstructed M:\n{M_check}")
     print(f"[Alignment]   Max diff: {np.max(np.abs(M - M_check)):.8f}")
 
-    # Touch segmentation_result.json so its mtime is newer than floor_transform.npz.
-    # This prevents unnecessary DBSCAN recomputation on next session load.
-    # (The gizmo alignment only changes display transform, not the underlying segmentation)
+    # Delete segmentation_result.json cache so OBBs get recomputed
+    # with the new floor_transform on next session load.
+    # (OBBs are computed from floor-transformed coordinates, so a new
+    # alignment MUST trigger recomputation)
     seg_result_path = output_dir / "segmentation_result.json"
     if seg_result_path.exists():
-        seg_result_path.touch()
-        print(f"[Alignment] ✅ Touched segmentation_result.json to preserve cache")
+        seg_result_path.unlink()
+        print(f"[Alignment] ✅ Deleted segmentation_result.json (OBBs will recompute on reload)")
 
     return {"ok": True, "scale": s}
 
@@ -2247,6 +2287,7 @@ async def bim_compare(request: Request):
     body = await request.json()
     session_id = body.get("session_id")
     matches = body.get("matches", [])
+    skip_registration = body.get("skip_registration", False)
     # Tolerance from config.yaml bim.deviation.tolerance_mm (mm)
     bim_cfg = cfg.get("bim", {}).get("deviation", {})
     tolerance_mm = bim_cfg.get("tolerance_mm", 50.0)
@@ -2273,6 +2314,7 @@ async def bim_compare(request: Request):
                     matches,
                     tolerance=tolerance_mm / 1000.0,
                     progress_callback=on_progress,
+                    skip_registration=skip_registration,
                 )
                 task_manager.finish(tid)
                 return result
@@ -2798,6 +2840,16 @@ async def viewer_websocket(websocket: WebSocket):
                 print(f"[Viewer] Loading session {session_id}...")
                 loop = asyncio.get_event_loop()
                 
+                # Unload SAM3 model if loaded — free VRAM for new session
+                try:
+                    from sam3_wrapper import get_sam3_wrapper
+                    _sam3 = get_sam3_wrapper()
+                    if _sam3.is_loaded:
+                        print("[Viewer] Unloading SAM3 model to free VRAM...")
+                        await loop.run_in_executor(None, _sam3.unload_model)
+                except Exception:
+                    pass
+                
                 # Clear current view (lightweight, no I/O)
                 alignment_manager.reset()
                 frame_storage.stop_session()
@@ -2925,15 +2977,26 @@ async def viewer_websocket(websocket: WebSocket):
                                         print(f"[Viewer] ⚠️ Floor alignment fallback failed: {e}")
                             # Detect IFC files in session directory
                             ifc_files = [f.name for f in sorted(_load_ctx.ifcs_dir.glob('*.ifc'))] if _load_ctx.ifcs_dir.exists() else []
-                            return potree_meta, floor_transform_4x4, ifc_files
+                            # Check if cleaned_cloud.ply has confidence data
+                            has_confidence = False
+                            cleaned_path = output_dir / "cleaned_cloud.ply"
+                            if cleaned_path.exists():
+                                with open(cleaned_path, 'rb') as fp:
+                                    for hl in fp:
+                                        if b'confidence' in hl:
+                                            has_confidence = True
+                                        if hl.startswith(b'end_header'):
+                                            break
+                            return potree_meta, floor_transform_4x4, ifc_files, has_confidence
                         
-                        potree_meta, floor_transform_4x4, ifc_files = await loop.run_in_executor(None, _load_metadata)
+                        potree_meta, floor_transform_4x4, ifc_files, has_confidence = await loop.run_in_executor(None, _load_metadata)
                         
                         msg = {
                             "type": "potree_ready",
                             "session_id": session_id,
                             "url": f"/potree/{session_id}/",
                             "points": potree_meta.get("points", 0),
+                            "hasConfidence": has_confidence,
                         }
                         if floor_transform_4x4:
                             msg["floorTransform"] = floor_transform_4x4
@@ -3076,15 +3139,26 @@ async def viewer_websocket(websocket: WebSocket):
                                         floor_transform_4x4 = M.T.flatten().tolist()
                                     except Exception:
                                         pass
-                                return potree_meta, floor_transform_4x4
+                                # Check confidence in PLY
+                                has_confidence = False
+                                cp = session_path / "output" / "cleaned_cloud.ply"
+                                if cp.exists():
+                                    with open(cp, 'rb') as fp:
+                                        for hl in fp:
+                                            if b'confidence' in hl:
+                                                has_confidence = True
+                                            if hl.startswith(b'end_header'):
+                                                break
+                                return potree_meta, floor_transform_4x4, has_confidence
                             
-                            potree_meta, floor_transform_4x4 = await _pipe_loop.run_in_executor(None, _load_pipe_metadata)
+                            potree_meta, floor_transform_4x4, has_confidence = await _pipe_loop.run_in_executor(None, _load_pipe_metadata)
                             
                             pipe_msg = {
                                 "type": "potree_ready",
                                 "session_id": sid,
                                 "url": f"/potree/{sid}/",
                                 "points": potree_meta.get("points", 0),
+                                "hasConfidence": has_confidence,
                             }
                             if floor_transform_4x4:
                                 pipe_msg["floorTransform"] = floor_transform_4x4

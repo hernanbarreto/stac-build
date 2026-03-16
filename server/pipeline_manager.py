@@ -235,10 +235,12 @@ class PipelineManager:
 
     # ── Internal: Pipeline Orchestration Loop ─────────────────
 
-    # Files each stage produces — used by replace mode to clean up before re-running
+    # Files each stage produces (in output/) — used by replace mode to clean before re-running
     STAGE_OUTPUT_FILES: Dict[StageId, List[str]] = {
         StageId.RECONSTRUCTION: ["chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json",
-                      "slam_reconstruction.ply", "maplong_run"],
+                      "slam_reconstruction.ply", "maplong_run",
+                      "vggt_long_config.yaml", "camera_poses_mapanything.json",
+                      "intrinsic.txt"],
         StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "floor_transform.npz"],
         StageId.VLM: ["scene_analysis.json", "vlm_analysis.json"],
         StageId.SAM3: ["segmentation.json", "segmentation_result.json",
@@ -246,31 +248,104 @@ class PipelineManager:
         StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
     }
 
+    # Files in frames/ dir that should be regenerated on reconstruction
+    FRAMES_DIR_FILES: List[str] = [
+        "selected_frames.json", "selected_frames_seg*.json", "frame_quality.json",
+    ]
+
+    # BIM comparison / sábana artifacts (may live in output/, session root, or bim_comparison/)
+    BIM_COMPARISON_FILES: List[str] = [
+        "sabana.npz", "sabana_cloud.ply", "sabana_meta.json", "sabana_potree",
+    ]
+
+    # Cascade: when a stage re-runs, these downstream stages' outputs are ALSO invalidated
+    # Example: Reconstruction → new chunks → old cleaned_cloud is invalid → old sábana is invalid
+    CASCADE_INVALIDATION: Dict[StageId, List[StageId]] = {
+        StageId.RECONSTRUCTION: [
+            StageId.CLOUDCOMPY,       # cleaned_cloud depends on chunks
+            StageId.VLM,              # scene analysis ran on old keyframes
+            StageId.SAM3,             # segmentation ran on old cloud
+            StageId.INSTANCE_CLEANER, # instance PLYs from old segmentation
+        ],
+        StageId.CLOUDCOMPY: [
+            StageId.SAM3,             # segmentation used old cleaned_cloud
+            StageId.INSTANCE_CLEANER,
+        ],
+        StageId.VLM: [
+            StageId.SAM3,             # SAM3 uses VLM categories
+            StageId.INSTANCE_CLEANER,
+        ],
+        StageId.SAM3: [
+            StageId.INSTANCE_CLEANER, # instances depend on segmentation
+        ],
+    }
+
     @staticmethod
-    def _cleanup_stage_outputs(output_dir: Path, stage_id: StageId):
-        """Delete existing output files for a stage before re-running."""
-        patterns = PipelineManager.STAGE_OUTPUT_FILES.get(stage_id, [])
-        deleted = []
-        for pattern in patterns:
-            if "*" in pattern:
-                for f in output_dir.glob(pattern):
-                    if f.is_dir():
-                        import shutil
-                        shutil.rmtree(f, ignore_errors=True)
-                    else:
-                        f.unlink(missing_ok=True)
-                    deleted.append(f.name)
-            else:
-                target = output_dir / pattern
-                if target.exists():
-                    if target.is_dir():
-                        import shutil
-                        shutil.rmtree(target, ignore_errors=True)
-                    else:
-                        target.unlink(missing_ok=True)
-                    deleted.append(pattern)
-        if deleted:
-            logger.info(f"[Pipeline] 🗑️ Replace mode: deleted {', '.join(deleted)}")
+    def _cleanup_stage_outputs(output_dir: Path, stage_id: StageId,
+                               session_dir: Path = None):
+        """Delete existing output files for a stage AND all downstream dependents.
+
+        Handles files in:
+          - output/ dir (stage outputs)
+          - frames/ dir (selected_frames.json, frame_quality.json)
+          - session root or bim_comparison/ (sábana files)
+        """
+        import shutil as _shutil
+
+        # Collect all stages to clean: this stage + cascade dependents
+        stages_to_clean = [stage_id]
+        stages_to_clean.extend(
+            PipelineManager.CASCADE_INVALIDATION.get(stage_id, [])
+        )
+
+        all_deleted = []
+
+        def _delete_patterns(base_dir: Path, patterns: List[str]):
+            for pattern in patterns:
+                if "*" in pattern:
+                    for f in base_dir.glob(pattern):
+                        if f.is_dir():
+                            _shutil.rmtree(f, ignore_errors=True)
+                        else:
+                            f.unlink(missing_ok=True)
+                        all_deleted.append(f.name)
+                else:
+                    target = base_dir / pattern
+                    if target.exists():
+                        if target.is_dir():
+                            _shutil.rmtree(target, ignore_errors=True)
+                        else:
+                            target.unlink(missing_ok=True)
+                        all_deleted.append(pattern)
+
+        # 1) Clean stage output files in output/ dir
+        for sid in stages_to_clean:
+            patterns = PipelineManager.STAGE_OUTPUT_FILES.get(sid, [])
+            _delete_patterns(output_dir, patterns)
+
+        # 2) Clean frames/ dir files when reconstruction is re-run
+        if stage_id == StageId.RECONSTRUCTION and session_dir:
+            frames_dir = session_dir / "frames"
+            if frames_dir.exists():
+                _delete_patterns(frames_dir, PipelineManager.FRAMES_DIR_FILES)
+
+        # 3) Clean BIM comparison / sábana artifacts when cloud changes
+        if stage_id in (StageId.RECONSTRUCTION, StageId.CLOUDCOMPY):
+            # Check output dir (legacy sessions store sábana here)
+            _delete_patterns(output_dir, PipelineManager.BIM_COMPARISON_FILES)
+            # Check session root (some legacy layouts)
+            if session_dir:
+                _delete_patterns(session_dir, PipelineManager.BIM_COMPARISON_FILES)
+                # Check bim_comparison/ subdir (new project layout)
+                bim_dir = session_dir.parent.parent.parent / "bim_comparison"
+                if bim_dir.exists():
+                    _delete_patterns(bim_dir, PipelineManager.BIM_COMPARISON_FILES)
+
+        if all_deleted:
+            cascade_label = ""
+            if len(stages_to_clean) > 1:
+                cascade_label = f" (+cascade: {', '.join(s.value for s in stages_to_clean[1:])})"
+            logger.info(f"[Pipeline] 🗑️ Replace mode{cascade_label}: deleted {', '.join(all_deleted)}")
 
     async def _run_pipeline(
         self,
@@ -295,9 +370,12 @@ class PipelineManager:
             if job.status == JobStatus.CANCELLED:
                 break
 
-            # Clean up previous outputs if in replace mode
+            # Clean up previous outputs if in replace mode (cascade invalidation)
             if replace and output_dir.exists():
-                self._cleanup_stage_outputs(output_dir, stage_state.stage.id)
+                self._cleanup_stage_outputs(
+                    output_dir, stage_state.stage.id,
+                    session_dir=Path(session_dir)
+                )
 
             job.current_stage_idx = idx
             stage_state.status = JobStatus.RUNNING

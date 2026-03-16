@@ -73,7 +73,9 @@ function App() {
   const [bimModels, setBimModels] = useState<IFCLoadResult[]>([])
   const [sidebarWidth, setSidebarWidth] = useState(280)
   const [consoleOpen, setConsoleOpen] = useState(false)
-  const [pointSize, setPointSize] = useState(2.0)
+  const [pointSize, setPointSize] = useState(5.0)
+  const [confidenceThreshold, setConfidenceThreshold] = useState(0.0)
+  const [hasConfidence, setHasConfidence] = useState(false)
   const [showAxes, setShowAxes] = useState(false)
   const [showGrid, setShowGrid] = useState(true)
   const [pointCount, setPointCount] = useState(0)
@@ -130,6 +132,9 @@ function App() {
     }
   }, [pipelineRunning])
   const [interactiveSessionId, setInteractiveSessionId] = useState<string | null>(null)
+  const interactiveSessionRef = useRef(interactiveSessionId)
+  const [compareDialogOpen, setCompareDialogOpen] = useState(false)
+  const [useManualAlignment, setUseManualAlignment] = useState(true)
   const [creatingProject, setCreatingProject] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [renamingProject, setRenamingProject] = useState<string | null>(null)
@@ -141,14 +146,20 @@ function App() {
   const { user, token, loading: authLoading, logout } = useAuth()
 
   // Periodic server health check — updates indicator only
+  // NOTE: timeout/threshold are generous because the Python server does heavy
+  // CPU-bound work (BIM registration, SAM3 loading, reconstruction) that blocks
+  // the GIL for up to several minutes. Short thresholds cause false disconnects.
   const failCountRef = useRef(0)
-  const FAIL_THRESHOLD = 3 // Require 3 consecutive failures before declaring dead
+  const FAIL_THRESHOLD = 10 // ~60s of unresponsiveness before declaring dead
   useEffect(() => {
-    let intervalMs = 3000
+    interactiveSessionRef.current = interactiveSessionId
+  }, [interactiveSessionId])
+  useEffect(() => {
+    let intervalMs = 5000
     let timerId: ReturnType<typeof setTimeout> | null = null
     const checkHealth = async () => {
       try {
-        const resp = await fetch('/health', { signal: AbortSignal.timeout(15000) })
+        const resp = await fetch('/health', { signal: AbortSignal.timeout(60000) })
         if (resp.ok) {
           failCountRef.current = 0
           setServerAlive(true)
@@ -156,12 +167,12 @@ function App() {
         } else {
           failCountRef.current++
           if (failCountRef.current >= FAIL_THRESHOLD) setServerAlive(false)
-          intervalMs = 3000
+          intervalMs = 5000
         }
       } catch {
         failCountRef.current++
         if (failCountRef.current >= FAIL_THRESHOLD) setServerAlive(false)
-        intervalMs = failCountRef.current >= FAIL_THRESHOLD ? 10000 : 3000
+        intervalMs = failCountRef.current >= FAIL_THRESHOLD ? 10000 : 5000
       }
       timerId = setTimeout(checkHealth, intervalMs)
     }
@@ -363,7 +374,7 @@ function App() {
           setStatusMessage('Session has no point cloud data. Run Reconstruct to generate.')
         }
       }
-    }, 15000)
+    }, 45000)  // 45s: large octrees need time to download before points appear
     return () => clearTimeout(timer)
   }, [sessionLoading, pipelineRunning, activeSession]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -561,30 +572,25 @@ function App() {
   }, [])
 
   // ── Sábana: Generate comparison (auto_match → compare → show via Potree) ──
-  const handleGenerateComparison = useCallback(async () => {
+  // Open the comparison dialog (shows toggle inside)
+  const handleGenerateComparison = useCallback(() => {
     if (!activeSession) return
-    // If sábana already exists, ask before regenerating
-    const session = sessions.find(s => s.id === activeSession)
-    if (session?.hasSabana) {
-      const ok = await confirmDanger(
-        'Existing sábana data will be deleted and replaced. Continue?',
-        'Regenerate Comparison?'
-      )
-      if (!ok) return
-    }
+    setCompareDialogOpen(true)
+  }, [activeSession])
+
+  // Actually run the comparison after dialog confirm
+  const runComparison = useCallback(async () => {
+    if (!activeSession) return
+    setCompareDialogOpen(false)
     setSabanaLoading(true)
     setSabanaMetrics(null)
     setSabanaFullMeta(null)
-    // Reset view: reload scan cloud + full-opacity BIM (clearing old sábana)
-    if (sabanaVisible) {
-      setSabanaVisible(false)
-    }
+    if (sabanaVisible) setSabanaVisible(false)
     viewportRef.current?.sendCommand({ type: 'load_session', session_id: activeSession })
     viewportRef.current?.setOBBsVisible(true)
     setActivePanel('bim')
-    setStatusMessage('Running BIM comparison...')
+    setStatusMessage(useManualAlignment ? 'Running BIM comparison (manual alignment)...' : 'Running BIM comparison (auto-register)...')
     try {
-      // Step 1: auto-match segments to IFC elements
       const matchRes = await fetch(`/api/bim/auto_match/${activeSession}`)
       const matchData = await matchRes.json()
       if (!matchData.matches?.length) {
@@ -592,11 +598,14 @@ function App() {
         setSabanaLoading(false)
         return
       }
-      // Step 2: run comparison (saves sabana_cloud.ply on server)
       const compareRes = await fetch('/api/bim/compare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: activeSession, matches: matchData.matches }),
+        body: JSON.stringify({
+          session_id: activeSession,
+          matches: matchData.matches,
+          skip_registration: useManualAlignment,
+        }),
       })
       const compareData = await compareRes.json()
       if (!compareData.ok) {
@@ -604,13 +613,11 @@ function App() {
         setSabanaLoading(false)
         return
       }
-      // Step 3: load sábana via Potree pipeline (WS binary streaming)
       viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: activeSession })
       viewportRef.current?.setOBBsVisible(false)
       if (activeTool === 'align') setActiveTool('navigate')
       setSabanaVisible(true)
       setSessions(prev => prev.map(s => s.id === activeSession ? { ...s, hasSabana: true } : s))
-      // Fetch full metadata + switch to analysis panel
       try {
         const metaRes = await fetch(`/api/sessions/${activeSession}/sabana/meta`)
         if (metaRes.ok) {
@@ -624,7 +631,7 @@ function App() {
       setStatusMessage(`Comparison error: ${e.message}`)
     }
     setSabanaLoading(false)
-  }, [activeSession, sessions, confirmDanger, sabanaVisible])
+  }, [activeSession, sabanaVisible, useManualAlignment])
 
   // ── Sábana: Toggle visibility via Potree streaming ──
   const handleToggleSabana = useCallback(() => {
@@ -1347,7 +1354,7 @@ function App() {
                     }
                   }}
                 />
-                {/* Deviation buttons will be added in toolbar redesign */}
+                {/* Registration toggle moved to comparison dialog */}
               </>
             )}
 
@@ -1424,6 +1431,16 @@ function App() {
                 onChange={e => setPointSize(parseFloat(e.target.value))} />
               <span className="control-value">{pointSize.toFixed(1)}</span>
             </div>
+            {hasConfidence && (
+              <div className="toolbar-group">
+                <span className="control-label">Confidence</span>
+                <input className="control-slider" type="range"
+                  min={0} max={1} step={0.01}
+                  value={confidenceThreshold}
+                  onChange={e => setConfidenceThreshold(parseFloat(e.target.value))} />
+                <span className="control-value">{confidenceThreshold.toFixed(2)}</span>
+              </div>
+            )}
             {/* ── Sábana / BIM Comparison ── */}
             {bimModels.length > 0 && segments.length > 0 && (
               <>
@@ -1459,6 +1476,7 @@ function App() {
           <Viewport
             ref={viewportRef}
             pointSize={pointSize}
+            confidenceThreshold={confidenceThreshold}
             activeSession={activeSession}
             activeTool={activeTool}
             showAxes={showAxes}
@@ -1469,6 +1487,10 @@ function App() {
             onStatusMessage={setStatusMessage}
             onSegments={setSegments}
             onPipelineProgress={handlePipelineProgress}
+            onHasConfidence={(has) => {
+              setHasConfidence(has)
+              if (has) setConfidenceThreshold(0.0)  // Start at 0 = show all
+            }}
             onBimLoaded={(models) => {
               setBimModels(models)
               if (models.length > 0) {
@@ -1843,6 +1865,42 @@ function App() {
           />
         )
       }
+      {/* BIM Comparison dialog with registration toggle */}
+      {compareDialogOpen && (
+        <div className="cd-overlay" onClick={(e) => { if (e.target === e.currentTarget) setCompareDialogOpen(false) }}>
+          <div className="cd-dialog cd-confirm">
+            <div className="cd-header">
+              <img src="/logo.png" alt="STAC" className="cd-logo" />
+              <span className="cd-app-name">STAC Build</span>
+            </div>
+            <div className="cd-body">
+              <span className="cd-icon">📐</span>
+              <div className="cd-content">
+                <div className="cd-title">BIM vs Scan Comparison</div>
+              </div>
+            </div>
+            <div className="compare-dialog-option">
+              <label className="bim-alignment-toggle">
+                <span className="bim-alignment-label">Registration</span>
+                <div className="toggle-switch-container">
+                  <span className={`toggle-option-label ${!useManualAlignment ? 'active' : ''}`}>Auto</span>
+                  <button
+                    className={`toggle-switch ${useManualAlignment ? 'on' : ''}`}
+                    onClick={() => setUseManualAlignment(!useManualAlignment)}
+                  >
+                    <span className="toggle-switch-knob" />
+                  </button>
+                  <span className={`toggle-option-label ${useManualAlignment ? 'active' : ''}`}>Manual</span>
+                </div>
+              </label>
+            </div>
+            <div className="cd-actions">
+              <button className="cd-btn cd-btn-cancel" onClick={() => setCompareDialogOpen(false)}>Cancel</button>
+              <button className="cd-btn cd-btn-confirm" onClick={runComparison}>Run Comparison</button>
+            </div>
+          </div>
+        </div>
+      )}
       {appDialog}
     </div >
   )
