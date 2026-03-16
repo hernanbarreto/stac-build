@@ -1382,10 +1382,20 @@ async def start_interactive_segmentation(session_id: str):
     from sam3_wrapper import get_sam3_wrapper
     sam3 = get_sam3_wrapper()
     
-    # Unload any previous SAM3 model to free VRAM before loading new session
-    if sam3.is_loaded:
-        print("[InteractiveSeg] Unloading previous SAM3 model to free VRAM...")
-        await asyncio.get_event_loop().run_in_executor(None, sam3.unload_model)
+    # Clean up any existing interactive sessions (but keep the model loaded)
+    for sid in list(sam3._interactive_sessions.keys()):
+        try:
+            sam3.predictor.handle_request(
+                request=dict(type="reset_session", session_id=sid)
+            )
+            session_info = sam3._interactive_sessions.pop(sid, None)
+            if session_info and isinstance(session_info, dict):
+                import shutil
+                temp_dir = session_info.get("keyframe_temp_dir")
+                if temp_dir and os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
     
     # Needs to run in executor
     loop = asyncio.get_event_loop()
@@ -1468,6 +1478,26 @@ async def reset_interactive_segmentation(request: Request):
             print(f"[InteractiveSeg] Reset session error (non-fatal): {e}")
 
     await loop.run_in_executor(None, _reset)
+    return {"ok": True}
+
+@app.post("/api/segmentation/clear_prompts")
+async def clear_interactive_prompts(request: Request):
+    """
+    Clear all prompts/tracked objects from the current interactive session
+    WITHOUT destroying it.  Frames stay loaded, model stays loaded.
+    The user can immediately add new prompts after this.
+    """
+    from sam3_wrapper import get_sam3_wrapper
+    body = await request.json()
+    state_id = body.get("state_id")
+    if not state_id:
+        raise HTTPException(status_code=400, detail="Missing state_id")
+
+    sam3 = get_sam3_wrapper()
+    loop = asyncio.get_event_loop()
+    ok = await loop.run_in_executor(None, sam3.clear_interactive_prompts, state_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to clear prompts")
     return {"ok": True}
 
 @app.post("/api/segmentation/add_prompt")
@@ -1757,16 +1787,22 @@ async def propagate_interactive_segmentation(request: Request):
             
             obj_labels = {temp_global_id: label_name}
             
-            stale_result = output_dir / "segmentation_result.json"
-            if stale_result.exists():
-                stale_result.unlink()
+            saved_seg = _save_masks(output_dir, remapped_masks, [label_name], obj_labels, cfg)
             
-            _save_masks(output_dir, remapped_masks, [label_name], obj_labels, cfg)
+            # Get the actual remapped obj_id (may differ from temp_global_id)
+            saved_obj_ids = set()
+            for inst in saved_seg.get("instances", []):
+                if inst.get("label") == label_name:
+                    saved_obj_ids.add(inst["id"])
+            if not saved_obj_ids:
+                # Fallback: use all obj_ids from NPZ that aren't in prev result
+                saved_obj_ids = {temp_global_id}
             
             task_manager.update(tid, detail="Computing 3D matching...")
             yield f"event: saving\ndata: {{\"status\": \"Computing 3D matching...\"}}\n\n"
             
-            result = _match_and_save_result(output_dir)
+            # Incremental: only match the new object, preserve existing segments
+            result = _match_and_save_result(output_dir, new_obj_ids=saved_obj_ids)
             
             task_manager.finish(tid)
             done_event = json.dumps({
@@ -1828,6 +1864,7 @@ async def get_segmentation_instances(session_id: str):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.get("/api/sessions/{session_id}/segmentation/mask/{instance_id}")

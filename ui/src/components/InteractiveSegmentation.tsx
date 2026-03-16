@@ -892,28 +892,25 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                         setPromptPoints([])
                                         setMaskOverlay(null)
                                         setHasPrompts(false)
+                                        setLabelName('')
                                         promptPointsMapRef.current.clear()
                                         maskCacheRef.current.clear()
-                                        // Reset SAM3 backend session and start fresh
+                                        // Clear SAM3 tracked objects (lightweight — session stays alive)
                                         if (stateId) {
                                             try {
                                                 setLoading(true)
-                                                setStatus('Resetting session...')
-                                                await fetch('/api/segmentation/reset_session', {
+                                                setStatus('Clearing prompts...')
+                                                const res = await fetch('/api/segmentation/clear_prompts', {
                                                     method: 'POST',
                                                     headers: { 'Content-Type': 'application/json' },
                                                     body: JSON.stringify({ state_id: stateId })
                                                 })
-                                                // Re-init fresh session
-                                                const res = await fetch(`/api/segmentation/start_session/${sessionId}`, { method: 'POST' })
                                                 if (res.ok) {
-                                                    const data = await res.json()
-                                                    setStateId(data.state_id)
-                                                    setStatus('Session reset — ready for new prompts.')
+                                                    setStatus('Prompts cleared — ready for new prompts.')
                                                 } else {
-                                                    setStatus('Warning: could not restart session')
+                                                    setStatus('Warning: could not clear prompts on backend')
                                                 }
-                                            } catch { setStatus('Error resetting session') }
+                                            } catch { setStatus('Error clearing prompts') }
                                             finally { setLoading(false) }
                                         } else {
                                             setStatus('Prompts cleared.')

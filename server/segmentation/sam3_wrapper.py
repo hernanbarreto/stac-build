@@ -597,6 +597,52 @@ class SAM3Wrapper:
         """Get session info including keyframe mapping, if available."""
         return self._interactive_sessions.get(state_id)
 
+    def clear_interactive_prompts(self, state_id: str) -> bool:
+        """
+        Clear all prompts/tracked objects from an interactive session WITHOUT
+        destroying the session.  The frames stay loaded in memory, and the
+        user can immediately add new prompts.
+
+        Returns True on success.
+        """
+        if not self.is_loaded or self.predictor is None:
+            return False
+
+        try:
+            session = self.predictor._ALL_INFERENCE_STATES.get(state_id)
+            if session is None:
+                logger.warning(f"[SAM3-Interactive] clear_prompts: session {state_id} not found")
+                return False
+
+            inference_state = session.get("state", {})
+            num_frames = inference_state.get("num_frames", 0)
+
+            # Clear tracked objects
+            if "obj_ids" in inference_state:
+                inference_state["obj_ids"] = []
+            if "obj_id_to_idx" in inference_state:
+                inference_state["obj_id_to_idx"] = {}
+            # Clear output caches
+            if "previous_stages_out" in inference_state:
+                for i in range(len(inference_state["previous_stages_out"])):
+                    inference_state["previous_stages_out"][i] = None
+            # Clear tracking results but keep frame features
+            if "output_dict" in inference_state:
+                for key in list(inference_state["output_dict"].keys()):
+                    inference_state["output_dict"][key] = {}
+            # Re-seed cached_frame_outputs (empty dicts for each frame)
+            if "cached_frame_outputs" in inference_state:
+                for fidx in range(num_frames):
+                    inference_state["cached_frame_outputs"][fidx] = {}
+
+            logger.info(f"[SAM3-Interactive] Cleared prompts for session {state_id} ({num_frames} frames kept)")
+            return True
+        except Exception as e:
+            logger.error(f"[SAM3-Interactive] Failed to clear prompts: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def add_interactive_prompt(
         self,
         state_id: str,
@@ -799,22 +845,21 @@ class SAM3Wrapper:
             import traceback
             traceback.print_exc()
         finally:
-            # Reset the session to free VRAM
+            # Re-seed cached_frame_outputs so subsequent add_prompt calls work.
+            # Propagation populates the cache, but SAM3 may clear parts of it
+            # after the stream ends.  Do NOT reset the session here — the user
+            # may want to add more prompts and re-propagate.
             try:
-                self.predictor.handle_request(
-                    request=dict(type="reset_session", session_id=state_id)
-                )
-                # Cleanup temp keyframe dir if it exists
-                session_info = self._interactive_sessions.pop(state_id, None)
-                if session_info and isinstance(session_info, dict):
-                    temp_dir = session_info.get("keyframe_temp_dir")
-                    if temp_dir and os.path.exists(temp_dir):
-                        import shutil
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                        logger.info(f"[SAM3-Interactive] Cleaned up temp dir: {temp_dir}")
-                logger.info(f"[SAM3-Interactive] Session {state_id} reset")
+                session = self.predictor._ALL_INFERENCE_STATES.get(state_id, {})
+                inference_state = session.get("state", {})
+                cached = inference_state.get("cached_frame_outputs", {})
+                n_frames = inference_state.get("num_frames", 0)
+                for fidx in range(n_frames):
+                    if fidx not in cached:
+                        cached[fidx] = {}
+                logger.info(f"[SAM3-Interactive] Re-seeded cache for {n_frames} frames after propagation")
             except Exception as e:
-                logger.error(f"[SAM3-Interactive] Error resetting session: {e}")
+                logger.warning(f"[SAM3-Interactive] Could not re-seed cache: {e}")
 
     def load_cached_masks(self, session_dir: Path, frame_indices: List[int] = None) -> Dict[int, Any]:
         """

@@ -282,7 +282,8 @@ class SourceContext:
 
     @property
     def segmentation_dir(self) -> Path:
-        return self.paths.segmentation_dir
+        # Segmentation data lives per-scan inside output/, not at project level
+        return self.output_dir
 
     @property
     def bim_comparison_dir(self) -> Path:

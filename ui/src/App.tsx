@@ -1236,44 +1236,46 @@ function App() {
                 <div className="segments-list">
                   {segments.map(seg => (
                     <div key={seg.key} className="segment-item" style={{ opacity: seg.excluded ? 0.5 : 1 }}>
-                      <input
-                        type="checkbox"
-                        checked={seg.visible}
-                        title="Toggle Visibility in 3D"
-                        className="segment-checkbox"
-                        onChange={() => {
-                          const newVis = !seg.visible
-                          setSegments(prev => prev.map(s =>
-                            s.key === seg.key ? { ...s, visible: newVis } : s
-                          ))
-                          viewportRef.current?.toggleOBB(seg.key, newVis)
-                        }}
-                      />
-                      <span
-                        className="segment-color-dot"
-                        style={{ background: seg.color }}
-                      />
-                      <span className="segment-label" style={{ flex: 1 }}>{seg.label}</span>
-                      <span className="segment-count" style={{ marginRight: '8px' }}>
-                        ({seg.totalPoints.toLocaleString()})
-                      </span>
-                      <button
-                        title="Exclude from Reconstruction"
-                        style={{
-                          background: seg.excluded ? '#ff4444' : 'transparent',
-                          border: '1px solid #ff4444',
-                          color: seg.excluded ? '#fff' : '#ff4444',
-                          borderRadius: '4px',
-                          padding: '2px 6px',
-                          fontSize: '10px',
-                          cursor: 'pointer'
-                        }}
-                        onClick={() => {
-                          setSegments(prev => prev.map(s => s.key === seg.key ? { ...s, excluded: !s.excluded } : s))
-                        }}
-                      >
-                        {seg.excluded ? 'Excluded' : 'Exclude'}
-                      </button>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <input
+                          type="checkbox"
+                          checked={seg.visible}
+                          title="Toggle Visibility in 3D"
+                          className="segment-checkbox"
+                          onChange={() => {
+                            const newVis = !seg.visible
+                            setSegments(prev => prev.map(s =>
+                              s.key === seg.key ? { ...s, visible: newVis } : s
+                            ))
+                            viewportRef.current?.toggleOBB(seg.key, newVis)
+                          }}
+                        />
+                        <span
+                          className="segment-color-dot"
+                          style={{ background: seg.color }}
+                        />
+                        <span className="segment-label" style={{ flex: 1 }}>{seg.label}</span>
+                        <span className="segment-count" style={{ marginRight: '8px' }}>
+                          ({seg.totalPoints.toLocaleString()})
+                        </span>
+                        <button
+                          title="Exclude from Reconstruction"
+                          style={{
+                            background: seg.excluded ? '#ff4444' : 'transparent',
+                            border: '1px solid #ff4444',
+                            color: seg.excluded ? '#fff' : '#ff4444',
+                            borderRadius: '4px',
+                            padding: '2px 6px',
+                            fontSize: '10px',
+                            cursor: 'pointer'
+                          }}
+                          onClick={() => {
+                            setSegments(prev => prev.map(s => s.key === seg.key ? { ...s, excluded: !s.excluded } : s))
+                          }}
+                        >
+                          {seg.excluded ? 'Excluded' : 'Exclude'}
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1798,6 +1800,8 @@ function App() {
                         totalPoints: inst.total_points || 0,
                         visible: true,
                         excluded: inst.excluded || false,
+                        confThreshold: inst.conf_threshold || 0,
+                        instanceId: inst.instance_id || inst.id,
                       })))
                     }
                     viewportRef.current?.refreshSegmentOBBs(sid)

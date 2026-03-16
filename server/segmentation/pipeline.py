@@ -923,29 +923,36 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
 def _load_ply_origins(ply_path: Path):
     """Load point origins (frame_global, pixel_row, pixel_col) and xyz from a binary PLY.
     Returns (xyz, frame_global, pixel_row, pixel_col) or None if no origins.
+    Dynamically reads the PLY header so it works regardless of extra fields.
     """
+    _ply_type = {
+        'float': '<f4', 'float32': '<f4', 'double': '<f8', 'float64': '<f8',
+        'uchar': 'u1', 'uint8': 'u1', 'char': 'i1', 'int8': 'i1',
+        'ushort': '<u2', 'uint16': '<u2', 'short': '<i2', 'int16': '<i2',
+        'uint': '<u4', 'uint32': '<u4', 'int': '<i4', 'int32': '<i4',
+    }
     try:
         with open(ply_path, 'rb') as f:
             n_pts = 0
-            has_origins = False
+            props = []
             while True:
                 line = f.readline().decode('ascii').strip()
                 if line.startswith('element vertex'):
                     n_pts = int(line.split()[-1])
-                if 'frame_global' in line:
-                    has_origins = True
-                if line == 'end_header':
+                elif line.startswith('property') and n_pts > 0:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        np_type = _ply_type.get(parts[1])
+                        if np_type:
+                            props.append((parts[2], np_type))
+                elif line == 'end_header':
                     break
-            
-            if not has_origins or n_pts == 0:
+
+            prop_names = {p[0] for p in props}
+            if 'frame_global' not in prop_names or n_pts == 0:
                 return None
-            
-            dtype = np.dtype([
-                ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-                ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
-                ('frame_global', '<i4'),
-                ('pixel_row', '<i2'), ('pixel_col', '<i2')
-            ])
+
+            dtype = np.dtype(props)
             data = np.frombuffer(f.read(), dtype=dtype)
             xyz = np.column_stack([data['x'], data['y'], data['z']])
             return xyz, data['frame_global'], data['pixel_row'], data['pixel_col']
@@ -954,11 +961,13 @@ def _load_ply_origins(ply_path: Path):
         return None
 
 
-def _compute_obb(points_xyz: np.ndarray) -> dict:
+
+def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
     """Compute minimum Oriented Bounding Box for floor-aligned coordinates.
     
-    Uses convex hull + rotating calipers on the XZ plane (floor) to find the
-    minimum-area footprint, then extends vertically (Y axis).
+    If face_normals is provided (list of (normal, n_points) tuples from RANSAC),
+    uses the dominant face normal to orient the OBB on the XZ plane.
+    Otherwise falls back to convex hull + rotating calipers.
     Coordinates must be floor-aligned (Y = up).
     """
     if len(points_xyz) < 4:
@@ -975,55 +984,70 @@ def _compute_obb(points_xyz: np.ndarray) -> dict:
     half_y = (y_max - y_min) / 2.0
     cy = (y_min + y_max) / 2.0
     
-    # Project to XZ plane for 2D minimum bounding rectangle
+    # Project to XZ plane for 2D bounding rectangle
     pts_xz = points_xyz[:, [0, 2]]  # (N, 2): [x, z]
     
-    try:
-        from scipy.spatial import ConvexHull
-        hull = ConvexHull(pts_xz)
-        hull_pts = pts_xz[hull.vertices]
-    except Exception:
-        # Fallback: use all points
-        hull_pts = pts_xz
-    
-    # Rotating calipers: try each hull edge as candidate orientation
-    n_hull = len(hull_pts)
-    best_area = float('inf')
     best_angle = 0.0
-    best_min = np.zeros(2)
-    best_max = np.zeros(2)
     
-    for i in range(n_hull):
-        edge = hull_pts[(i + 1) % n_hull] - hull_pts[i]
-        edge_len = np.linalg.norm(edge)
-        if edge_len < 1e-10:
-            continue
-        angle = np.arctan2(edge[1], edge[0])
+    if face_normals and len(face_normals) > 0:
+        # Use dominant face normal to orient the OBB
+        # Find face with most points
+        dominant_normal = max(face_normals, key=lambda fn: fn[1])[0]
         
-        cos_a = np.cos(-angle)
-        sin_a = np.sin(-angle)
-        rot2d = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        # Project face normal to XZ plane (ignore Y component)
+        nxz = np.array([dominant_normal[0], dominant_normal[2]])
+        nxz_len = np.linalg.norm(nxz)
+        if nxz_len > 0.1:  # face has meaningful XZ component
+            nxz = nxz / nxz_len
+            # Angle of the face normal in XZ (the OBB aligns PERPENDICULAR to the face)
+            best_angle = np.arctan2(nxz[1], nxz[0])
+    else:
+        # Fallback: convex hull + rotating calipers
+        try:
+            from scipy.spatial import ConvexHull
+            hull = ConvexHull(pts_xz)
+            hull_pts = pts_xz[hull.vertices]
+        except Exception:
+            hull_pts = pts_xz
         
-        rotated = hull_pts @ rot2d.T
-        rmin = rotated.min(axis=0)
-        rmax = rotated.max(axis=0)
-        area = (rmax[0] - rmin[0]) * (rmax[1] - rmin[1])
+        n_hull = len(hull_pts)
+        best_area = float('inf')
         
-        if area < best_area:
-            best_area = area
-            best_angle = angle
-            best_min = rmin
-            best_max = rmax
+        for i in range(n_hull):
+            edge = hull_pts[(i + 1) % n_hull] - hull_pts[i]
+            edge_len = np.linalg.norm(edge)
+            if edge_len < 1e-10:
+                continue
+            angle = np.arctan2(edge[1], edge[0])
+            
+            cos_a = np.cos(-angle)
+            sin_a = np.sin(-angle)
+            rot2d = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+            
+            rotated = hull_pts @ rot2d.T
+            rmin = rotated.min(axis=0)
+            rmax = rotated.max(axis=0)
+            area = (rmax[0] - rmin[0]) * (rmax[1] - rmin[1])
+            
+            if area < best_area:
+                best_area = area
+                best_angle = angle
     
-    # Half extents in the rotated frame: [along-edge, Y, perpendicular]
-    half_x = (best_max[0] - best_min[0]) / 2.0
-    half_z = (best_max[1] - best_min[1]) / 2.0
+    # Compute extents using best_angle
+    cos_a = np.cos(-best_angle)
+    sin_a = np.sin(-best_angle)
+    rot2d = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+    rotated = pts_xz @ rot2d.T
+    rmin = rotated.min(axis=0)
+    rmax = rotated.max(axis=0)
     
-    # Center in rotated 2D space
-    cx_rot = (best_max[0] + best_min[0]) / 2.0
-    cz_rot = (best_max[1] + best_min[1]) / 2.0
+    half_x = (rmax[0] - rmin[0]) / 2.0
+    half_z = (rmax[1] - rmin[1]) / 2.0
     
-    # Transform center back to world XZ
+    # Center in rotated 2D space → world XZ
+    cx_rot = (rmax[0] + rmin[0]) / 2.0
+    cz_rot = (rmax[1] + rmin[1]) / 2.0
+    
     cos_back = np.cos(best_angle)
     sin_back = np.sin(best_angle)
     rot_back = np.array([[cos_back, -sin_back], [sin_back, cos_back]])
@@ -1033,7 +1057,6 @@ def _compute_obb(points_xyz: np.ndarray) -> dict:
     half_extents = [float(half_x), float(half_y), float(half_z)]
     
     # Rotation matrix: Y-axis rotation by best_angle
-    # Maps box local X → world direction along edge, local Z → perpendicular
     rotation = [
         [float(cos_back), 0.0, float(-sin_back)],
         [0.0, 1.0, 0.0],
@@ -1064,83 +1087,304 @@ def _find_nearest_keyframe(frame_idx: int, keyframes: list) -> Optional[int]:
     return best
 
 
-def _filter_instance_outliers(xyz: np.ndarray, indices: np.ndarray,
-                               obj_id: int, min_samples: int = 10,
-                               sor_k: int = 20, sor_std: float = 1.5) -> np.ndarray:
+def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
+                             obj_id: int) -> tuple:
     """
-    Remove outlier points from a segmented instance using DBSCAN + SOR.
+    Clean a segmented sub-cloud using voxel grid + local PCA + depth peeling.
     
-    1. DBSCAN clusters the instance's 3D points (auto-calibrated eps)
-    2. Keep only the largest cluster (removes satellite clusters)
-    3. SOR refines within the cluster (removes borderline strays)
+    Pipeline:
+      1. DBSCAN → keep largest cluster (remove satellite misattributions)
+      2. Subdivide into voxel grid
+      3. Per-voxel local PCA → classify as planar or complex
+      4. Planar voxels: depth peel along local normal (remove onion layers)
+      5. Non-planar voxels: SOR fallback (statistical outlier removal)
+    
+    All parameters are read from config.yaml (models.segmentation.segment_cleaning).
     
     Args:
         xyz: Full point cloud (N, 3) in display coordinates
         indices: Indices of points belonging to this instance
         obj_id: Object ID (for logging)
-        min_samples: DBSCAN min_samples parameter
-        sor_k: Number of neighbors for SOR
-        sor_std: Standard deviation multiplier for SOR threshold
     
     Returns:
-        Filtered indices array
+        Tuple of (filtered_indices, voxel_data) where voxel_data is a list of
+        [cx, cy, cz, nx, ny, nz] for each planar voxel
     """
-    points = xyz[indices]
+    from config import get_param
     
-    try:
-        from sklearn.cluster import DBSCAN
-        from sklearn.neighbors import NearestNeighbors
+    cfg_prefix = 'models.segmentation.segment_cleaning'
+    enabled = get_param(f'{cfg_prefix}.enabled', True)
+    if not enabled:
+        return indices, []
+    
+    voxel_size = get_param(f'{cfg_prefix}.voxel_size', 0.05)
+    min_pts_voxel = get_param(f'{cfg_prefix}.min_points_per_voxel', 10)
+    planarity_thresh = get_param(f'{cfg_prefix}.planarity_threshold', 0.3)
+    layer_tol = get_param(f'{cfg_prefix}.layer_tolerance', 0.005)
+    hist_bins = get_param(f'{cfg_prefix}.histogram_bins', 50)
+    dbscan_enabled = get_param(f'{cfg_prefix}.dbscan_enabled', True)
+    dbscan_min_samples = get_param(f'{cfg_prefix}.dbscan_min_samples', 10)
+    sor_k = get_param(f'{cfg_prefix}.sor_k', 20)
+    sor_std = get_param(f'{cfg_prefix}.sor_std', 1.5)
+    mad_mult = get_param(f'{cfg_prefix}.mad_multiplier', 3.0)
+    
+    points = xyz[indices]
+    n_original = len(indices)
+    _zr = lambda p: f"Z:[{p[:,2].min():.3f},{p[:,2].max():.3f}]" if len(p)>0 else "Z:empty"
+    print(f"[SegPipeline]     step0 RAW: {len(indices):,} pts {_zr(points)}")
+    
+    # ── Step 1: DBSCAN → remove noise/tiny clusters (optional) ──
+    dbscan_removed = 0
+    if dbscan_enabled:
+        try:
+            from sklearn.cluster import DBSCAN
+            from sklearn.neighbors import NearestNeighbors
+            
+            k = min(dbscan_min_samples, len(points) - 1)
+            if k < 2:
+                return indices, [], []
+            
+            nbrs = NearestNeighbors(n_neighbors=k).fit(points)
+            distances, _ = nbrs.kneighbors(points)
+            knn_dists = distances[:, -1]
+            eps = np.percentile(knn_dists, 90)
+            
+            clustering = DBSCAN(eps=eps, min_samples=dbscan_min_samples).fit(points)
+            labels = clustering.labels_
+            
+            unique_labels, counts = np.unique(labels[labels >= 0], return_counts=True)
+            if len(unique_labels) == 0:
+                return indices, [], []
+            
+            # Keep ALL clusters, only remove noise (label=-1)
+            cluster_mask = labels >= 0
+            
+            dbscan_removed = int(np.sum(~cluster_mask))
+            indices = indices[cluster_mask]
+            points = points[cluster_mask]
+            print(f"[SegPipeline]     step1 DBSCAN: {len(indices):,} pts (-{dbscan_removed}) {_zr(points)}")
+        except ImportError:
+            pass
+    
+    if len(points) < 20:
+        return indices, [], []
+    
+    # ── Load RANSAC parameters ──
+    ransac_tol = get_param(f'{cfg_prefix}.ransac_tolerance', 0.01)
+    min_face_pts = get_param(f'{cfg_prefix}.min_face_points', 100)
+    max_faces = get_param(f'{cfg_prefix}.max_faces', 8)
+    face_thick = get_param(f'{cfg_prefix}.face_thickness', 0.01)
+    
+    # ── Step 2: RANSAC iterative plane detection ──
+    remaining_mask = np.ones(len(points), dtype=bool)
+    faces = []
+    
+    for face_i in range(max_faces):
+        remaining_idx = np.where(remaining_mask)[0]
+        if len(remaining_idx) < min_face_pts:
+            break
         
-        # Auto-calibrate eps from k-NN distances (adapts to object density)
-        k = min(min_samples, len(points) - 1)
-        if k < 2:
-            return indices
+        rem_pts = points[remaining_idx]
         
-        nbrs = NearestNeighbors(n_neighbors=k).fit(points)
-        distances, _ = nbrs.kneighbors(points)
-        knn_dists = distances[:, -1]  # distance to k-th neighbor
-        eps = np.percentile(knn_dists, 90)  # 90th percentile → robust eps
+        best_inlier_count = 0
+        best_normal = None
+        best_d = 0.0
+        n_iters = min(500, max(50, len(rem_pts) // 10))
         
-        # Step 1: DBSCAN clustering
-        clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(points)
-        labels = clustering.labels_
+        for _ in range(n_iters):
+            sample_idx = np.random.choice(len(rem_pts), 3, replace=False)
+            p0, p1, p2 = rem_pts[sample_idx]
+            v1 = p1 - p0
+            v2 = p2 - p0
+            normal = np.cross(v1, v2)
+            norm_len = np.linalg.norm(normal)
+            if norm_len < 1e-10:
+                continue
+            normal = normal / norm_len
+            d = -np.dot(normal, p0)
+            dists = np.abs(rem_pts @ normal + d)
+            n_inliers = int(np.sum(dists < ransac_tol))
+            if n_inliers > best_inlier_count:
+                best_inlier_count = n_inliers
+                best_normal = normal
+                best_d = d
         
-        unique_labels, counts = np.unique(labels[labels >= 0], return_counts=True)
-        if len(unique_labels) == 0:
-            return indices  # all noise → keep originals
+        if best_inlier_count < min_face_pts:
+            break
         
-        largest_cluster = unique_labels[np.argmax(counts)]
-        cluster_mask = labels == largest_cluster
+        # Refine plane using all inliers via PCA
+        rem_dists = np.abs(rem_pts @ best_normal + best_d)
+        inlier_local = rem_dists < ransac_tol
+        inlier_pts = rem_pts[inlier_local]
+        centroid = np.mean(inlier_pts, axis=0)
+        centered = inlier_pts - centroid
+        cov = (centered.T @ centered) / len(inlier_pts)
+        _, eigvecs = np.linalg.eigh(cov)
+        refined_normal = eigvecs[:, 0]
+        refined_d = -np.dot(refined_normal, centroid)
         
-        # Step 2: SOR on largest cluster
-        cluster_points = points[cluster_mask]
-        cluster_indices = indices[cluster_mask]
+        rem_dists_refined = np.abs(rem_pts @ refined_normal + refined_d)
+        inlier_local_refined = rem_dists_refined < ransac_tol
+        inlier_global_idx = remaining_idx[inlier_local_refined]
+        faces.append((refined_normal, refined_d, inlier_global_idx))
+        remaining_mask[inlier_global_idx] = False
         
-        if len(cluster_points) >= sor_k:
-            nbrs2 = NearestNeighbors(n_neighbors=sor_k).fit(cluster_points)
-            dists2, _ = nbrs2.kneighbors(cluster_points)
-            mean_dists = np.mean(dists2[:, 1:], axis=1)
-            threshold = np.mean(mean_dists) + sor_std * np.std(mean_dists)
-            sor_mask = mean_dists < threshold
-            cluster_indices = cluster_indices[sor_mask]
+        print(f"[SegPipeline]     face {face_i}: {len(inlier_global_idx)} pts, "
+              f"normal=[{refined_normal[0]:.2f},{refined_normal[1]:.2f},{refined_normal[2]:.2f}]")
+    
+    # ── Step 2b: Merge parallel faces (collapse onion layers) ──
+    # If two faces have near-parallel normals (|dot| > 0.95), merge into one
+    if len(faces) > 1:
+        merged = []
+        used = set()
+        for i in range(len(faces)):
+            if i in used:
+                continue
+            n_i, d_i, idx_i = faces[i]
+            group_idx = [idx_i]
+            for j in range(i + 1, len(faces)):
+                if j in used:
+                    continue
+                n_j = faces[j][0]
+                dot = abs(np.dot(n_i, n_j))
+                if dot > 0.95:  # near-parallel → same surface
+                    group_idx.append(faces[j][2])
+                    used.add(j)
+            
+            # Merge all grouped indices
+            combined_idx = np.concatenate(group_idx) if len(group_idx) > 1 else idx_i
+            
+            # Refit plane using combined inliers via PCA
+            combined_pts = points[combined_idx]
+            centroid = np.mean(combined_pts, axis=0)
+            centered = combined_pts - centroid
+            cov = (centered.T @ centered) / len(combined_pts)
+            _, eigvecs = np.linalg.eigh(cov)
+            merged_normal = eigvecs[:, 0]
+            merged_d = -np.dot(merged_normal, centroid)
+            
+            merged.append((merged_normal, merged_d, combined_idx))
         
-        removed = len(indices) - len(cluster_indices)
-        if removed > 0:
-            n_clusters = len(unique_labels)
-            noise_count = np.sum(labels == -1)
-            print(f"[SegPipeline]   DBSCAN obj {obj_id}: eps={eps:.4f}, "
-                  f"{n_clusters} clusters, {noise_count} noise pts → "
-                  f"removed {removed} outliers ({100*removed/len(indices):.1f}%)")
+        print(f"[SegPipeline]     merged: {len(faces)} → {len(merged)} faces")
+        faces = merged
+    
+    # ── Step 3: Per-face thickness cleaning ──
+    kept_mask = np.zeros(len(points), dtype=bool)
+    n_face_cleaned = 0
+    
+    for face_normal, face_d, face_idx in faces:
+        face_pts = points[face_idx]
+        dists_to_plane = np.abs(face_pts @ face_normal + face_d)
+        thickness_mask = dists_to_plane <= face_thick
+        n_face_cleaned += int(np.sum(~thickness_mask))
+        kept_mask[face_idx[thickness_mask]] = True
+    
+    # ── Step 4: Residual points — SOR cleanup ──
+    residual_idx = np.where(remaining_mask)[0]
+    n_residual = len(residual_idx)
+    n_residual_kept = 0
+    n_residual_removed = 0
+    
+    if n_residual >= sor_k:
+        try:
+            from sklearn.neighbors import NearestNeighbors as NN
+            res_pts = points[residual_idx]
+            nbrs_res = NN(n_neighbors=min(sor_k, len(res_pts))).fit(res_pts)
+            dists_res, _ = nbrs_res.kneighbors(res_pts)
+            mean_dists_res = np.mean(dists_res[:, 1:], axis=1)
+            threshold_res = np.mean(mean_dists_res) + sor_std * np.std(mean_dists_res)
+            sor_mask_res = mean_dists_res < threshold_res
+            kept_mask[residual_idx[sor_mask_res]] = True
+            n_residual_kept = int(np.sum(sor_mask_res))
+            n_residual_removed = int(np.sum(~sor_mask_res))
+        except ImportError:
+            kept_mask[residual_idx] = True
+            n_residual_kept = n_residual
+    elif n_residual > 0:
+        kept_mask[residual_idx] = True
+        n_residual_kept = n_residual
+    
+    result_indices = indices[kept_mask]
+    
+    # Build face_id mapping before SOR (will filter in sync)
+    local_face_id = np.full(len(points), -1, dtype=np.int32)
+    for fi, (face_normal, face_d, face_idx) in enumerate(faces):
+        local_face_id[face_idx] = fi
+    result_face_id = local_face_id[kept_mask]
+    
+    # ── Step 5: Final global SOR ──
+    n_final_sor = 0
+    if len(result_indices) >= sor_k:
+        try:
+            from sklearn.neighbors import NearestNeighbors as NN
+            result_pts = xyz[result_indices]
+            nbrs_final = NN(n_neighbors=sor_k).fit(result_pts)
+            dists_final, _ = nbrs_final.kneighbors(result_pts)
+            mean_dists_final = np.mean(dists_final[:, 1:], axis=1)
+            threshold_final = (np.mean(mean_dists_final)
+                               + sor_std * np.std(mean_dists_final))
+            final_mask = mean_dists_final < threshold_final
+            n_final_sor = int(np.sum(~final_mask))
+            result_indices = result_indices[final_mask]
+            result_face_id = result_face_id[final_mask]  # keep in sync
+        except ImportError:
+            pass
+    
+    total_removed = n_original - len(result_indices)
+    
+    if total_removed > 0:
+        print(f"[SegPipeline]   Clean obj {obj_id}: "
+              f"{n_original:,} → {len(result_indices):,} pts "
+              f"(DBSCAN -{dbscan_removed}, "
+              f"{len(faces)} faces: cleaned -{n_face_cleaned}, "
+              f"residual {n_residual_kept}/{n_residual} kept, "
+              f"SOR -{n_final_sor})")
+    
+
+
+    # ── Step 6: Generate voxel mesh data from detected faces ──
+    # Use larger voxels for visualization (5cm) — independent of cleaning voxel_size
+    voxel_data = []
+    mesh_vs = 0.05  # 5cm visualization voxels
+    if len(result_indices) >= 5 and faces:
+        final_pts = xyz[result_indices]
         
-        return cluster_indices
+        # Voxelize at 5cm for the mesh
+        fv_keys = np.floor(final_pts / mesh_vs).astype(np.int64)
+        fv_ids = fv_keys[:, 0] * 1_000_003 + fv_keys[:, 1] * 1_000_033 + fv_keys[:, 2]
         
-    except ImportError:
-        # Fallback: centroid + stddev filter
-        centroid = np.mean(points, axis=0)
-        dists = np.linalg.norm(points - centroid, axis=1)
-        threshold = np.mean(dists) + 2 * np.std(dists)
-        inlier_mask = dists < threshold
-        return indices[inlier_mask]
+        for fv_id in np.unique(fv_ids):
+            fv_mask = fv_ids == fv_id
+            fv_pts = final_pts[fv_mask]
+            if len(fv_pts) < 3:
+                continue
+            centroid = np.mean(fv_pts, axis=0)
+            
+            # Majority face normal for this voxel
+            vox_face_ids = result_face_id[fv_mask]
+            face_ids_in_vox = vox_face_ids[vox_face_ids >= 0]
+            if len(face_ids_in_vox) > 0:
+                majority_fi = np.bincount(face_ids_in_vox).argmax()
+                normal = faces[majority_fi][0]  # face normal
+            else:
+                # Residual: PCA fallback
+                centered = fv_pts - centroid
+                cov = (centered.T @ centered) / len(fv_pts)
+                eigenvalues = np.linalg.eigvalsh(cov)
+                if max(eigenvalues[0], 1e-12) / max(eigenvalues[2], 1e-12) < planarity_thresh:
+                    _, eigvecs = np.linalg.eigh(cov)
+                    normal = eigvecs[:, 0]
+                else:
+                    continue
+            
+            voxel_data.append([
+                float(centroid[0]), float(centroid[1]), float(centroid[2]),
+                float(normal[0]), float(normal[1]), float(normal[2])
+            ])
+    # Build face_normals summary for OBB: [(normal, n_points), ...]
+    face_normals_summary = [(fn, len(fi)) for fn, fd, fi in faces]
+    
+    return result_indices, voxel_data, face_normals_summary
 
 
 def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_obj_ids=None) -> dict:
@@ -1352,11 +1596,13 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         # ── Per-instance DBSCAN outlier removal ──
         # Skip if already filtered in a previous incremental run
         pre_filter_count = len(all_matched)
+        voxel_mesh_data = []
+        face_normals_data = []
         if skip_filter_ids and iid in skip_filter_ids:
-            # Reuse cached filtered indices (already passed DBSCAN+SOR)
+            # Reuse cached filtered indices (already cleaned)
             pass  # all_matched stays as-is from mask matching
         elif pre_filter_count >= 20:
-            all_matched = _filter_instance_outliers(
+            all_matched, voxel_mesh_data, face_normals_data = _clean_segment_subcloud(
                 xyz_display, all_matched, iid
             )
         
@@ -1377,9 +1623,17 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             "globalIndices": all_matched.tolist(),
         }
         
-        # Compute OBB using floor-aligned coordinates
+        # Add voxel mesh data if available
+        if voxel_mesh_data:
+            instance["voxel_mesh"] = {
+                "voxel_size": 0.05,  # 5cm mesh voxels (independent of cleaning voxel_size)
+                "count": len(voxel_mesh_data),
+                "data": voxel_mesh_data,  # [[cx,cy,cz,nx,ny,nz], ...]
+            }
+        
+        # Compute OBB using floor-aligned coordinates + face normals
         if len(all_matched) >= 4:
-            instance["obb"] = _compute_obb(xyz_display[all_matched])
+            instance["obb"] = _compute_obb(xyz_display[all_matched], face_normals=face_normals_data)
         
         instances.append(instance)
         removed = pre_filter_count - len(all_matched)

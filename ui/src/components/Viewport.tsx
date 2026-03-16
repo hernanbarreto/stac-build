@@ -1705,6 +1705,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         if (materialRef.current) {
             materialRef.current.uniforms.uConfidenceThreshold.value = confidenceThreshold
         }
+        // Hide point cloud at max confidence to show only voxel mesh + wireframe
+        const hideCloud = confidenceThreshold >= 1.0
+        if (pointCloudRef.current) {
+            pointCloudRef.current.visible = !hideCloud
+        }
+        // Also hide Potree octree
+        const potreeGroup = sceneRef.current?.getObjectByName('potree-octree')
+        if (potreeGroup) {
+            potreeGroup.visible = !hideCloud
+        }
     }, [confidenceThreshold])
 
     // Track activeSession in a ref for the WS onopen handler
@@ -2207,6 +2217,85 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
             obbContainer.add(wireframe)
 
+            // ── Voxel mesh: semi-transparent surface quads ──
+            const voxelMesh = inst.voxel_mesh as { voxel_size: number; count: number; data: number[][] } | undefined
+            if (voxelMesh && voxelMesh.count > 0) {
+                const vs = voxelMesh.voxel_size
+                const planeGeo = new THREE.PlaneGeometry(vs, vs)
+                const planeMat = new THREE.MeshBasicMaterial({
+                    color: hexColor,
+                    opacity: 0.25,
+                    transparent: true,
+                    side: THREE.DoubleSide,
+                    depthWrite: false,
+                })
+                const mesh = new THREE.InstancedMesh(planeGeo, planeMat, voxelMesh.count)
+
+                const dummy = new THREE.Object3D()
+                const defaultNormal = new THREE.Vector3(0, 0, 1)
+                const quat = new THREE.Quaternion()
+
+                for (let vi = 0; vi < voxelMesh.count; vi++) {
+                    const d = voxelMesh.data[vi]
+                    dummy.position.set(d[0], d[1], d[2])
+                    const voxNormal = new THREE.Vector3(d[3], d[4], d[5]).normalize()
+                    quat.setFromUnitVectors(defaultNormal, voxNormal)
+                    dummy.quaternion.copy(quat)
+                    dummy.updateMatrix()
+                    mesh.setMatrixAt(vi, dummy.matrix)
+                }
+                mesh.instanceMatrix.needsUpdate = true
+                group.add(mesh)
+
+                // ── Wireframe: connect neighboring voxel centers via grid hash (O(n)) ──
+                const linePositions: number[] = []
+
+                // Build spatial hash: grid key → voxel index
+                const gridMap = new Map<string, number>()
+                for (let vi = 0; vi < voxelMesh.count; vi++) {
+                    const d = voxelMesh.data[vi]
+                    const gx = Math.floor(d[0] / vs)
+                    const gy = Math.floor(d[1] / vs)
+                    const gz = Math.floor(d[2] / vs)
+                    gridMap.set(`${gx},${gy},${gz}`, vi)
+                }
+
+                // For each voxel, check 13 unique neighbor directions (avoid duplicates)
+                const neighborOffsets = [
+                    [1, 0, 0], [0, 1, 0], [0, 0, 1],
+                    [1, 1, 0], [1, -1, 0], [1, 0, 1], [1, 0, -1],
+                    [0, 1, 1], [0, 1, -1],
+                    [1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1],
+                ]
+                for (let vi = 0; vi < voxelMesh.count; vi++) {
+                    const d = voxelMesh.data[vi]
+                    const gx = Math.floor(d[0] / vs)
+                    const gy = Math.floor(d[1] / vs)
+                    const gz = Math.floor(d[2] / vs)
+                    for (const [ox, oy, oz] of neighborOffsets) {
+                        const key = `${gx + ox},${gy + oy},${gz + oz}`
+                        const ni = gridMap.get(key)
+                        if (ni !== undefined) {
+                            const nd = voxelMesh.data[ni]
+                            linePositions.push(d[0], d[1], d[2], nd[0], nd[1], nd[2])
+                        }
+                    }
+                }
+
+                if (linePositions.length > 0) {
+                    const lineGeo = new THREE.BufferGeometry()
+                    lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3))
+                    const lineMat = new THREE.LineBasicMaterial({
+                        color: hexColor,
+                        opacity: 0.7,
+                        transparent: true,
+                        depthWrite: false,
+                    })
+                    const wireLines = new THREE.LineSegments(lineGeo, lineMat)
+                    group.add(wireLines)
+                }
+            }
+
             // Text label sprite at top of box
             const labelCanvas = document.createElement('canvas')
             const ctx = labelCanvas.getContext('2d')!
@@ -2239,6 +2328,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // NOTE: OBBs are already in floor-aligned coordinates from the backend
         // (segmentation_pipeline.py applies floor transform to xyz_display before
         // computing OBBs). No additional transform needed here.
+
 
         // console.log(`[Viewport] Rendered ${group.children.length} OBBs`)
 
