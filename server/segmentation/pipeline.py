@@ -960,6 +960,49 @@ def _load_ply_origins(ply_path: Path):
         print(f"[SegPipeline] Error loading PLY origins from {ply_path}: {e}")
         return None
 
+def _write_corrected_ply(src_path: Path, dst_path: Path, xyz_corrected: np.ndarray):
+    """Write a corrected PLY by replacing xyz in the original binary PLY.
+    Preserves all other fields (colors, normals, confidence, origins).
+    """
+    _ply_type = {
+        'float': '<f4', 'float32': '<f4', 'double': '<f8', 'float64': '<f8',
+        'uchar': 'u1', 'uint8': 'u1', 'char': 'i1', 'int8': 'i1',
+        'ushort': '<u2', 'uint16': '<u2', 'short': '<i2', 'int16': '<i2',
+        'uint': '<u4', 'uint32': '<u4', 'int': '<i4', 'int32': '<i4',
+    }
+    with open(src_path, 'rb') as f:
+        header_lines = []
+        n_pts = 0
+        props = []
+        while True:
+            line = f.readline().decode('ascii').strip()
+            header_lines.append(line)
+            if line.startswith('element vertex'):
+                n_pts = int(line.split()[-1])
+            elif line.startswith('property') and n_pts > 0:
+                parts = line.split()
+                if len(parts) >= 3:
+                    np_type = _ply_type.get(parts[1])
+                    if np_type:
+                        props.append((parts[2], np_type))
+            elif line == 'end_header':
+                break
+        
+        dtype = np.dtype(props)
+        data = np.frombuffer(f.read(), dtype=dtype).copy()
+    
+    # Replace xyz
+    data['x'] = xyz_corrected[:, 0].astype(data['x'].dtype)
+    data['y'] = xyz_corrected[:, 1].astype(data['y'].dtype)
+    data['z'] = xyz_corrected[:, 2].astype(data['z'].dtype)
+    
+    # Write corrected PLY
+    header = '\n'.join(header_lines) + '\n'
+    with open(dst_path, 'wb') as f:
+        f.write(header.encode('ascii'))
+        f.write(data.tobytes())
+    
+    print(f"[SegPipeline] Wrote corrected cloud: {dst_path.name} ({n_pts:,} pts)")
 
 
 def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
@@ -1142,7 +1185,7 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
             
             k = min(dbscan_min_samples, len(points) - 1)
             if k < 2:
-                return indices, [], []
+                return indices, [], [], [], np.array([], dtype=np.int32)
             
             nbrs = NearestNeighbors(n_neighbors=k).fit(points)
             distances, _ = nbrs.kneighbors(points)
@@ -1154,7 +1197,7 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
             
             unique_labels, counts = np.unique(labels[labels >= 0], return_counts=True)
             if len(unique_labels) == 0:
-                return indices, [], []
+                return indices, [], [], [], np.array([], dtype=np.int32)
             
             # Keep ALL clusters, only remove noise (label=-1)
             cluster_mask = labels >= 0
@@ -1167,7 +1210,7 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
             pass
     
     if len(points) < 20:
-        return indices, [], []
+        return indices, [], [], [], np.array([], dtype=np.int32)
     
     # ── Load RANSAC parameters ──
     ransac_tol = get_param(f'{cfg_prefix}.ransac_tolerance', 0.01)
@@ -1261,6 +1304,15 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
             cov = (centered.T @ centered) / len(combined_pts)
             _, eigvecs = np.linalg.eigh(cov)
             merged_normal = eigvecs[:, 0]
+            
+            # Snap near-axis normals to exact axis (eliminates tilt-induced thickness)
+            abs_n = np.abs(merged_normal)
+            dominant_axis = int(np.argmax(abs_n))
+            if abs_n[dominant_axis] > 0.99:  # within ~8° of axis
+                sign = np.sign(merged_normal[dominant_axis])
+                merged_normal = np.zeros(3)
+                merged_normal[dominant_axis] = sign
+            
             merged_d = -np.dot(merged_normal, centroid)
             
             merged.append((merged_normal, merged_d, combined_idx))
@@ -1268,77 +1320,43 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
         print(f"[SegPipeline]     merged: {len(faces)} → {len(merged)} faces")
         faces = merged
     
-    # ── Step 3: Per-face thickness cleaning ──
-    kept_mask = np.zeros(len(points), dtype=bool)
-    n_face_cleaned = 0
+    # ── Step 3: Assign ALL points to nearest face (non-destructive) ──
+    # No points are removed — every post-DBSCAN point is kept.
+    # Each point is assigned to the face whose plane is closest.
+    result_indices = indices  # keep ALL points
     
-    for face_normal, face_d, face_idx in faces:
-        face_pts = points[face_idx]
-        dists_to_plane = np.abs(face_pts @ face_normal + face_d)
-        thickness_mask = dists_to_plane <= face_thick
-        n_face_cleaned += int(np.sum(~thickness_mask))
-        kept_mask[face_idx[thickness_mask]] = True
-    
-    # ── Step 4: Residual points — SOR cleanup ──
-    residual_idx = np.where(remaining_mask)[0]
-    n_residual = len(residual_idx)
-    n_residual_kept = 0
-    n_residual_removed = 0
-    
-    if n_residual >= sor_k:
-        try:
-            from sklearn.neighbors import NearestNeighbors as NN
-            res_pts = points[residual_idx]
-            nbrs_res = NN(n_neighbors=min(sor_k, len(res_pts))).fit(res_pts)
-            dists_res, _ = nbrs_res.kneighbors(res_pts)
-            mean_dists_res = np.mean(dists_res[:, 1:], axis=1)
-            threshold_res = np.mean(mean_dists_res) + sor_std * np.std(mean_dists_res)
-            sor_mask_res = mean_dists_res < threshold_res
-            kept_mask[residual_idx[sor_mask_res]] = True
-            n_residual_kept = int(np.sum(sor_mask_res))
-            n_residual_removed = int(np.sum(~sor_mask_res))
-        except ImportError:
-            kept_mask[residual_idx] = True
-            n_residual_kept = n_residual
-    elif n_residual > 0:
-        kept_mask[residual_idx] = True
-        n_residual_kept = n_residual
-    
-    result_indices = indices[kept_mask]
-    
-    # Build face_id mapping before SOR (will filter in sync)
     local_face_id = np.full(len(points), -1, dtype=np.int32)
-    for fi, (face_normal, face_d, face_idx) in enumerate(faces):
-        local_face_id[face_idx] = fi
-    result_face_id = local_face_id[kept_mask]
     
-    # ── Step 5: Final global SOR ──
-    n_final_sor = 0
-    if len(result_indices) >= sor_k:
-        try:
-            from sklearn.neighbors import NearestNeighbors as NN
-            result_pts = xyz[result_indices]
-            nbrs_final = NN(n_neighbors=sor_k).fit(result_pts)
-            dists_final, _ = nbrs_final.kneighbors(result_pts)
-            mean_dists_final = np.mean(dists_final[:, 1:], axis=1)
-            threshold_final = (np.mean(mean_dists_final)
-                               + sor_std * np.std(mean_dists_final))
-            final_mask = mean_dists_final < threshold_final
-            n_final_sor = int(np.sum(~final_mask))
-            result_indices = result_indices[final_mask]
-            result_face_id = result_face_id[final_mask]  # keep in sync
-        except ImportError:
-            pass
+    if faces:
+        # Compute distance of each point to each face plane
+        n_faces = len(faces)
+        all_dists = np.full((len(points), n_faces), np.inf)
+        for fi, (face_normal, face_d, face_idx) in enumerate(faces):
+            all_dists[:, fi] = np.abs(points @ face_normal + face_d)
+        
+        # Assign each point to the nearest face
+        nearest_face = np.argmin(all_dists, axis=1)
+        nearest_dist = all_dists[np.arange(len(points)), nearest_face]
+        
+        if n_faces == 1:
+            # Single face: assign ALL points (object is one surface)
+            local_face_id[:] = 0
+        else:
+            # Multi-face: generous threshold to catch onion layers
+            max_assign_dist = 0.10  # 10cm
+            assign_mask = nearest_dist <= max_assign_dist
+            local_face_id[assign_mask] = nearest_face[assign_mask]
+    
+    result_face_id = local_face_id
     
     total_removed = n_original - len(result_indices)
+    n_assigned = int(np.sum(local_face_id >= 0))
+    n_residual = int(np.sum(local_face_id < 0))
     
-    if total_removed > 0:
-        print(f"[SegPipeline]   Clean obj {obj_id}: "
-              f"{n_original:,} → {len(result_indices):,} pts "
-              f"(DBSCAN -{dbscan_removed}, "
-              f"{len(faces)} faces: cleaned -{n_face_cleaned}, "
-              f"residual {n_residual_kept}/{n_residual} kept, "
-              f"SOR -{n_final_sor})")
+    print(f"[SegPipeline]   Clean obj {obj_id}: "
+          f"{n_original:,} → {len(result_indices):,} pts "
+          f"(DBSCAN -{dbscan_removed}, "
+          f"{len(faces)} faces, {n_assigned} assigned, {n_residual} residual)")
     
 
 
@@ -1353,29 +1371,64 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
         fv_keys = np.floor(final_pts / mesh_vs).astype(np.int64)
         fv_ids = fv_keys[:, 0] * 1_000_003 + fv_keys[:, 1] * 1_000_033 + fv_keys[:, 2]
         
+        # Pass 1: compute face or PCA for each voxel
+        voxel_info = {}  # grid_key → {centroid, face_fi, normal, pca_normal}
         for fv_id in np.unique(fv_ids):
             fv_mask = fv_ids == fv_id
             fv_pts = final_pts[fv_mask]
             if len(fv_pts) < 3:
                 continue
             centroid = np.mean(fv_pts, axis=0)
+            gk = tuple(np.floor(centroid / mesh_vs).astype(int))
             
-            # Majority face normal for this voxel
+            # Majority face
             vox_face_ids = result_face_id[fv_mask]
             face_ids_in_vox = vox_face_ids[vox_face_ids >= 0]
             if len(face_ids_in_vox) > 0:
-                majority_fi = np.bincount(face_ids_in_vox).argmax()
-                normal = faces[majority_fi][0]  # face normal
+                majority_fi = int(np.bincount(face_ids_in_vox).argmax())
+                voxel_info[gk] = {'centroid': centroid, 'face_fi': majority_fi, 'normal': faces[majority_fi][0]}
             else:
-                # Residual: PCA fallback
+                # PCA for residual
                 centered = fv_pts - centroid
                 cov = (centered.T @ centered) / len(fv_pts)
                 eigenvalues = np.linalg.eigvalsh(cov)
                 if max(eigenvalues[0], 1e-12) / max(eigenvalues[2], 1e-12) < planarity_thresh:
                     _, eigvecs = np.linalg.eigh(cov)
-                    normal = eigvecs[:, 0]
-                else:
-                    continue
+                    pca_normal = eigvecs[:, 0]
+                    voxel_info[gk] = {'centroid': centroid, 'face_fi': -1, 'normal': pca_normal}
+        
+        # Pass 2: flood-fill residual voxels to neighbor faces
+        # Check 26 neighbors; if a neighbor has a face and PCA normal is compatible, adopt it
+        neighbor_offsets_26 = [(dx, dy, dz) for dx in (-1,0,1) for dy in (-1,0,1) for dz in (-1,0,1) if (dx,dy,dz) != (0,0,0)]
+        changed = True
+        while changed:
+            changed = False
+            for gk, info in list(voxel_info.items()):
+                if info['face_fi'] >= 0:
+                    continue  # already assigned
+                for ox, oy, oz in neighbor_offsets_26:
+                    nk = (gk[0]+ox, gk[1]+oy, gk[2]+oz)
+                    nb = voxel_info.get(nk)
+                    if nb and nb['face_fi'] >= 0:
+                        # Check normal compatibility
+                        dot = abs(np.dot(info['normal'], nb['normal']))
+                        if dot > 0.8:
+                            info['face_fi'] = nb['face_fi']
+                            info['normal'] = faces[nb['face_fi']][0]
+                            changed = True
+                            break
+        
+        # Build final voxel_data with snapping
+        for gk, info in voxel_info.items():
+            centroid = info['centroid']
+            normal = info['normal']
+            fi = info['face_fi']
+            
+            if fi >= 0:
+                # Snap to face plane
+                face_d = faces[fi][1]
+                dist_to_plane = np.dot(centroid, normal) + face_d
+                centroid = centroid - dist_to_plane * normal
             
             voxel_data.append([
                 float(centroid[0]), float(centroid[1]), float(centroid[2]),
@@ -1384,7 +1437,10 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
     # Build face_normals summary for OBB: [(normal, n_points), ...]
     face_normals_summary = [(fn, len(fi)) for fn, fd, fi in faces]
     
-    return result_indices, voxel_data, face_normals_summary
+    # Face planes for point projection: [(normal, d), ...]
+    face_planes = [(fn, fd) for fn, fd, fi in faces]
+    
+    return result_indices, voxel_data, face_normals_summary, face_planes, local_face_id
 
 
 def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_obj_ids=None) -> dict:
@@ -1447,6 +1503,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     
     # Apply SAME floor alignment the viewer uses (from saved transform)
     xyz_display = xyz  # default: use raw xyz
+    s, R, t = 1.0, np.eye(3), np.zeros(3)  # identity transform defaults
     transform_path = output_dir / "floor_transform.npz"
     if transform_path.exists():
         try:
@@ -1598,11 +1655,13 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         pre_filter_count = len(all_matched)
         voxel_mesh_data = []
         face_normals_data = []
+        face_planes_data = []
+        face_id_data = np.array([], dtype=np.int32)
         if skip_filter_ids and iid in skip_filter_ids:
             # Reuse cached filtered indices (already cleaned)
             pass  # all_matched stays as-is from mask matching
         elif pre_filter_count >= 20:
-            all_matched, voxel_mesh_data, face_normals_data = _clean_segment_subcloud(
+            all_matched, voxel_mesh_data, face_normals_data, face_planes_data, face_id_data = _clean_segment_subcloud(
                 xyz_display, all_matched, iid
             )
         
@@ -1631,9 +1690,17 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                 "data": voxel_mesh_data,  # [[cx,cy,cz,nx,ny,nz], ...]
             }
         
-        # Compute OBB using floor-aligned coordinates + face normals
-        if len(all_matched) >= 4:
+        # Compute OBB from snapped voxel centroids (corrected geometry)
+        if voxel_mesh_data and len(voxel_mesh_data) >= 4:
+            voxel_centers = np.array([[v[0], v[1], v[2]] for v in voxel_mesh_data])
+            instance["obb"] = _compute_obb(voxel_centers, face_normals=face_normals_data)
+        elif len(all_matched) >= 4:
             instance["obb"] = _compute_obb(xyz_display[all_matched], face_normals=face_normals_data)
+        
+        # Store face projection data for point correction
+        if face_planes_data and len(face_id_data) > 0:
+            instance["_face_planes"] = face_planes_data
+            instance["_face_id"] = face_id_data
         
         instances.append(instance)
         removed = pre_filter_count - len(all_matched)
@@ -1717,6 +1784,64 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     
     print(f"[SegPipeline] ✅ {len(instances)} instances matched against {cloud_label}, "
           f"{total_segmented:,}/{n_pts:,} points ({coverage*100:.1f}% coverage)")
+    
+    # ── Phase 4: Project assigned points to face planes → corrected cloud ──
+    n_projected = 0
+    xyz_corrected = xyz.copy()  # start from RAW xyz (pre-transform)
+    classification = np.zeros(len(xyz), dtype=np.uint8)  # 0=unsegmented
+    
+    # We need to work in display coordinates, then convert back
+    for inst in instances:
+        face_planes = inst.pop("_face_planes", None)
+        face_id = inst.pop("_face_id", None)
+        if face_planes is None or face_id is None or len(face_id) == 0:
+            continue
+        
+        global_indices = np.array(inst["globalIndices"], dtype=np.int64)
+        pts_display = xyz_display[global_indices].copy()
+        seg_id = int(inst.get("id", 0))
+        classification[global_indices] = min(seg_id, 255)  # uint8 cap
+        
+        for fi, (fn, fd) in enumerate(face_planes):
+            mask = face_id == fi
+            n_mask = int(np.sum(mask))
+            if n_mask == 0:
+                continue
+            pts_fi = pts_display[mask]
+            dists = pts_fi @ fn + fd
+            projected = pts_fi - np.outer(dists, fn)
+            pts_display[mask] = projected
+            n_projected += int(n_mask)
+        
+        # Convert back from display to raw coordinates
+        if transform_path.exists() and not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+            # Inverse: xyz_raw = (pts_display - t) @ R / s
+            xyz_corrected[global_indices] = (pts_display - t) @ R / s
+        else:
+            xyz_corrected[global_indices] = pts_display
+    
+    # Save classification sidecar (always, even if no projection — for segment visibility)
+    class_path = output_dir / "classification.npy"
+    np.save(class_path, classification)
+    
+    if n_projected > 0:
+        # Write corrected PLY (cleaned_cloud.ply stays untouched)
+        corrected_path = output_dir / "corrected_cloud.ply"
+        _write_corrected_ply(ply_path, corrected_path, xyz_corrected)
+        print(f"[SegPipeline] ✏️ Projected {n_projected:,} points to face planes → {corrected_path.name}")
+        
+        # Rebuild Potree octree from corrected cloud
+        try:
+            from potree_converter import convert_ply_to_potree
+            session_dir = output_dir.parent
+            success = convert_ply_to_potree(session_dir, force=True, ply_override=corrected_path)
+            if success:
+                print(f"[SegPipeline] 🌲 Potree octree rebuilt with corrected cloud")
+                result["reload_potree"] = True
+            else:
+                print(f"[SegPipeline] ⚠️ Potree rebuild failed")
+        except Exception as e:
+            print(f"[SegPipeline] ⚠️ Potree rebuild error: {e}")
     
     return result
 

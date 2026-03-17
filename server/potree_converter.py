@@ -86,6 +86,16 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
     las.green = data['g'].astype(np.uint16) * 256
     las.blue = data['b'].astype(np.uint16) * 256
 
+    # Per-point segment classification (0=unsegmented, 1..N=segment ID)
+    class_npy = ply_path.parent / "classification.npy"
+    if class_npy.exists():
+        class_arr = np.load(class_npy)
+        if len(class_arr) == len(data):
+            las.classification = class_arr.astype(np.uint8)
+            logger.info(f"[Potree] Classification loaded: {np.count_nonzero(class_arr):,} classified pts")
+        else:
+            logger.warning(f"[Potree] Classification size mismatch: {len(class_arr)} vs {len(data)} pts")
+
     # Confidence is already normalized to [0, 1] by VGGT-Long — map directly to uint16 intensity.
     if has_confidence:
         conf = data['confidence'].astype(np.float32)
@@ -148,22 +158,23 @@ def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
     return True
 
 
-def convert_ply_to_potree(session_dir: Path, force: bool = False) -> bool:
-    """Full pipeline: cleaned_cloud.ply → LAS → Potree octree.
+def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: Path = None) -> bool:
+    """Full pipeline: PLY → LAS → Potree octree.
     
     Args:
         session_dir: Path to session dir (e.g. server/scans/live_xxx)
         force: If True, skip mtime cache check and always reconvert.
+        ply_override: Optional path to use instead of cleaned_cloud.ply
     
     Returns:
         True if potree/ directory was created successfully.
     """
     output_dir = session_dir / "output"
-    ply_path = output_dir / "cleaned_cloud.ply"
+    ply_path = Path(ply_override) if ply_override else output_dir / "cleaned_cloud.ply"
     potree_dir = output_dir / "potree"
 
     if not ply_path.exists():
-        logger.warning(f"[Potree] No cleaned_cloud.ply found in {output_dir}")
+        logger.warning(f"[Potree] No {ply_path.name} found in {output_dir}")
         return False
 
     # Skip if already converted and PLY hasn't changed (unless forced)
@@ -206,13 +217,16 @@ async def convert_ply_to_potree_async(
     session_dir: Path,
     on_progress: Optional[Callable[[str], Awaitable[None]]] = None,
     force: bool = False,
+    ply_override: Path = None,
 ) -> bool:
     """Async wrapper — runs conversion in executor to avoid blocking event loop."""
     if on_progress:
         await on_progress("Converting point cloud to LOD octree...")
 
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, convert_ply_to_potree, session_dir, force)
+    result = await loop.run_in_executor(
+        None, lambda: convert_ply_to_potree(session_dir, force, ply_override)
+    )
 
     if result and on_progress:
         await on_progress("LOD octree ready")

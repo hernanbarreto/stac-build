@@ -3048,8 +3048,30 @@ async def viewer_websocket(websocket: WebSocket):
                         from segmentation_pipeline import apply_segmentation_to_cloud
                         seg_data = await loop.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
                         if seg_data.get("instances"):
+                            # Check if cloud was corrected and Potree rebuilt
+                            should_reload_potree = seg_data.pop("reload_potree", False)
                             await websocket.send_text(json.dumps(seg_data))
                             print(f"[Viewer] Sent segmentation ({len(seg_data['instances'])} instances)")
+                            
+                            # Reload Potree with corrected cloud
+                            if should_reload_potree:
+                                potree_meta_path = _load_ctx.merged_potree / "metadata.json"
+                                if not potree_meta_path.exists():
+                                    potree_meta_path = output_dir / "potree" / "metadata.json"
+                                if potree_meta_path.exists():
+                                    reload_meta = json.loads(potree_meta_path.read_text())
+                                    reload_msg = {
+                                        "type": "potree_ready",
+                                        "session_id": session_id,
+                                        "url": f"/potree/{session_id}/",
+                                        "points": reload_meta.get("points", 0),
+                                    }
+                                    if floor_transform_4x4 is not None:
+                                        reload_msg["floorTransform"] = floor_transform_4x4.tolist() if hasattr(floor_transform_4x4, 'tolist') else floor_transform_4x4
+                                    if has_confidence:
+                                        reload_msg["hasConfidence"] = True
+                                    await websocket.send_text(json.dumps(reload_msg))
+                                    print(f"[Viewer] 🔄 Sent potree_ready reload (corrected cloud)")
                         
                         # Notify frontend about BIM files (raw IFC — parsed on frontend by web-ifc)
                         if ifc_files:

@@ -538,15 +538,16 @@ export class PotreeOctreeLoader {
 
         const nodeData = new DataView(this.octreeData, byteOffset, byteSize)
 
-        // Find attribute offsets
         let posOffset = -1
         let rgbOffset = -1
         let intensityOffset = -1
+        let classOffset = -1
         let attrOffset = 0
         for (const attr of meta.attributes) {
             if (attr.name === 'position') posOffset = attrOffset
             if (attr.name === 'rgb') rgbOffset = attrOffset
             if (attr.name === 'intensity') intensityOffset = attrOffset
+            if (attr.name === 'classification') classOffset = attrOffset
             attrOffset += attr.size
         }
 
@@ -598,7 +599,12 @@ export class PotreeOctreeLoader {
                 colors[validPoints * 3 + 2] = 0.7
             }
 
-            classIds[validPoints] = 0
+            // Classification (segment ID: 0=unsegmented, 1..N=segment)
+            if (classOffset >= 0 && base + classOffset + 1 <= byteSize) {
+                classIds[validPoints] = nodeData.getUint8(base + classOffset)
+            } else {
+                classIds[validPoints] = 0
+            }
 
             // Intensity → confidence [0..1] (normalized from uint16 0..65535)
             if (intensityOffset >= 0 && confidences) {

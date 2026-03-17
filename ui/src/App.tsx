@@ -1221,12 +1221,20 @@ function App() {
                     <button className="segment-toggle-btn" title="Select All"
                       onClick={() => {
                         setSegments(prev => prev.map(s => ({ ...s, visible: true })))
-                        segments.forEach(s => viewportRef.current?.toggleOBB(s.key, true))
+                        segments.forEach(s => {
+                          viewportRef.current?.toggleOBB(s.key, true)
+                          viewportRef.current?.setSegmentVisibility(s.id, true)
+                        })
+                        viewportRef.current?.setSegmentVisibility(0, true)  // unsegmented
                       }}><CheckSquare size={13} /></button>
                     <button className="segment-toggle-btn" title="Deselect All"
                       onClick={() => {
                         setSegments(prev => prev.map(s => ({ ...s, visible: false })))
-                        segments.forEach(s => viewportRef.current?.toggleOBB(s.key, false))
+                        segments.forEach(s => {
+                          viewportRef.current?.toggleOBB(s.key, false)
+                          viewportRef.current?.setSegmentVisibility(s.id, false)
+                        })
+                        viewportRef.current?.setSegmentVisibility(0, false)  // unsegmented
                       }}><Square size={13} /></button>
                   </span>
                 </div>
@@ -1248,6 +1256,7 @@ function App() {
                               s.key === seg.key ? { ...s, visible: newVis } : s
                             ))
                             viewportRef.current?.toggleOBB(seg.key, newVis)
+                            viewportRef.current?.setSegmentVisibility(seg.id, newVis)
                           }}
                         />
                         <span
@@ -1278,6 +1287,25 @@ function App() {
                       </div>
                     </div>
                   ))}
+                </div>
+                {/* Unsegmented points toggle */}
+                <div className="segment-item" style={{ borderTop: '1px solid rgba(255,255,255,0.1)', padding: '6px 12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <input
+                      type="checkbox"
+                      defaultChecked={true}
+                      title="Show/hide unsegmented points"
+                      className="segment-checkbox"
+                      onChange={(e) => {
+                        viewportRef.current?.setSegmentVisibility(0, e.target.checked)
+                      }}
+                    />
+                    <span
+                      className="segment-color-dot"
+                      style={{ background: '#666' }}
+                    />
+                    <span className="segment-label" style={{ flex: 1, fontStyle: 'italic', opacity: 0.7 }}>Unsegmented</span>
+                  </div>
                 </div>
                 <div style={{ padding: '12px' }}>
                   <button

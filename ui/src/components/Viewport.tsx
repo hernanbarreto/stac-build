@@ -31,6 +31,7 @@ interface ViewportProps {
 
 export interface SegmentInstance {
     key: string
+    id: number
     label: string
     color: string
     totalPoints: number
@@ -56,6 +57,7 @@ export interface ViewportHandle {
     clearScene: () => void
     refreshSegmentOBBs: (sessionId: string) => void
     setOBBsVisible: (visible: boolean) => void
+    setSegmentVisibility: (segId: number, visible: boolean) => void
 }
 
 // Vertex shader — matches FusionRenderer.js point size formula
@@ -97,8 +99,31 @@ const fragmentShader = `
   uniform bool sectionBoxEnabled;
   uniform vec3 sectionBoxMin;
   uniform vec3 sectionBoxMax;
+  uniform float uSegmentVisible[16];
 
   void main() {
+    // Segment visibility filter
+    int segIdx = int(clamp(vClassId, 0.0, 15.0));
+    // Unrolled lookup (GLSL ES doesn't allow dynamic array indexing with varying)
+    float segVis = 1.0;
+    if (segIdx == 0) segVis = uSegmentVisible[0];
+    else if (segIdx == 1) segVis = uSegmentVisible[1];
+    else if (segIdx == 2) segVis = uSegmentVisible[2];
+    else if (segIdx == 3) segVis = uSegmentVisible[3];
+    else if (segIdx == 4) segVis = uSegmentVisible[4];
+    else if (segIdx == 5) segVis = uSegmentVisible[5];
+    else if (segIdx == 6) segVis = uSegmentVisible[6];
+    else if (segIdx == 7) segVis = uSegmentVisible[7];
+    else if (segIdx == 8) segVis = uSegmentVisible[8];
+    else if (segIdx == 9) segVis = uSegmentVisible[9];
+    else if (segIdx == 10) segVis = uSegmentVisible[10];
+    else if (segIdx == 11) segVis = uSegmentVisible[11];
+    else if (segIdx == 12) segVis = uSegmentVisible[12];
+    else if (segIdx == 13) segVis = uSegmentVisible[13];
+    else if (segIdx == 14) segVis = uSegmentVisible[14];
+    else segVis = uSegmentVisible[15];
+    if (segVis < 0.5) discard;
+
     // Confidence filter: discard points below threshold
     // vConfidence defaults to 0.0 when attribute is absent; threshold 0.0 shows everything
     if (uConfidenceThreshold > 0.0 && vConfidence < uConfidenceThreshold) {
@@ -1128,6 +1153,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const group = obbGroupRef.current
             if (group) group.visible = visible
         },
+        setSegmentVisibility: (segId: number, visible: boolean) => {
+            const mat = materialRef.current
+            if (!mat) return
+            const idx = Math.max(0, Math.min(segId, 15))
+            const arr = mat.uniforms.uSegmentVisible.value as number[]
+            arr[idx] = visible ? 1.0 : 0.0
+            mat.uniformsNeedUpdate = true
+        },
         toggleBIMVisibility: (meshNames: string[], visible: boolean) => {
             const bimGroup = bimGroupRef.current
             if (!bimGroup) return
@@ -1571,6 +1604,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 highlightIntensity: { value: 0.5 },
                 uOpacity: { value: 1.0 },
                 uConfidenceThreshold: { value: 0.0 },
+                uSegmentVisible: { value: new Array(16).fill(1.0) },
                 time: { value: 0 },
                 sectionBoxEnabled: { value: false },
                 sectionBoxMin: { value: new THREE.Vector3(-100, -100, -100) },
@@ -2173,6 +2207,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
             segmentList.push({
                 key: globalKey,
+                id: instId,
                 label: `${label} #${instId}`,
                 color: colorStr,
                 totalPoints,
