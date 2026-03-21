@@ -1284,6 +1284,7 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
             if i in used:
                 continue
             n_i, d_i, idx_i = faces[i]
+            group_faces = [(n_i, d_i, idx_i)]
             group_idx = [idx_i]
             for j in range(i + 1, len(faces)):
                 if j in used:
@@ -1291,29 +1292,23 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
                 n_j = faces[j][0]
                 dot = abs(np.dot(n_i, n_j))
                 if dot > 0.95:  # near-parallel → same surface
+                    group_faces.append(faces[j])
                     group_idx.append(faces[j][2])
                     used.add(j)
             
             # Merge all grouped indices
             combined_idx = np.concatenate(group_idx) if len(group_idx) > 1 else idx_i
             
-            # Refit plane using combined inliers via PCA
-            combined_pts = points[combined_idx]
-            centroid = np.mean(combined_pts, axis=0)
-            centered = combined_pts - centroid
-            cov = (centered.T @ centered) / len(combined_pts)
-            _, eigvecs = np.linalg.eigh(cov)
-            merged_normal = eigvecs[:, 0]
+            # Use the DOMINANT face's plane (most inlier points)
+            # This ensures all parallel planes converge to the actual
+            # front surface, not the average of front+back.
+            dominant = max(group_faces, key=lambda f: len(f[2]))
+            merged_normal = dominant[0].copy()
             
-            # Snap near-axis normals to exact axis (eliminates tilt-induced thickness)
-            abs_n = np.abs(merged_normal)
-            dominant_axis = int(np.argmax(abs_n))
-            if abs_n[dominant_axis] > 0.99:  # within ~8° of axis
-                sign = np.sign(merged_normal[dominant_axis])
-                merged_normal = np.zeros(3)
-                merged_normal[dominant_axis] = sign
-            
-            merged_d = -np.dot(merged_normal, centroid)
+            # Recompute d using dominant face's inlier centroid
+            dom_centroid = np.mean(points[dominant[2]], axis=0)
+            merged_d = -np.dot(merged_normal, dom_centroid)
+
             
             merged.append((merged_normal, merged_d, combined_idx))
         
@@ -1786,11 +1781,12 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
           f"{total_segmented:,}/{n_pts:,} points ({coverage*100:.1f}% coverage)")
     
     # ── Phase 4: Project assigned points to face planes → corrected cloud ──
+    # Project in display space (where face planes live), then convert back
+    # to raw space for PLY output. Potree re-applies floorTransform on load.
     n_projected = 0
-    xyz_corrected = xyz.copy()  # start from RAW xyz (pre-transform)
-    classification = np.zeros(len(xyz), dtype=np.uint8)  # 0=unsegmented
+    xyz_corrected = xyz.copy()  # RAW space
+    classification = np.zeros(len(xyz), dtype=np.uint8)
     
-    # We need to work in display coordinates, then convert back
     for inst in instances:
         face_planes = inst.pop("_face_planes", None)
         face_id = inst.pop("_face_id", None)
@@ -1800,7 +1796,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         global_indices = np.array(inst["globalIndices"], dtype=np.int64)
         pts_display = xyz_display[global_indices].copy()
         seg_id = int(inst.get("id", 0))
-        classification[global_indices] = min(seg_id, 255)  # uint8 cap
+        classification[global_indices] = min(seg_id, 255)
         
         for fi, (fn, fd) in enumerate(face_planes):
             mask = face_id == fi
@@ -1813,30 +1809,29 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             pts_display[mask] = projected
             n_projected += int(n_mask)
         
-        # Convert back from display to raw coordinates
-        if transform_path.exists() and not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
-            # Inverse: xyz_raw = (pts_display - t) @ R / s
-            xyz_corrected[global_indices] = (pts_display - t) @ R / s
+        # Convert projected display coords back to raw: raw = (display - t) @ R / s
+        if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+            pts_raw = (pts_display - t) @ R / s
         else:
-            xyz_corrected[global_indices] = pts_display
+            pts_raw = pts_display
+        xyz_corrected[global_indices] = pts_raw
     
-    # Save classification sidecar (always, even if no projection — for segment visibility)
+    # Save classification sidecar
     class_path = output_dir / "classification.npy"
     np.save(class_path, classification)
     
     if n_projected > 0:
-        # Write corrected PLY (cleaned_cloud.ply stays untouched)
         corrected_path = output_dir / "corrected_cloud.ply"
         _write_corrected_ply(ply_path, corrected_path, xyz_corrected)
-        print(f"[SegPipeline] ✏️ Projected {n_projected:,} points to face planes → {corrected_path.name}")
+        print(f"[SegPipeline] ✏️ Projected {n_projected:,} points → {corrected_path.name} (raw space)")
         
-        # Rebuild Potree octree from corrected cloud
+        # Rebuild Potree so cloud visually matches voxel projections
         try:
             from potree_converter import convert_ply_to_potree
             session_dir = output_dir.parent
             success = convert_ply_to_potree(session_dir, force=True, ply_override=corrected_path)
             if success:
-                print(f"[SegPipeline] 🌲 Potree octree rebuilt with corrected cloud")
+                print(f"[SegPipeline] 🌲 Potree octree rebuilt from corrected cloud")
                 result["reload_potree"] = True
             else:
                 print(f"[SegPipeline] ⚠️ Potree rebuild failed")
@@ -1991,8 +1986,11 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
         if "error" not in result and result.get("instances"):
             try:
                 result_path = output_dir / "segmentation_result.json"
+                # Strip transient flags — only needed for first load after segmentation
+                cache_result = {k: v for k, v in result.items()
+                                if k not in ("reload_potree", "corrected_is_display_space")}
                 with open(result_path, "w") as f:
-                    json.dump(result, f)
+                    json.dump(cache_result, f)
                 print(f"[SegPipeline] 💾 Cached result for instant future loads")
             except Exception as e:
                 print(f"[SegPipeline] ⚠️ Failed to cache result: {e}")

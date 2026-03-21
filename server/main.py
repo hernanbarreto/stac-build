@@ -2926,6 +2926,20 @@ async def viewer_websocket(websocket: WebSocket):
                     _load_ctx = _ctx(session_id)
                     output_dir = _load_ctx.output_dir
 
+                    # Auto-cleanup: stale display-space data from previous code version
+                    display_marker = output_dir / ".display_space"
+                    if display_marker.exists():
+                        print("[Viewer] ⚠️ Stale .display_space marker found — cleaning cached data")
+                        display_marker.unlink()
+                        for stale in ["corrected_cloud.ply", "segmentation_result.json", "classification.npy"]:
+                            p = output_dir / stale
+                            if p.exists():
+                                p.unlink()
+                        stale_potree = output_dir / "potree"
+                        if stale_potree.exists():
+                            import shutil
+                            shutil.rmtree(stale_potree)
+
                     # ── Potree LOD: always convert before serving ──
                     cleaned_ply = output_dir / "cleaned_cloud.ply"
                     # Check both merged/potree (migrated) and output/potree (newly converted)
@@ -3048,12 +3062,11 @@ async def viewer_websocket(websocket: WebSocket):
                         from segmentation_pipeline import apply_segmentation_to_cloud
                         seg_data = await loop.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
                         if seg_data.get("instances"):
-                            # Check if cloud was corrected and Potree rebuilt
                             should_reload_potree = seg_data.pop("reload_potree", False)
                             await websocket.send_text(json.dumps(seg_data))
                             print(f"[Viewer] Sent segmentation ({len(seg_data['instances'])} instances)")
                             
-                            # Reload Potree with corrected cloud
+                            # Reload Potree with corrected (projected) cloud
                             if should_reload_potree:
                                 potree_meta_path = _load_ctx.merged_potree / "metadata.json"
                                 if not potree_meta_path.exists():
@@ -3067,11 +3080,12 @@ async def viewer_websocket(websocket: WebSocket):
                                         "points": reload_meta.get("points", 0),
                                     }
                                     if floor_transform_4x4 is not None:
-                                        reload_msg["floorTransform"] = floor_transform_4x4.tolist() if hasattr(floor_transform_4x4, 'tolist') else floor_transform_4x4
+                                        reload_msg["floorTransform"] = floor_transform_4x4
                                     if has_confidence:
                                         reload_msg["hasConfidence"] = True
                                     await websocket.send_text(json.dumps(reload_msg))
                                     print(f"[Viewer] 🔄 Sent potree_ready reload (corrected cloud)")
+
                         
                         # Notify frontend about BIM files (raw IFC — parsed on frontend by web-ifc)
                         if ifc_files:

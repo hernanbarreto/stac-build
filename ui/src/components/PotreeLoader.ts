@@ -142,15 +142,15 @@ export class PotreeOctreeLoader {
         this.baseUrl = baseUrl.endsWith('/') ? baseUrl : baseUrl + '/'
 
         try {
-            // 1. Load metadata
-            const metaResp = await fetch(this.baseUrl + 'metadata.json')
+            // 1. Load metadata (no-store: corrected cloud may replace original)
+            const metaResp = await fetch(this.baseUrl + 'metadata.json', { cache: 'no-store' })
             if (!metaResp.ok) throw new Error(`Failed to load metadata: ${metaResp.status}`)
             this.metadata = await metaResp.json()
 
             // console.log(`[PotreeLoader] Loaded metadata: ${this.metadata!.points.toLocaleString()} points, depth ${this.metadata!.hierarchy.depth}`)
 
             // 2. Load hierarchy (node index)
-            const hierResp = await fetch(this.baseUrl + 'hierarchy.bin')
+            const hierResp = await fetch(this.baseUrl + 'hierarchy.bin', { cache: 'no-store' })
             if (!hierResp.ok) throw new Error(`Failed to load hierarchy: ${hierResp.status}`)
             this.hierarchyData = await hierResp.arrayBuffer()
 
@@ -158,9 +158,10 @@ export class PotreeOctreeLoader {
             this.parseHierarchy()
 
             // 4. Load octree.bin (the actual point data)
-            const octreeResp = await fetch(this.baseUrl + 'octree.bin')
+            const octreeResp = await fetch(this.baseUrl + 'octree.bin', { cache: 'no-store' })
             if (!octreeResp.ok) throw new Error(`Failed to load octree: ${octreeResp.status}`)
             this.octreeData = await octreeResp.arrayBuffer()
+
 
             // console.log(`[PotreeLoader] Loaded octree: ${(this.octreeData.byteLength / 1024 / 1024).toFixed(1)} MB`)
 

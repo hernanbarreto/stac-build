@@ -2040,6 +2040,19 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
         // v2.0 format: { instances: [{label, instance_id, color, total_points, obb, ...}] }
         if (Array.isArray(msg.instances)) {
+            // Reset obbGroup transform — new OBBs are computed in the current
+            // display space (from floor_transform.npz). If the gizmo was saved,
+            // the obbGroup may still have the old gizmo delta applied. Clear it
+            // so the fresh OBBs render at their correct positions.
+            const obbGroup = obbGroupRef.current
+            if (obbGroup) {
+                obbGroup.matrix.identity()
+                obbGroup.matrixAutoUpdate = true
+                obbGroup.matrixWorldNeedsUpdate = true
+                obbGroup.position.set(0, 0, 0)
+                obbGroup.quaternion.identity()
+                obbGroup.scale.set(1, 1, 1)
+            }
             renderOBBs(msg.instances as Array<Record<string, unknown>>)
         }
         if (msg.type === 'status' || msg.type === 'progress') {
