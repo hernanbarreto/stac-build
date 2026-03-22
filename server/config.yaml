@@ -126,6 +126,7 @@ models:
       min_face_points: 100         # Minimum points to consider a plane as a face
       max_faces: 8                 # Maximum number of faces to detect
       face_thickness: 0.01        # 10mm — match ransac_tolerance to keep all inliers
+      mesh_voxel_size: 0.05      # Visualization voxel size in meters (5mm = 0.5cm)
 
 # --- Alignment (Auto-Leveling) ---
 alignment:
@@ -252,7 +253,7 @@ postprocessing:
 # --- Coverage Engine (Tier 1) ---
 # Cumulative, occlusion-aware coverage tracking per BIM element
 coverage_engine:
-  enabled: true
+  enabled: false
   ray_radius: 0.05            # Cylinder radius (m) for occlusion ray query
   sample_density: 4.0         # BIM surface samples per m²
   completion_threshold: 80.0  # % coverage to mark element COMPLETED

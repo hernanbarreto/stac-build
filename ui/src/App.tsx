@@ -22,7 +22,7 @@ import {
   Move, Palette, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Wrench,
   Building2, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
   Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
-  Scale, Thermometer, Loader2, BarChart3, Home, Pencil,
+  Scale, Thermometer, Loader2, BarChart3, Home, Pencil, Camera,
 } from 'lucide-react'
 
 interface SessionInfo {
@@ -93,6 +93,10 @@ function App() {
   const [sabanaLoading, setSabanaLoading] = useState(false)
   const [sabanaMetrics, setSabanaMetrics] = useState<any>(null)
   const [sabanaFullMeta, setSabanaFullMeta] = useState<any>(null)
+
+  // ── Camera Poses state ──
+  const [showCameraPoses, setShowCameraPoses] = useState(true)
+  const [hasCameraPoses, setHasCameraPoses] = useState(false)
 
   // Team / WebRTC state
   const teamWsRef = useRef<WebSocket | null>(null)
@@ -637,8 +641,8 @@ function App() {
   const handleToggleSabana = useCallback(() => {
     if (!activeSession) return
     if (sabanaVisible) {
-      // Toggle OFF → reload original scan cloud + show OBBs
-      viewportRef.current?.sendCommand({ type: 'load_session', session_id: activeSession })
+      // Toggle OFF → reload original scan cloud + show OBBs (preserve camera!)
+      viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: activeSession })
       viewportRef.current?.setOBBsVisible(true)
       setSabanaVisible(false)
       setSabanaMetrics(null)
@@ -1471,6 +1475,19 @@ function App() {
                 <span className="control-value">{confidenceThreshold.toFixed(2)}</span>
               </div>
             )}
+            {/* ── Camera Poses Toggle (only in NUBE mode) ── */}
+            {hasCameraPoses && !sabanaVisible && (
+              <>
+                <div className="toolbar-separator" />
+                <div className="toolbar-group">
+                  <button className={`tool-btn ${showCameraPoses ? 'active' : ''}`}
+                    onClick={() => setShowCameraPoses(v => !v)}
+                    title={showCameraPoses ? 'Hide Camera Poses' : 'Show Camera Poses'}>
+                    <Camera size={16} />
+                  </button>
+                </div>
+              </>
+            )}
             {/* ── Sábana / BIM Comparison ── */}
             {bimModels.length > 0 && segments.length > 0 && (
               <>
@@ -1533,6 +1550,8 @@ function App() {
               setSessionLoading(null)
               setStatusMessage(`Sábana: ${nPts?.toLocaleString()} deviation points`)
             }}
+            showCameraPoses={showCameraPoses && !sabanaVisible}
+            onHasCameraPoses={setHasCameraPoses}
           />
 
           {/* Session Loading Overlay — hidden when pipeline is running (show pipeline panel instead) */}

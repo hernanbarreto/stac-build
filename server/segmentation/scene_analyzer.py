@@ -198,6 +198,7 @@ def _load_model(model_id: str = None, precision: dict = None):
             low_cpu_mem_usage=False,
             use_flash_attn=use_flash,
             trust_remote_code=True,
+            local_files_only=True,
         ).eval()
     finally:
         torch.linspace = _orig_linspace  # Always restore
@@ -206,7 +207,8 @@ def _load_model(model_id: str = None, precision: dict = None):
         model = model.cuda()
 
     tokenizer = AutoTokenizer.from_pretrained(
-        model_id, trust_remote_code=True, use_fast=False
+        model_id, trust_remote_code=True, use_fast=False,
+        local_files_only=True,
     )
 
     elapsed = time.time() - t0

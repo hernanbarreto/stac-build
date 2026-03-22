@@ -2,13 +2,13 @@
 
 > **Living document** — Must be updated as new modules, integrations, or architectural changes are introduced per the [ROADMAP.md](./ROADMAP.md).
 >
-> Last updated: 2026-03-08
+> Last updated: 2026-03-21
 
 ---
 
 ## System Overview
 
-STAC-Builder is an AI-powered construction and asset lifecycle platform that transforms phone-based video into accurate 3D reconstructions, performs segmentation, BIM comparison, and coverage analysis. It comprises a **Python/FastAPI backend**, a **React/Three.js frontend**, and **vendored AI models** (Reconstruction, SAM3, InternVL3).
+STAC-Builder is an AI-powered construction and asset lifecycle platform that transforms phone-based video into accurate 3D reconstructions, performs segmentation, BIM comparison, and coverage analysis. It comprises a **Python/FastAPI backend**, a **React/Three.js frontend**, and **vendored AI models** (MapAnything, SAM3, PE Spatial, PLM-8B, DepthLM).
 
 ---
 
@@ -66,6 +66,9 @@ graph TB
     subgraph Vendor["Vendored AI Models"]
         Reconstruction["mapanything — Reconstruction_Streaming"]
         SAM3["sam3 — SAM3 Video Predictor"]
+        PESpatial["perception_models — PE-Spatial-G14-448"]
+        PLM["perception_models — PLM-8B VLM"]
+        DepthLM["DepthLM — Pixtral 12B Metric Depth"]
         CC["cloudcompy — CloudCompPy"]
         PC["PotreeConverter 2.1"]
     end
@@ -74,7 +77,7 @@ graph TB
     PM --> Workers
     W1 --> ReconstructionW --> Reconstruction
     W4 --> SP --> SAM3
-    W3 --> SA["scene_analyzer.py — InternVL3"]
+    W3 --> SA["scene_analyzer.py — InternVL3 (migrating to PLM-8B)"]
     W2 --> CC
 ```
 
@@ -125,7 +128,7 @@ All workers share a pattern: `run(conn, session_dir, config)` → `run_worker_sa
 | `base.py` | `WorkerPipe` (IPC: progress/log/done/error/cancel), `run_worker_safe()` |
 | `reconstruction_worker.py` | Dispatches to `_run_reconstruction_single` or `_run_reconstruction_multi_segment` based on zoom analysis. Multi-segment: per-zoom blur filter → novelty selection → Reconstruction reconstruction → ICP inter-segment alignment |
 | `cloudcompy_worker.py` | Runs `run_cloudcompy.sh`. Creates `cleaned_cloud.ply`, links to `merged/`, computes `floor_transform.npz` |
-| `vlm_worker.py` | InternVL3 scene analysis → `vlm_analysis.json` (prompt + frame_map) |
+| `vlm_worker.py` | InternVL3 scene analysis → `vlm_analysis.json` (prompt + frame_map). Being migrated to PLM-8B |
 | `sam3_worker.py` | SAM3 segmentation using VLM prompt → `segmentation.json` + `seg_masks.npz` |
 | `instance_cleaner_worker.py` | DBSCAN cluster isolation per segmented instance |
 
@@ -139,7 +142,7 @@ All workers share a pattern: `run(conn, session_dir, config)` → `run_worker_sa
 | `icp_aligner.py` | Scaled ICP registration: auto voxel sizing, FPFH features, RANSAC global registration, point-to-plane refinement, scale estimation from correspondences |
 | `segmentation_pipeline.py` | Batched SAM3 processing per category, IoU ID matching across batches, NPZ mask storage with upsert logic, display-time point-to-mask matching via PLY origin fields, OBB computation |
 | `sam3_wrapper.py` | `SAM3Wrapper`: model load/unload, batch/interactive/text-prompt modes, VRAM OOM recovery, mask caching, interactive session with propagation streaming |
-| `scene_analyzer.py` | InternVL3 scene analysis: auto model size selection (2B/8B), dynamic resolution preprocessing, multi-frame analysis with keyframe loading, category merging with synonym detection, frame_map building |
+| `scene_analyzer.py` | InternVL3 scene analysis: auto model size selection (2B/8B), dynamic resolution preprocessing, multi-frame analysis with keyframe loading, category merging with synonym detection, frame_map building. **Being migrated to PLM-8B** |
 | `bim_comparison.py` | IFC mesh extraction (Revit UniqueId suffix matching), C2M distance computation (KDTree + exact triangle projection), deviation reports, sábana generation |
 | `bim_registration.py` | Hierarchical BIM–scan registration: floor plane RANSAC alignment (height+tilt 3DOF) → object XZ+yaw sweep (3DOF) → full 6DOF transform |
 | `coverage_store.py` | Per-element cumulative coverage: mesh surface sampling, SampleStatus (COVERED/OCCLUDED/NOT_BUILT/NOT_VISIBLE), persistent NPZ storage, timeline tracking |
@@ -203,13 +206,56 @@ Custom Potree 2.0 octree loader:
 | Vendor | Purpose |
 |--------|---------|
 | **mapanything** | `Reconstruction_Streaming`: chunk-based monocular depth → 3D reconstruction with SIM3 alignment and loop closure |
+| **perception_models** | PE-Spatial-G14-448: dense spatial features (segmentation, detection, depth). PLM-8B: VLM for scene analysis, material ID. Apache 2.0 |
+| **DepthLM_Official** | DepthLM (Pixtral 12B): per-pixel metric depth estimation from single images |
 | **sam3** | SAM3 Video Predictor: text/point-prompt segmentation with video propagation |
 | **cloudcompy** | CloudCompPy: SOR filtering, voxel downsampling, duplicate removal, normal estimation |
 | **PotreeConverter** | Converts PLY point clouds to Potree 2.0 octree format |
 
 ---
 
-## Pipeline Sequence
+## 2D Analysis Pipeline (Tier 2)
+
+> **Full specification:** [ADR-002: 2D Comparison Pipeline](./002-2d-comparison-pipeline.md)
+
+Compares As-Built (real photos) against As-Planned (BIM) in 2D image space for each camera keyframe.
+
+```mermaid
+sequenceDiagram
+    participant MA as MapAnything
+    participant Gizmo as Gizmo Alignment
+    participant Render as BIM Rasterizer
+    participant PES as PE Spatial G14
+    participant DLM as DepthLM 12B
+    participant PLM as PLM-8B
+    participant Agg as Aggregator
+    participant Viz as Visualization
+
+    Note over MA,Gizmo: Phase 1 — Alignment (existing)
+    MA->>Gizmo: camera poses + point cloud
+    Gizmo->>Render: T_scan→BIM + poses in BIM space
+
+    Note over Render: Phase 2 — BIM Render
+    Render->>Render: Per keyframe: RGB + depth + element ID + edges
+
+    Note over PES,PLM: Phase 3 — Per-Frame Analysis (parallel)
+    Render->>PES: BIM render + real photo
+    PES->>Agg: deviation feature map
+    Render->>DLM: BIM z-buffer vs real photo
+    DLM->>Agg: Δdepth (meters)
+    Render->>PLM: element crops from real photo
+    PLM->>Agg: material + state classification
+
+    Note over Agg: Phase 4 — Multi-Frame Aggregation
+    Agg->>Viz: per-element report
+
+    Note over Viz: Phase 5 — Visualization
+    Viz->>Viz: Sábana 2.0 + frame overlay + gallery
+```
+
+---
+
+## 3D Pipeline Sequence
 
 ```mermaid
 sequenceDiagram
@@ -234,7 +280,7 @@ sequenceDiagram
     CCW-->>PM: done
 
     PM->>VLMW: Stage 3 — Scene Analysis
-    Note over VLMW: InternVL3 multi-frame analysis<br/>→ vlm_analysis.json
+    Note over VLMW: InternVL3 multi-frame analysis<br/>(migrating to PLM-8B)<br/>→ vlm_analysis.json
     VLMW-->>PM: done
 
     PM->>SAMW: Stage 4 — Segmentation
@@ -269,7 +315,7 @@ projects/<project-slug>/
 │       ├── chunk_*_origins.npz    # Per-point origin traceability
 │       ├── cleaned_cloud.ply      # CloudCompPy cleaned cloud
 │       ├── floor_transform.npz    # RANSAC floor alignment (s, R, t)
-│       ├── vlm_analysis.json      # InternVL3 scene inventory
+│       ├── vlm_analysis.json      # InternVL3 scene inventory (migrating to PLM-8B)
 │       ├── segmentation.json      # SAM3 raw seg results
 │       ├── segmentation_result.json # DBSCAN-cleaned with OBBs
 │       ├── seg_masks.npz          # Compressed per-frame masks

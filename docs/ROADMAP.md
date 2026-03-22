@@ -5,7 +5,7 @@
 
 ---
 
-## ✅ Tier 0: Core (Done)
+## ✅ Tier 0: Core Platform (Done)
 
 Everything here is implemented and working.
 
@@ -15,6 +15,9 @@ Everything here is implemented and working.
 - [x] Alignment manager (SIM3 + RANSAC auto-leveling)
 - [x] SAM3 instance segmentation (video mode + DBSCAN clustering)
 - [x] InternVL3 scene analysis (VLM object inventory)
+- [x] RANSAC face detection per segment + non-destructive point assignment
+- [x] Voxel mesh visualization with normal-snapped quads
+- [x] Segment visibility toggles (classification attribute in Potree)
 - [x] BIM comparison (IFC parsing, C2M deviation, sábana)
 - [x] Coverage analysis (mesh sampling + KDTree proximity)
 - [x] Potree octree streaming (custom LOD loader)
@@ -28,76 +31,125 @@ Everything here is implemented and working.
 
 ---
 
-## ✅ Tier 1: Coverage Engine
+## ✅ Tier 1: Coverage Engine (Done)
 
-**Why first:** This is the foundation for accurate progress tracking. Without cumulative coverage and occlusion handling, all downstream features (certification, S-curve, progress) would report incorrect data.
+**Why first:** Foundation for accurate progress tracking. Without cumulative coverage and occlusion handling, all downstream features report incorrect data.
 
-**Depends on:** Tier 0 (done)
+**Depends on:** Tier 0
 
-- [x] **1.1 Coverage Store** (`coverage_store.py`)
-  - [x] Per-element cumulative coverage data model
-  - [x] Surface sample persistence (NPZ per element in `coverage_history/`)
-  - [x] Merge logic: `best_covered = old | new` (coverage only increases)
-  - [x] Coverage timeline tracking (`coverage_timeline.json`)
-
-- [x] **1.2 Occlusion Ray-Caster** (`occlusion_raycaster.py`)
-  - [x] Extract camera positions from MapAnything extrinsics (w2c → world)
-  - [x] Cylindrical ray query (scan_tree along camera→BIM ray)
-  - [x] Classify BIM surface samples: COVERED | OCCLUDED | NOT_BUILT | NOT_VISIBLE
-  - [x] Normal-aware: front vs back face detection via dot product
-  - [x] Integrated into `run_comparison()` pipeline
-
-- [x] **1.3 SAM3 Occluder Identification**
-  - [x] Map occluding points to SAM3 segment labels (majority vote)
-  - [x] Per-point label array built from `segmentation_result.json`
-
-- [x] **1.4 VLM Occlusion Classifier**
-  - [x] Extend `scene_analyzer.py` with `classify_occluders()` — 3-tier: heuristic → cache → VLM
-  - [x] Classify occluders: permanent (furniture, MEP) vs temporary (debris, scaffold)
-  - [x] Store classification per occlusion event, update element states
-
-- [x] **1.5 Element State Machine**
-  - [x] State model: NOT_STARTED → IN_PROGRESS → COMPLETED → VERIFIED
-  - [x] Automatic transitions based on coverage + quality thresholds
-  - [x] OCCLUDED_PERMANENT: freeze coverage at last known value
-  - [x] OCCLUDED_TEMPORARY: flag for re-scan
-
-- [x] **1.6 Pipeline Integration**
-  - [x] Update `run_comparison()` in `bim_comparison.py` to use coverage engine
-  - [x] Config section `coverage_engine` in `config.yaml`
-  - [x] UI: element state badges, occlusion %, cumulative coverage in `BIMAnalysisPanel.tsx`
+- [x] **1.1 Coverage Store** — Per-element cumulative coverage, NPZ persistence, merge logic
+- [x] **1.2 Occlusion Ray-Caster** — Camera→BIM raycasting, classification (COVERED | OCCLUDED | NOT_BUILT | NOT_VISIBLE)
+- [x] **1.3 SAM3 Occluder Identification** — Map occluding points to segment labels
+- [x] **1.4 VLM Occlusion Classifier** — 3-tier heuristic→cache→VLM, permanent vs temporary classification
+- [x] **1.5 Element State Machine** — NOT_STARTED → IN_PROGRESS → COMPLETED → VERIFIED
+- [x] **1.6 Pipeline Integration** — Config, UI badges, cumulative coverage in BIMAnalysisPanel
 
 ---
 
-## 🔭 Tier 2: Long-Range & Multi-Source Scanning
+## 🔬 Tier 2: 2D Analysis Engine
 
-**Why second:** Extends the reach and scale of scanning. Tier 1 gives us accurate coverage tracking; Tier 2 gives us more area to cover.
+**Why now:** This is the architectural pivot. Moving the primary analysis from 3D point clouds to 2D image space dramatically improves precision, leverages SOTA vision models, and eliminates the error chain of 3D reconstruction.
 
-**Depends on:** Tier 0 (can be started in parallel with Tier 1)
+**Depends on:** Tier 0 (MapAnything poses) + Tier 1 (coverage tracking)
 
-- [x] **2.1 Zoom Detection** → REPLACED by zoom-lock capture
-  - [x] Zoom is now per-session metadata in `scan_meta.json`
-  - [x] Capture app locks zoom during recording (enforced by Unity)
+### Rationale
+
+The 2D image space preserves full sensor resolution (~1MP+ per frame) while 3D reconstruction loses information at every step (depth→backprojection→merging→SOR→octree). All state-of-the-art vision models (PE Spatial, SAM, VLM) operate natively in 2D. Camera poses from MapAnything enable direct BIM-to-2D projection for pixel-level comparison.
+
+> **Full pipeline specification:** [ADR-002: 2D Comparison Pipeline](./002-2d-comparison-pipeline.md)
+
+### Pipeline Phases → Implementation Items
+
+| Phase | Description | Items |
+|-------|-------------|-------|
+| Phase 1: Alignment | MapAnything poses + gizmo registration | ✅ Existing |
+| Phase 2: BIM Render | Render IFC from camera poses → RGB + depth + element ID + edges | 2.1 |
+| Phase 3A: Geometric Deviation | PE Spatial feature comparison (real vs BIM render) | 2.2, 2.3 |
+| Phase 3B: Metric Depth | DepthLM depth vs BIM z-buffer → Δdepth in meters | 2.8 |
+| Phase 3C: Material & State | PLM-8B classification per visible element | 2.4 |
+| Phase 4: Aggregation | Multi-frame weighted results per element | 2.5 |
+| Phase 5: Visualization | Sábana 2.0, per-frame overlay, element gallery | 2.5 |
+
+### AI Model Stack
+
+| Model | Role | Parameters | Conda Env |
+|-------|------|------------|----------|
+| **PE-Spatial-G14-448** | Dense spatial backbone — segmentation, detection, depth features | ~1.8B (ViT-G/14) | `pe_spatial` |
+| **PLM-8B** | VLM for scene analysis, material ID, occlusion classification | 8B | `pe_spatial` |
+| **DepthLM Pixtral 12B** | Metric depth estimation per-pixel | 12B | `depthlm` |
+
+> **Note:** InternVL3 remains active in the current pipeline (`scene_analyzer.py`) until PLM-8B is fully integrated and validated. Migration happens at step 2.7.
+
+### Implementation
+
+- [ ] **2.1 BIM Reprojection Engine**
+  - [ ] Load BIM mesh geometry (vertices, edges, faces per element)
+  - [ ] For each frame: project BIM elements using `K × [R|t]_BIM × P_BIM`
+  - [ ] Pose transformation: compose `T_scan→BIM` (from gizmo+ICP) with MapAnything cam2world
+  - [ ] Occlusion-aware rendering: only project visible BIM faces (z-buffer)
+  - [ ] Output: per-frame BIM overlay masks with element IDs
+
+- [ ] **2.2 PE Spatial Integration**
+  - [ ] Integrate PE-Spatial-G14-448 as dense spatial feature backbone
+  - [ ] Extract per-pixel spatial features from each frame
+  - [ ] Feature matching between BIM-projected regions and actual image
+  - [ ] Pose uncertainty compensation: expand matching region proportional to estimated error
+  - [ ] Env: `pe_spatial` conda env, GPU preferred (~3.6GB bf16), CPU fallback
+
+- [ ] **2.3 2D Deviation Detection**
+  - [ ] Compare projected BIM edges vs detected edges in image (PE Spatial features)
+  - [ ] Compute per-pixel deviation between expected BIM surface and observed surface
+  - [ ] Classify per-element: GOOD / REGULAR / BAD based on pixel-level analysis
+  - [ ] Aggregate multi-frame results per element (weighted by viewing angle and distance)
+
+- [ ] **2.4 Material Identification (PLM-8B)**
+  - [ ] PLM-8B (Perception Language Model, 8B params) analyzes image regions corresponding to BIM elements
+  - [ ] Material classification: concrete, steel, masonry, glass, etc.
+  - [ ] Cross-reference with BIM material specifications
+  - [ ] Flag material mismatches
+  - [ ] Env: `pe_spatial`, CPU-only on dev (16GB bf16), GPU on cloud
+
+- [ ] **2.5 Multi-Frame Coverage in 2D**
+  - [ ] Track which BIM elements are visible in each frame (from reprojection)
+  - [ ] Accumulate coverage across frames (multi-view coverage)
+  - [ ] Compute viewing quality per element (angle, distance, occlusion)
+  - [ ] Update coverage store with 2D analysis results
+
+- [ ] **2.6 Camera Pose Localization**
+  - [ ] Initial: use existing gizmo+ICP `T_scan→BIM` alignment
+  - [ ] Future: ARKit/ARCore absolute positioning (Unity capture app)
+  - [ ] Pose error estimation per frame (for matching window expansion)
+  - [ ] Dual-source fusion (ARKit + MapAnything) when both available
+
+- [ ] **2.7 Migrate InternVL3 → PLM-8B**
+  - [ ] Validate PLM-8B scene analysis quality against InternVL3 baseline
+  - [ ] Once validated, replace InternVL3 in `scene_analyzer.py` and `vlm_worker.py`
+  - [ ] Migrate occlusion classification from InternVL3 to PLM-8B
+  - [ ] Remove InternVL3 vendor deps and conda env
+
+- [ ] **2.8 DepthLM Metric Depth**
+  - [ ] Integrate DepthLM (Pixtral 12B) for per-pixel metric depth estimation
+  - [ ] Per-frame depth maps complement MapAnything geometry
+  - [ ] Use metric depth for BIM deviation verification (independent of 3D reconstruction)
+  - [ ] Env: `depthlm` conda env, CPU-only on dev (24GB bf16), GPU on cloud
+
+---
+
+## 🔭 Tier 3: Long-Range & Multi-Source Scanning
+
+**Why third:** Extends the reach and scale of scanning. Tiers 1-2 give us accurate analysis; Tier 3 gives us more area to cover.
+
+**Depends on:** Tier 0 (can be started in parallel with Tier 2)
+
+- [x] **3.1 Zoom Detection** → REPLACED by zoom-lock capture
+  - [x] Zoom is per-session metadata in `scan_meta.json`
   - [x] Manual zoom_level config for existing captures
 
-- [x] **2.2 Sequence Splitter** → REMOVED
-  - [x] No longer needed: each session has invariant zoom
-  - [x] Different zooms = different scan sessions (multi-source)
+- [x] **3.2 MapAnything Zoom Intrinsics Correction**
+  - [x] Session-level: `f_corrected = f_mapanything × zoom_level`
+  - [x] Applied uniformly in MapAnything ChunkWrapper
 
-- [x] **2.3 Adaptive Frame Quality** → SIMPLIFIED
-  - [x] Uniform blur threshold per session (no per-frame zoom scaling)
-  - [x] Quality filtering remains in `frame_quality.py`
-
-- [x] **2.4 MapAnything Zoom Intrinsics Correction**
-  - [x] Session-level: `f_corrected = f_mapanything_estimated × zoom_level`
-  - [x] Applied uniformly to all frames in MapAnything ChunkWrapper
-  - [x] zoom_level loaded from `scan_meta.json`
-
-- [x] **2.5 Segment Registration** → REMOVED
-  - [x] ICP alignment between zoom segments eliminated (failed approach)
-  - [x] Multi-zoom handled by multi-source (Tier 2.6)
-
-- [ ] **2.6 Multi-Source Foundations**
+- [ ] **3.3 Multi-Source Foundations**
   - [ ] Project data model: Project → N Scans
   - [ ] Scan metadata: operator, zone, timestamp, source_type, zoom_level
   - [ ] Independent processing per scan (existing pipeline)
@@ -107,278 +159,99 @@ Everything here is implemented and working.
 
 ---
 
-## 📄 Tier 3: Document Intelligence
+## 📄 Tier 4: Document Intelligence
 
-**Why third:** Independent from scanning improvements — can be developed in parallel. Provides the contractual foundation that Tiers 4+ need.
+**Why fourth:** Independent from scanning improvements — can be developed in parallel. Provides the contractual foundation that Tiers 5+ need.
 
 **Depends on:** Tier 0 only (WebSocket, auth, UI infrastructure)
 
-- [ ] **3.1 Document Storage & Indexing**
-  - [ ] File upload API (PDF, DOCX, XLSX)
-  - [ ] Hierarchical folder structure (contract → discipline → section)
-  - [ ] Document metadata extraction (title, date, pages)
-  - [ ] Full-text indexing
-
-- [ ] **3.2 RAG Engine**
-  - [ ] Document parsing (PyMuPDF / Unstructured.io)
-  - [ ] Text chunking with overlap
-  - [ ] Embedding model integration (sentence-transformers or similar)
-  - [ ] Vector database (ChromaDB or Qdrant)
-  - [ ] LLM integration for chat responses
-  - [ ] Source citation in answers (page, section, document)
-
-- [ ] **3.3 Contract Chat Interface**
-  - [ ] Chat UI component in frontend
-  - [ ] API endpoint for RAG queries
-  - [ ] Conversation history per user
-  - [ ] Context-aware: can reference BIM elements, drawings, requirements
-
-- [ ] **3.4 Contradiction Detection**
-  - [ ] Cross-document analysis via LLM
-  - [ ] Amendment vs base specification comparison
-  - [ ] Inter-discipline conflict detection
-  - [ ] Flagged contradictions dashboard
-
-- [ ] **3.5 Requirements Extraction**
-  - [ ] LLM-assisted extraction of requirements from tender docs
-  - [ ] Structured output: requirement ID, text, discipline, type
-  - [ ] Human review/approval workflow
-
-- [ ] **3.6 Requirements Matrix**
-  - [ ] Requirements database per discipline
-  - [ ] Status tracking: NOT_STARTED | IN_PROGRESS | COMPLIANT | NON_COMPLIANT | WAIVED
-  - [ ] Link requirements to BIM elements
-  - [ ] Compliance dashboard (% per discipline, per section)
-  - [ ] Export to spreadsheet
+- [ ] **4.1 Document Storage & Indexing** — File upload (PDF, DOCX, XLSX), hierarchical folders, full-text indexing
+- [ ] **4.2 RAG Engine** — Document parsing, chunking, embeddings, vector DB, LLM chat with source citations
+- [ ] **4.3 Contract Chat Interface** — Chat UI, API endpoint, conversation history
+- [ ] **4.4 Contradiction Detection** — Cross-document analysis, amendment vs base spec, inter-discipline conflicts
+- [ ] **4.5 Requirements Extraction** — LLM-assisted extraction from tender docs
+- [ ] **4.6 Requirements Matrix** — Status tracking, BIM element linking, compliance dashboard
 
 ---
 
-## 📊 Tier 4: BIM 5D — Schedule & Certification
+## 📊 Tier 5: BIM 5D — Schedule & Certification
 
-**Why fourth:** Needs Tier 1 (accurate coverage/progress) + Tier 3 (contract requirements) to produce meaningful outputs.
+**Why fifth:** Needs Tier 1 (accurate coverage/progress) + Tier 4 (contract requirements) to produce meaningful outputs.
 
-**Depends on:** Tier 1 (coverage engine) + Tier 3 (requirements)
+**Depends on:** Tier 1 (coverage engine) + Tier 4 (requirements)
 
-- [ ] **4.1 Schedule Data Model**
-  - [ ] WBS (Work Breakdown Structure) import/creation
-  - [ ] Activity → BIM element linking
-  - [ ] Planned dates per activity
-  - [ ] Predecessor/successor relationships
-
-- [ ] **4.2 Gantt Visualization**
-  - [ ] Gantt chart component (DHTMLX or custom)
-  - [ ] Planned vs actual bars
-  - [ ] Critical path highlighting
-  - [ ] Scan-driven progress auto-update
-
-- [ ] **4.3 Scan-Fed Progress**
-  - [ ] Activity progress = f(coverage_cumulative × quality)
-  - [ ] Auto-update when new scan is processed
-  - [ ] Delay detection: actual behind planned
-  - [ ] Impact analysis on downstream activities
-
-- [ ] **4.4 S-Curve**
-  - [ ] Planned S-curve from schedule
-  - [ ] Actual S-curve from scan history
-  - [ ] Comparison chart (D3.js / Chart.js)
-  - [ ] Early/late analysis
-
-- [ ] **4.5 Certification Engine**
-  - [ ] Certificate template with scan evidence
-  - [ ] Threshold: no certificate below X% coverage + Y% quality
-  - [ ] Certificate includes: scan date, coverage, deviation report, screenshots
-  - [ ] PDF generation
-  - [ ] Digital signature workflow
-  - [ ] Payment milestone linking
+- [ ] **5.1 Schedule Data Model** — WBS import, activity→BIM linking, planned dates
+- [ ] **5.2 Gantt Visualization** — Planned vs actual, critical path, scan-driven progress
+- [ ] **5.3 Scan-Fed Progress** — `progress = f(coverage × quality)`, delay detection
+- [ ] **5.4 S-Curve** — Planned vs actual, comparison chart
+- [ ] **5.5 Certification Engine** — Certificate with scan evidence, threshold enforcement, PDF generation, digital signatures
 
 ---
 
-## 📐 Tier 5: Engineering Document Control
+## 📐 Tier 6: Engineering Document Control
 
-**Why fifth:** Needs Tier 3 (document infrastructure + requirements) to link drawings to requirements.
+**Depends on:** Tier 4 (document storage, requirements matrix)
 
-**Depends on:** Tier 3 (document storage, requirements matrix)
-
-- [ ] **5.1 Drawing Management**
-  - [ ] Upload engineering drawings (PDF, DWG conversion)
-  - [ ] Version control with full history
-  - [ ] Status workflow: DRAFT → REVIEW → APPROVED → SUPERSEDED
-  - [ ] Observations and comments per drawing
-
-- [ ] **5.2 Requirement-Drawing Linking**
-  - [ ] Associate drawings to contract requirements
-  - [ ] Gap detection: requirements without drawings
-  - [ ] AI-assisted compliance check
-
-- [ ] **5.3 BIM Consistency**
-  - [ ] Detect drawing ↔ BIM discrepancies
-  - [ ] Flag BIM updates needed when drawings change
-  - [ ] Drawing-to-BIM element association
-
-- [ ] **5.4 Pending Items Tracker**
-  - [ ] Observations register per drawing/element
-  - [ ] Status: OPEN → ADDRESSED → VERIFIED → CLOSED
-  - [ ] Dashboard: pending items by discipline, age, priority
+- [ ] **6.1 Drawing Management** — Upload, version control, status workflow, observations
+- [ ] **6.2 Requirement-Drawing Linking** — Gap detection, AI-assisted compliance
+- [ ] **6.3 BIM Consistency** — Drawing↔BIM discrepancy detection
+- [ ] **6.4 Pending Items Tracker** — Observations register, status workflow, dashboard
 
 ---
 
-## 🛡️ Tier 6: Quality, Safety & Environment
+## 🛡️ Tier 7: Quality, Safety & Environment
 
-**Why sixth:** Needs Tier 1 (deviations trigger NCRs) + Tier 3 (quality requirements from contract).
+**Depends on:** Tier 1 (deviations) + Tier 4 (requirements) + Tier 6 (doc control)
 
-**Depends on:** Tier 1 (deviations) + Tier 3 (requirements) + Tier 5 (doc control)
-
-- [ ] **6.1 Quality Management**
-  - [ ] Inspection checklists per activity/discipline
-  - [ ] Non-conformance reports (NCR) auto-generated from deviations
-  - [ ] NCR workflow: OPEN → REVIEW → CORRECTIVE → VERIFIED → CLOSED
-  - [ ] Quality KPIs (first-pass yield, NCR rate, rework %)
-
-- [ ] **6.2 Worker Safety & PPE Detection**
-  - [ ] SAM3 body segmentation (detect human silhouettes, NOT identities)
-  - [ ] Face anonymization pipeline (auto-blur before storage)
-  - [ ] VLM PPE verification prompts (hard hat, vest, harness, gloves, glasses)
-  - [ ] Work-at-height detection (MapAnything elevation + VLM harness check)
-  - [ ] Restricted zone violation (3D worker position vs BIM hazard zones)
-  - [ ] Improper tool usage detection (VLM context analysis)
-  - [ ] Safety NCR auto-generation from detected violations
-  - [ ] Safety KPIs dashboard (PPE compliance rate, violations trend)
-  - [ ] GDPR compliance: no biometric data, no individual tracking
-  - [ ] Permit management (work permits, hot work, confined space)
-
-- [ ] **6.3 Environmental Management**
-  - [ ] Environmental requirements tracking
-  - [ ] Compliance reporting
-  - [ ] Waste/emissions monitoring
-
-- [ ] **6.4 RAMS (where applicable)**
-  - [ ] RAMS requirements matrix
-  - [ ] Verification linked to test/commissioning results
-  - [ ] Applicable for metro, rail, energy projects
+- [ ] **7.1 Quality Management** — Inspection checklists, auto-NCR from deviations, quality KPIs
+- [ ] **7.2 Worker Safety & PPE Detection** — SAM3 body segmentation (anonymized), VLM PPE verification, hazard detection, GDPR compliant
+- [ ] **7.3 Environmental Management** — Requirements tracking, compliance reporting
+- [ ] **7.4 RAMS** — Requirements matrix, verification linked to commissioning (metro, rail, energy)
 
 ---
 
-## 💬 Tier 7: Communication & Meeting Governance
+## 💬 Tier 8: Communication & Meeting Governance
 
-**Why seventh:** Adds collaboration layer. Can be started earlier if needed but full value comes with Tiers 3-6 in place.
+**Depends on:** Tier 0 (WebSocket infrastructure)
 
-**Depends on:** Tier 0 (WebSocket infrastructure exists)
-
-- [ ] **7.1 Project Chat**
-  - [ ] Real-time messaging (WebSocket-based)
-  - [ ] Channels per team/discipline
-  - [ ] Contextual threads (about a BIM element, drawing, NCR)
-  - [ ] AI assistant (RAG over all project data)
-
-- [ ] **7.2 Meeting Management**
-  - [ ] Meeting scheduling / calendar
-  - [ ] Audio recording + Whisper transcription
-  - [ ] LLM auto-generated minutes (key points, decisions, action items)
-  - [ ] Digital signature of minutes (on-site, tablet/phone)
-
-- [ ] **7.3 Agreement Tracking**
-  - [ ] All meeting agreements become tracked items
-  - [ ] Status: AGREED → IN_PROGRESS → COMPLETED → VERIFIED
-  - [ ] AI checks if agreements are being fulfilled
-  - [ ] Legal compliance verification (notice periods, quorum)
+- [ ] **8.1 Project Chat** — Real-time messaging, contextual threads, AI assistant (RAG)
+- [ ] **8.2 Meeting Management** — Audio recording + Whisper transcription, LLM auto-minutes, digital signatures
+- [ ] **8.3 Agreement Tracking** — Status tracking, AI fulfillment checks, legal compliance
 
 ---
 
-## 🔗 Tier 8: Blockchain Audit Trail
+## 🔗 Tier 9: Blockchain Audit Trail
 
-**Why last:** The seal of trust. All other tiers produce the events that get recorded. Blockchain is the immutability layer on top.
+**Depends on:** Tier 5 (certification) + Tier 6 (documents)
 
-**Depends on:** Tier 4 (certification) + Tier 5 (documents) — needs events to record
-
-- [ ] **8.1 Event Hashing**
-  - [ ] SHA-256 hash of every critical event (scan, certificate, amendment, NCR, meeting)
-  - [ ] Structured event format: { type, hash, timestamp, signer, references }
-
-- [ ] **8.2 Immutable Ledger**
-  - [ ] MVP: Merkle tree with TSA (Trusted Timestamp Authority)
-  - [ ] Each block references previous → chain integrity
-  - [ ] Digital signature of responsible party
-  - [ ] Future: upgrade to Hyperledger or public chain
-
-- [ ] **8.3 Verification API**
-  - [ ] "Was this certificate issued on this date?" → verify hash
-  - [ ] "Has this scan data been modified since?" → compare hashes
-  - [ ] "Did this person approve this drawing?" → verify signature
-  - [ ] Public verification endpoint for auditors
-
-- [ ] **8.4 Regulatory Standards Engine**
-  - [ ] Standards library (upload + index norms)
-  - [ ] Auto-linking: standard clauses → requirements → BIM elements
-  - [ ] Compliance dashboard per standard
+- [ ] **9.1 Event Hashing** — SHA-256 of every critical event
+- [ ] **9.2 Immutable Ledger** — Merkle tree + TSA, chain integrity, digital signatures
+- [ ] **9.3 Verification API** — Public verification endpoint for auditors
+- [ ] **9.4 Regulatory Standards Engine** — Standards library, auto-linking, compliance dashboard
 
 ---
 
-## 🔧 Tier 9: STAC Maintain — Asset Lifecycle
+## 🔧 Tier 10: STAC Maintain — Asset Lifecycle
 
-**Why ninth:** The crown jewel. After everything is built, verified, documented, and sealed with blockchain — STAC transitions to maintenance mode for the life of the asset.
+**Depends on:** Tier 5 (certification) + Tier 7 (QSE) + Tier 9 (blockchain)
 
-**Depends on:** Tier 4 (certification) + Tier 6 (QSE) + Tier 8 (blockchain)
-
-- [ ] **9.1 Digital Twin Handover**
-  - [ ] Auto-generate operations package at project completion
-  - [ ] Asset register from SAM3 segmentation + BIM elements
-  - [ ] Baseline condition snapshot (day-zero 3D reference)
-  - [ ] Documentation package: specs, drawings, certificates, warranties
-  - [ ] Project mode → Maintenance mode transition in UI
-
-- [ ] **9.2 Preventive Maintenance**
-  - [ ] Maintenance plan auto-generation from installed equipment
-  - [ ] BIM-aware scheduling (MEP systems, intervals, calibrations)
-  - [ ] Calendar + alerts for upcoming tasks
-  - [ ] Compliance tracking: overdue, completed, skipped
-
-- [ ] **9.3 Corrective Maintenance & Work Orders**
-  - [ ] Work order creation, assignment, tracking, closure
-  - [ ] Full context: drawings, specs, construction method, materials
-  - [ ] Parts/materials linking (installed → replacement needed)
-  - [ ] Repair history per element
-
-- [ ] **9.4 Deterioration Monitoring (Re-Scanning)**
-  - [ ] Periodic maintenance scans (same MapAnything pipeline)
-  - [ ] Compare current state vs as-built baseline
-  - [ ] Crack/deformation progression tracking
-  - [ ] Structural health trend analysis
-  - [ ] Early warning alerts for degradation thresholds
-
-- [ ] **9.5 Technician Traceability**
-  - [ ] Technician profiles: ID, company, licenses, certifications
-  - [ ] Tool/equipment tracking with calibration dates
-  - [ ] Materials used: batch numbers, specs, warranties
-  - [ ] All interventions recorded in blockchain
-
-- [ ] **9.6 Warranty Management**
-  - [ ] Warranty dates and conditions per element
-  - [ ] Expiration alerts
-  - [ ] Claim support: full construction + maintenance history as evidence
+- [ ] **10.1 Digital Twin Handover** — Operations package, asset register, baseline snapshot
+- [ ] **10.2 Preventive Maintenance** — Auto scheduling, BIM-aware, compliance tracking
+- [ ] **10.3 Corrective Maintenance & Work Orders** — Full context, parts linking, repair history
+- [ ] **10.4 Deterioration Monitoring** — Periodic re-scans, baseline comparison, trend analysis
+- [ ] **10.5 Technician Traceability** — Profiles, tools, materials, blockchain recording
+- [ ] **10.6 Warranty Management** — Dates, alerts, claim support
 
 ---
 
-## 📱 Tier 10: STAC Build Capture (Unity)
+## 📱 Tier 11: STAC Build Capture (Unity)
 
-**Why last for now:** Requires the scanning pipeline (Tiers 0–2) to be mature before standardizing the capture end. Once implemented, becomes the only supported video source — all metadata is controlled.
+**Depends on:** Tier 3 (multi-source stabilized) + Tier 2 (2D engine needs pose data)
 
-**Depends on:** Tier 2 (zoom/multi-source stabilized)
-
-- [ ] **10.1 Unity Camera App**
-  - [ ] AR Foundation camera access (iOS/Android)
-  - [ ] Real-time preview with scanning guidance overlays
-  - [ ] Controlled frame rate + resolution settings
-
-- [ ] **10.2 Metadata Injection**
-  - [ ] Per-frame intrinsics (focal length, lens ID, zoom level) baked into video container
-  - [ ] IMU data stream (accelerometer, gyroscope) for motion priors
-  - [ ] GPS/BLE positioning for scan zone mapping
-  - [ ] STAC session metadata header (project ID, operator, zone, timestamp)
-
-- [ ] **10.3 Source Verification**
-  - [ ] Cryptographic signing of video files (STAC Capture signature)
-  - [ ] Pipeline rejects unsigned/external video sources
-  - [ ] Chain of custody: capture → upload → processing is verified end-to-end
+- [ ] **11.1 Unity Camera App** — AR Foundation, scanning guidance, controlled capture
+- [ ] **11.2 Metadata Injection** — Per-frame intrinsics, IMU data, GPS/BLE, session metadata
+- [ ] **11.3 ARKit/ARCore Pose Stream** — Dual pose source: ARKit VIO + MapAnything NN
+- [ ] **11.4 Source Verification** — Cryptographic signing, chain of custody
 
 ---
 
@@ -387,32 +260,36 @@ Everything here is implemented and working.
 ```
 Tier 0 (DONE)
   │
-  ├──→ Tier 1: Coverage Engine
+  ├──→ Tier 1: Coverage Engine (DONE)
   │       │
-  │       ├──→ Tier 4: BIM 5D (Gantt, S-Curve, Certification)
+  │       ├──→ Tier 2: 2D Analysis Engine ← CURRENT PRIORITY
   │       │       │
-  │       │       ├──→ Tier 8: Blockchain Audit Trail
-  │       │       │
-  │       │       └──→ Tier 9: STAC Maintain (lifecycle + maintenance)
+  │       │       └──→ Tier 11: Unity Capture (dual pose source)
   │       │
-  │       └──→ Tier 6: QSE + RAMS + Worker Safety
+  │       ├──→ Tier 5: BIM 5D (Gantt, S-Curve, Certification)
+  │       │       │
+  │       │       ├──→ Tier 9: Blockchain Audit Trail
+  │       │       │
+  │       │       └──→ Tier 10: STAC Maintain (lifecycle)
+  │       │
+  │       └──→ Tier 7: QSE + RAMS + Worker Safety
   │               │
-  │               └──→ Tier 9: STAC Maintain
+  │               └──→ Tier 10: STAC Maintain
   │
-  ├──→ Tier 2: Long-Range + Multi-Source  (parallel with Tier 1)
+  ├──→ Tier 3: Long-Range + Multi-Source (parallel with Tier 2)
   │       │
-  │       └──→ Tier 10: STAC Build Capture (Unity)
+  │       └──→ Tier 11: STAC Build Capture (Unity)
   │
-  ├──→ Tier 3: Document Intelligence      (parallel with Tier 1)
+  ├──→ Tier 4: Document Intelligence (parallel with Tier 2)
   │       │
-  │       ├──→ Tier 4: BIM 5D
-  │       ├──→ Tier 5: Engineering Doc Control
+  │       ├──→ Tier 5: BIM 5D
+  │       ├──→ Tier 6: Engineering Doc Control
   │       │       │
-  │       │       └──→ Tier 6: QSE + RAMS
+  │       │       └──→ Tier 7: QSE + RAMS
   │       │
-  │       └──→ Tier 8: Blockchain
+  │       └──→ Tier 9: Blockchain
   │
-  └──→ Tier 7: Communication              (parallel, but richer with 3-6)
+  └──→ Tier 8: Communication (parallel, richer with 4-7)
 ```
 
 ---
@@ -422,13 +299,14 @@ Tier 0 (DONE)
 | When this is done... | ...these become possible |
 |---------------------|------------------------|
 | **Tier 1** (Coverage) | Accurate progress %, element states, scan-fed Gantt |
-| **Tier 2** (Long-range) | Large project scanning, multi-operator workflows |
-| **Tier 3** (Documents) | Contract chat, requirements tracking, contradiction detection |
-| **Tier 1 + 3** | Certification backed by both scan evidence AND contract requirements |
-| **Tier 4** (BIM 5D) | S-curve, payment certificates, delay analysis |
-| **Tier 5** (Eng. Docs) | Drawing-to-BIM linking, version control, compliance |
-| **Tier 6** (QSE) | Auto-NCRs from deviations, **worker safety detection (PPE, hazards)** |
-| **Tier 7** (Comms) | Meeting minutes, agreement tracking, project chat |
-| **Tier 8** (Blockchain) | Immutable audit trail, legal-grade evidence, public transparency |
-| **Tier 9** (Maintain) | **Lifecycle maintenance, deterioration monitoring, recurring revenue** |
-| **Tier 10** (Capture) | **Standardized metadata, source verification, guided scanning** |
+| **Tier 2** (2D Analysis) | **Pixel-level deviation detection, material ID, precise BIM comparison** |
+| **Tier 3** (Long-range) | Large project scanning, multi-operator workflows |
+| **Tier 4** (Documents) | Contract chat, requirements tracking, contradiction detection |
+| **Tier 2 + 4** | 2D-verified certification backed by both pixel evidence AND contract requirements |
+| **Tier 5** (BIM 5D) | S-curve, payment certificates, delay analysis |
+| **Tier 6** (Eng. Docs) | Drawing-to-BIM linking, version control, compliance |
+| **Tier 7** (QSE) | Auto-NCRs from deviations, **worker safety detection (PPE, hazards)** |
+| **Tier 8** (Comms) | Meeting minutes, agreement tracking, project chat |
+| **Tier 9** (Blockchain) | Immutable audit trail, legal-grade evidence |
+| **Tier 10** (Maintain) | **Lifecycle maintenance, deterioration monitoring, recurring revenue** |
+| **Tier 11** (Capture) | **Dual pose sources (ARKit+NN), standardized metadata, guided scanning** |

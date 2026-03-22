@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <em>AI-powered As-Built vs As-Planned comparison using dense 3D reconstruction and BIM</em>
+  <em>AI-powered As-Built vs As-Planned comparison using 2D image analysis with BIM reprojection and dense 3D reconstruction</em>
 </p>
 
 ---
@@ -16,7 +16,21 @@
 
 **STAC Build** is a construction dimensional control system that compares **As-Built reality** (captured via smartphone video) against **As-Planned design** (BIM/IFC models) to detect geometric deviations and track construction progress.
 
-The system captures video from a phone camera, reconstructs a dense 3D point cloud using AI-based depth estimation, segments construction elements, matches them to BIM components, and visualizes deviations as a color-coded "sábana" (deviation map) directly overlaid on the point cloud.
+The system uses a **dual-engine architecture**: a **2D Analysis Engine** that projects BIM elements onto high-resolution camera frames for pixel-level comparison, and a **3D Reconstruction Engine** that generates dense point clouds for navigation, visualization, and spatial context.
+
+### Why 2D-Primary?
+
+The core insight: **analysis is more precise in the original 2D image space** than in reconstructed 3D point clouds.
+
+| Dimension | 2D Image Space | 3D Reconstructed Space |
+|-----------|---------------|----------------------|
+| **Resolution** | Full sensor resolution (~1MP+ per frame) | Lossy: depth→backprojection→merge→filter |
+| **AI Model Precision** | SOTA models (SAM, VLM, PE Spatial) optimized for 2D | No equivalent 3D-native models at this quality |
+| **Error Chain** | Direct — pixel vs projected BIM | Cumulative — depth→alignment→SOR→octree |
+| **Deviation Detection** | Pixel-level BIM overlay comparison | Point-to-mesh distance (noisy) |
+| **Material Identification** | Native — VLM on original pixels | Indirect — must trace back to source frame |
+
+The 2D engine uses **perfect camera poses from MapAnything** to project BIM geometry onto each frame, enabling direct pixel-level comparison without the noise introduced by 3D reconstruction.
 
 ### Core Workflow
 
@@ -24,27 +38,34 @@ The system captures video from a phone camera, reconstructs a dense 3D point clo
 📱 Capture Video (MP4)
     │
     ▼
-🧠 Dense 3D Reconstruction (Reconstruction — MapAnything)
-    ├─ Monocular depth estimation
-    ├─ Camera pose tracking (SLAM)
-    └─ Aligned point cloud generation
+🧠 Dual-Engine Processing
+    │
+    ├─ ENGINE 1: 2D Analysis (Primary)
+    │   ├─ Frame selection (H/F ratio + blur filter)
+    │   ├─ Camera pose estimation (MapAnything cam2world)
+    │   ├─ BIM → 2D reprojection (K × [R|t] × P_BIM)
+    │   ├─ Per-frame deviation analysis (pixel-level)
+    │   ├─ Material identification (PE Spatial + VLM)
+    │   └─ Multi-frame coverage accumulation
+    │
+    ├─ ENGINE 2: 3D Reconstruction (Secondary)
+    │   ├─ Dense point cloud (MapAnything)
+    │   ├─ SIM3 chunk alignment + auto-leveling
+    │   ├─ Instance segmentation (SAM3 + VLM)
+    │   └─ Potree octree for streaming visualization
     │
     ▼
-🔍 Semantic Segmentation (SAM3 + VLM)
-    ├─ SAM3: Instance segmentation of construction elements
-    └─ InternVL3: Automatic scene inventory and element labeling
-    │
-    ▼
-📐 BIM Comparison
-    ├─ IFC parsing (IfcOpenShell)
-    ├─ Scan-to-BIM registration (ICP)
+📐 BIM Comparison & Registration
+    ├─ Scan-to-BIM alignment (gizmo + ICP)
+    ├─ Pose transformation: T_scan→BIM
     ├─ Cloud-to-Mesh deviation (C2M)
     └─ Coverage analysis per BIM element
     │
     ▼
 📊 Visualization & Reports
-    ├─ Sábana: color-coded deviation point cloud
-    ├─ Potree: level-of-detail streaming for massive clouds
+    ├─ Sábana: color-coded deviation map
+    ├─ Per-frame BIM overlay (2D analysis results)
+    ├─ Potree: level-of-detail point cloud streaming
     ├─ BIM overlay: Three.js + IFC rendering
     └─ Per-element metrics: coverage %, deviation stats
 ```
@@ -53,14 +74,29 @@ The system captures video from a phone camera, reconstructs a dense 3D point clo
 
 ## Technology Stack
 
+### 2D Analysis Engine
+
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| **Depth & SLAM** | [MapAnything](https://github.com/DepthAnything/Depth-Anything-V3) | Dense 3D reconstruction from monocular video |
+| **Spatial Backbone** | [PE Spatial](https://github.com/facebookresearch/perception_models) (Meta) | Dense spatial features — segmentation, detection, depth, tracking. ViT-G/14, ~1.8B params. Apache 2.0 |
+| **Scene Analysis VLM** | [PLM-8B](https://github.com/facebookresearch/perception_models) (Meta) | Perception Language Model — material identification, scene understanding, occlusion classification. Replaces InternVL3 |
+| **Metric Depth** | [DepthLM](https://github.com/facebookresearch/DepthLM_Official) (Meta) | VLM-based per-pixel metric depth estimation (Pixtral 12B). ICLR 2026 Oral (top 1.2%) |
+| **Scene Analysis (current)** | [InternVL3](https://github.com/OpenGVLab/InternVL) | Current VLM for object identification and labeling. Being migrated to PLM-8B |
+
+### 3D Reconstruction Engine
+
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| **Reconstruction** | [MapAnything](https://github.com/facebookresearch/MapAnything2) (Meta FAIR) | Dense 3D reconstruction + camera poses from monocular video. Apache 2.0 |
 | **Segmentation** | [SAM3](https://github.com/facebookresearch/sam2) (Segment Anything 3) | Instance segmentation of construction elements |
-| **Scene Analysis** | [InternVL3](https://github.com/OpenGVLab/InternVL) (Vision-Language Model) | Automatic object identification and labeling |
-| **BIM Parsing** | [IfcOpenShell](https://ifcopenshell.org/) | IFC geometry extraction |
-| **Point Cloud Viz** | [Potree](https://potree.github.io/) + [Three.js](https://threejs.org/) | Level-of-detail point cloud rendering |
 | **Post-processing** | [CloudCompPy](https://www.cloudcompare.org/) | SOR filtering, octree generation |
+| **Point Cloud Viz** | [Potree](https://potree.github.io/) + [Three.js](https://threejs.org/) | Level-of-detail point cloud rendering |
+
+### Platform
+
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| **BIM Parsing** | [IfcOpenShell](https://ifcopenshell.org/) | IFC geometry extraction |
 | **Backend** | Python 3.11, Flask, WebSocket | Pipeline orchestration, API |
 | **Frontend** | React + TypeScript + Vite | IDE-style viewer interface |
 | **Infrastructure** | Docker, CUDA 12.1 | GPU-accelerated containerized deployment |
@@ -68,6 +104,13 @@ The system captures video from a phone camera, reconstructs a dense 3D point clo
 ---
 
 ## Features
+
+### 2D Analysis Engine
+- **BIM Reprojection**: Project BIM elements onto each camera frame using MapAnything poses + intrinsics
+- **Pixel-Level Deviation Detection**: Compare projected BIM edges and surfaces against actual image content
+- **Material Identification**: PE Spatial + VLM analyze original image pixels for material classification
+- **Multi-Frame Coverage**: Accumulate analysis results across frames for complete element coverage
+- **Pose-Aware Tolerance**: Expand matching regions based on estimated pose uncertainty
 
 ### Dense 3D Reconstruction
 - **MapAnything** processes video frames to produce dense depth maps and camera poses
@@ -78,9 +121,10 @@ The system captures video from a phone camera, reconstructs a dense 3D point clo
 
 ### Semantic Segmentation
 - **SAM3** segments individual construction elements in 3D
-- **InternVL3** VLM automatically scans frames and generates an object inventory
+- **InternVL3** VLM automatically scans frames and generates an object inventory (being replaced by **PLM-8B**)
 - DBSCAN spatial clustering separates co-labeled instances
-- Oriented Bounding Boxes (OBB) for each segmented element
+- RANSAC face detection per segment with non-destructive point assignment
+- Voxel mesh visualization with normal-snapped quads
 - Interactive retroactive prompting: point-and-click to re-segment
 
 ### BIM Integration
@@ -121,7 +165,8 @@ stac-builder/
 │   ├─ frame_selector.py      # Visual novelty filter (H/F ratio)
 │   ├─ alignment_manager.py   # SIM3 alignment + auto-leveling
 │   ├─ scene_analyzer.py      # InternVL3 scene inventory
-│   ├─ segmentation_pipeline.py # SAM3 + DBSCAN + OBB
+│   ├─ segmentation/          # SAM3 + DBSCAN + RANSAC face detection
+│   │   └─ pipeline.py        # Full segmentation pipeline
 │   ├─ bim_comparison.py      # C2M deviation, sábana, coverage
 │   ├─ bim_registration.py    # Scan-to-BIM alignment (ICP)
 │   ├─ cloudcompy_postprocess.py # SOR filter, Potree conversion
@@ -133,23 +178,41 @@ stac-builder/
 │       ├─ components/
 │       │   ├─ IFCLoader.ts    # BIM model rendering
 │       │   ├─ PotreeLoader.ts # Point cloud streaming
-│       │   └─ ...
+│       │   └─ InteractiveSegmentation.tsx
 │       └─ pages/
 │           └─ LoginPage.tsx   # Authentication
 │
 ├─ vendor/                    # AI model integrations
-│   ├─ mapanything/      # Reconstruction streaming inference
-│   └─ sam3/                  # SAM3 video segmentation
+│   ├─ MapAnything2/           # 3D reconstruction + camera poses
+│   ├─ perception_models/     # PE Spatial backbone + PLM-8B VLM (Apache 2.0)
+│   ├─ DepthLM_Official/      # VLM metric depth estimation (Pixtral 12B)
+│   ├─ sam3/                   # SAM3 video segmentation
+│   └─ PotreeConverter/        # Octree generation
 │
-├─ static/                    # Legacy viewer + camera capture
-│   ├─ viewer.html
-│   └─ camera.html
+├─ docs/                      # Documentation
+│   ├─ ROADMAP.md
+│   ├─ FUTURE_VISION.md
+│   ├─ ARCHITECTURE.md
+│   └─ SCANNING_GUIDE.md
 │
-└─ docs/                      # Documentation
-    ├─ SCANNING_GUIDE.md
-    ├─ BIM_INTEGRATION_PLAN.md
-    └─ COVERAGE_STRATEGY.md
+└─ static/                    # Legacy viewer + camera capture
 ```
+
+---
+
+## Camera Pose & Localization
+
+The 2D analysis engine depends on accurate camera poses for BIM reprojection. STAC uses a layered approach:
+
+| Source | Type | Accuracy | When |
+|--------|------|----------|------|
+| **MapAnything** | SfM feed-forward | High relative, ~cm inter-frame | Always (core pipeline) |
+| **Gizmo + ICP** | Manual alignment → refinement | Depends on user + ICP | Current registration method |
+| **ARKit/ARCore** | VIO + IMU + LiDAR | ~cm short-range, drift over distance | Future (Unity capture app) |
+
+**Initial Localization**: The scan-to-BIM registration (gizmo + ICP) provides the transformation `T_scan→BIM` that maps MapAnything poses to BIM coordinates. This is the same registration used today for 3D comparison, now repurposed for 2D reprojection.
+
+**Error Handling**: Pose uncertainty at distance `d` is compensated by expanding the BIM reprojection search window proportionally. PE Spatial features enable robust local matching even with ±20px uncertainty.
 
 ---
 
@@ -160,7 +223,7 @@ All pipeline parameters are centralized in `server/config.yaml`:
 ```yaml
 # Key configuration sections
 server:
-  chunk_size: 30              # Frames per Reconstruction chunk
+  chunk_size: 30              # Frames per reconstruction chunk
   chunk_overlap: 10           # Overlap frames for alignment
 
 frame_selection:
@@ -169,7 +232,7 @@ frame_selection:
 
 models:
   depth:
-    name: "depth-anything/ReconstructionNESTED-GIANT-LARGE-1.1"
+    name: "facebook/map-anything-apache"
     device: "cuda"
   segmentation:
     sam3_checkpoint: "sam3_hiera_large.pt"
@@ -191,7 +254,7 @@ bim:
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| **GPU** | RTX 3060 (12GB VRAM) | RTX 4090 (24GB VRAM) |
+| **GPU** | RTX 3060 6GB (CPU fallback for large models) | RTX 4090 (24GB VRAM) |
 | **CPU** | 8 cores | 16+ cores |
 | **RAM** | 32 GB | 64 GB |
 | **Storage** | SSD 500GB | NVMe 1TB+ |
@@ -231,22 +294,10 @@ Access the application at `http://localhost:5000`
 
 ## Roadmap
 
-- [ ] **Long-range scanning**: Zoom-aware capture with adaptive intrinsics
-- [ ] **Occlusion-aware coverage**: Ray-casting + SAM3 + VLM for intelligent occlusion detection
-- [ ] **Multi-source scanning**: Multiple operators scanning concurrently, cloud merging
-- [ ] **Multi-level support**: Cross-floor scanning with BIM storey alignment
-- [ ] **Unity + ARKit/ARCore**: Mobile capture app with native intrinsics
-
-See [COVERAGE_STRATEGY.md](docs/COVERAGE_STRATEGY.md) for the detailed design of upcoming features.
-
----
-
-## Origin
-
-STAC Build was presented at **Ingerop Paris** on February 3, 2026, during the IN3 Modernization Program for Mexico City Metro Line 1. It was selected by the Science & Technology department and will be accelerated through the **Impulse Partners** program in partnership with Ingerop France.
+See [ROADMAP.md](docs/ROADMAP.md) for the full development roadmap and [FUTURE_VISION.md](docs/FUTURE_VISION.md) for the strategic platform vision.
 
 ---
 
 <p align="center">
-  <sub>Designed and developed by <strong>Hernán Barreto</strong> — Ingerop IN3</sub>
+  <sub>Designed and developed by <strong>Hernán Barreto</strong></sub>
 </p>

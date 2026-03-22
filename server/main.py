@@ -3038,9 +3038,85 @@ async def viewer_websocket(websocket: WebSocket):
                                             has_confidence = True
                                         if hl.startswith(b'end_header'):
                                             break
-                            return potree_meta, floor_transform_4x4, ifc_files, has_confidence
+                            # Load camera poses (4x4 extrinsic matrices from VGGT-Long)
+                            # Prefer maplong_run/ (keyframe-only) over root (may have all frames)
+                            # Transform to floor-aligned space using floor_transform (s*R*p+t)
+                            camera_poses_list = None
+                            frame_names = None
+                            
+                            # Load keyframe names first (for tooltip labels + filtering)
+                            sel_json = _load_ctx.frames_dir / "selected_frames.json"
+                            if sel_json.exists():
+                                with open(sel_json) as sf:
+                                    sel_data = json.loads(sf.read())
+                                    frame_names = sel_data if isinstance(sel_data, list) else sel_data.get("selected_files", [])
+                            
+                            # Find poses file (prefer maplong_run/)
+                            poses_path = output_dir / "maplong_run" / "camera_poses.txt"
+                            if not poses_path.exists():
+                                poses_path = output_dir / "camera_poses.txt"
+                            
+                            if poses_path.exists():
+                                try:
+                                    # Load floor transform for pose transformation
+                                    ft_s, ft_R, ft_t = 1.0, np.eye(3), np.zeros(3)
+                                    transform_path = output_dir / "floor_transform.npz"
+                                    if transform_path.exists():
+                                        ft_data = np.load(transform_path)
+                                        ft_s = float(ft_data['s'])
+                                        ft_R = ft_data['R']
+                                        ft_t = ft_data['t']
+                                    
+                                    c2w_list = []
+                                    with open(poses_path) as pf:
+                                        for line in pf:
+                                            vals = line.strip().split()
+                                            if len(vals) >= 16:
+                                                c2w_scan = np.array([float(v) for v in vals[:16]]).reshape(4, 4)
+                                                c2w_aligned = np.eye(4)
+                                                c2w_aligned[:3, :3] = ft_R @ c2w_scan[:3, :3]
+                                                c2w_aligned[:3, 3] = ft_s * ft_R @ c2w_scan[:3, 3] + ft_t
+                                                c2w_list.append(c2w_aligned.tolist())
+                                    
+                                    # Filter to keyframe indices if poses > keyframes
+                                    n_kf = len(frame_names) if frame_names else 0
+                                    if n_kf > 0 and len(c2w_list) > n_kf:
+                                        all_jpg = sorted(f.name for f in _load_ctx.frames_dir.glob("*.jpg"))
+                                        fn2idx = {fn: i for i, fn in enumerate(all_jpg)}
+                                        kf_indices = [fn2idx[kf] for kf in frame_names if kf in fn2idx]
+                                        valid = [i for i in kf_indices if i < len(c2w_list)]
+                                        if valid:
+                                            c2w_list = [c2w_list[i] for i in valid]
+                                            print(f"[Viewer] Filtered {len(valid)} keyframe poses from {len(all_jpg)} total")
+                                    
+                                    if c2w_list:
+                                        camera_poses_list = c2w_list
+                                        # Load intrinsics for FOV matching
+                                        intrinsics_list = []
+                                        intr_path = poses_path.parent / "intrinsic.txt"
+                                        if intr_path.exists():
+                                            with open(intr_path) as inf:
+                                                for line in inf:
+                                                    parts = line.strip().split()
+                                                    if len(parts) >= 4:
+                                                        intrinsics_list.append({
+                                                            "fx": float(parts[0]),
+                                                            "fy": float(parts[1]),
+                                                            "cx": float(parts[2]),
+                                                            "cy": float(parts[3]),
+                                                        })
+                                        # Bundle: (poses, frame_names, intrinsics)
+                                        camera_poses_list = (
+                                            c2w_list,
+                                            frame_names[:len(c2w_list)] if frame_names else None,
+                                            intrinsics_list[:len(c2w_list)] if intrinsics_list else None,
+                                        )
+                                        print(f"[Viewer] Loaded {len(c2w_list)} camera poses from {poses_path.name}")
+                                except Exception as e:
+                                    print(f"[Viewer] ⚠️ Could not load camera poses: {e}")
+                            return potree_meta, floor_transform_4x4, ifc_files, has_confidence, camera_poses_list
                         
-                        potree_meta, floor_transform_4x4, ifc_files, has_confidence = await loop.run_in_executor(None, _load_metadata)
+                        potree_meta, floor_transform_4x4, ifc_files, has_confidence, camera_poses_list = await loop.run_in_executor(None, _load_metadata)
                         
                         msg = {
                             "type": "potree_ready",
@@ -3053,6 +3129,15 @@ async def viewer_websocket(websocket: WebSocket):
                             msg["floorTransform"] = floor_transform_4x4
                         if ifc_files:
                             msg["bimFiles"] = ifc_files
+                        if camera_poses_list:
+                            if isinstance(camera_poses_list, tuple):
+                                msg["cameraPoses"] = camera_poses_list[0]
+                                if camera_poses_list[1]:
+                                    msg["cameraFrameNames"] = camera_poses_list[1]
+                                if camera_poses_list[2]:
+                                    msg["cameraIntrinsics"] = camera_poses_list[2]
+                            else:
+                                msg["cameraPoses"] = camera_poses_list
                         await websocket.send_text(json.dumps(msg))
                         print(f"[Viewer] ✅ Sent potree_ready for {session_id} ({potree_meta.get('points', 0):,} pts)")
                         

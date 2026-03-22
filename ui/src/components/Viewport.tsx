@@ -27,6 +27,8 @@ interface ViewportProps {
     onBimLoaded?: (models: import('./IFCLoader').IFCLoadResult[]) => void
     onSabanaLoaded?: (pointCount: number) => void
     onHasConfidence?: (has: boolean) => void
+    showCameraPoses?: boolean
+    onHasCameraPoses?: (has: boolean) => void
 }
 
 export interface SegmentInstance {
@@ -41,6 +43,7 @@ export interface SegmentInstance {
 
 export interface ViewportHandle {
     sendCommand: (cmd: Record<string, unknown>) => void
+    sendCommandPreserveCamera: (cmd: Record<string, unknown>) => void
     toggleOBB: (key: string, visible: boolean) => void
     toggleBIMVisibility: (meshNames: string[], visible: boolean) => void
     highlightBIMElement: (meshNames: string[]) => void
@@ -271,7 +274,7 @@ function adaptGrid(
 }
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence },
+    { pointSize, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -289,6 +292,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const obbMapRef = useRef<Map<string, THREE.Object3D>>(new Map())
     const bimGroupRef = useRef<THREE.Group | null>(null)
     const sabanaGroupRef = useRef<THREE.Group | null>(null)
+    const cameraGroupRef = useRef<THREE.Group | null>(null)
+    const [camTooltip, setCamTooltip] = useState<{ x: number; y: number; frameName: string; sessionId: string } | null>(null)
+    const camRaycasterRef = useRef(new THREE.Raycaster())
 
     // Measurement state
     const measureGroupRef = useRef<THREE.Group | null>(null)
@@ -302,6 +308,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const hoverHighlightRef = useRef<THREE.Group | null>(null)
     const potreeLoaderRef = useRef<PotreeOctreeLoader | null>(null)
     const lastLodUpdateRef = useRef(0)
+    const sabanaLoadIdRef = useRef(0)  // monotonic counter to discard stale sábana loads
+    const sessionFramedRef = useRef<string | null>(null)  // track which session has been framed
+    const preserveCameraRef = useRef<{ pos: THREE.Vector3; target: THREE.Vector3 } | null>(null)
     const floorTransformRef = useRef<THREE.Matrix4 | null>(null)
     const gridRef = useRef<THREE.GridHelper | null>(null)
     const cloudBBoxRef = useRef<THREE.Box3 | null>(null)
@@ -1145,6 +1154,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 wsRef.current.send(JSON.stringify(cmd))
             }
         },
+        sendCommandPreserveCamera: (cmd: Record<string, unknown>) => {
+            // Save current camera state before reload
+            if (cameraRef.current && controlsRef.current) {
+                preserveCameraRef.current = {
+                    pos: cameraRef.current.position.clone(),
+                    target: controlsRef.current.target.clone(),
+                }
+            }
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify(cmd))
+            }
+        },
         toggleOBB: (key: string, visible: boolean) => {
             const mesh = obbMapRef.current.get(key)
             if (mesh) mesh.visible = visible
@@ -1527,6 +1548,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         scene.add(bimGroup)
         bimGroupRef.current = bimGroup
 
+        // Camera poses group
+        const cameraGroup = new THREE.Group()
+        cameraGroup.name = 'cameraGroup'
+        scene.add(cameraGroup)
+        cameraGroupRef.current = cameraGroup
+
         // Measurement overlay group
         const measureGroup = new THREE.Group()
         measureGroup.name = 'measureGroup'
@@ -1753,7 +1780,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
     // Track activeSession in a ref for the WS onopen handler
     const activeSessionRef = useRef(activeSession)
-    useEffect(() => { activeSessionRef.current = activeSession }, [activeSession])
+    useEffect(() => {
+        activeSessionRef.current = activeSession
+        sessionFramedRef.current = null  // reset so new session gets framed
+    }, [activeSession])
 
     // Connect WebSocket with auto-reconnect
     useEffect(() => {
@@ -1829,6 +1859,83 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             wsRef.current?.close()
         }
     }, []) // Only setup once on mount
+
+    // Camera pose hover raycasting
+    useEffect(() => {
+        const container = containerRef.current
+        if (!container) return
+        const handleMouseMove = (e: MouseEvent) => {
+            const camGroup = cameraGroupRef.current
+            const camera = cameraRef.current
+            if (!camGroup || !camera || camGroup.children.length === 0) {
+                setCamTooltip(null)
+                return
+            }
+            const rect = container.getBoundingClientRect()
+            const mouse = new THREE.Vector2(
+                ((e.clientX - rect.left) / rect.width) * 2 - 1,
+                -((e.clientY - rect.top) / rect.height) * 2 + 1
+            )
+            const rc = camRaycasterRef.current
+            rc.setFromCamera(mouse, camera)
+            // Only raycast against spheres (Mesh children, not ArrowHelpers)
+            const spheres = camGroup.children.filter(c => (c as THREE.Mesh).isMesh && c.userData.isCamPose)
+            const hits = rc.intersectObjects(spheres, false)
+            if (hits.length > 0) {
+                const hit = hits[0].object
+                setCamTooltip({
+                    x: e.clientX - rect.left,
+                    y: e.clientY - rect.top,
+                    frameName: hit.userData.frameName,
+                    sessionId: hit.userData.sessionId,
+                })
+            } else {
+                setCamTooltip(null)
+            }
+        }
+        container.addEventListener('mousemove', handleMouseMove)
+        
+        // Click handler: fly to camera pose
+        const handleClick = (e: MouseEvent) => {
+            const camGroup = cameraGroupRef.current
+            const camera = cameraRef.current
+            const controls = controlsRef.current
+            if (!camGroup || !camera || !controls || camGroup.children.length === 0) return
+            const rect = container.getBoundingClientRect()
+            const mouse = new THREE.Vector2(
+                ((e.clientX - rect.left) / rect.width) * 2 - 1,
+                -((e.clientY - rect.top) / rect.height) * 2 + 1
+            )
+            const rc = camRaycasterRef.current
+            rc.setFromCamera(mouse, camera)
+            const spheres = camGroup.children.filter(c => (c as THREE.Mesh).isMesh && c.userData.isCamPose)
+            const hits = rc.intersectObjects(spheres, false)
+            if (hits.length > 0) {
+                const hit = hits[0].object
+                const pos = hit.position.clone()
+                const lookDir = hit.userData.lookDir as THREE.Vector3
+                if (lookDir) {
+                    // Move camera to pose position, look along pose direction
+                    camera.position.copy(pos)
+                    controls.target.copy(pos).addScaledVector(lookDir, 0.5)
+                    // Set FOV from intrinsics if available
+                    const intr = hit.userData.intrinsics
+                    if (intr && intr.fy && intr.cy) {
+                        const fovRad = 2 * Math.atan(intr.cy / intr.fy)
+                        camera.fov = fovRad * 180 / Math.PI
+                        camera.updateProjectionMatrix()
+                    }
+                    controls.update()
+                }
+            }
+        }
+        container.addEventListener('click', handleClick)
+        
+        return () => {
+            container.removeEventListener('mousemove', handleMouseMove)
+            container.removeEventListener('click', handleClick)
+        }
+    }, [])
 
     // When activeSession changes, send load command on existing WS
     // Skip if pipeline is running — no cloud exists yet
@@ -1958,8 +2065,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         totalPointsRef.current += newPointCount
         onPointCount(totalPointsRef.current)
 
-        // Auto-center camera on first chunk
-        if (totalPointsRef.current === newPointCount && controlsRef.current && cameraRef.current) {
+        // Auto-center camera on first chunk (only if session not already framed and not restoring)
+        if (totalPointsRef.current === newPointCount && controlsRef.current && cameraRef.current && !sessionFramedRef.current && !preserveCameraRef.current) {
             const center = new THREE.Vector3()
             geometry.boundingSphere?.center && center.copy(geometry.boundingSphere.center)
             controlsRef.current.target.copy(center)
@@ -1999,6 +2106,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             potreeLoaderRef.current = loader
 
             loader.load(url).then((loadedPts) => {
+                // Guard: if this loader was replaced (e.g. by sábana), skip
+                if (potreeLoaderRef.current !== loader) return
                 // console.log(`[Viewport] Potree loaded: ${loadedPts.toLocaleString()} points`)
                 if (onStatusMessage) onStatusMessage(`LOD octree loaded — ${pts?.toLocaleString()} total points`)
                 onPointCount(loadedPts)
@@ -2026,10 +2135,60 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                             cloudBBoxRef.current.union(bimBox)
                         }
                     }
-                    // Frame with combined bbox (cloud + any BIM)
-                    frameCloud(cloudBBoxRef.current, cameraRef.current, controlsRef.current)
+                    // Frame with combined bbox — only on first load for this session
+                    const sid = msg.session_id as string
+                    if (sessionFramedRef.current !== sid && !preserveCameraRef.current) {
+                        frameCloud(cloudBBoxRef.current, cameraRef.current, controlsRef.current)
+                    }
+                    sessionFramedRef.current = sid
+                    // Restore saved camera state if preserving
+                    if (preserveCameraRef.current && cameraRef.current && controlsRef.current) {
+                        cameraRef.current.position.copy(preserveCameraRef.current.pos)
+                        controlsRef.current.target.copy(preserveCameraRef.current.target)
+                        controlsRef.current.update()
+                    }
                     // Adapt grid to combined extents
                     if (sceneRef.current) adaptGrid(cloudBBoxRef.current, sceneRef.current, gridRef, showGridRef.current)
+                }
+
+                // Render camera poses as arrows if provided
+                const cameraPoses = msg.cameraPoses as number[][][] | undefined
+                if (cameraPoses && cameraGroupRef.current) {
+                    const camGroup = cameraGroupRef.current
+                    // Clear previous
+                    while (camGroup.children.length > 0) camGroup.remove(camGroup.children[0])
+                    const frameNames = msg.cameraFrameNames as string[] | undefined
+                    const intrinsics = msg.cameraIntrinsics as Array<{fx: number, fy: number, cx: number, cy: number}> | undefined
+                    const arrowLen = 0.3
+                    cameraPoses.forEach((c2w, idx) => {
+                        const pos = new THREE.Vector3(c2w[0][3], c2w[1][3], c2w[2][3])
+                        // OpenCV convention: camera looks along +Z
+                        const lookDir = new THREE.Vector3(c2w[0][2], c2w[1][2], c2w[2][2]).normalize()
+                        
+                        const hue = idx / cameraPoses.length
+                        const color = new THREE.Color().setHSL(hue, 0.9, 0.55)
+                        
+                        // Small sphere at camera position
+                        const sphere = new THREE.Mesh(
+                            new THREE.SphereGeometry(0.03, 6, 4),
+                            new THREE.MeshBasicMaterial({ color })
+                        )
+                        sphere.position.copy(pos)
+                        sphere.userData = {
+                            isCamPose: true,
+                            frameName: frameNames?.[idx] || `frame_${idx}`,
+                            sessionId: msg.session_id,
+                            lookDir: lookDir.clone(),
+                            intrinsics: intrinsics?.[idx] || null,
+                        }
+                        camGroup.add(sphere)
+                        
+                        // Arrow for look direction
+                        const lookArrow = new THREE.ArrowHelper(lookDir, pos, arrowLen, color.getHex(), 0.06, 0.04)
+                        camGroup.add(lookArrow)
+                    })
+                    console.log(`[Viewport] Rendered ${cameraPoses.length} camera poses`)
+                    if (onHasCameraPoses) onHasCameraPoses(true)
                 }
             }).catch((err) => {
                 console.error('[Viewport] Potree load failed:', err)
@@ -2066,7 +2225,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         if (msg.type === 'sabana_potree_ready') {
             const url = msg.url as string
             const nPts = msg.points as number
-            console.log(`[Viewport] Sábana Potree ready: ${nPts?.toLocaleString()} points at ${url}`)
+
+            // Bump load counter — any in-flight loads with an older ID are stale
+            const thisLoadId = ++sabanaLoadIdRef.current
+            console.log(`[Viewport] Sábana Potree ready (load #${thisLoadId}): ${nPts?.toLocaleString()} points at ${url}`)
             if (onStatusMessage) onStatusMessage(`Loading sábana LOD octree (${nPts?.toLocaleString()} points)...`)
 
             const scene = sceneRef.current
@@ -2092,7 +2254,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const loader = new PotreeOctreeLoader(scene, camera, mat)
             potreeLoaderRef.current = loader
             loader.load(url).then((loadedPts) => {
-                console.log(`[Viewport] Sábana Potree loaded: ${loadedPts.toLocaleString()} points`)
+                // Guard: if a newer load was started, discard this stale result
+                if (sabanaLoadIdRef.current !== thisLoadId) {
+                    console.log(`[Viewport] Discarding stale sábana load #${thisLoadId} (current: #${sabanaLoadIdRef.current})`)
+                    return
+                }
+                console.log(`[Viewport] Sábana Potree loaded (load #${thisLoadId}): ${loadedPts.toLocaleString()} points`)
                 if (onStatusMessage) onStatusMessage(`Sábana: ${nPts?.toLocaleString()} deviation points`)
                 onPointCount(loadedPts)
 
@@ -2127,6 +2294,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
                 if (onSabanaLoaded) onSabanaLoaded(loadedPts)
             }).catch((err) => {
+                if (sabanaLoadIdRef.current !== thisLoadId) return  // stale, ignore error too
                 console.error('[Viewport] Sábana Potree load error:', err)
                 if (onStatusMessage) onStatusMessage(`Sábana load error: ${err.message}`)
             })
@@ -2164,7 +2332,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                                 cloudBBoxRef.current = bimBox.clone()
                             }
                             if (cameraRef.current && controlsRef.current) {
-                                frameCloud(cloudBBoxRef.current, cameraRef.current, controlsRef.current)
+                                if (!preserveCameraRef.current) {
+                                    frameCloud(cloudBBoxRef.current, cameraRef.current, controlsRef.current)
+                                }
+                            }
+                            // Restore saved camera state if mode-switching (final load step)
+                            if (preserveCameraRef.current && cameraRef.current && controlsRef.current) {
+                                cameraRef.current.position.copy(preserveCameraRef.current.pos)
+                                controlsRef.current.target.copy(preserveCameraRef.current.target)
+                                controlsRef.current.update()
+                                preserveCameraRef.current = null
                             }
                             if (sceneRef.current) {
                                 adaptGrid(cloudBBoxRef.current, sceneRef.current, gridRef, showGridRef.current)
@@ -2189,6 +2366,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             })
         }
     }, [onStatusMessage, onSegments, onPipelineProgress, onPointCount, onBimLoaded, onSabanaLoaded])
+
+    // Toggle camera poses visibility
+    useEffect(() => {
+        const g = cameraGroupRef.current
+        if (g) g.visible = showCameraPoses
+    }, [showCameraPoses])
 
     // Render OBB wireframe boxes for segmentation instances
     const renderOBBs = useCallback((instances: Array<Record<string, unknown>>) => {
@@ -2412,6 +2595,34 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         onClick={saveAlignment}
                         disabled={!alignDirty}
                     >💾 Save Alignment</button>
+                </div>
+            )}
+            {/* Camera pose hover tooltip */}
+            {camTooltip && (
+                <div style={{
+                    position: 'absolute',
+                    left: camTooltip.x + 16,
+                    top: camTooltip.y - 80,
+                    background: 'rgba(10,10,20,0.95)',
+                    borderRadius: 8,
+                    padding: 8,
+                    color: '#fff',
+                    fontSize: 11,
+                    fontWeight: 600,
+                    zIndex: 200,
+                    pointerEvents: 'none',
+                    border: '1px solid rgba(255,255,255,0.2)',
+                    backdropFilter: 'blur(6px)',
+                    minWidth: 120,
+                    maxWidth: 220,
+                }}>
+                    <div style={{ marginBottom: 4 }}>{camTooltip.frameName}</div>
+                    <img
+                        src={`/api/sessions/${camTooltip.sessionId}/frames/${camTooltip.frameName}`}
+                        alt={camTooltip.frameName}
+                        style={{ width: '100%', borderRadius: 4, display: 'block' }}
+                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                    />
                 </div>
             )}
         </div>

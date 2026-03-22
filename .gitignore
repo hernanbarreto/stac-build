@@ -84,6 +84,18 @@ logs/
 # Model weights (downloaded by setup_weights.sh)
 weights/
 
+# Model weight files (any vendor)
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+*.onnx
+
+# Vendor checkpoint directories
+vendor/perception_models/checkpoints/
+vendor/DepthLM_Official/checkpoints/
+
 # HuggingFace cache
 .cache/huggingface/
 

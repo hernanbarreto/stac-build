@@ -56,10 +56,16 @@ The platform is organized into three interdependent layers, where each upper lay
 ┌──────────────────────┴──────────────────────────────────┐
 │  LAYER 1: PHYSICAL REALITY (Core)          ← WORKING   │
 │                                                         │
-│  🧠 MapAnything dense 3D reconstruction                  │
+│  ENGINE 1: 2D Analysis (Primary)                        │
+│  🔬 PE Spatial backbone (dense spatial features)        │
+│  📐 BIM→2D reprojection (pose-aware pixel comparison)   │
+│  🎯 Per-frame deviation detection (pixel-level)         │
+│  🏗️ Material identification (VLM on original pixels)    │
+│                                                         │
+│  ENGINE 2: 3D Reconstruction (Secondary)                │
+│  🧠 MapAnything dense 3D reconstruction + poses         │
 │  🔍 SAM3 instance segmentation                          │
 │  💬 InternVL3 scene analysis (VLM)                      │
-│  📐 BIM comparison + sábana de desviaciones             │
 │  🌐 Potree level-of-detail visualization                │
 │  👁️ Occlusion-aware spatio-temporal coverage            │
 │                                                         │
@@ -92,18 +98,30 @@ DESIGN ──→ CONSTRUCTION ──→ HANDOVER ──→ OPERATION ──→ M
 │                        STAC BUILD PLATFORM                             │
 ├────────────────────────────────────────────────────────────────────────┤
 │                                                                        │
-│  CORE (Current)                                                        │
-│  ├─ 3D Reconstruction (MapAnything)                                    │
-│  ├─ Semantic Segmentation (SAM3)                                       │
-│  ├─ Scene Analysis (InternVL3 VLM)                                     │
-│  ├─ BIM Comparison (IFC → sábana)                                      │
-│  └─ Potree Visualization                                               │
+│  CORE — Dual Engine (Current)                                          │
+│  ├─ 2D Analysis Engine (Primary)                                       │
+│  │   ├─ PE Spatial backbone (dense spatial features, Apache 2.0)       │
+│  │   ├─ BIM→2D reprojection (camera pose + intrinsics)                 │
+│  │   ├─ PLM-8B (scene analysis VLM, replaces InternVL3)               │
+│  │   ├─ DepthLM (VLM metric depth, ICLR 2026 Oral)                    │
+│  │   └─ Material ID + deviation detection (pixel-level)                │
+│  │                                                                     │
+│  ├─ 3D Reconstruction Engine (Secondary)                               │
+│  │   ├─ MapAnything (dense 3D + camera poses, Apache 2.0)              │
+│  │   ├─ SAM3 instance segmentation                                     │
+│  │   ├─ InternVL3 VLM scene analysis                                   │
+│  │   └─ Potree visualization                                           │
+│  │                                                                     │
+│  └─ BIM Comparison (IFC → sábana + 2D deviation overlay)               │
 │                                                                        │
-│  PLANNED (Near-term)                                                   │
-│  ├─ Zoom/Distance Scanning                                             │
+│  DONE (Near-term completed)                                            │
 │  ├─ Occlusion-Aware Coverage Engine                                    │
+│  ├─ Zoom/Distance Scanning                                             │
+│  └─ RANSAC face detection + voxel mesh visualization                   │
+│                                                                        │
+│  PLANNED                                                               │
 │  ├─ Multi-Source Scanning                                               │
-│  └─ Multi-Level Support                                                │
+│  └─ Unity Capture App (ARKit/ARCore + MapAnything dual pose)           │
 │                                                                        │
 │  FUTURE MODULES                                                        │
 │  ├─ 📄 Contract & Tender Documentation                                 │
@@ -638,10 +656,12 @@ All future modules connect through the existing STAC core:
 
 | Model | Current Use | Future Use |
 |-------|------------|------------|
-| **MapAnything** | 3D reconstruction | Same + deterioration re-scanning |
+| **PE Spatial** (Meta, Apache 2.0) | 2D analysis backbone | Dense feature matching for all spatial tasks |
+| **MapAnything** (Meta FAIR, Apache 2.0) | 3D reconstruction + camera poses | Same + deterioration re-scanning + pose for 2D reprojection |
+| **PLM-8B** (Meta, Apache 2.0) | Scene analysis (replacing InternVL3) | Material ID, occlusion classification, safety analysis, equipment condition |
+| **DepthLM** (Meta, ICLR 2026 Oral) | — | VLM metric depth, distance estimation, pose refinement |
 | **SAM3** | Instance segmentation | Safety hazard detection + asset inventory for maintenance |
-| **InternVL3** | Scene inventory | Occlusion classification, safety analysis, equipment condition |
-| **LLM (TBD)** | — | Contract chat (RAG), contradiction detection, meeting minutes, requirement extraction, maintenance chat |
+| **LLM (TBD)** | — | Contract chat (RAG), contradiction detection, meeting minutes, requirement extraction |
 | **Whisper** | — | Meeting audio transcription |
 | **Embedding model** | — | Document vectorization for RAG |
 
