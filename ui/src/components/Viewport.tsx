@@ -69,19 +69,46 @@ const vertexShader = `
   attribute float confidence;
   varying float vClassId;
   varying float vConfidence;
+  varying float vSegVisible;
   varying vec3 vColor;
   varying vec3 vWorldPos;
   uniform float pointSize;
+  uniform float uSegmentVisible[16];
 
   void main() {
     vClassId = classId;
     vConfidence = confidence;
     vColor = color;
     vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
-    
+
+    // Segment visibility lookup (done here because classId attribute is exact)
+    if (classId < 0.0) {
+      vSegVisible = 1.0; // always visible (e.g. sábana)
+    } else {
+      int segIdx = int(clamp(classId, 0.0, 15.0));
+      float sv = 1.0;
+      if (segIdx == 0) sv = uSegmentVisible[0];
+      else if (segIdx == 1) sv = uSegmentVisible[1];
+      else if (segIdx == 2) sv = uSegmentVisible[2];
+      else if (segIdx == 3) sv = uSegmentVisible[3];
+      else if (segIdx == 4) sv = uSegmentVisible[4];
+      else if (segIdx == 5) sv = uSegmentVisible[5];
+      else if (segIdx == 6) sv = uSegmentVisible[6];
+      else if (segIdx == 7) sv = uSegmentVisible[7];
+      else if (segIdx == 8) sv = uSegmentVisible[8];
+      else if (segIdx == 9) sv = uSegmentVisible[9];
+      else if (segIdx == 10) sv = uSegmentVisible[10];
+      else if (segIdx == 11) sv = uSegmentVisible[11];
+      else if (segIdx == 12) sv = uSegmentVisible[12];
+      else if (segIdx == 13) sv = uSegmentVisible[13];
+      else if (segIdx == 14) sv = uSegmentVisible[14];
+      else sv = uSegmentVisible[15];
+      vSegVisible = sv;
+    }
+
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * mvPosition;
-    
+
     // Same formula as standalone viewer: pointScale / depth
     // Higher minimum (2.0) prevents vanishing at distance for sparser clouds
     float depth = -mvPosition.z;
@@ -94,6 +121,7 @@ const vertexShader = `
 const fragmentShader = `
   varying float vClassId;
   varying float vConfidence;
+  varying float vSegVisible;
   varying vec3 vColor;
   varying vec3 vWorldPos;
   uniform float highlightIntensity;
@@ -102,30 +130,10 @@ const fragmentShader = `
   uniform bool sectionBoxEnabled;
   uniform vec3 sectionBoxMin;
   uniform vec3 sectionBoxMax;
-  uniform float uSegmentVisible[16];
 
   void main() {
-    // Segment visibility filter
-    int segIdx = int(clamp(vClassId, 0.0, 15.0));
-    // Unrolled lookup (GLSL ES doesn't allow dynamic array indexing with varying)
-    float segVis = 1.0;
-    if (segIdx == 0) segVis = uSegmentVisible[0];
-    else if (segIdx == 1) segVis = uSegmentVisible[1];
-    else if (segIdx == 2) segVis = uSegmentVisible[2];
-    else if (segIdx == 3) segVis = uSegmentVisible[3];
-    else if (segIdx == 4) segVis = uSegmentVisible[4];
-    else if (segIdx == 5) segVis = uSegmentVisible[5];
-    else if (segIdx == 6) segVis = uSegmentVisible[6];
-    else if (segIdx == 7) segVis = uSegmentVisible[7];
-    else if (segIdx == 8) segVis = uSegmentVisible[8];
-    else if (segIdx == 9) segVis = uSegmentVisible[9];
-    else if (segIdx == 10) segVis = uSegmentVisible[10];
-    else if (segIdx == 11) segVis = uSegmentVisible[11];
-    else if (segIdx == 12) segVis = uSegmentVisible[12];
-    else if (segIdx == 13) segVis = uSegmentVisible[13];
-    else if (segIdx == 14) segVis = uSegmentVisible[14];
-    else segVis = uSegmentVisible[15];
-    if (segVis < 0.5) discard;
+    // Segment visibility filter (computed in vertex shader for precision)
+    if (vSegVisible < 0.5) discard;
 
     // Confidence filter: discard points below threshold
     // vConfidence defaults to 0.0 when attribute is absent; threshold 0.0 shows everything
@@ -294,6 +302,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const sabanaGroupRef = useRef<THREE.Group | null>(null)
     const cameraGroupRef = useRef<THREE.Group | null>(null)
     const [camTooltip, setCamTooltip] = useState<{ x: number; y: number; frameName: string; sessionId: string } | null>(null)
+    const [bimTooltip, setBimTooltip] = useState<{ x: number; y: number; type: string; name: string } | null>(null)
+    const bimHoverThrottleRef = useRef(0)
+    const [bimCtxMenu, setBimCtxMenu] = useState<{
+        x: number; y: number; expressID: number; type: string; name: string; opacity: number
+    } | null>(null)
     const camRaycasterRef = useRef(new THREE.Raycaster())
 
     // Measurement state
@@ -1178,8 +1191,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const mat = materialRef.current
             if (!mat) return
             const idx = Math.max(0, Math.min(segId, 15))
-            const arr = mat.uniforms.uSegmentVisible.value as number[]
-            arr[idx] = visible ? 1.0 : 0.0
+            const oldArr = mat.uniforms.uSegmentVisible.value as number[]
+            const newArr = [...oldArr]
+            newArr[idx] = visible ? 1.0 : 0.0
+            mat.uniforms.uSegmentVisible.value = newArr
             mat.uniformsNeedUpdate = true
         },
         toggleBIMVisibility: (meshNames: string[], visible: boolean) => {
@@ -1892,9 +1907,83 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             } else {
                 setCamTooltip(null)
             }
+
+            // BIM element hover raycast (throttled)
+            const now = performance.now()
+            if (now - bimHoverThrottleRef.current > 80) {
+                bimHoverThrottleRef.current = now
+                const bimGroup = bimGroupRef.current
+                if (bimGroup && bimGroup.children.length > 0 && bimGroup.visible) {
+                    const bimHits = rc.intersectObjects(bimGroup.children, true)
+                      .filter(h => h.object.visible)
+                    if (bimHits.length > 0) {
+                        const bimHit = bimHits[0].object
+                        const ifcType = bimHit.userData?.ifc_type || ''
+                        const ifcName = bimHit.userData?.ifc_name || ''
+                        if (ifcType || ifcName) {
+                            setBimTooltip({
+                                x: e.clientX - rect.left,
+                                y: e.clientY - rect.top,
+                                type: ifcType,
+                                name: ifcName,
+                            })
+                        } else {
+                            setBimTooltip(null)
+                        }
+                    } else {
+                        setBimTooltip(null)
+                    }
+                } else {
+                    setBimTooltip(null)
+                }
+            }
         }
         container.addEventListener('mousemove', handleMouseMove)
-        
+
+        // Track right-click down position for drag detection
+        let rightDownPos = { x: 0, y: 0 }
+        const handleRightDown = (e: MouseEvent) => {
+            if (e.button === 2) rightDownPos = { x: e.clientX, y: e.clientY }
+        }
+        container.addEventListener('mousedown', handleRightDown)
+
+        // Right-click handler: BIM context menu (only if not dragging)
+        const handleContextMenu = (e: MouseEvent) => {
+            // Suppress if user was orbiting (dragged > 5px)
+            const dx = e.clientX - rightDownPos.x
+            const dy = e.clientY - rightDownPos.y
+            if (Math.sqrt(dx * dx + dy * dy) > 5) return
+
+            const bimGroup = bimGroupRef.current
+            const camera = cameraRef.current
+            if (!bimGroup || !camera || bimGroup.children.length === 0 || !bimGroup.visible) return
+            const rect = container.getBoundingClientRect()
+            const mouse = new THREE.Vector2(
+                ((e.clientX - rect.left) / rect.width) * 2 - 1,
+                -((e.clientY - rect.top) / rect.height) * 2 + 1
+            )
+            const rc = camRaycasterRef.current
+            rc.setFromCamera(mouse, camera)
+            const bimHits = rc.intersectObjects(bimGroup.children, true)
+              .filter(h => h.object.visible)
+            if (bimHits.length > 0) {
+                e.preventDefault()
+                e.stopPropagation()
+                const hit = bimHits[0].object as THREE.Mesh
+                const mat = hit.material as THREE.MeshStandardMaterial
+                setBimCtxMenu({
+                    x: e.clientX - rect.left,
+                    y: e.clientY - rect.top,
+                    expressID: hit.userData?.expressID ?? -1,
+                    type: hit.userData?.ifc_type || '',
+                    name: hit.userData?.ifc_name || '',
+                    opacity: mat.opacity ?? 1.0,
+                })
+                setBimTooltip(null)
+            }
+        }
+        container.addEventListener('contextmenu', handleContextMenu)
+
         // Click handler: fly to camera pose
         const handleClick = (e: MouseEvent) => {
             const camGroup = cameraGroupRef.current
@@ -1930,10 +2019,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
         }
         container.addEventListener('click', handleClick)
-        
+
+        // Close BIM context menu on any left click
+        const handleLeftClick = () => setBimCtxMenu(null)
+        container.addEventListener('click', handleLeftClick)
+
         return () => {
             container.removeEventListener('mousemove', handleMouseMove)
+            container.removeEventListener('mousedown', handleRightDown)
+            container.removeEventListener('contextmenu', handleContextMenu)
             container.removeEventListener('click', handleClick)
+            container.removeEventListener('click', handleLeftClick)
         }
     }, [])
 
@@ -2108,7 +2204,6 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             loader.load(url).then((loadedPts) => {
                 // Guard: if this loader was replaced (e.g. by sábana), skip
                 if (potreeLoaderRef.current !== loader) return
-                // console.log(`[Viewport] Potree loaded: ${loadedPts.toLocaleString()} points`)
                 if (onStatusMessage) onStatusMessage(`LOD octree loaded — ${pts?.toLocaleString()} total points`)
                 onPointCount(loadedPts)
                 if (onHasConfidence) onHasConfidence(!!serverHasConfidence)
@@ -2158,16 +2253,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     // Clear previous
                     while (camGroup.children.length > 0) camGroup.remove(camGroup.children[0])
                     const frameNames = msg.cameraFrameNames as string[] | undefined
-                    const intrinsics = msg.cameraIntrinsics as Array<{fx: number, fy: number, cx: number, cy: number}> | undefined
+                    const intrinsics = msg.cameraIntrinsics as Array<{ fx: number, fy: number, cx: number, cy: number }> | undefined
                     const arrowLen = 0.3
                     cameraPoses.forEach((c2w, idx) => {
                         const pos = new THREE.Vector3(c2w[0][3], c2w[1][3], c2w[2][3])
                         // OpenCV convention: camera looks along +Z
                         const lookDir = new THREE.Vector3(c2w[0][2], c2w[1][2], c2w[2][2]).normalize()
-                        
+
                         const hue = idx / cameraPoses.length
                         const color = new THREE.Color().setHSL(hue, 0.9, 0.55)
-                        
+
                         // Small sphere at camera position
                         const sphere = new THREE.Mesh(
                             new THREE.SphereGeometry(0.03, 6, 4),
@@ -2182,7 +2277,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                             intrinsics: intrinsics?.[idx] || null,
                         }
                         camGroup.add(sphere)
-                        
+
                         // Arrow for look direction
                         const lookArrow = new THREE.ArrowHelper(lookDir, pos, arrowLen, color.getHex(), 0.06, 0.04)
                         camGroup.add(lookArrow)
@@ -2250,8 +2345,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
             totalPointsRef.current = 0
 
-            // 2) Load sábana via PotreeOctreeLoader (same as scan)
-            const loader = new PotreeOctreeLoader(scene, camera, mat)
+            // 2) Load sábana via PotreeOctreeLoader (forceClassId=-1 → always visible)
+            const loader = new PotreeOctreeLoader(scene, camera, mat, undefined, -1)
             potreeLoaderRef.current = loader
             loader.load(url).then((loadedPts) => {
                 // Guard: if a newer load was started, discard this stale result
@@ -2623,6 +2718,159 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         style={{ width: '100%', borderRadius: 4, display: 'block' }}
                         onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
                     />
+                </div>
+            )}
+            {/* BIM element hover tooltip */}
+            {bimTooltip && !camTooltip && (
+                <div style={{
+                    position: 'absolute',
+                    left: bimTooltip.x + 14,
+                    top: bimTooltip.y + 14,
+                    background: 'rgba(10,10,20,0.92)',
+                    borderRadius: 6,
+                    padding: '5px 10px',
+                    color: '#fff',
+                    fontSize: 11,
+                    zIndex: 200,
+                    pointerEvents: 'none',
+                    border: '1px solid rgba(100,180,255,0.3)',
+                    backdropFilter: 'blur(6px)',
+                    maxWidth: 360,
+                    wordBreak: 'break-all' as const,
+                }}>
+                    <span style={{ color: '#7cb8ff', fontWeight: 600 }}>{bimTooltip.type.replace('Ifc', '')}</span>
+                    {bimTooltip.name && !bimTooltip.name.startsWith('Element_') && (
+                        <span style={{ marginLeft: 6, opacity: 0.8 }}>{bimTooltip.name}</span>
+                    )}
+                </div>
+            )}
+            {/* BIM right-click context menu */}
+            {bimCtxMenu && (
+                <div style={{
+                    position: 'absolute',
+                    left: bimCtxMenu.x,
+                    top: bimCtxMenu.y,
+                    background: 'rgba(20,20,30,0.97)',
+                    borderRadius: 8,
+                    padding: 0,
+                    color: '#fff',
+                    fontSize: 12,
+                    zIndex: 300,
+                    border: '1px solid rgba(100,180,255,0.25)',
+                    backdropFilter: 'blur(10px)',
+                    minWidth: 200,
+                    boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+                    overflow: 'hidden',
+                }} onClick={e => e.stopPropagation()}>
+                    {/* Header */}
+                    <div style={{
+                        padding: '8px 12px',
+                        borderBottom: '1px solid rgba(255,255,255,0.1)',
+                        fontSize: 11,
+                        opacity: 0.7,
+                        wordBreak: 'break-all' as const,
+                    }}>
+                        <span style={{ color: '#7cb8ff', fontWeight: 600 }}>{bimCtxMenu.type.replace('Ifc', '')}</span>
+                        {bimCtxMenu.name && !bimCtxMenu.name.startsWith('Element_') && (
+                            <span style={{ marginLeft: 6 }}>{bimCtxMenu.name}</span>
+                        )}
+                    </div>
+                    {/* Transparency slider */}
+                    <div style={{ padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontSize: 11, opacity: 0.7, minWidth: 70 }}>Transparency</span>
+                            <input
+                                type="range" min="0" max="100"
+                                value={Math.round((1 - bimCtxMenu.opacity) * 100)}
+                                onChange={e => {
+                                    const newOpacity = 1 - parseInt(e.target.value) / 100
+                                    const bimGroup = bimGroupRef.current
+                                    if (!bimGroup) return
+                                    bimGroup.traverse(child => {
+                                        if ((child as THREE.Mesh).isMesh && child.userData?.expressID === bimCtxMenu.expressID) {
+                                            const mat = (child as THREE.Mesh).material as THREE.MeshStandardMaterial
+                                            // Save original state on first modification
+                                            if (child.userData._origOpacity === undefined) {
+                                                child.userData._origOpacity = mat.opacity
+                                                child.userData._origTransparent = mat.transparent
+                                                child.userData._origDepthWrite = mat.depthWrite
+                                            }
+                                            mat.opacity = newOpacity
+                                            mat.transparent = true
+                                            mat.depthWrite = newOpacity > 0.9
+                                            mat.needsUpdate = true
+                                        }
+                                    })
+                                    setBimCtxMenu(prev => prev ? { ...prev, opacity: newOpacity } : null)
+                                }}
+                                style={{ flex: 1, accentColor: '#7cb8ff' }}
+                            />
+                            <span style={{ fontSize: 10, opacity: 0.5, minWidth: 28, textAlign: 'right' }}>
+                                {Math.round((1 - bimCtxMenu.opacity) * 100)}%
+                            </span>
+                        </div>
+                    </div>
+                    {/* Hide */}
+                    <div
+                        style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid rgba(255,255,255,0.06)' }}
+                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        onClick={() => {
+                            const bimGroup = bimGroupRef.current
+                            if (!bimGroup) return
+                            bimGroup.traverse(child => {
+                                if ((child as THREE.Mesh).isMesh && child.userData?.expressID === bimCtxMenu.expressID) {
+                                    child.visible = false
+                                }
+                            })
+                            setBimCtxMenu(null)
+                        }}
+                    >👁‍🗨 Hide</div>
+                    {/* Isolate */}
+                    <div
+                        style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid rgba(255,255,255,0.06)' }}
+                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        onClick={() => {
+                            const bimGroup = bimGroupRef.current
+                            if (!bimGroup) return
+                            bimGroup.traverse(child => {
+                                if ((child as THREE.Mesh).isMesh && child.userData?.expressID !== undefined) {
+                                    child.visible = child.userData.expressID === bimCtxMenu.expressID
+                                }
+                            })
+                            setBimCtxMenu(null)
+                        }}
+                    >🔍 Isolate</div>
+                    {/* Show all */}
+                    <div
+                        style={{ padding: '8px 12px', cursor: 'pointer' }}
+                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        onClick={() => {
+                            const bimGroup = bimGroupRef.current
+                            if (!bimGroup) return
+                            bimGroup.traverse(child => {
+                                if ((child as THREE.Mesh).isMesh) {
+                                    child.visible = true
+                                    const mat = (child as THREE.Mesh).material as THREE.MeshStandardMaterial
+                                    // Restore original material state (preserves IFC glass transparency)
+                                    const origOpacity = child.userData._origOpacity ?? mat.opacity
+                                    const origTransparent = child.userData._origTransparent ?? mat.transparent
+                                    const origDepthWrite = child.userData._origDepthWrite ?? mat.depthWrite
+                                    mat.opacity = origOpacity
+                                    mat.transparent = origTransparent
+                                    mat.depthWrite = origDepthWrite
+                                    mat.needsUpdate = true
+                                    // Clear saved state
+                                    delete child.userData._origOpacity
+                                    delete child.userData._origTransparent
+                                    delete child.userData._origDepthWrite
+                                }
+                            })
+                            setBimCtxMenu(null)
+                        }}
+                    >✨ Show All</div>
                 </div>
             )}
         </div>

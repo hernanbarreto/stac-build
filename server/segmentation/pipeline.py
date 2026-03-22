@@ -1784,8 +1784,24 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # Project in display space (where face planes live), then convert back
     # to raw space for PLY output. Potree re-applies floorTransform on load.
     n_projected = 0
-    xyz_corrected = xyz.copy()  # RAW space
-    classification = np.zeros(len(xyz), dtype=np.uint8)
+    # In incremental mode, start from corrected_cloud to preserve previous projections
+    corrected_path = output_dir / "corrected_cloud.ply"
+    if only_obj_ids is not None and corrected_path.exists():
+        prev_origins = _load_ply_origins(corrected_path)
+        if prev_origins is not None and len(prev_origins[0]) == len(xyz):
+            xyz_corrected = prev_origins[0].copy()
+        else:
+            xyz_corrected = xyz.copy()
+    else:
+        xyz_corrected = xyz.copy()  # RAW space
+    # Load existing classification to preserve previous objects in incremental mode
+    class_path = output_dir / "classification.npy"
+    if class_path.exists() and only_obj_ids is not None:
+        classification = np.load(class_path)
+        if len(classification) != len(xyz):
+            classification = np.zeros(len(xyz), dtype=np.uint8)
+    else:
+        classification = np.zeros(len(xyz), dtype=np.uint8)
     
     for inst in instances:
         face_planes = inst.pop("_face_planes", None)

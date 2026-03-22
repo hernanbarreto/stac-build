@@ -591,6 +591,7 @@ class SAM3Wrapper:
         }
         logger.info(f"[SAM3-Interactive] Session started: {session_id} "
                      f"({num_frames} frames, keyframes={'yes' if keyframes else 'no'})")
+
         return session_id
 
     def get_interactive_session_info(self, state_id: str) -> Optional[dict]:

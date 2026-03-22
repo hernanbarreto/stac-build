@@ -114,13 +114,39 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 setKeyframes(kfList)
                 setKfIndex(0)
 
-                // Start SAM3 session
-                setStatus(`Initializing segmentation (${kfList.length} keyframes)...`)
-                const res = await fetch(`/api/segmentation/start_session/${sessionId}`, { method: 'POST' })
-                if (!res.ok) throw new Error('Failed to init segmentation')
-                const data = await res.json()
-                setStateId(data.state_id)
+                // Fire-and-forget: kick off SAM3 init (server returns 202 immediately)
+                setStatus(`Initializing SAM3 model... (${kfList.length} keyframes)`)
+                fetch(`/api/segmentation/start_session/${sessionId}`, { method: 'POST' }).catch(() => {})
 
+                // Poll lightweight status endpoint every 2s until ready
+                const startTime = Date.now()
+                const result = await new Promise<any>((resolve, reject) => {
+                    const poll = setInterval(async () => {
+                        try {
+                            const elapsed = Math.round((Date.now() - startTime) / 1000)
+                            const dots = '.'.repeat((elapsed % 3) + 1)
+                            if (elapsed < 10) {
+                                setStatus(`Initializing SAM3 model${dots} (${kfList.length} keyframes)`)
+                            } else {
+                                setStatus(`Loading SAM3 model${dots} (${elapsed}s)`)
+                            }
+
+                            const r = await fetch(`/api/segmentation/init_status/${sessionId}`)
+                            if (!r.ok) return
+                            const data = await r.json()
+
+                            if (data.status === 'ready') {
+                                clearInterval(poll)
+                                resolve(data)
+                            } else if (data.status === 'error') {
+                                clearInterval(poll)
+                                reject(new Error(data.message || 'SAM3 init failed'))
+                            }
+                        } catch { /* poll retry */ }
+                    }, 2000)
+                })
+
+                setStateId(result.state_id)
                 setStatus(`Ready — ${kfList.length} keyframes`)
             } catch (e: any) {
                 setStatus(`Error: ${e.message}`)
@@ -356,17 +382,16 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             const newPoints = [...promptPoints, { x, y, label: isPositive ? 1 : 0 }]
             setPromptPoints(newPoints)
 
-            // Send ALL accumulated points to SAM3 (it uses cumulative prompts)
+            // Send point to SAM3
             const res = await fetch(`/api/segmentation/add_prompt`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     state_id: stateId, session_id: sessionId,
                     frame_idx: currentFrameIdx, obj_id: 1,
-                    // SAM3 expects relative coords (0-1), normalize by natural image size
                     points: [[x / natW, y / natH]],
                     labels: [isPositive ? 1 : 0]
-                })
+                }),
             })
             if (!res.ok) throw new Error('Failed to add prompt')
             const data = await res.json()
@@ -486,7 +511,21 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                 setHasPrompts(false)
                                 setMaskOverlay(null)
                                 setLabelName('')
+                                setPromptPoints([])
+                                promptPointsMapRef.current.clear()
+                                maskCacheRef.current.clear()
                                 setStatus(`✅ "${name}" segmented successfully!`)
+
+                                // Clear SAM3 tracked objects so next segment starts fresh
+                                if (stateId) {
+                                    try {
+                                        await fetch('/api/segmentation/clear_prompts', {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ state_id: stateId })
+                                        })
+                                    } catch { /* silent */ }
+                                }
 
                                 // Reload instances from server
                                 try {
@@ -534,7 +573,20 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 setHasPrompts(false)
                 setMaskOverlay(null)
                 setLabelName('')
+                setPromptPoints([])
+                promptPointsMapRef.current.clear()
+                maskCacheRef.current.clear()
                 setStatus(`✅ "${name}" propagation finished`)
+                // Clear SAM3 tracked objects
+                if (stateId) {
+                    try {
+                        await fetch('/api/segmentation/clear_prompts', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ state_id: stateId })
+                        })
+                    } catch { /* silent */ }
+                }
                 // Reload instances
                 try {
                     const segRes = await fetch(`/api/sessions/${sessionId}/segmentation`)
@@ -686,7 +738,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 {/* Header */}
                 <div className="admin-header">
                     <h2>🏷️ Segmentation Manager — {sessionId}</h2>
-                    <button className="admin-close" onClick={() => onClose(isDirty.current)} disabled={loading}>✕</button>
+                    <button className="admin-close" onClick={() => onClose(isDirty.current)}>✕</button>
                 </div>
 
                 <div className="seg-manager-body">

@@ -64,6 +64,8 @@ export default defineConfig(async () => {
           target: 'https://localhost:8765',
           changeOrigin: true,
           secure: false,
+          timeout: 300000,        // 5 min — SAM3 model loading takes ~3 min
+          proxyTimeout: 300000,   // 5 min — prevent proxy from dropping long requests
         },
         '/health': {
           target: 'https://localhost:8765',

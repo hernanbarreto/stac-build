@@ -26,7 +26,7 @@ logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
 from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 security = HTTPBearer(auto_error=False)
@@ -1371,80 +1371,94 @@ async def get_session_keyframes(session_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Interactive Segmentation Endpoints ---
+# Global SAM3 init status (keyed by session_id)
+_sam3_init_status: dict = {}
 
 @app.post("/api/segmentation/start_session/{session_id}")
 async def start_interactive_segmentation(session_id: str):
     """
-    Initializes SAM3 video predictor for manual, interactive segmentation.
-    Loads only keyframes (from selected_frames.json) for faster processing.
+    Kicks off SAM3 initialization as a background task.
+    Returns 202 immediately. Frontend polls /api/segmentation/init_status/{session_id}.
     """
+    # If already loading for this session, skip
+    current = _sam3_init_status.get(session_id, {})
+    if current.get("status") == "loading":
+        return JSONResponse({"ok": True, "status": "loading"}, status_code=202)
+
     from sam3_wrapper import get_sam3_wrapper
-    sam3 = get_sam3_wrapper()
-    
-    # Clean up any existing interactive sessions (but keep the model loaded)
-    for sid in list(sam3._interactive_sessions.keys()):
-        try:
-            sam3.predictor.handle_request(
-                request=dict(type="reset_session", session_id=sid)
-            )
-            session_info = sam3._interactive_sessions.pop(sid, None)
-            if session_info and isinstance(session_info, dict):
-                import shutil
-                temp_dir = session_info.get("keyframe_temp_dir")
-                if temp_dir and os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-        except Exception:
-            pass
-    
-    # Needs to run in executor
-    loop = asyncio.get_event_loop()
-    
+
     ctx = _ctx(session_id)
     frames_dir = ctx.frames_dir
-    
     if not frames_dir.exists():
         raise HTTPException(status_code=404, detail="Frames directory not found")
 
-    # Read keyframes from selected_frames.json (same as the keyframes API endpoint)
+    # Read keyframes
     keyframes = None
     selected_frames_path = frames_dir / "selected_frames.json"
     if selected_frames_path.exists():
         with open(selected_frames_path) as f:
             sf_data = json.load(f)
         keyframes = sf_data.get("selected_files", [])
-        # Filter to only files that exist
         keyframes = [fn for fn in keyframes if (frames_dir / fn).exists()]
         if keyframes:
             print(f"[InteractiveSeg] Using {len(keyframes)} keyframes from selected_frames.json")
-    
+
     if not keyframes:
-        # Fallback: use all frames
-        keyframes = sorted([f.name for f in frames_dir.iterdir() 
+        keyframes = sorted([f.name for f in frames_dir.iterdir()
                            if f.suffix.lower() in ('.jpg', '.jpeg', '.png')])
         print(f"[InteractiveSeg] No selected_frames.json, using all {len(keyframes)} frames")
 
-    try:
-        def _init():
-            return sam3.init_interactive_session(str(frames_dir), keyframes=keyframes)
-        
-        state_id = await loop.run_in_executor(None, _init)
-        
-        # Build kf_index → original filename mapping for the frontend
-        keyframes_sorted = sorted(keyframes)
-        kf_mapping = {i: name for i, name in enumerate(keyframes_sorted)}
-        
-        return {
-            "ok": True, 
-            "state_id": state_id, 
-            "session_id": session_id,
-            "num_keyframes": len(keyframes_sorted),
-            "kf_mapping": kf_mapping,  # SAM3 idx → original filename
-        }
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    _sam3_init_status[session_id] = {"status": "loading", "message": "Loading SAM3 model..."}
+
+    async def _background_init():
+        try:
+            sam3 = get_sam3_wrapper()
+            # Clean up existing sessions
+            for sid in list(sam3._interactive_sessions.keys()):
+                try:
+                    sam3.predictor.handle_request(request=dict(type="reset_session", session_id=sid))
+                    session_info = sam3._interactive_sessions.pop(sid, None)
+                    if session_info and isinstance(session_info, dict):
+                        import shutil
+                        temp_dir = session_info.get("keyframe_temp_dir")
+                        if temp_dir and os.path.exists(temp_dir):
+                            shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+            loop = asyncio.get_event_loop()
+            _sam3_init_status[session_id] = {"status": "loading", "message": "Initializing SAM3 session..."}
+
+            def _init():
+                return sam3.init_interactive_session(str(frames_dir), keyframes=keyframes)
+
+            state_id = await loop.run_in_executor(None, _init)
+
+            keyframes_sorted = sorted(keyframes)
+            kf_mapping = {i: name for i, name in enumerate(keyframes_sorted)}
+
+            _sam3_init_status[session_id] = {
+                "status": "ready",
+                "state_id": state_id,
+                "session_id": session_id,
+                "num_keyframes": len(keyframes_sorted),
+                "kf_mapping": kf_mapping,
+            }
+            print(f"[InteractiveSeg] ✅ SAM3 ready for {session_id} (state_id={state_id})")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            _sam3_init_status[session_id] = {"status": "error", "message": str(e)}
+
+    asyncio.create_task(_background_init())
+    return JSONResponse({"ok": True, "status": "loading"}, status_code=202)
+
+
+@app.get("/api/segmentation/init_status/{session_id}")
+async def get_sam3_init_status(session_id: str):
+    """Lightweight polling endpoint — returns current SAM3 init status."""
+    status = _sam3_init_status.get(session_id, {"status": "idle"})
+    return status
 
 @app.post("/api/segmentation/reset_session")
 async def reset_interactive_segmentation(request: Request):
@@ -1853,6 +1867,17 @@ async def get_segmentation_instances(session_id: str):
             with open(result_path) as f:
                 result_data = json.load(f)
             instances = result_data.get("instances", [])
+        elif (output_dir / "seg_masks.npz").exists():
+            # Auto-regenerate segmentation_result.json from masks
+            try:
+                from segmentation_pipeline import _match_and_save_result
+                print(f"[Segmentation] Auto-regenerating segmentation_result.json for {session_id}...")
+                result = _match_and_save_result(output_dir)
+                instances = result.get("instances", [])
+                print(f"[Segmentation] ✅ Regenerated: {len(instances)} instances")
+            except Exception as e:
+                print(f"[Segmentation] ⚠️ Auto-regeneration failed: {e}")
+                instances = seg_data.get("instances", [])
         else:
             # Fallback to raw segmentation.json
             instances = seg_data.get("instances", [])
@@ -2038,12 +2063,13 @@ async def rename_segmentation_instance(request: Request):
 
         updated = False
         for inst in data.get("instances", []):
-            if inst.get("id") == instance_id or inst.get("instance_id") == instance_id:
+            if inst.get("instance_id") == instance_id:
                 if new_label is not None:
                     inst["label"] = new_label
                 if excluded is not None:
                     inst["excluded"] = excluded
                 updated = True
+                break  # Only rename ONE instance
 
         if updated:
             with open(seg_path, "w") as f:

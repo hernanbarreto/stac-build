@@ -453,6 +453,7 @@ function App() {
                 if (Array.isArray(segData.instances)) {
                   setSegments(segData.instances.map((inst: any) => ({
                     key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
+                    id: inst.instance_id || inst.id,
                     label: `${inst.label}`,
                     color: inst.color || '#00d4ff',
                     totalPoints: inst.total_points || 0,
@@ -1842,6 +1843,7 @@ function App() {
                     if (Array.isArray(data.instances)) {
                       setSegments(data.instances.map((inst: any) => ({
                         key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
+                        id: inst.instance_id || inst.id,
                         label: `${inst.label}`,
                         color: inst.color || '#00d4ff',
                         totalPoints: inst.total_points || 0,
@@ -1852,6 +1854,8 @@ function App() {
                       })))
                     }
                     viewportRef.current?.refreshSegmentOBBs(sid)
+                    // Reload Potree so new classification data (classId per point) takes effect
+                    viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid })
                   }
                 } catch { /* silent */ }
                 return
@@ -1872,6 +1876,7 @@ function App() {
                   if (Array.isArray(data.instances)) {
                     setSegments(data.instances.map((inst: any) => ({
                       key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
+                      id: inst.instance_id || inst.id,
                       label: `${inst.label}`,
                       color: inst.color || '#00d4ff',
                       totalPoints: inst.total_points || 0,
@@ -1880,6 +1885,8 @@ function App() {
                     })))
                   }
                   viewportRef.current?.refreshSegmentOBBs(sid)
+                  // Reload Potree so new classification data (classId per point) takes effect
+                  viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid })
                 }
               } catch { /* silent */ }
               finally { setSessionLoading(null) }
@@ -1893,6 +1900,7 @@ function App() {
                   if (Array.isArray(data.instances)) {
                     setSegments(data.instances.map((inst: any) => ({
                       key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
+                      id: inst.instance_id || inst.id,
                       label: `${inst.label}`,
                       color: inst.color || '#00d4ff',
                       totalPoints: inst.total_points || 0,

@@ -88,18 +88,21 @@ export class PotreeOctreeLoader {
     private _loading = false
     private _smallCloudLogged = false
     private _hasConfidence = false
+    private _forceClassId: number | undefined = undefined
 
     constructor(
         scene: THREE.Scene,
         camera: THREE.PerspectiveCamera,
         material: THREE.ShaderMaterial,
         pointBudget = 5_000_000,
+        forceClassId?: number,
     ) {
         this.baseUrl = ''
         this.scene = scene
         this.camera = camera
         this.material = material
         this.pointBudget = pointBudget
+        this._forceClassId = forceClassId
         this.octreeGroup = new THREE.Group()
         this.octreeGroup.name = 'potree-octree'
         this.scene.add(this.octreeGroup)
@@ -600,11 +603,13 @@ export class PotreeOctreeLoader {
                 colors[validPoints * 3 + 2] = 0.7
             }
 
-            // Classification (segment ID: 0=unsegmented, 1..N=segment)
-            if (classOffset >= 0 && base + classOffset + 1 <= byteSize) {
+            // Classification (segment ID: 0=unsegmented, 1..N=segment, -1=always visible)
+            if (this._forceClassId !== undefined) {
+                classIds[validPoints] = this._forceClassId
+            } else if (classOffset >= 0 && base + classOffset + 1 <= byteSize) {
                 classIds[validPoints] = nodeData.getUint8(base + classOffset)
             } else {
-                classIds[validPoints] = 0
+                classIds[validPoints] = -1  // no classification → always visible (e.g. sábana)
             }
 
             // Intensity → confidence [0..1] (normalized from uint16 0..65535)
