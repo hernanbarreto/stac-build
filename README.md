@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/stac_banner.png" alt="STAC Build" width="600"/>
+  <img src="docs/assets/stac_banner.png" alt="STAC Build" width="360"/>
 </p>
 
 <p align="center">

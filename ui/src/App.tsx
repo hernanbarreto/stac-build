@@ -1104,7 +1104,7 @@ function App() {
                     </div>
                   )}
                 </nav>
-                {user && (user.role === 'admin' || user.role === 'manager') && (
+                {connected && user && (user.role === 'admin' || user.role === 'manager') && (
                   <div className="bim-actions" style={{ marginTop: 'auto' }}>
                     {!creatingProject ? (
                       <button className="bim-action-btn upload" onClick={() => setCreatingProject(true)}>
