@@ -924,7 +924,7 @@ function App() {
 
         {hasSession && (
           <button className={`activity-btn ${activePanel === 'segments' ? 'active' : ''}`}
-            onClick={() => togglePanel('segments')} title="Segments" disabled={segments.length === 0}>
+            onClick={() => togglePanel('segments')} title="Segments">
             <Tag size={18} />
             {segments.length > 0 && <span className="activity-badge">{segments.length}</span>}
           </button>
@@ -942,11 +942,11 @@ function App() {
             <BarChart3 size={18} />
           </button>
         )}
+        <div className="activity-spacer" />
         <button className={`activity-btn ${activePanel === 'team' ? 'active' : ''}`}
           onClick={() => togglePanel('team')} title="Team">
           <Users size={18} />
         </button>
-        <div className="activity-spacer" />
         <button className={`activity-btn ${consoleOpen ? 'active' : ''}`}
           onClick={() => setConsoleOpen(prev => !prev)} title="Console">
           <Monitor size={18} />
@@ -1177,30 +1177,32 @@ function App() {
 
 
             {/* Segments Panel */}
-            {activePanel === 'segments' && segments.length > 0 && (
+            {activePanel === 'segments' && activeSession && (
               <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
                 <div className="panel-header">
                   Segments
-                  <span style={{ float: 'right', display: 'flex', gap: '4px' }}>
-                    <button className="segment-toggle-btn" title="Select All"
-                      onClick={() => {
-                        setSegments(prev => prev.map(s => ({ ...s, visible: true })))
-                        segments.forEach(s => {
-                          viewportRef.current?.toggleOBB(s.key, true)
-                          viewportRef.current?.setSegmentVisibility(s.id, true)
-                        })
-                        viewportRef.current?.setSegmentVisibility(0, true)  // unsegmented
-                      }}><CheckSquare size={13} /></button>
-                    <button className="segment-toggle-btn" title="Deselect All"
-                      onClick={() => {
-                        setSegments(prev => prev.map(s => ({ ...s, visible: false })))
-                        segments.forEach(s => {
-                          viewportRef.current?.toggleOBB(s.key, false)
-                          viewportRef.current?.setSegmentVisibility(s.id, false)
-                        })
-                        viewportRef.current?.setSegmentVisibility(0, false)  // unsegmented
-                      }}><Square size={13} /></button>
-                  </span>
+                  {segments.length > 0 && (
+                    <span style={{ float: 'right', display: 'flex', gap: '4px' }}>
+                      <button className="segment-toggle-btn" title="Select All"
+                        onClick={() => {
+                          setSegments(prev => prev.map(s => ({ ...s, visible: true })))
+                          segments.forEach(s => {
+                            viewportRef.current?.toggleOBB(s.key, true)
+                            viewportRef.current?.setSegmentVisibility(s.id, true)
+                          })
+                          viewportRef.current?.setSegmentVisibility(0, true)  // unsegmented
+                        }}><CheckSquare size={13} /></button>
+                      <button className="segment-toggle-btn" title="Deselect All"
+                        onClick={() => {
+                          setSegments(prev => prev.map(s => ({ ...s, visible: false })))
+                          segments.forEach(s => {
+                            viewportRef.current?.toggleOBB(s.key, false)
+                            viewportRef.current?.setSegmentVisibility(s.id, false)
+                          })
+                          viewportRef.current?.setSegmentVisibility(0, false)  // unsegmented
+                        }}><Square size={13} /></button>
+                    </span>
+                  )}
                 </div>
                 <div className="bim-search">
                   <span className="bim-search-icon"><Search size={12} /></span>
@@ -1215,128 +1217,134 @@ function App() {
                   )}
                 </div>
                 <div className="segments-list" style={{ flex: 1, overflowY: 'auto' }}>
-                  {segments.filter(seg => !segSearch || seg.label.toLowerCase().includes(segSearch.toLowerCase())).map(seg => (
-                    <div key={seg.key} className="segment-item">
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%' }}>
-                        <input
-                          type="checkbox"
-                          checked={seg.visible}
-                          title="Toggle Visibility in 3D"
-                          className="segment-checkbox"
-                          onChange={() => {
-                            const newVis = !seg.visible
-                            setSegments(prev => prev.map(s =>
-                              s.key === seg.key ? { ...s, visible: newVis } : s
-                            ))
-                            viewportRef.current?.toggleOBB(seg.key, newVis)
-                            viewportRef.current?.setSegmentVisibility(seg.id, newVis)
-                          }}
-                        />
-                        <span
-                          className="segment-color-dot"
-                          style={{ background: seg.color }}
-                        />
-                        {editingSegKey === seg.key ? (
-                          <input
-                            autoFocus
-                            defaultValue={seg.label}
-                            className="segment-label"
-                            style={{ flex: 1, background: 'var(--bg-input)', border: '1px solid var(--accent)', borderRadius: '3px', padding: '1px 4px', color: 'var(--text-primary)', fontSize: '12px', outline: 'none' }}
-                            onKeyDown={async (e) => {
-                              if (e.key === 'Enter') {
-                                const newLabel = (e.target as HTMLInputElement).value.trim()
-                                if (newLabel && newLabel !== seg.label && activeSession) {
-                                  await fetch('/api/segmentation/rename', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel }),
-                                  })
-                                  setSegments(prev => prev.map(s =>
-                                    s.key === seg.key ? { ...s, label: newLabel } : s
-                                  ))
-                                  viewportRef.current?.refreshSegmentOBBs(activeSession)
-                                }
-                                setEditingSegKey(null)
-                              } else if (e.key === 'Escape') {
-                                setEditingSegKey(null)
-                              }
-                            }}
-                            onBlur={async (e) => {
-                              const newLabel = e.target.value.trim()
-                              if (newLabel && newLabel !== seg.label && activeSession) {
-                                await fetch('/api/segmentation/rename', {
+                  {segments.length === 0 ? (
+                    <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '13px', opacity: 0.7 }}>
+                      No segments
+                    </div>
+                  ) : (
+                    <>
+                      {segments.filter(seg => !segSearch || seg.label.toLowerCase().includes(segSearch.toLowerCase())).map(seg => (
+                        <div key={seg.key} className="segment-item">
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%' }}>
+                            <input
+                              type="checkbox"
+                              checked={seg.visible}
+                              title="Toggle Visibility in 3D"
+                              className="segment-checkbox"
+                              onChange={() => {
+                                const newVis = !seg.visible
+                                setSegments(prev => prev.map(s =>
+                                  s.key === seg.key ? { ...s, visible: newVis } : s
+                                ))
+                                viewportRef.current?.toggleOBB(seg.key, newVis)
+                                viewportRef.current?.setSegmentVisibility(seg.id, newVis)
+                              }}
+                            />
+                            <span
+                              className="segment-color-dot"
+                              style={{ background: seg.color }}
+                            />
+                            {editingSegKey === seg.key ? (
+                              <input
+                                autoFocus
+                                defaultValue={seg.label}
+                                className="segment-label"
+                                style={{ flex: 1, background: 'var(--bg-input)', border: '1px solid var(--accent)', borderRadius: '3px', padding: '1px 4px', color: 'var(--text-primary)', fontSize: '12px', outline: 'none' }}
+                                onKeyDown={async (e) => {
+                                  if (e.key === 'Enter') {
+                                    const newLabel = (e.target as HTMLInputElement).value.trim()
+                                    if (newLabel && newLabel !== seg.label && activeSession) {
+                                      await fetch('/api/segmentation/rename', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel }),
+                                      })
+                                      setSegments(prev => prev.map(s =>
+                                        s.key === seg.key ? { ...s, label: newLabel } : s
+                                      ))
+                                      viewportRef.current?.refreshSegmentOBBs(activeSession)
+                                    }
+                                    setEditingSegKey(null)
+                                  } else if (e.key === 'Escape') {
+                                    setEditingSegKey(null)
+                                  }
+                                }}
+                                onBlur={async (e) => {
+                                  const newLabel = e.target.value.trim()
+                                  if (newLabel && newLabel !== seg.label && activeSession) {
+                                    await fetch('/api/segmentation/rename', {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel }),
+                                    })
+                                    setSegments(prev => prev.map(s =>
+                                      s.key === seg.key ? { ...s, label: newLabel } : s
+                                    ))
+                                    viewportRef.current?.refreshSegmentOBBs(activeSession)
+                                  }
+                                  setEditingSegKey(null)
+                                }}
+                              />
+                            ) : (
+                              <span className="segment-label" style={{ flex: 1 }}>{seg.label}</span>
+                            )}
+                            <span className="segment-count">
+                              ({seg.totalPoints.toLocaleString()})
+                            </span>
+                            <button className="seg-inst-btn seg-inst-edit" title="Rename"
+                              onClick={() => setEditingSegKey(seg.key)}>
+                              <Pencil size={12} />
+                            </button>
+                            <button className="seg-inst-btn seg-inst-del" title="Delete"
+                              onClick={async () => {
+                                const ok = await confirmDanger(
+                                  'Delete Segment',
+                                  `Delete "${seg.label}"? This will remove the segment and its masks permanently.`
+                                )
+                                if (!ok || !activeSession) return
+                                const res = await fetch('/api/segmentation/delete', {
                                   method: 'POST',
                                   headers: { 'Content-Type': 'application/json' },
-                                  body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel }),
+                                  body: JSON.stringify({ session_id: activeSession, instance_id: seg.id }),
                                 })
-                                setSegments(prev => prev.map(s =>
-                                  s.key === seg.key ? { ...s, label: newLabel } : s
-                                ))
-                                viewportRef.current?.refreshSegmentOBBs(activeSession)
-                              }
-                              setEditingSegKey(null)
+                                if (res.ok) {
+                                  setSegments(prev => prev.filter(s => s.key !== seg.key))
+                                  viewportRef.current?.refreshSegmentOBBs(activeSession)
+                                }
+                              }}>
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      {/* Unsegmented points toggle */}
+                      <div className="segment-item" style={{ borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <input
+                            type="checkbox"
+                            defaultChecked={true}
+                            title="Show/hide unsegmented points"
+                            className="segment-checkbox"
+                            onChange={(e) => {
+                              viewportRef.current?.setSegmentVisibility(0, e.target.checked)
                             }}
                           />
-                        ) : (
-                          <span className="segment-label" style={{ flex: 1 }}>{seg.label}</span>
-                        )}
-                        <span className="segment-count">
-                          ({seg.totalPoints.toLocaleString()})
-                        </span>
-                        <button className="seg-inst-btn seg-inst-edit" title="Rename"
-                          onClick={() => setEditingSegKey(seg.key)}>
-                          <Pencil size={12} />
-                        </button>
-                        <button className="seg-inst-btn seg-inst-del" title="Delete"
-                          onClick={async () => {
-                            const ok = await confirmDanger(
-                              'Delete Segment',
-                              `Delete "${seg.label}"? This will remove the segment and its masks permanently.`
-                            )
-                            if (!ok || !activeSession) return
-                            const res = await fetch('/api/segmentation/delete', {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ session_id: activeSession, instance_id: seg.id }),
-                            })
-                            if (res.ok) {
-                              setSegments(prev => prev.filter(s => s.key !== seg.key))
-                              viewportRef.current?.refreshSegmentOBBs(activeSession)
-                            }
-                          }}>
-                          <Trash2 size={12} />
-                        </button>
+                          <span
+                            className="segment-color-dot"
+                            style={{ background: '#666' }}
+                          />
+                          <span className="segment-label" style={{ flex: 1, fontStyle: 'italic', opacity: 0.7 }}>Unsegmented</span>
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                  {/* Unsegmented points toggle */}
-                  <div className="segment-item" style={{ borderTop: '1px solid rgba(255,255,255,0.1)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <input
-                        type="checkbox"
-                        defaultChecked={true}
-                        title="Show/hide unsegmented points"
-                        className="segment-checkbox"
-                        onChange={(e) => {
-                          viewportRef.current?.setSegmentVisibility(0, e.target.checked)
-                        }}
-                      />
-                      <span
-                        className="segment-color-dot"
-                        style={{ background: '#666' }}
-                      />
-                      <span className="segment-label" style={{ flex: 1, fontStyle: 'italic', opacity: 0.7 }}>Unsegmented</span>
-                    </div>
-                  </div>
+                    </>
+                  )}
                 </div>
-                {activeSession && (
-                  <div className="bim-actions" style={{ marginTop: 'auto' }}>
-                    <button className="bim-action-btn upload"
-                      onClick={() => setInteractiveSessionId(activeSession)}>
-                      <Crosshair size={14} style={{ marginRight: '6px', verticalAlign: 'middle' }} /> Segmentation
-                    </button>
-                  </div>
-                )}
+                <div className="bim-actions" style={{ marginTop: 'auto' }}>
+                  <button className="bim-action-btn upload"
+                    onClick={() => setInteractiveSessionId(activeSession)}>
+                    <Crosshair size={14} style={{ marginRight: '6px', verticalAlign: 'middle' }} /> Segmentation
+                  </button>
+                </div>
               </div>
             )}
 

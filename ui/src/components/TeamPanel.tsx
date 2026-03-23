@@ -4,6 +4,7 @@
  * Hernán Barreto — Ingerop IN3
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { UserPlus } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useConfirmDialog } from './ConfirmDialog'
 
@@ -235,7 +236,7 @@ export default function TeamPanel({ onCallUser }: TeamPanelProps) {
     if (!user) return null
 
     return (
-        <div className="team-panel">
+        <div className="team-panel" style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
             {/* Team selector */}
             {teams.length > 1 && (
                 <div className="team-selector">
@@ -322,12 +323,7 @@ export default function TeamPanel({ onCallUser }: TeamPanelProps) {
                     {team.members.filter(m => m.user_id !== user.id).length === 0 && (
                         <div className="team-empty">No other members in this team yet</div>
                     )}
-                    {/* Add member button — manager only */}
-                    {selectedTeam && isManager(selectedTeam) && (
-                        <button className="team-add-member-btn" onClick={openAddMember}>
-                            ➕ Add Member
-                        </button>
-                    )}
+
                 </div>
             )}
 
@@ -402,6 +398,15 @@ export default function TeamPanel({ onCallUser }: TeamPanelProps) {
                             </div>
                         </div>
                     )}
+                </div>
+            )}
+
+            {/* Add member button — manager only */}
+            {selectedTeam && isManager(selectedTeam) && activeTab === 'members' && (
+                <div className="bim-actions" style={{ marginTop: 'auto' }}>
+                    <button className="bim-action-btn upload" onClick={openAddMember}>
+                        <UserPlus size={14} style={{ marginRight: '6px', verticalAlign: 'middle' }} /> Add Member
+                    </button>
                 </div>
             )}
 
