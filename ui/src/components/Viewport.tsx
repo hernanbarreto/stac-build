@@ -2100,6 +2100,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 })
             }
         }
+        // Clear tooltips
+        setCamTooltip(null)
+        setBimTooltip(null)
     }, [onPointCount])
 
     // Handle binary point cloud data from server

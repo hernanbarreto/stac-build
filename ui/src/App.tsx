@@ -190,6 +190,7 @@ function App() {
     if (prevAliveRef.current && !serverAlive) {
       // Server just went from alive → dead (after 3 consecutive failures)
       setConnected(false)
+      setActivePanel('sessions')
       setSessions([])
       setActiveSession(null)
       setSelectedSession(null)
@@ -291,6 +292,7 @@ function App() {
     } catch (err) {
       console.error('[STAC] Failed to connect:', err)
       setConnected(false)
+      setActivePanel('sessions')
     }
   }, [token])
 
@@ -728,6 +730,7 @@ function App() {
                     viewportRef.current?.sendCommand({ type: 'cleared' })
                     viewportRef.current?.clearScene()
                     setConnected(false)
+                    setActivePanel('sessions')
                     setSessions([])
                     setActiveSession(null)
                     setSelectedSession(null)
@@ -893,6 +896,7 @@ function App() {
                 onClick={() => menuAction(() => {
                   viewportRef.current?.sendCommand({ type: 'cleared' })
                   setConnected(false)
+                  setActivePanel('sessions')
                   setSessions([])
                   setActiveSession(null)
                   setSelectedSession(null)
@@ -1341,7 +1345,7 @@ function App() {
               <>
                 <BIMNavigator
                   models={bimModels}
-                  userRole={user?.role || 'viewer'}
+                  userRole={activeSession ? (user?.role || 'viewer') : 'viewer'}
                   onToggleVisibility={(meshNames, visible) => viewportRef.current?.toggleBIMVisibility(meshNames, visible)}
                   onSelectElement={(meshNames) => viewportRef.current?.highlightBIMElement(meshNames)}
                   onSetOpacity={(meshNames, opacity) => viewportRef.current?.setBIMOpacity(meshNames, opacity)}

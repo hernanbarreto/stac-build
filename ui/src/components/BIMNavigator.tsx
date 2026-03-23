@@ -249,7 +249,7 @@ export default function BIMNavigator({
         <div className="bim-navigator">
             <div className="panel-header">
                 Model
-                <span className="panel-header-badge">{totalElements}</span>
+                {totalElements > 0 && <span className="panel-header-badge">{totalElements}</span>}
             </div>
 
             {/* Search */}
