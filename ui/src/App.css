@@ -659,7 +659,6 @@
 /* Segments Panel */
 .segments-list {
   padding: 4px 8px;
-  max-height: 220px;
   overflow-y: auto;
 }
 

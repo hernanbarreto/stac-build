@@ -4,6 +4,7 @@
  * search, visibility toggles, opacity control, and selection highlighting.
  */
 import { useState, useMemo, useCallback, useRef } from 'react'
+import { Search } from 'lucide-react'
 import type { IFCTreeNode, IFCLoadResult } from './IFCLoader'
 import { countDescendants, collectMeshNames } from './IFCLoader'
 
@@ -195,9 +196,17 @@ export default function BIMNavigator({
     }, [hiddenNodes, onToggleVisibility])
 
     const handleSelect = useCallback((node: IFCTreeNode) => {
-        setSelectedNode(prev => prev === node.expressID ? null : node.expressID)
-        const meshNames = collectMeshNames(node)
-        onSelectElement(meshNames)
+        setSelectedNode(prev => {
+            const isDeselecting = prev === node.expressID
+            if (isDeselecting) {
+                onSelectElement([])
+                return null
+            } else {
+                const meshNames = collectMeshNames(node)
+                onSelectElement(meshNames)
+                return node.expressID
+            }
+        })
     }, [onSelectElement])
 
     const handleOpacityChange = useCallback((node: IFCTreeNode, opacity: number) => {
@@ -245,7 +254,7 @@ export default function BIMNavigator({
 
             {/* Search */}
             <div className="bim-search">
-                <span className="bim-search-icon">🔍</span>
+                <span className="bim-search-icon"><Search size={12} /></span>
                 <input
                     type="text"
                     className="bim-search-input"

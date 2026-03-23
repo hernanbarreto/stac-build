@@ -18,8 +18,8 @@ import SegmentationManager from './components/InteractiveSegmentation'
 import { useConfirmDialog } from './components/ConfirmDialog'
 import {
   Search, Tag, Hammer, Brush, Sparkles, Plug, Upload, Settings, Crosshair,
-  Maximize, Monitor, Pin, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
-  Move, Palette, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Wrench,
+  Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
+  Move, Palette, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D,
   Building2, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
   Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
   Scale, Thermometer, Loader2, BarChart3, Home, Pencil, Camera,
@@ -68,7 +68,7 @@ function App() {
   const [activeTool, setActiveTool] = useState<Tool>('navigate')
   const [connected, setConnected] = useState(false)
   const [serverAlive, setServerAlive] = useState(false)
-  const [activePanel, setActivePanel] = useState<'sessions' | 'tools' | 'segments' | 'bim' | 'team' | 'analysis' | null>('sessions')
+  const [activePanel, setActivePanel] = useState<'sessions' | 'segments' | 'bim' | 'team' | 'analysis' | null>('sessions')
 
   const [bimModels, setBimModels] = useState<IFCLoadResult[]>([])
   const [sidebarWidth, setSidebarWidth] = useState(280)
@@ -234,6 +234,8 @@ function App() {
 
   const [statusMessage, setStatusMessage] = useState('')
   const [segments, setSegments] = useState<SegmentInstance[]>([])
+  const [editingSegKey, setEditingSegKey] = useState<string | null>(null)
+  const [segSearch, setSegSearch] = useState('')
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -767,7 +769,7 @@ function App() {
               <div className="menu-separator" />
               <button className="menu-dropdown-item" disabled={!hasSession}
                 onClick={() => menuAction(() => viewportRef.current?.resetCamera())}>
-                <Crosshair size={14} /> Reset Camera
+                <Home size={14} /> Reset Camera
                 <span className="menu-shortcut">Home</span>
               </button>
               <button className="menu-dropdown-item"
@@ -789,7 +791,7 @@ function App() {
               <div className="menu-separator" />
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setShowAxes(prev => !prev))}>
-                {showAxes ? <><Pin size={14} /> Axes <Check size={12} /></> : <><Pin size={14} /> Axes</>}
+                {showAxes ? <><Axis3D size={14} /> Axes <Check size={12} /></> : <><Axis3D size={14} /> Axes</>}
               </button>
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setShowGrid(prev => !prev))}>
@@ -915,10 +917,7 @@ function App() {
           <FolderOpen size={18} />
           {sessions.length > 0 && <span className="activity-badge">{sessions.length}</span>}
         </button>
-        <button className={`activity-btn ${activePanel === 'tools' ? 'active' : ''}`}
-          onClick={() => togglePanel('tools')} title="Tools" style={{ display: hasSession ? undefined : 'none' }}>
-          <Wrench size={18} />
-        </button>
+
         {hasSession && (
           <button className={`activity-btn ${activePanel === 'segments' ? 'active' : ''}`}
             onClick={() => togglePanel('segments')} title="Segments" disabled={segments.length === 0}>
@@ -959,9 +958,9 @@ function App() {
           <div className="panel">
             {/* Sessions Panel */}
             {activePanel === 'sessions' && (
-              <>
+              <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
                 <div className="panel-header">Projects</div>
-                <nav className="sidebar-nav">
+                <nav className="sidebar-nav" style={{ flex: 1, overflowY: 'auto' }}>
                   {!connected ? (
                     <>
                       <div className="nav-section">Server</div>
@@ -972,70 +971,6 @@ function App() {
                     </>
                   ) : (
                     <div className="session-list">
-                      {/* Create new project — admin and manager only */}
-                      {user && (user.role === 'admin' || user.role === 'manager') && (
-                        <div className="session-create-bar">
-                          {!creatingProject ? (
-                            <button className="session-create-btn" onClick={() => setCreatingProject(true)}
-                              title="Create New Project">
-                              <span style={{ fontSize: 16, fontWeight: 600 }}>+</span> New Project
-                            </button>
-                          ) : (
-                            <div className="session-create-input">
-                              <input
-                                autoFocus
-                                placeholder="project-name"
-                                value={newProjectName}
-                                onChange={e => setNewProjectName(e.target.value)}
-                                onKeyDown={async e => {
-                                  if (e.key === 'Enter' && newProjectName.trim()) {
-                                    try {
-                                      const headers: HeadersInit = { 'Content-Type': 'application/json' }
-                                      if (token) headers['Authorization'] = `Bearer ${token}`
-                                      const res = await fetch('/sessions', {
-                                        method: 'POST', headers,
-                                        body: JSON.stringify({ name: newProjectName.trim() }),
-                                      })
-                                      if (!res.ok) {
-                                        const err = await res.json().catch(() => ({}))
-                                        setStatusMessage(err.detail || 'Failed to create project')
-                                      } else {
-                                        setNewProjectName('')
-                                        setCreatingProject(false)
-                                        connectToServer() // Refresh session list
-                                      }
-                                    } catch { setStatusMessage('Failed to create project') }
-                                  }
-                                  if (e.key === 'Escape') { setCreatingProject(false); setNewProjectName('') }
-                                }}
-                              />
-                              <button className="session-create-confirm"
-                                disabled={!newProjectName.trim()}
-                                onClick={async () => {
-                                  if (!newProjectName.trim()) return
-                                  try {
-                                    const headers: HeadersInit = { 'Content-Type': 'application/json' }
-                                    if (token) headers['Authorization'] = `Bearer ${token}`
-                                    const res = await fetch('/sessions', {
-                                      method: 'POST', headers,
-                                      body: JSON.stringify({ name: newProjectName.trim() }),
-                                    })
-                                    if (!res.ok) {
-                                      const err = await res.json().catch(() => ({}))
-                                      setStatusMessage(err.detail || 'Failed to create project')
-                                    } else {
-                                      setNewProjectName('')
-                                      setCreatingProject(false)
-                                      connectToServer()
-                                    }
-                                  } catch { setStatusMessage('Failed to create project') }
-                                }}>✓</button>
-                              <button className="session-create-cancel"
-                                onClick={() => { setCreatingProject(false); setNewProjectName('') }}>✕</button>
-                            </div>
-                          )}
-                        </div>
-                      )}
                       {/* Search filter — all users */}
                       <div className="session-search-bar">
                         <Search size={14} className="session-search-icon" />
@@ -1169,57 +1104,77 @@ function App() {
                     </div>
                   )}
                 </nav>
-              </>
+                {user && (user.role === 'admin' || user.role === 'manager') && (
+                  <div className="bim-actions" style={{ marginTop: 'auto' }}>
+                    {!creatingProject ? (
+                      <button className="bim-action-btn upload" onClick={() => setCreatingProject(true)}>
+                        + New Project
+                      </button>
+                    ) : (
+                      <div className="session-create-input" style={{ display: 'flex', gap: '4px' }}>
+                        <input
+                          autoFocus
+                          placeholder="project-name"
+                          value={newProjectName}
+                          style={{ flex: 1 }}
+                          onChange={e => setNewProjectName(e.target.value)}
+                          onKeyDown={async e => {
+                            if (e.key === 'Enter' && newProjectName.trim()) {
+                              try {
+                                const headers: HeadersInit = { 'Content-Type': 'application/json' }
+                                if (token) headers['Authorization'] = `Bearer ${token}`
+                                const res = await fetch('/sessions', {
+                                  method: 'POST', headers,
+                                  body: JSON.stringify({ name: newProjectName.trim() }),
+                                })
+                                if (!res.ok) {
+                                  const err = await res.json().catch(() => ({}))
+                                  setStatusMessage(err.detail || 'Failed to create project')
+                                } else {
+                                  setNewProjectName('')
+                                  setCreatingProject(false)
+                                  connectToServer()
+                                }
+                              } catch { setStatusMessage('Failed to create project') }
+                            }
+                            if (e.key === 'Escape') { setCreatingProject(false); setNewProjectName('') }
+                          }}
+                        />
+                        <button className="session-create-confirm"
+                          disabled={!newProjectName.trim()}
+                          onClick={async () => {
+                            if (!newProjectName.trim()) return
+                            try {
+                              const headers: HeadersInit = { 'Content-Type': 'application/json' }
+                              if (token) headers['Authorization'] = `Bearer ${token}`
+                              const res = await fetch('/sessions', {
+                                method: 'POST', headers,
+                                body: JSON.stringify({ name: newProjectName.trim() }),
+                              })
+                              if (!res.ok) {
+                                const err = await res.json().catch(() => ({}))
+                                setStatusMessage(err.detail || 'Failed to create project')
+                              } else {
+                                setNewProjectName('')
+                                setCreatingProject(false)
+                                connectToServer()
+                              }
+                            } catch { setStatusMessage('Failed to create project') }
+                          }}>✓</button>
+                        <button className="session-create-cancel"
+                          onClick={() => { setCreatingProject(false); setNewProjectName('') }}>✕</button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
 
-            {/* Tools Panel */}
-            {activePanel === 'tools' && hasSession && (
-              <>
-                <div className="panel-header">Tools</div>
-                <nav className="sidebar-nav">
-                  <div className={`nav-item ${activeTool === 'navigate' ? 'active' : ''}`}
-                    onClick={() => setActiveTool('navigate')}>
-                    <span className="nav-item-icon"><RotateCcw size={14} /></span>
-                    <span className="nav-item-label">Navigate</span>
-                  </div>
-                  <div className={`nav-item ${activeTool === 'measure-distance' ? 'active' : ''}`}
-                    onClick={() => setActiveTool('measure-distance')}>
-                    <span className="nav-item-icon"><Ruler size={14} /></span>
-                    <span className="nav-item-label">Measure Distance</span>
-                  </div>
-                  <div className={`nav-item ${activeTool === 'measure-angle' ? 'active' : ''}`}
-                    onClick={() => setActiveTool('measure-angle')}>
-                    <span className="nav-item-icon"><TriangleRight size={14} /></span>
-                    <span className="nav-item-label">Measure Angle</span>
-                  </div>
-                  <div className={`nav-item ${activeTool === 'section-box' ? 'active' : ''}`}
-                    onClick={() => setActiveTool('section-box')}>
-                    <span className="nav-item-icon"><Scissors size={14} /></span>
-                    <span className="nav-item-label">Section Box</span>
-                  </div>
-                  <div className={`nav-item ${activeTool === 'align' ? 'active' : ''} ${sabanaVisible ? 'disabled' : ''}`}
-                    style={sabanaVisible ? { opacity: 0.4, pointerEvents: 'none' } : {}}
-                    onClick={() => !sabanaVisible && setActiveTool(activeTool === 'align' ? 'navigate' : 'align')}>
-                    <span className="nav-item-icon"><Move size={14} /></span>
-                    <span className="nav-item-label">Align Cloud</span>
-                  </div>
-                  <div className="nav-section" style={{ marginTop: '16px' }}>Display</div>
-                  <div className="nav-item" style={{ padding: '4px 12px' }}>
-                    <span className="nav-item-icon"><Palette size={14} /></span>
-                    <span className="control-label" style={{ marginRight: '8px' }}>Point Size</span>
-                    <input className="control-slider" type="range"
-                      min="0.5" max="5" step="0.1" value={pointSize}
-                      style={{ flex: 1 }}
-                      onChange={e => setPointSize(parseFloat(e.target.value))} />
-                    <span className="control-value">{pointSize.toFixed(1)}</span>
-                  </div>
-                </nav>
-              </>
-            )}
+
 
             {/* Segments Panel */}
             {activePanel === 'segments' && segments.length > 0 && (
-              <>
+              <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
                 <div className="panel-header">
                   Segments
                   <span style={{ float: 'right', display: 'flex', gap: '4px' }}>
@@ -1243,13 +1198,22 @@ function App() {
                       }}><Square size={13} /></button>
                   </span>
                 </div>
-                <div style={{ padding: '8px 12px', fontSize: '12px', color: '#aaa', background: 'rgba(0,0,0,0.2)' }}>
-                  Mark instances to EXCLUDE them from the next 3D reconstruction.
+                <div className="bim-search">
+                  <span className="bim-search-icon"><Search size={12} /></span>
+                  <input
+                    className="bim-search-input"
+                    placeholder="Search..."
+                    value={segSearch}
+                    onChange={e => setSegSearch(e.target.value)}
+                  />
+                  {segSearch && (
+                    <span className="bim-search-clear" onClick={() => setSegSearch('')}>✕</span>
+                  )}
                 </div>
-                <div className="segments-list">
-                  {segments.map(seg => (
-                    <div key={seg.key} className="segment-item" style={{ opacity: seg.excluded ? 0.5 : 1 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <div className="segments-list" style={{ flex: 1, overflowY: 'auto' }}>
+                  {segments.filter(seg => !segSearch || seg.label.toLowerCase().includes(segSearch.toLowerCase())).map(seg => (
+                    <div key={seg.key} className="segment-item">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%' }}>
                         <input
                           type="checkbox"
                           checked={seg.visible}
@@ -1268,68 +1232,108 @@ function App() {
                           className="segment-color-dot"
                           style={{ background: seg.color }}
                         />
-                        <span className="segment-label" style={{ flex: 1 }}>{seg.label}</span>
-                        <span className="segment-count" style={{ marginRight: '8px' }}>
+                        {editingSegKey === seg.key ? (
+                          <input
+                            autoFocus
+                            defaultValue={seg.label}
+                            className="segment-label"
+                            style={{ flex: 1, background: 'var(--bg-input)', border: '1px solid var(--accent)', borderRadius: '3px', padding: '1px 4px', color: 'var(--text-primary)', fontSize: '12px', outline: 'none' }}
+                            onKeyDown={async (e) => {
+                              if (e.key === 'Enter') {
+                                const newLabel = (e.target as HTMLInputElement).value.trim()
+                                if (newLabel && newLabel !== seg.label && activeSession) {
+                                  await fetch('/api/segmentation/rename', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel }),
+                                  })
+                                  setSegments(prev => prev.map(s =>
+                                    s.key === seg.key ? { ...s, label: newLabel } : s
+                                  ))
+                                  viewportRef.current?.refreshSegmentOBBs(activeSession)
+                                }
+                                setEditingSegKey(null)
+                              } else if (e.key === 'Escape') {
+                                setEditingSegKey(null)
+                              }
+                            }}
+                            onBlur={async (e) => {
+                              const newLabel = e.target.value.trim()
+                              if (newLabel && newLabel !== seg.label && activeSession) {
+                                await fetch('/api/segmentation/rename', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel }),
+                                })
+                                setSegments(prev => prev.map(s =>
+                                  s.key === seg.key ? { ...s, label: newLabel } : s
+                                ))
+                                viewportRef.current?.refreshSegmentOBBs(activeSession)
+                              }
+                              setEditingSegKey(null)
+                            }}
+                          />
+                        ) : (
+                          <span className="segment-label" style={{ flex: 1 }}>{seg.label}</span>
+                        )}
+                        <span className="segment-count">
                           ({seg.totalPoints.toLocaleString()})
                         </span>
-                        <button
-                          title="Exclude from Reconstruction"
-                          style={{
-                            background: seg.excluded ? '#ff4444' : 'transparent',
-                            border: '1px solid #ff4444',
-                            color: seg.excluded ? '#fff' : '#ff4444',
-                            borderRadius: '4px',
-                            padding: '2px 6px',
-                            fontSize: '10px',
-                            cursor: 'pointer'
-                          }}
-                          onClick={() => {
-                            setSegments(prev => prev.map(s => s.key === seg.key ? { ...s, excluded: !s.excluded } : s))
-                          }}
-                        >
-                          {seg.excluded ? 'Excluded' : 'Exclude'}
+                        <button className="seg-inst-btn seg-inst-edit" title="Rename"
+                          onClick={() => setEditingSegKey(seg.key)}>
+                          <Pencil size={12} />
+                        </button>
+                        <button className="seg-inst-btn seg-inst-del" title="Delete"
+                          onClick={async () => {
+                            const ok = await confirmDanger(
+                              'Delete Segment',
+                              `Delete "${seg.label}"? This will remove the segment and its masks permanently.`
+                            )
+                            if (!ok || !activeSession) return
+                            const res = await fetch('/api/segmentation/delete', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ session_id: activeSession, instance_id: seg.id }),
+                            })
+                            if (res.ok) {
+                              setSegments(prev => prev.filter(s => s.key !== seg.key))
+                              viewportRef.current?.refreshSegmentOBBs(activeSession)
+                            }
+                          }}>
+                          <Trash2 size={12} />
                         </button>
                       </div>
                     </div>
                   ))}
-                </div>
-                {/* Unsegmented points toggle */}
-                <div className="segment-item" style={{ borderTop: '1px solid rgba(255,255,255,0.1)', padding: '6px 12px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <input
-                      type="checkbox"
-                      defaultChecked={true}
-                      title="Show/hide unsegmented points"
-                      className="segment-checkbox"
-                      onChange={(e) => {
-                        viewportRef.current?.setSegmentVisibility(0, e.target.checked)
-                      }}
-                    />
-                    <span
-                      className="segment-color-dot"
-                      style={{ background: '#666' }}
-                    />
-                    <span className="segment-label" style={{ flex: 1, fontStyle: 'italic', opacity: 0.7 }}>Unsegmented</span>
+                  {/* Unsegmented points toggle */}
+                  <div className="segment-item" style={{ borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <input
+                        type="checkbox"
+                        defaultChecked={true}
+                        title="Show/hide unsegmented points"
+                        className="segment-checkbox"
+                        onChange={(e) => {
+                          viewportRef.current?.setSegmentVisibility(0, e.target.checked)
+                        }}
+                      />
+                      <span
+                        className="segment-color-dot"
+                        style={{ background: '#666' }}
+                      />
+                      <span className="segment-label" style={{ flex: 1, fontStyle: 'italic', opacity: 0.7 }}>Unsegmented</span>
+                    </div>
                   </div>
                 </div>
-                <div style={{ padding: '12px' }}>
-                  <button
-                    className="pipeline-btn-run"
-                    style={{ width: '100%' }}
-                    onClick={() => {
-                      const excludedKeys = segments.filter(s => s.excluded).map(s => s.key)
-                      viewportRef.current?.sendCommand({
-                        type: 'save_exclusions',
-                        session_id: activeSession,
-                        excluded_keys: excludedKeys
-                      })
-                      setStatusMessage(`Saved ${excludedKeys.length} exclusions for next reconstruction.`)
-                    }}
-                  >
-                    Save Exclusions
-                  </button>
-                </div>
-              </>
+                {activeSession && (
+                  <div className="bim-actions" style={{ marginTop: 'auto' }}>
+                    <button className="bim-action-btn upload"
+                      onClick={() => setInteractiveSessionId(activeSession)}>
+                      <Crosshair size={14} style={{ marginRight: '6px', verticalAlign: 'middle' }} /> Segmentation
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
 
             {/* BIM Navigator Panel */}
@@ -1438,46 +1442,48 @@ function App() {
         {/* Toolbar — only with loaded cloud, hide during loading */}
         {hasSession && !sessionLoading && pointCount > 0 && (
           <div className="toolbar">
-            <div className="toolbar-group">
-              <button className={`tool-btn ${activeTool === 'navigate' ? 'active' : ''}`}
-                onClick={() => setActiveTool('navigate')} title="Navigate"><RotateCcw size={16} /></button>
-              <button className={`tool-btn ${activeTool === 'measure-distance' ? 'active' : ''}`}
-                onClick={() => setActiveTool('measure-distance')} title="Measure Distance"><Ruler size={16} /></button>
-              <button className={`tool-btn ${activeTool === 'measure-angle' ? 'active' : ''}`}
-                onClick={() => setActiveTool('measure-angle')} title="Measure Angle"><TriangleRight size={16} /></button>
-              <button className={`tool-btn ${activeTool === 'section-box' ? 'active' : ''}`}
-                onClick={() => setActiveTool('section-box')} title="Section Box"><Scissors size={16} /></button>
-              <button className={`tool-btn ${activeTool === 'align' ? 'active' : ''}`}
-                disabled={sabanaVisible}
-                style={sabanaVisible ? { opacity: 0.4 } : {}}
-                onClick={() => !sabanaVisible && setActiveTool(activeTool === 'align' ? 'navigate' : 'align')} title="Align Cloud"><Move size={16} /></button>
-              <button className="tool-btn" onClick={() => viewportRef.current?.clearMeasurements()}
-                title="Clear Measurements"><Trash2 size={16} /></button>
-              <button className="tool-btn" onClick={() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') }}
-                title="Reset Section Box"><Unlock size={16} /></button>
-              <button className="tool-btn" onClick={() => viewportRef.current?.resetCamera()}
-                title="Reset View (Home)"><Home size={16} /></button>
-            </div>
-            <div className="toolbar-separator" />
-            <div className="toolbar-group">
-              <span className="control-label">Point Size</span>
-              <input className="control-slider" type="range"
-                min="0.5" max="5" step="0.1" value={pointSize}
-                onChange={e => setPointSize(parseFloat(e.target.value))} />
-              <span className="control-value">{pointSize.toFixed(1)}</span>
-            </div>
-            {hasConfidence && (
+            {!sabanaVisible && (
+              <>
               <div className="toolbar-group">
-                <span className="control-label">Confidence</span>
-                <input className="control-slider" type="range"
-                  min={0} max={1} step={0.01}
-                  value={confidenceThreshold}
-                  onChange={e => setConfidenceThreshold(parseFloat(e.target.value))} />
-                <span className="control-value">{confidenceThreshold.toFixed(2)}</span>
+                <button className={`tool-btn ${activeTool === 'navigate' ? 'active' : ''}`}
+                  onClick={() => setActiveTool('navigate')} title="Navigate"><RotateCcw size={16} /></button>
+                <button className={`tool-btn ${activeTool === 'measure-distance' ? 'active' : ''}`}
+                  onClick={() => setActiveTool('measure-distance')} title="Measure Distance"><Ruler size={16} /></button>
+                <button className={`tool-btn ${activeTool === 'measure-angle' ? 'active' : ''}`}
+                  onClick={() => setActiveTool('measure-angle')} title="Measure Angle"><TriangleRight size={16} /></button>
+                <button className={`tool-btn ${activeTool === 'section-box' ? 'active' : ''}`}
+                  onClick={() => setActiveTool('section-box')} title="Section Box"><Scissors size={16} /></button>
+                <button className={`tool-btn ${activeTool === 'align' ? 'active' : ''}`}
+                  onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')} title="Align Cloud"><Move size={16} /></button>
+                <button className="tool-btn" onClick={() => viewportRef.current?.clearMeasurements()}
+                  title="Clear Measurements"><Trash2 size={16} /></button>
+                <button className="tool-btn" onClick={() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') }}
+                  title="Reset Section Box"><Unlock size={16} /></button>
+                <button className="tool-btn" onClick={() => viewportRef.current?.resetCamera()}
+                  title="Reset View (Home)"><Home size={16} /></button>
               </div>
+              <div className="toolbar-separator" />
+              <div className="toolbar-group">
+                <span className="control-label">Point Size</span>
+                <input className="control-slider" type="range"
+                  min="0.5" max="5" step="0.1" value={pointSize}
+                  onChange={e => setPointSize(parseFloat(e.target.value))} />
+                <span className="control-value">{pointSize.toFixed(1)}</span>
+              </div>
+              {hasConfidence && (
+                <div className="toolbar-group">
+                  <span className="control-label">Confidence</span>
+                  <input className="control-slider" type="range"
+                    min={0} max={1} step={0.01}
+                    value={confidenceThreshold}
+                    onChange={e => setConfidenceThreshold(parseFloat(e.target.value))} />
+                  <span className="control-value">{confidenceThreshold.toFixed(2)}</span>
+                </div>
+              )}
+              </>
             )}
             {/* ── Camera Poses Toggle (only in NUBE mode) ── */}
-            {hasCameraPoses && !sabanaVisible && (
+            {!sabanaVisible && hasCameraPoses && (
               <>
                 <div className="toolbar-separator" />
                 <div className="toolbar-group">
@@ -1489,17 +1495,33 @@ function App() {
                 </div>
               </>
             )}
+            {/* ── Grid & Axes (visible in both sábana and nube) ── */}
+            <div className="toolbar-separator" />
+            <div className="toolbar-group">
+              <button className={`tool-btn ${showGrid ? 'active' : ''}`}
+                onClick={() => setShowGrid(v => !v)}
+                title={showGrid ? 'Hide Grid' : 'Show Grid'}>
+                <Grid3X3 size={16} />
+              </button>
+              <button className={`tool-btn ${showAxes ? 'active' : ''}`}
+                onClick={() => setShowAxes(v => !v)}
+                title={showAxes ? 'Hide Axes' : 'Show Axes'}>
+                <Axis3D size={16} />
+              </button>
+            </div>
             {/* ── Sábana / BIM Comparison ── */}
             {bimModels.length > 0 && segments.length > 0 && (
               <>
                 <div className="toolbar-separator" />
                 <div className="toolbar-group">
-                  <button className="tool-btn"
-                    onClick={handleGenerateComparison}
-                    disabled={sabanaLoading}
-                    title="Generate BIM vs Scan comparison">
-                    {sabanaLoading ? <Loader2 size={16} className="spin" /> : <Scale size={16} />}
-                  </button>
+                  {!sabanaVisible && (
+                    <button className="tool-btn"
+                      onClick={handleGenerateComparison}
+                      disabled={sabanaLoading}
+                      title="Generate BIM vs Scan comparison">
+                      {sabanaLoading ? <Loader2 size={16} className="spin" /> : <Scale size={16} />}
+                    </button>
+                  )}
                   {!sabanaLoading && sessions.find(s => s.id === activeSession)?.hasSabana && (
                     <button className={`tool-btn ${sabanaVisible ? 'active' : ''}`}
                       onClick={handleToggleSabana}

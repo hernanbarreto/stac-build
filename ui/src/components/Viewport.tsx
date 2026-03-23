@@ -329,6 +329,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const cloudBBoxRef = useRef<THREE.Box3 | null>(null)
     const axesRef = useRef<THREE.Group | null>(null)
     const showGridRef = useRef(showGrid)
+    const showCameraPosesRef = useRef(showCameraPoses)
     const pipelineRunningRef = useRef(pipelineRunning)
 
     // Alignment gizmo state
@@ -1882,7 +1883,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const handleMouseMove = (e: MouseEvent) => {
             const camGroup = cameraGroupRef.current
             const camera = cameraRef.current
-            if (!camGroup || !camera || camGroup.children.length === 0) {
+            if (!camGroup || !camera || camGroup.children.length === 0 || !showCameraPosesRef.current) {
                 setCamTooltip(null)
                 return
             }
@@ -1989,7 +1990,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const camGroup = cameraGroupRef.current
             const camera = cameraRef.current
             const controls = controlsRef.current
-            if (!camGroup || !camera || !controls || camGroup.children.length === 0) return
+            if (!camGroup || !camera || !controls || camGroup.children.length === 0 || !showCameraPosesRef.current) return
             const rect = container.getBoundingClientRect()
             const mouse = new THREE.Vector2(
                 ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -2466,6 +2467,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => {
         const g = cameraGroupRef.current
         if (g) g.visible = showCameraPoses
+        showCameraPosesRef.current = showCameraPoses
+        // Clear any lingering tooltips when hiding
+        if (!showCameraPoses) {
+            setCamTooltip(null)
+            setBimTooltip(null)
+        }
     }, [showCameraPoses])
 
     // Render OBB wireframe boxes for segmentation instances
