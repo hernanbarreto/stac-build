@@ -101,6 +101,9 @@ models:
     max_num_objects: 32           # Max tracked objects per session
     compile: false                # torch.compile for ~2x speedup (requires warmup time)
     use_fa3: false                # FlashAttention 3 (requires flash-attn-3 pip package)
+    # Local checkpoint path (avoids HuggingFace download at runtime)
+    # If null, auto-downloads from HuggingFace (requires gated repo access)
+    checkpoint_path: null         # e.g. "/home/hernan/stac-builder/weights/sam3/sam3.1_multiplex.pt"
 
     # Inference parameters
     keyframe_interval: 2

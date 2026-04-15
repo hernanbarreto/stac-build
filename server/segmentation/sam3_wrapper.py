@@ -96,9 +96,11 @@ class SAM3Wrapper:
                     max_num_objects = seg_cfg.get("max_num_objects", 32)
                     use_compile = seg_cfg.get("compile", False)
                     use_fa3 = seg_cfg.get("use_fa3", False)
+                    ckpt_path = seg_cfg.get("checkpoint_path", None)
 
                     self.predictor = build_sam3_predictor(
                         version="sam3.1",
+                        checkpoint_path=ckpt_path,
                         multiplex_count=multiplex_count,
                         max_num_objects=max_num_objects,
                         compile=use_compile,
