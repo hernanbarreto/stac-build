@@ -1,10 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
+# pyre-unsafe
+
 import logging
 from collections import OrderedDict
 
 import torch
-
 from sam3.model.sam3_tracker_base import concat_points, NO_OBJ_SCORE, Sam3TrackerBase
 from sam3.model.sam3_tracker_utils import fill_holes_in_mask_scores
 from sam3.model.utils.sam2_utils import load_video_frames
@@ -657,8 +658,6 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
             image=image,
             point_inputs=None,
             mask_inputs=mask_inputs,
-            gt_masks=None,
-            frames_to_add_correction_pt=[],
             output_dict={
                 "cond_frame_outputs": {},
                 "non_cond_frame_outputs": {},

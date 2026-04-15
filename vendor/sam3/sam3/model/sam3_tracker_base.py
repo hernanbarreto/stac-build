@@ -1,14 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
+# pyre-unsafe
+
 import logging
 
 import torch
 import torch.nn.functional as F
-
 from sam3.model.memory import SimpleMaskEncoder
-
 from sam3.model.sam3_tracker_utils import get_1d_sine_pe, select_closest_cond_frames
-
 from sam3.sam.mask_decoder import MaskDecoder, MLP
 from sam3.sam.prompt_encoder import PromptEncoder
 from sam3.sam.transformer import TwoWayTransformer
@@ -900,8 +899,6 @@ class Sam3TrackerBase(torch.nn.Module):
                 image=current_image,
                 point_inputs=backbone_out["point_inputs_per_frame"].get(stage_id, None),
                 mask_inputs=backbone_out["mask_inputs_per_frame"].get(stage_id, None),
-                gt_masks=backbone_out["gt_masks_per_frame"].get(stage_id, None),
-                frames_to_add_correction_pt=frames_to_add_correction_pt,
                 output_dict=output_dict,
                 num_frames=num_frames,
             )

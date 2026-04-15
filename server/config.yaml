@@ -92,9 +92,15 @@ paths:
 # --- Models ---
 models:
   segmentation:
-    # SAM3 Model
-    model_type: "vit_b" # Options: vit_b, vit_l, vit_h
+    # SAM3 Model — v3.1 Object Multiplex (shared-memory multi-object tracking)
+    version: "sam3.1"             # "sam3" (legacy per-object) or "sam3.1" (Object Multiplex)
     device: "cuda"
+
+    # SAM 3.1 Multiplex parameters
+    multiplex_count: 16           # Objects per multiplex bucket (reduce to 8 for <12GB VRAM)
+    max_num_objects: 32           # Max tracked objects per session
+    compile: false                # torch.compile for ~2x speedup (requires warmup time)
+    use_fa3: false                # FlashAttention 3 (requires flash-attn-3 pip package)
 
     # Inference parameters
     keyframe_interval: 2
