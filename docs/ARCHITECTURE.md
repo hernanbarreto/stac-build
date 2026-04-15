@@ -2,7 +2,7 @@
 
 > **Living document** — Must be updated as new modules, integrations, or architectural changes are introduced per the [ROADMAP.md](./ROADMAP.md).
 >
-> Last updated: 2026-03-21
+> Last updated: 2026-04-15
 
 ---
 
@@ -33,8 +33,8 @@ graph TB
         PM["pipeline_manager.py — 5-Stage Orchestrator"]
 
         subgraph Workers["Subprocess Workers"]
-            W1["reconstruction_worker.py — 3D Reconstruction"]
-            W2["cloudcompy_worker.py — Cloud Cleaning"]
+            W1["map_worker.py — Reconstruction Dispatcher"]
+            W2["cloudcompy_worker.py — Cloud Cleaning + LiDAR Merge"]
             W3["vlm_worker.py — Scene Analysis"]
             W4["sam3_worker.py — Segmentation"]
             W5["instance_cleaner_worker.py — DBSCAN"]
@@ -64,7 +64,9 @@ graph TB
     end
 
     subgraph Vendor["Vendored AI Models"]
+        DA3["depth-anything-3 — DA3_Streaming"]
         Reconstruction["mapanything — Reconstruction_Streaming"]
+        StrayDA3["stray_da3_streaming — StrayDA3Streaming / StrayLiDAROnly"]
         SAM3["sam3 — SAM3 Video Predictor"]
         PESpatial["perception_models — PE-Spatial-G14-448"]
         PLM["perception_models — PLM-8B VLM"]
@@ -75,7 +77,9 @@ graph TB
 
     UI --> Server
     PM --> Workers
-    W1 --> ReconstructionW --> Reconstruction
+    W1 -->|backend=da3| DA3
+    W1 -->|backend=hybrid/lidar| StrayDA3
+    W1 -->|backend=mapanything| Reconstruction
     W4 --> SP --> SAM3
     W3 --> SA["scene_analyzer.py — InternVL3 (migrating to PLM-8B)"]
     W2 --> CC
@@ -126,8 +130,8 @@ All workers share a pattern: `run(conn, session_dir, config)` → `run_worker_sa
 | Worker | What It Does |
 |--------|-------------|
 | `base.py` | `WorkerPipe` (IPC: progress/log/done/error/cancel), `run_worker_safe()` |
-| `reconstruction_worker.py` | Dispatches to `_run_reconstruction_single` or `_run_reconstruction_multi_segment` based on zoom analysis. Multi-segment: per-zoom blur filter → novelty selection → Reconstruction reconstruction → ICP inter-segment alignment |
-| `cloudcompy_worker.py` | Runs `run_cloudcompy.sh`. Creates `cleaned_cloud.ply`, links to `merged/`, computes `floor_transform.npz` |
+| `map_worker.py` | **Reconstruction dispatcher**: routes to `_run_da3()`, `_run_hybrid_or_lidar()`, or `_run_mapanything()` based on `config.reconstruction.backend`. For hybrid/lidar: runs `stray_detector.py` validation, then spawns `run_da3_hybrid.sh` subprocess. Generates `lidar_complement.ply` in hybrid mode |
+| `cloudcompy_worker.py` | Runs `run_cloudcompy.sh`. Merges chunks + `lidar_complement.ply` (if present) → `cleaned_cloud.ply`, links to `merged/`, computes `floor_transform.npz` |
 | `vlm_worker.py` | InternVL3 scene analysis → `vlm_analysis.json` (prompt + frame_map). Being migrated to PLM-8B |
 | `sam3_worker.py` | SAM3 segmentation using VLM prompt → `segmentation.json` + `seg_masks.npz` |
 | `instance_cleaner_worker.py` | DBSCAN cluster isolation per segmented instance |
@@ -138,6 +142,10 @@ All workers share a pattern: `run(conn, session_dir, config)` → `run_worker_sa
 |--------|---------|
 | `reconstruction_native_wrapper.py` | `RealtimeReconstruction` wraps `Reconstruction_Streaming`. Per-chunk async processing with callbacks, zoom intrinsics correction, gravity transform management, metadata saving. **Fast path**: skips `super().__init__()` when `preloaded_model` is available |
 | `reconstruction_config_builder.py` | Builds Reconstruction config dict from `config.yaml` (model checkpoint, weights, chunk_size, overlap, conf_threshold, etc.) |
+| `stray_da3_streaming.py` | **Hybrid/LiDAR reconstruction subclasses**: `StrayDA3Streaming` injects ARKit poses + fused LiDAR/DA3 depth into DA3_Streaming. `StrayLiDAROnly` skips neural inference entirely, using raw LiDAR depth with DA3's SLAM backbone for alignment |
+| `run_da3_hybrid_main.py` | Entry point for hybrid/LiDAR subprocess: parses CLI args, loads Stray Scanner data via `prepare_stray_data()`, instantiates the appropriate subclass, runs chunk-based reconstruction |
+| `ingestors/stray_detector.py` | `detect_stray_data()`: validates Stray Scanner session (checks for `depth/`, `odometry.csv`, `camera_matrix.csv`). Used by `map_worker.py` and `GET /api/sessions/{id}/available_backends` |
+| `ingestors/stray_scanner.py` | `prepare_stray_data()`: extracts frames from `rgb.mp4`, loads ARKit poses (C2W matrices from quaternions), LiDAR depth maps (uint16 mm → float32 m), confidence masks, intrinsic matrix rescaling |
 | `alignment_manager.py` | `AlignmentManager`: RANSAC floor detection, SIM3 gravity correction, chunk-to-chunk alignment, point cloud generation with depth/conf thresholds, segmentation ID continuity mapping |
 | `icp_aligner.py` | Scaled ICP registration: auto voxel sizing, FPFH features, RANSAC global registration, point-to-plane refinement, scale estimation from correspondences |
 | `segmentation_pipeline.py` | Batched SAM3 processing per category, IoU ID matching across batches, NPZ mask storage with upsert logic, display-time point-to-mask matching via PLY origin fields, OBB computation |
@@ -205,7 +213,8 @@ Custom Potree 2.0 octree loader:
 
 | Vendor | Purpose |
 |--------|---------|
-| **mapanything** | `Reconstruction_Streaming`: chunk-based monocular depth → 3D reconstruction with SIM3 alignment and loop closure |
+| **depth-anything-3** | `DA3_Streaming`: chunk-based monocular depth estimation + SLAM with loop closure (SALAD features). Primary reconstruction backend |
+| **mapanything** | `Reconstruction_Streaming`: chunk-based feed-forward reconstruction. Legacy/fallback backend |
 | **perception_models** | PE-Spatial-G14-448: dense spatial features (segmentation, detection, depth). PLM-8B: VLM for scene analysis, material ID. Apache 2.0 |
 | **DepthLM_Official** | DepthLM (Pixtral 12B): per-pixel metric depth estimation from single images |
 | **sam3** | SAM3 Video Predictor: text/point-prompt segmentation with video propagation |
@@ -272,8 +281,8 @@ sequenceDiagram
     API->>PM: start_pipeline(session_id, stages)
 
     PM->>ReconstructionW: Stage 1 — 3D Reconstruction
-    Note over ReconstructionW: Zoom detection → segment splitting<br/>Per-segment: blur filter → novelty selection<br/>→ Reconstruction reconstruction → ICP alignment
-    ReconstructionW-->>PM: done (chunk PLYs)
+    Note over ReconstructionW: Backend selection: DA3 | hybrid | lidar | mapanything<br/>DA3: neural depth + SLAM<br/>Hybrid: LiDAR + DA3 fused depth + ARKit poses<br/>LiDAR: raw LiDAR depth + DA3 SLAM alignment
+    ReconstructionW-->>PM: done (chunk PLYs + lidar_complement.ply)
 
     PM->>CCW: Stage 2 — Cloud Cleaning
     Note over CCW: CloudCompPy: SOR + voxel + normals<br/>→ cleaned_cloud.ply + floor_transform.npz
@@ -310,10 +319,11 @@ projects/<project-slug>/
 │   │   ├── selected_frames.json   # Novelty-filtered keyframes
 │   │   └── zoom_analysis.json     # Per-frame zoom levels
 │   └── output/
-│       ├── chunk_*.ply            # Reconstruction raw reconstruction chunks
+│       ├── chunk_*.ply            # Reconstruction raw chunks
 │       ├── chunk_*_meta.json      # Per-chunk metadata (cameras, intrinsics)
 │       ├── chunk_*_origins.npz    # Per-point origin traceability
-│       ├── cleaned_cloud.ply      # CloudCompPy cleaned cloud
+│       ├── lidar_complement.ply   # LiDAR backprojection (hybrid mode only)
+│       ├── cleaned_cloud.ply      # CloudCompPy cleaned cloud (chunks + complement merged)
 │       ├── floor_transform.npz    # RANSAC floor alignment (s, R, t)
 │       ├── vlm_analysis.json      # InternVL3 scene inventory (migrating to PLM-8B)
 │       ├── segmentation.json      # SAM3 raw seg results
@@ -337,9 +347,11 @@ projects/<project-slug>/
 ## Key Design Decisions
 
 1. **Model caching**: Reconstruction model is loaded once and reused across zoom segments via `preloaded_model` in `RealtimeReconstruction.__init__` (fast path skips `super().__init__()`)
-2. **Zoom segmentation**: Videos with zoom changes are split into segments, each processed independently, then aligned with ICP
-3. **Origin traceability**: Every point in the PLY carries `(frame_global, pixel_row, pixel_col)` — this is how segmentation masks (2D) map to 3D points at display-time
-4. **Gravity alignment**: Computed once from first chunk, shared across all segments. Floor transform persisted to NPZ for consistent loading
-5. **Pipeline is subprocess-based**: Each stage runs in its own `multiprocessing.Process` with `Pipe` IPC — the server process never loads GPU models
-6. **Potree LOD**: PotreeConverter generates octree; frontend `PotreeLoader` does priority-queue visibility traversal with configurable point budget
-7. **All parameters in `config.yaml`**: No hardcoded values — all thresholds, model paths, and tuning parameters are configurable
+2. **Multi-backend reconstruction**: `map_worker.py` dispatches to DA3, hybrid/LiDAR (via `run_da3_hybrid.sh`), or MapAnything based on `config.reconstruction.backend`. Stray Scanner data is auto-detected at runtime
+3. **Hybrid depth fusion**: `StrayDA3Streaming` fuses LiDAR depth (trust range 0.1-5m) with DA3 neural depth for pixels beyond LiDAR range. `StrayLiDAROnly` bypasses neural inference entirely
+4. **Origin traceability**: Every point in the PLY carries `(frame_global, pixel_row, pixel_col)` — this is how segmentation masks (2D) map to 3D points at display-time
+5. **Gravity alignment**: Computed once from first chunk, shared across all segments. Floor transform persisted to NPZ for consistent loading
+6. **Pipeline is subprocess-based**: Each stage runs in its own `multiprocessing.Process` with `Pipe` IPC — the server process never loads GPU models
+7. **Potree LOD**: PotreeConverter generates octree; frontend `PotreeLoader` does priority-queue visibility traversal with configurable point budget
+8. **All parameters in `config.yaml`**: No hardcoded values — all thresholds, model paths, and tuning parameters are configurable
+9. **LiDAR complement**: In hybrid mode, raw LiDAR depth is backprojected using post-loop-closure refined camera poses to generate `lidar_complement.ply`, which CloudCompPy merges with the neural reconstruction

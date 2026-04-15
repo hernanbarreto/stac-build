@@ -10,6 +10,13 @@
 Everything here is implemented and working.
 
 - [x] MapAnything dense 3D reconstruction (chunked, SIM3 overlap)
+- [x] **DA3 (Depth Anything 3) Streaming** — primary reconstruction backend with SLAM + loop closure
+- [x] **Hybrid reconstruction (LiDAR + DA3)** — fuses Stray Scanner LiDAR depth with DA3 neural depth
+- [x] **LiDAR-only reconstruction** — DA3 SLAM backbone with raw LiDAR depth injection (no neural inference)
+- [x] **Stray Scanner integration** — auto-detection of iOS LiDAR data (ARKit poses, depth, intrinsics)
+- [x] **LiDAR complement generation** — backprojects raw LiDAR using post-loop-closure poses, merged by CloudCompPy
+- [x] **Available backends API** — `GET /api/sessions/{id}/available_backends` with auto-detection
+- [x] Multi-backend reconstruction dispatcher (`map_worker.py`)
 - [x] Frame quality filtering (Laplacian blur detection)
 - [x] Visual novelty frame selector (H/F ratio, ORB-SLAM inspired)
 - [x] Alignment manager (SIM3 + RANSAC auto-leveling)
@@ -21,13 +28,20 @@ Everything here is implemented and working.
 - [x] BIM comparison (IFC parsing, C2M deviation, sábana)
 - [x] Coverage analysis (mesh sampling + KDTree proximity)
 - [x] Potree octree streaming (custom LOD loader)
-- [x] CloudCompPy post-processing (SOR filter)
+- [x] CloudCompPy post-processing (SOR filter + LiDAR complement merge)
 - [x] Three.js BIM overlay (IFC → mesh rendering)
 - [x] React/TypeScript frontend (IDE-style viewer)
 - [x] JWT authentication + role-based access
 - [x] Team/session management
 - [x] WebSocket real-time pipeline progress
 - [x] Configurable pipeline stages (drag-and-drop ordering)
+
+### 🔧 Tier 0.5: Hybrid Reconstruction Industrialization (In Progress)
+
+- [ ] **UI backend selector** — dropdown in Pipeline Dialog to choose reconstruction backend (calls `available_backends` endpoint)
+- [ ] **WebSocket backend override** — pass selected backend from UI to server, override `config.yaml` at runtime
+- [ ] Parameterize DA3 resolution in `StrayLiDAROnly` (currently hardcoded 378×504)
+- [ ] Replace fragile relative path in `_generate_lidar_complement` with direct session path
 
 ---
 

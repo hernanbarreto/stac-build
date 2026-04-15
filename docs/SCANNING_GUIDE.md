@@ -8,7 +8,12 @@
 
 ## 1. Introducción
 
-Este documento establece el procedimiento estándar para la captura de video destinada a la reconstrucción 3D mediante el sistema STAC. El sistema utiliza **estimación monocular de profundidad (Reconstruction)** a partir de un video convencional de smartphone o cámara, sin necesidad de sensores LiDAR ni equipamiento especializado.
+Este documento establece el procedimiento estándar para la captura de video destinada a la reconstrucción 3D mediante el sistema STAC. El sistema soporta **múltiples backends de reconstrucción**:
+
+- **DA3 (Depth Anything 3)**: Estimación monocular de profundidad con SLAM y loop closure. Backend principal.
+- **Híbrido (LiDAR + DA3)**: Fusiona profundidad LiDAR del Stray Scanner (< 5m) con estimación neural DA3 (> 5m). Máxima precisión absoluta.
+- **Solo LiDAR**: Usa el backbone SLAM de DA3 con inyección directa de profundidad LiDAR. Sin inferencia neural.
+- **MapAnything**: Reconstrucción feed-forward. Backend de respaldo.
 
 La calidad de la nube de puntos resultante depende directamente de la técnica de captura. Un escaneo correcto produce nubes densas con precisión centimétrica; un escaneo deficiente genera artefactos, huecos y errores geométricos que ningún post-procesamiento puede corregir.
 
@@ -58,7 +63,27 @@ El sistema calcula la profundidad de cada píxel mediante **parallax** — la di
 | Contraluz directo | ❌ Inaceptable | Evitar filmar contra ventanas/focos |
 | Oscuridad total | ❌ Inaceptable | Iluminación obligatoria |
 
-### 3.3 Accesorios recomendados
+### 3.3 Stray Scanner (iOS LiDAR)
+
+Para captura con LiDAR (modos **híbrido** o **solo LiDAR**), se requiere un dispositivo iOS con sensor LiDAR y la app [Stray Scanner](https://apps.apple.com/app/stray-scanner/id1557051662):
+
+| Dispositivo | Notas |
+|------------|-------|
+| iPhone 12 Pro / Pro Max | LiDAR 192×256 |
+| iPhone 13/14/15/16 Pro | LiDAR 192×256, mejor procesador |
+| iPad Pro (2020+) | LiDAR 192×256, pantalla grande para visualización |
+
+Stray Scanner genera automáticamente:
+- `rgb.mp4` — video a resolución nativa
+- `depth/` — mapas de profundidad LiDAR (uint16 PNG, mm)
+- `confidence/` — mapas de confianza (0=baja, 1=media, 2=alta)
+- `odometry.csv` — poses ARKit por frame (quaternion + traslación)
+- `camera_matrix.csv` — matriz intrínseca K (3×3)
+
+> [!TIP]
+> El modo **híbrido** es el recomendado para Stray Scanner: combina la precisión métrica absoluta del LiDAR (< 5m) con la capacidad de DA3 de estimar profundidad a distancias mayores.
+
+### 3.4 Accesorios recomendados
 
 - **Estabilizador gimbal** (DJI OM, etc.) — reduce blur significativamente
 - **Linterna LED portátil** — para cuartos técnicos oscuros
@@ -212,11 +237,13 @@ Reconstruction tiene un **error relativo de profundidad de ~10%**. Esto signific
 |-----------|-------------|-----------|----------|-------------------|
 | **LiDAR terrestre** (Leica, Faro) | €50,000-150,000 | ±2 mm | 10M pts/scan | 5 min/estación |
 | **LiDAR portátil** (NavVis, GeoSLAM) | €20,000-50,000 | ±10-30 mm | 300K pts/s | Tiempo real |
-| **Fotogrametría clásica** (MapAnything) | €0 (cámara) | ±5-20 mm | Variable | Horas de procesamiento |
-| **STAC (Reconstruction mono)** | €0 (smartphone) | ±30-100 mm | 15-50M pts | Minutos de procesamiento |
+| **Fotogrametría clásica** | €0 (cámara) | ±5-20 mm | Variable | Horas de procesamiento |
+| **STAC DA3** (monocular) | €0 (smartphone) | ±30-100 mm | 15-50M pts | Minutos de procesamiento |
+| **STAC Híbrido** (LiDAR+DA3) | €1,200 (iPhone Pro) | ±10-30 mm | 20-60M pts | Minutos de procesamiento |
+| **STAC Solo LiDAR** | €1,200 (iPhone Pro) | ±10-50 mm | 5-15M pts | Minutos de procesamiento |
 | **iPhone LiDAR** (Polycam) | €1,200 (iPhone Pro) | ±10-50 mm | 1-5M pts | Tiempo real |
 
-**Ventaja STAC**: Cero inversión en hardware, procesamiento en GPU convencional, nube ultra-densa, y segmentación con IA integrada.
+**Ventaja STAC**: Múltiples backends de captura adaptados al equipamiento disponible. El modo **híbrido** alcanza precisión comparable al LiDAR portátil profesional con un iPhone Pro.
 
 ---
 
@@ -308,7 +335,7 @@ Antes de abandonar el sitio, verificar:
 ### 10.3 Pipeline de Procesamiento
 
 ```
-Video .mp4
+Video .mp4 (+ opcional: datos Stray Scanner)
   ↓
 1. Extracción de frames (extract_frames.py)
   ↓
@@ -316,9 +343,9 @@ Video .mp4
   ↓
 3. Filtro de novedad visual (frame_selector.py) → Selecciona keyframes con parallax
   ↓
-4. Reconstrucción 3D (Reconstruction)                    → Genera chunks de nube de puntos
+4. Reconstrucción 3D (DA3/Híbrido/LiDAR/MapAnything) → Genera chunks + complemento LiDAR
   ↓
-5. Post-procesamiento (CloudComPy)            → Merge, SOR, voxel subsampling
+5. Post-procesamiento (CloudComPy)            → Merge chunks + complement, SOR, voxel
   ↓
 6. Segmentación (SAM3)                        → Detección de objetos
   ↓

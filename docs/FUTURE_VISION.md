@@ -63,7 +63,10 @@ The platform is organized into three interdependent layers, where each upper lay
 │  🏗️ Material identification (VLM on original pixels)    │
 │                                                         │
 │  ENGINE 2: 3D Reconstruction (Secondary)                │
-│  🧠 MapAnything dense 3D reconstruction + poses         │
+│  🧠 DA3 Streaming — primary neural depth + SLAM            │
+│  📱 Stray Scanner Hybrid (LiDAR + DA3 fused depth)        │
+│  📱 Stray Scanner LiDAR-only (no neural inference)        │
+│  📱 MapAnything fallback (feed-forward)                   │
 │  🔍 SAM3 instance segmentation                          │
 │  💬 InternVL3 scene analysis (VLM)                      │
 │  🌐 Potree level-of-detail visualization                │
@@ -107,7 +110,10 @@ DESIGN ──→ CONSTRUCTION ──→ HANDOVER ──→ OPERATION ──→ M
 │  │   └─ Material ID + deviation detection (pixel-level)                │
 │  │                                                                     │
 │  ├─ 3D Reconstruction Engine (Secondary)                               │
-│  │   ├─ MapAnything (dense 3D + camera poses, Apache 2.0)              │
+│  │   ├─ DA3 Streaming (primary neural depth + SLAM, loop closure)      │
+│  │   ├─ Stray Scanner Hybrid (LiDAR < 5m + DA3 > 5m)                  │
+│  │   ├─ Stray Scanner LiDAR-only (no neural inference)                 │
+│  │   ├─ MapAnything (feed-forward fallback, Apache 2.0)                │
 │  │   ├─ SAM3 instance segmentation                                     │
 │  │   ├─ InternVL3 VLM scene analysis                                   │
 │  │   └─ Potree visualization                                           │
@@ -657,7 +663,9 @@ All future modules connect through the existing STAC core:
 | Model | Current Use | Future Use |
 |-------|------------|------------|
 | **PE Spatial** (Meta, Apache 2.0) | 2D analysis backbone | Dense feature matching for all spatial tasks |
-| **MapAnything** (Meta FAIR, Apache 2.0) | 3D reconstruction + camera poses | Same + deterioration re-scanning + pose for 2D reprojection |
+| **DA3 Streaming** | Primary 3D reconstruction + SLAM | Same + hybrid/LiDAR modes + deterioration re-scanning |
+| **MapAnything** (Meta FAIR, Apache 2.0) | Fallback 3D reconstruction | Legacy projects, CPU-friendly mode |
+| **Stray Scanner** (iOS) | LiDAR capture for hybrid/LiDAR modes | Metric-scale scanning, ARKit pose priors |
 | **PLM-8B** (Meta, Apache 2.0) | Scene analysis (replacing InternVL3) | Material ID, occlusion classification, safety analysis, equipment condition |
 | **DepthLM** (Meta, ICLR 2026 Oral) | — | VLM metric depth, distance estimation, pose refinement |
 | **SAM3** | Instance segmentation | Safety hazard detection + asset inventory for maintenance |

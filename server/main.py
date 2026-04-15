@@ -34,7 +34,7 @@ security = HTTPBearer(auto_error=False)
 from frame_storage import get_frame_storage, FrameStorage
 from alignment_manager import get_alignment_manager, AlignmentManager
 from sam3_wrapper import get_sam3_wrapper
-from config import cfg, DATA_DIR
+from config import cfg, DATA_DIR, PROJECTS_DIR
 from pipeline_manager import PipelineManager, PipelineStage, StageId
 from project_paths import resolve_session
 
@@ -659,8 +659,12 @@ def apply_gravity_correction(points: np.ndarray, s: float, R: np.ndarray, t: np.
 HOST = cfg["server"]["host"]
 PORT = cfg["server"]["port"]
 STATIC_DIR = Path(__file__).parent / cfg["server"]["static_dir"]
-CHUNK_SIZE = cfg["mapanything"]["chunk_size"]
-CHUNK_OVERLAP = cfg["mapanything"]["chunk_overlap"]
+# Read chunk settings from active reconstruction backend
+_recon = cfg.get("reconstruction", {})
+_backend = _recon.get("backend", "mapanything")
+_backend_cfg = _recon.get(_backend, cfg.get("mapanything", {}))
+CHUNK_SIZE = _backend_cfg.get("chunk_size", 120 if _backend == "da3" else 60)
+CHUNK_OVERLAP = _backend_cfg.get("chunk_overlap", _backend_cfg.get("overlap", 60 if _backend == "da3" else 30))
 
 
 # --- Connection Managers ---
@@ -774,7 +778,7 @@ async def lifespan(app: FastAPI):
     # Initialize SAM3 Wrapper (lazy load, but triggers init log)
     get_sam3_wrapper()
     
-    print("[Server] Reconstruction backend: MapAnything (VGGT-Long)")
+    print(f"[Server] Reconstruction backend: {_backend.upper()} (chunk_size={CHUNK_SIZE}, overlap={CHUNK_OVERLAP})")
     print("[Server] Models will be loaded on-demand (lazy loading enabled)")
 
     # Initialize auth database
@@ -1023,7 +1027,7 @@ async def get_sessions(
 
     try:
         scans_dir = Path(__file__).parent / "scans"
-        projects_dir = DATA_DIR / "projects"
+        projects_dir = PROJECTS_DIR
         
         # Collect sessions from both legacy scans/ and new projects/
         all_dirs = []
@@ -1112,7 +1116,7 @@ async def create_session(
     # Create as new-style project
     from project_paths import ProjectPaths
     import time as _time
-    projects_dir = DATA_DIR / "projects"
+    projects_dir = PROJECTS_DIR
     paths = ProjectPaths(str(projects_dir), session_name)
     
     if paths.project_dir.exists():
@@ -1151,7 +1155,7 @@ async def delete_session(
         raise HTTPException(status_code=403, detail="Admin only")
 
     # Locate the project/session folder
-    projects_dir = DATA_DIR / "projects"
+    projects_dir = PROJECTS_DIR
     project_dir = projects_dir / session_id
     legacy_dir = Path(__file__).parent / "scans" / session_id
 
@@ -1206,7 +1210,7 @@ async def rename_session(
         return {"ok": True, "old_id": session_id, "new_id": new_name}
 
     # Locate current directory
-    projects_dir = DATA_DIR / "projects"
+    projects_dir = PROJECTS_DIR
     legacy_scans = Path(__file__).parent / "scans"
     old_dir = None
     is_legacy = False
@@ -1275,7 +1279,7 @@ async def get_session_scans(session_id: str):
     """
     from project_paths import ProjectPaths
 
-    projects_dir = DATA_DIR / "projects"
+    projects_dir = PROJECTS_DIR
     project_json = projects_dir / session_id / "project.json"
 
     if not project_json.exists():
@@ -1310,6 +1314,77 @@ async def get_session_scans(session_id: str):
             })
 
     return {"session_id": session_id, "scans": scans}
+
+
+@app.get("/api/sessions/{session_id}/available_backends")
+async def get_available_backends(session_id: str, scan_key: str = None):
+    """Return which reconstruction backends are available for this session.
+
+    Checks for Stray Scanner data (depth/, odometry.csv, camera_matrix.csv)
+    in the source directory. If present, hybrid and lidar modes are available.
+
+    Query params:
+        scan_key: Optional "date/source" to check a specific scan (e.g. "2026-04-09/ipad_hernan").
+                  If omitted, checks the latest/default scan.
+
+    Returns:
+        {
+            "session_id": "...",
+            "backends": ["da3", "hybrid", "lidar", "mapanything"],
+            "stray_data": { "has_lidar": true, "has_arkit": true, ... },
+            "recommended": "hybrid"
+        }
+    """
+    from ingestors.stray_detector import detect_stray_data
+    from project_paths import ProjectPaths
+
+    # Resolve session dir
+    if scan_key:
+        parts = scan_key.split("/", 1)
+        date = parts[0]
+        source = parts[1] if len(parts) > 1 else "default"
+        projects_dir = PROJECTS_DIR
+        if (projects_dir / session_id / "project.json").exists():
+            paths = ProjectPaths(str(projects_dir), session_id)
+            ctx = paths.for_source(date, source)
+            session_dir = str(ctx.session_dir)
+        else:
+            ctx = _ctx(session_id)
+            session_dir = str(ctx.session_dir)
+    else:
+        ctx = _ctx(session_id)
+        session_dir = str(ctx.session_dir)
+
+    # Detect Stray Scanner data
+    stray_info = detect_stray_data(session_dir)
+
+    # Always available
+    backends = ["da3", "mapanything"]
+
+    # Stray Scanner backends
+    if stray_info["is_stray_session"]:
+        backends.insert(1, "hybrid")
+        backends.insert(2, "lidar")
+
+    # Recommendation
+    if stray_info["is_stray_session"]:
+        recommended = "hybrid"
+    else:
+        recommended = "da3"
+
+    return {
+        "session_id": session_id,
+        "scan_key": scan_key,
+        "backends": backends,
+        "stray_data": {
+            "has_lidar": stray_info["has_lidar"],
+            "has_arkit": stray_info["has_arkit"],
+            "has_intrinsics": stray_info["has_intrinsics"],
+            "is_stray_session": stray_info["is_stray_session"],
+            "depth_count": stray_info["depth_count"],
+        },
+        "recommended": recommended,
+    }
 
 @app.get("/segments/{session_id}")
 async def get_segments(session_id: str):
@@ -3657,7 +3732,7 @@ async def scan_websocket(websocket: WebSocket):
                 # Create scan directory for today
                 scan_date = time.strftime("%Y-%m-%d")
                 from project_paths import ProjectPaths
-                projects_dir = DATA_DIR / "projects"
+                projects_dir = PROJECTS_DIR
                 paths = ProjectPaths(str(projects_dir), project_id)
                 paths.ensure_source_dirs(scan_date, source_name)
 

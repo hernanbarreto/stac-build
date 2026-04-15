@@ -172,8 +172,8 @@ class PipelineManager:
             parts = scan_key.split("/", 1)
             date = parts[0]
             source = parts[1] if len(parts) > 1 else "default"
-            from config import DATA_DIR
-            projects_dir = DATA_DIR / "projects"
+            from config import PROJECTS_DIR
+            projects_dir = PROJECTS_DIR
             if (projects_dir / session_id / "project.json").exists():
                 paths = ProjectPaths(str(projects_dir), session_id)
                 ctx = paths.for_source(date, source)
@@ -238,9 +238,10 @@ class PipelineManager:
     # Files each stage produces (in output/) — used by replace mode to clean before re-running
     STAGE_OUTPUT_FILES: Dict[StageId, List[str]] = {
         StageId.RECONSTRUCTION: ["chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json",
-                      "slam_reconstruction.ply", "maplong_run",
-                      "vggt_long_config.yaml", "camera_poses_mapanything.json",
-                      "intrinsic.txt"],
+                      "slam_reconstruction.ply", "maplong_run", "da3_run", "gs_ply",
+                      "vggt_long_config.yaml", "da3_streaming_config.yaml",
+                      "camera_poses_mapanything.json",
+                      "intrinsic.txt", "lidar_complement.ply"],
         StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "floor_transform.npz"],
         StageId.VLM: ["scene_analysis.json", "vlm_analysis.json"],
         StageId.SAM3: ["segmentation.json", "segmentation_result.json",

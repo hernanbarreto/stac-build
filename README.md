@@ -30,27 +30,28 @@ The core insight: **analysis is more precise in the original 2D image space** th
 | **Deviation Detection** | Pixel-level BIM overlay comparison | Point-to-mesh distance (noisy) |
 | **Material Identification** | Native — VLM on original pixels | Indirect — must trace back to source frame |
 
-The 2D engine uses **perfect camera poses from MapAnything** to project BIM geometry onto each frame, enabling direct pixel-level comparison without the noise introduced by 3D reconstruction.
+The 2D engine uses **perfect camera poses from the reconstruction engine** to project BIM geometry onto each frame, enabling direct pixel-level comparison without the noise introduced by 3D reconstruction.
 
 ### Core Workflow
 
 ```
-📱 Capture Video (MP4)
+📱 Capture Video (MP4) + optional 📷 Stray Scanner (LiDAR)
     │
     ▼
 🧠 Dual-Engine Processing
     │
     ├─ ENGINE 1: 2D Analysis (Primary)
     │   ├─ Frame selection (H/F ratio + blur filter)
-    │   ├─ Camera pose estimation (MapAnything cam2world)
+    │   ├─ Camera pose estimation (cam2world)
     │   ├─ BIM → 2D reprojection (K × [R|t] × P_BIM)
     │   ├─ Per-frame deviation analysis (pixel-level)
     │   ├─ Material identification (PE Spatial + VLM)
     │   └─ Multi-frame coverage accumulation
     │
     ├─ ENGINE 2: 3D Reconstruction (Secondary)
-    │   ├─ Dense point cloud (MapAnything)
-    │   ├─ SIM3 chunk alignment + auto-leveling
+    │   ├─ Backend selection: DA3 │ Hybrid │ LiDAR │ MapAnything
+    │   ├─ Stray Scanner integration (ARKit poses + LiDAR depth)
+    │   ├─ Dense point cloud with SIM3 alignment + auto-leveling
     │   ├─ Instance segmentation (SAM3 + VLM)
     │   └─ Potree octree for streaming visualization
     │
@@ -87,9 +88,13 @@ The 2D engine uses **perfect camera poses from MapAnything** to project BIM geom
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| **Reconstruction** | [MapAnything](https://github.com/facebookresearch/MapAnything2) (Meta FAIR) | Dense 3D reconstruction + camera poses from monocular video. Apache 2.0 |
+| **DA3** (Primary) | [Depth Anything 3 Streaming](https://github.com/DepthAnything/Depth-Anything-V3) | Dense monocular depth + SLAM with loop closure. Sub-cm relative precision |
+| **Hybrid** (LiDAR+DA3) | DA3 + Stray Scanner | Fuses LiDAR depth (<5m, metrically exact) with DA3 neural depth (>5m). Best absolute accuracy |
+| **LiDAR-Only** | Stray Scanner ARKit | Uses DA3 SLAM backbone with raw LiDAR depth injection. No neural inference needed |
+| **MapAnything** (Legacy) | [MapAnything](https://github.com/facebookresearch/MapAnything2) (Meta FAIR) | Feed-forward reconstruction. Apache 2.0. Fallback backend |
+| **Stray Scanner** | [Stray Scanner](https://apps.apple.com/app/stray-scanner/id1557051662) (iOS) | iPhone/iPad Pro LiDAR capture for hybrid/LiDAR modes |
 | **Segmentation** | [SAM3](https://github.com/facebookresearch/sam2) (Segment Anything 3) | Instance segmentation of construction elements |
-| **Post-processing** | [CloudCompPy](https://www.cloudcompare.org/) | SOR filtering, octree generation |
+| **Post-processing** | [CloudCompPy](https://www.cloudcompare.org/) | SOR filtering, cloud merging, LiDAR complement fusion |
 | **Point Cloud Viz** | [Potree](https://potree.github.io/) + [Three.js](https://threejs.org/) | Level-of-detail point cloud rendering |
 
 ### Platform
@@ -113,11 +118,17 @@ The 2D engine uses **perfect camera poses from MapAnything** to project BIM geom
 - **Pose-Aware Tolerance**: Expand matching regions based on estimated pose uncertainty
 
 ### Dense 3D Reconstruction
-- **MapAnything** processes video frames to produce dense depth maps and camera poses
+- **Multi-backend architecture** with dynamic backend selection per session:
+  - **DA3** (Depth Anything 3): Primary neural depth + SLAM with loop closure
+  - **Hybrid** (LiDAR + DA3): Fuses Stray Scanner LiDAR depth with DA3 inference for optimal accuracy
+  - **LiDAR-only**: DA3 SLAM backbone with raw LiDAR depth injection (no neural inference)
+  - **MapAnything**: Legacy feed-forward fallback
+- **Stray Scanner integration**: Automatic detection of iOS LiDAR data (ARKit poses, depth maps, intrinsics)
 - Chunk-based processing with SIM3 overlap alignment for long sequences
 - Smart frame selection using ORB-SLAM H/F ratio keyframe detection
 - Blur filtering via Laplacian variance analysis
 - RANSAC auto-leveling (floor detection and gravity alignment)
+- **LiDAR complement generation**: In hybrid mode, raw LiDAR depth is backprojected using post-loop-closure refined poses, merged with the neural reconstruction
 
 ### Semantic Segmentation
 - **SAM3** segments individual construction elements in 3D
@@ -159,17 +170,28 @@ The 2D engine uses **perfect camera poses from MapAnything** to project BIM geom
 ```
 stac-builder/
 ├─ server/                    # Python backend
-│   ├─ main.py                # Flask app, WebSocket, API routes
-│   ├─ reconstruction_native_wrapper.py  # Reconstruction pipeline orchestration
+│   ├─ main.py                # FastAPI app, WebSocket, API routes
+│   ├─ pipeline_manager.py    # 5-stage pipeline orchestrator
+│   ├─ workers/               # Subprocess workers (GPU-isolated)
+│   │   ├─ base.py            # WorkerPipe IPC protocol
+│   │   ├─ map_worker.py      # Reconstruction dispatcher (DA3/hybrid/lidar/mapanything)
+│   │   ├─ cloudcompy_worker.py # Cloud cleaning + LiDAR complement merge
+│   │   ├─ vlm_worker.py      # InternVL3 scene analysis
+│   │   ├─ sam3_worker.py     # SAM3 segmentation
+│   │   └─ instance_cleaner_worker.py # DBSCAN instance cleaning
+│   ├─ stray_da3_streaming.py # Hybrid + LiDAR-only DA3 subclasses
+│   ├─ run_da3_hybrid_main.py # Entry point for hybrid/LiDAR subprocess
+│   ├─ run_da3_hybrid.sh      # Shell launcher (conda env activation)
+│   ├─ ingestors/
+│   │   ├─ stray_detector.py  # Auto-detect Stray Scanner data in sessions
+│   │   └─ stray_scanner.py   # Load ARKit poses, LiDAR depth, intrinsics
 │   ├─ frame_quality.py       # Blur detection (Laplacian)
 │   ├─ frame_selector.py      # Visual novelty filter (H/F ratio)
 │   ├─ alignment_manager.py   # SIM3 alignment + auto-leveling
 │   ├─ scene_analyzer.py      # InternVL3 scene inventory
-│   ├─ segmentation/          # SAM3 + DBSCAN + RANSAC face detection
-│   │   └─ pipeline.py        # Full segmentation pipeline
+│   ├─ segmentation_pipeline.py # SAM3 + DBSCAN + RANSAC face detection
 │   ├─ bim_comparison.py      # C2M deviation, sábana, coverage
 │   ├─ bim_registration.py    # Scan-to-BIM alignment (ICP)
-│   ├─ cloudcompy_postprocess.py # SOR filter, Potree conversion
 │   └─ config.yaml            # All pipeline configuration
 │
 ├─ ui/                        # React + TypeScript frontend
@@ -183,7 +205,8 @@ stac-builder/
 │           └─ LoginPage.tsx   # Authentication
 │
 ├─ vendor/                    # AI model integrations
-│   ├─ MapAnything2/           # 3D reconstruction + camera poses
+│   ├─ depth-anything-3/      # DA3 Streaming — primary reconstruction
+│   ├─ MapAnything2/           # MapAnything — fallback reconstruction
 │   ├─ perception_models/     # PE Spatial backbone + PLM-8B VLM (Apache 2.0)
 │   ├─ DepthLM_Official/      # VLM metric depth estimation (Pixtral 12B)
 │   ├─ sam3/                   # SAM3 video segmentation
@@ -206,11 +229,12 @@ The 2D analysis engine depends on accurate camera poses for BIM reprojection. ST
 
 | Source | Type | Accuracy | When |
 |--------|------|----------|------|
-| **MapAnything** | SfM feed-forward | High relative, ~cm inter-frame | Always (core pipeline) |
-| **Gizmo + ICP** | Manual alignment → refinement | Depends on user + ICP | Current registration method |
-| **ARKit/ARCore** | VIO + IMU + LiDAR | ~cm short-range, drift over distance | Future (Unity capture app) |
+| **DA3 SLAM** | Loop-closure optimized poses | High relative, ~cm inter-frame | Primary (DA3/hybrid/lidar backends) |
+| **ARKit (Stray Scanner)** | VIO + IMU + LiDAR | ~cm absolute, metric-scale | Hybrid/LiDAR modes (injected as pose priors) |
+| **MapAnything** | SfM feed-forward | High relative, ~cm inter-frame | Fallback backend |
+| **Gizmo + ICP** | Manual alignment → refinement | Depends on user + ICP | Current Scan→BIM registration |
 
-**Initial Localization**: The scan-to-BIM registration (gizmo + ICP) provides the transformation `T_scan→BIM` that maps MapAnything poses to BIM coordinates. This is the same registration used today for 3D comparison, now repurposed for 2D reprojection.
+**Pose Sources**: In hybrid/LiDAR modes, ARKit poses from Stray Scanner are injected directly into DA3's SLAM backbone, providing metric-scale priors that DA3 refines through loop closure. In pure DA3 mode, neural pose estimation with SALAD features handles all alignment.
 
 **Error Handling**: Pose uncertainty at distance `d` is compensated by expanding the BIM reprojection search window proportionally. PE Spatial features enable robust local matching even with ±20px uncertainty.
 
@@ -222,20 +246,21 @@ All pipeline parameters are centralized in `server/config.yaml`:
 
 ```yaml
 # Key configuration sections
-server:
-  chunk_size: 30              # Frames per reconstruction chunk
-  chunk_overlap: 10           # Overlap frames for alignment
+reconstruction:
+  backend: da3                 # da3 | hybrid | lidar | mapanything
+  da3:
+    chunk_size: 120            # Frames per reconstruction chunk
+    chunk_overlap: 60          # Overlap frames for alignment
+    conf_threshold: 1.5        # Depth confidence threshold
+  lidar:
+    trust_range: [0.1, 5.0]    # LiDAR depth trust range (meters)
+    confidence_threshold: 1    # Min confidence level (0-2)
+    fallback_to_da3: true      # Fallback if no Stray Scanner data
+    stray_stride: 4            # Frame extraction stride
 
 frame_selection:
   enabled: true               # Visual novelty filter
   hf_ratio_threshold: 0.45    # H/F ratio for parallax detection
-
-models:
-  depth:
-    name: "facebook/map-anything-apache"
-    device: "cuda"
-  segmentation:
-    sam3_checkpoint: "sam3_hiera_large.pt"
 
 alignment:
   method: "scale+se3"         # SIM3 alignment
@@ -247,6 +272,10 @@ bim:
     tolerance_mm: 20.0        # Deviation threshold
     coverage_proximity_m: 0.15
 ```
+
+### Reconstruction Backend Selection
+
+The API endpoint `GET /api/sessions/{id}/available_backends` auto-detects which backends are viable for each session based on the presence of Stray Scanner data (`depth/`, `odometry.csv`, `camera_matrix.csv`).
 
 ---
 
@@ -286,6 +315,7 @@ Access the application at `http://localhost:5000`
 | Type | Formats |
 |------|---------|
 | **Video input** | MP4, AVI, MOV |
+| **LiDAR input** | Stray Scanner (depth PNGs + odometry CSV + intrinsics CSV) |
 | **BIM models** | IFC 2x3, IFC 4, IFC 4.3 |
 | **Point clouds** | PLY (native), Potree octree |
 | **Export** | PLY, JSON metrics, Potree |

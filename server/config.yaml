@@ -8,7 +8,7 @@ server:
 # InternVL3 auto-detects object categories from scan frames
 # Replaces manual prompt input for segmentation
 scene_analysis:
-  enabled: true
+  enabled: false
   model_id: "OpenGVLab/InternVL3-8B"   # MIT license, auto-downloads from HuggingFace
   max_tiles: 6                           # Image tiles (6=dev/12GB, 12=production/24GB+)
   max_merged_categories: 25              # Cap after merge across all frames (was 40)
@@ -71,7 +71,7 @@ frame_selection:
   method: "dino"                # "dino" (DINO cosine similarity) or "hf_ratio" (legacy ORB-SLAM)
   # DINO settings (used when method=dino)
   dino_model: "dinov2_vitb14"   # ViT-B/14 (~330MB, same model VGGT-Long uses for loop closure)
-  dino_threshold: 0.92          # Cosine similarity threshold (higher = more keyframes accepted)
+  dino_threshold: 0.98          # Cosine similarity threshold (higher = more keyframes accepted)
   dino_device: "cuda"           # "cuda" or "cpu" (auto-falls back to CPU if no GPU)
   # Legacy H/F settings (used when method=hf_ratio, or as fallback if DINO fails)
   max_features: 2000            # ORB features per frame
@@ -85,6 +85,9 @@ frame_selection:
 paths:
   # Default output directory name within each session
   output_dir_name: "output"
+  # Projects data directory (point clouds, frames, reconstructions)
+  # Set to external drive path to save disk space on internal SSD
+  projects_dir: "/mnt/e/stac-projects"
 
 # --- Models ---
 models:
@@ -110,7 +113,7 @@ models:
 
     # Segment sub-cloud cleaning (voxel grid + local PCA + depth peeling)
     segment_cleaning:
-      enabled: true
+      enabled: false
       voxel_size: 0.005            # Grid cell size in meters (5mm) — for curved surface fallback
       min_points_per_voxel: 5      # Skip voxels with fewer points (reduced for small voxels)
       planarity_threshold: 0.3     # λ₃/λ₁ eigenvalue ratio; below = planar → depth peel
@@ -144,7 +147,7 @@ storage:
   jpeg_quality: 95
   
   outlier_removal:
-    enabled: true
+    enabled: false
     eps: 0.05
     min_samples: 10
     sor_k: 20
@@ -208,24 +211,53 @@ bim:
       regular_threshold: 50     # >=50% within tolerance = REGULAR (yellow)
                                 # <50% = BAD (red) — advance counts as 0
 
-# --- MapAnything (via VGGT-Long) Configuration ---
-# 3D Reconstruction backend — MapAnything v2 (Apache 2.0, commercial OK)
-mapanything:
-  conda_env: "mapanything"             # Conda environment with MapAnything installed
-  model_weights: "facebook/map-anything-apache"  # Apache 2.0 (commercial OK)
-  device: "cpu"                        # "cpu" or "cuda"
-  conf_threshold_coef: 0.75            # Higher = stricter, keeps only high-confidence points
-  sample_ratio: 1.0                    # 1.0 = keep all points that pass confidence filter
-  chunk_size: 60                       # Frames per VGGT-Long chunk
-  chunk_overlap: 30                    # Overlap between chunks for alignment
-  reference_frame_mid: true            # Use middle frame as reference (better consistency)
-  loop_closure: true                   # Enable SALAD loop closure
-  use_keyframes: true                  # Use frame_selector keyframes (recommended)
+# --- 3D Reconstruction Backend ---
+# Supports: "da3", "lidar", "hybrid", or "mapanything"
+#   - da3:         Depth Anything 3 Streaming (works with any video input)
+#   - lidar:       LiDAR-only backprojection via DA3-streaming SLAM (requires Stray Scanner)
+#   - hybrid:      DA3 + LiDAR injection + LiDAR merge via CloudCompPy (requires Stray Scanner)
+#   - mapanything:  VGGT-Long (legacy fallback)
+reconstruction:
+  backend: "da3"                         # "da3", "lidar", "hybrid", "mapanything"
+  device: "cpu"                          # "cpu" or "cuda" (CPU forced — 6GB GPU = OOM)
+  use_keyframes: true                    # Use frame_selector keyframes (recommended)
+
+  # DA3 Streaming (Depth Anything 3) — primary backend
+  da3:
+    conda_env: "da3"                     # Conda environment with DA3 installed
+    model_id: "depth-anything/DA3NESTED-GIANT-LARGE-1.1"  # Auto-downloads from HF Hub
+    chunk_size: 120                      # Frames per DA3 chunk
+    overlap: 60                          # Overlap between chunks for alignment
+    loop_enable: true                    # SALAD loop closure
+    infer_gs: true                       # Enable 3D Gaussian Splatting output
+    align_method: "sim3"                 # "sim3", "se3", or "scale+se3"
+    align_lib: "numpy"                   # "numpy" (CPU) or "triton"/"torch" (GPU)
+    depth_threshold: 15.0                # Max depth in meters
+    conf_threshold_coef: 0.75            # Confidence filter coefficient
+    sample_ratio: 1.0                    # 1.0 = keep all points that pass confidence
+    save_depth_conf_result: true         # Save per-frame depth + confidence npz
+
+  # LiDAR / Hybrid — Stray Scanner integration (requires ARKit + LiDAR data)
+  lidar:
+    trust_range: 5.0                     # Max LiDAR depth in meters (iPad LiDAR ≈ 5m)
+    confidence_threshold: 1              # Min Stray Scanner confidence (0=low, 1=medium, 2=high)
+    fallback_to_da3: true                # If session has no ARKit data, fall back to DA3
+    stride: 4                            # Frame stride for Stray Scanner depth extraction
+
+  # MapAnything (VGGT-Long) — legacy fallback
+  mapanything:
+    conda_env: "mapanything"
+    model_weights: "facebook/map-anything-apache"
+    chunk_size: 60
+    chunk_overlap: 30
+    loop_closure: true
+    conf_threshold_coef: 0.75
+    sample_ratio: 1.0
 
 # --- Post-Processing (CloudCompPy) ---
 # Professional cleaning pipeline for reconstructed point clouds
 postprocessing:
-  enabled: true
+  enabled: false
   conda_env: "CloudComPy310"
   
   # Step 1: Duplicate removal
@@ -258,3 +290,4 @@ coverage_engine:
   sample_density: 4.0         # BIM surface samples per m²
   completion_threshold: 80.0  # % coverage to mark element COMPLETED
   quality_threshold: 80.0     # % of points within tolerance for COMPLETED
+
