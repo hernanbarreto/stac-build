@@ -365,30 +365,34 @@ async def _send_cleaned_cloud(websocket, session_id: str):
                 n_pts = 0
                 is_binary = False
                 has_origins = False
+                has_confidence = False
                 while True:
                     line = f.readline()
                     if line.startswith(b"element vertex"):
                         n_pts = int(line.split()[-1])
                     if line.startswith(b"format binary"):
                         is_binary = True
+                    if b"confidence" in line:
+                        has_confidence = True
                     if b"frame_global" in line:
                         has_origins = True
                     if line.startswith(b"end_header"):
                         break
                 
                 if is_binary:
+                    # Dynamically build numpy dtype based on detected fields
+                    dtype_fields = [
+                        ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                        ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
+                    ]
+                    if has_confidence:
+                        dtype_fields.append(('confidence', '<f4'))
                     if has_origins:
-                        ply_dtype = np.dtype([
-                            ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-                            ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+                        dtype_fields.extend([
                             ('frame_global', '<i4'),
                             ('pixel_row', '<i2'), ('pixel_col', '<i2')
                         ])
-                    else:
-                        ply_dtype = np.dtype([
-                            ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-                            ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
-                        ])
+                    ply_dtype = np.dtype(dtype_fields)
                     raw_data = np.frombuffer(f.read(), dtype=ply_dtype)
                     point_count = len(raw_data)
                     output_data = np.zeros((point_count, 7), dtype=np.float32)
@@ -1819,6 +1823,11 @@ async def propagate_interactive_segmentation(request: Request):
     if not state_id or not session_id:
         raise HTTPException(status_code=400, detail="Missing state_id or session_id")
     
+    # Prevent concurrent propagations on the same session
+    active_tasks = task_manager.get_active(session_id)
+    if any(task["task_type"] == "propagation" for task in active_tasks):
+        raise HTTPException(status_code=409, detail="A propagation is already running for this session. Please wait or cancel the existing task.")
+    
     from sam3_wrapper import get_sam3_wrapper
     sam3 = get_sam3_wrapper()
     
@@ -1841,6 +1850,8 @@ async def propagate_interactive_segmentation(request: Request):
                 mask_b64 = ""
                 if "out_binary_masks" in outputs:
                     mask = outputs["out_binary_masks"]
+                    if hasattr(mask, 'cpu'):
+                        mask = mask.cpu().numpy()
                     if mask.ndim == 3:
                         mask = np.max(mask, axis=0) if mask.shape[0] > 0 else np.zeros((1,1), dtype=np.uint8)
                     h, w = mask.shape[:2]
@@ -1856,8 +1867,30 @@ async def propagate_interactive_segmentation(request: Request):
                     "pct": pct, "mask_png": mask_b64
                 })
                 yield f"event: progress\ndata: {event}\n\n"
+        
+        except asyncio.CancelledError:
+            print(f"[Segmentation] Propagation SSE disconnected. Saving partial progress ({len(all_masks)} frames)...")
+            sam3.predictor.cancel_propagation(state_id) if hasattr(sam3.predictor, "cancel_propagation") else None
+            # Do NOT re-raise; fall through to the save logic below!
+        except GeneratorExit:
+            print(f"[Segmentation] GeneratorExit during Propagation. Saving partial progress ({len(all_masks)} frames)...")
+            sam3.predictor.cancel_propagation(state_id) if hasattr(sam3.predictor, "cancel_propagation") else None
+            # Do NOT re-raise
+        except Exception as e:
+            print(f"[Segmentation] Error during propagation: {e}")
+            import traceback
+            traceback.print_exc()
+            task_manager.fail(tid, str(e))
+            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+            return
             
-            # All frames done — save results
+        try:
+            if not all_masks:
+                task_manager.fail(tid, "No masks generated")
+                yield f"event: error\ndata: {{\"message\": \"No masks generated\"}}\n\n"
+                return
+
+            # All frames done (or partially done) — save results
             task_manager.update(tid, pct=100, detail="Saving masks...")
             yield f"event: saving\ndata: {{\"status\": \"Saving masks...\"}}\n\n"
             
@@ -3152,8 +3185,10 @@ async def viewer_websocket(websocket: WebSocket):
                                     sel_data = json.loads(sf.read())
                                     frame_names = sel_data if isinstance(sel_data, list) else sel_data.get("selected_files", [])
                             
-                            # Find poses file (prefer maplong_run/)
+                            # Find poses file (prefer maplong_run/ or da3_run/)
                             poses_path = output_dir / "maplong_run" / "camera_poses.txt"
+                            if not poses_path.exists():
+                                poses_path = output_dir / "da3_run" / "camera_poses.txt"
                             if not poses_path.exists():
                                 poses_path = output_dir / "camera_poses.txt"
                             

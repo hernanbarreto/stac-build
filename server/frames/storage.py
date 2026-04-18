@@ -143,11 +143,14 @@ class FrameStorage:
     """
     
     def __init__(self, scans_dir: Optional[Path] = None):
-        self.chunk_size = cfg["mapanything"]["chunk_size"]
-        self.chunk_overlap = cfg["mapanything"]["chunk_overlap"]
+        _recon = cfg.get("reconstruction", {})
+        _backend = _recon.get("backend", "mapanything")
+        _bcfg = _recon.get(_backend, cfg.get("mapanything", {}))
+        self.chunk_size = _bcfg.get("chunk_size", 120 if _backend == "da3" else 60)
+        self.chunk_overlap = _bcfg.get("chunk_overlap", _bcfg.get("overlap", 60 if _backend == "da3" else 30))
         # scans_dir is set per-session from ProjectPaths; fallback only for legacy
-        from config import DATA_DIR
-        self.scans_dir = scans_dir or (DATA_DIR / "projects")
+        from config import PROJECTS_DIR
+        self.scans_dir = scans_dir or PROJECTS_DIR
         
         self.current_session: Optional[ScanSession] = None
         self.lock = Lock()
@@ -649,9 +652,11 @@ class FrameStorage:
                     if first_img is not None:
                         original_resolution = [first_img.shape[0], first_img.shape[1]]
 
-            # Get chunk step from config (NOT hardcoded)
-            chunk_size = cfg["mapanything"]["chunk_size"]
-            chunk_overlap = cfg["mapanything"]["chunk_overlap"]
+            _recon = cfg.get("reconstruction", {})
+            _backend = _recon.get("backend", "mapanything")
+            _bcfg = _recon.get(_backend, cfg.get("mapanything", {}))
+            chunk_size = _bcfg.get("chunk_size", 120 if _backend == "da3" else 60)
+            chunk_overlap = _bcfg.get("chunk_overlap", _bcfg.get("overlap", 60 if _backend == "da3" else 30))
             chunk_step = chunk_size - chunk_overlap
 
             data = {

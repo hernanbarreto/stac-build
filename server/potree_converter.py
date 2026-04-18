@@ -185,12 +185,28 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
             logger.info(f"[Potree] Octree already up-to-date, skipping conversion")
             return True
 
+    lock_file = output_dir / ".potree_lock"
+    if lock_file.exists():
+        logger.info(f"[Potree] ⏳ Conversion already in progress for {session_dir.name}, waiting for lock...")
+        import time
+        wait_cycles = 0
+        while lock_file.exists() and wait_cycles < 600:  # 10 minute timeout max
+            time.sleep(1)
+            wait_cycles += 1
+        # If the lock was removed, assume conversion finished successfully
+        if (potree_dir / "metadata.json").exists():
+            return True
+        elif wait_cycles >= 600:
+            logger.warning(f"[Potree] ⚠️ Lock file timeout for {session_dir.name}, breaking lock")
+            lock_file.unlink(missing_ok=True)
+
     logger.info(f"[Potree] 🌲 Starting PLY → Potree conversion...")
 
     # Use temp file for LAS to avoid leaving it around
     las_path = output_dir / "cleaned_cloud.las"
 
     try:
+        lock_file.touch(exist_ok=True)
         # Step 1: PLY → LAS
         n_points = _ply_to_las(ply_path, las_path)
         logger.info(f"[Potree] Converted {n_points:,} points to LAS")
@@ -211,6 +227,8 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
         if las_path.exists():
             las_path.unlink()
             logger.info(f"[Potree] Cleaned up temporary LAS file")
+        if lock_file.exists():
+            lock_file.unlink(missing_ok=True)
 
 
 async def convert_ply_to_potree_async(

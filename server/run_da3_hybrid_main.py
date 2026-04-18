@@ -48,7 +48,7 @@ def main():
                         help="Stray Scanner frame stride")
     parser.add_argument("--max_frames", type=int, default=0,
                         help="Max frames (0=all)")
-    parser.add_argument("--confidence_threshold", type=int, default=1,
+    parser.add_argument("--confidence_threshold", type=int, default=0,
                         help="Stray Scanner confidence threshold (0-2)")
     parser.add_argument("--lidar_trust_range", type=float, default=5.0,
                         help="Max LiDAR depth in meters")

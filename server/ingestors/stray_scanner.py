@@ -291,6 +291,7 @@ def prepare_stray_data(
             depth_h, depth_w = d.shape
         
         # Apply confidence mask at native resolution (no upsampling)
+        # Apply confidence mask at native resolution (no upsampling)
         mask = c >= confidence_threshold
         d[~mask] = 0.0
         
@@ -298,7 +299,7 @@ def prepare_stray_data(
         frame_indices.append(fidx)
         poses.append(pose_map[fidx])
         depths.append(d)
-        conf_masks.append(mask)
+        conf_masks.append(c)  # return raw [0, 1, 2] instead of boolean
     
     # Scale intrinsics from RGB resolution to depth resolution
     K_depth = rescale_intrinsics(K_rgb, rgb_w, rgb_h, depth_w, depth_h)

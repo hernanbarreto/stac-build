@@ -111,6 +111,15 @@ echo "║                                                                    ║
 echo "╚════════════════════════════════════════════════════════════════════╝"
 echo ""
 echo "🚀 Launching STAC Server..."
+
+# Ensure external drive is mounted (WSL2 loses DrvFS mounts on reboot)
+if grep -q "projects_dir" "$CONFIG_FILE" 2>/dev/null; then
+    EXT_DRIVE="/mnt/e"
+    if ! ls "$EXT_DRIVE" &>/dev/null; then
+        echo "📀 Mounting external drive E: → $EXT_DRIVE ..."
+        sudo mount -t drvfs E: "$EXT_DRIVE" 2>/dev/null && echo "   ✅ Drive mounted" || echo "   ⚠️  Could not mount E: — projects may not load"
+    fi
+fi
 echo ""
 
 # Run Uvicorn Server with SSL

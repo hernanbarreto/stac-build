@@ -57,6 +57,8 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const maskImageRef = useRef<HTMLImageElement | null>(null)
     const initRef = useRef(false)
     const isDirty = useRef(false)
+    const propagatingRef = useRef(false)
+    const promptingRef = useRef(false)
     const stateIdRef = useRef<string | null>(null)
 
     // Keep ref in sync with state for cleanup
@@ -326,7 +328,8 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         }
 
         // ── New instance mode (SAM3 prompts) ──
-        if (!stateId || loading) return
+        if (!stateId || loading || promptingRef.current) return
+        promptingRef.current = true
 
         // Hit-test: check if click is near an existing prompt dot (for removal)
         const HIT_RADIUS = 30  // pixels in natural image coords — generous for easy clicking
@@ -369,7 +372,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 }
                 setStatus('Prompt updated.')
             } catch { setStatus('Error updating mask') }
-            finally { setLoading(false) }
+            finally { setLoading(false); promptingRef.current = false }
             return
         }
 
@@ -407,6 +410,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             setStatus(`Error: ${e.message}`)
         } finally {
             setLoading(false)
+            promptingRef.current = false
         }
     }, [mode, stateId, sessionId, loading, currentFrame, currentFrameIdx, promptPoints, selectedInstance, kfIndex])
 
@@ -458,7 +462,8 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const [propagationPct, setPropagationPct] = useState(-1)  // -1 = not propagating
 
     const handlePropagate = useCallback(async () => {
-        if (!stateId) return
+        if (!stateId || propagatingRef.current) return
+        propagatingRef.current = true
         const name = labelName.trim() || 'manual_object'
         let receivedDone = false
         try {
@@ -472,6 +477,11 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 body: JSON.stringify({ state_id: stateId, session_id: sessionId, label_name: name })
             })
 
+            if (res.status === 409) {
+                // Already propagating from a prior click — just wait
+                setStatus(`Propagation already in progress...`)
+                return
+            }
             if (!res.ok) throw new Error('Propagation failed')
             if (!res.body) throw new Error('No response body')
 
@@ -607,6 +617,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             setPropagationPct(-1)
         } finally {
             setLoading(false)
+            propagatingRef.current = false
         }
     }, [stateId, sessionId, labelName])
 

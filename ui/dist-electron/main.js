@@ -1,15 +1,13 @@
-import { app, BrowserWindow } from "electron";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
-const __dirname$1 = path.dirname(fileURLToPath(import.meta.url));
-process.env.APP_ROOT = path.join(__dirname$1, "..");
-const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
-const MAIN_DIST = path.join(process.env.APP_ROOT, "dist-electron");
-const RENDERER_DIST = path.join(process.env.APP_ROOT, "dist");
-process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, "public") : RENDERER_DIST;
-let win;
-function createWindow() {
-  win = new BrowserWindow({
+import { app as n, BrowserWindow as t } from "electron";
+import { fileURLToPath as d } from "node:url";
+import e from "node:path";
+const r = e.dirname(d(import.meta.url));
+process.env.APP_ROOT = e.join(r, "..");
+const i = process.env.VITE_DEV_SERVER_URL, m = e.join(process.env.APP_ROOT, "dist-electron"), l = e.join(process.env.APP_ROOT, "dist");
+process.env.VITE_PUBLIC = i ? e.join(process.env.APP_ROOT, "public") : l;
+let o;
+function s() {
+  o = new t({
     width: 1400,
     height: 900,
     minWidth: 900,
@@ -18,33 +16,21 @@ function createWindow() {
     backgroundColor: "#0d1117",
     titleBarStyle: "default",
     webPreferences: {
-      preload: path.join(__dirname$1, "preload.mjs"),
+      preload: e.join(r, "preload.mjs"),
       // Allow WebGL for Three.js
-      webgl: true
+      webgl: !0
     }
-  });
-  win.maximize();
-  if (VITE_DEV_SERVER_URL) {
-    win.loadURL(VITE_DEV_SERVER_URL);
-    win.webContents.openDevTools({ mode: "right" });
-  } else {
-    win.loadFile(path.join(RENDERER_DIST, "index.html"));
-  }
+  }), o.maximize(), i ? (o.loadURL(i), o.webContents.openDevTools({ mode: "right" })) : o.loadFile(e.join(l, "index.html"));
 }
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-    win = null;
-  }
+n.on("window-all-closed", () => {
+  process.platform !== "darwin" && (n.quit(), o = null);
 });
-app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  }
+n.on("activate", () => {
+  t.getAllWindows().length === 0 && s();
 });
-app.whenReady().then(createWindow);
+n.whenReady().then(s);
 export {
-  MAIN_DIST,
-  RENDERER_DIST,
-  VITE_DEV_SERVER_URL
+  m as MAIN_DIST,
+  l as RENDERER_DIST,
+  i as VITE_DEV_SERVER_URL
 };

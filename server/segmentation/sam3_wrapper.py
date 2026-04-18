@@ -552,34 +552,31 @@ class SAM3Wrapper:
         
         logger.info(f"[SAM3-Interactive] Starting session for {load_dir}")
         
-        # Cast model to float32 BEFORE loading frames.
-        # The backbone caches features during start_session; if the model is in
-        # BFloat16 those cached tensors will be BFloat16, causing type mismatches
-        # later when conv layers (float32 bias) consume them.
-        self.predictor.model.float()
-        logger.info("[SAM3-Interactive] Cast model to float32")
-        
-        response = self.predictor.handle_request(
-            request=dict(
-                type="start_session",
-                resource_path=load_dir,
+        with self.lock:
+            self.predictor.model.float()
+            response = self.predictor.handle_request(
+                request=dict(
+                    type="start_session",
+                    resource_path=load_dir,
+                )
             )
-        )
-        session_id = response["session_id"]
+            session_id = response["session_id"]
         
-        # Seed empty cached_frame_outputs for all frames.
-        # SAM3's add_tracker_new_points requires cached outputs to exist
-        # (populated normally by propagate_in_video). For interactive prompts
-        # on a fresh session we need to pre-seed them as empty dicts.
+        # SAM3's tracker pathway (point prompts) requires cached_frame_outputs
+        # to exist for the target frame. The detector pathway (text prompts) 
+        # doesn't need this. Since we allow point prompts as the first 
+        # interaction, we must pre-seed empty caches.
+        num_frames = 0
         try:
             session = self.predictor._ALL_INFERENCE_STATES.get(session_id, {})
             inference_state = session.get("state", {})
             num_frames = inference_state.get("num_frames", 0)
-            if num_frames > 0 and "cached_frame_outputs" in inference_state:
-                for fidx in range(num_frames):
-                    if fidx not in inference_state["cached_frame_outputs"]:
-                        inference_state["cached_frame_outputs"][fidx] = {}
-                logger.info(f"[SAM3-Interactive] Seeded cache for {num_frames} frames")
+            if "cached_frame_outputs" not in inference_state:
+                inference_state["cached_frame_outputs"] = {}
+            for fidx in range(num_frames):
+                if fidx not in inference_state["cached_frame_outputs"]:
+                    inference_state["cached_frame_outputs"][fidx] = {}
+            logger.info(f"[SAM3-Interactive] Seeded tracker cache for {num_frames} frames")
         except Exception as e:
             logger.warning(f"[SAM3-Interactive] Could not seed cache: {e}")
         
@@ -611,32 +608,17 @@ class SAM3Wrapper:
 
         try:
             session = self.predictor._ALL_INFERENCE_STATES.get(state_id)
-            if session is None:
-                logger.warning(f"[SAM3-Interactive] clear_prompts: session {state_id} not found")
-                return False
+            # Use SAM3's official reset_session API (from notebook pattern)
+            # instead of manually manipulating internal state
+            with self.lock:
+                self.predictor.handle_request(
+                    request=dict(
+                        type="reset_session",
+                        session_id=state_id,
+                    )
+                )
 
-            inference_state = session.get("state", {})
-            num_frames = inference_state.get("num_frames", 0)
-
-            # Clear tracked objects
-            if "obj_ids" in inference_state:
-                inference_state["obj_ids"] = []
-            if "obj_id_to_idx" in inference_state:
-                inference_state["obj_id_to_idx"] = {}
-            # Clear output caches
-            if "previous_stages_out" in inference_state:
-                for i in range(len(inference_state["previous_stages_out"])):
-                    inference_state["previous_stages_out"][i] = None
-            # Clear tracking results but keep frame features
-            if "output_dict" in inference_state:
-                for key in list(inference_state["output_dict"].keys()):
-                    inference_state["output_dict"][key] = {}
-            # Re-seed cached_frame_outputs (empty dicts for each frame)
-            if "cached_frame_outputs" in inference_state:
-                for fidx in range(num_frames):
-                    inference_state["cached_frame_outputs"][fidx] = {}
-
-            logger.info(f"[SAM3-Interactive] Cleared prompts for session {state_id} ({num_frames} frames kept)")
+            logger.info(f"[SAM3-Interactive] Reset session {state_id} (prompts cleared)")
             return True
         except Exception as e:
             logger.error(f"[SAM3-Interactive] Failed to clear prompts: {e}")
@@ -673,34 +655,36 @@ class SAM3Wrapper:
                 f"[SAM3-Interactive] Adding {len(points)} point(s) to frame {frame_idx}, "
                 f"obj_id={obj_id}, labels={labels.tolist()}"
             )
-            # SAM3 API uses 'point_labels', not 'labels'
-            pts = points.tolist() if hasattr(points, 'tolist') else points
-            pt_labels = labels.tolist() if hasattr(labels, 'tolist') else labels
+            # SAM3 VideoPredictor.add_prompt expects List[List[float]] and List[int]
+            # (see sam3_video_predictor.py line 137-138)
+            pts = points.tolist() if hasattr(points, 'tolist') else list(points)
+            pt_labels = labels.tolist() if hasattr(labels, 'tolist') else list(labels)
 
-            response = self.predictor.handle_request(
-                request=dict(
-                    type="add_prompt",
-                    session_id=state_id,
-                    frame_index=frame_idx,
-                    obj_id=obj_id,
-                    points=pts,
-                    point_labels=pt_labels,
+            with self.lock:
+                response = self.predictor.handle_request(
+                    request=dict(
+                        type="add_prompt",
+                        session_id=state_id,
+                        frame_index=frame_idx,
+                        obj_id=obj_id,
+                        points=pts,
+                        point_labels=pt_labels,
+                    )
                 )
-            )
 
-            # Mark the frame as having outputs so propagate_in_video sees it.
-            # Tracker add_new_points doesn't set previous_stages_out (only the
-            # SAM3 detection stage does), so propagation fails with
-            # "No prompts received on any frames" without this.
+            # Mark previous_stages_out so propagate_in_video knows this frame has prompts.
+            # The detector pathway (text prompts) sets this automatically 
+            # (sam3_video_inference.py line 399), but the tracker pathway (point prompts)
+            # does NOT. We use the exact same dummy string SAM3 uses internally.
             try:
                 session = self.predictor._ALL_INFERENCE_STATES.get(state_id, {})
                 inference_state = session.get("state", {})
                 pso = inference_state.get("previous_stages_out")
                 if pso is not None and frame_idx < len(pso):
                     pso[frame_idx] = "_THIS_FRAME_HAS_OUTPUTS_"
-                    logger.info(f"[SAM3-Interactive] Marked frame {frame_idx} as having outputs for propagation")
+                    logger.info(f"[SAM3-Interactive] Marked frame {frame_idx} for propagation")
             except Exception as e:
-                logger.warning(f"[SAM3-Interactive] Could not mark frame for propagation: {e}")
+                logger.warning(f"[SAM3-Interactive] Could not mark frame: {e}")
 
             # Extract mask from response for preview
             result = {"success": True}
@@ -710,22 +694,13 @@ class SAM3Wrapper:
                     mask = outputs["out_binary_masks"]
                     if hasattr(mask, 'cpu'):
                         mask = mask.cpu().numpy()
-                    # Shape is typically [N_obj, H, W] — take first object union
                     if mask.ndim == 3:
                         if mask.shape[0] == 0:
-                            # Empty mask (e.g. negative-only prompt removed all objects)
                             mask = None
                         else:
                             mask = np.max(mask, axis=0)
                     if mask is not None:
                         result["mask"] = mask  # [H, W] binary
-
-                    # Also cache the mask in the inference state for propagation
-                    try:
-                        cached = inference_state.get("cached_frame_outputs", {})
-                        cached[frame_idx] = {obj_id: mask}
-                    except Exception:
-                        pass
 
             return result
         except Exception as e:
@@ -760,15 +735,16 @@ class SAM3Wrapper:
             logger.info(
                 f"[SAM3-Interactive] Text prompt on frame {frame_idx}: '{text}', obj_id={obj_id}"
             )
-            response = self.predictor.handle_request(
-                request=dict(
-                    type="add_prompt",
-                    session_id=state_id,
-                    frame_index=frame_idx,
-                    obj_id=obj_id,
-                    text=text,
+            with self.lock:
+                response = self.predictor.handle_request(
+                    request=dict(
+                        type="add_prompt",
+                        session_id=state_id,
+                        frame_index=frame_idx,
+                        obj_id=obj_id,
+                        text=text,
+                    )
                 )
-            )
 
             result = {"success": True}
             if response and "outputs" in response:
@@ -819,6 +795,11 @@ class SAM3Wrapper:
 
         try:
             logger.info(f"[SAM3-Interactive] Propagating session {state_id} ({num_frames} frames)...")
+            # NOTE: We intentionally do NOT hold self.lock here.
+            # Propagation is a long-running generator that yields per-frame.
+            # Holding a lock across yields would block ALL other SAM3 operations
+            # for the entire duration (minutes). The server-side 409 guard already
+            # prevents concurrent propagations on the same session.
             for response in self.predictor.handle_stream_request(
                 request=dict(
                     type="propagate_in_video",
@@ -846,21 +827,7 @@ class SAM3Wrapper:
             import traceback
             traceback.print_exc()
         finally:
-            # Re-seed cached_frame_outputs so subsequent add_prompt calls work.
-            # Propagation populates the cache, but SAM3 may clear parts of it
-            # after the stream ends.  Do NOT reset the session here — the user
-            # may want to add more prompts and re-propagate.
-            try:
-                session = self.predictor._ALL_INFERENCE_STATES.get(state_id, {})
-                inference_state = session.get("state", {})
-                cached = inference_state.get("cached_frame_outputs", {})
-                n_frames = inference_state.get("num_frames", 0)
-                for fidx in range(n_frames):
-                    if fidx not in cached:
-                        cached[fidx] = {}
-                logger.info(f"[SAM3-Interactive] Re-seeded cache for {n_frames} frames after propagation")
-            except Exception as e:
-                logger.warning(f"[SAM3-Interactive] Could not re-seed cache: {e}")
+            pass  # No internal state manipulation needed (notebook pattern)
 
     def load_cached_masks(self, session_dir: Path, frame_indices: List[int] = None) -> Dict[int, Any]:
         """

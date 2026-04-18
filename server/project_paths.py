@@ -409,8 +409,8 @@ def resolve_session(server_dir: str, session_id: str) -> "SourceContext | Legacy
     server = Path(server_dir)
     
     # ── New-style project? ──
-    from config import DATA_DIR
-    projects_dir = DATA_DIR / "projects"
+    from config import PROJECTS_DIR
+    projects_dir = PROJECTS_DIR
     project_json = projects_dir / session_id / "project.json"
     if project_json.exists():
         paths = ProjectPaths(str(projects_dir), session_id)

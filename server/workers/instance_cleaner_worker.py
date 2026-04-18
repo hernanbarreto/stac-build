@@ -91,7 +91,7 @@ def _instance_cleaner_work(pipe: WorkerPipe, session_dir: str, config: dict):
         pipe.send_log("No instances found to clean.", level="info")
         # Just copy the array
         import shutil
-        shutil.copy2(cleaned_cloud_ply, final_output_ply)
+        shutil.copyfile(cleaned_cloud_ply, final_output_ply)
         return
 
     pipe.send_progress(5, f"Cleaning {len(instances)} instances", stage="instance_cleaner")

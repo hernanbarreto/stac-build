@@ -7,8 +7,26 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
 
-# Runtime data directory (projects, personnel, teams, logs, stac.db)
+# Runtime data directory (personnel, teams, logs, stac.db)
 DATA_DIR = BASE_DIR / "data"
+
+# Projects directory — configurable via config.yaml paths.projects_dir
+# Defaults to DATA_DIR / "projects" if not set (backwards compatible)
+# NOTE: Do NOT check exists() here — WSL mounts external drives lazily,
+# so /mnt/e may not be accessible at import time but works at runtime.
+def _resolve_projects_dir():
+    """Read projects_dir from config.yaml at import time."""
+    try:
+        with open(CONFIG_PATH, 'r') as f:
+            _raw = yaml.safe_load(f) or {}
+        custom = (_raw.get("paths") or {}).get("projects_dir")
+        if custom:
+            return Path(custom)
+    except Exception:
+        pass
+    return DATA_DIR / "projects"
+
+PROJECTS_DIR = _resolve_projects_dir()
 
 def load_config():
     """Load configuration from YAML file."""

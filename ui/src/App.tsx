@@ -561,7 +561,19 @@ function App() {
       setStatusMessage(`${currentStage.icon} ${currentStage.label}: ${shortMsg || ''} ${pct}%`)
     }
     if (newState.status === 'done' || newState.status === 'failed' || newState.status === 'cancelled') {
-      setTimeout(() => setPipelineRunning(null), 5000)
+      setTimeout(() => {
+        setPipelineRunning(null)
+        // After pipeline completes successfully, reload the session in the viewer.
+        // This handles the case where the WebSocket reconnected during a long pipeline
+        // (the original _on_pipeline_complete closure sent potree_ready on a dead socket)
+        if (newState.status === 'done' && newState.session_id) {
+          viewportRef.current?.clearScene()
+          viewportRef.current?.sendCommand({
+            type: 'load_session',
+            session_id: newState.session_id,
+          })
+        }
+      }, 5000)
     }
   }, [])
 

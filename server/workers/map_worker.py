@@ -142,10 +142,12 @@ def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     if selected_frames_path and Path(selected_frames_path).exists():
         cmd.extend(["--selected_frames", str(selected_frames_path)])
 
-    # Set CUDA visibility
+    # Set CUDA visibility and prevent CPU lockups
     env = os.environ.copy()
     if device == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
+        env["OMP_NUM_THREADS"] = "4"
+        env["MKL_NUM_THREADS"] = "4"
 
     pipe.send_log(f"Running: {' '.join(cmd[-6:])}")
 
@@ -265,6 +267,8 @@ def _run_hybrid_or_lidar(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     device = recon_cfg.get("device", "cpu")
     if device == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
+        env["OMP_NUM_THREADS"] = "4"
+        env["MKL_NUM_THREADS"] = "4"
 
     pipe.send_log(f"Running: {mode} mode with LiDAR trust={lidar_cfg.get('trust_range', 5.0)}m")
 
@@ -369,13 +373,20 @@ def _generate_lidar_complement(pipe: WorkerPipe, da3_save_dir: Path, output_dir:
     pipe.send_log(f"Backprojecting {n} LiDAR frames with DA3-streaming poses")
 
     all_pts, all_cols = [], []
+    all_fg, all_pr, all_pc = [], [], []
+    all_conf = []
+
     for i in range(n):
         depth = stray['depths'][i]
+        raw_conf = stray.get('conf_masks', [None] * n)[i]  # raw ARKit [0, 1, 2]
+        
         c2w = poses[i]
         rgb = cv2.cvtColor(cv2.imread(str(frame_files[i])), cv2.COLOR_BGR2RGB)
         rgb_small = cv2.resize(rgb, (depth.shape[1], depth.shape[0]))
         H, W = depth.shape
         u, v = np.meshgrid(np.arange(W), np.arange(H))
+        
+        # Keep all points where depth measurement exists (noise bounds)
         valid = depth > 0
         pts_cam = np.stack([
             (u[valid] - cx) * depth[valid] / fx,
@@ -385,22 +396,45 @@ def _generate_lidar_complement(pipe: WorkerPipe, da3_save_dir: Path, output_dir:
         pts_world = (pts_cam @ c2w[:3,:3].T) + c2w[:3,3]
         all_pts.append(pts_world.astype(np.float32))
         all_cols.append(rgb_small[valid].astype(np.uint8))
+        
+        # Normalize ARKit confidence [0, 1, 2] -> [0.0, 0.5, 1.0]
+        if raw_conf is not None:
+            conf_val = raw_conf[valid].astype(np.float32) / 2.0
+        else:
+            conf_val = np.ones(valid.sum(), dtype=np.float32)
+        all_conf.append(conf_val)
+        
+        # Append origin arrays
+        all_fg.append(np.full(valid.sum(), i, dtype=np.float32))
+        all_pr.append(v[valid].astype(np.float32))
+        all_pc.append(u[valid].astype(np.float32))
 
     pts = np.concatenate(all_pts)
     cols = np.concatenate(all_cols)
+    confs = np.concatenate(all_conf)
+    fg = np.concatenate(all_fg)
+    pr = np.concatenate(all_pr)
+    pc = np.concatenate(all_pc)
 
-    # Save as lidar_complement.ply in output/
-    complement_path = output_dir / "lidar_complement.ply"
+    # Save as chunk_999_lidar.ply in output/
+    complement_path = output_dir / "chunk_999_lidar.ply"
+    origins_path = output_dir / "chunk_999_lidar_origins.npz"
+    
+    np.savez_compressed(origins_path, frame_global=fg, pixel_row=pr, pixel_col=pc)
     _n = len(pts)
     dtype = np.dtype([('x','<f4'),('y','<f4'),('z','<f4'),
-                      ('r','u1'),('g','u1'),('b','u1')])
+                      ('r','u1'),('g','u1'),('b','u1'),
+                      ('confidence','<f4')])
     vd = np.empty(_n, dtype=dtype)
     vd['x'], vd['y'], vd['z'] = pts[:,0], pts[:,1], pts[:,2]
     vd['r'], vd['g'], vd['b'] = cols[:,0], cols[:,1], cols[:,2]
+    vd['confidence'] = confs
+    
     with open(complement_path, 'wb') as f:
         f.write(f"ply\nformat binary_little_endian 1.0\nelement vertex {_n}\n"
                 f"property float x\nproperty float y\nproperty float z\n"
                 f"property uchar red\nproperty uchar green\nproperty uchar blue\n"
+                f"property float confidence\n"
                 f"end_header\n".encode('ascii'))
         vd.tofile(f)
 
@@ -454,6 +488,8 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     env = os.environ.copy()
     if device == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
+        env["OMP_NUM_THREADS"] = "4"
+        env["MKL_NUM_THREADS"] = "4"
 
     pipe.send_log(f"Running: {' '.join(cmd[-6:])}")
 
@@ -523,7 +559,7 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
 
     for i, ply_src in enumerate(ply_files):
         ply_dst = output_dir / f"chunk_{i:03d}.ply"
-        shutil.copy2(ply_src, ply_dst)
+        shutil.copyfile(ply_src, ply_dst)
         pipe.send_log(f"Copied {Path(ply_src).name} → {ply_dst.name}")
 
     # ── Copy GS PLY if available (DA3 with infer_gs=True) ──
@@ -535,7 +571,7 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
             gs_output_dir.mkdir(exist_ok=True)
             for gs_src in gs_files:
                 gs_dst = gs_output_dir / Path(gs_src).name
-                shutil.copy2(gs_src, gs_dst)
+                shutil.copyfile(gs_src, gs_dst)
             pipe.send_log(f"Copied {len(gs_files)} GS PLY files")
 
     # ── Generate origin traceability ──
@@ -552,7 +588,7 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
     ]:
         src = save_dir / src_name
         if src.exists():
-            shutil.copy2(src, output_dir / dst_name)
+            shutil.copyfile(src, output_dir / dst_name)
 
     pipe.send_progress(100, f"{backend.upper()} reconstruction complete", stage="reconstruction")
     pipe.send_log(f"{backend} complete: {len(ply_files)} chunks")
@@ -743,7 +779,7 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
             HW = H * W
             total_points = S * HW
 
-            # All points are kept (no confidence filtering — matches VGGT-Long behavior)
+            # Generate indices (DA3 PLYs now contain 100% of points, no filtering needed)
             all_indices = np.arange(total_points)
 
             # Apply sampling
