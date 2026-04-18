@@ -1,8 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
-
-# pyre-unsafe
 import argparse
 import logging
+
 import multiprocessing as mp
 import os
 from functools import partial

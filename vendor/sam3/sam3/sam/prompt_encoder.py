@@ -1,7 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
-# pyre-unsafe
-
 from typing import Any, Optional, Tuple, Type
 
 import numpy as np

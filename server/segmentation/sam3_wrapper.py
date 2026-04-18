@@ -28,47 +28,10 @@ class SAM3Wrapper:
         self.is_loaded = False
         self.lock = Lock()
         self._interactive_sessions: Dict[str, dict] = {}  # state_id → session info dict
-        self._sam_version: str = "sam3"  # Updated on load
         logger.info("SAM3 Wrapper initialized (Lazy Loading Enabled: Model will load on first prompt).")
-
-    @property
-    def is_multiplex(self) -> bool:
-        """Whether the loaded model is SAM 3.1 Object Multiplex."""
-        return self._sam_version == "sam3.1"
-
-    def _get_inference_state(self, session_id: str) -> Optional[dict]:
-        """
-        Version-aware accessor for SAM3 internal inference state.
-        SAM 3:   predictor._ALL_INFERENCE_STATES[session_id]["state"]
-        SAM 3.1: predictor.inference_states[session_id]  (MultiplexVideoPredictor)
-        Returns None if state cannot be accessed.
-        """
-        try:
-            if self.is_multiplex:
-                # SAM 3.1 MultiplexVideoPredictor stores states differently
-                states = getattr(self.predictor, 'inference_states', None)
-                if states and session_id in states:
-                    return states[session_id]
-                # Fallback: try the model's session storage
-                model = getattr(self.predictor, 'model', None)
-                if model:
-                    tracker = getattr(model, 'tracker', None)
-                    if tracker:
-                        model_inner = getattr(tracker, 'model', None)
-                        if model_inner and hasattr(model_inner, '_ALL_INFERENCE_STATES'):
-                            session = model_inner._ALL_INFERENCE_STATES.get(session_id, {})
-                            return session.get("state", session)
-                return None
-            else:
-                # SAM 3 legacy
-                session = self.predictor._ALL_INFERENCE_STATES.get(session_id, {})
-                return session.get("state", {})
-        except Exception as e:
-            logger.warning(f"Could not access inference state for {session_id}: {e}")
-            return None
-
+        
     def load_model(self):
-        """Lazy load the SAM3/3.1 model based on config.yaml version."""
+        """Lazy load the SAM3 model."""
         if self.is_loaded:
             return
 
@@ -76,12 +39,10 @@ class SAM3Wrapper:
             if self.is_loaded:
                 return
 
-            seg_cfg = cfg.get("models", {}).get("segmentation", {})
-            sam_version = seg_cfg.get("version", "sam3.1")
-            self._sam_version = sam_version
-
-            logger.info(f"Loading SAM {sam_version} Model...")
+            logger.info("Loading SAM3 Model...")
             try:
+                from sam3.model_builder import build_sam3_video_predictor
+                
                 # SAM3 requires CUDA GPU — fail clearly if not available
                 if not torch.cuda.is_available():
                     raise RuntimeError(
@@ -89,40 +50,14 @@ class SAM3Wrapper:
                         "In Docker, ensure: docker run --gpus all ... "
                         "and NVIDIA Container Toolkit is installed."
                     )
-
-                if sam_version == "sam3.1":
-                    from sam3.model_builder import build_sam3_predictor
-                    multiplex_count = seg_cfg.get("multiplex_count", 16)
-                    max_num_objects = seg_cfg.get("max_num_objects", 32)
-                    use_compile = seg_cfg.get("compile", False)
-                    use_fa3 = seg_cfg.get("use_fa3", False)
-                    ckpt_path = seg_cfg.get("checkpoint_path", None)
-
-                    self.predictor = build_sam3_predictor(
-                        version="sam3.1",
-                        checkpoint_path=ckpt_path,
-                        multiplex_count=multiplex_count,
-                        max_num_objects=max_num_objects,
-                        compile=use_compile,
-                        use_fa3=use_fa3,
-                    )
-                    logger.info(
-                        f"SAM 3.1 Object Multiplex loaded "
-                        f"(multiplex_count={multiplex_count}, "
-                        f"max_objects={max_num_objects}, "
-                        f"compile={use_compile}, fa3={use_fa3})"
-                    )
-                else:
-                    # Legacy SAM 3
-                    from sam3.model_builder import build_sam3_video_predictor
-                    gpus_to_use = [torch.cuda.current_device()]
-                    self.predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
-                    logger.info("SAM 3 (legacy) Model loaded successfully.")
-
+                
+                gpus_to_use = [torch.cuda.current_device()]
+                self.predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
                 self.is_loaded = True
-
+                logger.info("SAM3 Model loaded successfully.")
+                
             except Exception as e:
-                logger.error(f"Failed to load SAM {sam_version} model: {e}")
+                logger.error(f"Failed to load SAM3 model: {e}")
                 import traceback
                 traceback.print_exc()
                 raise e
@@ -621,13 +556,9 @@ class SAM3Wrapper:
         # The backbone caches features during start_session; if the model is in
         # BFloat16 those cached tensors will be BFloat16, causing type mismatches
         # later when conv layers (float32 bias) consume them.
-        try:
-            self.predictor.model.float()
-            logger.info("[SAM3-Interactive] Cast model to float32")
-        except AttributeError:
-            # SAM 3.1 MultiplexVideoPredictor may not expose .model directly
-            logger.info("[SAM3-Interactive] Skipped float32 cast (SAM 3.1 multiplex)")
-
+        self.predictor.model.float()
+        logger.info("[SAM3-Interactive] Cast model to float32")
+        
         response = self.predictor.handle_request(
             request=dict(
                 type="start_session",
@@ -635,25 +566,23 @@ class SAM3Wrapper:
             )
         )
         session_id = response["session_id"]
-
-        # Seed empty cached_frame_outputs for all frames (SAM 3 only).
-        # SAM 3.1 handles this internally via the multiplex controller.
-        num_frames = 0
-        if not self.is_multiplex:
-            try:
-                inference_state = self._get_inference_state(session_id)
-                if inference_state:
-                    num_frames = inference_state.get("num_frames", 0)
-                    if num_frames > 0 and "cached_frame_outputs" in inference_state:
-                        for fidx in range(num_frames):
-                            if fidx not in inference_state["cached_frame_outputs"]:
-                                inference_state["cached_frame_outputs"][fidx] = {}
-                        logger.info(f"[SAM3-Interactive] Seeded cache for {num_frames} frames")
-            except Exception as e:
-                logger.warning(f"[SAM3-Interactive] Could not seed cache: {e}")
-        else:
-            logger.info("[SAM3-Interactive] SAM 3.1 multiplex — cache seeding not needed")
-
+        
+        # Seed empty cached_frame_outputs for all frames.
+        # SAM3's add_tracker_new_points requires cached outputs to exist
+        # (populated normally by propagate_in_video). For interactive prompts
+        # on a fresh session we need to pre-seed them as empty dicts.
+        try:
+            session = self.predictor._ALL_INFERENCE_STATES.get(session_id, {})
+            inference_state = session.get("state", {})
+            num_frames = inference_state.get("num_frames", 0)
+            if num_frames > 0 and "cached_frame_outputs" in inference_state:
+                for fidx in range(num_frames):
+                    if fidx not in inference_state["cached_frame_outputs"]:
+                        inference_state["cached_frame_outputs"][fidx] = {}
+                logger.info(f"[SAM3-Interactive] Seeded cache for {num_frames} frames")
+        except Exception as e:
+            logger.warning(f"[SAM3-Interactive] Could not seed cache: {e}")
+        
         # Track the session with metadata for cleanup and frame mapping
         self._interactive_sessions[session_id] = {
             "session_id": session_id,
@@ -681,20 +610,12 @@ class SAM3Wrapper:
             return False
 
         try:
-            # SAM 3.1: use reset_session + re-start (cleanest approach)
-            if self.is_multiplex:
-                self.predictor.handle_request(
-                    request=dict(type="reset_session", session_id=state_id)
-                )
-                logger.info(f"[SAM3-Interactive] Cleared prompts via reset_session (SAM 3.1)")
-                return True
-
-            # SAM 3 legacy: manually clear internal state
-            inference_state = self._get_inference_state(state_id)
-            if inference_state is None:
+            session = self.predictor._ALL_INFERENCE_STATES.get(state_id)
+            if session is None:
                 logger.warning(f"[SAM3-Interactive] clear_prompts: session {state_id} not found")
                 return False
 
+            inference_state = session.get("state", {})
             num_frames = inference_state.get("num_frames", 0)
 
             # Clear tracked objects
@@ -768,18 +689,18 @@ class SAM3Wrapper:
             )
 
             # Mark the frame as having outputs so propagate_in_video sees it.
-            # SAM 3 only — tracker add_new_points doesn't set previous_stages_out.
-            # SAM 3.1 handles this internally via the multiplex controller.
-            if not self.is_multiplex:
-                try:
-                    inference_state = self._get_inference_state(state_id)
-                    if inference_state:
-                        pso = inference_state.get("previous_stages_out")
-                        if pso is not None and frame_idx < len(pso):
-                            pso[frame_idx] = "_THIS_FRAME_HAS_OUTPUTS_"
-                            logger.info(f"[SAM3-Interactive] Marked frame {frame_idx} as having outputs for propagation")
-                except Exception as e:
-                    logger.warning(f"[SAM3-Interactive] Could not mark frame for propagation: {e}")
+            # Tracker add_new_points doesn't set previous_stages_out (only the
+            # SAM3 detection stage does), so propagation fails with
+            # "No prompts received on any frames" without this.
+            try:
+                session = self.predictor._ALL_INFERENCE_STATES.get(state_id, {})
+                inference_state = session.get("state", {})
+                pso = inference_state.get("previous_stages_out")
+                if pso is not None and frame_idx < len(pso):
+                    pso[frame_idx] = "_THIS_FRAME_HAS_OUTPUTS_"
+                    logger.info(f"[SAM3-Interactive] Marked frame {frame_idx} as having outputs for propagation")
+            except Exception as e:
+                logger.warning(f"[SAM3-Interactive] Could not mark frame for propagation: {e}")
 
             # Extract mask from response for preview
             result = {"success": True}
@@ -792,21 +713,19 @@ class SAM3Wrapper:
                     # Shape is typically [N_obj, H, W] — take first object union
                     if mask.ndim == 3:
                         if mask.shape[0] == 0:
+                            # Empty mask (e.g. negative-only prompt removed all objects)
                             mask = None
                         else:
                             mask = np.max(mask, axis=0)
                     if mask is not None:
                         result["mask"] = mask  # [H, W] binary
 
-                    # Also cache the mask in the inference state for propagation (SAM 3 only)
-                    if not self.is_multiplex:
-                        try:
-                            inference_state = self._get_inference_state(state_id)
-                            if inference_state:
-                                cached = inference_state.get("cached_frame_outputs", {})
-                                cached[frame_idx] = {obj_id: mask}
-                        except Exception:
-                            pass
+                    # Also cache the mask in the inference state for propagation
+                    try:
+                        cached = inference_state.get("cached_frame_outputs", {})
+                        cached[frame_idx] = {obj_id: mask}
+                    except Exception:
+                        pass
 
             return result
         except Exception as e:
@@ -888,10 +807,9 @@ class SAM3Wrapper:
             raise RuntimeError("SAM3 model not loaded")
 
         # Get num_frames for progress calculation
-        num_frames = 0
-        inference_state = self._get_inference_state(state_id)
-        if inference_state:
-            num_frames = inference_state.get("num_frames", 0)
+        session = self.predictor._ALL_INFERENCE_STATES.get(state_id, {})
+        inference_state = session.get("state", {})
+        num_frames = inference_state.get("num_frames", 0)
         # Fallback from session metadata
         if num_frames == 0:
             sess_meta = self._interactive_sessions.get(state_id, {})
@@ -929,19 +847,20 @@ class SAM3Wrapper:
             traceback.print_exc()
         finally:
             # Re-seed cached_frame_outputs so subsequent add_prompt calls work.
-            # SAM 3.1 handles this internally — only needed for SAM 3 legacy.
-            if not self.is_multiplex:
-                try:
-                    inference_state = self._get_inference_state(state_id)
-                    if inference_state:
-                        cached = inference_state.get("cached_frame_outputs", {})
-                        n_frames = inference_state.get("num_frames", 0)
-                        for fidx in range(n_frames):
-                            if fidx not in cached:
-                                cached[fidx] = {}
-                        logger.info(f"[SAM3-Interactive] Re-seeded cache for {n_frames} frames after propagation")
-                except Exception as e:
-                    logger.warning(f"[SAM3-Interactive] Could not re-seed cache: {e}")
+            # Propagation populates the cache, but SAM3 may clear parts of it
+            # after the stream ends.  Do NOT reset the session here — the user
+            # may want to add more prompts and re-propagate.
+            try:
+                session = self.predictor._ALL_INFERENCE_STATES.get(state_id, {})
+                inference_state = session.get("state", {})
+                cached = inference_state.get("cached_frame_outputs", {})
+                n_frames = inference_state.get("num_frames", 0)
+                for fidx in range(n_frames):
+                    if fidx not in cached:
+                        cached[fidx] = {}
+                logger.info(f"[SAM3-Interactive] Re-seeded cache for {n_frames} frames after propagation")
+            except Exception as e:
+                logger.warning(f"[SAM3-Interactive] Could not re-seed cache: {e}")
 
     def load_cached_masks(self, session_dir: Path, frame_indices: List[int] = None) -> Dict[int, Any]:
         """

@@ -1,6 +1,4 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
-
-# pyre-unsafe
 import warnings
 from typing import Dict, List
 
@@ -35,7 +33,7 @@ def convert_bbox_format(bbox: list) -> List[float]:
 # -------------------- Track-level NMS --------------------
 def process_track_level_nms(video_groups: Dict, nms_threshold: float) -> Dict:
     """Apply track-level NMS to all videos"""
-    for tracks in video_groups.values():
+    for video_id, tracks in video_groups.items():
         track_detections = []
 
         # Process tracks
@@ -78,7 +76,7 @@ def process_track_level_nms(video_groups: Dict, nms_threshold: float) -> Dict:
 # -------------------- Frame-level NMS --------------------
 def process_frame_level_nms(video_groups: Dict, nms_threshold: float) -> Dict:
     """Apply frame-level NMS to all videos"""
-    for tracks in video_groups.values():
+    for video_id, tracks in video_groups.items():
         if not tracks:
             continue
 

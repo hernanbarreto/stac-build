@@ -93,7 +93,7 @@ paths:
 models:
   segmentation:
     # SAM3 Model — v3.1 Object Multiplex (shared-memory multi-object tracking)
-    version: "sam3.1"             # "sam3" (legacy per-object) or "sam3.1" (Object Multiplex)
+    version: "sam3"             # "sam3" (legacy per-object) or "sam3.1" (Object Multiplex)
     device: "cuda"
 
     # SAM 3.1 Multiplex parameters
@@ -122,7 +122,7 @@ models:
 
     # Segment sub-cloud cleaning (voxel grid + local PCA + depth peeling)
     segment_cleaning:
-      enabled: false
+      enabled: true
       voxel_size: 0.005            # Grid cell size in meters (5mm) — for curved surface fallback
       min_points_per_voxel: 5      # Skip voxels with fewer points (reduced for small voxels)
       planarity_threshold: 0.3     # λ₃/λ₁ eigenvalue ratio; below = planar → depth peel

@@ -1,7 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
-# pyre-unsafe
-
 """
 Script to extract and analyze training results from Roboflow VL100 experiments.
 

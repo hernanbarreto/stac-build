@@ -1,7 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
-# pyre-unsafe
-
 import json
 import os
 
@@ -41,7 +39,7 @@ def run_single_image_inference(
         print(f"Output JSON {output_json_path} already exists. Skipping.")
         return
 
-    print(f"{'-' * 30} Starting SAM 3 Agent Session... {'-' * 30} ")
+    print(f"{'-'*30} Starting SAM 3 Agent Session... {'-'*30} ")
     agent_history, final_output_dict, rendered_final_output = agent_inference(
         image_path,
         text_prompt,
@@ -50,7 +48,7 @@ def run_single_image_inference(
         output_dir=output_dir,
         debug=debug,
     )
-    print(f"{'-' * 30} End of SAM 3 Agent Session... {'-' * 30} ")
+    print(f"{'-'*30} End of SAM 3 Agent Session... {'-'*30} ")
 
     final_output_dict["text_prompt"] = text_prompt
     final_output_dict["image_path"] = image_path

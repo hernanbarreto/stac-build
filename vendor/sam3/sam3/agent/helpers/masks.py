@@ -1,7 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
-# pyre-unsafe
-
 import copy
 import itertools
 from typing import Any, Iterator, List, Union
@@ -13,6 +11,7 @@ from torch import device
 
 from .boxes import Boxes
 from .memory import retry_if_cuda_oom
+
 from .roi_align import ROIAlign
 
 
@@ -141,10 +140,10 @@ class BitMasks:
         if isinstance(item, int):
             return BitMasks(self.tensor[item].unsqueeze(0))
         m = self.tensor[item]
-        assert m.dim() == 3, (
-            "Indexing on BitMasks with {} returns a tensor with shape {}!".format(
-                item, m.shape
-            )
+        assert (
+            m.dim() == 3
+        ), "Indexing on BitMasks with {} returns a tensor with shape {}!".format(
+            item, m.shape
         )
         return BitMasks(m)
 

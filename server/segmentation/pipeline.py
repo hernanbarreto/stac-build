@@ -190,7 +190,7 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
         dst = frames_valid_dir / new_name
         
         if src.exists():
-            shutil.copy2(str(src), str(dst))
+            shutil.copyfile(str(src), str(dst))
             seq_frame_files.append(new_name)
     
     print(f"[SegPipeline] Copied {len(seq_frame_files)} valid frames to {frames_valid_dir}")
@@ -1158,7 +1158,7 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
     cfg_prefix = 'models.segmentation.segment_cleaning'
     enabled = get_param(f'{cfg_prefix}.enabled', True)
     if not enabled:
-        return indices, []
+        return indices, [], [], [], np.array([], dtype=np.int32)
     
     voxel_size = get_param(f'{cfg_prefix}.voxel_size', 0.05)
     min_pts_voxel = get_param(f'{cfg_prefix}.min_points_per_voxel', 10)
@@ -1488,8 +1488,38 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # Load cloud origins
     origins = _load_ply_origins(ply_path)
     if origins is None:
-        print(f"[SegPipeline] ⚠️ PLY {ply_path.name} has no origin fields")
-        return {"error": "PLY has no origins", "instances": []}
+        print(f"[SegPipeline] ⚠️ PLY {ply_path.name} has no origin fields. Falling back to 2D-only instances.")
+        
+        # Build lookup from obj_id → instance metadata (label, color)
+        instance_meta = {}
+        for inst in metadata.get("instances", []):
+            instance_meta[inst["id"]] = inst
+            
+        # Group obj_ids by instance_id
+        from collections import defaultdict
+        instance_groups = defaultdict(list)
+        for obj_id in obj_ids:
+            meta = instance_meta.get(obj_id)
+            if meta:
+                iid = meta.get("instance_id", obj_id)
+                instance_groups[iid].append(obj_id)
+                
+        colors = cfg["visualization"]["segment_colors"]
+        dummy_instances = []
+        for iid, group_obj_ids in instance_groups.items():
+            meta_inst = instance_meta.get(group_obj_ids[0], {})
+            label = meta_inst.get("label", "object")
+            color = meta_inst.get("color", colors[len(dummy_instances) % len(colors)])
+            dummy_instances.append({
+                "id": int(iid),
+                "label": label,
+                "instance_id": int(iid),
+                "color": color,
+                "total_points": 0,
+                "globalIndices": [],
+            })
+            
+        return {"warning": "PLY has no origins (2D only)", "instances": dummy_instances}
     
     xyz, frame_global, pixel_row, pixel_col = origins
     n_pts = len(frame_global)
@@ -1806,13 +1836,17 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     for inst in instances:
         face_planes = inst.pop("_face_planes", None)
         face_id = inst.pop("_face_id", None)
+        
+        # SIEMPRE asignar la clasificación del objeto (aunque no tenga caras planas)
+        global_indices = np.array(inst["globalIndices"], dtype=np.int64)
+        seg_id = int(inst.get("id", 0))
+        classification[global_indices] = min(seg_id, 255)
+
+        # Si no hay caras planas, saltamos la corrección geométrica (proyección)
         if face_planes is None or face_id is None or len(face_id) == 0:
             continue
         
-        global_indices = np.array(inst["globalIndices"], dtype=np.int64)
         pts_display = xyz_display[global_indices].copy()
-        seg_id = int(inst.get("id", 0))
-        classification[global_indices] = min(seg_id, 255)
         
         for fi, (fn, fd) in enumerate(face_planes):
             mask = face_id == fi
@@ -1840,19 +1874,24 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         corrected_path = output_dir / "corrected_cloud.ply"
         _write_corrected_ply(ply_path, corrected_path, xyz_corrected)
         print(f"[SegPipeline] ✏️ Projected {n_projected:,} points → {corrected_path.name} (raw space)")
+        ply_override = corrected_path
+    else:
+        # Always rebuild Potree even if no planes were projected (so classification color updates apply)
+        corrected_path = output_dir / "corrected_cloud.ply"
+        ply_override = corrected_path if corrected_path.exists() else ply_path
         
-        # Rebuild Potree so cloud visually matches voxel projections
-        try:
-            from potree_converter import convert_ply_to_potree
-            session_dir = output_dir.parent
-            success = convert_ply_to_potree(session_dir, force=True, ply_override=corrected_path)
-            if success:
-                print(f"[SegPipeline] 🌲 Potree octree rebuilt from corrected cloud")
-                result["reload_potree"] = True
-            else:
-                print(f"[SegPipeline] ⚠️ Potree rebuild failed")
-        except Exception as e:
-            print(f"[SegPipeline] ⚠️ Potree rebuild error: {e}")
+    # Rebuild Potree so cloud visually matches voxel projections AND classification updates
+    try:
+        from potree_converter import convert_ply_to_potree
+        session_dir = output_dir.parent
+        success = convert_ply_to_potree(session_dir, force=True, ply_override=ply_override)
+        if success:
+            print(f"[SegPipeline] 🌲 Potree octree rebuilt from {ply_override.name}")
+            result["reload_potree"] = True
+        else:
+            print(f"[SegPipeline] ⚠️ Potree rebuild failed")
+    except Exception as e:
+        print(f"[SegPipeline] ⚠️ Potree rebuild error: {e}")
     
     return result
 
@@ -1886,8 +1925,14 @@ def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
             only_obj_ids=new_obj_ids
         )
         
-        if "error" in result or not result.get("instances"):
-            # No new matches — keep previous result as-is
+        if "error" in result:
+            # Fatal error, abort save
+            if prev_instances:
+                return prev_result
+            return result
+        
+        if not result.get("instances"):
+            # No new matches generated
             if prev_instances:
                 return prev_result
             return result

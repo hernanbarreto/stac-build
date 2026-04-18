@@ -1,7 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
-# pyre-unsafe
-
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 

@@ -1,7 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
-# pyre-unsafe
-
 """
 Adapted from:
 1. https://github.com/meta-llama/codellama/blob/main/llama/model.py

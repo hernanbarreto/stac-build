@@ -1,8 +1,6 @@
 # fmt: off
 # flake8: noqa
 
-# pyre-unsafe
-
 """TAO Dataset."""
 import copy
 import itertools

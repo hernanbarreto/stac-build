@@ -1,7 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
-# pyre-unsafe
-
 """
 This evaluator is meant for regular COCO mAP evaluation, for example on the COCO val set.
 

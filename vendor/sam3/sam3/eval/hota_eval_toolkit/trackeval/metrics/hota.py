@@ -1,7 +1,5 @@
 # flake8: noqa
 
-# pyre-unsafe
-
 import os
 
 import numpy as np

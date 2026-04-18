@@ -1,6 +1,4 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
-
-# pyre-unsafe
 import logging
 
 import torch
@@ -36,9 +34,9 @@ def connected_components_cpu(input_tensor: torch.Tensor):
     if input_tensor.dim() == 4 and input_tensor.shape[1] == 1:
         input_tensor = input_tensor.squeeze(1)
     else:
-        assert input_tensor.dim() == 3, (
-            "Input tensor must be (B, H, W) or (B, 1, H, W)."
-        )
+        assert (
+            input_tensor.dim() == 3
+        ), "Input tensor must be (B, H, W) or (B, 1, H, W)."
 
     batch_size = input_tensor.shape[0]
     labels_list = []
@@ -67,20 +65,24 @@ def connected_components(input_tensor: torch.Tensor):
     if input_tensor.dim() == 3:
         input_tensor = input_tensor.unsqueeze(1)
 
-    assert input_tensor.dim() == 4 and input_tensor.shape[1] == 1, (
-        "Input tensor must be (B, H, W) or (B, 1, H, W)."
-    )
+    assert (
+        input_tensor.dim() == 4 and input_tensor.shape[1] == 1
+    ), "Input tensor must be (B, H, W) or (B, 1, H, W)."
 
     if input_tensor.is_cuda:
         if HAS_CC_TORCH:
             return get_connected_components(input_tensor.to(torch.uint8))
         else:
-            # triton fallback
-            from sam3.perflib.triton.connected_components import (
-                connected_components_triton,
-            )
-
-            return connected_components_triton(input_tensor)
+            # Try triton fallback, with CPU fallback if it fails (e.g., on large images)
+            try:
+                from sam3.perflib.triton.connected_components import (
+                    connected_components_triton,
+                )
+                return connected_components_triton(input_tensor)
+            except RuntimeError as e:
+                # Triton can fail on very large images - fallback to CPU
+                logging.warning(f"Triton connected_components failed ({e}), falling back to CPU")
+                return connected_components_cpu(input_tensor)
 
     # CPU fallback
     return connected_components_cpu(input_tensor)

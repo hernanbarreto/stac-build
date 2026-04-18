@@ -1,7 +1,5 @@
 # flake8: noqa
 
-# pyre-unsafe
-
 import inspect
 from functools import wraps
 from time import perf_counter

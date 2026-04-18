@@ -1,7 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
-# pyre-unsafe
-
 """Triton kernel for faster and memory efficient sigmoid focal loss"""
 
 import torch
