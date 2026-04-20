@@ -650,6 +650,17 @@ class SAM3Wrapper:
         if not self.is_loaded or self.predictor is None:
             raise RuntimeError("SAM3 model not loaded")
 
+        # Dedup: if exact same prompt arrives again within 5s, return cached result
+        import time as _time
+        prompt_key = (state_id, frame_idx, obj_id, points.tobytes(), labels.tobytes())
+        now = _time.time()
+        if (hasattr(self, '_last_prompt_key') and self._last_prompt_key == prompt_key
+                and (now - getattr(self, '_last_prompt_time', 0)) < 5.0):
+            logger.info(f"[SAM3-Interactive] Dedup: skipping duplicate prompt for frame {frame_idx}")
+            return getattr(self, '_last_prompt_result', {"success": True})
+        self._last_prompt_key = prompt_key
+        self._last_prompt_time = now
+
         try:
             logger.info(
                 f"[SAM3-Interactive] Adding {len(points)} point(s) to frame {frame_idx}, "
@@ -702,6 +713,7 @@ class SAM3Wrapper:
                     if mask is not None:
                         result["mask"] = mask  # [H, W] binary
 
+            self._last_prompt_result = result
             return result
         except Exception as e:
             logger.error(f"[SAM3-Interactive] Failed to add prompt: {e}")

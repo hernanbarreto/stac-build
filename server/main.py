@@ -33,7 +33,7 @@ security = HTTPBearer(auto_error=False)
 
 from frame_storage import get_frame_storage, FrameStorage
 from alignment_manager import get_alignment_manager, AlignmentManager
-from sam3_wrapper import get_sam3_wrapper
+from segmentation.sam3_wrapper import get_sam3_wrapper
 from config import cfg, DATA_DIR, PROJECTS_DIR
 from pipeline_manager import PipelineManager, PipelineStage, StageId
 from project_paths import resolve_session
@@ -1464,7 +1464,7 @@ async def start_interactive_segmentation(session_id: str):
     if current.get("status") == "loading":
         return JSONResponse({"ok": True, "status": "loading"}, status_code=202)
 
-    from sam3_wrapper import get_sam3_wrapper
+    from segmentation.sam3_wrapper import get_sam3_wrapper
 
     ctx = _ctx(session_id)
     frames_dir = ctx.frames_dir
@@ -1545,7 +1545,7 @@ async def reset_interactive_segmentation(request: Request):
     Reset/close an interactive SAM3 session to free VRAM.
     Called when the SegmentationManager is closed.
     """
-    from sam3_wrapper import get_sam3_wrapper
+    from segmentation.sam3_wrapper import get_sam3_wrapper
     body = await request.json()
     state_id = body.get("state_id")
     if not state_id:
@@ -1580,7 +1580,7 @@ async def clear_interactive_prompts(request: Request):
     WITHOUT destroying it.  Frames stay loaded, model stays loaded.
     The user can immediately add new prompts after this.
     """
-    from sam3_wrapper import get_sam3_wrapper
+    from segmentation.sam3_wrapper import get_sam3_wrapper
     body = await request.json()
     state_id = body.get("state_id")
     if not state_id:
@@ -1592,6 +1592,7 @@ async def clear_interactive_prompts(request: Request):
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to clear prompts")
     return {"ok": True}
+_last_prompt = {"key": None, "time": 0, "result": None}
 
 @app.post("/api/segmentation/add_prompt")
 async def add_interactive_prompt(request: Request):
@@ -1599,6 +1600,7 @@ async def add_interactive_prompt(request: Request):
     Apply a positive or negative click to a specific frame.
     Returns the predicted mask as base64 PNG for live overlay.
     """
+    import time as _time
     body = await request.json()
     state_id = body.get("state_id")
     session_id = body.get("session_id")  # needed to find segmentation.json for resize
@@ -1609,8 +1611,18 @@ async def add_interactive_prompt(request: Request):
     
     if not all([state_id, frame_idx is not None, points, labels]):
         raise HTTPException(status_code=400, detail="Missing required parameters")
+    
+    # Server-side debounce: reject duplicate calls within 2 seconds
+    prompt_key = f"{state_id}:{frame_idx}:{points}:{labels}"
+    now = _time.time()
+    if prompt_key == _last_prompt["key"] and (now - _last_prompt["time"]) < 2.0:
+        print(f"[add_prompt] Debounced duplicate call (Δ={now - _last_prompt['time']:.2f}s)")
+        return _last_prompt.get("result") or {"ok": True}
+    _last_prompt["key"] = prompt_key
+    _last_prompt["time"] = now
+    _last_prompt["result"] = None
         
-    from sam3_wrapper import get_sam3_wrapper
+    from segmentation.sam3_wrapper import get_sam3_wrapper
     sam3 = get_sam3_wrapper()
     loop = asyncio.get_event_loop()
     
@@ -1667,6 +1679,7 @@ async def add_interactive_prompt(request: Request):
         resp = {"ok": True}
         if mask_b64:
             resp["mask_png"] = mask_b64
+        _last_prompt["result"] = resp
         return resp
         
     except Exception as e:
@@ -1828,7 +1841,7 @@ async def propagate_interactive_segmentation(request: Request):
     if any(task["task_type"] == "propagation" for task in active_tasks):
         raise HTTPException(status_code=409, detail="A propagation is already running for this session. Please wait or cancel the existing task.")
     
-    from sam3_wrapper import get_sam3_wrapper
+    from segmentation.sam3_wrapper import get_sam3_wrapper
     sam3 = get_sam3_wrapper()
     
     ctx = _ctx(session_id)
@@ -1836,15 +1849,51 @@ async def propagate_interactive_segmentation(request: Request):
     
     tid = task_manager.start(session_id, "propagation", f'Propagating "{label_name}"')
     
+    # Shared state for save logic (accessible from finally block)
+    _all_masks = {}
+    _save_done = False
+    
+    def _save_results():
+        """Save masks + 3D matching. Called from finally if propagation produced masks."""
+        nonlocal _save_done
+        if _save_done or not _all_masks:
+            return
+        _save_done = True
+        try:
+            from segmentation_pipeline import _save_masks, _parse_raw_masks, _match_and_save_result
+            structured_masks = _parse_raw_masks(_all_masks)
+            from time import time as _time
+            temp_global_id = int(_time() % 10000)
+            remapped_masks = {}
+            for f_idx, frame_masks in structured_masks.items():
+                remapped_masks[f_idx] = {}
+                for l_id, mask in frame_masks.items():
+                    remapped_masks[f_idx][temp_global_id] = mask
+            obj_labels = {temp_global_id: label_name}
+            saved_seg = _save_masks(output_dir, remapped_masks, [label_name], obj_labels, cfg)
+            saved_obj_ids = set()
+            for inst in saved_seg.get("instances", []):
+                if inst.get("label") == label_name:
+                    saved_obj_ids.add(inst["id"])
+            if not saved_obj_ids:
+                saved_obj_ids = {temp_global_id}
+            _match_and_save_result(output_dir, new_obj_ids=saved_obj_ids)
+            task_manager.finish(tid)
+            print(f"[Segmentation] ✅ Saved {len(_all_masks)} frames for '{label_name}'")
+        except Exception as e:
+            print(f"[Segmentation] Error saving results: {e}")
+            import traceback
+            traceback.print_exc()
+            task_manager.fail(tid, str(e))
+    
     def sse_generator():
         import base64, cv2
-        all_masks = {}  # frame_idx → outputs
         
         try:
             for frame_idx, num_frames, outputs in sam3.propagate_interactive_stream(state_id):
-                all_masks[frame_idx] = outputs
-                pct = round((len(all_masks) / max(1, num_frames)) * 100)
-                task_manager.update(tid, pct=pct, detail=f"Frame {len(all_masks)}/{num_frames}")
+                _all_masks[frame_idx] = outputs
+                pct = round((len(_all_masks) / max(1, num_frames)) * 100)
+                task_manager.update(tid, pct=pct, detail=f"Frame {len(_all_masks)}/{num_frames}")
                 
                 # Generate a small mask preview PNG for this frame
                 mask_b64 = ""
@@ -1867,77 +1916,35 @@ async def propagate_interactive_segmentation(request: Request):
                     "pct": pct, "mask_png": mask_b64
                 })
                 yield f"event: progress\ndata: {event}\n\n"
-        
-        except asyncio.CancelledError:
-            print(f"[Segmentation] Propagation SSE disconnected. Saving partial progress ({len(all_masks)} frames)...")
-            sam3.predictor.cancel_propagation(state_id) if hasattr(sam3.predictor, "cancel_propagation") else None
-            # Do NOT re-raise; fall through to the save logic below!
+            
+            # Propagation completed normally — save and emit done
+            if not _all_masks:
+                task_manager.fail(tid, "No masks generated")
+                yield f"event: error\ndata: {{\"message\": \"No masks generated\"}}\n\n"
+                return
+
+            task_manager.update(tid, pct=100, detail="Saving masks...")
+            yield f"event: saving\ndata: {{\"status\": \"Saving masks...\"}}\n\n"
+            
+            _save_results()
+            
+            task_manager.update(tid, detail="Computing 3D matching...")
+            yield f"event: saving\ndata: {{\"status\": \"Computing 3D matching...\"}}\n\n"
+            
+            done_event = json.dumps({"ok": True})
+            yield f"event: done\ndata: {done_event}\n\n"
+            
         except GeneratorExit:
-            print(f"[Segmentation] GeneratorExit during Propagation. Saving partial progress ({len(all_masks)} frames)...")
-            sam3.predictor.cancel_propagation(state_id) if hasattr(sam3.predictor, "cancel_propagation") else None
-            # Do NOT re-raise
+            # Client disconnected — save partial results without yielding
+            print(f"[Segmentation] Client disconnected. Saving {len(_all_masks)} frames in background...")
+            _save_results()
+            return  # MUST return, not re-raise, after GeneratorExit in sync generators
         except Exception as e:
             print(f"[Segmentation] Error during propagation: {e}")
             import traceback
             traceback.print_exc()
             task_manager.fail(tid, str(e))
             yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
-            return
-            
-        try:
-            if not all_masks:
-                task_manager.fail(tid, "No masks generated")
-                yield f"event: error\ndata: {{\"message\": \"No masks generated\"}}\n\n"
-                return
-
-            # All frames done (or partially done) — save results
-            task_manager.update(tid, pct=100, detail="Saving masks...")
-            yield f"event: saving\ndata: {{\"status\": \"Saving masks...\"}}\n\n"
-            
-            from segmentation_pipeline import _save_masks, _parse_raw_masks, _match_and_save_result
-            
-            structured_masks = _parse_raw_masks(all_masks)
-            
-            from time import time
-            temp_global_id = int(time() % 10000)
-            
-            remapped_masks = {}
-            for f_idx, frame_masks in structured_masks.items():
-                remapped_masks[f_idx] = {}
-                for l_id, mask in frame_masks.items():
-                    remapped_masks[f_idx][temp_global_id] = mask
-            
-            obj_labels = {temp_global_id: label_name}
-            
-            saved_seg = _save_masks(output_dir, remapped_masks, [label_name], obj_labels, cfg)
-            
-            # Get the actual remapped obj_id (may differ from temp_global_id)
-            saved_obj_ids = set()
-            for inst in saved_seg.get("instances", []):
-                if inst.get("label") == label_name:
-                    saved_obj_ids.add(inst["id"])
-            if not saved_obj_ids:
-                # Fallback: use all obj_ids from NPZ that aren't in prev result
-                saved_obj_ids = {temp_global_id}
-            
-            task_manager.update(tid, detail="Computing 3D matching...")
-            yield f"event: saving\ndata: {{\"status\": \"Computing 3D matching...\"}}\n\n"
-            
-            # Incremental: only match the new object, preserve existing segments
-            result = _match_and_save_result(output_dir, new_obj_ids=saved_obj_ids)
-            
-            task_manager.finish(tid)
-            done_event = json.dumps({
-                "ok": True,
-                "instances": result.get("instances", [])
-            })
-            yield f"event: done\ndata: {done_event}\n\n"
-            
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            task_manager.fail(tid, str(e))
-            yield f"event: error\ndata: {{\"message\": \"{str(e)}\"}}\n\n"
     
     return StreamingResponse(
         sse_generator(),
@@ -2711,7 +2718,7 @@ async def add_text_prompt_endpoint(request: Request):
     if not state_id or frame_idx is None or not text:
         raise HTTPException(status_code=400, detail="Missing state_id, frame_idx, or text")
 
-    from sam3_wrapper import get_sam3_wrapper
+    from segmentation.sam3_wrapper import get_sam3_wrapper
     sam3 = get_sam3_wrapper()
     loop = asyncio.get_event_loop()
 
@@ -3013,7 +3020,7 @@ async def viewer_websocket(websocket: WebSocket):
                 
                 # Unload SAM3 model if loaded — free VRAM for new session
                 try:
-                    from sam3_wrapper import get_sam3_wrapper
+                    from segmentation.sam3_wrapper import get_sam3_wrapper
                     _sam3 = get_sam3_wrapper()
                     if _sam3.is_loaded:
                         print("[Viewer] Unloading SAM3 model to free VRAM...")

@@ -282,8 +282,14 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     }, [sessionId])
 
     // ── Manual click handler ──────────────────────────────────
+    const lastClickTime = useRef(0)
     const handleImageClick = useCallback(async (e: React.MouseEvent<HTMLCanvasElement>, isPositive: boolean) => {
         e.preventDefault()
+        e.stopPropagation()
+        // Debounce: ignore clicks within 300ms of each other
+        const now = Date.now()
+        if (now - lastClickTime.current < 300) return
+        lastClickTime.current = now
         // Suppress click if user was dragging (panning)
         if (wasDragging.current) {
             wasDragging.current = false

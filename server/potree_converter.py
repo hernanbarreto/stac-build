@@ -125,14 +125,17 @@ def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
 
     # Remove old output if exists
     if output_dir.exists():
-        shutil.rmtree(output_dir)
+        try:
+            shutil.rmtree(output_dir)
+        except OSError as e:
+            logger.warning(f"[Potree] rmtree failed ({e}), falling back to rm -rf")
+            subprocess.run(["rm", "-rf", str(output_dir)], check=False)
 
     cmd = [
         str(POTREE_BIN),
         "-i", str(las_path),
         "-o", str(output_dir),
         "--encoding", "UNCOMPRESSED",
-        "-m", "poisson",
     ]
 
     logger.info(f"[Potree] Running: {' '.join(cmd)}")
@@ -200,21 +203,38 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
             logger.warning(f"[Potree] ⚠️ Lock file timeout for {session_dir.name}, breaking lock")
             lock_file.unlink(missing_ok=True)
 
-    logger.info(f"[Potree] 🌲 Starting PLY → Potree conversion...")
-
-    # Use temp file for LAS to avoid leaving it around
-    las_path = output_dir / "cleaned_cloud.las"
+    logger.info(f"[Potree] 🌲 Starting PLY → Potree conversion using pure Linux I/O...")
 
     try:
         lock_file.touch(exist_ok=True)
-        # Step 1: PLY → LAS
-        n_points = _ply_to_las(ply_path, las_path)
-        logger.info(f"[Potree] Converted {n_points:,} points to LAS")
+        # Usar /tmp (RAM pura) para esquivar asfixia de I/O en puente WSL de Windows
+        import time
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            tmp_las_path = tmpdir_path / "cleaned_cloud.las"
+            tmp_potree_dir = tmpdir_path / "potree"
+            
+            n_points = _ply_to_las(ply_path, tmp_las_path)
+            logger.info(f"[Potree] Converted {n_points:,} points to LAS in RAM/tmp")
 
-        # Step 2: LAS → Potree octree
-        success = _run_potree_converter(las_path, potree_dir)
+            success = _run_potree_converter(tmp_las_path, tmp_potree_dir)
 
-        return success
+            if success:
+                # Evitar borrar la carpeta vieja previniendo Errno 22 por bloqueo
+                if potree_dir.exists():
+                    old_potree = output_dir / f"potree_old_{int(time.time())}"
+                    try:
+                        potree_dir.rename(old_potree)
+                        subprocess.Popen(["rm", "-rf", str(old_potree)]) 
+                    except OSError:
+                        pass
+                
+                # Copiado nativo relámpago a través de bash para evitar colapso de Windows
+                subprocess.run(["mkdir", "-p", str(potree_dir)]) 
+                subprocess.run(["cp", "-a", f"{tmp_potree_dir}/.", str(potree_dir)])
+                logger.info(f"[Potree] Successfully transferred chunks to Windows mount {potree_dir} in record time")
+
+            return success
 
     except Exception as e:
         logger.error(f"[Potree] ❌ Conversion failed: {e}")
@@ -223,10 +243,6 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
         return False
 
     finally:
-        # Clean up temporary LAS file
-        if las_path.exists():
-            las_path.unlink()
-            logger.info(f"[Potree] Cleaned up temporary LAS file")
         if lock_file.exists():
             lock_file.unlink(missing_ok=True)
 

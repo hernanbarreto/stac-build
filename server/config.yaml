@@ -71,7 +71,7 @@ frame_selection:
   method: "dino"                # "dino" (DINO cosine similarity) or "hf_ratio" (legacy ORB-SLAM)
   # DINO settings (used when method=dino)
   dino_model: "dinov2_vitb14"   # ViT-B/14 (~330MB, same model VGGT-Long uses for loop closure)
-  dino_threshold: 0.98          # Cosine similarity threshold (higher = more keyframes accepted)
+  dino_threshold: 0.92          # Cosine similarity threshold (higher = more keyframes accepted)
   dino_device: "cuda"           # "cuda" or "cpu" (auto-falls back to CPU if no GPU)
   # Legacy H/F settings (used when method=hf_ratio, or as fallback if DINO fails)
   max_features: 2000            # ORB features per frame
@@ -87,7 +87,8 @@ paths:
   output_dir_name: "output"
   # Projects data directory (point clouds, frames, reconstructions)
   # Set to external drive path to save disk space on internal SSD
-  projects_dir: "/mnt/e/stac-projects"
+  #projects_dir: "/mnt/e/stac-projects"
+  projects_dir: "/home/hernan/stac-builder/server/projects"
 
 # --- Models ---
 models:
