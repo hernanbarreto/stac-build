@@ -1810,21 +1810,9 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     print(f"[SegPipeline] ✅ {len(instances)} instances matched against {cloud_label}, "
           f"{total_segmented:,}/{n_pts:,} points ({coverage*100:.1f}% coverage)")
     
-    # ── Phase 4: Project assigned points to face planes → corrected cloud ──
-    # Project in display space (where face planes live), then convert back
-    # to raw space for PLY output. Potree re-applies floorTransform on load.
-    n_projected = 0
-    # In incremental mode, start from corrected_cloud to preserve previous projections
-    corrected_path = output_dir / "corrected_cloud.ply"
-    if only_obj_ids is not None and corrected_path.exists():
-        prev_origins = _load_ply_origins(corrected_path)
-        if prev_origins is not None and len(prev_origins[0]) == len(xyz):
-            xyz_corrected = prev_origins[0].copy()
-        else:
-            xyz_corrected = xyz.copy()
-    else:
-        xyz_corrected = xyz.copy()  # RAW space
-    # Load existing classification to preserve previous objects in incremental mode
+    # ── Phase 4: Classification assignment (NO geometric projection) ──
+    # Assign classification labels per-point for color-coded display.
+    # Face-plane projection is DISABLED — it deforms non-planar objects.
     class_path = output_dir / "classification.npy"
     if class_path.exists() and only_obj_ids is not None:
         classification = np.load(class_path)
@@ -1834,59 +1822,24 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         classification = np.zeros(len(xyz), dtype=np.uint8)
     
     for inst in instances:
-        face_planes = inst.pop("_face_planes", None)
-        face_id = inst.pop("_face_id", None)
+        # Pop internal fields (not needed in output)
+        inst.pop("_face_planes", None)
+        inst.pop("_face_id", None)
         
-        # SIEMPRE asignar la clasificación del objeto (aunque no tenga caras planas)
         global_indices = np.array(inst["globalIndices"], dtype=np.int64)
         seg_id = int(inst.get("id", 0))
         classification[global_indices] = min(seg_id, 255)
-
-        # Si no hay caras planas, saltamos la corrección geométrica (proyección)
-        if face_planes is None or face_id is None or len(face_id) == 0:
-            continue
-        
-        pts_display = xyz_display[global_indices].copy()
-        
-        for fi, (fn, fd) in enumerate(face_planes):
-            mask = face_id == fi
-            n_mask = int(np.sum(mask))
-            if n_mask == 0:
-                continue
-            pts_fi = pts_display[mask]
-            dists = pts_fi @ fn + fd
-            projected = pts_fi - np.outer(dists, fn)
-            pts_display[mask] = projected
-            n_projected += int(n_mask)
-        
-        # Convert projected display coords back to raw: raw = (display - t) @ R / s
-        if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
-            pts_raw = (pts_display - t) @ R / s
-        else:
-            pts_raw = pts_display
-        xyz_corrected[global_indices] = pts_raw
     
     # Save classification sidecar
-    class_path = output_dir / "classification.npy"
     np.save(class_path, classification)
     
-    if n_projected > 0:
-        corrected_path = output_dir / "corrected_cloud.ply"
-        _write_corrected_ply(ply_path, corrected_path, xyz_corrected)
-        print(f"[SegPipeline] ✏️ Projected {n_projected:,} points → {corrected_path.name} (raw space)")
-        ply_override = corrected_path
-    else:
-        # Always rebuild Potree even if no planes were projected (so classification color updates apply)
-        corrected_path = output_dir / "corrected_cloud.ply"
-        ply_override = corrected_path if corrected_path.exists() else ply_path
-        
-    # Rebuild Potree so cloud visually matches voxel projections AND classification updates
+    # Rebuild Potree from the ORIGINAL cloud (no geometric correction)
     try:
         from potree_converter import convert_ply_to_potree
         session_dir = output_dir.parent
-        success = convert_ply_to_potree(session_dir, force=True, ply_override=ply_override)
+        success = convert_ply_to_potree(session_dir, force=True, ply_override=ply_path)
         if success:
-            print(f"[SegPipeline] 🌲 Potree octree rebuilt from {ply_override.name}")
+            print(f"[SegPipeline] 🌲 Potree octree rebuilt from {ply_path.name}")
             result["reload_potree"] = True
         else:
             print(f"[SegPipeline] ⚠️ Potree rebuild failed")

@@ -76,6 +76,28 @@ function App() {
   const [pointSize, setPointSize] = useState(5.0)
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.0)
   const [hasConfidence, setHasConfidence] = useState(false)
+
+  // ── Per-user per-session viewer preferences (localStorage) ──
+  const prefsKey = (sessionId: string) =>
+    user ? `stac_prefs_${user.username}_${sessionId}` : null
+
+  const saveViewerPrefs = useCallback((sessionId: string, prefs: Record<string, number>) => {
+    const key = prefsKey(sessionId)
+    if (!key) return
+    try {
+      const existing = JSON.parse(localStorage.getItem(key) || '{}')
+      localStorage.setItem(key, JSON.stringify({ ...existing, ...prefs }))
+    } catch { /* ignore */ }
+  }, [user]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const loadViewerPrefs = useCallback((sessionId: string): Record<string, number> | null => {
+    const key = prefsKey(sessionId)
+    if (!key) return null
+    try {
+      const raw = localStorage.getItem(key)
+      return raw ? JSON.parse(raw) : null
+    } catch { return null }
+  }, [user]) // eslint-disable-line react-hooks/exhaustive-deps
   const [showAxes, setShowAxes] = useState(false)
   const [showGrid, setShowGrid] = useState(true)
   const [pointCount, setPointCount] = useState(0)
@@ -591,6 +613,25 @@ function App() {
     setPointCount(0)
     setStatusMessage('')
   }, [])
+
+  // ── Auto-load viewer prefs when session loads ──
+  useEffect(() => {
+    if (!activeSession || !user) return
+    const prefs = loadViewerPrefs(activeSession)
+    if (prefs) {
+      if (typeof prefs.pointSize === 'number') setPointSize(prefs.pointSize)
+      if (typeof prefs.confidenceThreshold === 'number') setConfidenceThreshold(prefs.confidenceThreshold)
+    }
+  }, [activeSession, user]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Auto-save viewer prefs on change ──
+  const prefsInitRef = useRef(false)
+  useEffect(() => {
+    // Skip the initial render (don't save defaults before prefs load)
+    if (!activeSession || !user) { prefsInitRef.current = false; return }
+    if (!prefsInitRef.current) { prefsInitRef.current = true; return }
+    saveViewerPrefs(activeSession, { pointSize, confidenceThreshold })
+  }, [pointSize, confidenceThreshold]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Sábana: Generate comparison (auto_match → compare → show via Potree) ──
   // Open the comparison dialog (shows toggle inside)
