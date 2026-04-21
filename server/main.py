@@ -1988,6 +1988,53 @@ async def propagate_interactive_segmentation(request: Request):
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
 
+# --- User Viewer Preferences ---
+
+@app.get("/api/sessions/{session_id}/prefs")
+async def get_viewer_prefs(
+    session_id: str,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Load per-user viewer preferences for a session."""
+    from auth import decode_token
+    if not credentials:
+        return {}
+    try:
+        payload = decode_token(credentials.credentials)
+        username = payload.get("username", "")
+    except Exception:
+        return {}
+    
+    ctx = _ctx(session_id)
+    prefs_file = ctx.session_dir / "user_prefs" / f"{username}.json"
+    if prefs_file.exists():
+        return json.loads(prefs_file.read_text())
+    return {}
+
+@app.post("/api/sessions/{session_id}/prefs")
+async def save_viewer_prefs(
+    session_id: str,
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Save per-user viewer preferences for a session."""
+    from auth import decode_token
+    if not credentials:
+        return {"error": "Not authenticated"}
+    try:
+        payload = decode_token(credentials.credentials)
+        username = payload.get("username", "")
+    except Exception:
+        return {"error": "Invalid token"}
+    
+    prefs = await request.json()
+    ctx = _ctx(session_id)
+    prefs_dir = ctx.session_dir / "user_prefs"
+    prefs_dir.mkdir(parents=True, exist_ok=True)
+    prefs_file = prefs_dir / f"{username}.json"
+    prefs_file.write_text(json.dumps(prefs))
+    return {"ok": True}
+
 # --- Segmentation Manager Endpoints ---
 
 @app.get("/api/sessions/{session_id}/segmentation")
@@ -3367,8 +3414,12 @@ async def viewer_websocket(websocket: WebSocket):
                         await websocket.send_text(json.dumps({"type": "error", "message": "Failed to build cleaned cloud"}))
 
                 except Exception as e:
-                    print(f"Error loading session: {e}")
-                    await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
+                    print(f"Error loading session:")
+                    print(f"[Viewer] ❌ WebSocket Error: {e}")
+                    try:
+                        await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
+                    except Exception:
+                        pass  # Client already disconnected
 
             elif cmd.get("type") == "load_sabana":
                 session_id = cmd.get("session_id")

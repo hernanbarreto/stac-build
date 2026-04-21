@@ -135,6 +135,7 @@ models:
       sor_std: 1.5                 # SOR std multiplier
       mad_multiplier: 3.0          # MAD-based thickness filter
       # RANSAC face detection
+      ransac_enabled: false        # Disable face detection (deforms non-planar objects)
       ransac_tolerance: 0.01       # 1cm inlier distance for plane detection
       min_face_points: 100         # Minimum points to consider a plane as a face
       max_faces: 8                 # Maximum number of faces to detect

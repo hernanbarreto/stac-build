@@ -1212,15 +1212,239 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
     if len(points) < 20:
         return indices, [], [], [], np.array([], dtype=np.int32)
     
-    # Face detection (RANSAC) and voxel generation are DISABLED.
-    # They deform non-planar objects by projecting points to face planes.
-    # Only DBSCAN outlier removal is active.
-    total_removed = n_original - len(indices)
-    print(f"[SegPipeline]   Clean obj {obj_id}: "
-          f"{n_original:,} → {len(indices):,} pts "
-          f"(DBSCAN -{dbscan_removed})")
+    # ── Check if RANSAC face detection is enabled ──
+    ransac_enabled = get_param(f'{cfg_prefix}.ransac_enabled', True)
+    if not ransac_enabled:
+        total_removed = n_original - len(indices)
+        print(f"[SegPipeline]   Clean obj {obj_id}: "
+              f"{n_original:,} → {len(indices):,} pts "
+              f"(DBSCAN -{dbscan_removed}, RANSAC disabled)")
+        return indices, [], [], [], np.array([], dtype=np.int32)
     
-    return indices, [], [], [], np.array([], dtype=np.int32)
+    # ── Load RANSAC parameters ──
+    ransac_tol = get_param(f'{cfg_prefix}.ransac_tolerance', 0.01)
+    min_face_pts = get_param(f'{cfg_prefix}.min_face_points', 100)
+    max_faces = get_param(f'{cfg_prefix}.max_faces', 8)
+    face_thick = get_param(f'{cfg_prefix}.face_thickness', 0.01)
+    
+    # ── Step 2: RANSAC iterative plane detection ──
+    remaining_mask = np.ones(len(points), dtype=bool)
+    faces = []
+    
+    for face_i in range(max_faces):
+        remaining_idx = np.where(remaining_mask)[0]
+        if len(remaining_idx) < min_face_pts:
+            break
+        
+        rem_pts = points[remaining_idx]
+        
+        best_inlier_count = 0
+        best_normal = None
+        best_d = 0.0
+        n_iters = min(500, max(50, len(rem_pts) // 10))
+        
+        for _ in range(n_iters):
+            sample_idx = np.random.choice(len(rem_pts), 3, replace=False)
+            p0, p1, p2 = rem_pts[sample_idx]
+            v1 = p1 - p0
+            v2 = p2 - p0
+            normal = np.cross(v1, v2)
+            norm_len = np.linalg.norm(normal)
+            if norm_len < 1e-10:
+                continue
+            normal = normal / norm_len
+            d = -np.dot(normal, p0)
+            dists = np.abs(rem_pts @ normal + d)
+            n_inliers = int(np.sum(dists < ransac_tol))
+            if n_inliers > best_inlier_count:
+                best_inlier_count = n_inliers
+                best_normal = normal
+                best_d = d
+        
+        if best_inlier_count < min_face_pts:
+            break
+        
+        # Refine plane using all inliers via PCA
+        rem_dists = np.abs(rem_pts @ best_normal + best_d)
+        inlier_local = rem_dists < ransac_tol
+        inlier_pts = rem_pts[inlier_local]
+        centroid = np.mean(inlier_pts, axis=0)
+        centered = inlier_pts - centroid
+        cov = (centered.T @ centered) / len(inlier_pts)
+        _, eigvecs = np.linalg.eigh(cov)
+        refined_normal = eigvecs[:, 0]
+        refined_d = -np.dot(refined_normal, centroid)
+        
+        rem_dists_refined = np.abs(rem_pts @ refined_normal + refined_d)
+        inlier_local_refined = rem_dists_refined < ransac_tol
+        inlier_global_idx = remaining_idx[inlier_local_refined]
+        faces.append((refined_normal, refined_d, inlier_global_idx))
+        remaining_mask[inlier_global_idx] = False
+        
+        print(f"[SegPipeline]     face {face_i}: {len(inlier_global_idx)} pts, "
+              f"normal=[{refined_normal[0]:.2f},{refined_normal[1]:.2f},{refined_normal[2]:.2f}]")
+    
+    # ── Step 2b: Merge parallel faces (collapse onion layers) ──
+    # If two faces have near-parallel normals (|dot| > 0.95), merge into one
+    if len(faces) > 1:
+        merged = []
+        used = set()
+        for i in range(len(faces)):
+            if i in used:
+                continue
+            n_i, d_i, idx_i = faces[i]
+            group_faces = [(n_i, d_i, idx_i)]
+            group_idx = [idx_i]
+            for j in range(i + 1, len(faces)):
+                if j in used:
+                    continue
+                n_j = faces[j][0]
+                dot = abs(np.dot(n_i, n_j))
+                if dot > 0.95:  # near-parallel → same surface
+                    group_faces.append(faces[j])
+                    group_idx.append(faces[j][2])
+                    used.add(j)
+            
+            # Merge all grouped indices
+            combined_idx = np.concatenate(group_idx) if len(group_idx) > 1 else idx_i
+            
+            # Use the DOMINANT face's plane (most inlier points)
+            # This ensures all parallel planes converge to the actual
+            # front surface, not the average of front+back.
+            dominant = max(group_faces, key=lambda f: len(f[2]))
+            merged_normal = dominant[0].copy()
+            
+            # Recompute d using dominant face's inlier centroid
+            dom_centroid = np.mean(points[dominant[2]], axis=0)
+            merged_d = -np.dot(merged_normal, dom_centroid)
+
+            
+            merged.append((merged_normal, merged_d, combined_idx))
+        
+        print(f"[SegPipeline]     merged: {len(faces)} → {len(merged)} faces")
+        faces = merged
+    
+    # ── Step 3: Assign ALL points to nearest face (non-destructive) ──
+    # No points are removed — every post-DBSCAN point is kept.
+    # Each point is assigned to the face whose plane is closest.
+    result_indices = indices  # keep ALL points
+    
+    local_face_id = np.full(len(points), -1, dtype=np.int32)
+    
+    if faces:
+        # Compute distance of each point to each face plane
+        n_faces = len(faces)
+        all_dists = np.full((len(points), n_faces), np.inf)
+        for fi, (face_normal, face_d, face_idx) in enumerate(faces):
+            all_dists[:, fi] = np.abs(points @ face_normal + face_d)
+        
+        # Assign each point to the nearest face
+        nearest_face = np.argmin(all_dists, axis=1)
+        nearest_dist = all_dists[np.arange(len(points)), nearest_face]
+        
+        if n_faces == 1:
+            # Single face: assign ALL points (object is one surface)
+            local_face_id[:] = 0
+        else:
+            # Multi-face: generous threshold to catch onion layers
+            max_assign_dist = 0.10  # 10cm
+            assign_mask = nearest_dist <= max_assign_dist
+            local_face_id[assign_mask] = nearest_face[assign_mask]
+    
+    result_face_id = local_face_id
+    
+    total_removed = n_original - len(result_indices)
+    n_assigned = int(np.sum(local_face_id >= 0))
+    n_residual = int(np.sum(local_face_id < 0))
+    
+    print(f"[SegPipeline]   Clean obj {obj_id}: "
+          f"{n_original:,} → {len(result_indices):,} pts "
+          f"(DBSCAN -{dbscan_removed}, "
+          f"{len(faces)} faces, {n_assigned} assigned, {n_residual} residual)")
+    
+
+
+    # ── Step 6: Generate voxel mesh data from detected faces ──
+    # Use larger voxels for visualization (5cm) — independent of cleaning voxel_size
+    voxel_data = []
+    mesh_vs = 0.05  # 5cm visualization voxels
+    if len(result_indices) >= 5 and faces:
+        final_pts = xyz[result_indices]
+        
+        # Voxelize at 5cm for the mesh
+        fv_keys = np.floor(final_pts / mesh_vs).astype(np.int64)
+        fv_ids = fv_keys[:, 0] * 1_000_003 + fv_keys[:, 1] * 1_000_033 + fv_keys[:, 2]
+        
+        # Pass 1: compute face or PCA for each voxel
+        voxel_info = {}  # grid_key → {centroid, face_fi, normal, pca_normal}
+        for fv_id in np.unique(fv_ids):
+            fv_mask = fv_ids == fv_id
+            fv_pts = final_pts[fv_mask]
+            if len(fv_pts) < 3:
+                continue
+            centroid = np.mean(fv_pts, axis=0)
+            gk = tuple(np.floor(centroid / mesh_vs).astype(int))
+            
+            # Majority face
+            vox_face_ids = result_face_id[fv_mask]
+            face_ids_in_vox = vox_face_ids[vox_face_ids >= 0]
+            if len(face_ids_in_vox) > 0:
+                majority_fi = int(np.bincount(face_ids_in_vox).argmax())
+                voxel_info[gk] = {'centroid': centroid, 'face_fi': majority_fi, 'normal': faces[majority_fi][0]}
+            else:
+                # PCA for residual
+                centered = fv_pts - centroid
+                cov = (centered.T @ centered) / len(fv_pts)
+                eigenvalues = np.linalg.eigvalsh(cov)
+                if max(eigenvalues[0], 1e-12) / max(eigenvalues[2], 1e-12) < planarity_thresh:
+                    _, eigvecs = np.linalg.eigh(cov)
+                    pca_normal = eigvecs[:, 0]
+                    voxel_info[gk] = {'centroid': centroid, 'face_fi': -1, 'normal': pca_normal}
+        
+        # Pass 2: flood-fill residual voxels to neighbor faces
+        # Check 26 neighbors; if a neighbor has a face and PCA normal is compatible, adopt it
+        neighbor_offsets_26 = [(dx, dy, dz) for dx in (-1,0,1) for dy in (-1,0,1) for dz in (-1,0,1) if (dx,dy,dz) != (0,0,0)]
+        changed = True
+        while changed:
+            changed = False
+            for gk, info in list(voxel_info.items()):
+                if info['face_fi'] >= 0:
+                    continue  # already assigned
+                for ox, oy, oz in neighbor_offsets_26:
+                    nk = (gk[0]+ox, gk[1]+oy, gk[2]+oz)
+                    nb = voxel_info.get(nk)
+                    if nb and nb['face_fi'] >= 0:
+                        # Check normal compatibility
+                        dot = abs(np.dot(info['normal'], nb['normal']))
+                        if dot > 0.8:
+                            info['face_fi'] = nb['face_fi']
+                            info['normal'] = faces[nb['face_fi']][0]
+                            changed = True
+                            break
+        
+        # Build final voxel_data with snapping
+        for gk, info in voxel_info.items():
+            centroid = info['centroid']
+            normal = info['normal']
+            fi = info['face_fi']
+            
+            if fi >= 0:
+                # Snap to face plane
+                face_d = faces[fi][1]
+                dist_to_plane = np.dot(centroid, normal) + face_d
+                centroid = centroid - dist_to_plane * normal
+            
+            voxel_data.append([
+                float(centroid[0]), float(centroid[1]), float(centroid[2]),
+                float(normal[0]), float(normal[1]), float(normal[2])
+            ])
+    # Build face_normals summary for OBB: [(normal, n_points), ...]
+    face_normals_summary = [(fn, len(fi)) for fn, fd, fi in faces]
+    
+    # Face planes for point projection: [(normal, d), ...]
+    face_planes = [(fn, fd) for fn, fd, fi in faces]
+    
+    return result_indices, voxel_data, face_normals_summary, face_planes, local_face_id
 
 
 def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_obj_ids=None) -> dict:
@@ -1595,9 +1819,21 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     print(f"[SegPipeline] ✅ {len(instances)} instances matched against {cloud_label}, "
           f"{total_segmented:,}/{n_pts:,} points ({coverage*100:.1f}% coverage)")
     
-    # ── Phase 4: Classification assignment (NO geometric projection) ──
-    # Assign classification labels per-point for color-coded display.
-    # Face-plane projection is DISABLED — it deforms non-planar objects.
+    # ── Phase 4: Project assigned points to face planes → corrected cloud ──
+    # Project in display space (where face planes live), then convert back
+    # to raw space for PLY output. Potree re-applies floorTransform on load.
+    n_projected = 0
+    # In incremental mode, start from corrected_cloud to preserve previous projections
+    corrected_path = output_dir / "corrected_cloud.ply"
+    if only_obj_ids is not None and corrected_path.exists():
+        prev_origins = _load_ply_origins(corrected_path)
+        if prev_origins is not None and len(prev_origins[0]) == len(xyz):
+            xyz_corrected = prev_origins[0].copy()
+        else:
+            xyz_corrected = xyz.copy()
+    else:
+        xyz_corrected = xyz.copy()  # RAW space
+    # Load existing classification to preserve previous objects in incremental mode
     class_path = output_dir / "classification.npy"
     if class_path.exists() and only_obj_ids is not None:
         classification = np.load(class_path)
@@ -1607,24 +1843,59 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         classification = np.zeros(len(xyz), dtype=np.uint8)
     
     for inst in instances:
-        # Pop internal fields (not needed in output)
-        inst.pop("_face_planes", None)
-        inst.pop("_face_id", None)
+        face_planes = inst.pop("_face_planes", None)
+        face_id = inst.pop("_face_id", None)
         
+        # SIEMPRE asignar la clasificación del objeto (aunque no tenga caras planas)
         global_indices = np.array(inst["globalIndices"], dtype=np.int64)
         seg_id = int(inst.get("id", 0))
         classification[global_indices] = min(seg_id, 255)
+
+        # Si no hay caras planas, saltamos la corrección geométrica (proyección)
+        if face_planes is None or face_id is None or len(face_id) == 0:
+            continue
+        
+        pts_display = xyz_display[global_indices].copy()
+        
+        for fi, (fn, fd) in enumerate(face_planes):
+            mask = face_id == fi
+            n_mask = int(np.sum(mask))
+            if n_mask == 0:
+                continue
+            pts_fi = pts_display[mask]
+            dists = pts_fi @ fn + fd
+            projected = pts_fi - np.outer(dists, fn)
+            pts_display[mask] = projected
+            n_projected += int(n_mask)
+        
+        # Convert projected display coords back to raw: raw = (display - t) @ R / s
+        if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+            pts_raw = (pts_display - t) @ R / s
+        else:
+            pts_raw = pts_display
+        xyz_corrected[global_indices] = pts_raw
     
     # Save classification sidecar
+    class_path = output_dir / "classification.npy"
     np.save(class_path, classification)
     
-    # Rebuild Potree from the ORIGINAL cloud (no geometric correction)
+    if n_projected > 0:
+        corrected_path = output_dir / "corrected_cloud.ply"
+        _write_corrected_ply(ply_path, corrected_path, xyz_corrected)
+        print(f"[SegPipeline] ✏️ Projected {n_projected:,} points → {corrected_path.name} (raw space)")
+        ply_override = corrected_path
+    else:
+        # Always rebuild Potree even if no planes were projected (so classification color updates apply)
+        corrected_path = output_dir / "corrected_cloud.ply"
+        ply_override = corrected_path if corrected_path.exists() else ply_path
+        
+    # Rebuild Potree so cloud visually matches voxel projections AND classification updates
     try:
         from potree_converter import convert_ply_to_potree
         session_dir = output_dir.parent
-        success = convert_ply_to_potree(session_dir, force=True, ply_override=ply_path)
+        success = convert_ply_to_potree(session_dir, force=True, ply_override=ply_override)
         if success:
-            print(f"[SegPipeline] 🌲 Potree octree rebuilt from {ply_path.name}")
+            print(f"[SegPipeline] 🌲 Potree octree rebuilt from {ply_override.name}")
             result["reload_potree"] = True
         else:
             print(f"[SegPipeline] ⚠️ Potree rebuild failed")

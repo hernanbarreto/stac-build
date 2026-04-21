@@ -77,27 +77,6 @@ function App() {
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.0)
   const [hasConfidence, setHasConfidence] = useState(false)
 
-  // ── Per-user per-session viewer preferences (localStorage) ──
-  const prefsKey = (sessionId: string) =>
-    user ? `stac_prefs_${user.username}_${sessionId}` : null
-
-  const saveViewerPrefs = useCallback((sessionId: string, prefs: Record<string, number>) => {
-    const key = prefsKey(sessionId)
-    if (!key) return
-    try {
-      const existing = JSON.parse(localStorage.getItem(key) || '{}')
-      localStorage.setItem(key, JSON.stringify({ ...existing, ...prefs }))
-    } catch { /* ignore */ }
-  }, [user]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const loadViewerPrefs = useCallback((sessionId: string): Record<string, number> | null => {
-    const key = prefsKey(sessionId)
-    if (!key) return null
-    try {
-      const raw = localStorage.getItem(key)
-      return raw ? JSON.parse(raw) : null
-    } catch { return null }
-  }, [user]) // eslint-disable-line react-hooks/exhaustive-deps
   const [showAxes, setShowAxes] = useState(false)
   const [showGrid, setShowGrid] = useState(true)
   const [pointCount, setPointCount] = useState(0)
@@ -170,6 +149,8 @@ function App() {
   const [projectFilter, setProjectFilter] = useState('')
 
   const { user, token, loading: authLoading, logout } = useAuth()
+
+
 
   // Periodic server health check — updates indicator only
   // NOTE: timeout/threshold are generous because the Python server does heavy
@@ -614,23 +595,48 @@ function App() {
     setStatusMessage('')
   }, [])
 
-  // ── Auto-load viewer prefs when session loads ──
+  // ── Auto-load viewer prefs from server AFTER cloud finishes loading ──
+  // Triggered when pointCount goes from 0 to >0 (cloud ready, all reset callbacks done)
+  const prefsLoadedRef = useRef(false)
+  const prevPointCountRef = useRef(0)
   useEffect(() => {
-    if (!activeSession || !user) return
-    const prefs = loadViewerPrefs(activeSession)
-    if (prefs) {
-      if (typeof prefs.pointSize === 'number') setPointSize(prefs.pointSize)
-      if (typeof prefs.confidenceThreshold === 'number') setConfidenceThreshold(prefs.confidenceThreshold)
-    }
-  }, [activeSession, user]) // eslint-disable-line react-hooks/exhaustive-deps
+    const wasZero = prevPointCountRef.current === 0
+    prevPointCountRef.current = pointCount
+    if (!wasZero || pointCount === 0) return  // Only trigger on 0 → N transition
+    if (!activeSession || !token) return
+    prefsLoadedRef.current = false
+    fetch(`/api/sessions/${activeSession}/prefs`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+      .then(r => r.json())
+      .then(prefs => {
+        setPointSize(typeof prefs.pointSize === 'number' ? prefs.pointSize : 5.0)
+        setConfidenceThreshold(typeof prefs.confidenceThreshold === 'number' ? prefs.confidenceThreshold : 0.0)
+        setTimeout(() => { prefsLoadedRef.current = true }, 300)
+      })
+      .catch(() => { 
+        setPointSize(5.0)
+        setConfidenceThreshold(0.0)
+        prefsLoadedRef.current = true 
+      })
+  }, [pointCount]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Auto-save viewer prefs on change ──
-  const prefsInitRef = useRef(false)
+  // ── Auto-save viewer prefs to server on change (debounced) ──
+  const prefsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    // Skip the initial render (don't save defaults before prefs load)
-    if (!activeSession || !user) { prefsInitRef.current = false; return }
-    if (!prefsInitRef.current) { prefsInitRef.current = true; return }
-    saveViewerPrefs(activeSession, { pointSize, confidenceThreshold })
+    if (!prefsLoadedRef.current || !activeSession || !token) return
+    if (prefsSaveTimer.current) clearTimeout(prefsSaveTimer.current)
+    prefsSaveTimer.current = setTimeout(() => {
+      fetch(`/api/sessions/${activeSession}/prefs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ pointSize, confidenceThreshold })
+      }).catch(() => {})
+    }, 500)
+    return () => { if (prefsSaveTimer.current) clearTimeout(prefsSaveTimer.current) }
   }, [pointSize, confidenceThreshold]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Sábana: Generate comparison (auto_match → compare → show via Potree) ──
@@ -1611,7 +1617,7 @@ function App() {
           <Viewport
             ref={viewportRef}
             pointSize={pointSize}
-            confidenceThreshold={confidenceThreshold}
+            confidenceThreshold={sabanaVisible ? 0.0 : confidenceThreshold}
             activeSession={activeSession}
             activeTool={activeTool}
             showAxes={showAxes}
@@ -1624,7 +1630,6 @@ function App() {
             onPipelineProgress={handlePipelineProgress}
             onHasConfidence={(has) => {
               setHasConfidence(has)
-              if (has) setConfidenceThreshold(0.0)  // Start at 0 = show all
             }}
             onBimLoaded={(models) => {
               setBimModels(models)
