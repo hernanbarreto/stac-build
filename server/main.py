@@ -1593,34 +1593,63 @@ async def clear_interactive_prompts(request: Request):
         raise HTTPException(status_code=500, detail="Failed to clear prompts")
     return {"ok": True}
 _last_prompt = {"key": None, "time": 0, "result": None}
+_prompt_in_flight = {"key": None, "event": None}  # Track currently-executing prompt + completion signal
 
 @app.post("/api/segmentation/add_prompt")
 async def add_interactive_prompt(request: Request):
     """
     Apply a positive or negative click to a specific frame.
     Returns the predicted mask as base64 PNG for live overlay.
+    
+    Handles browser timeout retries: if the same prompt is still being
+    processed, the retry will WAIT for completion and return the result.
     """
     import time as _time
+    import threading as _threading
     body = await request.json()
     state_id = body.get("state_id")
-    session_id = body.get("session_id")  # needed to find segmentation.json for resize
+    session_id = body.get("session_id")
     frame_idx = body.get("frame_idx")
     obj_id = body.get("obj_id", 1)
-    points = body.get("points")      # list of [x, y]
-    labels = body.get("labels")      # list of 1 (positive) or 0 (negative)
+    points = body.get("points")
+    labels = body.get("labels")
     
     if not all([state_id, frame_idx is not None, points, labels]):
         raise HTTPException(status_code=400, detail="Missing required parameters")
     
-    # Server-side debounce: reject duplicate calls within 2 seconds
     prompt_key = f"{state_id}:{frame_idx}:{points}:{labels}"
     now = _time.time()
+
+    # ── Guard 1: Same prompt still in-flight → WAIT for result (don't reject)
+    if prompt_key == _prompt_in_flight["key"] and _prompt_in_flight["event"] is not None:
+        print(f"[add_prompt] ⏳ Duplicate detected — waiting for in-flight result...")
+        evt = _prompt_in_flight["event"]
+        loop = asyncio.get_event_loop()
+        # Wait for the event in a thread to not block the event loop (up to 10 min)
+        got_result = await loop.run_in_executor(None, lambda: evt.wait(timeout=600))
+        if got_result and _last_prompt.get("result") and _last_prompt["key"] == prompt_key:
+            print(f"[add_prompt] ✅ Returning result from in-flight prompt")
+            return _last_prompt["result"]
+        print(f"[add_prompt] ⚠️ In-flight prompt finished but no result available")
+        return {"ok": True}
+
+    # ── Guard 2: Short debounce for rapid double-clicks (< 2 seconds)
     if prompt_key == _last_prompt["key"] and (now - _last_prompt["time"]) < 2.0:
         print(f"[add_prompt] Debounced duplicate call (Δ={now - _last_prompt['time']:.2f}s)")
         return _last_prompt.get("result") or {"ok": True}
+
+    # ── Guard 3: If result is already cached for this exact prompt, return it
+    if prompt_key == _last_prompt["key"] and _last_prompt.get("result"):
+        print(f"[add_prompt] Returning cached result for identical prompt")
+        return _last_prompt["result"]
+
+    # Set up in-flight tracking with completion event
+    completion_event = _threading.Event()
     _last_prompt["key"] = prompt_key
     _last_prompt["time"] = now
     _last_prompt["result"] = None
+    _prompt_in_flight["key"] = prompt_key
+    _prompt_in_flight["event"] = completion_event
         
     from segmentation.sam3_wrapper import get_sam3_wrapper
     sam3 = get_sam3_wrapper()
@@ -1686,6 +1715,13 @@ async def add_interactive_prompt(request: Request):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Signal completion so any waiting retry gets the result
+        completion_event.set()
+        # Clear in-flight flag
+        if _prompt_in_flight["key"] == prompt_key:
+            _prompt_in_flight["key"] = None
+            _prompt_in_flight["event"] = None
 
 @app.post("/api/sessions/{session_id}/alignment")
 async def save_alignment(session_id: str, request: Request):

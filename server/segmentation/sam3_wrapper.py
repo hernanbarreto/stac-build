@@ -11,9 +11,15 @@ import logging
 # Centralised vendor path resolution (ensures sam3 package is findable)
 import vendor_paths
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging — avoid basicConfig() which adds duplicate handlers
+# when Uvicorn already configures the root logger
 logger = logging.getLogger("SAM3Wrapper")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    logger.addHandler(_handler)
+logger.propagate = False
 from config import cfg
 
 class SAM3Wrapper:
@@ -53,8 +59,14 @@ class SAM3Wrapper:
                 
                 gpus_to_use = [torch.cuda.current_device()]
                 self.predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
+                
+                # Enable global bfloat16 autocast — exactly as SAM3's official
+                # qualitative_test.py does it. This persists for the lifetime
+                # of the process so all SAM3 ops run in mixed precision.
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+                
                 self.is_loaded = True
-                logger.info("SAM3 Model loaded successfully.")
+                logger.info("SAM3 Model loaded successfully (bfloat16 autocast active).")
                 
             except Exception as e:
                 logger.error(f"Failed to load SAM3 model: {e}")
@@ -553,7 +565,6 @@ class SAM3Wrapper:
         logger.info(f"[SAM3-Interactive] Starting session for {load_dir}")
         
         with self.lock:
-            self.predictor.model.float()
             response = self.predictor.handle_request(
                 request=dict(
                     type="start_session",
