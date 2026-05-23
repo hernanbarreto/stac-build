@@ -1,0 +1,30 @@
+.git/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.DS_Store
+node_modules/
+ui/
+*.log
+*.tmp
+.env
+.venv*/
+venv*/
+# vendor pipelines upstream — sus outputs ya están en server/projects/.../output/
+vendor/VGGT-Long/
+vendor/gaus-slam/
+vendor/MapAnything2/
+vendor/dinov3/
+vendor/cloudcompy/
+vendor/PotreeConverter/
+vendor/scenescript/
+vendor/easy3d/
+# Sí van a la pod:
+#   vendor/depth-anything-3/   (paquete local del env da3)
+#   vendor/sam3/               (linkeado como módulo del env stac-build)
+#   vendor/ShapeR/             (checkpoints + código de ShapeR)
+#   vendor/MILo/               (ya estaba incluido)

@@ -12,6 +12,7 @@
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
 import csv
+import json
 import cv2
 import numpy as np
 from pathlib import Path
@@ -207,19 +208,26 @@ def prepare_stray_data(
     stride: int = 2,
     max_frames: int = 0,
     confidence_threshold: int = 1,
+    selected_frames_path: Optional[str] = None,
 ) -> dict:
     """Full preparation pipeline for Stray Scanner data.
-    
+
     Extracts frames, loads all priors, and returns a dict with everything
     needed for MapAnythingV2 multi-modal inference.
-    
+
     Args:
         data_dir: Path to Stray Scanner capture (contains rgb.mp4, depth/, etc.)
         frames_output_dir: Where to save extracted JPGs
-        stride: Frame subsampling stride (60fps → 30fps with stride=2)
+        stride: Frame subsampling stride (60fps → 30fps with stride=2). Ignored
+            when ``selected_frames_path`` is provided.
         max_frames: Max frames to use (0 = all)
         confidence_threshold: Min confidence level (0-2)
-    
+        selected_frames_path: Optional path to ``selected_frames.json`` produced
+            by the keyframe selector. When given, ``stride`` is ignored and the
+            pipeline restricts itself to the keyframes the upstream filter
+            picked (blur + cosine-similarity); the per-frame extraction step
+            is also skipped because those JPGs are already on disk.
+
     Returns:
         dict with keys:
             frame_paths: list of extracted frame paths
@@ -233,28 +241,47 @@ def prepare_stray_data(
             depth_shape: (H, W) of the native depth maps (192, 256)
     """
     data = Path(data_dir)
-    
+
     # 1. Load intrinsics (for RGB resolution)
     K_rgb = load_intrinsics(str(data / "camera_matrix.csv"))
     print(f"[StrayScanner] K (RGB): fx={K_rgb[0,0]:.1f} fy={K_rgb[1,1]:.1f} "
           f"cx={K_rgb[0,2]:.1f} cy={K_rgb[1,2]:.1f}")
-    
+
     # 2. Load odometry (raw ARKit poses, no coordinate conversion)
     odo_frame_indices, odo_poses = load_odometry(str(data / "odometry.csv"))
     pose_map = dict(zip(odo_frame_indices, odo_poses))
     print(f"[StrayScanner] Loaded {len(odo_poses)} odometry poses")
-    
-    # 3. Extract frames
-    n_extracted = extract_frames(
-        str(data / "rgb.mp4"),
-        frames_output_dir,
-        max_frames=max_frames,
-        stride=stride,
-    )
-    
-    # 4. Get extracted frame list and their indices
+
+    # 3. Frame source: either honour the upstream keyframe selection (when
+    # ``selected_frames_path`` is given) or fall back to the legacy mp4
+    # extraction with stride.
     frames_dir = Path(frames_output_dir)
+    keyframe_set: Optional[set] = None
+    if selected_frames_path:
+        try:
+            with open(selected_frames_path) as f:
+                sel = json.load(f)
+            keyframe_set = set(sel.get("selected_files", []))
+            print(f"[StrayScanner] Using {len(keyframe_set)} keyframes from "
+                  f"{selected_frames_path} — skipping mp4 stride extraction.")
+        except Exception as e:
+            print(f"[StrayScanner] ⚠️ could not read {selected_frames_path}: {e}")
+            keyframe_set = None
+
+    if keyframe_set is None:
+        n_extracted = extract_frames(
+            str(data / "rgb.mp4"),
+            frames_output_dir,
+            max_frames=max_frames,
+            stride=stride,
+        )
+
+    # 4. Get extracted frame list and their indices
     frame_files = sorted(frames_dir.glob("*.jpg"))
+    if keyframe_set is not None:
+        frame_files = [p for p in frame_files if p.name in keyframe_set]
+        print(f"[StrayScanner] Filtered to {len(frame_files)} keyframes "
+              f"matching selected_frames.json")
     
     # Read one frame to get RGB resolution
     sample = cv2.imread(str(frame_files[0]))
@@ -307,7 +334,7 @@ def prepare_stray_data(
           f"cx={K_depth[0,2]:.1f} cy={K_depth[1,2]:.1f}")
     print(f"[StrayScanner] Depth resolution: {depth_w}x{depth_h}")
     print(f"[StrayScanner] {len(frame_paths)} frames with complete priors "
-          f"(of {n_extracted} extracted)")
+          f"(of {len(frame_files)} candidate frames)")
     
     return {
         "frame_paths": frame_paths,

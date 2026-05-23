@@ -40,14 +40,23 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     pipe.send_log(f"Starting 3D reconstruction (backend: {backend})")
     pipe.send_progress(0, "Initializing...", stage="reconstruction")
 
-    # ── Step 1: Frame quality analysis ──
-    # Skip for lidar-only mode (no neural inference, uses all frames)
-    if backend != "lidar":
-        pipe.send_progress(2, "Analyzing frame quality...", stage="reconstruction")
-        server_dir = str(Path(__file__).resolve().parent.parent)
-        if server_dir not in sys.path:
-            sys.path.insert(0, server_dir)
+    # Replace mode (set by PipelineManager). When False, pre-existing frames/
+    # artifacts (frame_quality.json, selected_frames.json) are reused as-is —
+    # they belong to the outputs the user chose NOT to overwrite, so they must
+    # not be re-computed either.
+    replace = config.get("_pipeline_replace", True)
 
+    # Ensure server/ is importable for frame_quality / frame_selector
+    server_dir = str(Path(__file__).resolve().parent.parent)
+    if server_dir not in sys.path:
+        sys.path.insert(0, server_dir)
+
+    # ── Step 1: Frame quality analysis (blur detection) ──
+    fq_path = frames_dir / "frame_quality.json"
+    if not replace and fq_path.exists():
+        pipe.send_log("Reusing existing frame_quality.json (replace=off — skipping blur analysis)")
+    else:
+        pipe.send_progress(2, "Analyzing frame quality...", stage="reconstruction")
         try:
             from frame_quality import analyze_frames, save_manifest
             fq = analyze_frames(str(frames_dir))
@@ -55,44 +64,219 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
                 save_manifest(str(frames_dir), fq)
         except Exception as e:
             pipe.send_log(f"Frame quality analysis skipped: {e}", level="warning")
-    else:
-        pipe.send_log("Skipping frame quality/selection (lidar mode — all frames used)")
-        server_dir = str(Path(__file__).resolve().parent.parent)
-        if server_dir not in sys.path:
-            sys.path.insert(0, server_dir)
 
     # ── Step 2: Frame selection (visual novelty filter) ──
-    # Skip for lidar-only mode
     selected_frames_path = None
-    use_keyframes = recon_cfg.get("use_keyframes", True) and backend != "lidar"
+    use_keyframes = recon_cfg.get("use_keyframes", True)
+    sf_path = frames_dir / "selected_frames.json"
 
     if use_keyframes:
-        from frame_selector import _load_valid_frame_list, select_keyframes, load_selected_frames
-        frame_sel_cfg = config.get("frame_selection", {})
-        if frame_sel_cfg.get("enabled", False):
-            try:
-                pipe.send_progress(5, "Selecting keyframes...", stage="reconstruction")
-                sel = select_keyframes(str(frames_dir), frame_sel_cfg)
-                pipe.send_log(f"Selected {sel['selected_count']}/{sel['total_frames']} keyframes")
-            except Exception as e:
-                pipe.send_log(f"Frame selection failed: {e}", level="warning")
+        if not replace and sf_path.exists():
+            pipe.send_log("Reusing existing selected_frames.json (replace=off — skipping keyframe selection)")
+        else:
+            frame_sel_cfg = config.get("frame_selection", {})
+            if frame_sel_cfg.get("enabled", False):
+                from frame_selector import select_keyframes
+                try:
+                    pipe.send_progress(5, "Selecting keyframes...", stage="reconstruction")
+                    sel = select_keyframes(str(frames_dir), frame_sel_cfg)
+                    pipe.send_log(f"Selected {sel['selected_count']}/{sel['total_frames']} keyframes")
+                except Exception as e:
+                    pipe.send_log(f"Frame selection failed: {e}", level="warning")
 
     # Check if selected_frames.json exists
-    sf_path = frames_dir / "selected_frames.json"
-    if sf_path.exists() and backend != "lidar":
+    if sf_path.exists():
         selected_frames_path = str(sf_path)
         pipe.send_log(f"Using keyframes from {sf_path}")
 
     # ── Step 3: Dispatch to backend ──
     if backend == "da3":
         _run_da3(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
-    elif backend in ("hybrid", "lidar"):
+    elif backend == "lidar":
+        _run_lidar_only(pipe, frames_dir, output_dir, recon_cfg, session_path, selected_frames_path)
+    elif backend == "hybrid":
         _run_hybrid_or_lidar(
             pipe, frames_dir, output_dir, selected_frames_path,
             recon_cfg, config, session_path, mode=backend
         )
     else:
         _run_mapanything(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
+
+
+def _find_stray_dir(session_path: Path) -> Path:
+    """Find the Stray Scanner raw data directory (sibling of src_default/)."""
+    if (session_path / "odometry.csv").exists() and (session_path / "depth").is_dir():
+        return session_path
+    parent = session_path.parent
+    for child in parent.iterdir():
+        if not child.is_dir() or child.name == session_path.name:
+            continue
+        if (child / "odometry.csv").exists() and (child / "depth").is_dir():
+            return child
+    return None
+
+
+def _run_lidar_only(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
+                    recon_cfg: dict, session_path: Path,
+                    selected_frames_path: str = None):
+    """Pure LiDAR reconstruction — backproject LiDAR depth maps with ARKit poses.
+
+    No DA3, no neural inference. Uses native LiDAR (192x256) + odometry.csv.
+    Only processes keyframes (from selected_frames.json) if available.
+    Generates chunk_999_lidar.ply + chunk_999_lidar_origins.npz.
+    CloudCompPy handles cleanup and traceability injection.
+    """
+    import numpy as np
+    import cv2
+
+    lidar_cfg = recon_cfg.get("lidar", {})
+
+    # ── Find Stray Scanner data ──
+    stray_dir = _find_stray_dir(session_path)
+    if stray_dir is None:
+        raise FileNotFoundError(
+            f"Backend 'lidar' requires Stray Scanner data (depth/, odometry.csv), "
+            f"but not found in {session_path} or siblings."
+        )
+
+    n_depth_files = len(list((stray_dir / 'depth').glob('*.png')))
+    pipe.send_log(f"Stray Scanner data: {stray_dir.name}/ ({n_depth_files} depth frames)")
+    pipe.send_progress(5, "Loading Stray Scanner data...", stage="reconstruction")
+
+    # ── Load Stray Scanner data ──
+    from ingestors.stray_scanner import prepare_stray_data
+
+    stray = prepare_stray_data(
+        data_dir=str(stray_dir),
+        frames_output_dir=str(frames_dir),
+        stride=lidar_cfg.get("stride", 4),
+        max_frames=0,
+        confidence_threshold=lidar_cfg.get("confidence_threshold", 1),
+    )
+
+    K = stray['intrinsics']
+    fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
+
+    # ── Filter to keyframes only ──
+    all_frame_files = sorted(Path(frames_dir).glob("*.jpg"))
+    if selected_frames_path and Path(selected_frames_path).exists():
+        with open(selected_frames_path) as f:
+            sf_data = json.load(f)
+        keyframe_names = set(sf_data.get("selected_files", []))
+        frame_files = [fp for fp in all_frame_files if fp.name in keyframe_names]
+        pipe.send_log(f"Using {len(frame_files)}/{len(all_frame_files)} keyframes")
+    else:
+        frame_files = all_frame_files
+        pipe.send_log(f"No keyframe filter — using all {len(frame_files)} frames")
+
+    # Build lookup: frame filename → stray index (for depth/pose access)
+    stray_idx_map = {}  # frame_global_idx → stray array index
+    for si, fidx in enumerate(stray['frame_indices']):
+        stray_idx_map[fidx] = si
+
+    n = len(frame_files)
+    pipe.send_log(f"Backprojecting {n} LiDAR frames with ARKit poses")
+    pipe.send_progress(10, f"Backprojecting {n} frames...", stage="reconstruction")
+
+    # Scale factors: depth → RGB resolution for traceability
+    rgb_h, rgb_w = stray['rgb_shape']
+    depth_h, depth_w = stray['depth_shape']
+    px_scale_y = rgb_h / depth_h
+    px_scale_x = rgb_w / depth_w
+    pipe.send_log(f"Pixel scale: depth({depth_w}x{depth_h}) → RGB({rgb_w}x{rgb_h}) = {px_scale_x:.1f}x")
+
+    all_pts, all_cols = [], []
+    all_fg, all_pr, all_pc = [], [], []
+    all_conf = []
+    skipped = 0
+
+    for i, fp in enumerate(frame_files):
+        # Extract frame index from filename (e.g., "000123.jpg" → 123)
+        frame_global_idx = int(fp.stem)
+        si = stray_idx_map.get(frame_global_idx)
+        if si is None:
+            skipped += 1
+            continue  # No depth/pose for this frame
+
+        depth = stray['depths'][si]
+        raw_conf = stray.get('conf_masks', [None] * len(stray['depths']))[si]
+        c2w = stray['poses'][si]
+
+        rgb = cv2.cvtColor(cv2.imread(str(fp)), cv2.COLOR_BGR2RGB)
+        H, W = depth.shape
+        u, v = np.meshgrid(np.arange(W), np.arange(H))
+
+        valid = depth > 0
+        pts_cam = np.stack([
+            (u[valid] - cx) * depth[valid] / fx,
+            (v[valid] - cy) * depth[valid] / fy,
+            depth[valid]
+        ], axis=-1)
+        pts_world = (pts_cam @ c2w[:3,:3].T) + c2w[:3,3]
+        all_pts.append(pts_world.astype(np.float32))
+
+        # Colors from full-res RGB
+        rgb_rows = np.clip((v[valid] * px_scale_y).astype(int), 0, rgb_h - 1)
+        rgb_cols = np.clip((u[valid] * px_scale_x).astype(int), 0, rgb_w - 1)
+        all_cols.append(rgb[rgb_rows, rgb_cols].astype(np.uint8))
+
+        # Confidence [0,1,2] → [0.0, 0.5, 1.0]
+        if raw_conf is not None:
+            all_conf.append(raw_conf[valid].astype(np.float32) / 2.0)
+        else:
+            all_conf.append(np.ones(valid.sum(), dtype=np.float32))
+
+        # Traceability: real frame index + RGB-resolution pixel coords
+        all_fg.append(np.full(valid.sum(), frame_global_idx, dtype=np.float32))
+        all_pr.append(v[valid].astype(np.float32) * px_scale_y)
+        all_pc.append(u[valid].astype(np.float32) * px_scale_x)
+
+        if (i + 1) % 50 == 0 or i == n - 1:
+            pct = 10 + (i / n) * 80
+            pipe.send_progress(pct, f"Frame {i+1}/{n}", stage="reconstruction")
+
+    if skipped > 0:
+        pipe.send_log(f"Skipped {skipped} frames (no depth/pose data)")
+
+    if not all_pts:
+        raise RuntimeError("No valid points generated from LiDAR backprojection")
+
+    pts = np.concatenate(all_pts)
+    cols = np.concatenate(all_cols)
+    confs = np.concatenate(all_conf)
+    fg = np.concatenate(all_fg)
+    pr = np.concatenate(all_pr)
+    pc = np.concatenate(all_pc)
+
+    pipe.send_log(f"Total: {len(pts):,} points")
+    pipe.send_progress(92, "Saving LiDAR cloud...", stage="reconstruction")
+
+    # ── Save PLY + origins ──
+    chunk_ply = output_dir / "chunk_999_lidar.ply"
+    origins_npz = output_dir / "chunk_999_lidar_origins.npz"
+
+    np.savez_compressed(origins_npz, frame_global=fg, pixel_row=pr, pixel_col=pc)
+
+    _n = len(pts)
+    dtype = np.dtype([('x','<f4'),('y','<f4'),('z','<f4'),
+                      ('r','u1'),('g','u1'),('b','u1'),
+                      ('confidence','<f4')])
+    vd = np.empty(_n, dtype=dtype)
+    vd['x'], vd['y'], vd['z'] = pts[:,0], pts[:,1], pts[:,2]
+    vd['r'], vd['g'], vd['b'] = cols[:,0], cols[:,1], cols[:,2]
+    vd['confidence'] = confs
+
+    with open(chunk_ply, 'wb') as f:
+        f.write(f"ply\nformat binary_little_endian 1.0\nelement vertex {_n}\n"
+                f"property float x\nproperty float y\nproperty float z\n"
+                f"property uchar red\nproperty uchar green\nproperty uchar blue\n"
+                f"property float confidence\n"
+                f"end_header\n".encode('ascii'))
+        vd.tofile(f)
+
+    size_mb = chunk_ply.stat().st_size / (1024 * 1024)
+    pipe.send_log(f"LiDAR cloud: {_n:,} pts ({size_mb:.0f} MB) → {chunk_ply.name}")
+    pipe.send_progress(100, "LiDAR reconstruction complete", stage="reconstruction")
 
 
 def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
@@ -211,11 +395,15 @@ def _run_hybrid_or_lidar(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     da3_cfg = recon_cfg.get("da3", {})
     fallback = lidar_cfg.get("fallback_to_da3", True)
 
-    # ── Detect Stray Scanner data ──
-    from ingestors.stray_detector import detect_stray_data
-    stray_info = detect_stray_data(str(session_path))
+    # ── Detect Stray Scanner data (searches session_path and siblings) ──
+    stray_dir = _find_stray_dir(session_path)
 
-    if not stray_info["is_stray_session"]:
+    if stray_dir is None:
+        if mode == "lidar":
+            raise FileNotFoundError(
+                f"Backend 'lidar' requires Stray Scanner data (depth/, odometry.csv), "
+                f"but not found in {session_path} or siblings."
+            )
         if fallback:
             pipe.send_log(
                 f"No Stray Scanner data found — falling back to DA3 (from {mode})",
@@ -228,7 +416,10 @@ def _run_hybrid_or_lidar(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 f"Backend '{mode}' requires Stray Scanner data, but not found in {session_path}"
             )
 
-    pipe.send_log(f"Stray Scanner data detected: {stray_info['depth_count']} depth frames")
+    # Override session_path with the actual stray data location
+    session_path = stray_dir
+    n_depths = len(list((stray_dir / 'depth').glob('*.png')))
+    pipe.send_log(f"Stray Scanner data found: {stray_dir.name}/ ({n_depths} depth frames)")
     pipe.send_progress(8, f"Generating DA3 config ({mode} mode)...", stage="reconstruction")
 
     # Build DA3 config
@@ -314,13 +505,15 @@ def _run_hybrid_or_lidar(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # ── Post-process reconstruction output (chunks → output/) ──
     _postprocess_reconstruction(pipe, da3_save_dir, output_dir, da3_config, backend=f"da3_{mode}")
 
-    # ── Hybrid mode: generate LiDAR complement cloud ──
-    if mode == "hybrid":
-        pipe.send_progress(92, "Generating LiDAR complement cloud...", stage="reconstruction")
+    # ── Generate LiDAR cloud (hybrid: complement, lidar: primary) ──
+    if mode in ("hybrid", "lidar"):
+        label = "complement" if mode == "hybrid" else "primary"
+        pipe.send_progress(92, f"Generating LiDAR {label} cloud...", stage="reconstruction")
         try:
-            _generate_lidar_complement(pipe, da3_save_dir, output_dir, session_path, lidar_cfg)
+            _generate_lidar_complement(pipe, da3_save_dir, output_dir, session_path,
+                                       lidar_cfg, selected_frames_path)
         except Exception as e:
-            pipe.send_log(f"LiDAR complement generation failed: {e}", level="warning")
+            pipe.send_log(f"LiDAR {label} generation failed: {e}", level="warning")
             import traceback
             traceback.print_exc()
 
@@ -328,12 +521,19 @@ def _run_hybrid_or_lidar(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
 
 
 def _generate_lidar_complement(pipe: WorkerPipe, da3_save_dir: Path, output_dir: Path,
-                               session_path: Path, lidar_cfg: dict):
+                               session_path: Path, lidar_cfg: dict,
+                               selected_frames_path: str = None):
     """Generate a LiDAR-only point cloud using DA3-streaming's refined poses.
 
     Backprojects raw LiDAR depth maps using camera_poses.txt from the
     DA3-streaming run (post-loop-closure). This cloud is saved as
     lidar_complement.ply in output/ for CloudCompPy to merge.
+
+    CRITICAL: ``camera_poses.txt`` is indexed by the SAME keyframe set DA3
+    processed. ``prepare_stray_data`` must therefore be restricted to those
+    keyframes too — otherwise pose[i] gets paired with a different frame's
+    depth (index misalignment) and the complement cloud lands in the wrong
+    place. Hence ``selected_frames_path`` is threaded through.
     """
     import numpy as np
     import cv2
@@ -363,14 +563,26 @@ def _generate_lidar_complement(pipe: WorkerPipe, da3_save_dir: Path, output_dir:
         stride=lidar_cfg.get("stride", 4),
         max_frames=0,
         confidence_threshold=lidar_cfg.get("confidence_threshold", 1),
+        selected_frames_path=selected_frames_path,
     )
 
     K = stray['intrinsics']
     fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
-    frame_files = sorted(Path(frames_dir).glob("*.jpg"))
+    # Use the frame list prepare_stray_data actually selected (keyframe-filtered
+    # when selected_frames_path was given) so frame_files[i] / depths[i] /
+    # poses[i] all index the same frame. Re-globbing the directory would pick
+    # up every JPG and break the index alignment.
+    frame_files = [Path(p) for p in stray['frame_paths']]
     n = min(len(stray['depths']), len(poses), len(frame_files))
 
     pipe.send_log(f"Backprojecting {n} LiDAR frames with DA3-streaming poses")
+
+    # Compute scale factors: depth → RGB resolution for traceability
+    rgb_h, rgb_w = stray['rgb_shape']
+    depth_h, depth_w = stray['depth_shape']
+    px_scale_y = rgb_h / depth_h  # e.g., 1440/192 = 7.5
+    px_scale_x = rgb_w / depth_w  # e.g., 1920/256 = 7.5
+    pipe.send_log(f"Pixel scale: depth({depth_w}x{depth_h}) → RGB({rgb_w}x{rgb_h}) = {px_scale_x:.1f}x")
 
     all_pts, all_cols = [], []
     all_fg, all_pr, all_pc = [], [], []
@@ -382,7 +594,6 @@ def _generate_lidar_complement(pipe: WorkerPipe, da3_save_dir: Path, output_dir:
         
         c2w = poses[i]
         rgb = cv2.cvtColor(cv2.imread(str(frame_files[i])), cv2.COLOR_BGR2RGB)
-        rgb_small = cv2.resize(rgb, (depth.shape[1], depth.shape[0]))
         H, W = depth.shape
         u, v = np.meshgrid(np.arange(W), np.arange(H))
         
@@ -395,7 +606,11 @@ def _generate_lidar_complement(pipe: WorkerPipe, da3_save_dir: Path, output_dir:
         ], axis=-1)
         pts_world = (pts_cam @ c2w[:3,:3].T) + c2w[:3,3]
         all_pts.append(pts_world.astype(np.float32))
-        all_cols.append(rgb_small[valid].astype(np.uint8))
+
+        # Sample colors from full-res RGB at scaled pixel coordinates
+        rgb_rows = np.clip((v[valid] * px_scale_y).astype(int), 0, rgb_h - 1)
+        rgb_cols = np.clip((u[valid] * px_scale_x).astype(int), 0, rgb_w - 1)
+        all_cols.append(rgb[rgb_rows, rgb_cols].astype(np.uint8))
         
         # Normalize ARKit confidence [0, 1, 2] -> [0.0, 0.5, 1.0]
         if raw_conf is not None:
@@ -404,10 +619,11 @@ def _generate_lidar_complement(pipe: WorkerPipe, da3_save_dir: Path, output_dir:
             conf_val = np.ones(valid.sum(), dtype=np.float32)
         all_conf.append(conf_val)
         
-        # Append origin arrays
-        all_fg.append(np.full(valid.sum(), i, dtype=np.float32))
-        all_pr.append(v[valid].astype(np.float32))
-        all_pc.append(u[valid].astype(np.float32))
+        # Traceability: real frame index + pixel coords in RGB resolution
+        real_frame_idx = stray['frame_indices'][i]
+        all_fg.append(np.full(valid.sum(), real_frame_idx, dtype=np.float32))
+        all_pr.append((v[valid].astype(np.float32) * px_scale_y))
+        all_pc.append((u[valid].astype(np.float32) * px_scale_x))
 
     pts = np.concatenate(all_pts)
     cols = np.concatenate(all_cols)
@@ -856,6 +1072,7 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
     # Clean up temporary sys.path addition
     if _added_da3 and da3_src in sys.path:
         sys.path.remove(da3_src)
+
 
 
 # ── Process entry point ──────────────────────────────────────

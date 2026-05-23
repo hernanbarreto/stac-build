@@ -147,7 +147,7 @@ class Sam3VideoInference(Sam3VideoBase):
             find_targets=[None] * num_frames,
             find_metadatas=[None] * num_frames,
         )
-        input_batch = copy_data_to_device(input_batch, device, non_blocking=True)
+        input_batch = copy_data_to_device(input_batch, device, non_blocking=torch.cuda.is_available())
         inference_state["input_batch"] = input_batch
 
         # construct the placeholder interactive prompts and tracking queries
@@ -253,6 +253,7 @@ class Sam3VideoInference(Sam3VideoBase):
         start_frame_idx=None,
         max_frame_num_to_track=None,
         reverse=False,
+        valid_frame_indices=None,
     ):
         """
         Propagate the prompts to get grounding results for the entire video. This method
@@ -271,6 +272,9 @@ class Sam3VideoInference(Sam3VideoBase):
             max_frame_num_to_track,
             reverse=reverse,
         )
+        
+        if valid_frame_indices is not None:
+            processing_order = [f for f in processing_order if f in valid_frame_indices]
 
         # Store max_frame_num_to_track in feature_cache for downstream methods
         inference_state["feature_cache"]["tracking_bounds"] = {
@@ -477,8 +481,11 @@ class Sam3VideoInference(Sam3VideoBase):
 
             # slice those valid entries from the original outputs
             keep_idx = torch.nonzero(keep, as_tuple=True)[0]
-            keep_idx_gpu = keep_idx.pin_memory().to(
-                device=out_binary_masks.device, non_blocking=True
+            keep_idx_gpu = keep_idx
+            if torch.cuda.is_available():
+                keep_idx_gpu = keep_idx_gpu.pin_memory()
+            keep_idx_gpu = keep_idx_gpu.to(
+                device=out_binary_masks.device, non_blocking=torch.cuda.is_available()
             )
 
             out_obj_ids = torch.index_select(out_obj_ids, 0, keep_idx)
@@ -550,11 +557,10 @@ class Sam3VideoInference(Sam3VideoBase):
     def _build_tracker_output(
         self, inference_state, frame_idx, refined_obj_id_to_mask=None
     ):
-        assert (
-            "cached_frame_outputs" in inference_state
-            and frame_idx in inference_state["cached_frame_outputs"]
-        ), "No cached outputs found. Ensure normal propagation has run first to populate the cache."
-        cached_outputs = inference_state["cached_frame_outputs"][frame_idx]
+        if "cached_frame_outputs" not in inference_state or frame_idx not in inference_state["cached_frame_outputs"]:
+            cached_outputs = {}
+        else:
+            cached_outputs = inference_state["cached_frame_outputs"][frame_idx]
 
         obj_id_to_mask = cached_outputs.copy()
 
@@ -996,6 +1002,7 @@ class Sam3VideoInferenceWithInstanceInteractivity(Sam3VideoInference):
         start_frame_idx=None,
         max_frame_num_to_track=None,
         reverse=False,
+        valid_frame_indices=None,
     ):
         # step 1: check which type of propagation to run, should be the same for all GPUs.
         propagation_type, obj_ids = self.parse_action_history_for_propagation(
@@ -1016,6 +1023,7 @@ class Sam3VideoInferenceWithInstanceInteractivity(Sam3VideoInference):
                 start_frame_idx=start_frame_idx,
                 max_frame_num_to_track=max_frame_num_to_track,
                 reverse=reverse,
+                valid_frame_indices=valid_frame_indices,
             )
             return
 
@@ -1032,6 +1040,13 @@ class Sam3VideoInferenceWithInstanceInteractivity(Sam3VideoInference):
             max_frame_num_to_track=max_frame_num_to_track,
             reverse=reverse,
         )
+        original_len = len(processing_order)
+        if valid_frame_indices is not None:
+            valid_set = set(valid_frame_indices)
+            processing_order = [f for f in processing_order if f in valid_set]
+            logger.info(f"[SPARSE] Filtered processing_order from {original_len} to {len(processing_order)} frames (valid_frame_indices has {len(valid_frame_indices)} entries)")
+        else:
+            logger.info(f"[SPARSE] valid_frame_indices is None — processing all {original_len} frames")
 
         tracker_metadata = inference_state["tracker_metadata"]
 

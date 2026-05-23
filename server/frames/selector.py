@@ -40,9 +40,21 @@ from typing import List, Dict, Optional, Tuple
 def _load_dino_model(model_name: str = "dinov2_vitb14", device: str = "cuda"):
     """
     Load DINOv2 model for embedding extraction.
-    Uses ViT-S/14 by default (~86MB, same backbone MapAnything uses).
+    Uses ViT-B/14 by default (~86MB, same backbone MapAnything uses).
+    On CPU: disables xFormers (CUDA-only) BEFORE import.
     """
     import torch
+    import os
+    import sys
+
+    # MUST be set BEFORE torch.hub.load imports dinov2 modules.
+    # dinov2/layers/attention.py checks this at import time (line 21).
+    if device == "cpu":
+        os.environ["XFORMERS_DISABLED"] = "1"
+        # Invalidate cached dinov2 modules so env var takes effect
+        to_remove = [k for k in sys.modules if "dinov2" in k]
+        for k in to_remove:
+            del sys.modules[k]
 
     print(f"[FrameSelector] Loading DINOv2 ({model_name}) on {device}...")
     model = torch.hub.load('facebookresearch/dinov2', model_name, verbose=False)

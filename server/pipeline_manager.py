@@ -239,6 +239,7 @@ class PipelineManager:
     STAGE_OUTPUT_FILES: Dict[StageId, List[str]] = {
         StageId.RECONSTRUCTION: ["chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json",
                       "slam_reconstruction.ply", "maplong_run", "da3_run", "gs_ply",
+                      "gaus_slam_run",
                       "vggt_long_config.yaml", "da3_streaming_config.yaml",
                       "camera_poses_mapanything.json",
                       "intrinsic.txt", "lidar_complement.ply"],
@@ -322,7 +323,17 @@ class PipelineManager:
         # 1) Clean stage output files in output/ dir
         for sid in stages_to_clean:
             patterns = PipelineManager.STAGE_OUTPUT_FILES.get(sid, [])
-            _delete_patterns(output_dir, patterns)
+            # Protect gaus_slam_run/da3_full if nerfstudio_run symlinks to it
+            # (nerfstudio resume depends on this data surviving cleanup)
+            ns_da3_link = output_dir / "nerfstudio_run" / "da3_full"
+            protected_dirs = set()
+            if ns_da3_link.is_symlink():
+                try:
+                    protected_dirs.add(ns_da3_link.resolve().parent.name)
+                except Exception:
+                    pass
+            filtered = [p for p in patterns if p not in protected_dirs]
+            _delete_patterns(output_dir, filtered)
 
         # 2) Clean frames/ dir files when reconstruction is re-run
         if stage_id == StageId.RECONSTRUCTION and session_dir:
@@ -387,7 +398,7 @@ class PipelineManager:
                 await on_progress(job.session_id, job.to_dict())
 
             try:
-                ok = await self._run_stage(job, stage_state, session_dir, config, on_progress)
+                ok = await self._run_stage(job, stage_state, session_dir, config, on_progress, replace)
                 if not ok:
                     stage_state.status = JobStatus.FAILED
                     success = False
@@ -426,6 +437,7 @@ class PipelineManager:
         session_dir: str,
         config: dict,
         on_progress: Optional[ProgressCallback],
+        replace: bool = True,
     ) -> bool:
         """Run a single stage as a subprocess with Pipe IPC."""
 
@@ -444,8 +456,10 @@ class PipelineManager:
         server_conn, worker_conn = ctx.Pipe()
         job._server_conn = server_conn
 
-        # Merge stage-specific config with global config
-        merged_config = {**config, **stage_state.stage.config}
+        # Merge stage-specific config with global config.
+        # _pipeline_replace lets workers reuse pre-existing artifacts when the
+        # user disabled "Replace existing outputs" (only map_worker reads it).
+        merged_config = {**config, **stage_state.stage.config, "_pipeline_replace": replace}
 
         proc = ctx.Process(
             target=worker_mod.run,
@@ -488,6 +502,8 @@ class PipelineManager:
                     level = msg.get("level", "info")
                     log_msg = f"[{stage_id.value}] {msg.get('msg', '')}"
                     getattr(logger, level, logger.info)(log_msg)
+                    # Also print to terminal so logs are visible in start.sh console
+                    print(log_msg, flush=True)
                     # Forward log to UI via progress callback
                     stage_state.message = msg.get("msg", "")
                     if on_progress:
@@ -501,9 +517,12 @@ class PipelineManager:
                         stage_state.message = msg.get("detail", "Failed")
 
                 elif msg_type == "error":
-                    logger.error(f"[{stage_id.value}] {msg.get('msg', 'Unknown error')}")
+                    error_msg = f"[{stage_id.value}] ❌ {msg.get('msg', 'Unknown error')}"
+                    logger.error(error_msg)
+                    print(error_msg, flush=True)
                     if msg.get("traceback"):
                         logger.error(msg["traceback"])
+                        print(msg["traceback"], flush=True)
 
             # Check if process died unexpectedly
             if not proc.is_alive() and not done:
@@ -537,6 +556,7 @@ class PipelineManager:
 def build_pipeline_stages(
     ordered_stages: Optional[List[str]] = None,
     enabled: Optional[Dict[str, bool]] = None,
+    backend: Optional[str] = None,
 ) -> List[PipelineStage]:
     """Build the pipeline stage list.
     
@@ -545,6 +565,8 @@ def build_pipeline_stages(
                         If not provided, defaults to DEFAULT_STAGE_ORDER.
         enabled: Optional dict like {"reconstruction": True, "vlm": False, ...}
                  to override which stages are actually executed.
+        backend: Reconstruction backend name (e.g., "da3", "gaus_slam").
+                 Used to auto-disable stages incompatible with certain backends.
     """
     if ordered_stages is None:
         stage_order = DEFAULT_STAGE_ORDER
@@ -557,7 +579,14 @@ def build_pipeline_stages(
             except ValueError:
                 logger.warning(f"Unknown stage: {s}")
 
-    enabled_dict = enabled or {}
+    enabled_dict = dict(enabled) if enabled else {}
+
+    # Auto-disable stages based on reconstruction backend
+    _gaus_backends = ("gaus_slam", "gaus_slam_lidar", "gaus_slam_da3", "gaus_slam_hybrid")
+    if backend in _gaus_backends:
+        # GauS-SLAM produces clean Gaussian surfels — CloudCompPy cleaning is unnecessary
+        enabled_dict.setdefault("cloudcompy", False)
+        logger.info(f"[Pipeline] Auto-disabled CloudCompPy (backend={backend})")
     stages = []
     
     for stage_id in stage_order:

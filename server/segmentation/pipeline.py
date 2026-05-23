@@ -92,6 +92,32 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
         
         # ── Step 4: Match masks to cloud and cache final result ──
         result = _match_and_save_result(output_dir)
+        
+        # ── Step 5: Export ShapeR pkl files for each instance ──
+        # NOTE: ShapeR export is temporarily disconnected from the segmentation manager.
+        # It will be executed as a separate standalone step later to reduce memory load.
+        # if result.get("instances"):
+        #     try:
+        #         from segmentation.shaper_export import export_shaper_pkls
+        #         from segmentation.object_captioner import caption_object
+        #         
+        #         session_dir = frames_dir.parent
+        #         pkl_paths = export_shaper_pkls(
+        #             output_dir=output_dir,
+        #             frames_dir=frames_dir,
+        #             segments_result=result,
+        #             session_dir=session_dir,
+        #             caption_fn=caption_object,
+        #         )
+        #         if pkl_paths:
+        #             print(f"[SegPipeline] 📦 ShapeR export: {len(pkl_paths)} pkl files")
+        #         else:
+        #             print("[SegPipeline] ⚠️ ShapeR export produced no pkl files")
+        #     except Exception as e:
+        #         print(f"[SegPipeline] ⚠️ ShapeR export failed (non-fatal): {e}")
+        #         import traceback
+        #         traceback.print_exc()
+        
         if result.get("instances"):
             return result
         return seg_meta
@@ -753,15 +779,30 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     """
     colors = cfg["visualization"]["segment_colors"]
     
-    # Load resolution from chunk metadata
+    # Load resolution from chunk metadata (DA3/MapAnything backends)
     meta_files = sorted(output_dir.glob("chunk_*_meta.json"))
-    scaled_res = [504, 280]
-    original_res = [1280, 720]
+    scaled_res = None   # Will be detected from actual mask shape if not available
+    original_res = None  # Will be detected from actual frames if not available
     if meta_files:
         with open(meta_files[0]) as f:
             meta = json.load(f)
-            scaled_res = meta.get("scaled_resolution", scaled_res)
-            original_res = meta.get("original_resolution", original_res)
+            scaled_res = meta.get("scaled_resolution")
+            original_res = meta.get("original_resolution")
+    
+    # Detect original resolution from frames on disk if not in metadata
+    if original_res is None:
+        frames_dir = output_dir.parent / "frames"
+        if not frames_dir.exists():
+            frames_dir = output_dir / "frames"
+        if frames_dir.exists():
+            sample_frames = sorted([f for f in frames_dir.iterdir() if f.suffix.lower() in ('.jpg', '.png', '.jpeg')])
+            if sample_frames:
+                sample_img = cv2.imread(str(sample_frames[0]))
+                if sample_img is not None:
+                    original_res = [sample_img.shape[0], sample_img.shape[1]]  # [H, W]
+        if original_res is None:
+            original_res = [720, 1280]  # Fallback only
+            print(f"[SegPipeline] ⚠️ Could not detect original resolution, using fallback {original_res}")
     
     # ── Load existing data ──
     masks_path = output_dir / "seg_masks.npz"
@@ -835,11 +876,22 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     new_frame_indices = sorted(all_masks.keys())
     mask_count = len(existing_npz)
     
+    # If scaled_res not set (no chunk metadata), detect from first mask shape
+    if scaled_res is None:
+        for frame_masks in all_masks.values():
+            for mask in frame_masks.values():
+                scaled_res = [mask.shape[0], mask.shape[1]]
+                break
+            break
+        if scaled_res is None:
+            scaled_res = [original_res[0], original_res[1]]  # Use original as fallback
+        print(f"[SegPipeline] Auto-detected mask resolution: {scaled_res[0]}x{scaled_res[1]}")
+    
     for frame_idx, frame_masks in all_masks.items():
         for raw_obj_id, mask in frame_masks.items():
             remapped_id = id_remap[raw_obj_id]
             key = f"f{frame_idx}_o{remapped_id}"
-            # Ensure mask is at scaled resolution
+            # Resize to scaled resolution only if needed (preserves native SAM3 output when no chunk metadata)
             if mask.shape[0] != scaled_res[0] or mask.shape[1] != scaled_res[1]:
                 mask = cv2.resize(mask.astype(np.uint8),
                                  (scaled_res[1], scaled_res[0]),
@@ -1113,8 +1165,8 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
     }
 
 
-def _find_nearest_keyframe(frame_idx: int, keyframes: list) -> Optional[int]:
-    """Find the nearest keyframe to a given frame index."""
+def _find_nearest_keyframe(frame_idx: int, keyframes: list, max_dist: int = 5) -> Optional[int]:
+    """Find the nearest keyframe to a given frame index, within max_dist."""
     if not keyframes:
         return None
     if frame_idx in keyframes:
@@ -1127,7 +1179,10 @@ def _find_nearest_keyframe(frame_idx: int, keyframes: list) -> Optional[int]:
         if d < best_dist:
             best = kf
             best_dist = d
-    return best
+    
+    if best_dist <= max_dist:
+        return best
+    return None
 
 
 def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
@@ -1605,6 +1660,47 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     
     obj_mask_areas = {}  # obj_id → average mask area (for priority)
     
+    # Precompute original image resolution for pixel coord scaling
+    # Sources (priority): 1) chunk metadata, 2) actual frame dimensions, 3) pixel coord max
+    orig_h, orig_w = None, None
+    
+    # Try 1: chunk metadata (DA3, MapAnything backends)
+    meta_files = sorted(output_dir.glob("chunk_*_meta.json"))
+    if meta_files:
+        try:
+            with open(meta_files[0]) as f:
+                chunk_meta = json.load(f)
+            orig_res = chunk_meta.get("original_resolution")
+            if orig_res:
+                orig_h, orig_w = float(orig_res[0]), float(orig_res[1])  # [H, W]
+        except Exception:
+            pass
+    
+    # Try 2: read actual frame image from disk
+    if orig_h is None:
+        frames_dir = output_dir.parent / "frames"
+        if not frames_dir.exists():
+            frames_dir = output_dir / "frames"
+        if frames_dir.exists():
+            sample_frames = sorted([f for f in frames_dir.iterdir() if f.suffix.lower() in ('.jpg', '.png', '.jpeg')])
+            if sample_frames:
+                try:
+                    sample_img = cv2.imread(str(sample_frames[0]))
+                    if sample_img is not None:
+                        orig_h, orig_w = float(sample_img.shape[0]), float(sample_img.shape[1])
+                except Exception:
+                    pass
+    
+    # Fallback 3: pixel coord max (last resort, works when coords span full image)
+    if orig_h is None:
+        orig_h = float(pixel_row.max() + 1)
+        orig_w = float(pixel_col.max() + 1)
+        print(f"[SegPipeline]   ⚠️ Original resolution estimated from pixel coords (fallback)")
+    
+    mask_h_ref, mask_w_ref = scaled_res[0], scaled_res[1]
+    print(f"[SegPipeline]   Original resolution: {orig_w:.0f}x{orig_h:.0f}, mask: {mask_h_ref}x{mask_w_ref}")
+    print(f"[SegPipeline]   Scale factors: row={mask_h_ref/orig_h:.4f}, col={mask_w_ref/orig_w:.4f}")
+    
     for i, obj_id in enumerate(obj_ids):
         # Skip obj_ids not in the incremental set
         if only_obj_ids is not None and obj_id not in only_obj_ids:
@@ -1613,13 +1709,10 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         frame_areas = []
         
         for cloud_frame, pt_indices in frame_groups.items():
-            # Find nearest SAM3 keyframe
-            nearest_kf = _find_nearest_keyframe(cloud_frame, keyframes)
-            if nearest_kf is None:
-                continue
-            
-            # Load mask for this frame+object
-            mask_key = f"f{nearest_kf}_o{obj_id}"
+            # EXACT MATCH ONLY: if SAM3 didn't generate a mask for this exact frame, skip these points.
+            # No fuzzy "nearest frame" matching, because that maps background points from unsegmented frames 
+            # to masks from completely different timestamps.
+            mask_key = f"f{cloud_frame}_o{obj_id}"
             if mask_key not in masks_data:
                 continue
             
@@ -1645,8 +1738,15 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             frame_areas.append(mask_area)
             
             # Look up each point's pixel in the eroded mask
-            rows = np.clip(pixel_row[pt_indices], 0, mask.shape[0] - 1)
-            cols = np.clip(pixel_col[pt_indices], 0, mask.shape[1] - 1)
+            # pixel_row/pixel_col are in ORIGINAL resolution,
+            # masks are at scaled_res — must rescale before lookup
+            mask_h, mask_w = mask.shape[:2]
+            orig_rows = pixel_row[pt_indices].astype(np.float32)
+            orig_cols = pixel_col[pt_indices].astype(np.float32)
+            scaled_rows = (orig_rows * (mask_h / orig_h)).astype(np.int32)
+            scaled_cols = (orig_cols * (mask_w / orig_w)).astype(np.int32)
+            rows = np.clip(scaled_rows, 0, mask_h - 1)
+            cols = np.clip(scaled_cols, 0, mask_w - 1)
             in_mask = mask[rows, cols]
             
             matched = pt_indices[in_mask]

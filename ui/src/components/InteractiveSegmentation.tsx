@@ -42,6 +42,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const [promptPoints, setPromptPoints] = useState<{ x: number, y: number, label: number }[]>([])
     const promptPointsMapRef = useRef<Map<number, { x: number, y: number, label: number }[]>>(new Map())
     const maskCacheRef = useRef<Map<number, string>>(new Map())
+    const [selectedFrames, setSelectedFrames] = useState<Set<number>>(new Set())
 
     // Zoom/Pan state
     const [zoom, setZoom] = useState(1)
@@ -115,10 +116,11 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 if (kfList.length === 0) throw new Error('No keyframes found')
                 setKeyframes(kfList)
                 setKfIndex(0)
+                setSelectedFrames(new Set(kfList.map((_, i) => i)))
 
                 // Fire-and-forget: kick off SAM3 init (server returns 202 immediately)
                 setStatus(`Initializing SAM3 model... (${kfList.length} keyframes)`)
-                fetch(`/api/segmentation/start_session/${sessionId}`, { method: 'POST' }).catch(() => {})
+                fetch(`/api/segmentation/start_session/${sessionId}`, { method: 'POST' }).catch(() => { })
 
                 // Poll lightweight status endpoint every 2s until ready
                 const startTime = Date.now()
@@ -391,15 +393,23 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             const newPoints = [...promptPoints, { x, y, label: isPositive ? 1 : 0 }]
             setPromptPoints(newPoints)
 
-            // Send point to SAM3
+            // Send the FULL accumulated point set to SAM3, not just the new
+            // click. SAM3's add_new_points_or_box defaults to
+            // ``clear_old_points=True`` (see vendor/sam3/sam3/model/
+            // sam3_tracking_predictor.py), so each call replaces prior
+            // prompts for this (frame, obj_id). Sending only the latest point
+            // is what made compound-object segmentations regress to just the
+            // last click — the mask "forgot" everything except the most
+            // recent input. The remove-point branch above already does this
+            // correctly; we mirror it here.
             const res = await fetch(`/api/segmentation/add_prompt`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     state_id: stateId, session_id: sessionId,
                     frame_idx: currentFrameIdx, obj_id: 1,
-                    points: [[x / natW, y / natH]],
-                    labels: [isPositive ? 1 : 0]
+                    points: newPoints.map(p => [p.x / natW, p.y / natH]),
+                    labels: newPoints.map(p => p.label)
                 }),
             })
             if (!res.ok) throw new Error('Failed to add prompt')
@@ -467,6 +477,36 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     // ── Propagate handler (SSE streaming) ─────────────────
     const [propagationPct, setPropagationPct] = useState(-1)  // -1 = not propagating
 
+    // ── Evaluate handler (DINOv2) ─────────────────
+    const handleEvaluate = useCallback(async () => {
+        if (!stateId || !hasPrompts || loading) return;
+        try {
+            setLoading(true)
+            setStatus('🧠 Evaluating DINOv2 priors across all frames...')
+            const res = await fetch('/api/segmentation/evaluate_frames', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    state_id: stateId,
+                    session_id: sessionId,
+                    frame_idx: currentFrameIdx,
+                    obj_id: 1
+                })
+            })
+            if (!res.ok) throw new Error('Evaluation failed')
+            const data = await res.json()
+            const valid = data.valid_frames as boolean[]
+            const newSet = new Set<number>()
+            valid.forEach((v, i) => { if (v) newSet.add(i) })
+            setSelectedFrames(newSet)
+            setStatus(`✅ Evaluation complete: ${newSet.size}/${valid.length} frames selected. Review before propagating.`)
+        } catch (e: any) {
+            setStatus(`Error: ${e.message}`)
+        } finally {
+            setLoading(false)
+        }
+    }, [stateId, sessionId, currentFrameIdx, hasPrompts, loading])
+
     const handlePropagate = useCallback(async () => {
         if (!stateId || propagatingRef.current) return
         propagatingRef.current = true
@@ -475,12 +515,17 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         try {
             setLoading(true)
             setPropagationPct(0)
-            setStatus(`Propagating "${name}"...`)
+            setStatus(`Propagating "${name}" on ${selectedFrames.size} frames...`)
 
             const res = await fetch(`/api/segmentation/propagate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ state_id: stateId, session_id: sessionId, label_name: name })
+                body: JSON.stringify({
+                    state_id: stateId,
+                    session_id: sessionId,
+                    label_name: name,
+                    selected_frames: Array.from(selectedFrames).sort((a, b) => a - b)
+                })
             })
 
             if (res.status === 409) {
@@ -530,6 +575,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                 setPromptPoints([])
                                 promptPointsMapRef.current.clear()
                                 maskCacheRef.current.clear()
+                                setSelectedFrames(new Set(keyframes.map((_, i) => i)))
                                 setStatus(`✅ "${name}" segmented successfully!`)
 
                                 // Clear SAM3 tracked objects so next segment starts fresh
@@ -592,6 +638,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 setPromptPoints([])
                 promptPointsMapRef.current.clear()
                 maskCacheRef.current.clear()
+                setSelectedFrames(new Set(keyframes.map((_, i) => i)))
                 setStatus(`✅ "${name}" propagation finished`)
                 // Clear SAM3 tracked objects
                 if (stateId) {
@@ -625,7 +672,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             setLoading(false)
             propagatingRef.current = false
         }
-    }, [stateId, sessionId, labelName])
+    }, [stateId, sessionId, labelName, selectedFrames, keyframes])
 
     // ── Auto segmentation ──────────────────────────────────
     const handleAutoSegment = useCallback(async () => {
@@ -870,6 +917,21 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                 <span className="seg-zoom-label">{Math.round(zoom * 100)}%</span>
                                 <button className="seg-nav-btn" onClick={() => setZoom(z => Math.max(0.5, z - 0.5))}>−</button>
                                 <button className="seg-nav-btn" onClick={resetView} title="Reset">⟲</button>
+
+                                <div style={{ width: 12 }}></div>
+
+                                <button className="seg-nav-btn" style={{ color: '#2ecc71', fontWeight: 'bold' }} title="Include frame & Next" onClick={() => {
+                                    const next = new Set(selectedFrames)
+                                    next.add(kfIndex)
+                                    setSelectedFrames(next)
+                                    if (kfIndex < keyframes.length - 1) setKfIndex(i => i + 1)
+                                }}>✓</button>
+                                <button className="seg-nav-btn" style={{ color: '#e74c3c', fontWeight: 'bold' }} title="Exclude frame & Next" onClick={() => {
+                                    const next = new Set(selectedFrames)
+                                    next.delete(kfIndex)
+                                    setSelectedFrames(next)
+                                    if (kfIndex < keyframes.length - 1) setKfIndex(i => i + 1)
+                                }}>✕</button>
                             </div>
                         </div>
 
@@ -964,6 +1026,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                         setLabelName('')
                                         promptPointsMapRef.current.clear()
                                         maskCacheRef.current.clear()
+                                        setSelectedFrames(new Set(keyframes.map((_, i) => i)))
                                         // Clear SAM3 tracked objects (lightweight — session stays alive)
                                         if (stateId) {
                                             try {
@@ -987,9 +1050,27 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                     }}
                                     disabled={loading || (promptPoints.length === 0 && promptPointsMapRef.current.size === 0)}
                                 >✕ Clear</button>
+                                <button className="admin-save-btn" style={{ background: '#9b59b6', color: '#fff' }} onClick={handleEvaluate}
+                                    disabled={loading || !stateId || !hasPrompts || propagatingRef.current}>🧠 Evaluate</button>
                                 <button className="admin-save-btn" onClick={handlePropagate}
-                                    disabled={loading || !stateId || !hasPrompts}>▶ Propagate</button>
+                                    disabled={loading || !stateId || !hasPrompts}>▶ Propagate ({selectedFrames.size})</button>
                             </div>
+                        </div>
+
+                        {/* Frames Gallery */}
+                        <div className="seg-frames-bar" style={{ display: 'flex', overflowX: 'auto', gap: 6, padding: '8px', background: '#222', borderTop: '1px solid #333' }}>
+                            {keyframes.map((kf, i) => (
+                                <div key={i} style={{ position: 'relative', flexShrink: 0, cursor: 'pointer', opacity: selectedFrames.has(i) ? 1 : 0.4 }} onClick={() => {
+                                    const next = new Set(selectedFrames)
+                                    if (next.has(i)) next.delete(i)
+                                    else next.add(i)
+                                    setSelectedFrames(next)
+                                }}>
+                                    <img src={`/api/sessions/${sessionId}/frames/${kf}`} style={{ height: 40, borderRadius: 4, border: kfIndex === i ? '2px solid #3498db' : '1px solid transparent' }} />
+                                    <input type="checkbox" checked={selectedFrames.has(i)} readOnly style={{ position: 'absolute', top: 2, right: 2, margin: 0, cursor: 'pointer', transform: 'scale(0.8)' }} />
+                                    <div style={{ position: 'absolute', bottom: 2, left: 2, fontSize: 9, background: 'rgba(0,0,0,0.7)', color: 'white', padding: '0 3px', borderRadius: 2 }}>{i + 1}</div>
+                                </div>
+                            ))}
                         </div>
                     </div>
                 </div>

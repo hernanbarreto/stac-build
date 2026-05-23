@@ -68,6 +68,7 @@ def main():
         stride=args.stride,
         max_frames=args.max_frames,
         confidence_threshold=args.confidence_threshold,
+        selected_frames_path=args.selected_frames,
     )
     print(f"[DA3-{args.mode.upper()}] {len(stray_data['frame_paths'])} frames prepared")
 

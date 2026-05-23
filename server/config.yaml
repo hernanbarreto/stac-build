@@ -1,19 +1,55 @@
-# --- Server Settings ---
+# ============================================================================
+# STAC-Builder — Server Configuration
+# ============================================================================
+# Each top-level key is consumed by specific modules. Keys are NOT free-form —
+# adding/renaming requires updating the consumer. Don't duplicate sections;
+# YAML "last wins" silently masks earlier blocks.
+#
+# Quick map (consumer → section):
+#   main.py                       → server, paths, scene_analysis, bim, fusion
+#   workers/map_worker.py         → reconstruction (.backend, .da3, .lidar,
+#                                   .mapanything, .gaus_slam, .hybrid)
+#   workers/cloudcompy_worker.py  → postprocessing
+#   workers/instance_cleaner_*.py → instance_cleaning
+#   workers/vlm_worker.py         → scene_analysis
+#   alignment_manager.py          → alignment.auto_leveling
+#   frame_selector.py             → frame_selection
+#   frames/storage.py             → storage, reconstruction.<backend>.{chunk_size,
+#                                   chunk_overlap}
+#   fusion_engine.py              → fusion
+#   segmentation/sam3_wrapper.py  → models.segmentation
+#   segmentation/manager.py       → visualization.segment_colors,
+#                                   models.segmentation
+#   segmentation/scene_analyzer.py→ scene_analysis (parts)
+#   bim/comparison.py             → bim.deviation
+#   stray_da3_streaming.py        → reconstruction.lidar.trust_range
+# ============================================================================
+
+
+# ── Server ─────────────────────────────────────────────────────────
 server:
   host: "0.0.0.0"
   port: 8765
-  static_dir: "../static"  # Relative to server directory
+  static_dir: "../static"   # Relative to server/
 
-# --- Scene Analysis (VLM Auto-Inventory) ---
-# InternVL3 auto-detects object categories from scan frames
-# Replaces manual prompt input for segmentation
+# ── Paths ──────────────────────────────────────────────────────────
+paths:
+  output_dir_name: "output"
+  # Read at import time by config.py to override DATA_DIR/projects.
+  # Use an external mount to save SSD space (e.g. "/mnt/e/stac-projects").
+  projects_dir: "/home/hernan/stac-builder/server/projects"
+
+
+# ── Scene Analysis (VLM auto-inventory) ────────────────────────────
+# InternVL3 detects object categories in scan frames. Replaces the manual
+# "type a SAM3 prompt" flow when enabled. Consumed by main.py and
+# segmentation/scene_analyzer.py.
 scene_analysis:
   enabled: false
-  model_id: "OpenGVLab/InternVL3-8B"   # MIT license, auto-downloads from HuggingFace
-  max_tiles: 6                           # Image tiles (6=dev/12GB, 12=production/24GB+)
-  max_merged_categories: 25              # Cap after merge across all frames (was 40)
+  model_id: "OpenGVLab/InternVL3-8B"
+  max_tiles: 6                         # 6 = dev/12GB · 12 = production/24GB
+  max_merged_categories: 25
 
-  # VLM prompt — universal 3D scanning (works for construction, residential, commercial)
   prompt: |
     <image>
     You are a spatial analyst for 3D scanning. Identify every physical object and surface visible.
@@ -30,8 +66,7 @@ scene_analysis:
 
     For each element provide:
     - "label": 1-2 word generic name (lowercase, e.g. "chair", "floor")
-    - "sam3_hint": 2-3 word specific phrase to help a segmentation model find it
-      (include material, color, or distinguishing feature, e.g. "checkered armchair", "ceramic floor tiles", "white radiator")
+    - "sam3_hint": 2-3 word specific phrase (include material/color/feature)
 
     Rules:
     1. Return JSON array: [{"label": "...", "sam3_hint": "..."}, ...]
@@ -41,7 +76,6 @@ scene_analysis:
 
     Output ONLY the JSON array.
 
-  # Merge prompt for combining detections across frames
   merge_prompt: |
     Merge these object lists from {n_frames} views into one unified inventory.
 
@@ -51,98 +85,87 @@ scene_analysis:
     1. Merge duplicates and synonyms (e.g. "wooden chair" + "chair" = "chair")
     2. Max {max_categories} entries — prioritize items seen in most frames
     3. MANDATORY: floor, wall, ceiling if detected in any frame
-    4. Keep the best sam3_hint for each merged category (most specific 2-3 word phrase)
+    4. Keep the best sam3_hint for each merged category
     5. Return JSON array of {{"label": "...", "sam3_hint": "..."}} objects
 
     Output ONLY the JSON array.
 
-  # Force-inject these categories even if VLM misses them
   required_categories:
     - { label: "floor" }
     - { label: "wall" }
     - { label: "ceiling" }
 
-# --- Frame Selection (Visual Novelty Filter) ---
-# Dual-mode keyframe selection: DINO cosine (default) or ORB-SLAM H/F ratio (fallback)
-# DINO uses DINOv2 embeddings to detect visual scene changes
-# H/F ratio uses feature matching to detect geometric parallax
+
+# ── Frame Selection (visual novelty filter) ────────────────────────
+# Two methods: DINO cosine similarity (default, more reliable) or ORB-SLAM
+# H/F ratio (legacy fallback). Consumed by frame_selector.py and triggered
+# at start of reconstruction in workers/map_worker.py.
 frame_selection:
   enabled: true
-  method: "dino"                # "dino" (DINO cosine similarity) or "hf_ratio" (legacy ORB-SLAM)
-  # DINO settings (used when method=dino)
-  dino_model: "dinov2_vitb14"   # ViT-B/14 (~330MB, same model VGGT-Long uses for loop closure)
-  dino_threshold: 0.92          # Cosine similarity threshold (higher = more keyframes accepted)
-  dino_device: "cuda"           # "cuda" or "cpu" (auto-falls back to CPU if no GPU)
-  # Legacy H/F settings (used when method=hf_ratio, or as fallback if DINO fails)
-  max_features: 2000            # ORB features per frame
-  sigma: 1.0                    # Reprojection error std dev (pixels)
-  process_scale: 0.25           # Process at 25% resolution (speed)
-  hf_ratio_threshold: 0.45      # H/(H+F) ratio: < 0.45 = parallax present (ORB-SLAM default)
-  min_displacement: 3.0         # Minimum median pixel displacement
-  force_accept_interval: 30     # Safety: force accept every N frames even if no parallax
+  method: "dino"                       # "dino" | "hf_ratio"
 
-# --- Paths ---
-paths:
-  # Default output directory name within each session
-  output_dir_name: "output"
-  # Projects data directory (point clouds, frames, reconstructions)
-  # Set to external drive path to save disk space on internal SSD
-  #projects_dir: "/mnt/e/stac-projects"
-  projects_dir: "/home/hernan/stac-builder/server/projects"
+  # DINO settings
+  dino_model: "dinov2_vitb14"          # ViT-B/14 ~330MB, same as VGGT-Long
+  dino_threshold: 0.92                 # cosine sim threshold (higher = more keyframes)
+  dino_device: "cuda"                  # "cuda" | "cpu" (auto-falls back)
 
-# --- Models ---
+  # Legacy H/F ratio (used if method=hf_ratio or DINO fails)
+  max_features: 2000
+  sigma: 1.0
+  process_scale: 0.25
+  hf_ratio_threshold: 0.45             # ORB-SLAM default
+  min_displacement: 3.0
+  force_accept_interval: 30            # Force accept every N frames as safety net
+
+
+# ── Models: Segmentation (SAM 3 / SAM 3.1) ─────────────────────────
 models:
   segmentation:
-    # SAM3 Model — v3.1 Object Multiplex (shared-memory multi-object tracking)
-    version: "sam3"             # "sam3" (legacy per-object) or "sam3.1" (Object Multiplex)
+    version: "sam3"                    # "sam3" | "sam3.1" (Object Multiplex)
     device: "cuda"
 
-    # SAM 3.1 Multiplex parameters
-    multiplex_count: 16           # Objects per multiplex bucket (reduce to 8 for <12GB VRAM)
-    max_num_objects: 32           # Max tracked objects per session
-    compile: false                # torch.compile for ~2x speedup (requires warmup time)
-    use_fa3: false                # FlashAttention 3 (requires flash-attn-3 pip package)
-    # Local checkpoint path (avoids HuggingFace download at runtime)
-    # If null, auto-downloads from HuggingFace (requires gated repo access)
-    checkpoint_path: null         # e.g. "/home/hernan/stac-builder/weights/sam3/sam3.1_multiplex.pt"
+    # SAM 3.1 Multiplex
+    multiplex_count: 16                # objects per multiplex bucket (8 if <12GB VRAM)
+    max_num_objects: 32
+    compile: false                     # torch.compile (~2x speedup, warmup time)
+    use_fa3: false                     # FlashAttention 3 (requires flash-attn-3)
+    checkpoint_path: null              # null = auto-download from HuggingFace
 
-    # Inference parameters
+    # Inference
     keyframe_interval: 2
     max_search_frames: 300
     points_per_side: 32
     pred_iou_thresh: 0.88
     stability_score_thresh: 0.95
+    prompt_search_frames: [0, 15]      # frames to apply prompt (relative to chunk start)
 
-    # Prompting Strategy
-    prompt_search_frames: [0, 15] # Frames to apply prompt to (Relative to chunk start)
-    
     # Batched processing (memory management for long videos)
-    batch_size: 50              # Frames per segmentation session
-    batch_overlap: 10           # Overlap between batches for ID continuity
-    iou_match_threshold: 0.3    # Min IoU to consider same object across batches
+    batch_size: 50
+    batch_overlap: 10
+    iou_match_threshold: 0.3
 
-    # Segment sub-cloud cleaning (voxel grid + local PCA + depth peeling)
+    # Per-segment cleaning (voxel grid + local PCA + depth peeling)
     segment_cleaning:
       enabled: true
-      voxel_size: 0.005            # Grid cell size in meters (5mm) — for curved surface fallback
-      min_points_per_voxel: 5      # Skip voxels with fewer points (reduced for small voxels)
-      planarity_threshold: 0.3     # λ₃/λ₁ eigenvalue ratio; below = planar → depth peel
-      layer_tolerance: 0.005       # Keep points within ±5mm of densest layer
-      histogram_bins: 50           # Bins for normal-projection histogram
-      dbscan_enabled: true         # Remove noise points via DBSCAN
-      dbscan_min_samples: 10       # DBSCAN min_samples
-      sor_k: 20                    # SOR k-neighbors (fallback for non-planar voxels)
-      sor_std: 1.5                 # SOR std multiplier
-      mad_multiplier: 3.0          # MAD-based thickness filter
-      # RANSAC face detection
-      ransac_enabled: false        # Disable face detection (deforms non-planar objects)
-      ransac_tolerance: 0.01       # 1cm inlier distance for plane detection
-      min_face_points: 100         # Minimum points to consider a plane as a face
-      max_faces: 8                 # Maximum number of faces to detect
-      face_thickness: 0.01        # 10mm — match ransac_tolerance to keep all inliers
-      mesh_voxel_size: 0.05      # Visualization voxel size in meters (5mm = 0.5cm)
+      voxel_size: 0.005                # 5mm cell — fallback for curved surfaces
+      min_points_per_voxel: 5
+      planarity_threshold: 0.3         # λ₃/λ₁ — below this = planar → depth peel
+      layer_tolerance: 0.005           # ±5mm of densest layer
+      histogram_bins: 50
+      dbscan_enabled: true
+      dbscan_min_samples: 10
+      sor_k: 20
+      sor_std: 1.5
+      mad_multiplier: 3.0
+      ransac_enabled: false            # face detection (deforms non-planar objects)
+      ransac_tolerance: 0.01
+      min_face_points: 100
+      max_faces: 8
+      face_thickness: 0.01
+      mesh_voxel_size: 0.05            # visualization voxel size
 
-# --- Alignment (Auto-Leveling) ---
+
+# ── Alignment (auto-leveling) ──────────────────────────────────────
 alignment:
   auto_leveling:
     enabled: true
@@ -153,18 +176,22 @@ alignment:
     gravity_check_threshold: 0.5
     target_gravity: [0.0, 1.0, 0.0]
 
-# --- Storage & Filtering ---
+
+# ── Storage & Filtering ────────────────────────────────────────────
 storage:
   jpeg_quality: 95
-  
-  outlier_removal:
+
+  outlier_removal:                     # frames/storage.py global outlier filter
     enabled: false
     eps: 0.05
     min_samples: 10
     sor_k: 20
     sor_std_ratio: 2.0
 
-# --- Fusion Engine (Visualization) ---
+
+# ── Fusion Engine (visualization) ──────────────────────────────────
+# Default intrinsics for client-side viewport overlays when no real K is
+# available (mostly fallback). Consumed by fusion_engine.py.
 fusion:
   min_depth: 0.1
   max_depth: 50.0
@@ -176,86 +203,89 @@ fusion:
     cx: 640.0
     cy: 360.0
 
-# --- Visualization Assets ---
+
+# ── Visualization ──────────────────────────────────────────────────
 visualization:
-  segment_colors: [
-    "#FFFF00", "#00FF00", "#FF00FF", "#00FFFF", 
-    "#FF8000", "#8000FF", "#FF0080", "#0080FF"
-  ]
+  segment_colors:
+    - "#FFFF00"
+    - "#00FF00"
+    - "#FF00FF"
+    - "#00FFFF"
+    - "#FF8000"
+    - "#8000FF"
+    - "#FF0080"
+    - "#0080FF"
 
 
-
-# --- BIM/IFC Configuration ---
+# ── BIM / IFC ──────────────────────────────────────────────────────
 bim:
-  # Supported formats
   supported_formats: [".ifc", ".rvt"]
-  
-  # Comparison parameters
+
   comparison:
-    # Alignment method: "icp", "manual", "control_points"
-    alignment_method: "icp"
-    # ICP parameters
+    alignment_method: "icp"            # "icp" | "manual" | "control_points"
     icp_max_iterations: 50
     icp_convergence_threshold: 0.001
-    
-  # Deviation detection
+
   deviation:
-    # Comparison tolerance (mm) — points within this distance from BIM surface count as "correct"
-    tolerance_mm: 50              # 50mm default — the main C2M deviation threshold
-    # Method: "point_to_surface", "point_to_point"
-    method: "point_to_surface"
-    # Display classification thresholds (mm) — for color heatmap only
+    tolerance_mm: 50                   # main C2M deviation threshold
+    method: "point_to_surface"         # "point_to_surface" | "point_to_point"
+    # Display heatmap thresholds (mm)
     warning_threshold: 10.0
     error_threshold: 20.0
     critical_threshold: 30.0
-    # Sábana (deviation heatmap) — rendered as colored point cloud
+    # Sábana (deviation heatmap point cloud)
     sabana:
-      point_size_mm: 3.0        # Render point size (matches typical scan spacing)
-      uncovered_alpha: 0.25     # Alpha for non-scanned BIM mesh areas
-      subsample_mm: 1.0         # Subsample cloud to this spacing (0 = raw)
-    # Coverage: "is there construction near this BIM face?" — separate from deviation accuracy
-    coverage_proximity_m: 0.15  # 15cm — generous radius for detecting construction presence
-                                # Handles thick slabs/walls where scan only sees one side
-    # Quality classification thresholds (% of scan points within tolerance)
+      point_size_mm: 3.0               # render point size
+      uncovered_alpha: 0.25            # alpha for non-scanned BIM mesh areas
+      subsample_mm: 1.0                # 0 = raw, else downsample to this spacing
+    # Coverage proximity (separate from deviation accuracy)
+    coverage_proximity_m: 0.15         # 15cm — generous for thick walls/slabs
+    # Quality classification thresholds (% of points within tolerance)
     quality:
-      good_threshold: 80        # >=80% within tolerance = GOOD (green)
-      regular_threshold: 50     # >=50% within tolerance = REGULAR (yellow)
-                                # <50% = BAD (red) — advance counts as 0
+      good_threshold: 80               # >=80% within tol = GOOD (green)
+      regular_threshold: 50            # >=50% = REGULAR (yellow), else BAD
 
-# --- 3D Reconstruction Backend ---
-# Supports: "da3", "lidar", "hybrid", or "mapanything"
-#   - da3:         Depth Anything 3 Streaming (works with any video input)
-#   - lidar:       LiDAR-only backprojection via DA3-streaming SLAM (requires Stray Scanner)
-#   - hybrid:      DA3 + LiDAR injection + LiDAR merge via CloudCompPy (requires Stray Scanner)
-#   - mapanything:  VGGT-Long (legacy fallback)
+
+# ── 3D Reconstruction ──────────────────────────────────────────────
+# Backends supported by workers/map_worker.py:
+#   "da3"               → DA3 Streaming (neural, no LiDAR)
+#   "lidar"             → Pure LiDAR backprojection (Stray Scanner only)
+#   "hybrid"            → DA3 calibrated with LiDAR depth
+#   "mapanything"       → VGGT-Long (legacy fallback)
+#   "gaus_slam"         → Gaussian Surfel SLAM via DA3
+#   "gaus_slam_lidar"   → GauS-SLAM with LiDAR+ARKit
+#   "gaus_slam_da3"     → GauS-SLAM with DA3 depth+poses
+#   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
+#   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
-  backend: "da3"                         # "da3", "lidar", "hybrid", "mapanything"
-  device: "cpu"                          # "cpu" or "cuda" (CPU forced — 6GB GPU = OOM)
-  use_keyframes: true                    # Use frame_selector keyframes (recommended)
+  backend: "hybrid"
+  device: "cpu"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
+  use_keyframes: true                  # use frame_selector keyframes (recommended)
 
-  # DA3 Streaming (Depth Anything 3) — primary backend
+  # DA3 Streaming (Depth Anything 3)
   da3:
-    conda_env: "da3"                     # Conda environment with DA3 installed
-    model_id: "depth-anything/DA3NESTED-GIANT-LARGE-1.1"  # Auto-downloads from HF Hub
-    chunk_size: 120                      # Frames per DA3 chunk
-    overlap: 60                          # Overlap between chunks for alignment
-    loop_enable: true                    # SALAD loop closure
-    infer_gs: true                       # Enable 3D Gaussian Splatting output
-    align_method: "sim3"                 # "sim3", "se3", or "scale+se3"
-    align_lib: "numpy"                   # "numpy" (CPU) or "triton"/"torch" (GPU)
-    depth_threshold: 15.0                # Max depth in meters
-    conf_threshold_coef: 0.75            # Confidence filter coefficient
-    sample_ratio: 1.0                    # 1.0 = keep all points that pass confidence
-    save_depth_conf_result: true         # Save per-frame depth + confidence npz
+    conda_env: "da3"
+    model_id: "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
+    chunk_size: 120
+    overlap: 60
+    loop_enable: true                  # SALAD loop closure
+    infer_gs: false                    # 3D Gaussian Splatting (cosmetic) — off: 5.7GB merge hit OSError EIO; re-enable on the GPU box
+    align_method: "sim3"               # "sim3" | "se3" | "scale+se3"
+    align_lib: "numpy"                 # "numpy" (CPU) | "triton"/"torch" (GPU)
+    depth_threshold: 15.0              # max depth (m)
+    conf_threshold_coef: 0.75
+    conf_min_normalized: 0.25          # drop bottom 25% by confidence (0 = keep all)
+    sample_ratio: 1.0
+    save_depth_conf_result: true       # save per-frame depth+conf .npz
 
-  # LiDAR / Hybrid — Stray Scanner integration (requires ARKit + LiDAR data)
+  # LiDAR / Stray Scanner / Hybrid
   lidar:
-    trust_range: 5.0                     # Max LiDAR depth in meters (iPad LiDAR ≈ 5m)
-    confidence_threshold: 1              # Min Stray Scanner confidence (0=low, 1=medium, 2=high)
-    fallback_to_da3: true                # If session has no ARKit data, fall back to DA3
-    stride: 4                            # Frame stride for Stray Scanner depth extraction
+    trust_range: 5.0                   # max LiDAR depth (m) — iPad LiDAR ≈ 5m
+    confidence_threshold: 1            # 0=low, 1=medium, 2=high
+    fallback_to_da3: true              # use DA3 if no Stray data found
+    stride: 4                          # frame stride for Stray depth extraction
 
-  # MapAnything (VGGT-Long) — legacy fallback
+  # MapAnything (VGGT-Long) — legacy
   mapanything:
     conda_env: "mapanything"
     model_weights: "facebook/map-anything-apache"
@@ -265,40 +295,58 @@ reconstruction:
     conf_threshold_coef: 0.75
     sample_ratio: 1.0
 
-# --- Post-Processing (CloudCompPy) ---
-# Professional cleaning pipeline for reconstructed point clouds
+  # GauS-SLAM (Gaussian Surfel SLAM)
+  # Pipeline: DA3 depth+poses → TUM bridge → GauS-SLAM (2DGS surfels).
+  # Skips frame_selector (uses all non-blurry frames) and CloudCompPy
+  # (Gaussian surfels are clean by nature).
+  gaus_slam:
+    conda_env: "gaus_slam"
+    da3_model_id: "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
+    process_res: 504                   # DA3 processing resolution
+    use_ray_pose: false                # ray-based pose (slower, more accurate)
+    max_frames: 0                      # 0 = all (use 50 for quick test)
+    frame_step: 2                      # 1-of-N temporal subsample (60fps→30fps if N=2)
+    num_tracking_iters: 120            # tracking optimization iters
+    num_ba_iters: 120                  # bundle adjustment iters
+    max_submap_frames: 40
+    eval_mesh: false                   # mesh generated separately after CloudCompPy
+    save_renders: true                 # for debug/SAM3
+
+  # GauS-SLAM Hybrid extras
+  gaus_slam_hybrid:
+    lidar_trust_range: 5.0
+    calib_min_depth: 0.3               # min depth for calibration
+    da3_max_range: 20.0                # clip max DA3 calibrated depth
+
+
+# ── Post-Processing (CloudCompPy) ──────────────────────────────────
 postprocessing:
   enabled: false
   conda_env: "CloudComPy310"
-  
-  # Step 1: Duplicate removal
+
+  # Pipeline toggles
   skip_duplicates: false
-  
-  # Step 2: Statistical Outlier Removal
   skip_sor: false
-  sor_knn: 8               # Number of nearest neighbors for SOR (lower = keeps isolated objects)
-  sor_sigma: 3.0           # Standard deviation multiplier (higher = keeps more points)
-  
-  # Step 3: Noise filter — DISABLED (O(n²), hangs on clouds >1M points)
-  # SOR already handles outlier removal effectively
-  skip_noise: true
-  noise_radius: 0.02      # Only usable on small clouds (<500K points)
+  skip_noise: true                     # noise filter is O(n²), hangs on >1M points
+  skip_normals: true                   # not needed for the point cloud viewer
+
+  # Statistical Outlier Removal
+  sor_knn: 8                           # neighbors (lower = keeps isolated objects)
+  sor_sigma: 3.0                       # std multiplier (higher = keeps more points)
+
+  # Noise filter (only safe on small clouds <500K)
+  noise_radius: 0.02
   noise_sigma: 2.0
-  
-  # Step 4: Voxel subsampling
-  voxel_size: 0.001        # 5mm voxel (keeps cloud under 100M pts)
-  max_points: 0            # 0 = unlimited
-  
-  # Step 5: Normal estimation (slow on big clouds, not needed for point cloud viewer)
-  skip_normals: true
+
+  # Voxel subsampling
+  voxel_size: 0.001                    # 1mm voxel (keeps cloud under 100M pts)
+  max_points: 0                        # 0 = unlimited
 
 
-# --- Coverage Engine (Tier 1) ---
-# Cumulative, occlusion-aware coverage tracking per BIM element
+# ── Coverage Engine (Tier 1) ───────────────────────────────────────
 coverage_engine:
   enabled: false
-  ray_radius: 0.05            # Cylinder radius (m) for occlusion ray query
-  sample_density: 4.0         # BIM surface samples per m²
-  completion_threshold: 80.0  # % coverage to mark element COMPLETED
-  quality_threshold: 80.0     # % of points within tolerance for COMPLETED
-
+  ray_radius: 0.05                     # cylinder radius (m) for occlusion ray
+  sample_density: 4.0                  # BIM samples per m²
+  completion_threshold: 80.0           # % coverage → COMPLETED
+  quality_threshold: 80.0              # % within tolerance → COMPLETED

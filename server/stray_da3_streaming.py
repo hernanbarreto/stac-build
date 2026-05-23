@@ -82,6 +82,14 @@ class StrayDA3Streaming(DA3_Streaming):
         super().__init__(image_dir, save_dir, config)
         self.stray_data = stray_data
 
+        # Per-frame export directory for the fused (LiDAR + calibrated-DA3)
+        # depth. Layout mirrors what ``extract_da3_full.py`` produces so
+        # ``tsdf_export._resolve_da3_depth`` discovers them automatically.
+        # ``save_dir`` is usually ``<output>/da3_run/`` so its parent is the
+        # session output dir.
+        self.da3_full_dir = Path(save_dir).parent / "da3_full"
+        self.da3_full_dir.mkdir(parents=True, exist_ok=True)
+
         # Apply config overrides
         if lidar_cfg:
             self.LIDAR_TRUST_M = lidar_cfg.get("trust_range", self.LIDAR_TRUST_M)
@@ -185,6 +193,17 @@ class StrayDA3Streaming(DA3_Streaming):
             conf_max = predictions.conf[local_idx].max()
             if conf_max > 0:
                 predictions.conf[local_idx][valid_lidar] = conf_max
+
+            # ── E. Persist per-frame fused depth for downstream pipelines
+            #       (TSDF, reconstruction_v2, etc). One .npy per frame keyed
+            #       by the original Stray frame index — same naming as
+            #       ``extract_da3_full.py``. Camera intrinsics are NOT saved:
+            #       downstream readers compute K at depth resolution from the
+            #       full-res Stray K + the .npy shape, so we don't need a
+            #       separate file.
+            stem = Path(chunk_images[local_idx]).stem
+            np.save(str(self.da3_full_dir / f"{stem}_depth.npy"),
+                    depth_fused.astype(np.float32))
 
         # 4. Re-save the modified chunk to disk
         if injected_count > 0:

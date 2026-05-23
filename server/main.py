@@ -12,14 +12,22 @@ import threading
 import torch
 import numpy as np
 from pathlib import Path
-from typing import Set, Optional
+from typing import Set, Optional, Dict, List, Any
 from contextlib import asynccontextmanager
 
-# Suppress /health spam from access logs (applies to all uvicorn start modes)
+# Suppress polling spam from access logs (applies to all uvicorn start modes).
+# These endpoints are hit on a tight interval by the UI and bury useful logs.
+_POLLING_NOISE = (
+    "GET /health",
+    "GET /api/tasks/",
+    "GET /api/segmentation/shape/progress/",
+    "GET /api/segmentation/reconstruct/progress/",
+    "GET /api/segmentation/tsdf/progress/",
+)
 class _HealthCheckFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        return "GET /health" not in msg and "GET /api/tasks/" not in msg
+        return not any(p in msg for p in _POLLING_NOISE)
 
 logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
 
@@ -1276,6 +1284,29 @@ async def rename_session(
     print(f"[Server] ✏️ Project '{session_id}' renamed to '{new_name}' by {username}")
     return {"ok": True, "old_id": session_id, "new_id": new_name}
 
+def _detect_recon_state(output_dir: Path) -> dict:
+    """Detect reconstruction completeness for a scan's output directory.
+
+    - 'complete': final chunk_*.ply already exist
+    - 'partial':  DA3-streaming chunk cache exists (resumable) but no final output
+    - 'none':     nothing reconstructed yet
+
+    The UI uses this to default "Replace existing outputs" to OFF (resume) when a
+    partial run can be completed instead of re-run from scratch.
+    """
+    try:
+        if output_dir.exists() and any(output_dir.glob("chunk_*.ply")):
+            return {"recon_state": "complete", "cached_chunks": 0}
+        cache = output_dir / "da3_run" / "_tmp_results_unaligned"
+        if cache.exists():
+            n = len(list(cache.glob("chunk_*.npy")))
+            if n > 0:
+                return {"recon_state": "partial", "cached_chunks": n}
+    except Exception:
+        pass
+    return {"recon_state": "none", "cached_chunks": 0}
+
+
 @app.get("/sessions/{session_id}/scans")
 async def get_session_scans(session_id: str):
     """List all scan days and sources for a project.
@@ -1299,6 +1330,7 @@ async def get_session_scans(session_id: str):
                 "key": "legacy/default",
                 "frame_count": frame_count,
                 "has_output": has_output,
+                **_detect_recon_state(ctx.output_dir),
             }]
         }
 
@@ -1315,6 +1347,7 @@ async def get_session_scans(session_id: str):
                 "key": f"{date}/{source}",
                 "frame_count": frame_count,
                 "has_output": has_output,
+                **_detect_recon_state(ctx.output_dir),
             })
 
     return {"session_id": session_id, "scans": scans}
@@ -1365,13 +1398,21 @@ async def get_available_backends(session_id: str, scan_key: str = None):
     # Always available
     backends = ["da3", "mapanything"]
 
-    # Stray Scanner backends
+    # Stray Scanner backends (streaming)
     if stray_info["is_stray_session"]:
         backends.insert(1, "hybrid")
         backends.insert(2, "lidar")
 
+    # GauS-SLAM backends
+    backends.append("gaus_slam_da3")                       # always available (no LiDAR needed)
+    if stray_info["has_lidar"] and stray_info["has_arkit"]:
+        backends.append("gaus_slam_lidar")                 # LiDAR + ARKit
+        backends.append("gaus_slam_hybrid")                # LiDAR-calibrated DA3 + ARKit
+
     # Recommendation
-    if stray_info["is_stray_session"]:
+    if stray_info["has_lidar"] and stray_info["has_arkit"]:
+        recommended = "gaus_slam_lidar"
+    elif stray_info["is_stray_session"]:
         recommended = "hybrid"
     else:
         recommended = "da3"
@@ -1851,6 +1892,78 @@ async def delete_bim(
     # Return updated list of IFC files
     ifc_files = [f.name for f in sorted(ctx.ifcs_dir.glob("*.ifc"))]
     return {"ok": True, "ifc_files": ifc_files}
+
+@app.post("/api/segmentation/evaluate_frames")
+async def evaluate_frames(request: Request):
+    """
+    Use DINOv2 (via DINOScout) to evaluate which KEYFRAMES contain the
+    prompted object.  Only processes the keyframes loaded in SAM3 (not all
+    session frames), making this 5-10× faster on CPU.
+
+    Returns a list of booleans (one per keyframe) indicating presence.
+    """
+    body = await request.json()
+    state_id = body.get("state_id")
+    session_id = body.get("session_id")
+    frame_idx = body.get("frame_idx", 0)
+    obj_id = body.get("obj_id", 1)
+    threshold = body.get("threshold", 0.25)
+
+    if not state_id or not session_id:
+        raise HTTPException(status_code=400, detail="Missing state_id or session_id")
+
+    from segmentation.sam3_wrapper import get_sam3_wrapper
+
+    sam3 = get_sam3_wrapper()
+    mask = sam3.get_mask_for_frame(state_id, frame_idx, obj_id)
+    if mask is None:
+        raise HTTPException(status_code=400, detail="No initial mask found for this object. Prompt first.")
+
+    # Build keyframe path list from init status (only the frames SAM3 loaded)
+    init_status = _sam3_init_status.get(session_id, {})
+    kf_mapping = init_status.get("kf_mapping", {})
+    if not kf_mapping:
+        raise HTTPException(status_code=400, detail="SAM3 session not initialized (no kf_mapping)")
+
+    ctx = _ctx(session_id)
+    frames_dir = ctx.frames_dir
+    sorted_keys = sorted(kf_mapping.keys(), key=lambda k: int(k))
+    kf_paths = [str(frames_dir / kf_mapping[k]) for k in sorted_keys]
+    source_path = kf_paths[frame_idx] if frame_idx < len(kf_paths) else kf_paths[0]
+
+    print(f"[Evaluate] Using DINOScout on {len(kf_paths)} keyframes (threshold={threshold})")
+
+    loop = asyncio.get_event_loop()
+
+    def _eval():
+        from segmentation.dino_scout import DINOScout
+        scout = DINOScout()
+        try:
+            # Precompute features (cached to output dir on disk)
+            output_dir = ctx.output_dir if hasattr(ctx, 'output_dir') else None
+            save_dir = str(output_dir) if output_dir and output_dir.exists() else None
+            precomputed = scout.precompute_keyframe_features(kf_paths, save_dir=save_dir)
+
+            result_paths = scout.find_object_frames(
+                mask=mask,
+                source_frame_path=source_path,
+                all_keyframe_paths=kf_paths,
+                threshold=threshold,
+                precomputed_features=precomputed,
+                min_frames=3,
+            )
+        finally:
+            scout.unload()
+
+        # Convert matched paths → boolean array aligned with keyframe order
+        result_set = set(result_paths)
+        return [p in result_set for p in kf_paths]
+
+    valid_frames = await loop.run_in_executor(None, _eval)
+    n_selected = sum(valid_frames)
+    print(f"[Evaluate] ✅ {n_selected}/{len(valid_frames)} keyframes selected")
+    return {"ok": True, "valid_frames": valid_frames}
+
 @app.post("/api/segmentation/propagate")
 async def propagate_interactive_segmentation(request: Request):
     """
@@ -1868,9 +1981,15 @@ async def propagate_interactive_segmentation(request: Request):
     state_id = body.get("state_id")
     session_id = body.get("session_id")
     label_name = body.get("label_name", "manual_object")
+    selected_frames = body.get("selected_frames", None)
     
     if not state_id or not session_id:
         raise HTTPException(status_code=400, detail="Missing state_id or session_id")
+        
+    # Unload any DINOv2 models before running SAM3 propagation (free CPU RAM)
+    from segmentation.dino_evaluator import get_dino_evaluator
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, get_dino_evaluator().unload_model)
     
     # Prevent concurrent propagations on the same session
     active_tasks = task_manager.get_active(session_id)
@@ -1882,6 +2001,9 @@ async def propagate_interactive_segmentation(request: Request):
     
     ctx = _ctx(session_id)
     output_dir = ctx.output_dir
+    
+    # Get kf_mapping to translate SAM3 sequential indices → real frame numbers
+    kf_mapping = _sam3_init_status.get(session_id, {}).get("kf_mapping", {})
     
     tid = task_manager.start(session_id, "propagation", f'Propagating "{label_name}"')
     
@@ -1898,22 +2020,46 @@ async def propagate_interactive_segmentation(request: Request):
         try:
             from segmentation_pipeline import _save_masks, _parse_raw_masks, _match_and_save_result
             structured_masks = _parse_raw_masks(_all_masks)
+            
+            # ── Translate SAM3 sequential indices → real frame_global ──
+            # SAM3 uses sequential indices (0,1,2,...) for its temp dir,
+            # but the PLY has frame_global from the original filenames.
+            # kf_mapping: {seq_idx: "001188.jpg"} → extract numeric part
+            translated_masks = {}
+            for f_idx, frame_masks in structured_masks.items():
+                if kf_mapping:
+                    kf_name = kf_mapping.get(f_idx, kf_mapping.get(str(f_idx)))
+                    if kf_name:
+                        # Extract numeric frame ID from filename (e.g., "001188.jpg" → 1188)
+                        import re
+                        m = re.search(r'(\d+)', kf_name)
+                        real_frame = int(m.group(1)) if m else f_idx
+                    else:
+                        real_frame = f_idx
+                else:
+                    real_frame = f_idx
+                translated_masks[real_frame] = frame_masks
+            
+            if kf_mapping:
+                sample_in = list(structured_masks.keys())[:3]
+                sample_out = list(translated_masks.keys())[:3]
+                print(f"[SegPipeline] Frame translation: SAM3 {sample_in} → real {sample_out}")
+            
             from time import time as _time
             temp_global_id = int(_time() % 10000)
             remapped_masks = {}
-            for f_idx, frame_masks in structured_masks.items():
+            for f_idx, frame_masks in translated_masks.items():
                 remapped_masks[f_idx] = {}
                 for l_id, mask in frame_masks.items():
                     remapped_masks[f_idx][temp_global_id] = mask
             obj_labels = {temp_global_id: label_name}
             saved_seg = _save_masks(output_dir, remapped_masks, [label_name], obj_labels, cfg)
-            saved_obj_ids = set()
-            for inst in saved_seg.get("instances", []):
-                if inst.get("label") == label_name:
-                    saved_obj_ids.add(inst["id"])
-            if not saved_obj_ids:
-                saved_obj_ids = {temp_global_id}
-            _match_and_save_result(output_dir, new_obj_ids=saved_obj_ids)
+            
+            # NOTE: We intentionally do NOT run _match_and_save_result here.
+            # Cloud matching + Potree rebuild is expensive (~minutes) and should
+            # only run ONCE when the user finishes segmenting all objects
+            # (i.e., when closing the Segmentation Manager or pressing Finalize).
+            
             task_manager.finish(tid)
             print(f"[Segmentation] ✅ Saved {len(_all_masks)} frames for '{label_name}'")
         except Exception as e:
@@ -1924,12 +2070,14 @@ async def propagate_interactive_segmentation(request: Request):
     
     def sse_generator():
         import base64, cv2
+        actual_total = len(selected_frames) if selected_frames else None
         
         try:
-            for frame_idx, num_frames, outputs in sam3.propagate_interactive_stream(state_id):
+            for frame_idx, num_frames, outputs in sam3.propagate_interactive_stream(state_id, selected_frames=selected_frames):
                 _all_masks[frame_idx] = outputs
-                pct = round((len(_all_masks) / max(1, num_frames)) * 100)
-                task_manager.update(tid, pct=pct, detail=f"Frame {len(_all_masks)}/{num_frames}")
+                effective_total = actual_total if actual_total else num_frames
+                pct = min(99, round((len(_all_masks) / max(1, effective_total)) * 100))
+                task_manager.update(tid, pct=pct, detail=f"Frame {len(_all_masks)}/{effective_total}")
                 
                 # Generate a small mask preview PNG for this frame
                 mask_b64 = ""
@@ -1948,7 +2096,7 @@ async def propagate_interactive_segmentation(request: Request):
                     mask_b64 = base64.b64encode(png_buf.tobytes()).decode('ascii')
                 
                 event = json.dumps({
-                    "frame": int(frame_idx), "total": int(num_frames),
+                    "frame": int(frame_idx), "total": int(effective_total),
                     "pct": pct, "mask_png": mask_b64
                 })
                 yield f"event: progress\ndata: {event}\n\n"
@@ -1960,12 +2108,9 @@ async def propagate_interactive_segmentation(request: Request):
                 return
 
             task_manager.update(tid, pct=100, detail="Saving masks...")
-            yield f"event: saving\ndata: {{\"status\": \"Saving masks...\"}}\n\n"
+            yield f"event: saving\ndata: {{\"status\": \"Saving masks & matching to 3D cloud...\"}}\n\n"
             
             _save_results()
-            
-            task_manager.update(tid, detail="Computing 3D matching...")
-            yield f"event: saving\ndata: {{\"status\": \"Computing 3D matching...\"}}\n\n"
             
             done_event = json.dumps({"ok": True})
             yield f"event: done\ndata: {done_event}\n\n"
@@ -2040,13 +2185,21 @@ async def save_viewer_prefs(
 @app.get("/api/sessions/{session_id}/segmentation")
 async def get_segmentation_instances(session_id: str):
     """Return all existing segmentation instances for a session.
-    Prefers segmentation_result.json (grouped by instance_id, with OBBs)
-    over segmentation.json (raw obj_ids from SAM3).
+
+    Source of truth for **which instances exist** is ``segmentation.json``,
+    which is updated by every interactive propagation (``_save_masks``).
+    The grouped result file ``segmentation_result.json`` only gets refreshed
+    by the expensive cloud-matching pass that runs on finalize — using IT as
+    the list source means freshly-propagated instances stay invisible until
+    the user closes the manager (the original bug).
+
+    So: take the list from ``segmentation.json`` and *enrich* each entry with
+    OBB / globalIndices / total_points from ``segmentation_result.json`` when
+    available. Best of both: live list + enriched metadata.
     """
     ctx = _ctx(session_id)
     output_dir = ctx.output_dir
-    
-    # Prefer the grouped result (has real instance count, OBBs, point_indices)
+
     result_path = output_dir / "segmentation_result.json"
     seg_path = output_dir / "segmentation.json"
 
@@ -2054,34 +2207,38 @@ async def get_segmentation_instances(session_id: str):
         return {"instances": [], "prompts": []}
 
     try:
-        # Load prompts from segmentation.json (always)
         with open(seg_path) as f:
             seg_data = json.load(f)
         prompts = seg_data.get("prompts", [])
         resolution = seg_data.get("resolution", {})
-        
-        # Load instances from segmentation_result.json if available
+        raw_instances = seg_data.get("instances", [])
+
+        enriched_by_id: Dict[int, Dict[str, Any]] = {}
         if result_path.exists():
-            with open(result_path) as f:
-                result_data = json.load(f)
-            instances = result_data.get("instances", [])
-        elif (output_dir / "seg_masks.npz").exists():
-            # Auto-regenerate segmentation_result.json from masks
             try:
-                from segmentation_pipeline import _match_and_save_result
-                print(f"[Segmentation] Auto-regenerating segmentation_result.json for {session_id}...")
-                result = _match_and_save_result(output_dir)
-                instances = result.get("instances", [])
-                print(f"[Segmentation] ✅ Regenerated: {len(instances)} instances")
-            except Exception as e:
-                print(f"[Segmentation] ⚠️ Auto-regeneration failed: {e}")
-                instances = seg_data.get("instances", [])
-        else:
-            # Fallback to raw segmentation.json
-            instances = seg_data.get("instances", [])
-        
+                with open(result_path) as f:
+                    result_data = json.load(f)
+                for inst in result_data.get("instances", []):
+                    iid = inst.get("id", inst.get("instance_id"))
+                    if iid is not None:
+                        enriched_by_id[int(iid)] = inst
+            except Exception:
+                pass  # if it's malformed, just skip enrichment
+
+        merged: List[Dict[str, Any]] = []
+        for inst in raw_instances:
+            iid = inst.get("id", inst.get("instance_id"))
+            if iid is not None and int(iid) in enriched_by_id:
+                # Enriched fields (OBB, globalIndices, total_points) override
+                # bare fields from segmentation.json; raw entries that don't
+                # have a match yet (just-propagated, no cloud-match yet) pass
+                # through unchanged so the UI list still includes them.
+                merged.append({**inst, **enriched_by_id[int(iid)]})
+            else:
+                merged.append(inst)
+
         return {
-            "instances": instances,
+            "instances": merged,
             "prompts": prompts,
             "resolution": resolution,
         }
@@ -2259,6 +2416,13 @@ async def rename_segmentation_instance(request: Request):
         with open(seg_path) as f:
             data = json.load(f)
 
+        # Save old label BEFORE updating (for shape folder rename)
+        old_label = None
+        for inst in data.get("instances", []):
+            if inst.get("instance_id") == instance_id:
+                old_label = inst.get("label")
+                break
+
         updated = False
         for inst in data.get("instances", []):
             if inst.get("instance_id") == instance_id:
@@ -2285,6 +2449,11 @@ async def rename_segmentation_instance(request: Request):
                         inst["excluded"] = excluded
             with open(result_path, "w") as f:
                 json.dump(result_data, f, indent=2)
+
+        # Sync shape folder if label changed
+        if new_label is not None and old_label and old_label != new_label:
+            from segmentation.shaper_export import rename_shape_folder
+            rename_shape_folder(output_dir, old_label, new_label, instance_id)
 
         return {"ok": True}
     except HTTPException:
@@ -2321,6 +2490,8 @@ async def delete_segmentation_instance(request: Request):
             # 1) Collect ALL obj_ids to remove from segmentation.json
             with open(seg_path) as f:
                 seg_data = json.load(f)
+
+            seg_data_original_instances = list(seg_data.get("instances", []))  # save for shape cleanup
 
             obj_ids_to_remove = set()
             instance_ids_to_remove = set()
@@ -2391,6 +2562,18 @@ async def delete_segmentation_instance(request: Request):
                 os.replace(tmp_path, str(masks_path))
                 print(f"[SegDelete]   seg_masks.npz: removed {removed_keys} mask keys")
 
+            # 4) Delete shape folder if it exists
+            try:
+                from segmentation.shaper_export import delete_shape_folder
+                for iid in instance_ids_to_remove:
+                    # Try to find label from the removed instances
+                    for inst in seg_data_original_instances:
+                        if inst.get("instance_id") == iid or inst.get("id") == iid:
+                            delete_shape_folder(output_dir, inst.get("label", ""), iid)
+                            break
+            except Exception as e:
+                print(f"[SegDelete]   Shape folder cleanup failed: {e}")
+
             print(f"[SegDelete]   ✅ Done: {len(fresh_instances)} instances remaining")
 
             return {
@@ -2407,6 +2590,1045 @@ async def delete_segmentation_instance(request: Request):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Shape progress tracking ─────────────────────────────────────
+# Per-session, per-instance state for the Shape pipeline. Read by
+# /api/segmentation/shape/progress/:session_id.
+#
+# Phases: pending → captioning → exporting_pkl → reconstructing → done | error
+_shape_progress: Dict[str, Dict[int, Dict[str, Any]]] = {}
+_shape_progress_lock = asyncio.Lock()
+
+# In-flight dedup for /shape/export. Browsers retry the POST after a 30 s
+# silence even though the server is still working — without dedup, we end up
+# captioning + exporting PKLs twice in parallel, doubling GPU/CPU usage and
+# producing the duplicate "[Shape] ━━━ /shape/export request ━━━" pattern in
+# logs. Keyed by (session_id, sorted(instance_ids)). Mirrors the pattern in
+# /api/segmentation/add_prompt.
+_shape_in_flight: Dict[str, Any] = {
+    "key": None, "event": None, "result": None, "completed_at": None,
+}
+
+# Global single-flight slot for the ShapeR subprocess. Spawning a second
+# `run_shaper.sh` while one is already running is what caused the OOM kill
+# on 2026-05-09: each subprocess imports torch + ShapeR modules (~2 GB) and
+# the first was already 8-10 GB into inference (T5/CLIP/DINOv2 + tensors).
+# WSL2 OOM-killed the bigger one. We refuse to spawn a second one regardless
+# of session — the user's hardware (CPU-only after the GPU broke) cannot run
+# two of these in parallel.
+_shaper_subprocess: Optional["asyncio.subprocess.Process"] = None
+_shaper_subprocess_lock = asyncio.Lock()
+
+
+def _shape_set(session_id: str, inst_id: int, **kw):
+    """Synchronous helper — safe to call from worker threads."""
+    state = _shape_progress.setdefault(session_id, {})
+    entry = state.setdefault(int(inst_id), {"id": int(inst_id), "phase": "pending"})
+    entry.update(kw)
+
+
+def _shape_set_overall(session_id: str, **kw):
+    state = _shape_progress.setdefault(session_id, {})
+    overall = state.setdefault("__overall__", {})
+    overall.update(kw)
+
+
+async def _run_shaper_subprocess(session_id: str, output_dir: Path,
+                                 pkl_paths: List[Path],
+                                 inst_id_by_pkl: Dict[str, int]):
+    """Spawn run_shaper.sh and parse [BATCH] events for live UI progress.
+
+    Single-flight globally: if another ShapeR subprocess is already running
+    we refuse to spawn — two parallel processes OOM the host and kill the
+    one that's already deep into inference (which is exactly what happened
+    on 2026-05-09 and lost ~2.5 h of work).
+    """
+    global _shaper_subprocess
+
+    if not pkl_paths:
+        print("[Shape] no PKLs to reconstruct — skipping subprocess")
+        _shape_set_overall(session_id, phase="done", reason="no_pkls")
+        return
+
+    # Single-flight guard. We hold the lock only across the check + assignment
+    # so the read loop below doesn't block other code paths.
+    async with _shaper_subprocess_lock:
+        if (_shaper_subprocess is not None
+                and _shaper_subprocess.returncode is None):
+            existing_pid = _shaper_subprocess.pid
+            msg = (f"Another ShapeR subprocess is already running "
+                   f"(pid={existing_pid}). Refusing to spawn a second one — "
+                   f"parallel ShapeR runs OOM the host on CPU-only hardware.")
+            print(f"[Shape] ⚠ {msg}")
+            _shape_set_overall(session_id, phase="error", error=msg)
+            return
+
+    server_dir = Path(__file__).resolve().parent
+    script = server_dir / "run_shaper.sh"
+
+    shape_root = output_dir / "shape"
+    # "quality" = 16 views, 4× tokens, 50 denoise steps — the best the released
+    # ckpt gives. On CPU run_shaper_batch.py honours it (slower than "cpu"/"balance"
+    # = 25 steps, ~2× the diffusion time per object); on a GPU it's the obvious pick.
+    cmd = [
+        "bash", str(script),
+        "--pkls", *[str(p) for p in pkl_paths],
+        "--output_dir", str(shape_root),
+        "--config", "quality",
+    ]
+
+    print(f"[Shape] ▶ starting ShapeR reconstruction of {len(pkl_paths)} object(s)")
+    print(f"[Shape]   PKLs: {[p.name for p in pkl_paths]}")
+    print(f"[Shape]   PKL→instance map: {inst_id_by_pkl}")
+    print(f"[Shape]   cmd: {' '.join(cmd[:6])} ... (+{len(cmd)-6} args)")
+    _shape_set_overall(session_id, phase="reconstructing",
+                       total=len(pkl_paths), done=0, started_at=time.time())
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},  # force CPU per user request
+        )
+        print(f"[Shape]   subprocess pid={proc.pid}")
+    except Exception as e:
+        print(f"[Shape] ❌ failed to spawn subprocess: {e}")
+        import traceback; traceback.print_exc()
+        _shape_set_overall(session_id, phase="error", error=str(e))
+        return
+
+    async with _shaper_subprocess_lock:
+        _shaper_subprocess = proc
+
+    done_count = 0
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            break
+        text = line.decode(errors="replace").rstrip()
+        if not text:
+            continue
+
+        # Print to console (StreamCapture also forwards to WS)
+        print(f"[Shape] {text}")
+
+        if not text.startswith("[BATCH]"):
+            continue
+
+        # Parse "[BATCH] key=value key=value"
+        body = text[len("[BATCH]"):].strip()
+        kv = {}
+        # Manual parser since values may contain spaces (e.g. msg=...)
+        # Strategy: tokens that look like k=v split on the first '=' until we hit msg= or tb= which slurps the rest.
+        i = 0
+        tokens = body.split(" ")
+        while i < len(tokens):
+            tok = tokens[i]
+            if "=" in tok:
+                k, _, v = tok.partition("=")
+                if k in ("msg", "tb"):
+                    v = " ".join([v] + tokens[i+1:])
+                    kv[k] = v
+                    break
+                kv[k] = v
+            else:
+                kv.setdefault("_event", tok)
+            i += 1
+        if "_event" not in kv:
+            kv["_event"] = body.split(" ", 1)[0] if body else ""
+
+        ev = kv.get("_event") or ""
+        name = kv.get("name")
+        inst_id = inst_id_by_pkl.get(name)
+
+        if ev == "item" and inst_id is not None:
+            status = kv.get("status", "")
+            update = {"phase": status if status != "done" else "done"}
+            if status == "starting":
+                update["phase"] = "reconstructing"
+                update["started_at"] = time.time()
+            elif status == "done":
+                update["elapsed"] = float(kv.get("elapsed", 0))
+                update["mesh"] = kv.get("out", "")
+                done_count += 1
+                _shape_set_overall(session_id, done=done_count)
+            elif status == "error":
+                update["phase"] = "error"
+                update["error"] = kv.get("msg", "unknown")
+            _shape_set(session_id, inst_id, **update)
+
+    rc = await proc.wait()
+    # Release the single-flight slot so the next /shape/export can spawn.
+    async with _shaper_subprocess_lock:
+        if _shaper_subprocess is proc:
+            _shaper_subprocess = None
+    overall_phase = "done" if rc == 0 else "error"
+    _shape_set_overall(session_id, phase=overall_phase, finished_at=time.time(),
+                       returncode=rc)
+    icon = "✅" if rc == 0 else "❌"
+    print(f"[Shape] {icon} reconstruction finished rc={rc} "
+          f"({done_count}/{len(pkl_paths)} succeeded)")
+
+
+@app.post("/api/segmentation/shape/export")
+async def export_shape_pkls(request: Request):
+    """Generate ShapeR PKL files (and optionally trigger ShapeR reconstruction).
+
+    Body:
+        session_id: str
+        captions: Optional[dict[int, str]] — manual captions per instance_id
+        instance_ids: Optional[list[int]] — filter to these IDs only
+        auto_caption: bool — run InternVL3 for caption generation
+        auto_reconstruct: bool (default True) — chain ShapeR mesh inference
+
+    A browser retry after timeout will hit the in-flight guard below and wait
+    for the original request's result instead of spawning a parallel run.
+    """
+    import threading as _threading
+    body = await request.json()
+    session_id = body.get("session_id")
+    captions = body.get("captions", {})
+    instance_ids = body.get("instance_ids")
+    auto_caption = body.get("auto_caption", False)
+    auto_reconstruct = body.get("auto_reconstruct", True)
+
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id")
+
+    # ── In-flight dedup ───────────────────────────────────────────────
+    # Stable key: session + sorted instance ids. Two requests with the same
+    # set are equivalent regardless of body order or auto_caption flag (the
+    # captioning is part of the same job).
+    inflight_key = (
+        f"{session_id}:"
+        f"{','.join(str(i) for i in sorted(instance_ids))}"
+        if instance_ids else f"{session_id}:ALL"
+    )
+    if (inflight_key == _shape_in_flight["key"]
+            and _shape_in_flight["event"] is not None):
+        evt = _shape_in_flight["event"]
+        loop = asyncio.get_event_loop()
+        if not evt.is_set():
+            # Original is still running — wait for it to finish.
+            print(f"[Shape] ⏳ duplicate request for {inflight_key} — waiting for in-flight result")
+            # 30 min cap — PKL export with 3 large objects can take ~25 min.
+            await loop.run_in_executor(None, lambda: evt.wait(timeout=1800))
+        # Either we just waited, or it had already completed when we arrived.
+        # Return the cached response if it's both present and fresh — a stale
+        # result from an hour-old run shouldn't satisfy a new explicit request.
+        completed_at = _shape_in_flight.get("completed_at")
+        fresh = completed_at is not None and (time.time() - completed_at) < 60
+        if (evt.is_set()
+                and _shape_in_flight.get("result") is not None
+                and _shape_in_flight["key"] == inflight_key
+                and fresh):
+            age = time.time() - completed_at
+            print(f"[Shape] ✅ returning cached result ({age:.0f}s old) for {inflight_key}")
+            return _shape_in_flight["result"]
+        print(f"[Shape] ⚠ in-flight wait expired without fresh result — falling through")
+
+    # Claim the in-flight slot. The completion_event is signaled in `finally`
+    # so any duplicate retry that arrived during processing wakes up and reads
+    # the cached result.
+    completion_event = _threading.Event()
+    _shape_in_flight["key"] = inflight_key
+    _shape_in_flight["event"] = completion_event
+    _shape_in_flight["result"] = None
+    _claimed_key = inflight_key
+
+    try:
+        ctx = _ctx(session_id)
+        output_dir = ctx.output_dir
+        frames_dir = ctx.frames_dir
+        result_path = output_dir / "segmentation_result.json"
+
+        if not result_path.exists():
+            raise HTTPException(status_code=404,
+                                detail="No segmentation_result.json — run propagation first")
+
+        with open(result_path) as f:
+            segments_result = json.load(f)
+
+        captions_int = {int(k): v for k, v in captions.items()} if captions else {}
+
+        print(f"[Shape] ━━━ /shape/export request ━━━")
+        print(f"[Shape]   session={session_id}  instance_ids={instance_ids}")
+        print(f"[Shape]   auto_caption={auto_caption}  auto_reconstruct={auto_reconstruct}")
+        print(f"[Shape]   manual captions: {list(captions_int.keys())}")
+
+        # Reset state for the instances we're about to touch
+        target_ids = set(instance_ids or [
+            inst.get("id", inst.get("instance_id"))
+            for inst in segments_result.get("instances", [])
+        ])
+        async with _shape_progress_lock:
+            sess_state = _shape_progress.setdefault(session_id, {})
+            for tid in target_ids:
+                initial_phase = "captioning" if (auto_caption and tid not in captions_int) else "exporting_pkl"
+                sess_state[int(tid)] = {"id": int(tid), "phase": initial_phase}
+            sess_state["__overall__"] = {
+                "phase": "exporting_pkl",
+                "total": len(target_ids),
+                "done": 0,
+                "started_at": time.time(),
+            }
+
+        caption_fn = None
+        if auto_caption:
+            try:
+                from segmentation.object_captioner import caption_object
+                caption_fn = caption_object
+                print(f"[Shape]   object_captioner loaded — InternVL3 will run for "
+                      f"{len(target_ids - set(captions_int))} object(s)")
+            except ImportError as e:
+                print(f"[Shape]   ⚠ object_captioner unavailable ({e}) — falling back to labels")
+
+        loop = asyncio.get_event_loop()
+
+        def _export():
+            from segmentation.shaper_export import export_shaper_pkls
+            # Wrap caption_fn so we can update progress per-instance even though
+            # export_shaper_pkls doesn't expose instance_id to the callback. We do
+            # the bookkeeping by closure-capturing the current label-id mapping.
+            return export_shaper_pkls(
+                output_dir=output_dir,
+                frames_dir=frames_dir,
+                segments_result=segments_result,
+                session_dir=frames_dir.parent,
+                obj_ids=instance_ids,
+                caption_fn=caption_fn,
+                captions=captions_int,
+            )
+
+        try:
+            exported = await loop.run_in_executor(None, _export)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            async with _shape_progress_lock:
+                _shape_set_overall(session_id, phase="error", error=str(e))
+            raise HTTPException(status_code=500, detail=str(e))
+
+        # Map pkl folder name → instance_id (folder name = "<safe_label>_<id>")
+        inst_by_folder = {}
+        for inst in segments_result.get("instances", []):
+            iid = inst.get("id", inst.get("instance_id"))
+            label = inst.get("label", f"object_{iid}")
+            safe = label.replace(" ", "_").replace("/", "_")[:30]
+            inst_by_folder[f"{safe}_{iid}"] = int(iid)
+
+        # batch wrapper uses the .pkl stem as "name"; our folder contains data.pkl,
+        # so the stem is "data" — useless. Rename map by folder lookup instead.
+        inst_id_by_pkl_name = {}
+        for p in exported:
+            # p is .../shape/<folder>/data.pkl
+            folder = p.parent.name
+            if folder in inst_by_folder:
+                iid = inst_by_folder[folder]
+                inst_id_by_pkl_name[p.stem] = iid  # stem == "data"
+                async with _shape_progress_lock:
+                    _shape_set(session_id, iid, phase="pkl_ready",
+                               pkl=str(p.relative_to(output_dir)))
+
+        # If multiple PKLs map to the same stem ("data"), the stdout matcher will
+        # collide. Rename per-pkl to "<folder>.pkl" so each one has a unique stem.
+        renamed_pkl_paths = []
+        inst_id_by_renamed = {}
+        for p in exported:
+            folder = p.parent.name
+            new_name = f"{folder}.pkl"
+            new_path = p.parent / new_name
+            if new_path != p:
+                try:
+                    p.rename(new_path)
+                    print(f"[Shape]   renamed {p.name} → {new_name}")
+                except Exception as e:
+                    print(f"[Shape]   ⚠ rename failed for {p}: {e} (keeping original)")
+                    new_path = p
+            renamed_pkl_paths.append(new_path)
+            if folder in inst_by_folder:
+                inst_id_by_renamed[new_path.stem] = inst_by_folder[folder]
+
+        response = {
+            "ok": True,
+            "exported": [str(p.relative_to(output_dir)) for p in renamed_pkl_paths],
+            "count": len(renamed_pkl_paths),
+            "reconstructing": False,
+        }
+
+        print(f"[Shape] PKL stage complete: {len(renamed_pkl_paths)} file(s)")
+
+        if auto_reconstruct and renamed_pkl_paths:
+            print(f"[Shape] auto_reconstruct=True — scheduling background ShapeR task")
+            async def _bg():
+                try:
+                    await _run_shaper_subprocess(
+                        session_id, output_dir, renamed_pkl_paths,
+                        inst_id_by_renamed,
+                    )
+                except Exception as e:
+                    import traceback
+                    print(f"[Shape] ❌ reconstruction crashed: {e}")
+                    traceback.print_exc()
+                    async with _shape_progress_lock:
+                        _shape_set_overall(session_id, phase="error", error=str(e))
+            asyncio.create_task(_bg())
+            response["reconstructing"] = True
+        elif not auto_reconstruct:
+            print(f"[Shape] auto_reconstruct=False — stopping after PKL")
+            async with _shape_progress_lock:
+                _shape_set_overall(session_id, phase="done")
+                for p in renamed_pkl_paths:
+                    folder = p.parent.name
+                    if folder in inst_by_folder:
+                        _shape_set(session_id, inst_by_folder[folder], phase="pkl_ready")
+
+        # Stash result + timestamp BEFORE the finally so the cached result is
+        # visible the moment the event fires. Keep key/event/result populated
+        # after completion: waiters that wake up after `event.set()` need to
+        # read them, and a same-key retry within 60 s is a browser duplicate
+        # that should also get the cached response. The slot is overwritten
+        # by the next request with a different key, or aged out via the 60 s
+        # freshness check at the top of the handler.
+        _shape_in_flight["result"] = response
+        _shape_in_flight["completed_at"] = time.time()
+        return response
+
+    finally:
+        # Always wake up waiters. Do NOT clear key/event — that would make the
+        # waiters' freshness check fail. Stale entries are filtered by the
+        # `< 60s` freshness gate, not by clearing.
+        completion_event.set()
+
+
+@app.get("/api/segmentation/shape/progress/{session_id}")
+async def shape_progress(session_id: str):
+    """Live state for the shape pipeline. UI polls this every ~1s during a run."""
+    async with _shape_progress_lock:
+        state = _shape_progress.get(session_id, {})
+        # Shallow copy to avoid mutation under our feet
+        per_instance = [v for k, v in state.items() if k != "__overall__"]
+        overall = state.get("__overall__", {"phase": "idle"})
+    return {"ok": True, "overall": overall, "instances": per_instance}
+
+
+@app.get("/api/segmentation/shape/status/{session_id}")
+async def shape_status(session_id: str):
+    """Check which segmented instances already have Shape PKLs and/or meshes."""
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
+    result_path = output_dir / "segmentation_result.json"
+    shape_dir = output_dir / "shape"
+
+    if not result_path.exists():
+        return {"ok": True, "instances": []}
+
+    with open(result_path) as f:
+        result_data = json.load(f)
+
+    statuses = []
+    for inst in result_data.get("instances", []):
+        iid = inst.get("id", inst.get("instance_id"))
+        label = inst.get("label", f"object_{iid}")
+        safe_label = label.replace(" ", "_").replace("/", "_")[:30]
+        obj_folder = shape_dir / f"{safe_label}_{iid}"
+
+        has_pkl = any(obj_folder.glob("*.pkl")) if obj_folder.exists() else False
+        has_mesh = any(obj_folder.glob("*.glb")) if obj_folder.exists() else False
+
+        statuses.append({
+            "id": iid,
+            "label": label,
+            "has_pkl": has_pkl,
+            "has_mesh": has_mesh,
+            "folder": str(obj_folder.relative_to(output_dir)) if obj_folder.exists() else None,
+        })
+
+    return {"ok": True, "instances": statuses}
+
+
+@app.get("/api/segmentation/shape/list/{session_id}")
+async def shape_list(session_id: str):
+    """List all reconstructed meshes for a session (for viewer auto-load).
+
+    Each entry includes the URL to fetch the .glb plus the metadata sidecar
+    so the viewer can know placement, label, ICP residual, etc. without
+    a second roundtrip per object.
+    """
+    ctx = _ctx(session_id)
+    shape_dir = ctx.output_dir / "shape"
+    if not shape_dir.exists():
+        return {"ok": True, "shapes": []}
+
+    shapes = []
+    for obj_folder in sorted(shape_dir.iterdir()):
+        if not obj_folder.is_dir():
+            continue
+        glb_files = sorted(obj_folder.glob("*.glb"))
+        if not glb_files:
+            continue
+        glb_file = glb_files[0]  # one mesh per object today
+        meta_file = glb_file.with_suffix(".meta.json")
+
+        meta = None
+        if meta_file.exists():
+            try:
+                with open(meta_file) as f:
+                    meta = json.load(f)
+            except Exception as e:
+                print(f"[ShapeList] failed to read {meta_file}: {e}")
+
+        shapes.append({
+            "folder": obj_folder.name,
+            "glb_url": f"/api/segmentation/shape/file/{session_id}/{obj_folder.name}/{glb_file.name}",
+            "meta": meta,
+        })
+
+    return {"ok": True, "shapes": shapes}
+
+
+@app.get("/api/segmentation/shape/file/{session_id}/{folder}/{filename}")
+async def shape_file(session_id: str, folder: str, filename: str):
+    """Serve a .glb (or its .meta.json) for the given session/object."""
+    from fastapi.responses import FileResponse
+    # Sanitize: prevent path traversal — folder + filename must be plain names
+    if "/" in folder or ".." in folder or "/" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid path component")
+
+    ctx = _ctx(session_id)
+    full_path = ctx.output_dir / "shape" / folder / filename
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+
+    if filename.endswith(".glb"):
+        media_type = "model/gltf-binary"
+    elif filename.endswith(".json"):
+        media_type = "application/json"
+    else:
+        media_type = "application/octet-stream"
+
+    return FileResponse(
+        str(full_path),
+        media_type=media_type,
+        headers={"Cache-Control": "no-cache"},  # may be regenerated
+    )
+
+
+# ── Reconstruction v2 (semantic-geometric, neighbor-aware) ─────────────
+# Additive to /shape/export: classifies every instance, reconstructs parametric
+# surfaces/swept solids/boxes/linear-repeats directly (no subprocess) and uses
+# the ShapeR GLBs only for genuinely free-form blobs, then assembles a coherent
+# scene (structural shell, opening detection, object clipping, snapping). Output:
+# output/scene/<label>_<id>.glb + .meta.json and output/scene/scene.json.
+
+# ── Reconstruction-v2 progress + single-flight ──────────────────────
+# run_reconstruction loads the full point cloud, builds Open3D raycasting
+# scenes and rasterises silhouettes per camera. One run is heavy; two in
+# parallel OOM-killed the host (2026-05-12 — two `[ReconV2] start` lines in
+# the log, then a hard reboot). So: GLOBAL single-flight (one recon at a time,
+# any session), run as a background task, expose progress for the UI to poll.
+_recon_state: Dict[str, Dict[str, Any]] = {}      # session_id -> {phase, ...}
+_recon_lock = asyncio.Lock()                       # guards the running-task slot
+_recon_running: Dict[str, Any] = {"session_id": None, "task": None, "started_at": None}
+
+
+def _recon_set(session_id: str, **kw):
+    """Synchronous, GIL-safe — callable from the worker thread (no asyncio lock)."""
+    st = _recon_state.setdefault(session_id, {"phase": "idle"})
+    st.update(kw)
+
+
+async def _run_reconstruction_job(session_id: str, ctx, only_ids, use_shaper: bool,
+                                  max_views: int):
+    loop = asyncio.get_event_loop()
+
+    def _cb(d: dict):
+        _recon_set(session_id, **d)
+
+    def _run():
+        from reconstruction_runner import run_reconstruction
+        return run_reconstruction(session_id, ctx.output_dir, ctx.frames_dir,
+                                  session_dir=ctx.session_dir, only_obj_ids=only_ids,
+                                  use_shaper_glbs=use_shaper, max_views=max_views,
+                                  progress_cb=_cb)
+    try:
+        summary = await loop.run_in_executor(None, _run)
+        if summary.get("ok"):
+            _recon_set(session_id, phase="done", finished_at=time.time(), summary=summary,
+                       n_elements=summary.get("n_elements"), by_class=summary.get("by_class"),
+                       n_adjacency=summary.get("n_adjacency"), elapsed_s=summary.get("elapsed_s"),
+                       error=None)
+        else:
+            _recon_set(session_id, phase="error", finished_at=time.time(), summary=summary,
+                       error=summary.get("error", "reconstruction failed"))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        _recon_set(session_id, phase="error", finished_at=time.time(), error=str(e))
+    finally:
+        async with _recon_lock:
+            if _recon_running.get("session_id") == session_id:
+                _recon_running.update({"session_id": None, "task": None, "started_at": None})
+
+
+@app.post("/api/segmentation/reconstruct/{session_id}")
+async def reconstruct_v2(session_id: str, request: Request):
+    """Kick off reconstruction v2 as a background job. Returns immediately;
+    poll GET /api/segmentation/reconstruct/progress/{session_id} for status.
+
+    Single-flight globally — two parallel runs OOM the CPU-only host.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    ctx = _ctx(session_id)
+    if not (ctx.output_dir / "segmentation_result.json").exists():
+        raise HTTPException(status_code=400, detail="No segmentation_result.json — run segmentation first")
+    only_ids = body.get("instance_ids")
+    use_shaper = bool(body.get("use_shaper_glbs", True))
+    try:
+        max_views = int(body.get("max_views") or 150)
+    except (TypeError, ValueError):
+        max_views = 150
+    max_views = max(1, min(max_views, 500))
+
+    async with _recon_lock:
+        cur = _recon_running.get("task")
+        if cur is not None and not cur.done():
+            other = _recon_running.get("session_id")
+            raise HTTPException(
+                status_code=409,
+                detail=(f"A reconstruction is already running (session={other}). "
+                        f"Wait for it to finish — running two at once OOMs the host."))
+        _recon_set(session_id, phase="starting", started_at=time.time(), finished_at=None,
+                   error=None, summary=None, n_elements=None, by_class=None, n_views=None,
+                   n_points=None, done=0, total=None, current=None)
+        task = asyncio.create_task(
+            _run_reconstruction_job(session_id, ctx, only_ids, use_shaper, max_views))
+        _recon_running.update({"session_id": session_id, "task": task, "started_at": time.time()})
+    return {"ok": True, "started": True, "session_id": session_id}
+
+
+@app.get("/api/segmentation/reconstruct/progress/{session_id}")
+async def reconstruct_progress(session_id: str):
+    """Live state for a reconstruction-v2 job. The UI polls this every ~1.5 s."""
+    st = dict(_recon_state.get(session_id, {"phase": "idle"}))
+    busy_session = _recon_running.get("session_id")
+    st["busy"] = busy_session is not None
+    st["busy_session"] = busy_session
+    return {"ok": True, "session_id": session_id, **st}
+
+
+def _load_scene_payload(output_dir: Path, session_id: str) -> Optional[Dict[str, Any]]:
+    """Read ``output/scene/scene.json``, resolve a ``glb_url`` per element, return
+    the payload the UI consumes. ``None`` if scene.json is missing or unreadable
+    (a bad JSON is logged but treated as "no scene" so a load can still succeed)."""
+    scene_path = Path(output_dir) / "scene" / "scene.json"
+    if not scene_path.exists():
+        return None
+    try:
+        scene = json.loads(scene_path.read_text())
+        from reconstruction.elements import json_safe
+        scene = json_safe(scene)
+    except Exception as e:
+        print(f"[Scene] bad scene.json for {session_id}: {e}")
+        return None
+    scene_dir = Path(output_dir) / "scene"
+    for el in scene.get("elements", []):
+        iid = el.get("instance_id")
+        label = str(el.get("label", f"object_{iid}")).replace(" ", "_").replace("/", "_")[:30]
+        folder = f"{label}_{iid}"
+        glb = scene_dir / f"{folder}.glb"
+        el["glb_url"] = (f"/api/segmentation/scene/file/{session_id}/{folder}.glb"
+                         if glb.exists() else None)
+    return {"session_id": scene.get("session_id", session_id),
+            "elements": scene.get("elements", []),
+            "adjacency": scene.get("adjacency", [])}
+
+
+@app.get("/api/segmentation/scene/{session_id}")
+async def get_scene(session_id: str):
+    """Return the assembled scene (output/scene/scene.json) + GLB URLs per element."""
+    ctx = _ctx(session_id)
+    payload = _load_scene_payload(ctx.output_dir, session_id)
+    if payload is None:
+        return {"ok": True, "exists": False, "elements": [], "adjacency": []}
+    return {"ok": True, "exists": True, **payload}
+
+
+@app.get("/api/segmentation/scene/file/{session_id}/{filename}")
+async def scene_file(session_id: str, filename: str):
+    """Serve a reconstruction-v2 element GLB / meta.json."""
+    from fastapi.responses import FileResponse
+    if "/" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid path component")
+    ctx = _ctx(session_id)
+    full_path = ctx.output_dir / "scene" / filename
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+    media_type = ("model/gltf-binary" if filename.endswith(".glb")
+                  else "application/json" if filename.endswith(".json")
+                  else "application/octet-stream")
+    return FileResponse(str(full_path), media_type=media_type,
+                        headers={"Cache-Control": "no-cache"})
+
+
+# ── TSDF reconstruction endpoints ───────────────────────────────────
+# Sibling pipeline to ShapeR (above) — same I/O contract per session, output
+# folder is ``output/tsdf/`` instead of ``output/shape/``. Runs in-process
+# (Open3D, no torch model) so no subprocess shell-out is needed.
+
+_tsdf_progress: Dict[str, Dict[int, Dict[str, Any]]] = {}
+_tsdf_progress_lock = asyncio.Lock()
+
+
+def _tsdf_set(session_id: str, inst_id: int, **kw):
+    state = _tsdf_progress.setdefault(session_id, {})
+    entry = state.setdefault(int(inst_id), {"id": int(inst_id), "phase": "pending"})
+    entry.update(kw)
+
+
+def _tsdf_set_overall(session_id: str, **kw):
+    state = _tsdf_progress.setdefault(session_id, {})
+    overall = state.setdefault("__overall__", {})
+    overall.update(kw)
+
+
+@app.post("/api/segmentation/tsdf/export")
+async def export_tsdf_endpoint(request: Request):
+    """Reconstruct TSDF meshes for selected instances.
+
+    Body:
+        session_id: str
+        instance_ids: Optional[list[int]]
+        voxel_length: float (m, default 0.015)
+        sdf_trunc:    float (m, default 0.04)
+        depth_trunc:  float (m, default 5.0)
+        dilate_radius: int (px, default 3)
+    """
+    body = await request.json()
+    session_id = body.get("session_id")
+    instance_ids = body.get("instance_ids")
+    voxel_length = float(body.get("voxel_length", 0.015))
+    sdf_trunc = float(body.get("sdf_trunc", 0.04))
+    depth_trunc = float(body.get("depth_trunc", 5.0))
+    dilate_radius = int(body.get("dilate_radius", 3))
+
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id")
+
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
+    frames_dir = ctx.frames_dir
+    result_path = output_dir / "segmentation_result.json"
+
+    if not result_path.exists():
+        raise HTTPException(status_code=404,
+                            detail="No segmentation_result.json — run propagation first")
+
+    with open(result_path) as f:
+        segments_result = json.load(f)
+
+    target_ids = set(instance_ids or [
+        inst.get("id", inst.get("instance_id"))
+        for inst in segments_result.get("instances", [])
+    ])
+
+    print(f"[TSDF] ━━━ /tsdf/export request ━━━")
+    print(f"[TSDF]   session={session_id}  instance_ids={sorted(target_ids)}")
+    print(f"[TSDF]   voxel={voxel_length}m  trunc={sdf_trunc}m  "
+          f"depth_max={depth_trunc}m  dilate={dilate_radius}px")
+
+    async with _tsdf_progress_lock:
+        sess_state = _tsdf_progress.setdefault(session_id, {})
+        for tid in target_ids:
+            sess_state[int(tid)] = {"id": int(tid), "phase": "pending"}
+        sess_state["__overall__"] = {
+            "phase": "integrating",
+            "total": len(target_ids),
+            "done": 0,
+            "started_at": time.time(),
+        }
+
+    loop = asyncio.get_event_loop()
+    done_counter = {"n": 0}
+
+    def _progress_cb(inst_id: int, phase: str, elapsed, mesh):
+        # Called from worker thread → fire-and-forget into the loop.
+        update: Dict[str, Any] = {"phase": phase}
+        if elapsed is not None:
+            update["elapsed"] = float(elapsed)
+        if mesh:
+            update["mesh"] = mesh
+        if phase == "done":
+            done_counter["n"] += 1
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _tsdf_apply_progress(session_id, inst_id, update,
+                                     done_counter["n"] if phase == "done" else None),
+                loop,
+            )
+        except Exception:
+            pass  # progress is best-effort
+
+    def _run_tsdf():
+        from segmentation.tsdf_export import export_tsdf_meshes
+        return export_tsdf_meshes(
+            output_dir=output_dir,
+            frames_dir=frames_dir,
+            segments_result=segments_result,
+            session_dir=frames_dir.parent,
+            obj_ids=list(target_ids) or None,
+            voxel_length=voxel_length,
+            sdf_trunc=sdf_trunc,
+            depth_trunc=depth_trunc,
+            dilate_radius=dilate_radius,
+            progress_cb=_progress_cb,
+        )
+
+    async def _bg():
+        try:
+            written = await loop.run_in_executor(None, _run_tsdf)
+            async with _tsdf_progress_lock:
+                _tsdf_set_overall(session_id, phase="done",
+                                  done=len(written), finished_at=time.time())
+            print(f"[TSDF] ✅ wrote {len(written)} mesh(es)")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            async with _tsdf_progress_lock:
+                _tsdf_set_overall(session_id, phase="error", error=str(e))
+
+    asyncio.create_task(_bg())
+
+    return {"ok": True, "started": True, "count": len(target_ids)}
+
+
+async def _tsdf_apply_progress(session_id: str, inst_id: int,
+                               update: Dict[str, Any],
+                               done_count: Optional[int]):
+    async with _tsdf_progress_lock:
+        _tsdf_set(session_id, inst_id, **update)
+        if done_count is not None:
+            _tsdf_set_overall(session_id, done=done_count)
+
+
+# ── Whole-scene TSDF (single mesh from all frames; no instance filtering) ──
+
+@app.post("/api/segmentation/tsdf/scene_export")
+async def export_tsdf_scene_endpoint(request: Request):
+    """Reconstruct ONE TSDF mesh from the entire scan (all poses + depth).
+
+    Body:
+        session_id: str
+        voxel_length: float (m, default 0.015)
+        sdf_trunc:    float (m, default 0.05)
+        depth_trunc:  float (m, default 5.0)
+        depth_min:    float (m, default 0.15)
+        edge_thresh:  float (m, default 0.08) — discontinuity drop threshold
+
+    Progress is tracked under the ``__scene__`` key of the same TSDF state
+    dict, so a single progress endpoint can surface both per-instance and
+    whole-scene jobs.
+    """
+    body = await request.json()
+    session_id = body.get("session_id")
+    # 1.5 cm voxel / 5 cm trunc — matched to the ~1-2 cm iPad-LiDAR footprint.
+    # A finer voxel just over-resolves sensor noise into floaters + a doubled
+    # shell (see plans/polycam-quality-reconstruction.md).
+    voxel_length = float(body.get("voxel_length", 0.015))
+    sdf_trunc = float(body.get("sdf_trunc", 0.05))
+    depth_trunc = float(body.get("depth_trunc", 5.0))
+    depth_min = float(body.get("depth_min", 0.15))
+    edge_thresh = float(body.get("edge_thresh", 0.04))
+    conf_min = int(body.get("conf_min", 2))
+    smooth_iterations = int(body.get("smooth_iterations", 2))
+
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id")
+
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
+    frames_dir = ctx.frames_dir
+
+    print(f"[TSDF-scene] ━━━ /tsdf/scene_export request ━━━")
+    print(f"[TSDF-scene]   session={session_id}")
+    print(f"[TSDF-scene]   voxel={voxel_length}m  trunc={sdf_trunc}m  "
+          f"depth_max={depth_trunc}m  edge={edge_thresh}m  "
+          f"conf_min={conf_min}  smooth={smooth_iterations}")
+
+    async with _tsdf_progress_lock:
+        sess_state = _tsdf_progress.setdefault(session_id, {})
+        sess_state["__scene__"] = {
+            "phase": "starting",
+            "started_at": time.time(),
+        }
+
+    loop = asyncio.get_event_loop()
+
+    def _progress_cb(phase: str, elapsed, mesh):
+        update: Dict[str, Any] = {"phase": phase}
+        if elapsed is not None:
+            update["elapsed"] = float(elapsed)
+        if mesh:
+            update["mesh"] = mesh
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _tsdf_scene_apply_progress(session_id, update), loop,
+            )
+        except Exception:
+            pass  # best-effort
+
+    def _run_tsdf_scene():
+        from segmentation.tsdf_export import export_tsdf_scene
+        return export_tsdf_scene(
+            output_dir=output_dir,
+            frames_dir=frames_dir,
+            session_dir=frames_dir.parent,
+            voxel_length=voxel_length,
+            sdf_trunc=sdf_trunc,
+            depth_trunc=depth_trunc,
+            depth_min=depth_min,
+            edge_thresh=edge_thresh,
+            conf_min=conf_min,
+            smooth_iterations=smooth_iterations,
+            progress_cb=_progress_cb,
+        )
+
+    async def _bg():
+        try:
+            path = await loop.run_in_executor(None, _run_tsdf_scene)
+            async with _tsdf_progress_lock:
+                _tsdf_progress.setdefault(session_id, {})["__scene__"] = {
+                    "phase": "done" if path else "error",
+                    "mesh": str(path) if path else None,
+                    "finished_at": time.time(),
+                }
+            print(f"[TSDF-scene] ✅ wrote {path}" if path else "[TSDF-scene] ❌ failed")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            async with _tsdf_progress_lock:
+                _tsdf_progress.setdefault(session_id, {})["__scene__"] = {
+                    "phase": "error", "error": str(e),
+                }
+
+    asyncio.create_task(_bg())
+
+    return {"ok": True, "started": True}
+
+
+async def _tsdf_scene_apply_progress(session_id: str, update: Dict[str, Any]):
+    async with _tsdf_progress_lock:
+        state = _tsdf_progress.setdefault(session_id, {})
+        scene = state.setdefault("__scene__", {})
+        scene.update(update)
+
+
+@app.get("/api/segmentation/tsdf/progress/{session_id}")
+async def tsdf_progress(session_id: str):
+    """Live state for the TSDF pipeline. UI polls this every ~1s during a run."""
+    async with _tsdf_progress_lock:
+        state = _tsdf_progress.get(session_id, {})
+        per_instance = [
+            v for k, v in state.items()
+            if k != "__overall__" and k != "__scene__"
+        ]
+        overall = state.get("__overall__", {"phase": "idle"})
+        scene = state.get("__scene__", {"phase": "idle"})
+    return {"ok": True, "overall": overall, "instances": per_instance, "scene": scene}
+
+
+@app.get("/api/segmentation/tsdf/status/{session_id}")
+async def tsdf_status(session_id: str):
+    """Check which segmented instances already have TSDF meshes."""
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
+    result_path = output_dir / "segmentation_result.json"
+    tsdf_dir = output_dir / "tsdf"
+
+    if not result_path.exists():
+        return {"ok": True, "instances": []}
+
+    with open(result_path) as f:
+        result_data = json.load(f)
+
+    statuses = []
+    for inst in result_data.get("instances", []):
+        iid = inst.get("id", inst.get("instance_id"))
+        label = inst.get("label", f"object_{iid}")
+        safe_label = label.replace(" ", "_").replace("/", "_")[:30]
+        obj_folder = tsdf_dir / f"{safe_label}_{iid}"
+        has_mesh = any(obj_folder.glob("*.glb")) if obj_folder.exists() else False
+        statuses.append({
+            "id": iid,
+            "label": label,
+            "has_mesh": has_mesh,
+            "folder": str(obj_folder.relative_to(output_dir)) if obj_folder.exists() else None,
+        })
+    return {"ok": True, "instances": statuses}
+
+
+@app.get("/api/segmentation/tsdf/list/{session_id}")
+async def tsdf_list(session_id: str):
+    """List all TSDF meshes for a session (viewer auto-load)."""
+    ctx = _ctx(session_id)
+    tsdf_dir = ctx.output_dir / "tsdf"
+    if not tsdf_dir.exists():
+        return {"ok": True, "shapes": []}
+
+    shapes = []
+    for obj_folder in sorted(tsdf_dir.iterdir()):
+        if not obj_folder.is_dir():
+            continue
+        glb_files = sorted(obj_folder.glob("*.glb"))
+        if not glb_files:
+            continue
+        glb_file = glb_files[0]
+        meta_file = glb_file.with_suffix(".meta.json")
+        meta = None
+        if meta_file.exists():
+            try:
+                with open(meta_file) as f:
+                    meta = json.load(f)
+            except Exception as e:
+                print(f"[TSDFList] failed to read {meta_file}: {e}")
+        shapes.append({
+            "folder": obj_folder.name,
+            "glb_url": f"/api/segmentation/tsdf/file/{session_id}/{obj_folder.name}/{glb_file.name}",
+            "meta": meta,
+        })
+    return {"ok": True, "shapes": shapes}
+
+
+@app.get("/api/segmentation/tsdf/file/{session_id}/{folder}/{filename}")
+async def tsdf_file(session_id: str, folder: str, filename: str):
+    """Serve a TSDF .glb (or its .meta.json)."""
+    from fastapi.responses import FileResponse
+    if "/" in folder or ".." in folder or "/" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid path component")
+
+    ctx = _ctx(session_id)
+    full_path = ctx.output_dir / "tsdf" / folder / filename
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+
+    if filename.endswith(".glb"):
+        media_type = "model/gltf-binary"
+    elif filename.endswith(".json"):
+        media_type = "application/json"
+    else:
+        media_type = "application/octet-stream"
+    return FileResponse(
+        str(full_path),
+        media_type=media_type,
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.post("/api/segmentation/refresh")
@@ -3340,10 +4562,11 @@ async def viewer_websocket(websocket: WebSocket):
                                         print(f"[Viewer] Loaded {len(c2w_list)} camera poses from {poses_path.name}")
                                 except Exception as e:
                                     print(f"[Viewer] ⚠️ Could not load camera poses: {e}")
-                            return potree_meta, floor_transform_4x4, ifc_files, has_confidence, camera_poses_list
-                        
-                        potree_meta, floor_transform_4x4, ifc_files, has_confidence, camera_poses_list = await loop.run_in_executor(None, _load_metadata)
-                        
+                            scene_payload = _load_scene_payload(output_dir, session_id)
+                            return potree_meta, floor_transform_4x4, ifc_files, has_confidence, camera_poses_list, scene_payload
+
+                        potree_meta, floor_transform_4x4, ifc_files, has_confidence, camera_poses_list, scene_payload = await loop.run_in_executor(None, _load_metadata)
+
                         msg = {
                             "type": "potree_ready",
                             "session_id": session_id,
@@ -3355,6 +4578,8 @@ async def viewer_websocket(websocket: WebSocket):
                             msg["floorTransform"] = floor_transform_4x4
                         if ifc_files:
                             msg["bimFiles"] = ifc_files
+                        if scene_payload is not None:
+                            msg["scene"] = scene_payload
                         if camera_poses_list:
                             if isinstance(camera_poses_list, tuple):
                                 msg["cameraPoses"] = camera_poses_list[0]
@@ -3463,7 +4688,8 @@ async def viewer_websocket(websocket: WebSocket):
                 ordered_stages = cmd.get("ordered_stages", None) # e.g. ["vlm", "sam3", "reconstruction", "cloudcompy"]
                 
                 from pipeline_manager import build_pipeline_stages
-                stages = build_pipeline_stages(ordered_stages=ordered_stages, enabled=stages_config)
+                _recon_backend = cfg.get("reconstruction", {}).get("backend", "da3")
+                stages = build_pipeline_stages(ordered_stages=ordered_stages, enabled=stages_config, backend=_recon_backend)
 
                 # Progress callback: relay to this websocket + broadcast
                 from task_manager import task_manager as _tm

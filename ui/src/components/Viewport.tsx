@@ -7,6 +7,8 @@ import { useRef, useEffect, useCallback, forwardRef, useImperativeHandle, useSta
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { PotreeOctreeLoader } from './PotreeLoader'
 
 type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align'
@@ -61,6 +63,16 @@ export interface ViewportHandle {
     refreshSegmentOBBs: (sessionId: string) => void
     setOBBsVisible: (visible: boolean) => void
     setSegmentVisibility: (segId: number, visible: boolean) => void
+    setCloudObjectVisible: (visible: boolean) => void
+    reloadShapes: (sessionId: string) => Promise<void>
+    setShapeVisibility: (instanceId: number, visible: boolean) => void
+    clearShapes: () => void
+    reloadTsdf: (sessionId: string) => Promise<void>
+    setTsdfVisibility: (folder: string, visible: boolean) => void
+    clearTsdf: () => void
+    reloadReconScene: (sessionId: string) => Promise<void>
+    setReconElementVisibility: (instanceId: number, visible: boolean) => void
+    clearReconScene: () => void
 }
 
 // Vertex shader — matches FusionRenderer.js point size formula
@@ -292,11 +304,32 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const controlsRef = useRef<OrbitControls | null>(null)
     const pointCloudRef = useRef<THREE.Points | null>(null)
     const materialRef = useRef<THREE.ShaderMaterial | null>(null)
+    // Cloud-hidden flag — driven by App (`setCloudObjectVisible`) and by the
+    // confidence-slider useEffect. Read by the Potree LOD gate to short-
+    // circuit `updateVisibility()` when the cloud is off. We never set
+    // `octreeGroup.visible = false` because mesh groups (TSDF/Shape/Recon)
+    // live under it for floor_transform inheritance and `visible` is
+    // hierarchical in three.js — hiding the parent would drag the meshes too.
+    const cloudHiddenRef = useRef(false)
     const animFrameRef = useRef<number>(0)
     const wsRef = useRef<WebSocket | null>(null)
     const totalPointsRef = useRef(0)
     const geometryRef = useRef<THREE.BufferGeometry | null>(null)
     const obbGroupRef = useRef<THREE.Group | null>(null)
+    // Shape (ShapeR) meshes — one per segmented instance. Lives as a child of
+    // the Potree octreeGroup so floor_transform / alignment edits apply
+    // automatically. Cleared/recreated when the session changes.
+    const shapesGroupRef = useRef<THREE.Group | null>(null)
+    const shapesByInstanceRef = useRef<Map<number, THREE.Group>>(new Map())
+    // TSDF meshes — same lifecycle as shapes, kept in a parallel group so both
+    // backends can be displayed simultaneously for A/B comparison.
+    const tsdfGroupRef = useRef<THREE.Group | null>(null)
+    // Reconstruction-v2 scene — typed elements (parametric surfaces / swept solids
+    // / boxes / linear-repeats + free-form ShapeR meshes). Same lifecycle as
+    // shapes; lives under the octreeGroup so floor_transform applies.
+    const reconSceneGroupRef = useRef<THREE.Group | null>(null)
+    const reconByInstanceRef = useRef<Map<number, THREE.Group>>(new Map())
+    const gltfLoaderRef = useRef<GLTFLoader | null>(null)
     const obbMapRef = useRef<Map<string, THREE.Object3D>>(new Map())
     const bimGroupRef = useRef<THREE.Group | null>(null)
     const sabanaGroupRef = useRef<THREE.Group | null>(null)
@@ -519,12 +552,29 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         raycaster.params.Points = { threshold: 0.01 }
         raycaster.setFromCamera(mouse, camera)
 
-        // Raycast against both legacy pointCloud and Potree octree nodes
-        const targets: THREE.Object3D[] = [pointCloud]
-        if (potreeLoaderRef.current) {
-            const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
-            if (octreeGroup) targets.push(...octreeGroup.children)
+        // Raycast targets. Mesh groups are always candidates so measurements
+        // snap to whatever the user is seeing. Cloud points are added ONLY
+        // when the cloud is not hidden — three.js's raycaster does NOT skip
+        // invisible objects automatically, so without this filter the
+        // (invisible) points still grab the hit, floating just above the mesh.
+        const targets: THREE.Object3D[] = []
+        if (!cloudHiddenRef.current) {
+            if (pointCloud) targets.push(pointCloud)
+            if (potreeLoaderRef.current) {
+                const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
+                if (octreeGroup) {
+                    octreeGroup.children.forEach(c => {
+                        if ((c.name || '').startsWith('potree-node-')) {
+                            targets.push(c)
+                        }
+                    })
+                }
+            }
         }
+        if (tsdfGroupRef.current) targets.push(tsdfGroupRef.current)
+        if (shapesGroupRef.current) targets.push(shapesGroupRef.current)
+        if (reconSceneGroupRef.current) targets.push(reconSceneGroupRef.current)
+        if (bimGroupRef.current) targets.push(bimGroupRef.current)
         const intersects = raycaster.intersectObjects(targets)
         // Filter out section-box-clipped points
         const hit = intersects.find(i => {
@@ -658,12 +708,29 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         raycaster.params.Points = { threshold: 0.01 }
         raycaster.setFromCamera(mouse, camera)
 
-        // Raycast against both legacy pointCloud and Potree octree nodes
-        const targets: THREE.Object3D[] = [pointCloud]
-        if (potreeLoaderRef.current) {
-            const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
-            if (octreeGroup) targets.push(...octreeGroup.children)
+        // Raycast targets. Mesh groups are always candidates so measurements
+        // snap to whatever the user is seeing. Cloud points are added ONLY
+        // when the cloud is not hidden — three.js's raycaster does NOT skip
+        // invisible objects automatically, so without this filter the
+        // (invisible) points still grab the hit, floating just above the mesh.
+        const targets: THREE.Object3D[] = []
+        if (!cloudHiddenRef.current) {
+            if (pointCloud) targets.push(pointCloud)
+            if (potreeLoaderRef.current) {
+                const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
+                if (octreeGroup) {
+                    octreeGroup.children.forEach(c => {
+                        if ((c.name || '').startsWith('potree-node-')) {
+                            targets.push(c)
+                        }
+                    })
+                }
+            }
         }
+        if (tsdfGroupRef.current) targets.push(tsdfGroupRef.current)
+        if (shapesGroupRef.current) targets.push(shapesGroupRef.current)
+        if (reconSceneGroupRef.current) targets.push(reconSceneGroupRef.current)
+        if (bimGroupRef.current) targets.push(bimGroupRef.current)
         const intersects = raycaster.intersectObjects(targets)
         // Filter out section-box-clipped points
         const hit = intersects.find(i => {
@@ -1162,6 +1229,251 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     }, [activeSession, onStatusMessage])
 
     // Expose sendCommand + toggleOBB + clearMeasurements + resetSectionBox to parent via ref
+    // ── ShapeR mesh auto-load helpers ────────────────────────────────
+    const clearAllShapes = useCallback(() => {
+        const group = shapesGroupRef.current
+        if (group) {
+            // Properly dispose geometry and materials to avoid GPU leaks
+            group.traverse((obj) => {
+                if (obj instanceof THREE.Mesh) {
+                    obj.geometry?.dispose()
+                    if (Array.isArray(obj.material)) {
+                        obj.material.forEach(m => m.dispose())
+                    } else {
+                        obj.material?.dispose()
+                    }
+                }
+            })
+            const parent = group.parent
+            if (parent) parent.remove(group)
+        }
+        shapesGroupRef.current = null
+        shapesByInstanceRef.current.clear()
+    }, [])
+
+    const loadShapesIntoGroup = useCallback(async (sessionId: string, parentGroup: THREE.Object3D) => {
+        // Reset previous shapes (different session or refresh)
+        clearAllShapes()
+
+        let res: Response
+        try {
+            res = await fetch(`/api/segmentation/shape/list/${sessionId}`)
+        } catch (e) {
+            console.warn('[Viewport] shape list fetch failed', e)
+            return
+        }
+        if (!res.ok) return
+        const data = await res.json()
+        const shapes = (data?.shapes || []) as Array<{ folder: string; glb_url: string; meta: any }>
+        if (shapes.length === 0) return
+
+        const group = new THREE.Group()
+        group.name = 'shapes-group'
+        parentGroup.add(group)
+        shapesGroupRef.current = group
+
+        if (!gltfLoaderRef.current) gltfLoaderRef.current = new GLTFLoader()
+        const loader = gltfLoaderRef.current
+
+        let loaded = 0
+        for (const sh of shapes) {
+            try {
+                const gltf = await loader.loadAsync(sh.glb_url)
+                const meshGroup = new THREE.Group()
+                meshGroup.name = `shape-${sh.folder}`
+                meshGroup.userData = { meta: sh.meta, folder: sh.folder }
+                meshGroup.add(gltf.scene)
+                group.add(meshGroup)
+
+                const iid = sh.meta?.instance_id
+                if (typeof iid === 'number') {
+                    shapesByInstanceRef.current.set(iid, meshGroup)
+                }
+                loaded += 1
+            } catch (e) {
+                console.warn(`[Viewport] failed to load mesh ${sh.glb_url}`, e)
+            }
+        }
+        if (onStatusMessage && loaded > 0) {
+            onStatusMessage(`Loaded ${loaded} reconstructed mesh${loaded !== 1 ? 'es' : ''}`)
+        }
+    }, [clearAllShapes, onStatusMessage])
+
+    // ── TSDF mesh auto-load helpers (mirrors ShapeR — separate group) ──
+    const clearAllTsdf = useCallback(() => {
+        const group = tsdfGroupRef.current
+        if (group) {
+            group.traverse((obj) => {
+                if (obj instanceof THREE.Mesh) {
+                    obj.geometry?.dispose()
+                    if (Array.isArray(obj.material)) {
+                        obj.material.forEach(m => m.dispose())
+                    } else {
+                        obj.material?.dispose()
+                    }
+                }
+            })
+            const parent = group.parent
+            if (parent) parent.remove(group)
+        }
+        tsdfGroupRef.current = null
+    }, [])
+
+    const loadTsdfIntoGroup = useCallback(async (sessionId: string, parentGroup: THREE.Object3D) => {
+        clearAllTsdf()
+        let res: Response
+        try {
+            res = await fetch(`/api/segmentation/tsdf/list/${sessionId}`)
+        } catch (e) {
+            console.warn('[Viewport] tsdf list fetch failed', e)
+            return
+        }
+        if (!res.ok) return
+        const data = await res.json()
+        const meshes = (data?.shapes || []) as Array<{ folder: string; glb_url: string; meta: any }>
+        if (meshes.length === 0) return
+
+        const group = new THREE.Group()
+        group.name = 'tsdf-group'
+        parentGroup.add(group)
+        tsdfGroupRef.current = group
+
+        if (!gltfLoaderRef.current) gltfLoaderRef.current = new GLTFLoader()
+        const loader = gltfLoaderRef.current
+
+        let loaded = 0
+        for (const sh of meshes) {
+            try {
+                const gltf = await loader.loadAsync(sh.glb_url)
+                // TSDF normals point INTO the room (marching cubes uses the
+                // SDF gradient, which points from the wall toward free space —
+                // and free space is the interior, since scanning happens from
+                // inside). With FrontSide (three.js default) walls disappear
+                // when seen from outside. DoubleSide renders both faces so the
+                // mesh is navigable from any angle. ~2× rasterized triangles,
+                // negligible at this tri count.
+                gltf.scene.traverse((obj) => {
+                    if (obj instanceof THREE.Mesh) {
+                        const mat = obj.material
+                        if (Array.isArray(mat)) {
+                            mat.forEach(m => { if (m) m.side = THREE.DoubleSide })
+                        } else if (mat) {
+                            mat.side = THREE.DoubleSide
+                        }
+                    }
+                })
+                const meshGroup = new THREE.Group()
+                meshGroup.name = `tsdf-${sh.folder}`
+                meshGroup.userData = { meta: sh.meta, folder: sh.folder, method: 'tsdf' }
+                meshGroup.add(gltf.scene)
+                group.add(meshGroup)
+                loaded += 1
+            } catch (e) {
+                console.warn(`[Viewport] failed to load TSDF mesh ${sh.glb_url}`, e)
+            }
+        }
+        if (onStatusMessage && loaded > 0) {
+            onStatusMessage(`Loaded ${loaded} TSDF mesh${loaded !== 1 ? 'es' : ''}`)
+        }
+    }, [clearAllTsdf, onStatusMessage])
+
+    // ── Reconstruction-v2 scene loader (mirrors ShapeR / TSDF; own group) ──
+    const clearAllReconScene = useCallback(() => {
+        const group = reconSceneGroupRef.current
+        if (group) {
+            group.traverse((obj) => {
+                if (obj instanceof THREE.Mesh) {
+                    obj.geometry?.dispose()
+                    if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose())
+                    else obj.material?.dispose()
+                }
+            })
+            const parent = group.parent
+            if (parent) parent.remove(group)
+        }
+        reconSceneGroupRef.current = null
+        reconByInstanceRef.current.clear()
+    }, [])
+
+    const loadReconSceneIntoGroup = useCallback(async (
+        sessionId: string,
+        parentGroup: THREE.Object3D,
+        preloaded?: { elements?: Array<any> } | null,
+    ) => {
+        clearAllReconScene()
+        let elements: Array<any>
+        if (preloaded && Array.isArray(preloaded.elements)) {
+            // ``potree_ready`` already bundles the scene payload — skip the fetch.
+            elements = preloaded.elements
+        } else {
+            let res: Response
+            try {
+                res = await fetch(`/api/segmentation/scene/${sessionId}`)
+            } catch (e) {
+                console.warn('[Viewport] scene fetch failed', e)
+                return
+            }
+            if (!res.ok) return
+            const data = await res.json()
+            if (!data?.exists) return
+            elements = (data?.elements || []) as Array<any>
+        }
+        if (elements.length === 0) return
+
+        const group = new THREE.Group()
+        group.name = 'recon-scene-group'
+        parentGroup.add(group)
+        reconSceneGroupRef.current = group
+
+        if (!gltfLoaderRef.current) gltfLoaderRef.current = new GLTFLoader()
+        const loader = gltfLoaderRef.current
+
+        // confidence colours (mesh elements carry a per-vertex `observed` attribute)
+        const OBS_GREEN = new THREE.Color(0.20, 0.85, 0.32)
+        const PRED_AMBER = new THREE.Color(0.95, 0.74, 0.20)
+
+        let loaded = 0
+        for (const el of elements) {
+            const url: string | null = el?.glb_url
+            const iid: number | undefined = el?.instance_id
+            if (!url) continue
+            try {
+                const gltf = await loader.loadAsync(url)
+                const meshGroup = new THREE.Group()
+                meshGroup.name = `recon-${el?.label || iid}`
+                meshGroup.userData = { meta: el, kind: el?.kind, geometryClass: el?.geometry_class }
+                // colour mesh-element vertices by the `observed` confidence attr
+                gltf.scene.traverse((obj) => {
+                    if (!(obj instanceof THREE.Mesh)) return
+                    const geo = obj.geometry as THREE.BufferGeometry
+                    const obsAttr = (geo.getAttribute('_observed') || geo.getAttribute('observed')) as THREE.BufferAttribute | undefined
+                    if (obsAttr && obsAttr.count === geo.getAttribute('position')?.count) {
+                        const n = obsAttr.count
+                        const colors = new Float32Array(n * 3)
+                        for (let i = 0; i < n; i++) {
+                            const c = obsAttr.getX(i) > 0.5 ? OBS_GREEN : PRED_AMBER
+                            colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b
+                        }
+                        geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+                        const mat = (Array.isArray(obj.material) ? obj.material[0] : obj.material) as THREE.Material
+                        const cloned = mat.clone() as any
+                        cloned.vertexColors = true
+                        obj.material = cloned
+                    }
+                })
+                meshGroup.add(gltf.scene)
+                group.add(meshGroup)
+                if (typeof iid === 'number') reconByInstanceRef.current.set(iid, meshGroup)
+                loaded += 1
+            } catch (e) {
+                console.warn(`[Viewport] failed to load recon element ${url}`, e)
+            }
+        }
+        if (onStatusMessage && loaded > 0) {
+            onStatusMessage(`Loaded reconstruction scene: ${loaded} element${loaded !== 1 ? 's' : ''}`)
+        }
+    }, [clearAllReconScene, onStatusMessage])
+
     useImperativeHandle(ref, () => ({
         sendCommand: (cmd: Record<string, unknown>) => {
             if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -1198,6 +1510,62 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             mat.uniforms.uSegmentVisible.value = newArr
             mat.uniformsNeedUpdate = true
         },
+        setCloudObjectVisible: (visible: boolean) => {
+            // Object-level cloud visibility, driven by App. Hide ONLY the
+            // Potree-owned point nodes (`potree-node-*` in PotreeLoader) —
+            // never the octreeGroup itself, because the mesh groups
+            // (TSDF/Shape/Recon) live under it for floor_transform inheritance
+            // and `visible` is hierarchical in three.js. cloudHiddenRef also
+            // gates the LOD loop (skips updateVisibility + node loading).
+            cloudHiddenRef.current = !visible
+            const pc = pointCloudRef.current
+            if (pc) pc.visible = visible
+            const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
+            if (octreeGroup) {
+                octreeGroup.children.forEach(child => {
+                    if ((child.name || '').startsWith('potree-node-')) {
+                        child.visible = visible
+                    }
+                })
+            }
+        },
+        reloadShapes: async (sessionId: string) => {
+            // Reuse current octreeGroup as parent if a cloud is loaded; otherwise
+            // attach to the scene root. Either way, floor_transform applies via
+            // the parent chain.
+            const loader = potreeLoaderRef.current
+            const parent = loader?.getOctreeGroup() || sceneRef.current
+            if (!parent) return
+            await loadShapesIntoGroup(sessionId, parent)
+        },
+        setShapeVisibility: (instanceId: number, visible: boolean) => {
+            const meshGroup = shapesByInstanceRef.current.get(instanceId)
+            if (meshGroup) meshGroup.visible = visible
+        },
+        clearShapes: () => clearAllShapes(),
+        reloadTsdf: async (sessionId: string) => {
+            const loader = potreeLoaderRef.current
+            const parent = loader?.getOctreeGroup() || sceneRef.current
+            if (!parent) return
+            await loadTsdfIntoGroup(sessionId, parent)
+        },
+        setTsdfVisibility: (folder: string, visible: boolean) => {
+            const meshGroup = tsdfGroupRef.current?.children
+                .find(c => c.name === `tsdf-${folder}`)
+            if (meshGroup) meshGroup.visible = visible
+        },
+        clearTsdf: () => clearAllTsdf(),
+        reloadReconScene: async (sessionId: string) => {
+            const loader = potreeLoaderRef.current
+            const parent = loader?.getOctreeGroup() || sceneRef.current
+            if (!parent) return
+            await loadReconSceneIntoGroup(sessionId, parent)
+        },
+        setReconElementVisibility: (instanceId: number, visible: boolean) => {
+            const g = reconByInstanceRef.current.get(instanceId)
+            if (g) g.visible = visible
+        },
+        clearReconScene: () => clearAllReconScene(),
         toggleBIMVisibility: (meshNames: string[], visible: boolean) => {
             const bimGroup = bimGroupRef.current
             if (!bimGroup) return
@@ -1528,11 +1896,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const container = containerRef.current
         if (!container) return
 
-        // Renderer
+        // Renderer — PBR-ready: sRGB output + ACES filmic tone mapping so the GLBs'
+        // PBR materials (concrete / wood / metal / glass / ...) render naturally
+        // instead of washed-out / clipped.
         const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
         renderer.setPixelRatio(window.devicePixelRatio)
         renderer.setSize(container.clientWidth, container.clientHeight)
         renderer.setClearColor(0x0d1117, 1)
+        renderer.outputColorSpace = THREE.SRGBColorSpace
+        renderer.toneMapping = THREE.ACESFilmicToneMapping
+        renderer.toneMappingExposure = 1.0
         container.appendChild(renderer.domElement)
         rendererRef.current = renderer
 
@@ -1542,13 +1915,27 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         scene.fog = new THREE.FogExp2(0x0d1117, 0.0003)
         sceneRef.current = scene
 
-        // Lights for BIM/mesh rendering (PBR materials need lights)
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
+        // Environment map for PBR (image-based lighting): a PMREM-prefiltered version
+        // of `RoomEnvironment` (a procedural neutral studio). Without this, metals look
+        // black and roughness/diffuse don't pick up any ambient gradient. With it,
+        // PBR materials look natural even with our few discrete lights.
+        try {
+            const pmrem = new THREE.PMREMGenerator(renderer)
+            const envScene = new RoomEnvironment()
+            scene.environment = pmrem.fromScene(envScene, 0.04).texture
+            pmrem.dispose()
+        } catch (e) {
+            console.warn('[Viewport] PMREM environment setup failed:', e)
+        }
+
+        // Discrete lights (still useful for shadow direction / sharper highlights;
+        // env map provides the soft ambient/diffuse).
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.25)
         scene.add(ambientLight)
-        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8)
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.85)
         dirLight.position.set(10, 20, 10)
         scene.add(dirLight)
-        const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.3)
+        const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.30)
         dirLight2.position.set(-10, -5, -10)
         scene.add(dirLight2)
 
@@ -1699,12 +2086,23 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             // Potree LOD: update visible nodes based on camera (~10 Hz, not every frame)
             if (potreeLoaderRef.current?.isLoaded && now - lastLodUpdateRef.current > 100) {
                 lastLodUpdateRef.current = now
-                potreeLoaderRef.current.updateVisibility()
-                // Report visible points back to UI
-                const visiblePts = potreeLoaderRef.current.getVisiblePointCount()
-                if (visiblePts !== totalPointsRef.current) {
-                    totalPointsRef.current = visiblePts
-                    onPointCount(visiblePts)
+                // Skip Potree's LOD/node-loading work when the cloud is hidden.
+                // We can't check octreeGroup.visible: setCloudObjectVisible
+                // hides only the potree-node-* children so the mesh groups
+                // under octreeGroup stay visible. cloudHiddenRef is the truth.
+                if (cloudHiddenRef.current) {
+                    if (totalPointsRef.current !== 0) {
+                        totalPointsRef.current = 0
+                        onPointCount(0)
+                    }
+                } else {
+                    potreeLoaderRef.current.updateVisibility()
+                    // Report visible points back to UI
+                    const visiblePts = potreeLoaderRef.current.getVisiblePointCount()
+                    if (visiblePts !== totalPointsRef.current) {
+                        totalPointsRef.current = visiblePts
+                        onPointCount(visiblePts)
+                    }
                 }
             }
 
@@ -1782,15 +2180,21 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         if (materialRef.current) {
             materialRef.current.uniforms.uConfidenceThreshold.value = confidenceThreshold
         }
-        // Hide point cloud at max confidence to show only voxel mesh + wireframe
+        // Confidence-slider "hide cloud" — same per-child path as
+        // setCloudObjectVisible so the mesh groups under octreeGroup don't
+        // get dragged out of view.
         const hideCloud = confidenceThreshold >= 1.0
+        cloudHiddenRef.current = hideCloud
         if (pointCloudRef.current) {
             pointCloudRef.current.visible = !hideCloud
         }
-        // Also hide Potree octree
         const potreeGroup = sceneRef.current?.getObjectByName('potree-octree')
         if (potreeGroup) {
-            potreeGroup.visible = !hideCloud
+            potreeGroup.children.forEach(child => {
+                if ((child.name || '').startsWith('potree-node-')) {
+                    child.visible = !hideCloud
+                }
+            })
         }
     }, [confidenceThreshold])
 
@@ -2248,6 +2652,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     }
                     // Adapt grid to combined extents
                     if (sceneRef.current) adaptGrid(cloudBBoxRef.current, sceneRef.current, gridRef, showGridRef.current)
+                }
+
+                // Auto-load reconstructed object meshes (ShapeR .glb) into the
+                // octreeGroup so floor_transform applies automatically.
+                const sessionIdForShapes = msg.session_id as string | undefined
+                const octreeGroupForShapes = loader.getOctreeGroup()
+                if (sessionIdForShapes && octreeGroupForShapes) {
+                    loadShapesIntoGroup(sessionIdForShapes, octreeGroupForShapes)
+                    loadTsdfIntoGroup(sessionIdForShapes, octreeGroupForShapes)
+                    const preloadedScene = msg.scene as { elements?: Array<any> } | undefined
+                    loadReconSceneIntoGroup(sessionIdForShapes, octreeGroupForShapes, preloadedScene)
                 }
 
                 // Render camera poses as arrows if provided

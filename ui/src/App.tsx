@@ -144,7 +144,7 @@ function App() {
   const [newProjectName, setNewProjectName] = useState('')
   const [renamingProject, setRenamingProject] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
-  const [scansList, setScansList] = useState<{ date: string; source: string; key: string; frame_count: number; has_output: boolean }[]>([])
+  const [scansList, setScansList] = useState<{ date: string; source: string; key: string; frame_count: number; has_output: boolean; recon_state?: string; cached_chunks?: number }[]>([])
   const [selectedScans, setSelectedScans] = useState<string[]>([])
   const [projectFilter, setProjectFilter] = useState('')
 
@@ -240,6 +240,339 @@ function App() {
   const [segments, setSegments] = useState<SegmentInstance[]>([])
   const [editingSegKey, setEditingSegKey] = useState<string | null>(null)
   const [segSearch, setSegSearch] = useState('')
+
+  // Cloud object-level visibility — App owns the truth (Unsegmented + segments).
+  // Reset to "visible" on every session switch; the second useEffect combines
+  // it with `segments` and tells the Viewport whether to keep the cloud in the
+  // scene (true) or pull it out (false → frees GPU, the Potree LOD self-gates,
+  // and the raycaster skips it so measurements land on meshes).
+  const [unsegmentedVisible, setUnsegmentedVisible] = useState(true)
+  useEffect(() => { setUnsegmentedVisible(true) }, [activeSession])
+  useEffect(() => {
+    if (!activeSession) return
+    const anyVisible = unsegmentedVisible || segments.some(s => s.visible)
+    viewportRef.current?.setCloudObjectVisible(anyVisible)
+  }, [activeSession, unsegmentedVisible, segments])
+
+  // Sidebar lists for generated meshes (visibility toggles only — generation
+  // happens through the modals). Folder is the on-disk dir name used as a
+  // stable React key when instance_id collides between shape and tsdf.
+  type MeshListItem = {
+    instanceId: number
+    label: string
+    folder: string
+    visible: boolean
+  }
+  const [shapeMeshes, setShapeMeshes] = useState<MeshListItem[]>([])
+  const [tsdfMeshes, setTsdfMeshes] = useState<MeshListItem[]>([])
+
+  // Shape export state
+  const [showShapeModal, setShowShapeModal] = useState(false)
+  const [shapeCaptions, setShapeCaptions] = useState<Record<number, string>>({})
+  const [shapeAutoCaption, setShapeAutoCaption] = useState(false)
+  const [shapeAutoReconstruct, setShapeAutoReconstruct] = useState(true)
+  const [shapeRunning, setShapeRunning] = useState(false)
+  // Ref-based busy guard. The `disabled` prop on the Start button only gates
+  // clicks AFTER React commits the next render — between the click and that
+  // commit (a few ms in the worst case, more under load) the DOM button is
+  // still clickable. A bouncy mouse, an over-eager screen reader, or an
+  // intermediary retry can all sneak a second click through. The ref is set
+  // synchronously, so any second entry within the same JS turn is rejected.
+  const shapeBusyRef = useRef(false)
+  // Reconstruction-v2 ("scene") trigger — assembles parametric surfaces / swept
+  // solids / boxes / linear-repeats + free-form ShapeR meshes into output/scene/.
+  const [reconRunning, setReconRunning] = useState(false)
+  const reconBusyRef = useRef(false)
+  const [shapeResult, setShapeResult] = useState<{ count: number; exported: string[] } | null>(null)
+  const [shapeSelected, setShapeSelected] = useState<Set<number>>(new Set())
+  const [shapeStatus, setShapeStatus] = useState<Record<number, { has_pkl: boolean; has_mesh: boolean }>>({})
+
+  // Live progress for the in-flight shape run
+  type ShapeInstanceProgress = {
+    id: number
+    phase: string  // captioning | exporting_pkl | pkl_ready | reconstructing | done | error
+    elapsed?: number
+    error?: string
+    mesh?: string
+  }
+  const [shapeProgress, setShapeProgress] = useState<Record<number, ShapeInstanceProgress>>({})
+  const [shapeOverall, setShapeOverall] = useState<{ phase: string; total?: number; done?: number }>({ phase: 'idle' })
+
+  const refreshShapeStatus = useCallback(async () => {
+    if (!activeSession) return
+    try {
+      const res = await fetch(`/api/segmentation/shape/status/${activeSession}`)
+      const data = await res.json()
+      if (data.ok) {
+        const statusMap: Record<number, { has_pkl: boolean; has_mesh: boolean }> = {}
+        for (const inst of data.instances) {
+          statusMap[inst.id] = { has_pkl: inst.has_pkl, has_mesh: inst.has_mesh }
+        }
+        setShapeStatus(statusMap)
+      }
+    } catch { /* ignore */ }
+  }, [activeSession])
+
+  // Refresh ShapeR mesh list for the sidebar (mirrors what Viewport fetches —
+  // shared endpoint). Preserves visibility for instances that already exist
+  // so a refresh after generation doesn't reset user-toggled hides.
+  const refreshShapeMeshList = useCallback(async (sessionId: string) => {
+    try {
+      const res = await fetch(`/api/segmentation/shape/list/${sessionId}`)
+      if (!res.ok) { setShapeMeshes([]); return }
+      const data = await res.json()
+      const items = (data?.shapes || []) as Array<{
+        folder: string
+        meta: { instance_id?: number; label?: string }
+      }>
+      setShapeMeshes(prev => {
+        const prevVis = new Map(prev.map(m => [m.instanceId, m.visible]))
+        return items
+          .filter(s => typeof s.meta?.instance_id === 'number')
+          .map(s => ({
+            instanceId: s.meta.instance_id as number,
+            label: (s.meta.label as string) || `object_${s.meta.instance_id}`,
+            folder: s.folder,
+            visible: prevVis.get(s.meta.instance_id as number) ?? true,
+          }))
+      })
+    } catch { /* ignore */ }
+  }, [])
+
+  // Same for TSDF mesh list.
+  const refreshTsdfMeshList = useCallback(async (sessionId: string) => {
+    try {
+      const res = await fetch(`/api/segmentation/tsdf/list/${sessionId}`)
+      if (!res.ok) { setTsdfMeshes([]); return }
+      const data = await res.json()
+      const items = (data?.shapes || []) as Array<{
+        folder: string
+        meta: { instance_id?: number; label?: string; method?: string }
+      }>
+      setTsdfMeshes(prev => {
+        const prevVis = new Map(prev.map(m => [m.folder, m.visible]))
+        // Include every TSDF mesh — per-object AND the whole-scene mesh
+        // (folder "scene", which has no instance_id).
+        return items.map(s => ({
+          instanceId: s.meta?.instance_id ?? -1,
+          label: (s.meta?.label as string)
+            || (s.meta?.method === 'tsdf_scene' ? '🧱 TSDF — whole scene'
+                : s.meta?.method === 'poisson_scene' ? '🟣 Poisson — whole scene'
+                : s.folder === 'scene' ? '🌐 Whole scene' : s.folder),
+          folder: s.folder,
+          visible: prevVis.get(s.folder) ?? true,
+        }))
+      })
+    } catch { /* ignore */ }
+  }, [])
+
+  const openShapeModal = useCallback(async () => {
+    setShapeResult(null)
+    setShapeProgress({})
+    setShapeOverall({ phase: 'idle' })
+    setShowShapeModal(true)
+    if (!activeSession) return
+    try {
+      const res = await fetch(`/api/segmentation/shape/status/${activeSession}`)
+      const data = await res.json()
+      if (data.ok) {
+        const statusMap: Record<number, { has_pkl: boolean; has_mesh: boolean }> = {}
+        const selectedIds = new Set<number>()
+        for (const inst of data.instances) {
+          statusMap[inst.id] = { has_pkl: inst.has_pkl, has_mesh: inst.has_mesh }
+          if (!inst.has_mesh) selectedIds.add(inst.id)
+        }
+        setShapeStatus(statusMap)
+        setShapeSelected(selectedIds)
+      }
+    } catch { /* ignore */ }
+  }, [activeSession])
+
+  // Poll progress while running
+  useEffect(() => {
+    if (!shapeRunning || !activeSession) return
+    let alive = true
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/segmentation/shape/progress/${activeSession}`)
+        const data = await res.json()
+        if (!alive) return
+        if (data.ok) {
+          const map: Record<number, ShapeInstanceProgress> = {}
+          for (const inst of (data.instances || [])) map[inst.id] = inst
+          setShapeProgress(map)
+          setShapeOverall(data.overall || { phase: 'idle' })
+          // When backend is done (or errored), refresh has_pkl/has_mesh and stop polling
+          if (data.overall?.phase === 'done' || data.overall?.phase === 'error') {
+            await refreshShapeStatus()
+            // Reload meshes into the viewport so the new .glb files appear
+            // automatically next to the point cloud.
+            if (activeSession) {
+              try { await viewportRef.current?.reloadShapes(activeSession) } catch { /* ignore */ }
+              await refreshShapeMeshList(activeSession)
+            }
+            setShapeRunning(false)
+          }
+        }
+      } catch { /* ignore transient errors */ }
+    }
+    tick()
+    const id = window.setInterval(tick, 1500)
+    return () => { alive = false; window.clearInterval(id) }
+  }, [shapeRunning, activeSession, refreshShapeStatus, refreshShapeMeshList])
+
+  // Poll reconstruction-v2 progress while a run is in flight. The POST kicks
+  // off a background job (single-flight, so it can't OOM the host) and returns
+  // immediately; this drives the status line and reloads the scene when done.
+  useEffect(() => {
+    if (!reconRunning || !activeSession) return
+    let alive = true
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/segmentation/reconstruct/progress/${activeSession}`)
+        const p = await r.json()
+        if (!alive) return
+        const ph: string = p.phase || 'running'
+        if (ph === 'done') {
+          const s = p.summary || {}
+          const byClass = Object.entries(s.by_class || {}).map(([k, v]) => `${v} ${k}`).join(', ')
+          setStatusMessage(`Scene: ${s.n_elements ?? '?'} element(s) [${byClass}], ${s.n_adjacency ?? 0} adjacency edge(s) — ${s.elapsed_s ?? '?'}s`)
+          try { await viewportRef.current?.reloadReconScene(activeSession) } catch { /* ignore */ }
+          reconBusyRef.current = false
+          setReconRunning(false)
+          return
+        }
+        if (ph === 'error') {
+          setStatusMessage(`Reconstruction error: ${p.error || 'unknown'}`)
+          reconBusyRef.current = false
+          setReconRunning(false)
+          return
+        }
+        const det = (ph === 'classifying' && p.total)
+          ? ` ${p.done ?? 0}/${p.total}${p.current ? ' — ' + p.current : ''}` : ''
+        const nv = p.n_views != null ? ` · ${p.n_views} views` : ''
+        const npts = p.n_points != null ? ` · ${(p.n_points / 1e6).toFixed(1)}M pts` : ''
+        setStatusMessage(`Reconstruction: ${ph}${det}${nv}${npts}…`)
+      } catch { /* keep polling through transient errors */ }
+    }
+    tick()
+    const id = window.setInterval(tick, 1500)
+    return () => { alive = false; window.clearInterval(id) }
+  }, [reconRunning, activeSession])
+
+  // ── TSDF export state (parallel to ShapeR — same UX, different backend) ──
+  const [showTsdfModal, setShowTsdfModal] = useState(false)
+  const [tsdfRunning, setTsdfRunning] = useState(false)
+  const [tsdfSelected, setTsdfSelected] = useState<Set<number>>(new Set())
+  const [tsdfStatus, setTsdfStatus] = useState<Record<number, { has_mesh: boolean }>>({})
+  type TsdfInstanceProgress = {
+    id: number
+    phase: string  // pending | starting | integrating | extracting | done | error
+    elapsed?: number
+    error?: string
+    mesh?: string
+  }
+  const [tsdfProgress, setTsdfProgress] = useState<Record<number, TsdfInstanceProgress>>({})
+  const [tsdfOverall, setTsdfOverall] = useState<{ phase: string; total?: number; done?: number }>({ phase: 'idle' })
+  // Tunables — exposed so we can sweep voxel/sdf_trunc on the same 3 elements
+  // without re-deploying. Defaults are the room-scale lidar sweet spot.
+  const [tsdfVoxel, setTsdfVoxel] = useState(0.015)
+  const [tsdfTrunc, setTsdfTrunc] = useState(0.04)
+  const [tsdfDepthMax, setTsdfDepthMax] = useState(5.0)
+  const [tsdfDilate, setTsdfDilate] = useState(3)
+
+  // Whole-scene TSDF (no instance filtering). Tracked independently from
+  // per-instance progress so both can be displayed in the same modal.
+  const [tsdfSceneRunning, setTsdfSceneRunning] = useState(false)
+  const [tsdfScene, setTsdfScene] = useState<{ phase: string; elapsed?: number; mesh?: string; error?: string }>({ phase: 'idle' })
+
+  const refreshTsdfStatus = useCallback(async () => {
+    if (!activeSession) return
+    try {
+      const res = await fetch(`/api/segmentation/tsdf/status/${activeSession}`)
+      const data = await res.json()
+      if (data.ok) {
+        const statusMap: Record<number, { has_mesh: boolean }> = {}
+        for (const inst of data.instances) statusMap[inst.id] = { has_mesh: inst.has_mesh }
+        setTsdfStatus(statusMap)
+      }
+    } catch { /* ignore */ }
+  }, [activeSession])
+
+  const openTsdfModal = useCallback(async () => {
+    setTsdfProgress({})
+    setTsdfOverall({ phase: 'idle' })
+    setShowTsdfModal(true)
+    if (!activeSession) return
+    try {
+      const res = await fetch(`/api/segmentation/tsdf/status/${activeSession}`)
+      const data = await res.json()
+      if (data.ok) {
+        const statusMap: Record<number, { has_mesh: boolean }> = {}
+        const selectedIds = new Set<number>()
+        for (const inst of data.instances) {
+          statusMap[inst.id] = { has_mesh: inst.has_mesh }
+          if (!inst.has_mesh) selectedIds.add(inst.id)
+        }
+        setTsdfStatus(statusMap)
+        setTsdfSelected(selectedIds)
+      }
+    } catch { /* ignore */ }
+  }, [activeSession])
+
+  // Poll TSDF progress while running (per-instance OR whole-scene)
+  useEffect(() => {
+    if ((!tsdfRunning && !tsdfSceneRunning) || !activeSession) return
+    let alive = true
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/segmentation/tsdf/progress/${activeSession}`)
+        const data = await res.json()
+        if (!alive) return
+        if (data.ok) {
+          const map: Record<number, TsdfInstanceProgress> = {}
+          for (const inst of (data.instances || [])) map[inst.id] = inst
+          setTsdfProgress(map)
+          setTsdfOverall(data.overall || { phase: 'idle' })
+          const scene = data.scene || { phase: 'idle' }
+          setTsdfScene(scene)
+          if (data.overall?.phase === 'done' || data.overall?.phase === 'error') {
+            await refreshTsdfStatus()
+            if (activeSession) {
+              try { await viewportRef.current?.reloadTsdf?.(activeSession) } catch { /* ignore */ }
+              await refreshTsdfMeshList(activeSession)
+            }
+            setTsdfRunning(false)
+          }
+          if (scene.phase === 'done' || scene.phase === 'error') {
+            if (scene.phase === 'done' && activeSession) {
+              // Whole-scene TSDF wrote output/tsdf/scene/scene.glb — pull it
+              // into the viewport (tsdf/list already includes the scene/ dir).
+              try { await viewportRef.current?.reloadTsdf?.(activeSession) } catch { /* ignore */ }
+              await refreshTsdfMeshList(activeSession)
+            }
+            setTsdfSceneRunning(false)
+          }
+        }
+      } catch { /* ignore */ }
+    }
+    tick()
+    const id = window.setInterval(tick, 1200)
+    return () => { alive = false; window.clearInterval(id) }
+  }, [tsdfRunning, tsdfSceneRunning, activeSession, refreshTsdfStatus, refreshTsdfMeshList])
+
+  // Refresh shape/TSDF mesh lists when the active session changes (or clear
+  // them on session unload). The Viewport already auto-loads the GLBs into
+  // the scene; this keeps the sidebar list in sync with what's on disk.
+  useEffect(() => {
+    if (!activeSession) {
+      setShapeMeshes([])
+      setTsdfMeshes([])
+      return
+    }
+    refreshShapeMeshList(activeSession)
+    refreshTsdfMeshList(activeSession)
+  }, [activeSession, refreshShapeMeshList, refreshTsdfMeshList])
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -337,8 +670,10 @@ function App() {
   const handleSessionLoad = useCallback((sessionId: string) => {
     // Check if session has a cloud to load
     const sess = sessions.find(s => s.id === sessionId)
-    if (sess && !sess.hasCloud) {
-      setStatusMessage('No cloud available. Run Reconstruct first.')
+    if (sess && !sess.hasCloud && sess.chunkCount === 0) {
+      // Nothing loadable yet — route straight to the reconstruction dialog.
+      // It auto-detects cached/partial runs and defaults to resume mode.
+      handleReconstruct(sessionId)
       return
     }
     // Unload current session if any
@@ -359,7 +694,7 @@ function App() {
     setSabanaFullMeta(null)
     // Reset OBBs visibility
     viewportRef.current?.setOBBsVisible(true)
-  }, [sessions])
+  }, [sessions]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Dismiss loading overlay when points arrive (session load only, not refresh)
   const prevPointCount = useRef(0)
@@ -500,7 +835,13 @@ function App() {
         const isActive = pr && (pr.status === 'running' || pr.status === 'queued') && pr.session_id === sessionId
         // If pipeline is active but scans list is missing, treat ALL as rebuilding
         const rebuildingKeys = isActive ? (pr.scans || scans.map((s: any) => s.key)) : []
-        setSelectedScans(scans.filter((s: any) => !rebuildingKeys.includes(s.key)).map((s: any) => s.key))
+        const selected = scans.filter((s: any) => !rebuildingKeys.includes(s.key)).map((s: any) => s.key)
+        setSelectedScans(selected)
+        // Resume detection: if any selected scan has a partial (cached but
+        // unfinished) reconstruction, default "Replace existing outputs" to OFF
+        // so Run completes the missing parts instead of wiping the cache.
+        const anyPartial = scans.some((s: any) => selected.includes(s.key) && s.recon_state === 'partial')
+        setPipelineReplace(!anyPartial)
       } else {
         setScansList([])
         setSelectedScans([])
@@ -1245,6 +1586,7 @@ function App() {
                       <button className="segment-toggle-btn" title="Select All"
                         onClick={() => {
                           setSegments(prev => prev.map(s => ({ ...s, visible: true })))
+                          setUnsegmentedVisible(true)
                           segments.forEach(s => {
                             viewportRef.current?.toggleOBB(s.key, true)
                             viewportRef.current?.setSegmentVisibility(s.id, true)
@@ -1254,6 +1596,7 @@ function App() {
                       <button className="segment-toggle-btn" title="Deselect All"
                         onClick={() => {
                           setSegments(prev => prev.map(s => ({ ...s, visible: false })))
+                          setUnsegmentedVisible(false)
                           segments.forEach(s => {
                             viewportRef.current?.toggleOBB(s.key, false)
                             viewportRef.current?.setSegmentVisibility(s.id, false)
@@ -1276,12 +1619,11 @@ function App() {
                   )}
                 </div>
                 <div className="segments-list" style={{ flex: 1, overflowY: 'auto' }}>
-                  {segments.length === 0 ? (
-                    <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '13px', opacity: 0.7 }}>
-                      No segments
+                  {segments.length === 0 && (
+                    <div style={{ padding: '14px 16px 6px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '12px', opacity: 0.6 }}>
+                      No segmented objects yet — the full cloud is listed as “Unsegmented” below.
                     </div>
-                  ) : (
-                    <>
+                  )}
                       {segments.filter(seg => !segSearch || seg.label.toLowerCase().includes(segSearch.toLowerCase())).map(seg => (
                         <div key={seg.key} className="segment-item">
                           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%' }}>
@@ -1381,10 +1723,11 @@ function App() {
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                           <input
                             type="checkbox"
-                            defaultChecked={true}
+                            checked={unsegmentedVisible}
                             title="Show/hide unsegmented points"
                             className="segment-checkbox"
                             onChange={(e) => {
+                              setUnsegmentedVisible(e.target.checked)
                               viewportRef.current?.setSegmentVisibility(0, e.target.checked)
                             }}
                           />
@@ -1395,13 +1738,98 @@ function App() {
                           <span className="segment-label" style={{ flex: 1, fontStyle: 'italic', opacity: 0.7 }}>Unsegmented</span>
                         </div>
                       </div>
+                  {/* SHAPE section — generated ShapeR meshes (visibility toggles) */}
+                  {shapeMeshes.length > 0 && (
+                    <>
+                      <div style={{
+                        marginTop: '8px',
+                        padding: '6px 8px 4px',
+                        fontSize: '10px',
+                        fontWeight: 600,
+                        letterSpacing: '0.08em',
+                        color: 'var(--text-secondary)',
+                        textTransform: 'uppercase',
+                        borderTop: '1px solid rgba(255,255,255,0.1)',
+                        opacity: 0.85,
+                      }}>
+                        🧊 Shape ({shapeMeshes.length})
+                      </div>
+                      {shapeMeshes.map(m => (
+                        <div key={`shape-${m.folder}`} className="segment-item">
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%' }}>
+                            <input
+                              type="checkbox"
+                              checked={m.visible}
+                              title="Toggle ShapeR mesh visibility"
+                              className="segment-checkbox"
+                              onChange={() => {
+                                const newVis = !m.visible
+                                setShapeMeshes(prev => prev.map(x =>
+                                  x.folder === m.folder ? { ...x, visible: newVis } : x
+                                ))
+                                viewportRef.current?.setShapeVisibility(m.instanceId, newVis)
+                              }}
+                            />
+                            <span className="segment-label" style={{ flex: 1 }}>{m.label}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                  {/* TSDF section — generated TSDF meshes (visibility toggles) */}
+                  {tsdfMeshes.length > 0 && (
+                    <>
+                      <div style={{
+                        marginTop: '8px',
+                        padding: '6px 8px 4px',
+                        fontSize: '10px',
+                        fontWeight: 600,
+                        letterSpacing: '0.08em',
+                        color: 'var(--text-secondary)',
+                        textTransform: 'uppercase',
+                        borderTop: '1px solid rgba(255,255,255,0.1)',
+                        opacity: 0.85,
+                      }}>
+                        🧱 TSDF ({tsdfMeshes.length})
+                      </div>
+                      {tsdfMeshes.map(m => (
+                        <div key={`tsdf-${m.folder}`} className="segment-item">
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%' }}>
+                            <input
+                              type="checkbox"
+                              checked={m.visible}
+                              title="Toggle TSDF mesh visibility"
+                              className="segment-checkbox"
+                              onChange={() => {
+                                const newVis = !m.visible
+                                setTsdfMeshes(prev => prev.map(x =>
+                                  x.folder === m.folder ? { ...x, visible: newVis } : x
+                                ))
+                                viewportRef.current?.setTsdfVisibility(m.folder, newVis)
+                              }}
+                            />
+                            <span className="segment-label" style={{ flex: 1 }}>{m.label}</span>
+                          </div>
+                        </div>
+                      ))}
                     </>
                   )}
                 </div>
-                <div className="bim-actions" style={{ marginTop: 'auto' }}>
-                  <button className="bim-action-btn upload"
+                <div className="bim-actions" style={{ marginTop: 'auto', display: 'flex', gap: 4 }}>
+                  <button className="bim-action-btn upload" style={{ flex: 1 }}
                     onClick={() => setInteractiveSessionId(activeSession)}>
                     <Crosshair size={14} style={{ marginRight: '6px', verticalAlign: 'middle' }} /> Segmentation
+                  </button>
+                  <button className="bim-action-btn upload" style={{ flex: 1 }}
+                    disabled={segments.length === 0}
+                    onClick={openShapeModal}>
+                    🧊 Shape
+                  </button>
+                  <button className="bim-action-btn upload" style={{ flex: 1 }}
+                    disabled={!activeSession}
+                    title="Reconstruct via Open3D TSDF — per-object (needs segmentation) or whole-scene"
+                    onClick={openTsdfModal}>
+                    🧱 TSDF
                   </button>
                 </div>
               </div>
@@ -1510,8 +1938,11 @@ function App() {
 
       {/* ── Main Content ── */}
       <main className="main-content">
-        {/* Toolbar — only with loaded cloud, hide during loading */}
-        {hasSession && !sessionLoading && pointCount > 0 && (
+        {/* Toolbar — visible whenever a session is loaded (any content: cloud,
+            IFC, TSDF, etc.). `pointCount > 0` was the old gate, but it tracks
+            currently-rendered points (frustum-culled), so it hid the toolbar
+            whenever the cloud left the view or was toggled off. */}
+        {hasSession && !sessionLoading && (
           <div className="toolbar">
             {!sabanaVisible && (
               <>
@@ -1855,6 +2286,17 @@ function App() {
                     </div>
                   )
                 })}
+                {(() => {
+                  const partial = scansList.filter(s => selectedScans.includes(s.key) && s.recon_state === 'partial')
+                  if (partial.length === 0) return null
+                  const totalCached = partial.reduce((n, s) => n + (s.cached_chunks || 0), 0)
+                  return (
+                    <div style={{ fontSize: '11px', background: 'rgba(46,160,67,0.12)', border: '1px solid rgba(46,160,67,0.4)', color: '#7ee787', borderRadius: '6px', padding: '8px', margin: '8px 0' }}>
+                      ⏸ Reconstrucción incompleta detectada ({totalCached} chunk{totalCached === 1 ? '' : 's'} en cache).
+                      Al ejecutar se <b>reanuda</b> y completa lo que falta sin re-procesar lo ya hecho.
+                    </div>
+                  )
+                })()}
                 <label className="pipeline-replace-toggle">
                   <input
                     type="checkbox"
@@ -1863,6 +2305,11 @@ function App() {
                   />
                   <span>Replace existing outputs</span>
                 </label>
+                {pipelineReplace && scansList.some(s => selectedScans.includes(s.key) && s.recon_state === 'partial') && (
+                  <div style={{ fontSize: '11px', color: '#f0883e', marginTop: '4px' }}>
+                    ⚠️ Con esto activado se borra el cache y la reconstrucción arranca de cero. Desactivalo para reanudar.
+                  </div>
+                )}
               </div>
               <div className="pipeline-dialog-actions">
                 <button className="pipeline-btn-cancel" onClick={() => setPipelineDialogOpen(false)}>Cancel</button>
@@ -2052,6 +2499,562 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* ── Shape Export Modal ── */}
+      {showShapeModal && (
+        <div className="admin-overlay" style={{ zIndex: 2000 }}>
+          <div className="admin-panel" style={{ maxWidth: 540, maxHeight: '80vh', overflow: 'auto' }}>
+            <div className="admin-header">
+              <h2>🧊 Shape Export</h2>
+              <button className="admin-close" onClick={() => setShowShapeModal(false)}>✕</button>
+            </div>
+            <div style={{ padding: 16 }}>
+              <p style={{ color: 'var(--text-secondary)', marginBottom: 12, fontSize: 13 }}>
+                Select which objects to export. Existing PKLs/meshes will be overwritten.
+              </p>
+
+              {(() => {
+                const phaseBadge = (phase?: string) => {
+                  if (!phase || phase === 'pending') return null
+                  const styles: Record<string, { bg: string; fg: string; icon: string; label: string }> = {
+                    captioning:      { bg: '#9b59b633', fg: '#bd93d3', icon: '📝', label: 'caption' },
+                    exporting_pkl:   { bg: '#3498db33', fg: '#5dade2', icon: '📦', label: 'pkl…' },
+                    pkl_ready:       { bg: '#e67e2233', fg: '#f0a868', icon: '📦', label: 'pkl' },
+                    reconstructing:  { bg: '#f39c1233', fg: '#f4b656', icon: '🔄', label: 'mesh…' },
+                    done:            { bg: '#2ecc7133', fg: '#52d68d', icon: '🧊', label: 'done' },
+                    error:           { bg: '#e74c3c33', fg: '#ec7063', icon: '❌', label: 'error' },
+                  }
+                  const s = styles[phase]
+                  if (!s) return null
+                  return (
+                    <span style={{
+                      fontSize: 11, background: s.bg, color: s.fg,
+                      padding: '1px 6px', borderRadius: 4, whiteSpace: 'nowrap',
+                    }}>
+                      {s.icon} {s.label}
+                    </span>
+                  )
+                }
+
+                return segments.filter(s => s.label !== 'Unsegmented').map(seg => {
+                  const st = shapeStatus[seg.id]
+                  const prog = shapeProgress[seg.id]
+                  const checked = shapeSelected.has(seg.id)
+                  const livePhase = prog?.phase
+                  return (
+                    <div key={seg.key} style={{
+                      display: 'flex', flexDirection: 'column', gap: 6,
+                      padding: '10px 12px', marginBottom: 8,
+                      background: checked ? 'var(--bg-secondary)' : 'var(--bg-tertiary)',
+                      borderRadius: 8,
+                      border: `2px solid ${checked ? seg.color + '55' : 'transparent'}`,
+                      opacity: checked ? 1 : 0.6,
+                      transition: 'all 0.15s',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <input type="checkbox" checked={checked}
+                          disabled={shapeRunning}
+                          onChange={() => {
+                            setShapeSelected(prev => {
+                              const next = new Set(prev)
+                              if (next.has(seg.id)) next.delete(seg.id)
+                              else next.add(seg.id)
+                              return next
+                            })
+                          }}
+                          style={{ cursor: shapeRunning ? 'not-allowed' : 'pointer' }}
+                        />
+                        <span style={{
+                          width: 12, height: 12, borderRadius: '50%',
+                          background: seg.color, flexShrink: 0,
+                        }} />
+                        <strong style={{ flex: 1, color: 'var(--text-primary)', fontSize: 13 }}>{seg.label}</strong>
+                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                          {seg.totalPoints.toLocaleString()} pts
+                        </span>
+                        {/* Live badge wins over static status */}
+                        {livePhase ? phaseBadge(livePhase) :
+                          st?.has_mesh ? phaseBadge('done') :
+                          st?.has_pkl ? phaseBadge('pkl_ready') : null}
+                      </div>
+                      {prog?.elapsed != null && livePhase === 'done' && (
+                        <div style={{ fontSize: 11, color: 'var(--text-secondary)', paddingLeft: 24 }}>
+                          mesh ready · {prog.elapsed.toFixed(0)}s
+                        </div>
+                      )}
+                      {prog?.error && (
+                        <div style={{ fontSize: 11, color: '#ec7063', paddingLeft: 24 }}>
+                          {prog.error.slice(0, 140)}
+                        </div>
+                      )}
+                      {checked && !shapeRunning && (
+                        <>
+                          {st?.has_mesh && (
+                            <div style={{ fontSize: 11, color: '#e67e22', padding: '2px 0' }}>
+                              ⚠️ This object already has a mesh. Running will overwrite it.
+                            </div>
+                          )}
+                          <input
+                            type="text"
+                            placeholder="Caption (optional — leave blank to auto-caption or use the SAM3 label)"
+                            value={shapeCaptions[seg.id] || ''}
+                            onChange={e => setShapeCaptions(prev => ({ ...prev, [seg.id]: e.target.value }))}
+                            style={{
+                              width: '100%', padding: '5px 8px', fontSize: 12,
+                              background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
+                              borderRadius: 4, color: 'var(--text-primary)',
+                            }}
+                          />
+                        </>
+                      )}
+                    </div>
+                  )
+                })
+              })()}
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, color: 'var(--text-secondary)', fontSize: 13 }}>
+                <input type="checkbox" checked={shapeAutoCaption} disabled={shapeRunning}
+                  onChange={e => setShapeAutoCaption(e.target.checked)} />
+                Auto-caption with InternVL3 (slow, ~30s per object)
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0 12px', color: 'var(--text-secondary)', fontSize: 13 }}>
+                <input type="checkbox" checked={shapeAutoReconstruct} disabled={shapeRunning}
+                  onChange={e => setShapeAutoReconstruct(e.target.checked)} />
+                Reconstruct mesh after PKL (runs ShapeR — minutes per object on CPU)
+              </label>
+
+              {shapeOverall.phase !== 'idle' && (shapeRunning || shapeOverall.phase === 'done' || shapeOverall.phase === 'error') && (
+                <div style={{
+                  padding: '10px 12px', marginBottom: 12,
+                  background: shapeOverall.phase === 'error' ? 'rgba(231,76,60,.1)' :
+                              shapeOverall.phase === 'done' ? 'rgba(46,204,113,.1)' :
+                              'rgba(52,152,219,.1)',
+                  borderRadius: 6, fontSize: 13,
+                  border: `1px solid ${shapeOverall.phase === 'error' ? '#e74c3c' :
+                          shapeOverall.phase === 'done' ? '#2ecc71' : '#3498db'}`,
+                  color: shapeOverall.phase === 'error' ? '#e74c3c' :
+                         shapeOverall.phase === 'done' ? '#2ecc71' : '#5dade2',
+                }}>
+                  {shapeOverall.phase === 'reconstructing' && (
+                    <>🔄 Reconstructing mesh {shapeOverall.done || 0}/{shapeOverall.total || 0}…</>
+                  )}
+                  {shapeOverall.phase === 'exporting_pkl' && (
+                    <>📦 Generating PKLs ({shapeOverall.total || 0})…</>
+                  )}
+                  {shapeOverall.phase === 'done' && (
+                    <>✅ All done — {shapeOverall.done || 0}/{shapeOverall.total || 0} mesh(es) reconstructed</>
+                  )}
+                  {shapeOverall.phase === 'error' && (
+                    <>❌ Pipeline error — check the console log for details</>
+                  )}
+                </div>
+              )}
+
+              {shapeResult && !shapeRunning && shapeOverall.phase !== 'reconstructing' && (
+                <div style={{
+                  padding: '10px 12px', marginBottom: 12,
+                  background: 'rgba(46, 204, 113, 0.1)', borderRadius: 6,
+                  border: '1px solid #2ecc71', color: '#2ecc71',
+                  fontSize: 13,
+                }}>
+                  Exported {shapeResult.count} PKL{shapeResult.count !== 1 ? 's' : ''}.
+                </div>
+              )}
+
+              <button
+                className="bim-action-btn upload"
+                style={{
+                  width: '100%', padding: 12, fontWeight: 600, fontSize: 14,
+                  opacity: shapeRunning || shapeSelected.size === 0 ? 0.5 : 1,
+                }}
+                disabled={shapeRunning || shapeSelected.size === 0}
+                onClick={async () => {
+                  if (!activeSession) return
+                  // Synchronous busy guard — `disabled` only kicks in after the
+                  // next React render, this gate fires immediately so a stray
+                  // second click in the same turn is dropped.
+                  if (shapeBusyRef.current) return
+                  shapeBusyRef.current = true
+                  setShapeRunning(true)
+                  setShapeResult(null)
+                  setShapeProgress({})
+                  setShapeOverall({ phase: 'exporting_pkl', total: shapeSelected.size, done: 0 })
+                  try {
+                    const captions: Record<string, string> = {}
+                    for (const [k, v] of Object.entries(shapeCaptions)) {
+                      if (v.trim()) captions[k] = v.trim()
+                    }
+                    const res = await fetch('/api/segmentation/shape/export', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        session_id: activeSession,
+                        captions,
+                        instance_ids: [...shapeSelected],
+                        auto_caption: shapeAutoCaption,
+                        auto_reconstruct: shapeAutoReconstruct,
+                      }),
+                    })
+                    const data = await res.json()
+                    if (data.ok) {
+                      setShapeResult({ count: data.count, exported: data.exported })
+                      setStatusMessage(`Shape: exported ${data.count} PKL(s)` +
+                        (data.reconstructing ? ' — reconstructing mesh in background' : ''))
+                      if (!data.reconstructing) {
+                        await refreshShapeStatus()
+                        setShapeRunning(false)
+                      }
+                      // else: keep shapeRunning=true; the polling effect will track it
+                    } else {
+                      setStatusMessage(`Shape error: ${data.detail || 'Unknown'}`)
+                      setShapeRunning(false)
+                    }
+                  } catch (err: any) {
+                    setStatusMessage(`Shape error: ${err.message}`)
+                    setShapeRunning(false)
+                  } finally {
+                    // Always clear the ref so the button can be re-armed once
+                    // the run is fully complete (the polling effect handles
+                    // setShapeRunning(false) for the reconstruction path).
+                    shapeBusyRef.current = false
+                  }
+                }}
+              >
+                {shapeRunning
+                  ? (shapeOverall.phase === 'reconstructing'
+                      ? `🔄 Reconstructing ${shapeOverall.done || 0}/${shapeOverall.total || 0}…`
+                      : '⏳ Working…')
+                  : `🚀 Start (${shapeSelected.size} object${shapeSelected.size !== 1 ? 's' : ''})`}
+              </button>
+
+              {/* Reconstruction v2 — assemble a coherent scene (parametric surfaces,
+                  swept solids, boxes, openings, ...) from the segmented cloud. */}
+              <button
+                className="bim-action-btn"
+                style={{ width: '100%', padding: 10, marginTop: 8, fontWeight: 600, fontSize: 13,
+                         opacity: reconRunning ? 0.5 : 1 }}
+                disabled={reconRunning}
+                title="Classify every segment and reconstruct parametric surfaces / swept solids / boxes + openings; free-form objects use the ShapeR meshes. Writes output/scene/scene.json."
+                onClick={async () => {
+                  if (!activeSession || reconBusyRef.current) return
+                  reconBusyRef.current = true
+                  setReconRunning(true)
+                  setStatusMessage('Reconstruction v2: starting…')
+                  try {
+                    const res = await fetch(`/api/segmentation/reconstruct/${activeSession}`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({}),
+                    })
+                    const data = await res.json().catch(() => ({} as any))
+                    if (res.status === 409) {
+                      setStatusMessage(`Reconstruction: ${data.detail || 'ya hay una reconstrucción corriendo — esperá a que termine'}`)
+                      reconBusyRef.current = false
+                      setReconRunning(false)
+                      return
+                    }
+                    if (!res.ok || !data.started) {
+                      setStatusMessage(`Reconstruction error: ${data.detail || data.error || 'no se pudo iniciar'}`)
+                      reconBusyRef.current = false
+                      setReconRunning(false)
+                      return
+                    }
+                    // Job is running in the background — the polling effect above
+                    // (keyed on reconRunning) drives the status line and reloads
+                    // the scene when it finishes, then clears reconRunning.
+                  } catch (err: any) {
+                    setStatusMessage(`Reconstruction error: ${err?.message ?? err}`)
+                    reconBusyRef.current = false
+                    setReconRunning(false)
+                  }
+                }}
+              >
+                {reconRunning ? '⏳ Assembling scene…' : '🏗️ Reconstruct scene (v2)'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── TSDF Reconstruction Modal ── */}
+      {showTsdfModal && (
+        <div className="admin-overlay" style={{ zIndex: 2000 }}>
+          <div className="admin-panel" style={{ maxWidth: 540, maxHeight: '80vh', overflow: 'auto' }}>
+            <div className="admin-header">
+              <h2>🧱 TSDF Reconstruction</h2>
+              <button className="admin-close" onClick={() => setShowTsdfModal(false)}>✕</button>
+            </div>
+            <div style={{ padding: 16 }}>
+              <p style={{ color: 'var(--text-secondary)', marginBottom: 12, fontSize: 13 }}>
+                Volumetric integration via Open3D ScalableTSDFVolume. Best for planar/architectural
+                geometry (walls, floors). Existing meshes will be overwritten.
+              </p>
+
+              {(() => {
+                const phaseBadge = (phase?: string) => {
+                  if (!phase || phase === 'pending') return null
+                  const styles: Record<string, { bg: string; fg: string; icon: string; label: string }> = {
+                    starting:     { bg: '#3498db33', fg: '#5dade2', icon: '▶️', label: 'starting' },
+                    integrating:  { bg: '#f39c1233', fg: '#f4b656', icon: '🔄', label: 'integrating' },
+                    extracting:   { bg: '#9b59b633', fg: '#bd93d3', icon: '🪄', label: 'extracting' },
+                    done:         { bg: '#2ecc7133', fg: '#52d68d', icon: '🧱', label: 'done' },
+                    error:        { bg: '#e74c3c33', fg: '#ec7063', icon: '❌', label: 'error' },
+                  }
+                  const s = styles[phase]
+                  if (!s) return null
+                  return (
+                    <span style={{
+                      fontSize: 11, background: s.bg, color: s.fg,
+                      padding: '1px 6px', borderRadius: 4, whiteSpace: 'nowrap',
+                    }}>
+                      {s.icon} {s.label}
+                    </span>
+                  )
+                }
+
+                return segments.filter(s => s.label !== 'Unsegmented').map(seg => {
+                  const st = tsdfStatus[seg.id]
+                  const prog = tsdfProgress[seg.id]
+                  const checked = tsdfSelected.has(seg.id)
+                  const livePhase = prog?.phase
+                  return (
+                    <div key={seg.key} style={{
+                      display: 'flex', flexDirection: 'column', gap: 6,
+                      padding: '10px 12px', marginBottom: 8,
+                      background: checked ? 'var(--bg-secondary)' : 'var(--bg-tertiary)',
+                      borderRadius: 8,
+                      border: `2px solid ${checked ? seg.color + '55' : 'transparent'}`,
+                      opacity: checked ? 1 : 0.6,
+                      transition: 'all 0.15s',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <input type="checkbox" checked={checked}
+                          disabled={tsdfRunning}
+                          onChange={() => {
+                            setTsdfSelected(prev => {
+                              const next = new Set(prev)
+                              if (next.has(seg.id)) next.delete(seg.id)
+                              else next.add(seg.id)
+                              return next
+                            })
+                          }}
+                          style={{ cursor: tsdfRunning ? 'not-allowed' : 'pointer' }}
+                        />
+                        <span style={{
+                          width: 12, height: 12, borderRadius: '50%',
+                          background: seg.color, flexShrink: 0,
+                        }} />
+                        <strong style={{ flex: 1, color: 'var(--text-primary)', fontSize: 13 }}>{seg.label}</strong>
+                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                          {seg.totalPoints.toLocaleString()} pts
+                        </span>
+                        {livePhase ? phaseBadge(livePhase) :
+                          st?.has_mesh ? phaseBadge('done') : null}
+                      </div>
+                      {prog?.elapsed != null && (livePhase === 'done' || livePhase === 'integrating' || livePhase === 'extracting') && (
+                        <div style={{ fontSize: 11, color: 'var(--text-secondary)', paddingLeft: 24 }}>
+                          {livePhase === 'done' ? `mesh ready · ${prog.elapsed.toFixed(1)}s` : `${prog.elapsed.toFixed(1)}s elapsed`}
+                        </div>
+                      )}
+                      {prog?.error && (
+                        <div style={{ fontSize: 11, color: '#ec7063', paddingLeft: 24 }}>
+                          {prog.error.slice(0, 140)}
+                        </div>
+                      )}
+                      {checked && !tsdfRunning && st?.has_mesh && (
+                        <div style={{ fontSize: 11, color: '#e67e22', padding: '2px 0 0 24px' }}>
+                          ⚠️ This object already has a TSDF mesh. Running will overwrite it.
+                        </div>
+                      )}
+                    </div>
+                  )
+                })
+              })()}
+
+              {segments.filter(s => s.label !== 'Unsegmented').length === 0 && (
+                <div style={{
+                  padding: '10px 12px', marginBottom: 4, fontSize: 12.5, lineHeight: 1.5,
+                  background: 'var(--bg-tertiary)', borderRadius: 8,
+                  color: 'var(--text-secondary)',
+                }}>
+                  No segmented objects in this session. Use{' '}
+                  <strong style={{ color: 'var(--text-primary)' }}>🌐 Reconstruct whole scene</strong>{' '}
+                  below to integrate the entire scan into one mesh — or run Segmentation
+                  first to reconstruct per object.
+                </div>
+              )}
+
+              {/* Tunables — sweep these for A/B comparison without code changes */}
+              <div style={{ marginTop: 16, padding: 12, background: 'var(--bg-tertiary)', borderRadius: 8 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                  Parameters
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, fontSize: 12 }}>
+                  <label style={{ color: 'var(--text-secondary)' }}>
+                    Voxel (m): <strong style={{ color: 'var(--text-primary)' }}>{tsdfVoxel.toFixed(3)}</strong>
+                    <input type="range" min={0.005} max={0.05} step={0.005}
+                      value={tsdfVoxel} disabled={tsdfRunning}
+                      onChange={e => setTsdfVoxel(parseFloat(e.target.value))}
+                      style={{ width: '100%' }} />
+                  </label>
+                  <label style={{ color: 'var(--text-secondary)' }}>
+                    SDF trunc (m): <strong style={{ color: 'var(--text-primary)' }}>{tsdfTrunc.toFixed(3)}</strong>
+                    <input type="range" min={0.01} max={0.15} step={0.005}
+                      value={tsdfTrunc} disabled={tsdfRunning}
+                      onChange={e => setTsdfTrunc(parseFloat(e.target.value))}
+                      style={{ width: '100%' }} />
+                  </label>
+                  <label style={{ color: 'var(--text-secondary)' }}>
+                    Max depth (m): <strong style={{ color: 'var(--text-primary)' }}>{tsdfDepthMax.toFixed(1)}</strong>
+                    <input type="range" min={1} max={10} step={0.5}
+                      value={tsdfDepthMax} disabled={tsdfRunning}
+                      onChange={e => setTsdfDepthMax(parseFloat(e.target.value))}
+                      style={{ width: '100%' }} />
+                  </label>
+                  <label style={{ color: 'var(--text-secondary)' }}>
+                    Dilate (px): <strong style={{ color: 'var(--text-primary)' }}>{tsdfDilate}</strong>
+                    <input type="range" min={0} max={8} step={1}
+                      value={tsdfDilate} disabled={tsdfRunning}
+                      onChange={e => setTsdfDilate(parseInt(e.target.value))}
+                      style={{ width: '100%' }} />
+                  </label>
+                </div>
+                <div style={{ fontSize: 10.5, color: 'var(--text-secondary)', marginTop: 8, lineHeight: 1.4 }}>
+                  Smaller voxel → more detail, more memory. SDF trunc defines the reconciliation
+                  window (typically 2–3× voxel). Dilate fills gaps between sparse traceability seeds.
+                </div>
+              </div>
+
+              {tsdfOverall.phase !== 'idle' && (tsdfRunning || tsdfOverall.phase === 'done' || tsdfOverall.phase === 'error') && (
+                <div style={{
+                  padding: '10px 12px', marginTop: 12, marginBottom: 12,
+                  background: tsdfOverall.phase === 'error' ? 'rgba(231,76,60,.1)' :
+                              tsdfOverall.phase === 'done' ? 'rgba(46,204,113,.1)' :
+                              'rgba(243,156,18,.1)',
+                  borderRadius: 6, fontSize: 13,
+                  border: `1px solid ${tsdfOverall.phase === 'error' ? '#e74c3c' :
+                          tsdfOverall.phase === 'done' ? '#2ecc71' : '#f39c12'}`,
+                  color: tsdfOverall.phase === 'error' ? '#e74c3c' :
+                         tsdfOverall.phase === 'done' ? '#2ecc71' : '#f4b656',
+                }}>
+                  {tsdfOverall.phase === 'integrating' && (
+                    <>🔄 Integrating depth → mesh {tsdfOverall.done || 0}/{tsdfOverall.total || 0}…</>
+                  )}
+                  {tsdfOverall.phase === 'done' && (
+                    <>✅ All done — {tsdfOverall.done || 0}/{tsdfOverall.total || 0} mesh(es) reconstructed</>
+                  )}
+                  {tsdfOverall.phase === 'error' && (
+                    <>❌ Pipeline error — check the console log for details</>
+                  )}
+                </div>
+              )}
+
+              <button
+                className="bim-action-btn upload"
+                style={{
+                  width: '100%', padding: 12, fontWeight: 600, fontSize: 14, marginTop: 8,
+                  opacity: tsdfRunning || tsdfSelected.size === 0 ? 0.5 : 1,
+                }}
+                disabled={tsdfRunning || tsdfSelected.size === 0}
+                onClick={async () => {
+                  if (!activeSession) return
+                  setTsdfRunning(true)
+                  setTsdfProgress({})
+                  setTsdfOverall({ phase: 'integrating', total: tsdfSelected.size, done: 0 })
+                  try {
+                    const res = await fetch('/api/segmentation/tsdf/export', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        session_id: activeSession,
+                        instance_ids: [...tsdfSelected],
+                        voxel_length: tsdfVoxel,
+                        sdf_trunc: tsdfTrunc,
+                        depth_trunc: tsdfDepthMax,
+                        dilate_radius: tsdfDilate,
+                      }),
+                    })
+                    const data = await res.json()
+                    if (data.ok) {
+                      setStatusMessage(`TSDF: reconstructing ${data.count} object(s) in background`)
+                    } else {
+                      setStatusMessage(`TSDF error: ${data.detail || 'Unknown'}`)
+                      setTsdfRunning(false)
+                    }
+                  } catch (err: any) {
+                    setStatusMessage(`TSDF error: ${err.message}`)
+                    setTsdfRunning(false)
+                  }
+                }}
+              >
+                {tsdfRunning
+                  ? `🔄 Reconstructing ${tsdfOverall.done || 0}/${tsdfOverall.total || 0}…`
+                  : `🚀 Start (${tsdfSelected.size} object${tsdfSelected.size !== 1 ? 's' : ''})`}
+              </button>
+
+              {/* Whole-scene TSDF — integrates every frame's depth into one
+                  global mesh, no per-instance filtering. Useful as a context
+                  baseline / for comparison. */}
+              <div style={{ marginTop: 12, borderTop: '1px solid #2a2a2a', paddingTop: 12 }}>
+                <button
+                  className="bim-action-btn upload"
+                  style={{
+                    width: '100%', padding: 12, fontWeight: 600, fontSize: 14,
+                    opacity: tsdfSceneRunning || tsdfRunning ? 0.5 : 1,
+                  }}
+                  disabled={tsdfSceneRunning || tsdfRunning}
+                  title="Integrate every frame into ONE global TSDF mesh of the whole scene (no instance filtering)"
+                  onClick={async () => {
+                    if (!activeSession) return
+                    setTsdfSceneRunning(true)
+                    setTsdfScene({ phase: 'starting' })
+                    try {
+                      // No mandamos voxel/trunc/depth desde el UI — el endpoint
+                      // de scene tiene defaults de máximo detalle (voxel 5mm,
+                      // conf_min 192, smooth 2) distintos al per-instance.
+                      const res = await fetch('/api/segmentation/tsdf/scene_export', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          session_id: activeSession,
+                        }),
+                      })
+                      const data = await res.json()
+                      if (data.ok) {
+                        setStatusMessage('TSDF scene: integrating whole scan in background')
+                      } else {
+                        setStatusMessage(`TSDF scene error: ${data.detail || 'Unknown'}`)
+                        setTsdfSceneRunning(false)
+                      }
+                    } catch (err: any) {
+                      setStatusMessage(`TSDF scene error: ${err.message}`)
+                      setTsdfSceneRunning(false)
+                    }
+                  }}
+                >
+                  {tsdfSceneRunning
+                    ? `🔄 Integrating scene (${tsdfScene.phase})…`
+                    : '🌐 Reconstruct whole scene'}
+                </button>
+                {(tsdfScene.phase === 'done' || tsdfScene.phase === 'error' || tsdfSceneRunning) && (
+                  <div style={{ fontSize: 12, color: '#888', marginTop: 6 }}>
+                    {tsdfScene.phase === 'done' && (
+                      <>✅ Scene mesh written: <code>{tsdfScene.mesh}</code></>
+                    )}
+                    {tsdfScene.phase === 'error' && (
+                      <>❌ {tsdfScene.error || 'Scene integration failed'}</>
+                    )}
+                    {tsdfSceneRunning && tsdfScene.phase !== 'done' && tsdfScene.phase !== 'error' && (
+                      <>Phase: <b>{tsdfScene.phase}</b>{tsdfScene.elapsed !== undefined && ` · ${tsdfScene.elapsed.toFixed(0)}s`}</>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {appDialog}
     </div >
   )

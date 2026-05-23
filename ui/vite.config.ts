@@ -40,7 +40,7 @@ export default defineConfig(async () => {
           secure: false, // Accept self-signed certs
         },
         '/ws': {
-          target: 'wss://localhost:8765',
+          target: 'https://localhost:8765',
           ws: true,
           changeOrigin: true,
           secure: false,

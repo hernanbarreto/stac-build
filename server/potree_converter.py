@@ -34,6 +34,7 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
         n_pts = 0
         has_origins = False
         has_confidence = False
+        pixel_type = '<i2'  # default: short (cloudcompy_postprocess output)
         while True:
             line = f.readline()
             if line.startswith(b"element vertex"):
@@ -42,6 +43,11 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
                 has_origins = True
             if b"confidence" in line:
                 has_confidence = True
+            # Detect pixel_row type from PLY header
+            if b"pixel_row" in line:
+                if b"property int" in line:
+                    pixel_type = '<i4'  # int32 (stray_direct_ply.py output)
+                # else stays '<i2' for "property short"
             if line.startswith(b"end_header"):
                 break
 
@@ -55,7 +61,7 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
         if has_origins:
             fields.extend([
                 ('frame_global', '<i4'),
-                ('pixel_row', '<i2'), ('pixel_col', '<i2')
+                ('pixel_row', pixel_type), ('pixel_col', pixel_type)
             ])
 
         ply_dtype = np.dtype(fields)
@@ -188,25 +194,10 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
             logger.info(f"[Potree] Octree already up-to-date, skipping conversion")
             return True
 
-    lock_file = output_dir / ".potree_lock"
-    if lock_file.exists():
-        logger.info(f"[Potree] ⏳ Conversion already in progress for {session_dir.name}, waiting for lock...")
-        import time
-        wait_cycles = 0
-        while lock_file.exists() and wait_cycles < 600:  # 10 minute timeout max
-            time.sleep(1)
-            wait_cycles += 1
-        # If the lock was removed, assume conversion finished successfully
-        if (potree_dir / "metadata.json").exists():
-            return True
-        elif wait_cycles >= 600:
-            logger.warning(f"[Potree] ⚠️ Lock file timeout for {session_dir.name}, breaking lock")
-            lock_file.unlink(missing_ok=True)
-
     logger.info(f"[Potree] 🌲 Starting PLY → Potree conversion using pure Linux I/O...")
 
     try:
-        lock_file.touch(exist_ok=True)
+
         # Usar /tmp (RAM pura) para esquivar asfixia de I/O en puente WSL de Windows
         import time
         with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
@@ -241,10 +232,6 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
         import traceback
         traceback.print_exc()
         return False
-
-    finally:
-        if lock_file.exists():
-            lock_file.unlink(missing_ok=True)
 
 
 async def convert_ply_to_potree_async(

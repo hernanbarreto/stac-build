@@ -47,26 +47,20 @@ class SAM3Wrapper:
 
             logger.info("Loading SAM3 Model...")
             try:
-                from sam3.model_builder import build_sam3_video_predictor
-                
-                # SAM3 requires CUDA GPU — fail clearly if not available
-                if not torch.cuda.is_available():
-                    raise RuntimeError(
-                        "SAM3 requires a CUDA GPU but none is available. "
-                        "In Docker, ensure: docker run --gpus all ... "
-                        "and NVIDIA Container Toolkit is installed."
-                    )
-                
-                gpus_to_use = [torch.cuda.current_device()]
-                self.predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
-                
-                # Enable global bfloat16 autocast — exactly as SAM3's official
-                # qualitative_test.py does it. This persists for the lifetime
-                # of the process so all SAM3 ops run in mixed precision.
-                torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+                if torch.cuda.is_available():
+                    # GPU path: use MultiGPU predictor with bfloat16 autocast
+                    from sam3.model_builder import build_sam3_video_predictor
+                    gpus_to_use = [torch.cuda.current_device()]
+                    self.predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
+                    torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+                    logger.info("SAM3 Model loaded on GPU (bfloat16 autocast active).")
+                else:
+                    # CPU path: use single-device Sam3VideoPredictor (no MultiGPU)
+                    from sam3.model.sam3_video_predictor import Sam3VideoPredictor
+                    self.predictor = Sam3VideoPredictor()
+                    logger.info("SAM3 Model loaded on CPU (float32, slower but functional).")
                 
                 self.is_loaded = True
-                logger.info("SAM3 Model loaded successfully (bfloat16 autocast active).")
                 
             except Exception as e:
                 logger.error(f"Failed to load SAM3 model: {e}")
@@ -606,6 +600,29 @@ class SAM3Wrapper:
         """Get session info including keyframe mapping, if available."""
         return self._interactive_sessions.get(state_id)
 
+    def get_mask_for_frame(self, state_id: str, frame_idx: int, obj_id: int = 1) -> Optional[np.ndarray]:
+        """Get the current numpy mask for a specific frame and object from the cache."""
+        if not self.is_loaded or self.predictor is None:
+            return None
+        with self.lock:
+            session = self.predictor._ALL_INFERENCE_STATES.get(state_id)
+            if not session: 
+                return None
+            inference_state = session.get("state")
+            if not inference_state:
+                return None
+            outputs = inference_state.get("cached_frame_outputs", {}).get(frame_idx)
+            if not outputs: 
+                return None
+            mask_data = outputs.get(obj_id)
+            if mask_data is None: 
+                return None
+            mask = mask_data.cpu().numpy() if hasattr(mask_data, 'cpu') else mask_data
+            if mask.ndim == 3: 
+                if mask.shape[0] == 0: return None
+                mask = np.max(mask, axis=0)
+            return mask
+
     def clear_interactive_prompts(self, state_id: str) -> bool:
         """
         Clear all prompts/tracked objects from an interactive session WITHOUT
@@ -797,7 +814,7 @@ class SAM3Wrapper:
             results[frame_idx] = outputs
         return results
 
-    def propagate_interactive_stream(self, state_id: str):
+    def propagate_interactive_stream(self, state_id: str, selected_frames: Optional[List[int]] = None):
         """
         Generator that yields (frame_idx, num_frames, outputs) per frame.
         Enables SSE streaming of per-frame progress.
@@ -817,7 +834,7 @@ class SAM3Wrapper:
                 num_frames = len(kf_map)
 
         try:
-            logger.info(f"[SAM3-Interactive] Propagating session {state_id} ({num_frames} frames)...")
+            logger.info(f"[SAM3-Interactive] Propagating session {state_id} ({num_frames} frames), selected_frames={selected_frames is not None} ({len(selected_frames) if selected_frames else 0} entries)...")
             # NOTE: We intentionally do NOT hold self.lock here.
             # Propagation is a long-running generator that yields per-frame.
             # Holding a lock across yields would block ALL other SAM3 operations
@@ -827,6 +844,7 @@ class SAM3Wrapper:
                 request=dict(
                     type="propagate_in_video",
                     session_id=state_id,
+                    valid_frame_indices=selected_frames,
                 )
             ):
                 frame_idx = response["frame_index"]

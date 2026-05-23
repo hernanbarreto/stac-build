@@ -39,18 +39,17 @@ class Sam3VideoPredictor:
         self.video_loader_type = video_loader_type
         from sam3.model_builder import build_sam3_video_model
 
-        self.model = (
-            build_sam3_video_model(
-                checkpoint_path=checkpoint_path,
-                bpe_path=bpe_path,
-                has_presence_token=has_presence_token,
-                geo_encoder_use_img_cross_attn=geo_encoder_use_img_cross_attn,
-                strict_state_dict_loading=strict_state_dict_loading,
-                apply_temporal_disambiguation=apply_temporal_disambiguation,
-            )
-            .cuda()
-            .eval()
+        self.model = build_sam3_video_model(
+            checkpoint_path=checkpoint_path,
+            bpe_path=bpe_path,
+            has_presence_token=has_presence_token,
+            geo_encoder_use_img_cross_attn=geo_encoder_use_img_cross_attn,
+            strict_state_dict_loading=strict_state_dict_loading,
+            apply_temporal_disambiguation=apply_temporal_disambiguation,
         )
+        if torch.cuda.is_available():
+            self.model = self.model.cuda()
+        self.model.eval()
 
     @torch.inference_mode()
     def handle_request(self, request):
@@ -95,6 +94,7 @@ class Sam3VideoPredictor:
                 propagation_direction=request.get("propagation_direction", "both"),
                 start_frame_idx=request.get("start_frame_index", None),
                 max_frame_num_to_track=request.get("max_frame_num_to_track", None),
+                valid_frame_indices=request.get("valid_frame_indices", None),
             )
         else:
             raise RuntimeError(f"invalid request type: {request_type}")
@@ -186,6 +186,7 @@ class Sam3VideoPredictor:
         propagation_direction,
         start_frame_idx,
         max_frame_num_to_track,
+        valid_frame_indices=None,
     ):
         """Propagate the added prompts to get grounding results on all video frames."""
         logger.debug(
@@ -207,6 +208,7 @@ class Sam3VideoPredictor:
                     start_frame_idx=start_frame_idx,
                     max_frame_num_to_track=max_frame_num_to_track,
                     reverse=False,
+                    valid_frame_indices=valid_frame_indices,
                 ):
                     yield {"frame_index": frame_idx, "outputs": outputs}
             # Then doing the backward propagation (reverse in time)
@@ -216,6 +218,7 @@ class Sam3VideoPredictor:
                     start_frame_idx=start_frame_idx,
                     max_frame_num_to_track=max_frame_num_to_track,
                     reverse=True,
+                    valid_frame_indices=valid_frame_indices,
                 ):
                     yield {"frame_index": frame_idx, "outputs": outputs}
         finally:
@@ -265,21 +268,28 @@ class Sam3VideoPredictor:
             f"'{session_id}' ({session['state']['num_frames']} frames)"
             for session_id, session in self._ALL_INFERENCE_STATES.items()
         ]
-        session_stats_str = (
-            f"live sessions: [{', '.join(live_session_strs)}], GPU memory: "
-            f"{torch.cuda.memory_allocated() // 1024**2} MiB used and "
-            f"{torch.cuda.memory_reserved() // 1024**2} MiB reserved"
-            f" (max over time: {torch.cuda.max_memory_allocated() // 1024**2} MiB used "
-            f"and {torch.cuda.max_memory_reserved() // 1024**2} MiB reserved)"
-        )
+        if torch.cuda.is_available():
+            mem_info = (
+                f"GPU memory: {torch.cuda.memory_allocated() // 1024**2} MiB used and "
+                f"{torch.cuda.memory_reserved() // 1024**2} MiB reserved "
+                f"(max over time: {torch.cuda.max_memory_allocated() // 1024**2} MiB used "
+                f"and {torch.cuda.max_memory_reserved() // 1024**2} MiB reserved)"
+            )
+        else:
+            mem_info = "Running on CPU (No GPU memory stats available)"
+            
+        session_stats_str = f"live sessions: [{', '.join(live_session_strs)}], {mem_info}"
         return session_stats_str
 
     def _get_torch_and_gpu_properties(self):
         """Get a string for PyTorch and GPU properties (for logging and debugging)."""
-        torch_and_gpu_str = (
-            f"torch: {torch.__version__} with CUDA arch {torch.cuda.get_arch_list()}, "
-            f"GPU device: {torch.cuda.get_device_properties(torch.cuda.current_device())}"
-        )
+        if torch.cuda.is_available():
+            torch_and_gpu_str = (
+                f"torch: {torch.__version__} with CUDA arch {torch.cuda.get_arch_list()}, "
+                f"GPU device: {torch.cuda.get_device_properties(torch.cuda.current_device())}"
+            )
+        else:
+            torch_and_gpu_str = f"torch: {torch.__version__}, GPU device: CPU-only mode (No CUDA)"
         return torch_and_gpu_str
 
     def shutdown(self):
@@ -428,7 +438,9 @@ class Sam3VideoPredictorMultiGPU(Sam3VideoPredictor):
             device_id=self.device,
         )
         # warm-up the NCCL process group by running a dummy all-reduce
-        tensor = torch.ones(1024, 1024).cuda()
+        tensor = torch.ones(1024, 1024)
+        if torch.cuda.is_available():
+            tensor = tensor.cuda()
         torch.distributed.all_reduce(tensor)
         logger.debug(f"started NCCL process group on {rank=} with {world_size=}")
 

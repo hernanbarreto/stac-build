@@ -114,3 +114,18 @@ BIM/
 
 # Build artifacts
 ui/release/
+
+# Vendor checkouts (embedded git repos — kept local only; not real submodules)
+vendor/ShapeR/
+vendor/dn-splatter/
+vendor/gaus-slam/
+vendor/scenescript/
+vendor/mvs-texturing/
+vendor/oneTBB-src/
+
+# Vendor install trees (compiled libs, platform-specific)
+vendor/oneTBB/
+
+# Pod env staging / exports (conda env dumps, not source)
+scripts/.pod_envs_stage/
+scripts/envs_export/
