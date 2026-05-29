@@ -37,7 +37,7 @@ paths:
   output_dir_name: "output"
   # Read at import time by config.py to override DATA_DIR/projects.
   # Use an external mount to save SSD space (e.g. "/mnt/e/stac-projects").
-  projects_dir: "/home/hernan/stac-builder/server/projects"
+  projects_dir: "/workspace/stac-build/server/projects"
 
 
 # ── Scene Analysis (VLM auto-inventory) ────────────────────────────
@@ -259,7 +259,7 @@ bim:
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
   backend: "hybrid"
-  device: "cpu"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
+  device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
   use_keyframes: true                  # use frame_selector keyframes (recommended)
 
   # DA3 Streaming (Depth Anything 3)
@@ -271,7 +271,7 @@ reconstruction:
     loop_enable: true                  # SALAD loop closure
     infer_gs: false                    # 3D Gaussian Splatting (cosmetic) — off: 5.7GB merge hit OSError EIO; re-enable on the GPU box
     align_method: "sim3"               # "sim3" | "se3" | "scale+se3"
-    align_lib: "numpy"                 # "numpy" (CPU) | "triton"/"torch" (GPU)
+    align_lib: "torch"                 # "numpy" (CPU) | "triton"/"torch" (GPU)
     depth_threshold: 15.0              # max depth (m)
     conf_threshold_coef: 0.75
     conf_min_normalized: 0.25          # drop bottom 25% by confidence (0 = keep all)

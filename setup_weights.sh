@@ -40,15 +40,9 @@ download_da3() {
         ok "DA3 DINO-SALAD weights already present"
     else
         info "Downloading DINO-SALAD checkpoint..."
-        python3 -c "
-from huggingface_hub import hf_hub_download
-hf_hub_download(
-    repo_id='Araachie/dino-salad',
-    filename='dino_salad.ckpt',
-    local_dir='${DA3_WEIGHTS}',
-)
-print('Done')
-"
+        curl -L https://github.com/serizba/salad/releases/download/v1.0.0/dino_salad.ckpt -o "${SALAD_CKPT}"
+        # CORREGIDO 29-05-2026: el repo HF 'Araachie/dino-salad' no existe (404).
+        # DINO-SALAD se baja de los releases de github.com/serizba/salad
         ok "DA3 DINO-SALAD weights downloaded"
     fi
 
