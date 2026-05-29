@@ -94,7 +94,7 @@ dependencies:
       - kiwisolver==1.5.0
       - lightning-utilities==0.15.3
       - llvmlite==0.46.0
-      - mapanything==1.1
+      # - mapanything==1.1  # QUITADO 29-05: editable, no esta en pip. Se instala con: pip install -e vendor/MapAnything2 --no-deps
       - markdown==3.10.2
       - markdown-it-py==4.0.0
       - markupsafe==3.0.3

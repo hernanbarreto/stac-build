@@ -1,0 +1,5 @@
+NOTA — carpeta models/
+El vendor MapAnything2 (v1.1.0) vino SIN la carpeta mapanything/models/ en el repo stac-build.
+Se restauro desde el repo oficial facebookresearch/map-anything, tag v1.1 (commit f065d133),
+que coincide con la version del vendor. Trae la clase MapAnything (models/mapanything/model.py).
+Restaurado 29-05-2026.

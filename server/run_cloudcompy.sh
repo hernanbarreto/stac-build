@@ -9,7 +9,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-CLOUDCOMPY_ROOT="${PROJECT_ROOT}/vendor/cloudcompy"
+CLOUDCOMPY_ROOT="${PROJECT_ROOT}/vendor/CloudComPy310"  # AJUSTADO 29-05: binario real (la cascara vendor/cloudcompy no traia los .so)
 
 # Detect if we're inside Docker (/.dockerenv exists or PYTHONPATH already set)
 if [ -f /.dockerenv ] || echo "$PYTHONPATH" | grep -q "cloudcompare"; then
@@ -18,7 +18,7 @@ if [ -f /.dockerenv ] || echo "$PYTHONPATH" | grep -q "cloudcompare"; then
 else
     # Native mode: activate conda environment
     CONDA_ENV="CloudComPy310"
-    CONDA_ROOT="${CONDA_ROOT:-/home/hernan/miniforge3}"
+    CONDA_ROOT="${CONDA_ROOT:-/workspace/miniforge3}"
 
     if [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
         source "${CONDA_ROOT}/etc/profile.d/conda.sh"
@@ -30,7 +30,8 @@ fi
 
 # Set CloudCompPy paths (safe to set even if already set)
 export PYTHONPATH="${CLOUDCOMPY_ROOT}/lib/cloudcompare:${CLOUDCOMPY_ROOT}/doc/PythonAPI_test:${PYTHONPATH}"
-export LD_LIBRARY_PATH="${CLOUDCOMPY_ROOT}/lib/cloudcompare:${CLOUDCOMPY_ROOT}/lib/cloudcompare/plugins:${LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${CLOUDCOMPY_ROOT}/lib/cloudcompare:${CLOUDCOMPY_ROOT}/lib/cloudcompare/plugins:${LD_LIBRARY_PATH}"
+export QT_QPA_PLATFORM=offscreen  # AJUSTADO 29-05: el pod no tiene pantalla, Qt necesita modo offscreen
 export LC_NUMERIC=C
 export PYTHONUNBUFFERED=1
 
