@@ -164,8 +164,20 @@ def _parse_da3_poses_text(path: Path) -> Dict[int, np.ndarray]:
 
 
 def _parse_da3_poses_json(path: Path) -> Dict[int, np.ndarray]:
+    # The reconstruction worker copies DA3's space-separated camera_poses.txt to
+    # camera_poses_mapanything.json verbatim (canonical name, original format),
+    # so this ".json" is often actually whitespace-matrix TEXT, not JSON. Be
+    # format-agnostic: try JSON, fall back to the text parser on any decode error
+    # — robust for any scan/backend regardless of which format produced it.
     with open(path) as f:
-        data = json.load(f)
+        head = f.read(64).lstrip()
+    if not head.startswith(("{", "[")):
+        return _parse_da3_poses_text(path)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        return _parse_da3_poses_text(path)
     pose_map = {}
     if isinstance(data, dict):
         # frame_name -> {camera_pose: [[..]], intrinsics:...} OR frame_idx -> mat
