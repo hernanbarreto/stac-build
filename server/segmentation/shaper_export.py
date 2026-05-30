@@ -192,9 +192,21 @@ def _load_da3_intrinsics(output_dir: Path) -> Tuple[Optional[np.ndarray],
                  output_dir / "da3_run" / "intrinsic.txt"]:
         if path.exists():
             try:
-                K = np.loadtxt(str(path))
-                if K.shape == (3, 3):
-                    return K, None  # resolution unknown from intrinsic.txt alone
+                arr = np.loadtxt(str(path))
+                if arr.shape == (3, 3):
+                    return arr, None  # legacy single 3x3
+                # DA3 native: one row per keyframe of [fx, fy, cx, cy]. Use the
+                # median row as the representative K (intrinsics barely vary
+                # frame-to-frame). This is the format DA3 actually writes — the
+                # old (3,3)-only check silently failed here → "no camera source".
+                if arr.ndim == 2 and arr.shape[1] >= 4:
+                    fx, fy, cx, cy = np.median(arr[:, :4], axis=0)
+                    return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]],
+                                    dtype=np.float64), None
+                if arr.ndim == 1 and arr.shape[0] >= 4:
+                    fx, fy, cx, cy = arr[:4]
+                    return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]],
+                                    dtype=np.float64), None
             except Exception:
                 pass
 

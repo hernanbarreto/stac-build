@@ -121,8 +121,47 @@ def _resolve_da3_depth(output_dir: Path, conf_percentile: Optional[float] = None
         if d.exists() and any(d.glob("*_depth.npy")):
             depth_dir = d
             break
+
+    # Layout B (DA3 streaming "da3" backend): depth+conf packed inside
+    # results_output/frame_<kf>.npz (save_depth_conf_result). Keyed by the
+    # keyframe-sequence index — same space as frame_global and camera_poses.txt.
     if depth_dir is None:
-        return None
+        npz_dir: Optional[Path] = None
+        for d in (output_dir / "da3_run" / "results_output",
+                  output_dir / "results_output",
+                  output_dir / "gaus_slam_run" / "results_output"):
+            if d.exists() and any(d.glob("frame_*.npz")):
+                npz_dir = d
+                break
+        if npz_dir is None:
+            return None
+        try:
+            zs = np.load(str(next(iter(npz_dir.glob("frame_*.npz")))))
+            if "depth" not in zs:
+                return None
+            h, w = zs["depth"].shape
+        except Exception:
+            return None
+
+        def _load_npz(frame_idx: int):
+            p = npz_dir / f"frame_{frame_idx}.npz"
+            if not p.exists():
+                return None
+            try:
+                z = np.load(str(p))
+            except Exception:
+                return None
+            if "depth" not in z:
+                return None
+            d = z["depth"].astype(np.float32)
+            if conf_percentile is not None and "conf" in z:
+                conf = z["conf"].astype(np.float32)
+                if conf.shape == d.shape:
+                    thr = float(np.percentile(conf, conf_percentile))
+                    return d, conf >= thr
+            return d, np.ones_like(d, dtype=bool)
+
+        return _load_npz, (h, w)
 
     # Probe shape from any sample
     sample = next(iter(depth_dir.glob("*_depth.npy")))
@@ -232,15 +271,18 @@ def _intrinsics_for_depth(K_rgb: np.ndarray, rgb_h: int, rgb_w: int,
 # ── RGB colour for TSDF integration ────────────────────────────────
 
 def _load_rgb_at_depth(frames_dir: Path, frame_idx: int,
-                       depth_h: int, depth_w: int) -> np.ndarray:
-    """Load RGB frame ``{idx:06d}.jpg`` and resize to the depth grid.
+                       depth_h: int, depth_w: int,
+                       frame_name: Optional[str] = None) -> np.ndarray:
+    """Load an RGB frame and resize to the depth grid.
 
-    Returns a uint8 (depth_h, depth_w, 3) array. ARKit ``sceneDepth`` is
-    registered to the wide camera, so a uniform resize keeps colour and depth
-    pixel-aligned. Falls back to neutral grey if the frame is missing — the
-    depth still integrates, just without colour.
+    ``frame_name`` (e.g. the actual keyframe filename) takes precedence over the
+    ``{idx:06d}.jpg`` convention — needed when ``frame_idx`` is a keyframe-
+    sequence index (0..N) rather than the original frame number, so we load the
+    real keyframe (e.g. 000020.jpg) instead of the wrong consecutive frame.
+
+    Returns a uint8 (depth_h, depth_w, 3) array; neutral grey if missing.
     """
-    jpg = frames_dir / f"{frame_idx:06d}.jpg"
+    jpg = frames_dir / (frame_name if frame_name else f"{frame_idx:06d}.jpg")
     if jpg.exists():
         try:
             with Image.open(jpg) as im:
@@ -298,12 +340,13 @@ def _load_da3_refined_poses(output_dir: Path, frames_dir: Path
                        f"cannot map; skipping refined poses")
         return None
 
-    refined: Dict[int, np.ndarray] = {}
-    for fname, mat in zip(kf_files, mats):
-        try:
-            refined[int(Path(fname).stem)] = mat
-        except ValueError:
-            continue
+    # Key by KEYFRAME-SEQUENCE index (line order), NOT the original frame number
+    # from the filename. The depth npz (frame_<kf>.npz), the per-point
+    # frame_global, and the base pose parser (_parse_da3_poses_text) are ALL
+    # keyed by keyframe-sequence index — keying refined poses by the original
+    # number (int(fname.stem)) made them mismatch the depth → no frames
+    # integrated / wrong depth. Line i of camera_poses.txt is the i-th keyframe.
+    refined: Dict[int, np.ndarray] = {i: mat for i, mat in enumerate(mats)}
     return refined or None
 
 
@@ -696,6 +739,8 @@ def export_tsdf_scene(
     use_refined_poses: bool = True,      # DA3 loop-closure poses, not raw ARKit
     scene_name: str = "scene",           # output subfolder under output/tsdf/
     variant_label: Optional[str] = None, # human label for the viewer panel
+    tsdf_block_count: int = 120_000,     # GPU VoxelBlockGrid hash slots (~10GB @120k)
+    tsdf_weight_thresh: float = 2.0,     # min observations per voxel to extract
     progress_cb: Optional[Callable[[str, Optional[float], Optional[str]], None]] = None,
 ) -> Optional[Path]:
     """Integrate the entire scan's depth maps into a single TSDF volume.
@@ -744,6 +789,19 @@ def export_tsdf_scene(
         else:
             logger.info("[TSDF-scene] no DA3 refined poses found — "
                         "using camera-source poses as-is")
+
+    # Keyframe-index → real keyframe filename, so RGB colour loads the correct
+    # frame (poses/depth are keyed by keyframe-sequence index, but the JPGs on
+    # disk use the original frame numbers, e.g. kf 1 == 000020.jpg).
+    kf_name_map: Dict[int, str] = {}
+    _sel = frames_dir / "selected_frames.json"
+    if _sel.exists():
+        try:
+            with open(_sel) as _f:
+                _kf = sorted(json.load(_f).get("selected_files", []))
+            kf_name_map = {i: n for i, n in enumerate(_kf)}
+        except Exception:
+            kf_name_map = {}
 
     # Depth source — pick the BEST available, driven by the reconstruction
     # backend (output/chunk_*_meta.json):
@@ -797,14 +855,25 @@ def export_tsdf_scene(
     if progress_cb:
         progress_cb("starting", 0.0, None)
 
-    # Single global TSDF volume. RGB8 so the integrated mesh carries real
-    # per-vertex colour (the fast "preview" colour tier — a crisp UV-atlas
-    # texture comes later; see plans/polycam-quality-reconstruction.md).
-    volume = o3d.pipelines.integration.ScalableTSDFVolume(
-        voxel_length=voxel_length,
-        sdf_trunc=sdf_trunc,
-        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+    # GPU TSDF via VoxelBlockGrid (cuda) — orders of magnitude faster than the
+    # legacy CPU ScalableTSDFVolume, which is unviable for large scans with
+    # hundreds of depth maps. Falls back to CPU VBG if no CUDA device.
+    import open3d.core as o3c
+    _dev_str = "cuda:0" if o3d.core.cuda.is_available() else "CPU:0"
+    o3d_device = o3c.Device(_dev_str)
+    trunc_mult = max(1.0, float(sdf_trunc) / float(voxel_length))
+    volume = o3d.t.geometry.VoxelBlockGrid(
+        attr_names=("tsdf", "weight", "color"),
+        attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
+        attr_channels=(o3c.SizeVector((1,)), o3c.SizeVector((1,)), o3c.SizeVector((3,))),
+        voxel_size=float(voxel_length),
+        block_resolution=16,
+        block_count=int(tsdf_block_count),
+        device=o3d_device,
     )
+    logger.info(f"[TSDF-scene] VoxelBlockGrid on {_dev_str} "
+                f"(voxel={voxel_length}m, trunc_mult={trunc_mult:.1f}, "
+                f"blocks={tsdf_block_count})")
 
     # ── Option A: restrict integration to pixels present in cleaned_cloud.ply ──
     # cleaned_cloud is the CloudCompPy-cleaned merge (DA3 + LiDAR). Each point
@@ -889,23 +958,29 @@ def export_tsdf_scene(
             skipped_no_K += 1
             continue
         K_d = _intrinsics_for_depth(K_rgb, rgb_h, rgb_w, depth_h, depth_w)
-        intrinsic = o3d.camera.PinholeCameraIntrinsic(
-            width=depth_w, height=depth_h,
-            fx=float(K_d[0, 0]), fy=float(K_d[1, 1]),
-            cx=float(K_d[0, 2]), cy=float(K_d[1, 2]),
-        )
 
-        color_np = _load_rgb_at_depth(frames_dir, fidx, depth_h, depth_w)
-        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            o3d.geometry.Image(color_np), o3d.geometry.Image(depth_masked),
-            depth_scale=1.0, depth_trunc=depth_trunc,
-            convert_rgb_to_intensity=False,
-        )
+        color_np = _load_rgb_at_depth(frames_dir, fidx, depth_h, depth_w,
+                                      frame_name=kf_name_map.get(fidx))
 
         c2w_4 = np.eye(4, dtype=np.float64)
         c2w_4[:c2w.shape[0], :c2w.shape[1]] = c2w
-        extrinsic = np.linalg.inv(c2w_4)
-        volume.integrate(rgbd, intrinsic, extrinsic)
+        extrinsic = np.linalg.inv(c2w_4)  # world → cam
+
+        # GPU integrate: depth/color as device Images; K & extrinsic as host
+        # float64 tensors (Open3D requires intrinsics/extrinsics on CPU).
+        # VBG.integrate requires (float, float) or (uint16, uint8) for
+        # (depth, color) — pass color as float32 to match the float depth.
+        depth_t = o3d.t.geometry.Image(o3c.Tensor(depth_masked, device=o3d_device))
+        color_t = o3d.t.geometry.Image(
+            o3c.Tensor(np.ascontiguousarray(color_np).astype(np.float32), device=o3d_device))
+        K_t = o3c.Tensor(np.ascontiguousarray(K_d), o3c.float64)
+        ext_t = o3c.Tensor(np.ascontiguousarray(extrinsic), o3c.float64)
+        coords = volume.compute_unique_block_coordinates(
+            depth_t, K_t, ext_t, depth_scale=1.0, depth_max=depth_trunc,
+            trunc_voxel_multiplier=trunc_mult)
+        volume.integrate(coords, depth_t, color_t, K_t, K_t, ext_t,
+                         depth_scale=1.0, depth_max=depth_trunc,
+                         trunc_voxel_multiplier=trunc_mult)
         n_integrated += 1
 
         if progress_cb and n_integrated % 50 == 0:
@@ -922,7 +997,15 @@ def export_tsdf_scene(
     if progress_cb:
         progress_cb("extracting", time.time() - t0, None)
 
-    mesh = volume.extract_triangle_mesh()
+    # Extract from the GPU grid → legacy mesh for the existing cleanup/texture path.
+    mesh = volume.extract_triangle_mesh(
+        weight_threshold=float(tsdf_weight_thresh)).to_legacy()
+    # VBG's float-color path stores colours in 0-255; legacy meshes and GLB
+    # expect 0-1, so normalise (the smoke test confirmed the 0-255 range).
+    if mesh.has_vertex_colors():
+        _vc = np.asarray(mesh.vertex_colors)
+        if _vc.size and _vc.max() > 1.5:
+            mesh.vertex_colors = o3d.utility.Vector3dVector(np.clip(_vc / 255.0, 0.0, 1.0))
     mesh.compute_vertex_normals()
 
     # Optional: drop tiny floating shells (same heuristic as per-instance).

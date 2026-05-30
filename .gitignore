@@ -135,3 +135,8 @@ vendor/oneTBB/
 # Pod env staging / exports (conda env dumps, not source)
 scripts/.pod_envs_stage/
 scripts/envs_export/
+
+# Vendored SLAM / postprocessing (large clones, weights, venvs, archives)
+vendor/vipe/
+vendor/CloudComPy310/
+vendor/CloudComPy_Conda310_Linux64_*.tgz

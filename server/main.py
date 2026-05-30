@@ -3585,47 +3585,56 @@ async def export_tsdf_scene_endpoint(request: Request):
             "started_at": time.time(),
         }
 
-    loop = asyncio.get_event_loop()
-
-    def _progress_cb(phase: str, elapsed, mesh):
-        update: Dict[str, Any] = {"phase": phase}
-        if elapsed is not None:
-            update["elapsed"] = float(elapsed)
-        if mesh:
-            update["mesh"] = mesh
-        try:
-            asyncio.run_coroutine_threadsafe(
-                _tsdf_scene_apply_progress(session_id, update), loop,
-            )
-        except Exception:
-            pass  # best-effort
-
-    def _run_tsdf_scene():
-        from segmentation.tsdf_export import export_tsdf_scene
-        return export_tsdf_scene(
-            output_dir=output_dir,
-            frames_dir=frames_dir,
-            session_dir=frames_dir.parent,
-            voxel_length=voxel_length,
-            sdf_trunc=sdf_trunc,
-            depth_trunc=depth_trunc,
-            depth_min=depth_min,
-            edge_thresh=edge_thresh,
-            conf_min=conf_min,
-            smooth_iterations=smooth_iterations,
-            progress_cb=_progress_cb,
-        )
+    # Run the heavy GPU/Open3D work in a SEPARATE PROCESS (not run_in_executor):
+    # a thread still saturates this process + the GIL and blocks the event loop,
+    # so /health times out and the UI falsely reports "server down" during a
+    # reconstruction. A subprocess read with async streams keeps the loop free.
+    params = {
+        "voxel_length": voxel_length, "sdf_trunc": sdf_trunc,
+        "depth_trunc": depth_trunc, "depth_min": depth_min,
+        "edge_thresh": edge_thresh, "conf_min": conf_min,
+        "smooth_iterations": smooth_iterations,
+    }
+    worker = Path(SERVER_DIR) / "run_tsdf_scene.py"
 
     async def _bg():
+        result_path = None
         try:
-            path = await loop.run_in_executor(None, _run_tsdf_scene)
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, str(worker),
+                "--output-dir", str(output_dir),
+                "--frames-dir", str(frames_dir),
+                "--session-dir", str(frames_dir.parent),
+                "--params", json.dumps(params),
+                cwd=str(SERVER_DIR),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            assert proc.stdout is not None
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", "ignore").rstrip()
+                if not line:
+                    continue
+                if line.startswith("[TSDF-PROGRESS]"):
+                    try:
+                        upd = json.loads(line[len("[TSDF-PROGRESS]"):])
+                        await _tsdf_scene_apply_progress(session_id, upd)
+                    except Exception:
+                        pass
+                elif line.startswith("[TSDF-RESULT]"):
+                    r = line[len("[TSDF-RESULT]"):].strip()
+                    result_path = None if r == "NONE" else r
+                else:
+                    print(line, flush=True)  # forward worker logs to server console
+            await proc.wait()
             async with _tsdf_progress_lock:
                 _tsdf_progress.setdefault(session_id, {})["__scene__"] = {
-                    "phase": "done" if path else "error",
-                    "mesh": str(path) if path else None,
+                    "phase": "done" if result_path else "error",
+                    "mesh": result_path,
                     "finished_at": time.time(),
                 }
-            print(f"[TSDF-scene] ✅ wrote {path}" if path else "[TSDF-scene] ❌ failed")
+            print(f"[TSDF-scene] ✅ wrote {result_path}" if result_path
+                  else "[TSDF-scene] ❌ failed")
         except Exception as e:
             import traceback
             traceback.print_exc()
