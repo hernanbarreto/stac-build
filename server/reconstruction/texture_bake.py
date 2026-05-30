@@ -93,6 +93,18 @@ def _write_cam_file(cam_path: Path, c2w: np.ndarray, K: np.ndarray,
 
     fx, fy = float(K[0, 0]), float(K[1, 1])
     cx, cy = float(K[0, 2]), float(K[1, 2])
+    # K may be given at a DIFFERENT resolution than the image texrecon uses
+    # (DA3's K is at processed/depth res ~280×504; the JPG is full-res ~464×832).
+    # Fit K to (img_w,img_h) assuming a ~centered principal point, so the
+    # normalised ppx/ppy/flen below are correct for the actual image. Without
+    # this, ppx=cx/img_w is computed against the wrong width → every view
+    # projects offset and the texture smears. Centralised here so all callers
+    # (TSDF scene, Poisson) are covered regardless of the K resolution.
+    impl_w, impl_h = 2.0 * cx, 2.0 * cy
+    if impl_w > 1.0 and impl_h > 1.0:
+        sx, sy = img_w / impl_w, img_h / impl_h
+        fx *= sx; cx *= sx
+        fy *= sy; cy *= sy
     flen = (fx / img_w) if img_w >= img_h else (fy / img_h)
     paspect = fy / fx
     ppx, ppy = cx / img_w, cy / img_h
@@ -113,6 +125,7 @@ def bake_texture(
     pose_map: Dict[int, np.ndarray],        # frame_idx → (4,4) c2w
     intrinsics_map: Dict[int, np.ndarray],  # frame_idx → (3,3) K at RGB res
     out_glb: Path,
+    name_map: Optional[Dict[int, str]] = None,  # frame_idx → real JPG filename
     frame_indices: Optional[List[int]] = None,
     max_views: int = 400,
     data_term: str = "gmi",
@@ -146,6 +159,15 @@ def bake_texture(
     frames_dir = Path(frames_dir)
     out_glb = Path(out_glb)
 
+    def _jpg_for(fi: int) -> Path:
+        # pose_map is keyed by keyframe-INDEX (0..N-1); the JPGs are named by the
+        # ORIGINAL frame number (a sparse subset). Without name_map, "{fi:06d}.jpg"
+        # silently pairs each pose with the wrong image — geometry textures fine
+        # but the projected photo is from a different frame. Resolve via name_map.
+        if name_map and fi in name_map:
+            return frames_dir / Path(str(name_map[fi])).name
+        return frames_dir / f"{fi:06d}.jpg"
+
     texrecon = _texrecon_bin()
     if texrecon is None:
         logger.error("[TextureBake] texrecon not found — build vendor/mvs-texturing "
@@ -166,7 +188,7 @@ def bake_texture(
         fi = int(fi)
         if pose_map.get(fi) is None or intrinsics_map.get(fi) is None:
             continue
-        if not (frames_dir / f"{fi:06d}.jpg").exists():
+        if not _jpg_for(fi).exists():
             continue
         usable.append(fi)
     if len(usable) < 2:
@@ -198,7 +220,7 @@ def bake_texture(
         views.mkdir()
         img_w = img_h = 0
         for fi in usable:
-            jpg = (frames_dir / f"{fi:06d}.jpg").resolve()
+            jpg = _jpg_for(fi).resolve()
             if img_w == 0:
                 with Image.open(jpg) as im:
                     img_w, img_h = im.size

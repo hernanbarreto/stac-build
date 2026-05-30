@@ -1203,25 +1203,16 @@ def export_tsdf_scene(
             progress_cb("texturing", time.time() - t0, None)
         tex_in = scene_dir / "_scene_geom.ply"
         try:
-            # Per-view intrinsics for texrecon, at the FULL-RES JPG resolution it
-            # normalises against. The native K (npz, preferred) is at depth
-            # resolution, so scale depth→jpg — otherwise texrecon's principal
-            # point/focal (ppx=cx/img_w …) are computed against the wrong size
-            # and every view projects offset, smearing the texture. Same root
-            # cause as the integrate intrinsics bug, on the texturing side.
-            sx_t = rgb_w / float(depth_w)
-            sy_t = rgb_h / float(depth_h)
+            # Per-view intrinsics for texrecon: prefer each frame's OWN native K
+            # (from its npz, captured during integrate). bake_texture fits K to
+            # the actual JPG resolution internally, so pass the native K as-is.
             tex_intrinsics: Dict[int, np.ndarray] = {}
             for _fidx in sorted_frames:
-                _K = native_K_map.get(_fidx)  # per-frame npz K, captured at integrate
+                _K = native_K_map.get(_fidx)
                 if _K is None:
                     _K = cam.K_for(_fidx)
-                if _K is None:
-                    continue
-                _K = np.asarray(_K, dtype=np.float64).copy()
-                _K[0, 0] *= sx_t; _K[0, 2] *= sx_t
-                _K[1, 1] *= sy_t; _K[1, 2] *= sy_t
-                tex_intrinsics[_fidx] = _K
+                if _K is not None:
+                    tex_intrinsics[_fidx] = np.asarray(_K, dtype=np.float64)
             # Hand texrecon a robust binary PLY (read natively) rather than
             # round-tripping the geometry through GLB.
             o3d.io.write_triangle_mesh(str(tex_in), mesh, write_ascii=False)
@@ -1231,6 +1222,7 @@ def export_tsdf_scene(
                 frames_dir=frames_dir,
                 pose_map=cam.pose_map,
                 intrinsics_map=tex_intrinsics,
+                name_map=kf_name_map,  # keyframe-index → real JPG (sparse originals)
                 out_glb=glb_path,
             )
             textured = res is not None
@@ -1425,12 +1417,24 @@ def export_poisson_scene(
                 cam.pose_map = refined
         if cam is not None:
             tex_in = scene_dir / "_poisson_geom.ply"
+            # keyframe-index → real JPG name (poses are keyframe-indexed but the
+            # JPGs use sparse original frame numbers — see the TSDF-scene path).
+            poisson_name_map: Dict[int, str] = {}
+            _sel = frames_dir / "selected_frames.json"
+            if _sel.exists():
+                try:
+                    with open(_sel) as _f:
+                        _kf = sorted(json.load(_f).get("selected_files", []))
+                    poisson_name_map = {i: n for i, n in enumerate(_kf)}
+                except Exception:
+                    poisson_name_map = {}
             try:
                 o3d.io.write_triangle_mesh(str(tex_in), mesh, write_ascii=False)
                 from reconstruction.texture_bake import bake_texture
                 res = bake_texture(
                     mesh_path=tex_in, frames_dir=frames_dir,
                     pose_map=cam.pose_map, intrinsics_map=cam.intrinsics_map,
+                    name_map=poisson_name_map,
                     out_glb=glb_path,
                 )
                 textured = res is not None
