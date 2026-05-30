@@ -43,8 +43,8 @@ def read_vipe_exr(zf: zipfile.ZipFile, orig_frame: int):
 
 
 def read_da3_depth(da3_dir: Path, frame_idx: int):
-    """DA3 streaming per-frame depth+conf+intrinsics (results_output/frame_<i>.npz)."""
-    p = da3_dir / f"frame_{frame_idx}.npz"
+    """Isolated DA3 per-frame depth+conf (da3_depth/{frame:06d}.npz)."""
+    p = da3_dir / f"{frame_idx:06d}.npz"
     if not p.exists():
         return None, None
     z = np.load(str(p))

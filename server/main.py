@@ -968,6 +968,21 @@ _ws_log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
 logging.getLogger().addHandler(_ws_log_handler)
 logging.getLogger("uvicorn").addHandler(_ws_log_handler)
 logging.getLogger("uvicorn.access").addHandler(_ws_log_handler)
+
+# Persist EVERYTHING to disk so runs are auditable after the fact (server +
+# pipeline + relayed worker logs: DA3, [vipe], [calib], [vipe-compose], errors).
+# pipeline_manager relays each worker `send_log` via logger.info → captured here.
+from logging.handlers import RotatingFileHandler as _RFH
+_log_dir = Path(__file__).parent / "logs"
+_log_dir.mkdir(exist_ok=True)
+_file_log_handler = _RFH(_log_dir / "server.log",
+                         maxBytes=100 * 1024 * 1024, backupCount=5, encoding="utf-8")
+_file_log_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+_file_log_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(_file_log_handler)
+logging.getLogger().setLevel(logging.INFO)
+
 sys.stdout = StreamCapture(sys.__stdout__, "info")
 sys.stderr = StreamCapture(sys.__stderr__, "error")
 

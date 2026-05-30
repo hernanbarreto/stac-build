@@ -51,9 +51,19 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if server_dir not in sys.path:
         sys.path.insert(0, server_dir)
 
-    # ── Step 1: Frame quality analysis (blur detection) ──
+    # COHERENCE: the ViPE SLAM path (pose_source=vipe) uses ALL frames as-is —
+    # NO blur analysis and NO cosine/DINO selection run (both irrelevant; ViPE
+    # gives cross-frame consistency, DA3 isolated depth gives the metric ref).
+    pose_source = recon_cfg.get("pose_source", "da3")
+    vipe_path = (pose_source == "vipe")
+    if vipe_path:
+        pipe.send_log("pose_source=vipe → ALL frames; skipping blur + cosine/DINO selection")
+
+    # ── Step 1: Frame quality analysis (blur detection) — skipped for ViPE ──
     fq_path = frames_dir / "frame_quality.json"
-    if not replace and fq_path.exists():
+    if vipe_path:
+        pass
+    elif not replace and fq_path.exists():
         pipe.send_log("Reusing existing frame_quality.json (replace=off — skipping blur analysis)")
     else:
         pipe.send_progress(2, "Analyzing frame quality...", stage="reconstruction")
@@ -65,9 +75,9 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         except Exception as e:
             pipe.send_log(f"Frame quality analysis skipped: {e}", level="warning")
 
-    # ── Step 2: Frame selection (visual novelty filter) ──
+    # ── Step 2: Frame selection (DINO cosine) — skipped for ViPE ──
     selected_frames_path = None
-    use_keyframes = recon_cfg.get("use_keyframes", True)
+    use_keyframes = recon_cfg.get("use_keyframes", True) and not vipe_path
     sf_path = frames_dir / "selected_frames.json"
 
     if use_keyframes:
@@ -84,8 +94,8 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
                 except Exception as e:
                     pipe.send_log(f"Frame selection failed: {e}", level="warning")
 
-    # Check if selected_frames.json exists
-    if sf_path.exists():
+    # keyframes only feed the non-ViPE backends
+    if (not vipe_path) and sf_path.exists():
         selected_frames_path = str(sf_path)
         pipe.send_log(f"Using keyframes from {sf_path}")
 
@@ -425,6 +435,22 @@ def _clean_da3_scratch(da3_dir: Path):
         shutil.rmtree(da3_dir / name, ignore_errors=True)
 
 
+def _run_da3_isolated(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, recon_cfg: dict):
+    """Isolated DA3 metric depth per image (no streaming/SLAM/poses) → da3_depth/.
+    Only the metric reference for calibrating ViPE depth."""
+    server_dir = Path(__file__).resolve().parent.parent
+    model = recon_cfg.get("da3", {}).get("model", "depth-anything/DA3NESTED-GIANT-LARGE-1.1")
+    out = output_dir / "da3_depth"
+    inner = (f"source {_conda_root()}/etc/profile.d/conda.sh && "
+             f"conda activate {os.environ.get('DA3_CONDA_ENV', 'da3')} && "
+             f"python -u {server_dir / 'reconstruction' / 'run_da3_isolated.py'} "
+             f"--frames-dir {frames_dir} --out {out} --model {model}")
+    pipe.send_progress(15, "DA3 isolated metric depth (all frames)...", stage="reconstruction")
+    proc = subprocess.Popen(["bash", "-lc", inner], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    _stream_proc(pipe, proc, "da3-iso")
+
+
 def _run_vipe(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, vcfg: dict):
     vipe_out = output_dir / "vipe_run"
     if vcfg["skip_if_exists"] and (vipe_out / "pose" / "frames.npz").exists():
@@ -449,7 +475,7 @@ def _run_vipe_calibrate(pipe: WorkerPipe, output_dir: Path, vcfg: dict):
     cmd = [f"{vcfg['venv']}/bin/python",
            str(server_dir / "reconstruction" / "vipe_calibrate.py"),
            "--vipe-out", str(output_dir / "vipe_run"),
-           "--da3-depth", str(output_dir / "da3_run" / "results_output"),
+           "--da3-depth", str(output_dir / "da3_depth"),
            "--out", str(output_dir / "vipe_run" / "depth_calibrated")]
     pipe.send_progress(75, "Calibrating ViPE depth → DA3 metric...", stage="reconstruction")
     pipe.send_log(f"[calib] {' '.join(cmd[1:])}")
@@ -481,11 +507,9 @@ def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     vcfg = _vipe_cfg(recon_cfg)
     pipe.send_log("Reconstruction backend: ViPE SLAM (pose_source=vipe, all frames)")
 
-    # 1. DA3 streaming over ALL frames (selected_frames=None) → metric depth ref.
-    pipe.send_progress(10, "DA3 depth over all frames (metric reference)...",
-                       stage="reconstruction")
-    _run_da3(pipe, frames_dir, output_dir, None, recon_cfg, config)
-    _clean_da3_scratch(output_dir / "da3_run")
+    # 1. Isolated DA3 metric depth over ALL frames (no streaming/SLAM/poses) —
+    #    only the per-frame metric reference to calibrate ViPE depth.
+    _run_da3_isolated(pipe, frames_dir, output_dir, recon_cfg)
 
     # 2. ViPE SLAM over ALL frames → continuous poses + dense depth.
     _run_vipe(pipe, frames_dir, output_dir, vcfg)
