@@ -90,7 +90,12 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         pipe.send_log(f"Using keyframes from {sf_path}")
 
     # ── Step 3: Dispatch to backend ──
-    if backend == "da3":
+    # pose_source == "vipe": ViPE is the SLAM (continuous poses), DA3 is the metric
+    # depth reference. Orthogonal to the depth backend; for now wired for da3 depth.
+    pose_source = recon_cfg.get("pose_source", "da3")
+    if pose_source == "vipe":
+        _run_vipe_slam(pipe, frames_dir, output_dir, recon_cfg, config)
+    elif backend == "da3":
         _run_da3(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
     elif backend == "lidar":
         _run_lidar_only(pipe, frames_dir, output_dir, recon_cfg, session_path, selected_frames_path)
@@ -380,6 +385,118 @@ def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
 
     # ── Post-process DA3 output (same format as VGGT-Long) ──
     _postprocess_reconstruction(pipe, da3_save_dir, output_dir, da3_config, backend="da3")
+
+
+# ────────────────────────────────────────────────────────────────────
+#  ViPE SLAM pose-source pipeline (pose_source == "vipe")
+#  DA3(all frames, depth ref) → ViPE(all frames, poses+depth) →
+#  per-frame calibrate ViPE→DA3 metric → compose cloud + traceability.
+#  ViPE IS the SLAM. Cleans its own scratch — no temporaries/leftovers.
+# ────────────────────────────────────────────────────────────────────
+
+def _vipe_cfg(recon_cfg: dict) -> dict:
+    v = recon_cfg.get("vipe", {})
+    return {
+        "venv": v.get("venv", "/workspace/stac-build/vendor/vipe/.venv"),
+        "vipe_dir": v.get("vipe_dir", "/workspace/stac-build/vendor/vipe"),
+        "pipeline": v.get("pipeline", "dav3"),
+        "skip_if_exists": v.get("skip_if_exists", True),
+    }
+
+
+def _conda_root() -> str:
+    return os.environ.get("CONDA_ROOT", "/workspace/miniforge3")
+
+
+def _stream_proc(pipe: WorkerPipe, proc, tag: str):
+    for line in proc.stdout:
+        line = line.rstrip()
+        if line:
+            pipe.send_log(f"[{tag}] {line}")
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"{tag} failed (exit {proc.returncode})")
+
+
+def _clean_da3_scratch(da3_dir: Path):
+    """Remove the streaming scratch so nothing temporary is left behind."""
+    for name in ("_tmp_results_unaligned", "_tmp_results_aligned",
+                 "_tmp_results_loop", "pcd", "gs_ply"):
+        shutil.rmtree(da3_dir / name, ignore_errors=True)
+
+
+def _run_vipe(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, vcfg: dict):
+    vipe_out = output_dir / "vipe_run"
+    if vcfg["skip_if_exists"] and (vipe_out / "pose" / "frames.npz").exists():
+        pipe.send_log("[vipe] reusing existing vipe_run/pose/frames.npz")
+        return
+    vipe_out.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["PATH"] = f"{vcfg['venv']}/bin:" + env.get("PATH", "")
+    cmd = [f"{vcfg['venv']}/bin/vipe", "infer", "--image-dir", str(frames_dir),
+           "-o", str(vipe_out), "-p", vcfg["pipeline"]]
+    pipe.send_progress(45, "Running ViPE SLAM (all frames)...", stage="reconstruction")
+    pipe.send_log(f"[vipe] {' '.join(cmd)}")
+    proc = subprocess.Popen(cmd, cwd=vcfg["vipe_dir"], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+    _stream_proc(pipe, proc, "vipe")
+    # drop the redundant rgb video (we already have frames/)
+    (vipe_out / "rgb" / "frames.mp4").unlink(missing_ok=True)
+
+
+def _run_vipe_calibrate(pipe: WorkerPipe, output_dir: Path, vcfg: dict):
+    server_dir = Path(__file__).resolve().parent.parent
+    cmd = [f"{vcfg['venv']}/bin/python",
+           str(server_dir / "reconstruction" / "vipe_calibrate.py"),
+           "--vipe-out", str(output_dir / "vipe_run"),
+           "--da3-depth", str(output_dir / "da3_run" / "results_output"),
+           "--out", str(output_dir / "vipe_run" / "depth_calibrated")]
+    pipe.send_progress(75, "Calibrating ViPE depth → DA3 metric...", stage="reconstruction")
+    pipe.send_log(f"[calib] {' '.join(cmd[1:])}")
+    proc = subprocess.Popen(cmd, cwd=vcfg["vipe_dir"], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    _stream_proc(pipe, proc, "calib")
+
+
+def _run_vipe_compose(pipe: WorkerPipe, frames_dir: Path, output_dir: Path):
+    """Compose chunks + poses in the da3 env (open3d)."""
+    server_dir = Path(__file__).resolve().parent.parent
+    script = server_dir / "reconstruction" / "run_vipe_compose.py"
+    inner = (f"source {_conda_root()}/etc/profile.d/conda.sh && "
+             f"conda activate {os.environ.get('DA3_CONDA_ENV', 'da3')} && "
+             f"PYTHONPATH={server_dir}:$PYTHONPATH python -u {script} "
+             f"--output-dir {output_dir} --frames-dir {frames_dir}")
+    pipe.send_progress(82, "Composing cloud (ViPE poses + calibrated depth)...",
+                       stage="reconstruction")
+    proc = subprocess.Popen(["bash", "-lc", inner], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    _stream_proc(pipe, proc, "vipe-compose")
+
+
+def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
+                   recon_cfg: dict, config: dict):
+    """Full ViPE SLAM reconstruction (all frames). DA3 depth is the metric
+    reference; ViPE provides poses (and depth); the cloud is composed from
+    ViPE poses + per-frame-calibrated ViPE depth, with full traceability."""
+    vcfg = _vipe_cfg(recon_cfg)
+    pipe.send_log("Reconstruction backend: ViPE SLAM (pose_source=vipe, all frames)")
+
+    # 1. DA3 streaming over ALL frames (selected_frames=None) → metric depth ref.
+    pipe.send_progress(10, "DA3 depth over all frames (metric reference)...",
+                       stage="reconstruction")
+    _run_da3(pipe, frames_dir, output_dir, None, recon_cfg, config)
+    _clean_da3_scratch(output_dir / "da3_run")
+
+    # 2. ViPE SLAM over ALL frames → continuous poses + dense depth.
+    _run_vipe(pipe, frames_dir, output_dir, vcfg)
+
+    # 3. Per-frame calibrate ViPE depth → DA3 metric.
+    _run_vipe_calibrate(pipe, output_dir, vcfg)
+
+    # 4. Compose chunks (cloud + origins) from ViPE poses + calibrated depth.
+    _run_vipe_compose(pipe, frames_dir, output_dir)
+
+    pipe.send_progress(90, "ViPE SLAM reconstruction complete", stage="reconstruction")
 
 
 def _run_hybrid_or_lidar(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,

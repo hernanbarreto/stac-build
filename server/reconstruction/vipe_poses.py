@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""
+ViPE pose loading + global metric scaling + camera_poses.txt writer.
+
+ViPE provides continuous c2w poses for ALL frames (its BA). We scale the pose
+translations to the DA3 metric (the calibration reference) by a single robust
+global factor derived from the per-frame depth-calibration scales, then write
+``camera_poses.txt`` (one row-major 4x4 per frame) + ``intrinsic.txt`` in the
+exact format the downstream TSDF/texture path expects (``_load_da3_refined_poses``).
+
+Pure-numpy (runs in the da3 env). No ViPE/OpenEXR import.
+"""
+import json
+from pathlib import Path
+from typing import Dict, Optional, Tuple
+
+import numpy as np
+
+
+def load_vipe_poses(vipe_out: Path) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (inds [N] original-frame#, c2w [N,4,4]). ViPE inds are positional
+    in the sorted file list it was given; with an all-frames contiguous run they
+    equal the original frame numbers."""
+    d = np.load(vipe_out / "pose" / "frames.npz")
+    return np.asarray(d["inds"]).astype(np.int64), np.asarray(d["data"], np.float64)
+
+
+def global_scale_from_calibration(cal_dir: Path,
+                                  scale_lo: float = 0.7, scale_hi: float = 1.7,
+                                  res_max: float = 0.10) -> float:
+    """Robust global ViPE→DA3-metric pose scale = median of the per-frame affine
+    depth scales over WELL-CALIBRATED frames (reject outlier fits). The depth and
+    poses share ViPE's native scale, so the depth-calibration scale converts pose
+    translations to metric too."""
+    manifest = json.load(open(cal_dir / "calibration_manifest.json"))
+    good = [m["scale"] for m in manifest.values()
+            if scale_lo <= m["scale"] <= scale_hi and m["residual_m"] <= res_max]
+    if not good:
+        return 1.0
+    return float(np.median(good))
+
+
+def build_pose_map(vipe_out: Path, frames: Optional[list] = None,
+                   scale: float = 1.0) -> Dict[int, np.ndarray]:
+    """frame# -> scaled c2w. ``frames`` (original frame numbers) restricts/orders
+    the output; default = all ViPE frames."""
+    inds, mats = load_vipe_poses(vipe_out)
+    row = {int(fi): i for i, fi in enumerate(inds)}
+    keys = frames if frames is not None else sorted(row)
+    pm: Dict[int, np.ndarray] = {}
+    for f in keys:
+        f = int(f)
+        if f in row:
+            c2w = mats[row[f]].copy()
+            c2w[:3, 3] *= scale
+            pm[f] = c2w
+    return pm
+
+
+def write_pose_files(pose_map: Dict[int, np.ndarray], intrinsics_map: Dict[int, np.ndarray],
+                     out_paths: list, intrinsic_path: Optional[Path] = None) -> None:
+    """Write camera_poses.txt (16 floats/line, row-major c2w, frame order) to each
+    path in ``out_paths``, and optionally intrinsic.txt (fx fy cx cy per frame).
+    A companion ``camera_frames.txt`` lists the frame number per line (since we are
+    no longer keyframe-indexed)."""
+    frames = sorted(pose_map)
+    for p in out_paths:
+        p = Path(p); p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w") as f:
+            for fr in frames:
+                f.write(" ".join(f"{v:.10f}" for v in pose_map[fr].reshape(-1)) + "\n")
+        # frame-number sidecar (all-frames is not keyframe-indexed anymore)
+        with open(p.parent / "camera_frames.txt", "w") as f:
+            f.write("\n".join(str(fr) for fr in frames) + "\n")
+    if intrinsic_path is not None and intrinsics_map:
+        intrinsic_path = Path(intrinsic_path)
+        with open(intrinsic_path, "w") as f:
+            for fr in frames:
+                K = intrinsics_map.get(fr)
+                if K is None:
+                    continue
+                f.write(f"{K[0,0]:.6f} {K[1,1]:.6f} {K[0,2]:.6f} {K[1,2]:.6f}\n")
