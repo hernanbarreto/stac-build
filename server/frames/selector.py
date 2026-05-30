@@ -56,12 +56,10 @@ def _load_dino_model(model_name: str = "dinov2_vitb14", device: str = "cuda"):
         for k in to_remove:
             del sys.modules[k]
 
-    # Persist the torch.hub cache on the pod's /workspace volume. torch.hub uses
-    # TORCH_HOME (default ~/.cache/torch), NOT HF_HOME — and on an ephemeral pod
-    # the root fs is wiped on restart, so dinov2 gets re-cloned from GitHub +
-    # weights re-downloaded every boot. /workspace persists.
-    if not os.environ.get("TORCH_HOME") and os.path.isdir("/workspace"):
-        os.environ["TORCH_HOME"] = "/workspace/torch_cache"
+    # NOTE: torch.hub cache is left at its default (~/.cache/torch, local disk).
+    # Pointing it at the /workspace network volume made the DINOv2 weight load
+    # ~40s per run. Local disk loads in a few seconds; the cost is a one-time
+    # re-clone from GitHub after a pod restart.
 
     print(f"[FrameSelector] Loading DINOv2 ({model_name}) on {device}...")
     model = torch.hub.load('facebookresearch/dinov2', model_name, verbose=False)
@@ -230,7 +228,7 @@ def dino_select_keyframes(frames_dir: str, config: dict = None,
     # Decoupled from the sequential selection logic below, since a frame's
     # embedding never depends on which frames were accepted.
     batch_size = int(config.get("dino_batch_size", 32))
-    num_workers = int(config.get("dino_num_workers", 4))
+    num_workers = int(config.get("dino_num_workers", 8))
     use_amp = bool(config.get("dino_fp16", False))
     embs = _extract_embeddings_batched(
         model, frames_dir, frame_files, transform, device,

@@ -255,7 +255,8 @@ def _run_lidar_only(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     chunk_ply = output_dir / "chunk_999_lidar.ply"
     origins_npz = output_dir / "chunk_999_lidar_origins.npz"
 
-    np.savez_compressed(origins_npz, frame_global=fg, pixel_row=pr, pixel_col=pc)
+    np.savez_compressed(origins_npz, frame_global=fg, pixel_row=pr, pixel_col=pc,
+                        confidence=confs.astype(np.float32))
 
     _n = len(pts)
     dtype = np.dtype([('x','<f4'),('y','<f4'),('z','<f4'),
@@ -635,8 +636,9 @@ def _generate_lidar_complement(pipe: WorkerPipe, da3_save_dir: Path, output_dir:
     # Save as chunk_999_lidar.ply in output/
     complement_path = output_dir / "chunk_999_lidar.ply"
     origins_path = output_dir / "chunk_999_lidar_origins.npz"
-    
-    np.savez_compressed(origins_path, frame_global=fg, pixel_row=pr, pixel_col=pc)
+
+    np.savez_compressed(origins_path, frame_global=fg, pixel_row=pr, pixel_col=pc,
+                        confidence=confs.astype(np.float32))
     _n = len(pts)
     dtype = np.dtype([('x','<f4'),('y','<f4'),('z','<f4'),
                       ('r','u1'),('g','u1'),('b','u1'),
@@ -826,12 +828,19 @@ def _build_da3_config(recon_cfg: dict) -> dict:
     da3 = recon_cfg.get("da3", {})
     device = recon_cfg.get("device", "cpu")
 
-    # SALAD weights: use the one from VGGT-Long or DA3 streaming's weights dir
+    # SALAD weights (DINO-SALAD, used by DA3's loop detector). Search known
+    # locations in order; the real file lives in weights/da3/ on this pod.
     project_root = Path(__file__).resolve().parent.parent.parent
-    salad_path = project_root / "vendor" / "depth-anything-3" / "da3_streaming" / "weights" / "dino_salad.ckpt"
+    _salad_candidates = [
+        project_root / "weights" / "da3" / "dino_salad.ckpt",
+        project_root / "weights" / "dino_salad.ckpt",
+        project_root / "vendor" / "depth-anything-3" / "da3_streaming" / "weights" / "dino_salad.ckpt",
+        project_root / "vendor" / "VGGT-Long" / "weights" / "dino_salad.ckpt",
+    ]
+    salad_path = next((p for p in _salad_candidates if p.exists()), _salad_candidates[0])
     if not salad_path.exists():
-        # Fallback to VGGT-Long weights
-        salad_path = project_root / "vendor" / "VGGT-Long" / "weights" / "dino_salad.ckpt"
+        print(f"[map_worker] ⚠️ dino_salad.ckpt not found in any known location; "
+              f"loop closure will fail. Looked in: {[str(p) for p in _salad_candidates]}")
 
     cfg = {
         "Weights": {
@@ -863,7 +872,9 @@ def _build_da3_config(recon_cfg: dict) -> dict:
             "IRLS": {
                 "delta": 0.1,
                 "max_iters": 5,
-                "tol": 1e-9,
+                # String on purpose: the vendored sim3utils does eval(config[...]["tol"]),
+                # so it must round-trip through YAML as a string, not a float.
+                "tol": "1e-9",
             },
             "Pointcloud_Save": {
                 "sample_ratio": da3.get("sample_ratio", 1.0),
@@ -882,7 +893,8 @@ def _build_da3_config(recon_cfg: dict) -> dict:
             "SIM3_Optimizer": {
                 "lang_version": "python",
                 "max_iterations": 30,
-                "lambda_init": 1e-6,
+                # String on purpose: vendored sim3loop does eval(config[...]["lambda_init"]).
+                "lambda_init": "1e-6",
             },
         },
     }
@@ -937,141 +949,166 @@ def _read_ply_point_count(ply_path: Path) -> int:
 
 def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                       vggt_config: dict, pipe: WorkerPipe):
-    """Generate chunk_*_origins.npz from VGGT-Long saved chunk .npy files.
-    
-    The unaligned chunk data contains world_points with shape (S, H, W, 3).
-    S = frames in chunk, H/W = image dimensions.
-    We reconstruct (frame_global, pixel_row, pixel_col) using the same
-    math as alignment pipeline.
+    """Generate chunk_NNN_origins.npz (frame_global, pixel_row, pixel_col,
+    confidence) aligned 1:1 with each chunk PLY's points.
+
+    DA3 writes each chunk PLY (K_pcd.ply) as the *confidence-thresholded* subset
+    of its points, in frame-major order (see save_confident_pointcloud_batch:
+    mask = conf >= mean(conf)*coef & conf > 1e-5). We replicate that EXACT mask on
+    the chunk's saved Prediction (.npy) so the origins line up point-for-point
+    with the PLY, and carry the per-point confidence. CloudComPy injects these as
+    scalar fields at merge time and preserves them through dedup/voxel/SOR into
+    cleaned_cloud.ply (so every final point is traceable to its keyframe + pixel
+    + confidence).
+
+    `frame_global` indexes self.img_list, i.e. the SELECTED KEYFRAMES — map it
+    through selected_frames.json["selected_files"][frame_global] to get the
+    source frame file.
+
+    Legacy MapAnything/VGGT-Long chunks (dicts with 'world_points', no per-point
+    confidence) keep the original all-points behavior.
     """
     import numpy as np
 
-    # VGGT-Long saves chunk data to _tmp_results_unaligned/chunk_N.npy
     unaligned_dir = vggt_save_dir / "_tmp_results_unaligned"
+    pcd_dir = vggt_save_dir / "pcd"
     if not unaligned_dir.exists():
         pipe.send_log("No unaligned chunk data found — origins not generated", level="warning")
         return
 
-    chunk_npy_files = sorted(glob.glob(str(unaligned_dir / "chunk_*.npy")))
-    if not chunk_npy_files:
-        pipe.send_log("No chunk .npy files found — origins not generated", level="warning")
+    # _postprocess copied save_dir/pcd/K_pcd.ply (K = real chunk number), sorted
+    # lexicographically, to output/chunk_{i:03d}.ply. Mirror that ordering so
+    # chunk_{i:03d}_origins.npz pairs with chunk_{i:03d}.ply — but use the REAL
+    # chunk number K for frame_global (lexicographic sort puts "10" before "2").
+    pcd_files = sorted(glob.glob(str(pcd_dir / "*_pcd.ply")))
+    pcd_files = [f for f in pcd_files if "combined" not in Path(f).name]
+    if not pcd_files:
+        pipe.send_log("No chunk PLYs found — origins not generated", level="warning")
         return
 
     chunk_size = vggt_config["Model"]["chunk_size"]
     overlap = vggt_config["Model"]["overlap"]
     chunk_step = chunk_size - overlap
-    sample_ratio = vggt_config["Model"]["Pointcloud_Save"]["sample_ratio"]
+    ps = vggt_config["Model"].get("Pointcloud_Save", {})
+    coef = ps.get("conf_threshold_coef", 0.75)
+    sample_ratio = ps.get("sample_ratio", 1.0)
+
+    if sample_ratio < 1.0:
+        pipe.send_log(
+            f"sample_ratio={sample_ratio} (<1.0): DA3 randomly subsamples each PLY, "
+            f"so per-point origins can't be reproduced exactly — set "
+            f"reconstruction.da3.sample_ratio: 1.0 for full traceability.",
+            level="warning")
 
     # DA3 .npy files contain pickled Prediction objects from depth_anything_3
-    # We need to temporarily add the module to sys.path for unpickling
     project_root = Path(__file__).resolve().parent.parent.parent
     da3_src = str(project_root / "vendor" / "depth-anything-3" / "src")
-    _added_da3 = False
-    if da3_src not in sys.path:
+    _added_da3 = da3_src not in sys.path
+    if _added_da3:
         sys.path.insert(0, da3_src)
-        _added_da3 = True
 
-    for chunk_idx, npy_path in enumerate(chunk_npy_files):
-        try:
-            chunk_data = np.load(npy_path, allow_pickle=True).item()
+    try:
+        for i, pf in enumerate(pcd_files):
+            try:
+                try:
+                    K = int(Path(pf).stem.split("_")[0])  # "10_pcd" -> 10
+                except ValueError:
+                    K = i  # fallback
 
-            # Handle both DA3 Prediction objects and legacy VGGT-Long dicts
-            if hasattr(chunk_data, 'depth'):
-                # DA3 Prediction: compute point count from depth shape (N, H, W)
-                depth = chunk_data.depth
-                if depth.ndim == 3:
-                    S, H, W = depth.shape
+                npy_path = unaligned_dir / f"chunk_{K}.npy"
+                if not npy_path.exists():
+                    pipe.send_log(f"Chunk {i:03d}: missing {npy_path.name}; origins skipped", level="warning")
+                    continue
+
+                chunk_data = np.load(npy_path, allow_pickle=True).item()
+
+                conf_flat = None
+                if hasattr(chunk_data, "conf") and getattr(chunk_data, "conf") is not None:
+                    # DA3 Prediction — replicate the PLY's confidence mask
+                    conf = np.asarray(chunk_data.conf, dtype=np.float32)
+                    if conf.ndim == 4:
+                        conf = conf.reshape(conf.shape[0], conf.shape[-2], conf.shape[-1])
+                    S, H, W = conf.shape
+                    conf_flat = conf.reshape(-1)
+                elif hasattr(chunk_data, "depth"):
+                    depth = np.asarray(chunk_data.depth)
+                    S, H, W = depth.shape[0], depth.shape[-2], depth.shape[-1]
+                elif isinstance(chunk_data, dict) and "world_points" in chunk_data:
+                    wp = chunk_data["world_points"]
+                    if wp.ndim == 5:
+                        wp = wp[0]
+                    S, H, W = wp.shape[:3]
                 else:
-                    S, H, W = depth.shape[0], depth.shape[1], depth.shape[2]
-            elif 'world_points' in chunk_data:
-                # Legacy VGGT-Long dict
-                wp = chunk_data['world_points']
-                if wp.ndim == 5:
-                    wp = wp[0]
-                S, H, W = wp.shape[:3]
-            else:
-                pipe.send_log(f"Chunk {chunk_idx}: unrecognized data format", level="warning")
-                continue
-            HW = H * W
-            total_points = S * HW
+                    pipe.send_log(f"Chunk {i:03d} (src {K}): unrecognized data format", level="warning")
+                    continue
 
-            # Generate indices (DA3 PLYs now contain 100% of points, no filtering needed)
-            all_indices = np.arange(total_points)
+                HW = H * W
 
-            # Apply sampling
-            if sample_ratio < 1.0 and len(all_indices) > 0:
-                n_samples = int(len(all_indices) * sample_ratio)
-                sample_local = np.sort(np.random.choice(
-                    len(all_indices), n_samples, replace=False
-                ))
-                final_indices = all_indices[sample_local]
-            else:
-                final_indices = all_indices
+                if conf_flat is not None:
+                    # Exact replica of save_confident_pointcloud_batch's mask.
+                    thr = float(np.mean(conf_flat)) * coef
+                    surviving = np.flatnonzero((conf_flat >= thr) & (conf_flat > 1e-5))
+                    confidence = conf_flat[surviving].astype(np.float32)
+                else:
+                    # Legacy (MapAnything/VGGT-Long): keep all points, no confidence.
+                    surviving = np.arange(S * HW)
+                    confidence = None
 
-            if len(final_indices) == 0:
-                pipe.send_log(f"Chunk {chunk_idx}: no valid points for origins", level="warning")
-                continue
+                if len(surviving) == 0:
+                    pipe.send_log(f"Chunk {i:03d} (src {K}): no points after conf mask", level="warning")
+                    continue
 
-            # Compute origin for each surviving point
-            frame_local = final_indices // HW
-            pixel_row = (final_indices % HW) // W
-            pixel_col = final_indices % W
+                frame_local = surviving // HW
+                within = surviving % HW
+                pixel_row = (within // W).astype(np.int16)
+                pixel_col = (within % W).astype(np.int16)
+                frame_global = (frame_local + K * chunk_step).astype(np.int32)
 
-            # Convert to global frame index
-            frame_global = frame_local + chunk_idx * chunk_step
+                # Sanity: must match the copied chunk_{i:03d}.ply point count, or
+                # CloudComPy will drop the (size-mismatched) origins on merge.
+                out_ply = output_dir / f"chunk_{i:03d}.ply"
+                ply_n = _read_ply_point_count(out_ply) if out_ply.exists() else None
+                if ply_n is not None and ply_n != len(surviving):
+                    pipe.send_log(
+                        f"Chunk {i:03d} (src {K}): origin/PLY count mismatch "
+                        f"({len(surviving)} vs {ply_n}) — origins will be dropped at merge. "
+                        f"Check conf mask / sample_ratio.", level="warning")
 
-            # Read the actual PLY point count for this chunk
-            ply_path = output_dir / f"chunk_{chunk_idx:03d}.ply"
-            ply_point_count = _read_ply_point_count(ply_path) if ply_path.exists() else None
-
-            # If there's a mismatch, truncate origins to match PLY
-            if ply_point_count is not None and len(final_indices) != ply_point_count:
-                pipe.send_log(
-                    f"Chunk {chunk_idx}: origin/PLY mismatch ({len(final_indices)} vs {ply_point_count}), adjusting",
-                    level="warning"
+                save_kw = dict(
+                    frame_global=frame_global,
+                    pixel_row=pixel_row,
+                    pixel_col=pixel_col,
+                    scaled_resolution=np.array([H, W], dtype=np.int32),
                 )
-                if ply_point_count < len(final_indices):
-                    final_indices = final_indices[:ply_point_count]
-                # Recompute after truncation
-                frame_local = final_indices // HW
-                pixel_row = (final_indices % HW) // W
-                pixel_col = final_indices % W
-                frame_global = frame_local + chunk_idx * chunk_step
+                if confidence is not None:
+                    save_kw["confidence"] = confidence
+                np.savez_compressed(output_dir / f"chunk_{i:03d}_origins.npz", **save_kw)
 
-            # Save origins
-            origin_path = output_dir / f"chunk_{chunk_idx:03d}_origins.npz"
-            np.savez_compressed(
-                origin_path,
-                frame_global=frame_global.astype(np.int32),
-                pixel_row=pixel_row.astype(np.int16),
-                pixel_col=pixel_col.astype(np.int16),
-                scaled_resolution=[H, W],
-            )
-            pipe.send_log(f"Saved origins: {origin_path.name} ({len(frame_global)} points)")
+                conf_tag = (f", conf[{confidence.min():.2f},{confidence.max():.2f}]"
+                            if confidence is not None else " (no conf)")
+                pipe.send_log(f"Saved origins chunk_{i:03d} (src chunk {K}): {len(surviving)} pts{conf_tag}")
 
-            # Also save chunk metadata for segmentation compatibility
-            meta_path = output_dir / f"chunk_{chunk_idx:03d}_meta.json"
-            meta = {
-                "chunk_id": chunk_idx,
-                "frame_count": S,
-                "scaled_resolution": [H, W],
-                "chunk_step": chunk_step,
-                "frame_global_start": chunk_idx * chunk_step,
-                "frame_global_end": chunk_idx * chunk_step + S - 1,
-                "backend": vggt_config.get("_backend", "mapanything"),
-                "ply_pre_aligned": True,
-            }
-            with open(meta_path, 'w') as f:
-                json.dump(meta, f)
+                with open(output_dir / f"chunk_{i:03d}_meta.json", "w") as f:
+                    json.dump({
+                        "chunk_id": i,
+                        "source_chunk": K,
+                        "frame_count": int(S),
+                        "scaled_resolution": [int(H), int(W)],
+                        "chunk_step": int(chunk_step),
+                        "frame_global_start": int(K * chunk_step),
+                        "frame_global_end": int(K * chunk_step + S - 1),
+                        "backend": vggt_config.get("_backend", "da3"),
+                        "has_confidence": confidence is not None,
+                        "ply_pre_aligned": True,
+                    }, f)
 
-        except Exception as e:
-            pipe.send_log(f"Failed to generate origins for chunk {chunk_idx}: {e}", level="warning")
-            import traceback
-            traceback.print_exc()
-
-    # Clean up temporary sys.path addition
-    if _added_da3 and da3_src in sys.path:
-        sys.path.remove(da3_src)
+            except Exception as e:
+                pipe.send_log(f"Failed to generate origins for chunk {i:03d}: {e}", level="warning")
+                import traceback
+                traceback.print_exc()
+    finally:
+        if _added_da3 and da3_src in sys.path:
+            sys.path.remove(da3_src)
 
 
 

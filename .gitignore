@@ -36,6 +36,9 @@ venv.bak/
 # Backup files
 *.bak
 
+# Runtime logs
+/logs/
+
 # =========================
 # IDE / Editor
 # =========================

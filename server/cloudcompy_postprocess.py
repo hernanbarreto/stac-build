@@ -124,32 +124,47 @@ def main():
     current.setName("merged")
     print(f"  ✅ Merged: {current.size():,} points ({time.time()-t0:.1f}s)\n")
 
-    # ── Step 1b: Inject origin scalar fields from .npz ──
+    # ── Step 1b: Inject per-point scalar fields from .npz ──
+    # frame_global / pixel_row / pixel_col + confidence, so every point stays
+    # traceable to its source keyframe + pixel + confidence. These ride along
+    # through dedup/voxel/SOR (partialClone preserves SFs) into the saved PLY.
     origin_files = sorted(glob.glob(os.path.join(args.input_dir, "chunk_*_origins.npz")))
     if origin_files:
         import numpy as np
         t_orig = time.time()
-        
-        all_fg, all_pr, all_pc = [], [], []
+
+        cols = {"frame_global": [], "pixel_row": [], "pixel_col": [], "confidence": []}
+        have_conf = True
         for of in origin_files:
             d = np.load(of)
-            all_fg.append(d["frame_global"].astype(np.float32))
-            all_pr.append(d["pixel_row"].astype(np.float32))
-            all_pc.append(d["pixel_col"].astype(np.float32))
-        
-        fg = np.concatenate(all_fg)
-        pr = np.concatenate(all_pr)
-        pc = np.concatenate(all_pc)
-        
+            cols["frame_global"].append(d["frame_global"].astype(np.float32))
+            cols["pixel_row"].append(d["pixel_row"].astype(np.float32))
+            cols["pixel_col"].append(d["pixel_col"].astype(np.float32))
+            if "confidence" in d:
+                cols["confidence"].append(d["confidence"].astype(np.float32))
+            else:
+                have_conf = False
+
+        fields = [("frame_global", np.concatenate(cols["frame_global"])),
+                  ("pixel_row", np.concatenate(cols["pixel_row"])),
+                  ("pixel_col", np.concatenate(cols["pixel_col"]))]
+        if have_conf and cols["confidence"]:
+            fields.append(("confidence", np.concatenate(cols["confidence"])))
+
         n_cloud = current.size()
-        if len(fg) == n_cloud:
-            for name, arr in [('frame_global', fg), ('pixel_row', pr), ('pixel_col', pc)]:
+        existing = current.getScalarFieldDic()  # avoid duplicating SFs already on the cloud
+        if len(fields[0][1]) == n_cloud:
+            injected = []
+            for name, arr in fields:
+                if name in existing:
+                    continue  # e.g. a LiDAR chunk PLY already carried 'confidence'
                 idx = current.addScalarField(name)
                 sf = current.getScalarField(idx)
                 sf.fromNpArrayCopy(arr)
-            print(f"  ✅ Injected origin scalar fields ({n_cloud:,} pts) ({time.time()-t_orig:.1f}s)\n")
+                injected.append(name)
+            print(f"  ✅ Injected scalar fields {injected} ({n_cloud:,} pts) ({time.time()-t_orig:.1f}s)\n")
         else:
-            print(f"  ⚠️ Origin size mismatch: {len(fg)} vs cloud {n_cloud} — origins NOT injected\n")
+            print(f"  ⚠️ Origin size mismatch: {len(fields[0][1])} vs cloud {n_cloud} — NOT injected\n")
 
     # ══════════════════════════════════════════════════════════════
     # STEP 2: NEAR-DUPLICATE REMOVAL (micro-voxel 0.1mm)

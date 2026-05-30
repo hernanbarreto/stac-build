@@ -53,6 +53,46 @@ def _robust_linear_fit(da3_vals, lidar_vals, inlier_rounds=2, inlier_sigma=3.0):
     return scale, offset
 
 
+_DA3_DEFAULT_HF = "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
+
+
+def _ensure_da3_local_weights(config):
+    """Resolve the HF DA3 model → local config.json + model.safetensors.
+
+    The vendored DA3_Streaming loader reads config["Weights"]["DA3_CONFIG"] (a
+    model config.json) and ["DA3"] (a safetensors local path). STAC configs only
+    carry DA3_HF_MODEL (the HF repo id, e.g. DA3NESTED-GIANT-LARGE-1.1), so the
+    loader KeyErrors. Here we download just those two files from the Hub (cached
+    under HF_HOME) and fill the keys — same inputs DepthAnything3.from_pretrained
+    uses, but feeding the unchanged vendored loader. No vendor patch, no change to
+    the configured model id.
+    """
+    w = config.setdefault("Weights", {})
+    if (w.get("DA3_CONFIG") and w.get("DA3")
+            and os.path.exists(str(w["DA3_CONFIG"]))
+            and os.path.exists(str(w["DA3"]))):
+        return  # already pointing at local files
+
+    model_id = w.get("DA3_HF_MODEL") or _DA3_DEFAULT_HF
+    print(f"[StrayDA3] Resolving DA3 model '{model_id}' from HuggingFace…", flush=True)
+
+    from huggingface_hub import snapshot_download
+    snap = snapshot_download(model_id, allow_patterns=["config.json", "model.safetensors"])
+    cfg_json = os.path.join(snap, "config.json")
+    weights = os.path.join(snap, "model.safetensors")
+
+    if not (os.path.exists(cfg_json) and os.path.exists(weights)):
+        raise FileNotFoundError(
+            f"DA3 model '{model_id}' resolved to {snap} but config.json / "
+            f"model.safetensors are missing. Verify reconstruction.da3.model_id "
+            f"in config.yaml."
+        )
+
+    w["DA3_CONFIG"] = cfg_json
+    w["DA3"] = weights
+    print(f"[StrayDA3] DA3 weights ready: {weights}", flush=True)
+
+
 class StrayDA3Streaming(DA3_Streaming):
     """DA3-streaming with automatic Stray Scanner data injection.
 
@@ -81,6 +121,8 @@ class StrayDA3Streaming(DA3_Streaming):
             stray_data: Dict from prepare_stray_data() or None for pure DA3
             lidar_cfg: Dict from config.yaml reconstruction.lidar (optional overrides)
         """
+        # Fill DA3_CONFIG/DA3 from the HF model id before the vendored loader runs.
+        _ensure_da3_local_weights(config)
         super().__init__(image_dir, save_dir, config)
         self.stray_data = stray_data
 
@@ -142,6 +184,26 @@ class StrayDA3Streaming(DA3_Streaming):
                           f"using all {len(self.img_list)} images")
 
         print(f"Found {len(self.img_list)} images")
+
+        # The ENTIRE pipeline must operate only on the selected keyframes
+        # (selected_frames.json is the single source of truth). The vendored loop
+        # detector otherwise re-globs the full frame dir in its run() → loop
+        # indices into 3044-frame space that DON'T match the keyframe-based chunks
+        # (get_chunk_indices uses self.img_list) AND ~4x slower feature extraction.
+        # Pin it to the exact same keyframe list so indices align and it's fast.
+        ld = getattr(self, "loop_detector", None)
+        if ld is not None:
+            _keyframes = [Path(p) for p in self.img_list]
+
+            def _fixed_get_image_paths(_ld=ld, _kf=_keyframes):
+                _ld.image_paths = _kf
+                return _kf
+
+            # run() calls self.get_image_paths() unconditionally, so override it.
+            ld.get_image_paths = _fixed_get_image_paths
+            ld.image_paths = _keyframes
+            print(f"Loop detector restricted to {len(_keyframes)} keyframes")
+
         self.process_long_sequence()
 
     def process_single_chunk(self, range_1, chunk_idx=None, range_2=None,
