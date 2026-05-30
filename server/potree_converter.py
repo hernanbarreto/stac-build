@@ -111,6 +111,23 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
         n = len(conf)
         logger.info(f"[Potree] Confidence [0-1] mapped to intensity ({n:,} pts)")
 
+    # Per-point origin traceability (source keyframe + pixel) as LAS extra
+    # dimensions, so PotreeConverter carries them into the octree attributes —
+    # otherwise frame_global/pixel_row/pixel_col would be dropped here and live
+    # only in cleaned_cloud.ply. (Confidence also kept as 'confidence' extra dim
+    # in addition to intensity, so the value is exact, not quantized to uint16.)
+    if has_confidence:
+        las.add_extra_dim(laspy.ExtraBytesParams(name="confidence", type=np.float32))
+        las.confidence = data['confidence'].astype(np.float32)
+    if has_origins:
+        for name in ("frame_global", "pixel_row", "pixel_col"):
+            las.add_extra_dim(laspy.ExtraBytesParams(name=name, type=np.int32))
+        las.frame_global = data['frame_global'].astype(np.int32)
+        las.pixel_row = data['pixel_row'].astype(np.int32)
+        las.pixel_col = data['pixel_col'].astype(np.int32)
+        logger.info(f"[Potree] Origin fields (frame_global, pixel_row, pixel_col) "
+                    f"written as LAS extra dims → propagated to octree")
+
     las.write(las_path)
     logger.info(f"[Potree] Written LAS: {las_path} ({las_path.stat().st_size / 1024**2:.1f} MB)")
 

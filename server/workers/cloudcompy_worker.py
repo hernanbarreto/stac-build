@@ -182,10 +182,57 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
                 pipe.send_log("No floor plane detected, skipping alignment", level="warning")
         except Exception as e:
             pipe.send_log(f"Floor alignment computation failed: {e}", level="warning")
+
+        # ── Build Potree LOD octree (so the first viewer load is instant) ──
+        # Runs as the final reconstruction step. Carries the per-point
+        # confidence + origin (frame_global/pixel_row/pixel_col) into the octree
+        # (see potree_converter._ply_to_las LAS extra dims). Non-fatal.
+        if postproc.get("build_potree", True):
+            pipe.send_progress(96, "Building Potree LOD octree...", stage="cloudcompy")
+            try:
+                import sys, os
+                server_dir_str = str(Path(__file__).resolve().parent.parent)
+                if server_dir_str not in sys.path:
+                    sys.path.insert(0, server_dir_str)
+                from potree_converter import convert_ply_to_potree
+
+                ok = convert_ply_to_potree(session_path, force=True)
+                if ok:
+                    potree_dir = output_dir / "potree"
+                    pipe.send_log(f"Potree octree built → {potree_dir}")
+                    # Mirror merged/potree symlink for new-style projects (serving
+                    # checks merged_potree first, then output/potree).
+                    try:
+                        project_root = session_path
+                        for _ in range(5):
+                            project_root = project_root.parent
+                            if (project_root / "project.json").exists():
+                                break
+                        else:
+                            project_root = None
+                        if project_root and (project_root / "project.json").exists():
+                            merged_dir = project_root / "merged"
+                            merged_dir.mkdir(parents=True, exist_ok=True)
+                            merged_potree = merged_dir / "potree"
+                            if merged_potree.exists() or merged_potree.is_symlink():
+                                if merged_potree.is_symlink() or merged_potree.is_file():
+                                    merged_potree.unlink()
+                                else:
+                                    import shutil as _sh
+                                    _sh.rmtree(merged_potree, ignore_errors=True)
+                            rel_potree = os.path.relpath(str(potree_dir), str(merged_dir))
+                            os.symlink(rel_potree, str(merged_potree))
+                            pipe.send_log(f"Linked merged/potree → {rel_potree}")
+                    except Exception as e:
+                        pipe.send_log(f"merged/potree symlink failed (non-critical): {e}", level="warning")
+                else:
+                    pipe.send_log("Potree conversion returned False (non-critical)", level="warning")
+            except Exception as e:
+                pipe.send_log(f"Potree build failed (non-critical): {e}", level="warning")
     else:
         pipe.send_log("Warning: cleaned_cloud.ply not created", level="warning")
 
-    pipe.send_progress(100, "Cloud cleaning complete", stage="cloudcompy")
+    pipe.send_progress(100, "Cloud cleaning + Potree complete", stage="cloudcompy")
 
 
 # ── Process entry point ──────────────────────────────────────
