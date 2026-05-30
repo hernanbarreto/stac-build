@@ -22,7 +22,7 @@ import {
   Move, Palette, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D,
   Building2, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
   Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
-  Scale, Thermometer, Loader2, BarChart3, Home, Pencil, Camera, Plus,
+  Scale, Thermometer, Loader2, BarChart3, Home, Pencil, Camera, Plus, SlidersHorizontal,
 } from 'lucide-react'
 
 interface SessionInfo {
@@ -74,6 +74,14 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(280)
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [pointSize, setPointSize] = useState(5.0)
+  // Potree LOD point budget (max points rendered at once). Higher = more of the
+  // cloud visible, but more client GPU/RAM. Slider lets it scale to any
+  // cloud/machine. Default 10M (good overview for large clouds; raise if your
+  // viewer GPU handles it).
+  const [pointBudget, setPointBudget] = useState(10_000_000)
+  // Display-settings popover (groups Point Size / Detail / Confidence so they
+  // don't eat toolbar space).
+  const [showDisplayMenu, setShowDisplayMenu] = useState(false)
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.0)
   const [hasConfidence, setHasConfidence] = useState(false)
 
@@ -1024,12 +1032,14 @@ function App() {
       .then(prefs => {
         setPointSize(typeof prefs.pointSize === 'number' ? prefs.pointSize : 5.0)
         setConfidenceThreshold(typeof prefs.confidenceThreshold === 'number' ? prefs.confidenceThreshold : 0.0)
+        setPointBudget(typeof prefs.pointBudget === 'number' ? prefs.pointBudget : 10_000_000)
         setTimeout(() => { prefsLoadedRef.current = true }, 300)
       })
-      .catch(() => { 
+      .catch(() => {
         setPointSize(5.0)
         setConfidenceThreshold(0.0)
-        prefsLoadedRef.current = true 
+        setPointBudget(10_000_000)
+        prefsLoadedRef.current = true
       })
   }, [pointCount]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1045,11 +1055,11 @@ function App() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ pointSize, confidenceThreshold })
+        body: JSON.stringify({ pointSize, confidenceThreshold, pointBudget })
       }).catch(() => {})
     }, 500)
     return () => { if (prefsSaveTimer.current) clearTimeout(prefsSaveTimer.current) }
-  }, [pointSize, confidenceThreshold]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pointSize, confidenceThreshold, pointBudget]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Sábana: Generate comparison (auto_match → compare → show via Potree) ──
   // Open the comparison dialog (shows toggle inside)
@@ -2062,23 +2072,52 @@ function App() {
                   title="Reset View (Home)"><Home size={16} /></button>
               </div>
               <div className="toolbar-separator" />
-              <div className="toolbar-group">
-                <span className="control-label">Point Size</span>
-                <input className="control-slider" type="range"
-                  min="0.5" max="5" step="0.1" value={pointSize}
-                  onChange={e => setPointSize(parseFloat(e.target.value))} />
-                <span className="control-value">{pointSize.toFixed(1)}</span>
+              <div className="toolbar-group" style={{ position: 'relative' }}>
+                <button className="tool-btn"
+                  title="Display settings — Point Size, Detail (LOD budget), Confidence"
+                  onClick={() => setShowDisplayMenu(v => !v)}
+                  style={showDisplayMenu ? { background: 'var(--accent)' } : undefined}>
+                  <SlidersHorizontal size={16} />
+                </button>
+                {showDisplayMenu && (
+                  <>
+                    {/* click-outside backdrop */}
+                    <div onClick={() => setShowDisplayMenu(false)}
+                      style={{ position: 'fixed', inset: 0, zIndex: 90 }} />
+                    <div style={{
+                      position: 'absolute', top: '100%', left: 0, marginTop: 6, zIndex: 100,
+                      background: '#1e1e1e', border: '1px solid #3c3c3c', borderRadius: 6,
+                      padding: 12, minWidth: 240, boxShadow: '0 6px 20px rgba(0,0,0,0.5)',
+                      display: 'flex', flexDirection: 'column', gap: 12,
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span className="control-label" style={{ minWidth: 74 }}>Point Size</span>
+                        <input className="control-slider" type="range" style={{ flex: 1 }}
+                          min="0.5" max="5" step="0.1" value={pointSize}
+                          onChange={e => setPointSize(parseFloat(e.target.value))} />
+                        <span className="control-value" style={{ minWidth: 30 }}>{pointSize.toFixed(1)}</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span className="control-label" style={{ minWidth: 74 }}
+                          title="Max points rendered at once (LOD budget). Higher = more of the cloud visible, more GPU/RAM.">Detail</span>
+                        <input className="control-slider" type="range" style={{ flex: 1 }}
+                          min="2" max="40" step="1" value={pointBudget / 1_000_000}
+                          onChange={e => setPointBudget(parseFloat(e.target.value) * 1_000_000)} />
+                        <span className="control-value" style={{ minWidth: 30 }}>{(pointBudget / 1_000_000).toFixed(0)}M</span>
+                      </div>
+                      {hasConfidence && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span className="control-label" style={{ minWidth: 74 }}>Confidence</span>
+                          <input className="control-slider" type="range" style={{ flex: 1 }}
+                            min={0} max={1} step={0.01} value={confidenceThreshold}
+                            onChange={e => setConfidenceThreshold(parseFloat(e.target.value))} />
+                          <span className="control-value" style={{ minWidth: 30 }}>{confidenceThreshold.toFixed(2)}</span>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
-              {hasConfidence && (
-                <div className="toolbar-group">
-                  <span className="control-label">Confidence</span>
-                  <input className="control-slider" type="range"
-                    min={0} max={1} step={0.01}
-                    value={confidenceThreshold}
-                    onChange={e => setConfidenceThreshold(parseFloat(e.target.value))} />
-                  <span className="control-value">{confidenceThreshold.toFixed(2)}</span>
-                </div>
-              )}
               </>
             )}
             {/* ── Camera Poses Toggle (only in NUBE mode) ── */}
@@ -2145,6 +2184,7 @@ function App() {
           <Viewport
             ref={viewportRef}
             pointSize={pointSize}
+            pointBudget={pointBudget}
             confidenceThreshold={sabanaVisible ? 0.0 : confidenceThreshold}
             activeSession={activeSession}
             activeTool={activeTool}

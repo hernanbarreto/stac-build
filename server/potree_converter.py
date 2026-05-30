@@ -120,13 +120,26 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
         las.add_extra_dim(laspy.ExtraBytesParams(name="confidence", type=np.float32))
         las.confidence = data['confidence'].astype(np.float32)
     if has_origins:
+        # Pick the smallest int type that fits each field's ACTUAL range, so the
+        # octree stays compact for typical scans (frame_global ~hundreds-to-low-
+        # thousands, pixels = DA3 res) WITHOUT ever overflowing on a large scan.
+        def _int_dim(arr):
+            hi = int(arr.max()) if arr.size else 0
+            lo = int(arr.min()) if arr.size else 0
+            if lo >= 0 and hi <= 65535:
+                return np.uint16
+            return np.int32
+        _types = {}
         for name in ("frame_global", "pixel_row", "pixel_col"):
-            las.add_extra_dim(laspy.ExtraBytesParams(name=name, type=np.int32))
-        las.frame_global = data['frame_global'].astype(np.int32)
-        las.pixel_row = data['pixel_row'].astype(np.int32)
-        las.pixel_col = data['pixel_col'].astype(np.int32)
-        logger.info(f"[Potree] Origin fields (frame_global, pixel_row, pixel_col) "
-                    f"written as LAS extra dims → propagated to octree")
+            t = _int_dim(data[name])
+            _types[name] = t
+            las.add_extra_dim(laspy.ExtraBytesParams(name=name, type=t))
+        las.frame_global = data['frame_global'].astype(_types['frame_global'])
+        las.pixel_row = data['pixel_row'].astype(_types['pixel_row'])
+        las.pixel_col = data['pixel_col'].astype(_types['pixel_col'])
+        logger.info(f"[Potree] Origin fields written as LAS extra dims "
+                    f"({', '.join(f'{k}:{np.dtype(v).name}' for k, v in _types.items())}) "
+                    f"→ propagated to octree")
 
     las.write(las_path)
     logger.info(f"[Potree] Written LAS: {las_path} ({las_path.stat().st_size / 1024**2:.1f} MB)")

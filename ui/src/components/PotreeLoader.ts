@@ -82,7 +82,6 @@ export class PotreeOctreeLoader {
     private pointBudget: number
     private visiblePoints = 0
     private octreeGroup: THREE.Group
-    private octreeData: ArrayBuffer | null = null
     private hierarchyData: ArrayBuffer | null = null
     private totalLoadedPoints = 0
     private _loading = false
@@ -160,15 +159,12 @@ export class PotreeOctreeLoader {
             // 3. Parse hierarchy to build node tree
             this.parseHierarchy()
 
-            // 4. Load octree.bin (the actual point data)
-            const octreeResp = await fetch(this.baseUrl + 'octree.bin', { cache: 'no-store' })
-            if (!octreeResp.ok) throw new Error(`Failed to load octree: ${octreeResp.status}`)
-            this.octreeData = await octreeResp.arrayBuffer()
+            // 4. Octree point data is streamed PER-NODE via HTTP Range requests
+            //    in loadNode() — we never download the whole octree.bin (can be
+            //    multiple GB). Only visible nodes (within the point budget) fetch
+            //    their byte range. This is what makes large clouds load at all.
 
-
-            // console.log(`[PotreeLoader] Loaded octree: ${(this.octreeData.byteLength / 1024 / 1024).toFixed(1)} MB`)
-
-            // 5. Initial visibility update — load root + nearby nodes
+            // 5. Initial visibility update — fetches root + nearby nodes
             this.updateVisibility()
 
             this._loading = false
@@ -356,7 +352,7 @@ export class PotreeOctreeLoader {
      *  for small clouds, we do the same.
      */
     updateVisibility(): void {
-        if (!this.metadata || !this.octreeData) return
+        if (!this.metadata) return
 
         // ── Small cloud bypass ─────────────────────────────────
         // If the cloud has fewer points than the budget, load EVERYTHING
@@ -439,7 +435,7 @@ export class PotreeOctreeLoader {
             }
 
             if (!node.loaded && !node.loading && node.nodeType !== 2) {
-                this.loadNode(node)
+                void this.loadNode(node)
             }
 
             // ---- Add children to queue if they project large enough ----
@@ -498,7 +494,7 @@ export class PotreeOctreeLoader {
             }
             // Load every real node
             if (!node.loaded && !node.loading && node.nodeType !== 2) {
-                this.loadNode(node)
+                void this.loadNode(node)
             }
             if (node.loaded) {
                 numVisible += node.numPoints
@@ -507,9 +503,9 @@ export class PotreeOctreeLoader {
         this.visiblePoints = numVisible
     }
 
-    /** Load a single octree node's point data into the scene */
-    private loadNode(node: OctreeNode): void {
-        if (!this.metadata || !this.octreeData || node.loaded || node.loading) return
+    /** Load a single octree node's point data via HTTP Range request (LOD streaming) */
+    private async loadNode(node: OctreeNode): Promise<void> {
+        if (!this.metadata || node.loaded || node.loading) return
 
         node.loading = true
 
@@ -517,41 +513,56 @@ export class PotreeOctreeLoader {
         const byteOffset = Number(node.byteOffset)
         const byteSize = Number(node.byteSize)
 
-        if (byteOffset + byteSize > this.octreeData.byteLength) {
-            console.warn(`[PotreeLoader] Node ${node.name}: byte range out of bounds (offset=${byteOffset}, size=${byteSize}, total=${this.octreeData.byteLength})`)
+        if (byteSize <= 0) { node.loading = false; return }
+
+        // ── Fetch ONLY this node's byte range from octree.bin ──
+        // Starlette's FileResponse honours Range → returns 206 with just the
+        // slice. We never hold the whole multi-GB file in memory.
+        let buffer: ArrayBuffer
+        try {
+            const resp = await fetch(this.baseUrl + 'octree.bin', {
+                headers: { 'Range': `bytes=${byteOffset}-${byteOffset + byteSize - 1}` },
+            })
+            if (resp.status !== 206 && resp.status !== 200) throw new Error(`HTTP ${resp.status}`)
+            buffer = await resp.arrayBuffer()
+        } catch (e) {
+            console.error(`[PotreeLoader] Node ${node.name}: range fetch failed`, e)
             node.loading = false
             return
         }
 
-        // Parse the byte stride from attributes
+        // Disposed/replaced while awaiting? bail out.
+        if (!this.metadata) { node.loading = false; return }
+
+        // 206 → buffer is exactly the node slice (base 0). If a server ignored
+        // Range and returned 200 (whole file), fall back to slicing at byteOffset.
+        let dvBase = 0
+        if (buffer.byteLength !== byteSize && buffer.byteLength >= byteOffset + byteSize) {
+            dvBase = byteOffset
+        }
+        const dvLen = Math.min(byteSize, buffer.byteLength - dvBase)
+
         const bytesPerPoint = meta.attributes.reduce((sum, attr) => sum + attr.size, 0)
+        if (bytesPerPoint === 0) { node.loading = false; return }
 
-        if (bytesPerPoint === 0) {
-            node.loading = false
-            return
-        }
-
-        // Clamp numPoints to what actually fits in the data
-        const maxPointsFromData = Math.floor(byteSize / bytesPerPoint)
+        const maxPointsFromData = Math.floor(dvLen / bytesPerPoint)
         const numPoints = Math.min(node.numPoints, maxPointsFromData)
+        if (numPoints === 0) { node.loading = false; return }
 
-        if (numPoints === 0) {
-            node.loading = false
-            return
-        }
-
-        const nodeData = new DataView(this.octreeData, byteOffset, byteSize)
+        const nodeData = new DataView(buffer, dvBase, dvLen)
 
         let posOffset = -1
         let rgbOffset = -1
         let intensityOffset = -1
         let classOffset = -1
+        let confidenceOffset = -1
         let attrOffset = 0
         for (const attr of meta.attributes) {
             if (attr.name === 'position') posOffset = attrOffset
-            if (attr.name === 'rgb') rgbOffset = attrOffset
-            if (attr.name === 'intensity') intensityOffset = attrOffset
-            if (attr.name === 'classification') classOffset = attrOffset
+            else if (attr.name === 'rgb') rgbOffset = attrOffset
+            else if (attr.name === 'intensity') intensityOffset = attrOffset
+            else if (attr.name === 'classification') classOffset = attrOffset
+            else if (attr.name === 'confidence') confidenceOffset = attrOffset
             attrOffset += attr.size
         }
 
@@ -561,11 +572,20 @@ export class PotreeOctreeLoader {
             return
         }
 
+        // Confidence: prefer the raw `confidence` extra dim (true DA3 range, e.g.
+        // 0.34..13.87) normalized to [0,1] via metadata min/max so the 0..1 slider
+        // spans the real distribution. Fall back to intensity (clamped) if absent.
+        const confAttr = meta.attributes.find(a => a.name === 'confidence')
+        const confMin = confAttr?.min?.[0] ?? 0
+        const confMax = confAttr?.max?.[0] ?? 1
+        const confRange = Math.max(confMax - confMin, 1e-6)
+        const hasConf = confidenceOffset >= 0 || intensityOffset >= 0
+
         // Extract positions and colors
         const positions = new Float32Array(numPoints * 3)
         const colors = new Float32Array(numPoints * 3)
         const classIds = new Float32Array(numPoints)
-        const confidences = intensityOffset >= 0 ? new Float32Array(numPoints) : null
+        const confidences = hasConf ? new Float32Array(numPoints) : null
 
         const scale = meta.scale
         const offset = meta.offset
@@ -575,12 +595,10 @@ export class PotreeOctreeLoader {
             const base = i * bytesPerPoint
 
             // Safety: check we won't read past the DataView
-            if (base + posOffset + 12 > byteSize) break
-            if (rgbOffset >= 0 && base + rgbOffset + 6 > byteSize) break
+            if (base + posOffset + 12 > dvLen) break
+            if (rgbOffset >= 0 && base + rgbOffset + 6 > dvLen) break
 
-            // Potree 2.0: int32 quantized positions.
-            // Decoded as: int * scale + metadata.offset (global coordinates)
-            // This matches Potree's DecoderWorker: int * scale + offset - min + sceneTranslation
+            // Potree 2.0: int32 quantized positions → int * scale + offset
             const ix = nodeData.getInt32(base + posOffset, true)
             const iy = nodeData.getInt32(base + posOffset + 4, true)
             const iz = nodeData.getInt32(base + posOffset + 8, true)
@@ -606,16 +624,20 @@ export class PotreeOctreeLoader {
             // Classification (segment ID: 0=unsegmented, 1..N=segment, -1=always visible)
             if (this._forceClassId !== undefined) {
                 classIds[validPoints] = this._forceClassId
-            } else if (classOffset >= 0 && base + classOffset + 1 <= byteSize) {
+            } else if (classOffset >= 0 && base + classOffset + 1 <= dvLen) {
                 classIds[validPoints] = nodeData.getUint8(base + classOffset)
             } else {
                 classIds[validPoints] = -1  // no classification → always visible (e.g. sábana)
             }
 
-            // Intensity → confidence [0..1] (normalized from uint16 0..65535)
-            if (intensityOffset >= 0 && confidences) {
-                const intensity = nodeData.getUint16(base + intensityOffset, true)
-                confidences[validPoints] = intensity / 65535
+            // Confidence → normalized [0,1] for the adjustable slider
+            if (confidences) {
+                if (confidenceOffset >= 0 && base + confidenceOffset + 4 <= dvLen) {
+                    const c = nodeData.getFloat32(base + confidenceOffset, true)
+                    confidences[validPoints] = (c - confMin) / confRange
+                } else if (intensityOffset >= 0 && base + intensityOffset + 2 <= dvLen) {
+                    confidences[validPoints] = nodeData.getUint16(base + intensityOffset, true) / 65535
+                }
             }
 
             validPoints++
@@ -674,7 +696,6 @@ export class PotreeOctreeLoader {
         this.scene.remove(this.octreeGroup)
         this.nodes.clear()
         this.metadata = null
-        this.octreeData = null
         this.hierarchyData = null
         this.totalLoadedPoints = 0
         this._loading = false

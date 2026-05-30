@@ -15,6 +15,7 @@ type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 
 
 interface ViewportProps {
     pointSize: number
+    pointBudget: number
     confidenceThreshold: number
     activeSession: string | null
     activeTool: Tool
@@ -121,11 +122,13 @@ const vertexShader = `
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * mvPosition;
 
-    // Same formula as standalone viewer: pointScale / depth
-    // Higher minimum (2.0) prevents vanishing at distance for sparser clouds
+    // Perspective-attenuated size. The *20 factor matters: without it,
+    // pointSize/depth at normal viewing distances (~10m) falls below the 2.0
+    // clamp floor, so the slider had no visible effect. With it, pointSize
+    // 1..5 maps to ~2..10px at 10m and scales with zoom.
     float depth = -mvPosition.z;
-    float size = pointSize / depth;
-    gl_PointSize = clamp(size, 2.0, 30.0);
+    float size = pointSize * 20.0 / depth;
+    gl_PointSize = clamp(size, 2.0, 40.0);
   }
 `
 
@@ -294,7 +297,7 @@ function adaptGrid(
 }
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -2175,6 +2178,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
     }, [pointSize])
 
+    // Update LOD point budget when prop changes → re-evaluate visible nodes
+    useEffect(() => {
+        const loader = potreeLoaderRef.current
+        if (loader) {
+            loader.setPointBudget(pointBudget)
+            loader.updateVisibility()
+        }
+    }, [pointBudget])
+
     // Update confidence threshold when prop changes
     useEffect(() => {
         if (materialRef.current) {
@@ -2606,7 +2618,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 potreeLoaderRef.current.dispose()
             }
 
-            const loader = new PotreeOctreeLoader(scene, camera, mat)
+            const loader = new PotreeOctreeLoader(scene, camera, mat, pointBudget)
             potreeLoaderRef.current = loader
 
             loader.load(url).then((loadedPts) => {
@@ -2765,7 +2777,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             totalPointsRef.current = 0
 
             // 2) Load sábana via PotreeOctreeLoader (forceClassId=-1 → always visible)
-            const loader = new PotreeOctreeLoader(scene, camera, mat, undefined, -1)
+            const loader = new PotreeOctreeLoader(scene, camera, mat, pointBudget, -1)
             potreeLoaderRef.current = loader
             loader.load(url).then((loadedPts) => {
                 // Guard: if a newer load was started, discard this stale result
