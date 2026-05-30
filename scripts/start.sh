@@ -16,6 +16,10 @@ conda activate da3
 
 # HF cache persistente
 export HF_HOME=/workspace/hf_cache
+# torch.hub cache persistente (DINOv2 del selector de keyframes). Por defecto usa
+# ~/.cache/torch, que vive en el fs efímero del pod y se borra al reiniciar →
+# re-clonaría dinov2 de GitHub en cada arranque. /workspace persiste.
+export TORCH_HOME=/workspace/torch_cache
 
 # Cert autofirmado si no existe
 if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then

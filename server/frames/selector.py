@@ -56,6 +56,13 @@ def _load_dino_model(model_name: str = "dinov2_vitb14", device: str = "cuda"):
         for k in to_remove:
             del sys.modules[k]
 
+    # Persist the torch.hub cache on the pod's /workspace volume. torch.hub uses
+    # TORCH_HOME (default ~/.cache/torch), NOT HF_HOME — and on an ephemeral pod
+    # the root fs is wiped on restart, so dinov2 gets re-cloned from GitHub +
+    # weights re-downloaded every boot. /workspace persists.
+    if not os.environ.get("TORCH_HOME") and os.path.isdir("/workspace"):
+        os.environ["TORCH_HOME"] = "/workspace/torch_cache"
+
     print(f"[FrameSelector] Loading DINOv2 ({model_name}) on {device}...")
     model = torch.hub.load('facebookresearch/dinov2', model_name, verbose=False)
     model = model.to(device).eval()
@@ -86,6 +93,69 @@ def _extract_embedding(model, img_path: str, transform, device: str):
     return emb[0].cpu().numpy()
 
 
+def _extract_embeddings_batched(model, frames_dir, frame_files, transform, device,
+                                batch_size: int = 32, num_workers: int = 4,
+                                use_amp: bool = False) -> np.ndarray:
+    """Compute L2-normalized DINOv2 embeddings for ALL frames, in batches.
+
+    This is the fast path. Embeddings are independent of the (sequential)
+    keyframe decisions, so we batch them: parallel CPU decode via THREADS
+    (daemon-safe — the pipeline worker is a daemonic process, so DataLoader's
+    child processes would crash), batched GPU forward, and a single device→host
+    copy per batch instead of one per frame. Turns the batch-1 + per-frame
+    `.cpu()` sync (where GPU overhead dominates and loses to CPU) into proper
+    GPU throughput.
+
+    Returns (N, D) float32. Rows that failed to decode are left as NaN.
+    """
+    import torch
+    from PIL import Image
+    from concurrent.futures import ThreadPoolExecutor
+
+    frames_dir = Path(frames_dir)
+    N = len(frame_files)
+
+    def _decode(fname):
+        try:
+            img = Image.open(str(frames_dir / fname)).convert("RGB")
+            return transform(img)  # (3, 224, 224)
+        except Exception:
+            return None
+
+    embs = None
+    done = 0
+    t0 = time.time()
+
+    with ThreadPoolExecutor(max_workers=max(1, num_workers)) as pool:
+        for start in range(0, N, batch_size):
+            chunk = frame_files[start:start + batch_size]
+            tensors = list(pool.map(_decode, chunk))
+            valid_local = [j for j, t in enumerate(tensors) if t is not None]
+
+            if valid_local:
+                batch = torch.stack([tensors[j] for j in valid_local]).to(device)
+                with torch.no_grad():
+                    if use_amp and device == "cuda":
+                        with torch.autocast(device_type="cuda", dtype=torch.float16):
+                            out = model(batch)
+                    else:
+                        out = model(batch)
+                    out = torch.nn.functional.normalize(out.float(), dim=1).cpu().numpy()
+                if embs is None:
+                    embs = np.full((N, out.shape[1]), np.nan, dtype=np.float32)
+                for k, j in enumerate(valid_local):
+                    embs[start + j] = out[k]
+
+            done += len(chunk)
+            if done % (batch_size * 10) < batch_size or done >= N:
+                fps = done / max(time.time() - t0, 1e-6)
+                print(f"  [embeddings {done}/{N}] {fps:.0f} img/s", flush=True)
+
+    if embs is None:
+        embs = np.full((N, 1), np.nan, dtype=np.float32)
+    return embs
+
+
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """Cosine similarity between two vectors."""
     dot = np.dot(a, b)
@@ -100,9 +170,9 @@ def dino_select_keyframes(frames_dir: str, config: dict = None,
     """
     Select keyframes using DINOv2 cosine similarity.
 
-    Extracts a 384-dim embedding from each frame using DINOv2 ViT-S/14.
-    Compares each candidate against the last accepted keyframe.
-    If cosine similarity drops below threshold → accept as new keyframe.
+    Embeddings for all frames are precomputed in batches (DINOv2, default
+    ViT-B/14 → 768-dim), then each candidate is compared against the last
+    accepted keyframe; cosine similarity below threshold → new keyframe.
 
     Args:
         frames_dir: Directory containing frame images (after blur filter)
@@ -156,10 +226,33 @@ def dino_select_keyframes(frames_dir: str, config: dict = None,
     transform = _get_dino_transform()
     model_load_time = time.time() - t0
 
-    # Always accept first frame
-    ref_path = str(frames_dir / frame_files[0])
-    ref_emb = _extract_embedding(model, ref_path, transform, device)
+    # ── Precompute ALL embeddings in batches (the expensive part) ──
+    # Decoupled from the sequential selection logic below, since a frame's
+    # embedding never depends on which frames were accepted.
+    batch_size = int(config.get("dino_batch_size", 32))
+    num_workers = int(config.get("dino_num_workers", 4))
+    use_amp = bool(config.get("dino_fp16", False))
+    embs = _extract_embeddings_batched(
+        model, frames_dir, frame_files, transform, device,
+        batch_size=batch_size, num_workers=num_workers, use_amp=use_amp,
+    )  # (N, D) L2-normalized; NaN rows = failed loads
+    embed_time = time.time() - t0 - model_load_time
+
+    # Model no longer needed — the rest is pure numpy.
+    del model
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
+    # ── Sequential keyframe decision over precomputed embeddings ──
+    # Bit-identical logic to the per-frame version: compare each candidate
+    # against the last accepted keyframe; accept on cosine < threshold, force
+    # accept every `force_interval` frames, accept on decode failure (NaN row).
+    # Vectors are L2-normalized, so cosine similarity == dot product.
+    def _valid(idx):
+        return not np.isnan(embs[idx, 0])
+
     selected = [frame_files[0]]
+    ref_emb = embs[0] if _valid(0) else None
 
     stats = {
         "ACCEPT": 0,
@@ -174,15 +267,12 @@ def dino_select_keyframes(frames_dir: str, config: dict = None,
 
     for i in range(1, len(frame_files)):
         frames_since_accept += 1
-        cand_path = str(frames_dir / frame_files[i])
 
         # Force accept if too many frames skipped
         if frames_since_accept >= force_interval:
-            try:
-                ref_emb = _extract_embedding(model, cand_path, transform, device)
-            except Exception:
-                pass
             selected.append(frame_files[i])
+            if _valid(i):
+                ref_emb = embs[i]
             frames_since_accept = 0
             stats["FORCE_ACCEPT"] += 1
             per_frame_log.append({
@@ -191,25 +281,23 @@ def dino_select_keyframes(frames_dir: str, config: dict = None,
             })
             continue
 
-        try:
-            cand_emb = _extract_embedding(model, cand_path, transform, device)
-            sim = _cosine_similarity(ref_emb, cand_emb)
-            similarities.append(sim)
-        except Exception as e:
-            # If embedding fails, accept the frame (safety)
+        # Failed embedding (or no reference yet) → accept (safety), ref unchanged
+        if not _valid(i) or ref_emb is None:
             selected.append(frame_files[i])
             frames_since_accept = 0
             stats["ERROR"] += 1
             per_frame_log.append({
                 "frame": frame_files[i], "status": "ERROR",
-                "error": str(e),
             })
             continue
+
+        sim = float(np.dot(ref_emb, embs[i]))
+        similarities.append(sim)
 
         if sim < threshold:
             # Sufficient visual change → accept as keyframe
             selected.append(frame_files[i])
-            ref_emb = cand_emb
+            ref_emb = embs[i]
             frames_since_accept = 0
             stats["ACCEPT"] += 1
             per_frame_log.append({
@@ -223,24 +311,13 @@ def dino_select_keyframes(frames_dir: str, config: dict = None,
                 "similarity": round(sim, 4),
             })
 
-        # Progress logging
-        if (i + 1) % 200 == 0 or i == len(frame_files) - 1:
-            elapsed = time.time() - t0
-            fps = (i + 1) / (elapsed - model_load_time) if elapsed > model_load_time else 0
-            print(f"  [{i + 1}/{len(frame_files)}] Selected: {len(selected)} "
-                  f"({fps:.0f} frames/s)")
-
-    # Cleanup GPU memory
-    del model
-    if device == "cuda":
-        torch.cuda.empty_cache()
-
     elapsed = time.time() - t0
     reduction = 1.0 - len(selected) / len(frame_files) if frame_files else 0
 
     print(f"\n{'=' * 65}")
     print(f"  ✅ SELECTION COMPLETE{seg_label} — {elapsed:.1f}s "
-          f"(model load: {model_load_time:.1f}s)")
+          f"(model load: {model_load_time:.1f}s, embeddings: {embed_time:.1f}s, "
+          f"batched on {device})")
     print(f"{'=' * 65}")
     print(f"  Input:      {len(frame_files)} frames")
     print(f"  Selected:   {len(selected)} keyframes")

@@ -1151,6 +1151,122 @@ async def create_session(
     return {"ok": True, "session_id": session_name}
 
 
+# ── Video upload → frame extraction ─────────────────────────────────
+# A freshly-created project has no frames, so reconstruction can't run yet.
+# The user uploads a video, we extract ALL frames into ctx.frames_dir as
+# {idx:06d}.jpg (same naming the frame selector / reconstruction expect),
+# then the UI swaps its "+" (upload) button for the "🔨" (reconstruct) one.
+# Extraction can take a while, so it runs as a background task; the UI polls
+# GET /api/sessions/{id}/video/extract_progress.
+_VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".m4v")
+_video_extract_state: Dict[str, Dict[str, Any]] = {}  # session_id -> {phase, pct, saved, total, error}
+
+
+def _video_extract_set(session_id: str, **kw):
+    """Synchronous, GIL-safe — callable from the executor thread."""
+    st = _video_extract_state.setdefault(session_id, {"phase": "idle"})
+    st.update(kw)
+
+
+def _extract_video_frames_sync(video_path: str, frames_dir: Path, session_id: str):
+    """Decode every frame of the video to frames_dir/{idx:06d}.jpg. Runs in an executor."""
+    import cv2
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        _video_extract_set(session_id, phase="error", error="could not open video")
+        return
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    params = [cv2.IMWRITE_JPEG_QUALITY, 95]
+    idx = 0
+    saved = 0
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            cv2.imwrite(str(frames_dir / f"{idx:06d}.jpg"), frame, params)
+            idx += 1
+            saved += 1
+            if saved % 25 == 0:
+                pct = round(100.0 * idx / total, 1) if total else 0.0
+                _video_extract_set(session_id, pct=pct, saved=saved, total=total)
+    finally:
+        cap.release()
+    _video_extract_set(session_id, phase="done", pct=100.0, saved=saved,
+                       total=total or saved, error=None, finished_at=time.time())
+    print(f"[Video] ✅ Extracted {saved} frames → {frames_dir}", flush=True)
+
+
+@app.post("/api/sessions/{session_id}/video/upload")
+async def upload_video(
+    session_id: str,
+    file: UploadFile = File(...),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Upload a video and extract all its frames into the session. Admin/manager only.
+    Returns immediately; poll /api/sessions/{id}/video/extract_progress for status."""
+    from auth import decode_token
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = decode_token(credentials.credentials)
+    if payload.get("role") not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="Admin or Manager only")
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in _VIDEO_EXTS:
+        raise HTTPException(status_code=400,
+                            detail=f"Unsupported video type. Accepted: {', '.join(_VIDEO_EXTS)}")
+
+    ctx = _ctx(session_id)
+    if not ctx.session_dir.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    st = _video_extract_state.get(session_id)
+    if st and st.get("phase") == "extracting":
+        raise HTTPException(status_code=409, detail="A video is already being processed for this session")
+
+    # Stream the upload to disk (videos can be large — avoid loading into RAM)
+    ctx.source_dir.mkdir(parents=True, exist_ok=True)
+    video_path = ctx.source_dir / f"source_video{ext}"
+    with video_path.open("wb") as out:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+    print(f"[Video] ⬆️ Received {file.filename} → {video_path}", flush=True)
+
+    _video_extract_set(session_id, phase="extracting", pct=0.0, saved=0, total=0,
+                       error=None, started_at=time.time())
+
+    loop = asyncio.get_event_loop()
+
+    async def _job():
+        try:
+            await loop.run_in_executor(
+                None, _extract_video_frames_sync, str(video_path), ctx.frames_dir, session_id
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            _video_extract_set(session_id, phase="error", error=str(e))
+
+    asyncio.create_task(_job())
+    return {"ok": True, "started": True, "filename": file.filename}
+
+
+@app.get("/api/sessions/{session_id}/video/extract_progress")
+async def video_extract_progress(session_id: str):
+    """Poll frame-extraction progress. When idle, reports the on-disk frame count."""
+    st = _video_extract_state.get(session_id)
+    if not st:
+        ctx = _ctx(session_id)
+        fc = len(list(ctx.frames_dir.glob("*.jpg"))) if ctx.frames_dir.exists() else 0
+        return {"phase": "idle", "frame_count": fc}
+    return st
+
+
 @app.delete("/sessions/{session_id}")
 async def delete_session(
     session_id: str,

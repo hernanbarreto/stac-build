@@ -14,15 +14,15 @@ SHAPER_DIR="${PROJECT_ROOT}/vendor/ShapeR"
 CONDA_ENV="${SHAPER_CONDA_ENV:-shaper}"
 CONDA_ROOT="${CONDA_ROOT:-/home/hernan/miniforge3}"
 
-if [ -f "/.dockerenv" ]; then
+# Prefer conda when it's available (the pod is itself a container, so /.dockerenv
+# exists there too — only the real single-env Docker image lacks miniforge).
+if [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
+    source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+    conda activate "${CONDA_ENV}"
+elif [ -f "/.dockerenv" ]; then
     echo "[Shaper] Running in Docker mode (no conda)"
 else
-    if [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
-        source "${CONDA_ROOT}/etc/profile.d/conda.sh"
-        conda activate "${CONDA_ENV}"
-    else
-        echo "[Shaper] ⚠️ Conda not found at ${CONDA_ROOT}, trying without activation"
-    fi
+    echo "[Shaper] ⚠️ Conda not found at ${CONDA_ROOT}, trying without activation"
 fi
 
 export PYTHONUNBUFFERED=1

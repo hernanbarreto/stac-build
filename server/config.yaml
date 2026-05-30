@@ -106,7 +106,7 @@ frame_selection:
 
   # DINO settings
   dino_model: "dinov2_vitb14"          # ViT-B/14 ~330MB, same as VGGT-Long
-  dino_threshold: 0.92                 # cosine sim threshold (higher = more keyframes)
+  dino_threshold: 0.97                 # cosine sim threshold (higher = more keyframes)
   dino_device: "cuda"                  # "cuda" | "cpu" (auto-falls back)
 
   # Legacy H/F ratio (used if method=hf_ratio or DINO fails)
@@ -258,7 +258,7 @@ bim:
 #   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
-  backend: "hybrid"
+  backend: "da3"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
   use_keyframes: true                  # use frame_selector keyframes (recommended)
 
@@ -272,7 +272,7 @@ reconstruction:
     infer_gs: false                    # 3D Gaussian Splatting (cosmetic) — off: 5.7GB merge hit OSError EIO; re-enable on the GPU box
     align_method: "sim3"               # "sim3" | "se3" | "scale+se3"
     align_lib: "torch"                 # "numpy" (CPU) | "triton"/"torch" (GPU)
-    depth_threshold: 15.0              # max depth (m)
+    depth_threshold: 20.0              # max depth (m)
     conf_threshold_coef: 0.75
     conf_min_normalized: 0.25          # drop bottom 25% by confidence (0 = keep all)
     sample_ratio: 1.0
@@ -289,8 +289,8 @@ reconstruction:
   mapanything:
     conda_env: "mapanything"
     model_weights: "facebook/map-anything-apache"
-    chunk_size: 60
-    chunk_overlap: 30
+    chunk_size: 120
+    chunk_overlap: 60
     loop_closure: true
     conf_threshold_coef: 0.75
     sample_ratio: 1.0
@@ -321,7 +321,7 @@ reconstruction:
 
 # ── Post-Processing (CloudCompPy) ──────────────────────────────────
 postprocessing:
-  enabled: false
+  enabled: true
   conda_env: "CloudComPy310"
 
   # Pipeline toggles

@@ -14,6 +14,8 @@ Authors: Hernán Barreto — Ingerop IN3
 """
 import os
 import sys
+import glob
+import json
 import numpy as np
 import cv2
 from pathlib import Path
@@ -105,6 +107,42 @@ class StrayDA3Streaming(DA3_Streaming):
         else:
             self._stray_index = {}
             print("[StrayDA3] No Stray Scanner data — running pure DA3-streaming")
+
+    def run(self, selected_frames_path=None):
+        """Override base DA3_Streaming.run() to support keyframe filtering.
+
+        The vendored DA3_Streaming.run() globs the whole image_dir and has no
+        keyframe filter. Rather than patch the (gitignored) vendor, we reproduce
+        its tiny body here and additionally restrict self.img_list to the
+        keyframes listed in selected_frames.json ("selected_files" = basenames,
+        produced by server/frames/selector.py). Used by both pure-DA3
+        (run_da3_main.py, stray_data=None) and hybrid/lidar paths.
+        """
+        print(f"Loading images from {self.img_dir}...")
+        self.img_list = sorted(
+            glob.glob(os.path.join(self.img_dir, "*.jpg"))
+            + glob.glob(os.path.join(self.img_dir, "*.png"))
+        )
+        if len(self.img_list) == 0:
+            raise ValueError(f"[DIR EMPTY] No images found in {self.img_dir}!")
+
+        if selected_frames_path and os.path.exists(selected_frames_path):
+            with open(selected_frames_path) as f:
+                sf_data = json.load(f)
+            keyframe_names = set(sf_data.get("selected_files", []))
+            if keyframe_names:
+                filtered = [p for p in self.img_list
+                            if os.path.basename(p) in keyframe_names]
+                if filtered:
+                    print(f"Keyframe filter: {len(filtered)}/{len(self.img_list)} "
+                          f"images kept (from {selected_frames_path})")
+                    self.img_list = filtered
+                else:
+                    print(f"[WARN] selected_frames.json matched 0 images — "
+                          f"using all {len(self.img_list)} images")
+
+        print(f"Found {len(self.img_list)} images")
+        self.process_long_sequence()
 
     def process_single_chunk(self, range_1, chunk_idx=None, range_2=None,
                              is_loop=False):

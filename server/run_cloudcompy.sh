@@ -11,21 +11,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CLOUDCOMPY_ROOT="${PROJECT_ROOT}/vendor/CloudComPy310"  # AJUSTADO 29-05: binario real (la cascara vendor/cloudcompy no traia los .so)
 
-# Detect if we're inside Docker (/.dockerenv exists or PYTHONPATH already set)
-if [ -f /.dockerenv ] || echo "$PYTHONPATH" | grep -q "cloudcompare"; then
+CONDA_ENV="CloudComPy310"
+CONDA_ROOT="${CONDA_ROOT:-/workspace/miniforge3}"
+
+# Prefer conda when it's available. The pod is itself a container (/.dockerenv
+# exists there too) but uses conda envs — only the real Docker image has
+# cloudcompare wired into PYTHONPATH with no conda.
+if [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
+    source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+    conda activate "${CONDA_ENV}"
+elif [ -f /.dockerenv ] || echo "$PYTHONPATH" | grep -q "cloudcompare"; then
     # Docker mode: env vars already set by Dockerfile, no conda needed
     echo "[CloudComPy] Running in Docker mode (no conda)"
 else
-    # Native mode: activate conda environment
-    CONDA_ENV="CloudComPy310"
-    CONDA_ROOT="${CONDA_ROOT:-/workspace/miniforge3}"
-
-    if [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
-        source "${CONDA_ROOT}/etc/profile.d/conda.sh"
-        conda activate "${CONDA_ENV}"
-    else
-        echo "[CloudComPy] ⚠️ Conda not found at ${CONDA_ROOT}, trying without activation"
-    fi
+    echo "[CloudComPy] ⚠️ Conda not found at ${CONDA_ROOT}, trying without activation"
 fi
 
 # Set CloudCompPy paths (safe to set even if already set)

@@ -60,15 +60,16 @@ CONDA_ROOT="${CONDA_ROOT:-/home/hernan/miniforge3}"
 DA3_ENV="${DA3_CONDA_ENV:-da3}"
 GAUS_ENV="${GAUS_CONDA_ENV:-gaus_slam}"
 
-if [ -f "/.dockerenv" ]; then
+# Prefer conda when it's available (the pod is itself a container, so /.dockerenv
+# exists there too). conda.sh must be sourced so the `conda activate` calls below
+# (DA3_ENV / GAUS_ENV) work.
+if [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
+    source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+elif [ -f "/.dockerenv" ]; then
     echo "[GauS-SLAM] Running in Docker mode (no conda)"
 else
-    if [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
-        source "${CONDA_ROOT}/etc/profile.d/conda.sh"
-    else
-        echo "[GauS-SLAM] ⚠️ Conda not found at ${CONDA_ROOT}"
-        exit 1
-    fi
+    echo "[GauS-SLAM] ⚠️ Conda not found at ${CONDA_ROOT}"
+    exit 1
 fi
 
 export PYTHONUNBUFFERED=1

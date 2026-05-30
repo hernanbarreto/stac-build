@@ -22,7 +22,7 @@ import {
   Move, Palette, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D,
   Building2, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
   Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
-  Scale, Thermometer, Loader2, BarChart3, Home, Pencil, Camera,
+  Scale, Thermometer, Loader2, BarChart3, Home, Pencil, Camera, Plus,
 } from 'lucide-react'
 
 interface SessionInfo {
@@ -144,6 +144,11 @@ function App() {
   const [newProjectName, setNewProjectName] = useState('')
   const [renamingProject, setRenamingProject] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  // Video upload → frame extraction, keyed by session id. Presence means the
+  // session has no frames yet and is uploading/extracting; pct drives the spinner.
+  const [extractingSessions, setExtractingSessions] = useState<Record<string, number>>({})
+  const videoInputRef = useRef<HTMLInputElement>(null)
+  const pendingVideoSession = useRef<string | null>(null)
   const [scansList, setScansList] = useState<{ date: string; source: string; key: string; frame_count: number; has_output: boolean; recon_state?: string; cached_chunks?: number }[]>([])
   const [selectedScans, setSelectedScans] = useState<string[]>([])
   const [projectFilter, setProjectFilter] = useState('')
@@ -821,6 +826,72 @@ function App() {
     }
   }, [activeSession, connected]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Poll frame-extraction progress until it finishes, then refresh the session
+  // list so frameCount > 0 and the "+" button becomes the reconstruct hammer.
+  const pollVideoExtraction = useCallback((sessionId: string) => {
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/sessions/${sessionId}/video/extract_progress`)
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        const p = await r.json()
+        if (p.phase === 'extracting') {
+          setExtractingSessions(prev => ({ ...prev, [sessionId]: p.pct || 0 }))
+          setStatusMessage(`Extracting frames: ${p.saved || 0}${p.total ? `/${p.total}` : ''} (${p.pct || 0}%)…`)
+          setTimeout(tick, 1500)
+        } else if (p.phase === 'error') {
+          setExtractingSessions(prev => { const n = { ...prev }; delete n[sessionId]; return n })
+          setStatusMessage(`Frame extraction failed: ${p.error || 'unknown'}`)
+        } else {
+          // done or idle → frames are on disk
+          setExtractingSessions(prev => { const n = { ...prev }; delete n[sessionId]; return n })
+          setStatusMessage(`Frames extracted (${p.saved || p.frame_count || 0}). Ready to reconstruct.`)
+          connectToServer()
+        }
+      } catch {
+        setExtractingSessions(prev => { const n = { ...prev }; delete n[sessionId]; return n })
+        setStatusMessage('Lost connection while extracting frames')
+      }
+    }
+    tick()
+  }, [connectToServer])
+
+  // Trigger the hidden file picker for a given session (the "+" button).
+  const handlePickVideo = useCallback((sessionId: string) => {
+    pendingVideoSession.current = sessionId
+    if (videoInputRef.current) {
+      videoInputRef.current.value = ''  // allow re-selecting the same file
+      videoInputRef.current.click()
+    }
+  }, [])
+
+  // Upload the chosen video and kick off background extraction.
+  const handleVideoSelected = useCallback(async (file: File) => {
+    const sessionId = pendingVideoSession.current
+    pendingVideoSession.current = null
+    if (!sessionId || !token) return
+    setExtractingSessions(prev => ({ ...prev, [sessionId]: 0 }))
+    setStatusMessage(`Uploading ${file.name}…`)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const res = await fetch(`/api/sessions/${sessionId}/video/upload`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: formData,
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        setExtractingSessions(prev => { const n = { ...prev }; delete n[sessionId]; return n })
+        setStatusMessage(`Upload failed: ${err.detail || `HTTP ${res.status}`}`)
+        return
+      }
+      pollVideoExtraction(sessionId)
+    } catch (err: any) {
+      setExtractingSessions(prev => { const n = { ...prev }; delete n[sessionId]; return n })
+      setStatusMessage(`Upload error: ${err?.message ?? err}`)
+    }
+  }, [token, pollVideoExtraction])
+
   const handleReconstruct = useCallback(async (sessionId: string) => {
     setPipelineDialogSession(sessionId)
     // Fetch available scans for this project
@@ -1109,6 +1180,17 @@ function App() {
       className={`app-layout ${!panelOpen ? 'panel-collapsed' : ''}`}
       style={panelOpen ? { '--sidebar-width': `${sidebarWidth}px` } as React.CSSProperties : undefined}
     >
+      {/* Hidden input used by the per-session "+" button to upload a video */}
+      <input
+        ref={videoInputRef}
+        type="file"
+        accept="video/mp4,video/x-msvideo,video/quicktime,video/x-matroska,.mp4,.avi,.mov,.mkv,.m4v"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) handleVideoSelected(f)
+        }}
+      />
       {/* ── Menu Bar ── */}
       <div className="menubar" ref={menuRef}>
         <span className="menu-app-title"><img src="/favicon.ico" alt="" className="menu-app-logo" /> STAC Build</span>
@@ -1446,10 +1528,25 @@ function App() {
                               style={!s.hasCloud ? { opacity: 0.3 } : undefined}
                               onClick={(e) => { e.stopPropagation(); handleSessionLoad(s.id) }}
                             ><FolderOpen size={14} /></button>
-                            <button className="session-action-btn reconstruct"
-                              title="Reconstruct Geometry"
-                              onClick={(e) => { e.stopPropagation(); handleReconstruct(s.id) }}
-                            ><Hammer size={14} /></button>
+                            {s.id in extractingSessions ? (
+                              <button className="session-action-btn reconstruct"
+                                title={`Extracting frames… ${extractingSessions[s.id] || 0}%`}
+                                disabled
+                                onClick={(e) => e.stopPropagation()}
+                              ><Loader2 size={14} className="spin" /></button>
+                            ) : s.frameCount > 0 ? (
+                              <button className="session-action-btn reconstruct"
+                                title="Reconstruct Geometry"
+                                onClick={(e) => { e.stopPropagation(); handleReconstruct(s.id) }}
+                              ><Hammer size={14} /></button>
+                            ) : (
+                              (user?.role === 'admin' || user?.role === 'manager') && (
+                                <button className="session-action-btn reconstruct"
+                                  title="No frames yet — upload a video to extract frames"
+                                  onClick={(e) => { e.stopPropagation(); handlePickVideo(s.id) }}
+                                ><Plus size={14} /></button>
+                              )
+                            )}
                             {activeSession === s.id && (
                               <button className="session-action-btn segment"
                                 title="Segment Objects"
