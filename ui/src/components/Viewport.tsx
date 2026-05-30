@@ -2469,6 +2469,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
     // Clear geometry and OBBs
     const clearScene = useCallback(() => {
+        // Reset stale view-state refs so a fresh load is never blocked:
+        //  - cloudHiddenRef: if it stuck `true` (e.g. all segments hidden), the
+        //    LOD loop would skip loading the cloud entirely on the next load.
+        //  - preserveCameraRef: set-once and otherwise never cleared → a later
+        //    full load would skip frameCloud and restore a stale camera, leaving
+        //    the frustum pointing at nothing (cloud "loads" but shows no points).
+        // F5 reset these (fresh module state); unload→reload did not — that was
+        // exactly the "reload shows only camera poses, no cloud" bug.
+        cloudHiddenRef.current = false
+        preserveCameraRef.current = null
+        sessionFramedRef.current = null
         // Dispose Potree loader if active
         if (potreeLoaderRef.current) {
             potreeLoaderRef.current.dispose()
@@ -2656,11 +2667,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         frameCloud(cloudBBoxRef.current, cameraRef.current, controlsRef.current)
                     }
                     sessionFramedRef.current = sid
-                    // Restore saved camera state if preserving
+                    // Restore saved camera state if preserving (one-shot: clear
+                    // after use so a later full load re-frames instead of
+                    // restoring a stale camera).
                     if (preserveCameraRef.current && cameraRef.current && controlsRef.current) {
                         cameraRef.current.position.copy(preserveCameraRef.current.pos)
                         controlsRef.current.target.copy(preserveCameraRef.current.target)
                         controlsRef.current.update()
+                        preserveCameraRef.current = null
                     }
                     // Adapt grid to combined extents
                     if (sceneRef.current) adaptGrid(cloudBBoxRef.current, sceneRef.current, gridRef, showGridRef.current)

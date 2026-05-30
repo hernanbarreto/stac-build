@@ -68,6 +68,7 @@ interface OctreeNode {
     hierarchyByteSize: bigint    // for proxy nodes: size in hierarchy.bin
     hierarchyLoaded: boolean     // for proxy nodes: has chunk been loaded?
     hierarchyLoading: boolean    // for proxy nodes: is chunk being loaded?
+    lastUsed: number             // LRU tick: last time this node was shown
 }
 
 // ── Potree Octree Loader ───────────────────────────────────────────────
@@ -84,6 +85,16 @@ export class PotreeOctreeLoader {
     private octreeGroup: THREE.Group
     private hierarchyData: ArrayBuffer | null = null
     private totalLoadedPoints = 0
+    // Aborts all in-flight fetches (metadata/hierarchy/per-node octree ranges)
+    // when this loader is disposed. Without it, abandoned fetches from a previous
+    // session pile up in the browser's connection pool (cap ~6/host) and starve
+    // the next load → progressively slower, then nothing (only F5 cleared it).
+    private _abort = new AbortController()
+    // In-memory node cache: nodes leaving the frustum keep their parsed geometry
+    // (just removed from the scene) so re-entering is instant — no HTTP re-fetch.
+    // Bounded by an LRU cap to keep client RAM in check.
+    private _cachedPoints = 0
+    private _tick = 0
     private _loading = false
     private _smallCloudLogged = false
     private _hasConfidence = false
@@ -145,14 +156,14 @@ export class PotreeOctreeLoader {
 
         try {
             // 1. Load metadata (no-store: corrected cloud may replace original)
-            const metaResp = await fetch(this.baseUrl + 'metadata.json', { cache: 'no-store' })
+            const metaResp = await fetch(this.baseUrl + 'metadata.json', { cache: 'no-store', signal: this._abort.signal })
             if (!metaResp.ok) throw new Error(`Failed to load metadata: ${metaResp.status}`)
             this.metadata = await metaResp.json()
 
             // console.log(`[PotreeLoader] Loaded metadata: ${this.metadata!.points.toLocaleString()} points, depth ${this.metadata!.hierarchy.depth}`)
 
             // 2. Load hierarchy (node index)
-            const hierResp = await fetch(this.baseUrl + 'hierarchy.bin', { cache: 'no-store' })
+            const hierResp = await fetch(this.baseUrl + 'hierarchy.bin', { cache: 'no-store', signal: this._abort.signal })
             if (!hierResp.ok) throw new Error(`Failed to load hierarchy: ${hierResp.status}`)
             this.hierarchyData = await hierResp.arrayBuffer()
 
@@ -242,6 +253,7 @@ export class PotreeOctreeLoader {
                     hierarchyByteSize: nodeType === 2 ? byteSize : 0n,
                     hierarchyLoaded: nodeType !== 2,
                     hierarchyLoading: false,
+                    lastUsed: 0,
                 }
                 this.nodes.set(name, node)
             }
@@ -300,7 +312,8 @@ export class PotreeOctreeLoader {
             } else {
                 // Need to fetch via Range request
                 const resp = await fetch(this.baseUrl + 'hierarchy.bin', {
-                    headers: { 'Range': `bytes=${offset}-${offset + size - 1}` }
+                    headers: { 'Range': `bytes=${offset}-${offset + size - 1}` },
+                    signal: this._abort.signal,
                 })
                 const buffer = await resp.arrayBuffer()
                 this.parseHierarchyChunk(buffer, 0, buffer.byteLength, node.name)
@@ -507,6 +520,16 @@ export class PotreeOctreeLoader {
     private async loadNode(node: OctreeNode): Promise<void> {
         if (!this.metadata || node.loaded || node.loading) return
 
+        // Cache hit: geometry still in memory from a previous visit → just
+        // re-attach to the scene. No network, no re-parse (instant).
+        if (node.points) {
+            this.octreeGroup.add(node.points)
+            node.loaded = true
+            node.lastUsed = ++this._tick
+            this.totalLoadedPoints += node.numPoints
+            return
+        }
+
         node.loading = true
 
         const meta = this.metadata
@@ -522,10 +545,13 @@ export class PotreeOctreeLoader {
         try {
             const resp = await fetch(this.baseUrl + 'octree.bin', {
                 headers: { 'Range': `bytes=${byteOffset}-${byteOffset + byteSize - 1}` },
+                signal: this._abort.signal,
             })
             if (resp.status !== 206 && resp.status !== 200) throw new Error(`HTTP ${resp.status}`)
             buffer = await resp.arrayBuffer()
         } catch (e) {
+            // Aborted on dispose (session unload) — not an error, just stop.
+            if ((e as Error)?.name === 'AbortError') { node.loading = false; return }
             console.error(`[PotreeLoader] Node ${node.name}: range fetch failed`, e)
             node.loading = false
             return
@@ -674,30 +700,62 @@ export class PotreeOctreeLoader {
         node.points = points
         node.loaded = true
         node.loading = false
-        this.totalLoadedPoints += validPoints
+        node.lastUsed = ++this._tick
+        this.totalLoadedPoints += node.numPoints
+        this._cachedPoints += node.numPoints
+        this._evictCache()
     }
 
-    /** Unload a node to free memory */
+    /** Remove a node from the scene but KEEP its geometry cached (no dispose),
+     *  so re-entering its region re-shows it instantly without an HTTP re-fetch. */
     private unloadNode(node: OctreeNode): void {
         if (!node.loaded || !node.points) return
 
         this.octreeGroup.remove(node.points)
-        node.points.geometry.dispose()
-        node.points = null
         node.loaded = false
         this.totalLoadedPoints -= node.numPoints
+        // geometry stays in node.points (cached); _evictCache() frees it later
     }
 
-    /** Remove everything and reset */
+    /** LRU eviction: when cached (off-screen) geometry exceeds the cap, dispose
+     *  the least-recently-shown NOT-in-scene nodes until back under budget. */
+    private _evictCache(): void {
+        const cap = Math.max(this.pointBudget * 2, 15_000_000)
+        if (this._cachedPoints <= cap) return
+
+        const evictable: OctreeNode[] = []
+        for (const [, n] of this.nodes) {
+            if (n.points && !n.loaded) evictable.push(n)
+        }
+        evictable.sort((a, b) => a.lastUsed - b.lastUsed)  // oldest first
+
+        for (const n of evictable) {
+            if (this._cachedPoints <= cap) break
+            n.points!.geometry.dispose()
+            n.points = null
+            this._cachedPoints -= n.numPoints
+        }
+    }
+
+    /** Remove everything and reset (disposes both in-scene and cached geometry) */
     dispose(): void {
+        // Cancel all in-flight fetches so they don't clog the browser's
+        // connection pool and starve the next session's load.
+        this._abort.abort()
         for (const [, node] of this.nodes) {
-            if (node.loaded) this.unloadNode(node)
+            if (node.points) {
+                this.octreeGroup.remove(node.points)
+                node.points.geometry.dispose()
+                node.points = null
+            }
+            node.loaded = false
         }
         this.scene.remove(this.octreeGroup)
         this.nodes.clear()
         this.metadata = null
         this.hierarchyData = null
         this.totalLoadedPoints = 0
+        this._cachedPoints = 0
         this._loading = false
     }
 
