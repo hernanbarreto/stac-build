@@ -140,3 +140,6 @@ scripts/envs_export/
 vendor/vipe/
 vendor/CloudComPy310/
 vendor/CloudComPy_Conda310_Linux64_*.tgz
+
+# nvdiffrast clone (compiled CUDA ext)
+vendor/nvdiffrast/

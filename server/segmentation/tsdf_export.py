@@ -796,7 +796,10 @@ def export_tsdf_scene(
                                          # → scattered grey patches that fragment the atlas
     fill_hole_size: float = 0.1,         # max hole size to fill when enabled
     decimate_target: int = 1_500_000,    # target tri count before texturing (0 = off)
-    texture: bool = True,                # bake a UV-atlas texture via texrecon
+    texture: bool = True,                # apply photo colour/texture
+    texture_mode: str = "vertex_gpu",    # "vertex_gpu" (full-mesh multi-view photo
+                                         # blend, GPU, keeps geometry) | "texrecon"
+                                         # (CPU UV atlas) | "none"
     use_refined_poses: bool = True,      # DA3 loop-closure poses, not raw ARKit
     scene_name: str = "scene",           # output subfolder under output/tsdf/
     variant_label: Optional[str] = None, # human label for the viewer panel
@@ -1186,6 +1189,52 @@ def export_tsdf_scene(
     glb_path = scene_dir / f"{scene_name}.glb"
     meta_path = glb_path.with_suffix(".meta.json")
 
+    # Per-view native intrinsics (each frame's OWN npz K, captured at integrate),
+    # shared by both colouring backends.
+    tex_intrinsics: Dict[int, np.ndarray] = {}
+    for _fidx in sorted_frames:
+        _K = native_K_map.get(_fidx)
+        if _K is None:
+            _K = cam.K_for(_fidx)
+        if _K is not None:
+            tex_intrinsics[_fidx] = np.asarray(_K, dtype=np.float64)
+
+    # ── Colour mode "vertex_gpu": multi-view photo blend per vertex on the FULL
+    #    mesh (GPU, ~10s, keeps geometry exact). Sets vertex colours BEFORE the
+    #    GLB is written. Validated MAE ≈ 17/255 vs source photos. ──
+    color_mode = "rgb8_per_vertex"
+    textured = False
+    if texture and texture_mode == "vertex_gpu":
+        if progress_cb:
+            progress_cb("texturing", time.time() - t0, None)
+        try:
+            from reconstruction.nvdiffrast_bake import (is_available,
+                                                        bake_vertex_colors_gpu)
+            if not is_available():
+                raise RuntimeError("nvdiffrast/torch CUDA not available")
+            mesh.compute_vertex_normals()
+            _init = (np.asarray(mesh.vertex_colors)
+                     if mesh.has_vertex_colors() else None)
+            vc = bake_vertex_colors_gpu(
+                vertices=np.asarray(mesh.vertices),
+                vertex_normals=np.asarray(mesh.vertex_normals),
+                frames_dir=frames_dir, pose_map=cam.pose_map,
+                intrinsics_map=tex_intrinsics, output_dir=output_dir,
+                name_map=kf_name_map, init_colors=_init,
+                progress_cb=(lambda p: progress_cb("texturing", time.time() - t0, None))
+                            if progress_cb else None,
+            )
+            if vc is not None:
+                mesh.vertex_colors = o3d.utility.Vector3dVector(vc)
+                color_mode = "rgb8_per_vertex_photo"
+                textured = True
+            else:
+                logger.warning("[TSDF-scene] vertex_gpu bake returned None — "
+                               "keeping VBG vertex colour")
+        except Exception as e:
+            logger.warning(f"[TSDF-scene] vertex_gpu bake error ({e}) — "
+                           "keeping VBG vertex colour")
+
     ok = o3d.io.write_triangle_mesh(str(glb_path), mesh, write_ascii=False)
     if not ok:
         logger.error(f"[TSDF-scene] failed to write GLB at {glb_path}")
@@ -1195,24 +1244,13 @@ def export_tsdf_scene(
 
     n_v, n_t = int(len(mesh.vertices)), int(len(mesh.triangles))
 
-    # ── UV-atlas texture bake (Phase 1B) — overwrites scene.glb with the
+    # ── UV-atlas texture bake (texrecon) — overwrites scene.glb with the
     #    textured mesh. On any failure the vertex-colour preview is kept. ──
-    textured = False
-    if texture:
+    if texture and texture_mode == "texrecon":
         if progress_cb:
             progress_cb("texturing", time.time() - t0, None)
         tex_in = scene_dir / "_scene_geom.ply"
         try:
-            # Per-view intrinsics for texrecon: prefer each frame's OWN native K
-            # (from its npz, captured during integrate). bake_texture fits K to
-            # the actual JPG resolution internally, so pass the native K as-is.
-            tex_intrinsics: Dict[int, np.ndarray] = {}
-            for _fidx in sorted_frames:
-                _K = native_K_map.get(_fidx)
-                if _K is None:
-                    _K = cam.K_for(_fidx)
-                if _K is not None:
-                    tex_intrinsics[_fidx] = np.asarray(_K, dtype=np.float64)
             # Hand texrecon a robust binary PLY (read natively) rather than
             # round-tripping the geometry through GLB.
             o3d.io.write_triangle_mesh(str(tex_in), mesh, write_ascii=False)
@@ -1239,8 +1277,10 @@ def export_tsdf_scene(
     meta = {
         "method": "tsdf_scene",
         **({"label": variant_label} if variant_label else {}),
-        "color": "uv_texture" if textured else "rgb8_per_vertex",
+        "color": ("uv_texture" if texture_mode == "texrecon" and textured
+                  else color_mode),
         "textured": textured,
+        "texture_mode": texture_mode,
         "voxel_length": voxel_length,
         "sdf_trunc": sdf_trunc,
         "depth_trunc": depth_trunc,
