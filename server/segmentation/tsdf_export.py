@@ -208,6 +208,67 @@ def _resolve_da3_depth(output_dir: Path, conf_percentile: Optional[float] = None
     return _load, (h, w)
 
 
+def _resolve_da3_frame_source(output_dir: Path, conf_percentile: Optional[float] = None
+                              ) -> Optional[Tuple[Callable[[int], Optional[dict]],
+                                                  Tuple[int, int]]]:
+    """Data-driven per-frame source: ``results_output/frame_<kf>.npz`` bundles
+    ``depth``, ``conf``, ``intrinsics`` (3x3) and ``image`` (H,W,3) ALL at the
+    same native resolution DA3 produced — no median, no rescaling, no
+    orientation guessing. The loader returns, per keyframe-index, a dict::
+
+        {"depth": (H,W) float32, "valid": (H,W) bool,
+         "K": (3,3) float64 | None, "rgb": (H,W,3) uint8 | None, "hw": (H,W)}
+
+    Using each frame's OWN intrinsics+image (instead of a scaled global K and a
+    re-decoded JPG) keeps the TSDF projection consistent with the cloud for any
+    scan/resolution/orientation. Returns ``(loader, (H, W))`` or None.
+    """
+    npz_dir: Optional[Path] = None
+    for d in (output_dir / "da3_run" / "results_output",
+              output_dir / "results_output",
+              output_dir / "gaus_slam_run" / "results_output"):
+        if d.exists() and any(d.glob("frame_*.npz")):
+            npz_dir = d
+            break
+    if npz_dir is None:
+        return None
+    try:
+        probe = np.load(str(next(iter(npz_dir.glob("frame_*.npz")))))
+        if "depth" not in probe or "intrinsics" not in probe:
+            return None  # not the rich layout — caller falls back
+        h, w = probe["depth"].shape
+    except Exception:
+        return None
+
+    def _load(frame_idx: int) -> Optional[dict]:
+        p = npz_dir / f"frame_{frame_idx}.npz"
+        if not p.exists():
+            return None
+        try:
+            z = np.load(str(p))
+        except Exception:
+            return None
+        if "depth" not in z:
+            return None
+        d = z["depth"].astype(np.float32)
+        valid = np.ones_like(d, dtype=bool)
+        if conf_percentile is not None and "conf" in z:
+            conf = z["conf"].astype(np.float32)
+            if conf.shape == d.shape:
+                thr = float(np.percentile(conf, conf_percentile))
+                valid = conf >= thr
+        K = (np.asarray(z["intrinsics"], dtype=np.float64).reshape(3, 3)
+             if "intrinsics" in z else None)
+        rgb = None
+        if "image" in z:
+            img = np.asarray(z["image"])
+            if img.ndim == 3 and img.shape[2] == 3 and img.shape[:2] == d.shape:
+                rgb = img.astype(np.uint8)
+        return {"depth": d, "valid": valid, "K": K, "rgb": rgb, "hw": d.shape}
+
+    return _load, (h, w)
+
+
 # ── Per-frame mask construction ────────────────────────────────────
 
 def _dilate_mask(mask: np.ndarray, radius: int) -> np.ndarray:
@@ -835,7 +896,21 @@ def export_tsdf_scene(
     logger.info(f"[TSDF-scene] recon_backend={backend}  depth={depth_kind}  "
                 f"({depth_w}x{depth_h})")
 
-    # RGB resolution — needed to scale K from RGB→depth.
+    # Data-driven per-frame source: each frame_<kf>.npz bundles depth +
+    # intrinsics + image at the SAME native resolution. Preferred over the
+    # scaled-global-K path because it removes all resolution/orientation
+    # guessing — the integration uses exactly what DA3 saved for that frame.
+    frame_src = _resolve_da3_frame_source(
+        output_dir,
+        conf_percentile=(da3_conf_percentile if da3_conf_percentile > 0 else None),
+    ) if da3_depth is not None else None
+    frame_loader = None
+    if frame_src is not None:
+        frame_loader, (depth_h, depth_w) = frame_src
+        logger.info(f"[TSDF-scene] per-frame npz source (depth+K+rgb) "
+                    f"@ {depth_w}x{depth_h} — no K rescaling")
+
+    # RGB resolution — only needed for the LEGACY scaled-K fallback below.
     rgb_h: Optional[int] = None
     rgb_w: Optional[int] = None
     for jpg_path in sorted(frames_dir.glob("*.jpg"))[:1]:
@@ -913,17 +988,31 @@ def export_tsdf_scene(
     sorted_frames = sorted(cam.pose_map.keys())
     n_integrated = 0
     skipped_no_depth = skipped_no_K = skipped_empty = 0
+    native_K_map: Dict[int, np.ndarray] = {}  # per-frame npz K (depth res) for texturing
 
     for i, fidx in enumerate(sorted_frames):
         fidx = int(fidx)
         c2w = cam.pose_map.get(fidx)
         if c2w is None:
             continue
-        depth_pair = depth_loader(fidx)
-        if depth_pair is None:
-            skipped_no_depth += 1
-            continue
-        depth_m, depth_valid = depth_pair
+        # Prefer the data-driven per-frame npz (depth + native K + native rgb,
+        # same resolution, zero rescaling). Fall back to the legacy depth_loader
+        # + scaled-global-K + re-decoded JPG when the rich source is absent.
+        frame_K = None
+        frame_rgb = None
+        if frame_loader is not None:
+            fr = frame_loader(fidx)
+            if fr is None:
+                skipped_no_depth += 1
+                continue
+            depth_m, depth_valid = fr["depth"], fr["valid"]
+            frame_K, frame_rgb = fr["K"], fr["rgb"]
+        else:
+            depth_pair = depth_loader(fidx)
+            if depth_pair is None:
+                skipped_no_depth += 1
+                continue
+            depth_m, depth_valid = depth_pair
 
         # Full-frame mask: depth validity + range. No per-instance filtering.
         mask = depth_valid & (depth_m > depth_min) & (depth_m < depth_trunc)
@@ -953,14 +1042,26 @@ def export_tsdf_scene(
 
         depth_masked = np.where(mask, depth_m, 0.0).astype(np.float32)
 
-        K_rgb = cam.K_for(fidx)
-        if K_rgb is None:
-            skipped_no_K += 1
-            continue
-        K_d = _intrinsics_for_depth(K_rgb, rgb_h, rgb_w, depth_h, depth_w)
+        # Intrinsics: use the frame's OWN K (native to this depth grid) when the
+        # rich npz source is active — no rescaling. Otherwise scale the global K
+        # from RGB→depth resolution (legacy path).
+        if frame_K is not None:
+            K_d = frame_K
+            native_K_map[fidx] = frame_K  # reuse for texturing (scaled to JPG res)
+        else:
+            K_rgb = cam.K_for(fidx)
+            if K_rgb is None:
+                skipped_no_K += 1
+                continue
+            K_d = _intrinsics_for_depth(K_rgb, rgb_h, rgb_w, depth_h, depth_w)
 
-        color_np = _load_rgb_at_depth(frames_dir, fidx, depth_h, depth_w,
-                                      frame_name=kf_name_map.get(fidx))
+        # Color: the npz image is already aligned to the depth grid (same
+        # source, same resolution). Fall back to re-decoding the full-res JPG.
+        if frame_rgb is not None:
+            color_np = frame_rgb
+        else:
+            color_np = _load_rgb_at_depth(frames_dir, fidx, depth_h, depth_w,
+                                          frame_name=kf_name_map.get(fidx))
 
         c2w_4 = np.eye(4, dtype=np.float64)
         c2w_4[:c2w.shape[0], :c2w.shape[1]] = c2w
@@ -1102,6 +1203,25 @@ def export_tsdf_scene(
             progress_cb("texturing", time.time() - t0, None)
         tex_in = scene_dir / "_scene_geom.ply"
         try:
+            # Per-view intrinsics for texrecon, at the FULL-RES JPG resolution it
+            # normalises against. The native K (npz, preferred) is at depth
+            # resolution, so scale depth→jpg — otherwise texrecon's principal
+            # point/focal (ppx=cx/img_w …) are computed against the wrong size
+            # and every view projects offset, smearing the texture. Same root
+            # cause as the integrate intrinsics bug, on the texturing side.
+            sx_t = rgb_w / float(depth_w)
+            sy_t = rgb_h / float(depth_h)
+            tex_intrinsics: Dict[int, np.ndarray] = {}
+            for _fidx in sorted_frames:
+                _K = native_K_map.get(_fidx)  # per-frame npz K, captured at integrate
+                if _K is None:
+                    _K = cam.K_for(_fidx)
+                if _K is None:
+                    continue
+                _K = np.asarray(_K, dtype=np.float64).copy()
+                _K[0, 0] *= sx_t; _K[0, 2] *= sx_t
+                _K[1, 1] *= sy_t; _K[1, 2] *= sy_t
+                tex_intrinsics[_fidx] = _K
             # Hand texrecon a robust binary PLY (read natively) rather than
             # round-tripping the geometry through GLB.
             o3d.io.write_triangle_mesh(str(tex_in), mesh, write_ascii=False)
@@ -1110,7 +1230,7 @@ def export_tsdf_scene(
                 mesh_path=tex_in,
                 frames_dir=frames_dir,
                 pose_map=cam.pose_map,
-                intrinsics_map=cam.intrinsics_map,
+                intrinsics_map=tex_intrinsics,
                 out_glb=glb_path,
             )
             textured = res is not None
