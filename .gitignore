@@ -33,6 +33,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Backup files
+*.bak
+
 # =========================
 # IDE / Editor
 # =========================
