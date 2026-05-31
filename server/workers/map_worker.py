@@ -507,7 +507,7 @@ def _write_stride_selection(frames_dir: Path, output_dir: Path, stride: int) -> 
 
 
 def _run_vipe_with_priors(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, vcfg: dict,
-                          inject_poses: bool = False, stride: int = 1):
+                          inject_poses: bool = False, stride: int = 1, pure: bool = False):
     """Run ViPE fed with per-frame priors from vipe_priors/. ALWAYS injects metric
     DEPTH (anchors scale in the BA). POSES are injected ONLY for stray/lidar
     (inject_poses=True) — in monocular (da3) we let ViPE solve poses freely, because
@@ -526,12 +526,14 @@ def _run_vipe_with_priors(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, 
            "--priors", str(output_dir / "vipe_priors"),
            "--output", str(vipe_out),
            "--pipeline", vcfg["pipeline"]]
-    if inject_poses:
+    if pure:
+        cmd.append("--pure")
+    elif inject_poses:
         cmd.append("--inject-poses")
     if stride > 1:
         cmd += ["--frame-stride", str(stride)]
-    pipe.send_progress(50, f"Running ViPE with priors (depth{'+poses' if inject_poses else ' only'})...",
-                       stage="reconstruction")
+    _mode = "PURE (no priors)" if pure else ("depth+poses" if inject_poses else "depth only")
+    pipe.send_progress(50, f"Running ViPE [{_mode}]...", stage="reconstruction")
     pipe.send_log(f"[vipe] {' '.join(cmd[1:])}")
     proc = subprocess.Popen(cmd, cwd=vcfg["vipe_dir"], stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
@@ -541,17 +543,17 @@ def _run_vipe_with_priors(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, 
 
 def _run_vipe_depth_export(pipe: WorkerPipe, output_dir: Path, vcfg: dict,
                            selected_frames_path: str = None):
-    """Transcode ViPE's refined (metric) depth EXR → vipe_depth/{frame}.npz for the
-    fusion keyframes. ViPE is already metric (priors), so no scale — pose_scale=1."""
+    """PURE ViPE is up-to-scale → compute ONE global scale g (median DA3/ViPE depth)
+    and export ViPE depth × g → vipe_depth/{frame}.npz + pose_scale.json=g. DA3 depth
+    (the metric reference) is vipe_priors/depth/."""
     server_dir = Path(__file__).resolve().parent.parent
     cmd = [f"{vcfg['venv']}/bin/python", "-u",
            str(server_dir / "reconstruction" / "vipe_calibrate.py"),
            "--vipe-out", str(output_dir / "vipe_run"),
+           "--da3-depth", str(output_dir / "vipe_priors" / "depth"),
            "--depth-out", str(output_dir / "vipe_depth"),
            "--out", str(output_dir / "vipe_run" / "pose_scale.json")]
-    if selected_frames_path:
-        cmd += ["--selected-frames", selected_frames_path]
-    pipe.send_progress(78, "Exporting ViPE metric depth → npz (keyframes)...",
+    pipe.send_progress(78, "Global metric scale + export ViPE depth → npz...",
                        stage="reconstruction")
     pipe.send_log(f"[vipe-depth] {' '.join(cmd[1:])}")
     proc = subprocess.Popen(cmd, cwd=vcfg["vipe_dir"], stdout=subprocess.PIPE,
@@ -638,8 +640,11 @@ def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     #    Poses prior ONLY for stray/lidar (ARKit poses are trustworthy); for da3
     #    (monocular) we feed ONLY depth and let ViPE solve poses freely.
     if replace or not (have_vipe_run or have_vipe_depth):
+        # Monocular (da3) → PURE ViPE (no priors; metric via global scale after).
+        # stray → inject LiDAR depth + ARKit poses.
         _run_vipe_with_priors(pipe, frames_dir, output_dir, vcfg,
-                              inject_poses=(prior_source == "stray"), stride=stride)
+                              inject_poses=(prior_source == "stray"), stride=stride,
+                              pure=(prior_source == "da3"))
     else:
         pipe.send_log("[resume] vipe_run present → skipping ViPE")
 

@@ -134,6 +134,10 @@ def main():
     ap.add_argument("--frame-stride", type=int, default=1,
                     help="Use 1 of every N frames (30fps video is highly redundant). "
                          "Must match the stride used for the DA3 priors.")
+    ap.add_argument("--pure", action="store_true",
+                    help="PURE ViPE: inject NO priors (RGB only). ViPE solves poses+depth "
+                         "on its own; metric is anchored by a global scale AFTERWARDS. "
+                         "Injecting DA3 depth poisoned ViPE's BA → use this for monocular.")
     args = ap.parse_args()
 
     logger = configure_logging()
@@ -142,33 +146,41 @@ def main():
         f"pipeline.output.path={args.output}",
         "pipeline.output.save_artifacts=true",
         "pipeline.output.save_viz=false",
-        "pipeline.slam.optimize_intrinsics=false",   # required when a metric-depth prior is present
         "streams=frame_dir_stream",
         f"streams.base_path={args.frames_dir}",
     ]
+    if not args.pure:
+        # required by ViPE only when a metric-depth prior is present
+        overrides.append("pipeline.slam.optimize_intrinsics=false")
     cfg = parse_typed_config("default", hydra_args=overrides)
     pipeline = make_pipeline(cfg.pipeline)
-    # relax ONLY the metric-depth init assertion (vendor untouched, instance-level)
-    pipeline._add_init_processors = types.MethodType(_patched_add_init_processors, pipeline)
+    if not args.pure:
+        # relax ONLY the metric-depth init assertion (vendor untouched, instance-level)
+        pipeline._add_init_processors = types.MethodType(_patched_add_init_processors, pipeline)
 
     stride = max(1, int(args.frame_stride))
     base = (FrameDirStream(args.frames_dir, seek_range=range(0, -1, stride))
             if stride > 1 else FrameDirStream(args.frames_dir))
-    H, W = base.frame_size()
-    poses, depths = _build_priors(args.frames_dir, args.priors, H, W, args.inject_poses, stride)
     if stride > 1:
         logger.info(f"Frame stride: 1-of-{stride} → {len(base)} frames used")
 
-    attrs = {FrameAttribute.METRIC_DEPTH: depths}      # always anchor metric via depth
-    if args.inject_poses:
-        attrs[FrameAttribute.POSE] = poses             # only stray/lidar seeds the trajectory
-    proc = AssignAttributesProcessor(attrs)
-    stream = ProcessedVideoStream(base, [proc]).cache(desc="Reading frames + priors")
+    if args.pure:
+        logger.info("PURE ViPE (no priors injected) — metric via global scale afterwards")
+        stream = ProcessedVideoStream(base, []).cache(desc="Reading frames (pure ViPE)")
+    else:
+        H, W = base.frame_size()
+        poses, depths = _build_priors(args.frames_dir, args.priors, H, W, args.inject_poses, stride)
+        attrs = {FrameAttribute.METRIC_DEPTH: depths}      # anchor metric via depth
+        if args.inject_poses:
+            attrs[FrameAttribute.POSE] = poses             # only stray/lidar seeds the trajectory
+        proc = AssignAttributesProcessor(attrs)
+        stream = ProcessedVideoStream(base, [proc]).cache(desc="Reading frames + priors")
 
-    logger.info(f"Running ViPE with priors (depth{'+pose' if args.inject_poses else ' only, poses free'}) "
-                f"→ {args.output}")
+    mode = ("PURE (no priors)" if args.pure
+            else f"priors: depth{'+pose' if args.inject_poses else ' only, poses free'}")
+    logger.info(f"Running ViPE [{mode}] → {args.output}")
     pipeline.run(stream)
-    logger.info("ViPE (with priors) finished")
+    logger.info(f"ViPE finished [{mode}]")
 
 
 if __name__ == "__main__":
