@@ -640,11 +640,11 @@ def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     #    Poses prior ONLY for stray/lidar (ARKit poses are trustworthy); for da3
     #    (monocular) we feed ONLY depth and let ViPE solve poses freely.
     if replace or not (have_vipe_run or have_vipe_depth):
-        # Monocular (da3) → PURE ViPE (no priors; metric via global scale after).
-        # stray → inject LiDAR depth + ARKit poses.
+        # Monocular (da3) → inject DA3 DEPTH (anchors ViPE's scale; pure ViPE collapsed
+        # the trajectory scale → disaster). stray → depth + ARKit poses.
         _run_vipe_with_priors(pipe, frames_dir, output_dir, vcfg,
                               inject_poses=(prior_source == "stray"), stride=stride,
-                              pure=(prior_source == "da3"))
+                              pure=False)
     else:
         pipe.send_log("[resume] vipe_run present → skipping ViPE")
 
