@@ -76,9 +76,10 @@ def _load_depth(p: Path) -> np.ndarray | None:
     return None
 
 
-def _build_priors(frames_dir: Path, priors: Path, H: int, W: int):
+def _build_priors(frames_dir: Path, priors: Path, H: int, W: int, inject_poses: bool):
     """Return (poses_list, depths_list) aligned to FrameDirStream's sorted order.
-    Entries are None where a prior is missing."""
+    Entries are None where a prior is missing. If inject_poses is False, poses stay
+    None (monocular: ViPE computes poses freely; we only anchor metric via depth)."""
     exts = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
     files = sorted({f for e in exts for f in
                     list(frames_dir.glob(f"*{e}")) + list(frames_dir.glob(f"*{e.upper()}"))})
@@ -98,7 +99,7 @@ def _build_priors(frames_dir: Path, priors: Path, H: int, W: int):
     for f in files:
         fr = int(f.stem)
         c2w = pose_by_frame.get(fr)
-        if c2w is not None:
+        if inject_poses and c2w is not None:
             poses.append(se3_matrix_to_se3(torch.from_numpy(c2w).float()))
             n_pose += 1
         else:
@@ -112,7 +113,9 @@ def _build_priors(frames_dir: Path, priors: Path, H: int, W: int):
             n_depth += 1
         else:
             depths.append(None)
-    print(f"[vipe-priors] {len(files)} frames | poses={n_pose} | depth={n_depth}", flush=True)
+    print(f"[vipe-priors] {len(files)} frames | poses={n_pose} "
+          f"({'injected' if inject_poses else 'OFF — ViPE computes freely'}) | "
+          f"depth={n_depth}", flush=True)
     return poses, depths
 
 
@@ -122,6 +125,9 @@ def main():
     ap.add_argument("--priors", required=True, type=Path)
     ap.add_argument("--output", required=True, type=Path)
     ap.add_argument("--pipeline", default="dav3")
+    ap.add_argument("--inject-poses", action="store_true",
+                    help="Inject DA3/ARKit poses as a prior (stray/lidar). Omit for "
+                         "monocular (da3): only depth anchors metric, ViPE solves poses.")
     args = ap.parse_args()
 
     logger = configure_logging()
@@ -141,15 +147,16 @@ def main():
 
     base = FrameDirStream(args.frames_dir)
     H, W = base.frame_size()
-    poses, depths = _build_priors(args.frames_dir, args.priors, H, W)
+    poses, depths = _build_priors(args.frames_dir, args.priors, H, W, args.inject_poses)
 
-    proc = AssignAttributesProcessor({
-        FrameAttribute.POSE: poses,
-        FrameAttribute.METRIC_DEPTH: depths,
-    })
+    attrs = {FrameAttribute.METRIC_DEPTH: depths}      # always anchor metric via depth
+    if args.inject_poses:
+        attrs[FrameAttribute.POSE] = poses             # only stray/lidar seeds the trajectory
+    proc = AssignAttributesProcessor(attrs)
     stream = ProcessedVideoStream(base, [proc]).cache(desc="Reading frames + priors")
 
-    logger.info(f"Running ViPE with priors (depth+pose) → {args.output}")
+    logger.info(f"Running ViPE with priors (depth{'+pose' if args.inject_poses else ' only, poses free'}) "
+                f"→ {args.output}")
     pipeline.run(stream)
     logger.info("ViPE (with priors) finished")
 

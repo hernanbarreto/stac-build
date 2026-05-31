@@ -487,10 +487,12 @@ def _clean_vipe_inputs(pipe: WorkerPipe, output_dir: Path):
             pipe.send_log(f"[cleanup] could not remove {t}: {e}", level="warning")
 
 
-def _run_vipe_with_priors(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, vcfg: dict):
-    """Run ViPE fed with the per-frame priors (metric depth + poses) in vipe_priors/.
-    ViPE consumes them as BA constraints (metric anchor) + trajectory seed and
-    outputs refined metric poses + depth → vipe_run/."""
+def _run_vipe_with_priors(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, vcfg: dict,
+                          inject_poses: bool = False):
+    """Run ViPE fed with per-frame priors from vipe_priors/. ALWAYS injects metric
+    DEPTH (anchors scale in the BA). POSES are injected ONLY for stray/lidar
+    (inject_poses=True) — in monocular (da3) we let ViPE solve poses freely, because
+    DA3's poses can drag ViPE toward their own drift. Output → vipe_run/."""
     vipe_out = output_dir / "vipe_run"
     if vcfg["skip_if_exists"] and (vipe_out / "pose" / "frames.npz").exists():
         pipe.send_log("[vipe] reusing existing vipe_run/pose/frames.npz")
@@ -505,7 +507,10 @@ def _run_vipe_with_priors(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, 
            "--priors", str(output_dir / "vipe_priors"),
            "--output", str(vipe_out),
            "--pipeline", vcfg["pipeline"]]
-    pipe.send_progress(50, "Running ViPE with priors (depth+poses)...", stage="reconstruction")
+    if inject_poses:
+        cmd.append("--inject-poses")
+    pipe.send_progress(50, f"Running ViPE with priors (depth{'+poses' if inject_poses else ' only'})...",
+                       stage="reconstruction")
     pipe.send_log(f"[vipe] {' '.join(cmd[1:])}")
     proc = subprocess.Popen(cmd, cwd=vcfg["vipe_dir"], stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
@@ -568,15 +573,20 @@ def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                   f"(replace={replace})")
 
     # ── Detect existing artifacts (resume points), newest → oldest ──
+    n_chunks = len(list(output_dir.glob("chunk_*.ply")))
+    n_vdepth = len(list((output_dir / "vipe_depth").glob("*.npz"))) if (output_dir / "vipe_depth").exists() else 0
     have_vipe_run = (output_dir / "vipe_run" / "pose" / "frames.npz").exists()
-    have_vipe_depth = (output_dir / "vipe_depth").exists() and \
-        any((output_dir / "vipe_depth").glob("*.npz"))
+    have_vipe_depth = n_vdepth > 0
     have_priors = (output_dir / "vipe_priors" / "poses.txt").exists()
-    have_chunks = any(output_dir.glob("chunk_*.ply"))
+    have_chunks = n_chunks > 0
+    # ALWAYS log what the resume detector sees, so we can tell where it (re)starts.
+    pipe.send_log(f"[resume] detected: chunks={n_chunks}, vipe_depth={n_vdepth}, "
+                  f"vipe_run={have_vipe_run}, priors={have_priors} | replace={replace} → "
+                  f"{'FULL run' if replace else 'resume from latest artifact'}")
 
     if not replace and have_chunks:
-        pipe.send_log("[resume] chunks present → reconstruction already complete, skipping")
-        pipe.send_progress(90, "Reconstruction complete (reused existing)", stage="reconstruction")
+        pipe.send_log(f"[resume] {n_chunks} chunks present → reconstruction already complete, skipping to cloudcompy")
+        pipe.send_progress(90, "Reconstruction complete (reused existing chunks)", stage="reconstruction")
         return
 
     # 1. Prior source → vipe_priors/. Skip if ViPE output (run/depth) or priors exist.
@@ -599,8 +609,11 @@ def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         pipe.send_log("[resume] ViPE output / priors present → skipping DA3 prior source")
 
     # 2. ViPE with priors → refined metric poses + depth. Skip if its output exists.
+    #    Poses prior ONLY for stray/lidar (ARKit poses are trustworthy); for da3
+    #    (monocular) we feed ONLY depth and let ViPE solve poses freely.
     if replace or not (have_vipe_run or have_vipe_depth):
-        _run_vipe_with_priors(pipe, frames_dir, output_dir, vcfg)
+        _run_vipe_with_priors(pipe, frames_dir, output_dir, vcfg,
+                              inject_poses=(prior_source == "stray"))
     else:
         pipe.send_log("[resume] vipe_run present → skipping ViPE")
 

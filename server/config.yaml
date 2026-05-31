@@ -349,8 +349,14 @@ postprocessing:
   conda_env: "CloudComPy310"
 
   # Pipeline toggles
-  skip_duplicates: false
-  skip_sor: false
+  skip_duplicates: true                # the 0.1mm micro-voxel near-dup pass is a
+                                       # heavy octree over a meters-scale scene
+                                       # (slow + caused std::length_error on 350M
+                                       # pts) AND redundant — the 10mm voxel below
+                                       # dedups within 10mm anyway. Skip it.
+  skip_sor: true                       # SOR (knn neighbor search) chokes on the
+                                       # all-frames cloud (~350M pts). Voxel (10mm)
+                                       # already thins it; re-enable for a clean pass.
   skip_noise: true                     # noise filter is O(n²), hangs on >1M points
   skip_normals: true                   # not needed for the point cloud viewer
 

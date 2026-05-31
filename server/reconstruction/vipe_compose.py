@@ -42,7 +42,11 @@ def compose_chunks_from_vipe(
     depth_max: float = 8.0,
     edge_thresh: float = 0.04,
     conf_percentile: float = 25.0,       # drop per-frame bottom % conf (only if npz has conf)
-    voxel_size: float = 0.005,           # voxel-dedup per chunk (m) — bounds disk
+    voxel_size: float = 0.015,           # voxel-dedup per chunk (m). 15mm (was 5mm):
+                                         # all-frames at 5mm = ~360M pts → CloudCompy
+                                         # chokes. 15mm → ~9x fewer (~40M) → chunks
+                                         # stay light. Cloud is for viewing/TSDF-mask
+                                         # (TSDF uses depth), so coarser is fine.
     chunk_size: int = 120,               # frames per chunk PLY
     progress_cb: Optional[Callable[[int, str], None]] = None,
 ) -> int:

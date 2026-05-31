@@ -196,26 +196,29 @@ def load_ply_to_numpy(ply_path: Path) -> Optional[np.ndarray]:
 async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, websocket=None):
     """Run CloudCompPy post-processing on reconstruction chunk PLYs as subprocess."""
     import subprocess
-    
+    import logging as _logging
+    _olog = _logging.getLogger("onload-cloudcompy")  # → server.log (root RotatingFileHandler)
+
     ctx = _ctx(session_id)
     scans_dir = ctx.output_dir
     output_ply = ctx.merged_cloud
     script_path = Path(__file__).parent / "run_cloudcompy.sh"
-    
+
     voxel_size = postproc_config.get("voxel_size", 0.001)
     max_points = postproc_config.get("max_points", 0)
-    
+
     if not script_path.exists():
-        print(f"[PostProc] ⚠️ run_cloudcompy.sh not found, skipping")
+        _olog.warning("[on-load PostProc] run_cloudcompy.sh not found, skipping")
         return
-    
+
     # Check if chunks exist
     chunks = sorted(scans_dir.glob("chunk_*.ply"))
     if not chunks:
-        print(f"[PostProc] ⚠️ No chunk PLYs found in {scans_dir}, skipping")
+        _olog.warning(f"[on-load PostProc] No chunk PLYs found in {scans_dir}, skipping")
         return
-    
-    print(f"\n[PostProc] 🔧 Starting CloudCompPy professional cleaning ({len(chunks)} chunks, voxel={voxel_size*1000:.1f}mm)...")
+
+    _olog.info(f"[on-load PostProc] Starting CloudCompPy on {len(chunks)} chunks, "
+               f"voxel={voxel_size*1000:.1f}mm (session={session_id})")
     
     if websocket:
         try:
@@ -262,7 +265,7 @@ async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, we
                 break
             line_str = line.decode('utf-8', errors='replace').strip()
             if line_str:
-                print(f"  {line_str}")
+                _olog.info(f"[on-load cloudcompy] {line_str}")   # → server.log
         
         await process.wait()
         
@@ -1059,6 +1062,15 @@ _file_log_handler.setFormatter(
 _file_log_handler.setLevel(logging.INFO)
 logging.getLogger().addHandler(_file_log_handler)
 logging.getLogger().setLevel(logging.INFO)
+
+# ALSO stream everything to the server's stdout (the start.sh console) so runs are
+# visible LIVE on screen, not only in server.log. Covers pipeline_manager relays
+# ([reconstruction]/[cloudcompy]) AND the on-load cloudcompy/Potree.
+import sys as _sys
+_console_log_handler = logging.StreamHandler(_sys.stdout)
+_console_log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+_console_log_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(_console_log_handler)
 
 sys.stdout = StreamCapture(sys.__stdout__, "info")
 sys.stderr = StreamCapture(sys.__stderr__, "error")
