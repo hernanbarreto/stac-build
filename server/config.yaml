@@ -96,19 +96,12 @@ scene_analysis:
     - { label: "ceiling" }
 
 
-# ── Frame Quality (blur detection) ─────────────────────────────────
-# In the ViPE prior-driven architecture ViPE + DA3 priors run on ALL frames,
-# so blur filtering is OFF (it does not execute when enabled: false).
-frame_quality:
-  enabled: false
-
 # ── Frame Selection (visual novelty filter) ────────────────────────
 # Two methods: DINO cosine similarity (default, more reliable) or ORB-SLAM
 # H/F ratio (legacy fallback). Consumed by frame_selector.py and triggered
 # at start of reconstruction in workers/map_worker.py.
-# OFF for the ViPE architecture: cosine keyframes are not used (all-frames fusion).
 frame_selection:
-  enabled: false
+  enabled: true
   method: "dino"                       # "dino" | "hf_ratio"
 
   # DINO settings
@@ -267,23 +260,12 @@ bim:
 reconstruction:
   backend: "da3"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
-  # Temporal subsample for the ViPE pipeline (DA3 priors + ViPE). 30fps video is
-  # highly redundant; 1-of-N halves/thirds the work with ~no coverage loss. Applies
-  # to DA3 and ViPE on the SAME frame subset. 1 = all frames. (Monocular AND stray.)
-  frame_stride: 2
-  use_keyframes: false                 # ViPE arch: NO cosine keyframes — fuse ALL frames
+  use_keyframes: true                  # use frame_selector keyframes (recommended)
 
-  # Pose source: "da3" (legacy DA3 chunk loop-closure) | "vipe".
-  # vipe → ViPE is the UNIVERSAL refinement engine, ALWAYS run, fed per-frame PRIORS
-  # (metric depth + poses). ViPE consumes them natively (METRIC_DEPTH = BA depth
-  # constraint → continuous metric anchor, kills drift; POSE = trajectory seed →
-  # smooths chunk jumps). Output: refined metric poses + depth → cloud + TSDF.
+  # Pose source: "da3" (DA3 chunk loop-closure) | "vipe" (ViPE continuous SLAM).
+  # vipe → DA3 depth over ALL frames (metric ref) + ViPE poses+depth (all frames) +
+  # per-frame depth calibration + cloud composed from ViPE poses. ViPE IS the SLAM.
   pose_source: "vipe"
-  # Prior source for ViPE (where depth+poses come from), by available data:
-  #   "da3"   → DA3 streaming (all frames, blur-only). We take its per-frame depth +
-  #             poses (NOT its chunks) and inject them into ViPE.
-  #   "stray" → ARKit poses + LiDAR depth.  [future]
-  prior_source: "da3"
   vipe:
     venv: "/workspace/stac-build/vendor/vipe/.venv"
     vipe_dir: "/workspace/stac-build/vendor/vipe"
@@ -305,21 +287,12 @@ reconstruction:
     conf_min_normalized: 0.25          # drop bottom 25% by confidence (0 = keep all)
     sample_ratio: 1.0
     save_depth_conf_result: true       # save per-frame depth+conf .npz
-    # ViPE depth-PRIOR confidence filter: before feeding DA3 depth to ViPE, zero-out
-    # the bottom N% lowest-confidence pixels PER FRAME (far/unreliable depth corrupts
-    # ViPE → "onion" duplications). 35 = keep top 65%. 0 = off. Tune: more onion →
-    # higher (stricter); too sparse / ViPE loses scale → lower.
-    prior_conf_percentile: 35
 
   # LiDAR / Stray Scanner / Hybrid
   lidar:
     trust_range: 5.0                   # max LiDAR depth (m) — iPad LiDAR ≈ 5m
     confidence_threshold: 1            # 0=low, 1=medium, 2=high
     fallback_to_da3: true              # use DA3 if no Stray data found
-    # ViPE depth-PRIOR confidence for stray: ARKit conf is DISCRETE 0/1/2 (NOT a
-    # percentile like DA3 — distinta escala). Keep pixels with conf >= this (far
-    # unreliable LiDAR points come as 0/1). 2 = only high. Used when prior_source=stray.
-    prior_conf_min: 2
     stride: 4                          # frame stride for Stray depth extraction
 
   # MapAnything (VGGT-Long) — legacy
@@ -362,14 +335,8 @@ postprocessing:
   conda_env: "CloudComPy310"
 
   # Pipeline toggles
-  skip_duplicates: true                # the 0.1mm micro-voxel near-dup pass is a
-                                       # heavy octree over a meters-scale scene
-                                       # (slow + caused std::length_error on 350M
-                                       # pts) AND redundant — the 10mm voxel below
-                                       # dedups within 10mm anyway. Skip it.
-  skip_sor: true                       # SOR (knn neighbor search) chokes on the
-                                       # all-frames cloud (~350M pts). Voxel (10mm)
-                                       # already thins it; re-enable for a clean pass.
+  skip_duplicates: false
+  skip_sor: false
   skip_noise: true                     # noise filter is O(n²), hangs on >1M points
   skip_normals: true                   # not needed for the point cloud viewer
 
@@ -381,11 +348,8 @@ postprocessing:
   noise_radius: 0.02
   noise_sigma: 2.0
 
-  # Voxel subsampling. NOTE: the ViPE compose already voxel-dedups at 5mm, so any
-  # value ≤ 0.005 does NOTHING here. Must be > 5mm to actually reduce the cloud.
-  # 10mm ≈ quarters the cloud (surfaces are 2D). Cloud is for viewing/TSDF-mask only
-  # (TSDF integrates depth, not this cloud), so being aggressive here is safe.
-  voxel_size: 0.01                     # 10mm voxel (real reduction; was 1mm = no-op)
+  # Voxel subsampling
+  voxel_size: 0.001                    # 1mm voxel (keeps cloud under 100M pts)
   max_points: 0                        # 0 = unlimited
 
 

@@ -245,7 +245,7 @@ class PipelineManager:
     STAGE_OUTPUT_FILES: Dict[StageId, List[str]] = {
         StageId.RECONSTRUCTION: ["chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json",
                       "slam_reconstruction.ply", "maplong_run", "da3_run", "gs_ply",
-                      "gaus_slam_run", "vipe_run", "vipe_depth", "vipe_priors",
+                      "gaus_slam_run", "vipe_run", "da3_depth",
                       "vggt_long_config.yaml", "da3_streaming_config.yaml",
                       "camera_poses_mapanything.json", "camera_poses.txt", "camera_frames.txt",
                       "intrinsic.txt", "lidar_complement.ply"],
