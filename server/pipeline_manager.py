@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 class StageId(str, Enum):
     RECONSTRUCTION = "reconstruction"
     CLOUDCOMPY = "cloudcompy"
+    TSDF = "tsdf"
     VLM = "vlm"
     SAM3 = "sam3"
     INSTANCE_CLEANER = "instance_cleaner"
@@ -32,14 +33,19 @@ class StageId(str, Enum):
 STAGE_REGISTRY = {
     StageId.RECONSTRUCTION:   {"label": "3D Reconstruction", "icon": "🔨", "module": "workers.map_worker"},
     StageId.CLOUDCOMPY:       {"label": "Cloud Cleaning",    "icon": "🧹", "module": "workers.cloudcompy_worker"},
+    StageId.TSDF:             {"label": "TSDF Mesh",         "icon": "🧊", "module": "workers.tsdf_worker"},
     StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker"},
     StageId.SAM3:             {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
     StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
 }
 
+# TSDF runs right after CloudCompy (which builds the cleaned cloud + Potree) so a
+# single pipeline run produces cloud → Potree → TSDF mesh; it depends only on the
+# cleaned cloud, not on VLM/SAM3.
 DEFAULT_STAGE_ORDER: List[StageId] = [
     StageId.RECONSTRUCTION,
     StageId.CLOUDCOMPY,
+    StageId.TSDF,
     StageId.VLM,
     StageId.SAM3,
     StageId.INSTANCE_CLEANER,
@@ -239,11 +245,12 @@ class PipelineManager:
     STAGE_OUTPUT_FILES: Dict[StageId, List[str]] = {
         StageId.RECONSTRUCTION: ["chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json",
                       "slam_reconstruction.ply", "maplong_run", "da3_run", "gs_ply",
-                      "gaus_slam_run",
+                      "gaus_slam_run", "vipe_run", "da3_depth",
                       "vggt_long_config.yaml", "da3_streaming_config.yaml",
-                      "camera_poses_mapanything.json",
+                      "camera_poses_mapanything.json", "camera_poses.txt", "camera_frames.txt",
                       "intrinsic.txt", "lidar_complement.ply"],
         StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "floor_transform.npz"],
+        StageId.TSDF: ["tsdf/scene"],
         StageId.VLM: ["scene_analysis.json", "vlm_analysis.json"],
         StageId.SAM3: ["segmentation.json", "segmentation_result.json",
                        "seg_masks.npz", "seg_broadcast.json"],
@@ -265,11 +272,13 @@ class PipelineManager:
     CASCADE_INVALIDATION: Dict[StageId, List[StageId]] = {
         StageId.RECONSTRUCTION: [
             StageId.CLOUDCOMPY,       # cleaned_cloud depends on chunks
+            StageId.TSDF,             # TSDF mesh integrated old depth/poses
             StageId.VLM,              # scene analysis ran on old keyframes
             StageId.SAM3,             # segmentation ran on old cloud
             StageId.INSTANCE_CLEANER, # instance PLYs from old segmentation
         ],
         StageId.CLOUDCOMPY: [
+            StageId.TSDF,             # TSDF masks to the old cleaned_cloud
             StageId.SAM3,             # segmentation used old cleaned_cloud
             StageId.INSTANCE_CLEANER,
         ],

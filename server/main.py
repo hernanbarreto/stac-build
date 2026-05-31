@@ -27,7 +27,19 @@ _POLLING_NOISE = (
 class _HealthCheckFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        return not any(p in msg for p in _POLLING_NOISE)
+        if any(p in msg for p in _POLLING_NOISE):
+            return False
+        # 206 Partial Content range-request spam (Potree octree nodes, video).
+        # uvicorn adds the phrase "Partial Content" in the FORMATTER, not the
+        # message, so we match the STATUS CODE 206 (last positional arg of the
+        # access record), not the text. Fallback: the raw '" 206' in the message.
+        try:
+            args = record.args
+            if isinstance(args, (tuple, list)) and args and int(args[-1]) == 206:
+                return False
+        except (ValueError, TypeError, IndexError):
+            pass
+        return '" 206' not in msg
 
 logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
 
@@ -796,7 +808,16 @@ async def lifespan(app: FastAPI):
     # Initialize auth database
     from db import init_db
     await init_db()
-    
+
+    # Re-apply the access-log noise filter AFTER uvicorn configured its logging.
+    # uvicorn's startup dictConfig can drop the module-import-time filter (line ~33),
+    # which is why "Partial Content" (206 range requests for Potree/video) kept
+    # printing. Re-adding here (post-config) makes it stick.
+    _ua = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _HealthCheckFilter) for f in _ua.filters):
+        _ua.addFilter(_HealthCheckFilter())
+        print("[Server] access-log noise filter re-applied (206/health/polling)")
+
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -899,14 +920,12 @@ async def get_flythrough(session_id: str):
     d = np.load(str(pose_npz))
     inds = np.asarray(d["inds"]).astype(int)
     mats = np.asarray(d["data"], dtype=np.float64)  # (N,4,4) c2w
-    # global metric scale (same factor compose used) — reuse the calibration manifest
+    # global metric scale (the SAME single factor compose applied to the poses)
     scale = 1.0
     try:
         sys.path.insert(0, str(SERVER_DIR))
-        from reconstruction.vipe_poses import global_scale_from_calibration
-        cal_dir = vipe_out / "depth_calibrated"
-        if (cal_dir / "calibration_manifest.json").exists():
-            scale = global_scale_from_calibration(cal_dir)
+        from reconstruction.vipe_poses import global_scale_from_file
+        scale = global_scale_from_file(vipe_out / "pose_scale.json")
     except Exception:
         pass
     order = np.argsort(inds)
@@ -4778,6 +4797,8 @@ async def viewer_websocket(websocket: WebSocket):
                             msg["bimFiles"] = ifc_files
                         if scene_payload is not None:
                             msg["scene"] = scene_payload
+                        # Camera-pose markers: sent on normal load (UI has a toggle).
+                        # The flythrough hides them via the viewport (setFlythroughActive).
                         if camera_poses_list:
                             if isinstance(camera_poses_list, tuple):
                                 msg["cameraPoses"] = camera_poses_list[0]

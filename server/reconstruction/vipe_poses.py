@@ -25,19 +25,15 @@ def load_vipe_poses(vipe_out: Path) -> Tuple[np.ndarray, np.ndarray]:
     return np.asarray(d["inds"]).astype(np.int64), np.asarray(d["data"], np.float64)
 
 
-def global_scale_from_calibration(cal_dir: Path,
-                                  scale_lo: float = 0.7, scale_hi: float = 1.7,
-                                  res_max: float = 0.10) -> float:
-    """Robust global ViPE→DA3-metric pose scale = median of the per-frame affine
-    depth scales over WELL-CALIBRATED frames (reject outlier fits). The depth and
-    poses share ViPE's native scale, so the depth-calibration scale converts pose
-    translations to metric too."""
-    manifest = json.load(open(cal_dir / "calibration_manifest.json"))
-    good = [m["scale"] for m in manifest.values()
-            if scale_lo <= m["scale"] <= scale_hi and m["residual_m"] <= res_max]
-    if not good:
+def global_scale_from_file(scale_path: Path) -> float:
+    """Read the single global ViPE→DA3-metric pose scale g written by
+    vipe_calibrate.py (median DA3/ViPE depth ratio). ViPE pose+depth share ViPE's
+    native scale, so g converts pose translations to the DA3 metric. We use DA3
+    depth DIRECTLY for the cloud/TSDF — only the pose translations are scaled."""
+    try:
+        return float(json.load(open(scale_path))["pose_scale"])
+    except Exception:
         return 1.0
-    return float(np.median(good))
 
 
 def build_pose_map(vipe_out: Path, frames: Optional[list] = None,

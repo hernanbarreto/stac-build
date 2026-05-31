@@ -446,11 +446,10 @@ def _run_da3_isolated(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
 
 
 def _clean_vipe_inputs(pipe: WorkerPipe, output_dir: Path):
-    """Once depth_calibrated/ exists, the calibration INPUTS are redundant:
-    DA3 isolated depth + ViPE raw EXR depth + ViPE masks. Keep depth_calibrated
-    (TSDF uses it), poses and intrinsics."""
+    """Once the global pose scale is computed, the ViPE raw EXR depth + masks are
+    redundant. KEEP da3_depth — the cloud composition AND the TSDF use the DA3
+    metric depth DIRECTLY (no per-frame calibration). Keep poses + intrinsics."""
     targets = [
-        output_dir / "da3_depth",
         output_dir / "vipe_run" / "depth" / "frames.zip",
         output_dir / "vipe_run" / "mask",
     ]
@@ -484,18 +483,21 @@ def _run_vipe(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, vcfg: dict):
     (vipe_out / "rgb" / "frames.mp4").unlink(missing_ok=True)
 
 
-def _run_vipe_calibrate(pipe: WorkerPipe, output_dir: Path, vcfg: dict):
+def _run_vipe_pose_scale(pipe: WorkerPipe, output_dir: Path, vcfg: dict):
+    """Compute the SINGLE global ViPE→DA3-metric pose scale g (median DA3/ViPE
+    depth ratio) → vipe_run/pose_scale.json. No per-frame depth calibration."""
     server_dir = Path(__file__).resolve().parent.parent
     cmd = [f"{vcfg['venv']}/bin/python",
            str(server_dir / "reconstruction" / "vipe_calibrate.py"),
            "--vipe-out", str(output_dir / "vipe_run"),
            "--da3-depth", str(output_dir / "da3_depth"),
-           "--out", str(output_dir / "vipe_run" / "depth_calibrated")]
-    pipe.send_progress(75, "Calibrating ViPE depth → DA3 metric...", stage="reconstruction")
-    pipe.send_log(f"[calib] {' '.join(cmd[1:])}")
+           "--out", str(output_dir / "vipe_run" / "pose_scale.json")]
+    pipe.send_progress(75, "Computing global pose scale (ViPE → DA3 metric)...",
+                       stage="reconstruction")
+    pipe.send_log(f"[scale] {' '.join(cmd[1:])}")
     proc = subprocess.Popen(cmd, cwd=vcfg["vipe_dir"], stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1)
-    _stream_proc(pipe, proc, "calib")
+    _stream_proc(pipe, proc, "scale")
 
 
 def _run_vipe_compose(pipe: WorkerPipe, frames_dir: Path, output_dir: Path):
@@ -516,24 +518,24 @@ def _run_vipe_compose(pipe: WorkerPipe, frames_dir: Path, output_dir: Path):
 def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                    recon_cfg: dict, config: dict, selected_frames_path: str = None):
     """ViPE SLAM reconstruction. ViPE tracks ALL frames → continuous poses. The
-    cloud is fused on the cosine KEYFRAMES (selected_frames): DA3 isolated depth
-    (metric ref) + per-frame calibration + composition run only on them."""
+    cloud is fused on the cosine KEYFRAMES (selected_frames) using DA3 metric depth
+    DIRECTLY (no per-frame calibration) + ViPE poses scaled by ONE global factor."""
     vcfg = _vipe_cfg(recon_cfg)
-    pipe.send_log("Reconstruction backend: ViPE SLAM (poses=all frames, fusion=keyframes)")
+    pipe.send_log("Reconstruction backend: ViPE SLAM (poses=all frames, depth=DA3 direct)")
 
-    # 1. Isolated DA3 metric depth on the FUSION KEYFRAMES (metric reference).
+    # 1. Isolated DA3 metric depth on the FUSION KEYFRAMES (used DIRECTLY for the cloud/TSDF).
     _run_da3_isolated(pipe, frames_dir, output_dir, recon_cfg, selected_frames_path)
 
     # 2. ViPE SLAM over ALL frames → continuous poses + dense depth.
     _run_vipe(pipe, frames_dir, output_dir, vcfg)
 
-    # 3. Per-frame calibrate ViPE depth → DA3 metric.
-    _run_vipe_calibrate(pipe, output_dir, vcfg)
+    # 3. Single global pose scale g (median DA3/ViPE depth ratio) → pose_scale.json.
+    _run_vipe_pose_scale(pipe, output_dir, vcfg)
 
-    # 3b. Calibration done → drop its now-redundant inputs (DA3 depth + raw EXR).
+    # 3b. Scale computed → drop the redundant ViPE raw EXR + masks (KEEP da3_depth).
     _clean_vipe_inputs(pipe, output_dir)
 
-    # 4. Compose chunks (cloud + origins) from ViPE poses + calibrated depth.
+    # 4. Compose chunks (cloud + origins) from DA3 metric depth + scaled ViPE poses.
     _run_vipe_compose(pipe, frames_dir, output_dir)
 
     pipe.send_progress(90, "ViPE SLAM reconstruction complete", stage="reconstruction")

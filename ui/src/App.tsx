@@ -24,6 +24,7 @@ import {
   Building2, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
   Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
   Scale, Thermometer, Loader2, BarChart3, Home, Pencil, Camera, Plus, SlidersHorizontal,
+  Box,
 } from 'lucide-react'
 
 interface SessionInfo {
@@ -123,11 +124,12 @@ function App() {
     sam3: { label: 'Segmentation', icon: <Tag size={14} /> },
     reconstruction: { label: '3D Reconstruction', icon: <Hammer size={14} /> },
     cloudcompy: { label: 'Global Cloud Cleaning', icon: <Brush size={14} /> },
+    tsdf: { label: 'TSDF Mesh', icon: <Box size={14} /> },
     instance_cleaner: { label: 'Instance Isolation & Erosion', icon: <Sparkles size={14} /> },
   }
-  const [pipelineOrder] = useState<string[]>(['reconstruction', 'cloudcompy', 'vlm', 'sam3', 'instance_cleaner'])
+  const [pipelineOrder] = useState<string[]>(['reconstruction', 'cloudcompy', 'tsdf', 'vlm', 'sam3', 'instance_cleaner'])
   const [pipelineEnabled, setPipelineEnabled] = useState<Record<string, boolean>>({
-    reconstruction: true, cloudcompy: true, vlm: true, sam3: true, instance_cleaner: true
+    reconstruction: true, cloudcompy: true, tsdf: true, vlm: true, sam3: true, instance_cleaner: true
   })
 
   const [pipelineReplace, setPipelineReplace] = useState(true)
