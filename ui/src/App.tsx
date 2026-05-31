@@ -1544,7 +1544,13 @@ function App() {
                               title={s.hasCloud ? 'Flythrough: video ↔ escena 3D' : 'Sin nube todavía'}
                               disabled={!s.hasCloud}
                               style={!s.hasCloud ? { opacity: 0.3 } : undefined}
-                              onClick={(e) => { e.stopPropagation(); handleSessionLoad(s.id); setFlythroughOpen(s.id) }}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                // use the already-loaded cloud/octree — only load if
+                                // this session isn't the active one (avoid a reload).
+                                if (activeSession !== s.id) handleSessionLoad(s.id)
+                                setFlythroughOpen(s.id)
+                              }}
                             ><Play size={14} /></button>
                             {s.id in extractingSessions ? (
                               <button className="session-action-btn reconstruct"

@@ -1893,8 +1893,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const c2w = new THREE.Matrix4().fromArray(c2wRowMajor).transpose()
             const cvToGl = new THREE.Matrix4().makeScale(1, -1, -1)
             c2w.multiply(cvToGl)
-            const groupM = cameraGroupRef.current
-                ? cameraGroupRef.current.matrixWorld.clone()
+            // Apply the SAME transform the displayed cloud uses (floor_transform /
+            // alignment) so the camera path lives in the cloud's displayed frame.
+            // (Earlier this used cameraGroupRef.matrixWorld — wrong matrix → camera
+            // ended up far below. floorTransformRef is what the cloud bbox uses.)
+            const groupM = floorTransformRef.current
+                ? floorTransformRef.current.clone()
                 : new THREE.Matrix4()
             const world = groupM.multiply(c2w)
             const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), scl = new THREE.Vector3()

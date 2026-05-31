@@ -184,7 +184,9 @@ def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
     )
 
     if result.returncode != 0:
-        logger.error(f"[Potree] ❌ PotreeConverter failed:\n{result.stderr}")
+        logger.error(f"[Potree] ❌ PotreeConverter failed (exit {result.returncode}, "
+                     f"signal {-result.returncode if result.returncode < 0 else 'n/a'})\n"
+                     f"STDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}")
         return False
 
     # Verify output
@@ -228,9 +230,12 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
 
     try:
 
-        # Usar /tmp (RAM pura) para esquivar asfixia de I/O en puente WSL de Windows
+        # Write the intermediate LAS + octree on the big /workspace volume (via
+        # output_dir), NOT /tmp: /tmp here is the container overlay (~20GB, ~7.8 free)
+        # and a 128M-point LAS (~4.4GB) + UNCOMPRESSED octree overflows it →
+        # PotreeConverter crashes. /workspace has tens of GB free.
         import time
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory(dir=str(output_dir)) as tmpdir:
             tmpdir_path = Path(tmpdir)
             tmp_las_path = tmpdir_path / "cleaned_cloud.las"
             tmp_potree_dir = tmpdir_path / "potree"
