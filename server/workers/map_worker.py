@@ -560,34 +560,59 @@ def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     global scale — already metric)."""
     vcfg = _vipe_cfg(recon_cfg)
     prior_source = recon_cfg.get("prior_source", "da3")
-    pipe.send_log(f"Reconstruction: ViPE (universal engine) + priors from '{prior_source}'")
+    # replace=True (UI "Replace existing outputs") → run from scratch.
+    # replace=False → RESUME: detect what's already on disk and run only the missing
+    # sub-steps. Each step's output is the checkpoint for the next.
+    replace = config.get("_pipeline_replace", True)
+    pipe.send_log(f"Reconstruction: ViPE (universal engine) + priors from '{prior_source}' "
+                  f"(replace={replace})")
 
-    # 1. Prior source → vipe_priors/ (per-frame metric depth + c2w poses).
-    if prior_source == "da3":
-        # DA3 streaming over ALL frames (no keyframe filter) — depth+poses only.
-        _run_da3(pipe, frames_dir, output_dir, None, recon_cfg, config, lean=True)
-        _extract_da3_priors(pipe, frames_dir, output_dir)
-        # da3_run is fully consumed now (vipe_priors is self-contained) → free it
-        # BEFORE the long ViPE run instead of holding ~25GB of DA3 scratch on disk.
-        shutil.rmtree(output_dir / "da3_run", ignore_errors=True)
-        shutil.rmtree(output_dir / "da3_full", ignore_errors=True)
-        (output_dir / "da3_streaming_config.yaml").unlink(missing_ok=True)
-        pipe.send_log("[cleanup] removed da3_run scratch (priors extracted, self-contained)")
-    elif prior_source == "stray":
-        raise NotImplementedError("prior_source='stray' (ARKit+LiDAR injection) not wired yet")
+    # ── Detect existing artifacts (resume points), newest → oldest ──
+    have_vipe_run = (output_dir / "vipe_run" / "pose" / "frames.npz").exists()
+    have_vipe_depth = (output_dir / "vipe_depth").exists() and \
+        any((output_dir / "vipe_depth").glob("*.npz"))
+    have_priors = (output_dir / "vipe_priors" / "poses.txt").exists()
+    have_chunks = any(output_dir.glob("chunk_*.ply"))
+
+    if not replace and have_chunks:
+        pipe.send_log("[resume] chunks present → reconstruction already complete, skipping")
+        pipe.send_progress(90, "Reconstruction complete (reused existing)", stage="reconstruction")
+        return
+
+    # 1. Prior source → vipe_priors/. Skip if ViPE output (run/depth) or priors exist.
+    if replace or not (have_vipe_run or have_vipe_depth or have_priors):
+        if prior_source == "da3":
+            # DA3 streaming over ALL frames (no keyframe filter) — depth+poses only.
+            _run_da3(pipe, frames_dir, output_dir, None, recon_cfg, config, lean=True)
+            _extract_da3_priors(pipe, frames_dir, output_dir)
+            # da3_run fully consumed (vipe_priors is self-contained) → free it BEFORE
+            # the long ViPE run instead of holding ~25GB of DA3 scratch on disk.
+            shutil.rmtree(output_dir / "da3_run", ignore_errors=True)
+            shutil.rmtree(output_dir / "da3_full", ignore_errors=True)
+            (output_dir / "da3_streaming_config.yaml").unlink(missing_ok=True)
+            pipe.send_log("[cleanup] removed da3_run scratch (priors extracted, self-contained)")
+        elif prior_source == "stray":
+            raise NotImplementedError("prior_source='stray' (ARKit+LiDAR injection) not wired yet")
+        else:
+            raise ValueError(f"unknown prior_source: {prior_source}")
     else:
-        raise ValueError(f"unknown prior_source: {prior_source}")
+        pipe.send_log("[resume] ViPE output / priors present → skipping DA3 prior source")
 
-    # 2. ViPE with priors → refined metric poses + depth (vipe_run/).
-    _run_vipe_with_priors(pipe, frames_dir, output_dir, vcfg)
+    # 2. ViPE with priors → refined metric poses + depth. Skip if its output exists.
+    if replace or not (have_vipe_run or have_vipe_depth):
+        _run_vipe_with_priors(pipe, frames_dir, output_dir, vcfg)
+    else:
+        pipe.send_log("[resume] vipe_run present → skipping ViPE")
 
-    # 3. Export ViPE's refined metric depth → vipe_depth/ (fusion keyframes).
-    _run_vipe_depth_export(pipe, output_dir, vcfg, selected_frames_path)
-
-    # 3b. Drop redundant inputs (raw EXR + DA3 run + priors); KEEP vipe_depth/.
-    _clean_vipe_inputs(pipe, output_dir)
+    # 3. Export ViPE's refined metric depth → vipe_depth/. Skip if already exported.
+    if replace or not have_vipe_depth:
+        _run_vipe_depth_export(pipe, output_dir, vcfg, selected_frames_path)
+        _clean_vipe_inputs(pipe, output_dir)   # drop raw EXR + priors; KEEP vipe_depth/
+    else:
+        pipe.send_log("[resume] vipe_depth present → skipping depth export")
 
     # 4. Compose chunks (cloud + origins) from metric ViPE depth + ViPE poses.
+    #    (Only reached when chunks were absent; cheap — reads vipe_depth + poses.)
     _run_vipe_compose(pipe, frames_dir, output_dir)
 
     pipe.send_progress(90, "ViPE SLAM reconstruction complete", stage="reconstruction")

@@ -362,8 +362,11 @@ postprocessing:
   noise_radius: 0.02
   noise_sigma: 2.0
 
-  # Voxel subsampling
-  voxel_size: 0.001                    # 1mm voxel (keeps cloud under 100M pts)
+  # Voxel subsampling. NOTE: the ViPE compose already voxel-dedups at 5mm, so any
+  # value ≤ 0.005 does NOTHING here. Must be > 5mm to actually reduce the cloud.
+  # 10mm ≈ quarters the cloud (surfaces are 2D). Cloud is for viewing/TSDF-mask only
+  # (TSDF integrates depth, not this cloud), so being aggressive here is safe.
+  voxel_size: 0.01                     # 10mm voxel (real reduction; was 1mm = no-op)
   max_points: 0                        # 0 = unlimited
 
 
