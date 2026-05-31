@@ -94,12 +94,18 @@ def main():
     # frame numbers, INDEX-ALIGNED with camera_poses.txt (= processing order)
     cframes = _first_existing([args.da3_run / "camera_frames.txt",
                                out_dir / "camera_frames.txt"])
+    stride_sel = out_dir / "stride_frames.json"
     if cframes is not None:
         frame_nums = [int(x) for x in cframes.read_text().split()]
+    elif stride_sel.exists():
+        # DA3 processed only the strided subset → use THAT list for frame numbers
+        import json as _json
+        names = _json.load(open(stride_sel)).get("selected_files", [])
+        frame_nums = [int(Path(n).stem) for n in names]
     elif kind == "npy":
         frame_nums = [int(p.stem.replace("_depth", "")) for p in depth_files]
     else:
-        # plain-DA3 results npz: assume DA3 processed every input frame 1:1
+        # plain-DA3 results npz (no stride): assume DA3 processed every input frame 1:1
         frame_nums = [int(p.stem) for p in
                       sorted({f for e in _EXTS for f in
                               list(args.frames_dir.glob(f"*{e}")) +

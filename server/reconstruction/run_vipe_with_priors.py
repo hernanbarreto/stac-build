@@ -76,13 +76,16 @@ def _load_depth(p: Path) -> np.ndarray | None:
     return None
 
 
-def _build_priors(frames_dir: Path, priors: Path, H: int, W: int, inject_poses: bool):
-    """Return (poses_list, depths_list) aligned to FrameDirStream's sorted order.
-    Entries are None where a prior is missing. If inject_poses is False, poses stay
-    None (monocular: ViPE computes poses freely; we only anchor metric via depth)."""
+def _build_priors(frames_dir: Path, priors: Path, H: int, W: int, inject_poses: bool,
+                  stride: int = 1):
+    """Return (poses_list, depths_list) aligned to FrameDirStream's sorted+strided
+    order (1-of-`stride`). Entries are None where a prior is missing. If inject_poses
+    is False, poses stay None (monocular: ViPE solves poses freely; depth anchors metric)."""
     exts = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
     files = sorted({f for e in exts for f in
                     list(frames_dir.glob(f"*{e}")) + list(frames_dir.glob(f"*{e.upper()}"))})
+    if stride > 1:
+        files = files[::stride]   # MUST match FrameDirStream(seek_range step=stride)
 
     # poses keyed by frame number
     pose_by_frame: dict[int, np.ndarray] = {}
@@ -128,6 +131,9 @@ def main():
     ap.add_argument("--inject-poses", action="store_true",
                     help="Inject DA3/ARKit poses as a prior (stray/lidar). Omit for "
                          "monocular (da3): only depth anchors metric, ViPE solves poses.")
+    ap.add_argument("--frame-stride", type=int, default=1,
+                    help="Use 1 of every N frames (30fps video is highly redundant). "
+                         "Must match the stride used for the DA3 priors.")
     args = ap.parse_args()
 
     logger = configure_logging()
@@ -145,9 +151,13 @@ def main():
     # relax ONLY the metric-depth init assertion (vendor untouched, instance-level)
     pipeline._add_init_processors = types.MethodType(_patched_add_init_processors, pipeline)
 
-    base = FrameDirStream(args.frames_dir)
+    stride = max(1, int(args.frame_stride))
+    base = (FrameDirStream(args.frames_dir, seek_range=range(0, -1, stride))
+            if stride > 1 else FrameDirStream(args.frames_dir))
     H, W = base.frame_size()
-    poses, depths = _build_priors(args.frames_dir, args.priors, H, W, args.inject_poses)
+    poses, depths = _build_priors(args.frames_dir, args.priors, H, W, args.inject_poses, stride)
+    if stride > 1:
+        logger.info(f"Frame stride: 1-of-{stride} → {len(base)} frames used")
 
     attrs = {FrameAttribute.METRIC_DEPTH: depths}      # always anchor metric via depth
     if args.inject_poses:

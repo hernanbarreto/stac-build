@@ -490,8 +490,24 @@ def _clean_vipe_inputs(pipe: WorkerPipe, output_dir: Path):
             pipe.send_log(f"[cleanup] could not remove {t}: {e}", level="warning")
 
 
+def _write_stride_selection(frames_dir: Path, output_dir: Path, stride: int) -> str:
+    """Write a selected_frames.json (selected_files = basenames) of 1-of-`stride`
+    frames, sorted — the SAME set ViPE strides via FrameDirStream. Used to make DA3
+    streaming process only those frames so DA3 priors and ViPE align 1:1."""
+    import json
+    exts = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif")
+    files = sorted({f for e in exts for f in
+                    list(frames_dir.glob(f"*{e}")) + list(frames_dir.glob(f"*{e.upper()}"))})
+    keep = [f.name for f in files[::stride]]
+    out = output_dir / "stride_frames.json"
+    with open(out, "w") as f:
+        json.dump({"selected_files": keep, "selected": keep,
+                   "total_frames": len(files), "stride": stride}, f)
+    return str(out)
+
+
 def _run_vipe_with_priors(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, vcfg: dict,
-                          inject_poses: bool = False):
+                          inject_poses: bool = False, stride: int = 1):
     """Run ViPE fed with per-frame priors from vipe_priors/. ALWAYS injects metric
     DEPTH (anchors scale in the BA). POSES are injected ONLY for stray/lidar
     (inject_poses=True) — in monocular (da3) we let ViPE solve poses freely, because
@@ -512,6 +528,8 @@ def _run_vipe_with_priors(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, 
            "--pipeline", vcfg["pipeline"]]
     if inject_poses:
         cmd.append("--inject-poses")
+    if stride > 1:
+        cmd += ["--frame-stride", str(stride)]
     pipe.send_progress(50, f"Running ViPE with priors (depth{'+poses' if inject_poses else ' only'})...",
                        stage="reconstruction")
     pipe.send_log(f"[vipe] {' '.join(cmd[1:])}")
@@ -568,6 +586,7 @@ def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     global scale — already metric)."""
     vcfg = _vipe_cfg(recon_cfg)
     prior_source = recon_cfg.get("prior_source", "da3")
+    stride = max(1, int(recon_cfg.get("frame_stride", 1)))   # 1-of-N temporal subsample
     # replace=True (UI "Replace existing outputs") → run from scratch.
     # replace=False → RESUME: detect what's already on disk and run only the missing
     # sub-steps. Each step's output is the checkpoint for the next.
@@ -595,8 +614,11 @@ def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # 1. Prior source → vipe_priors/. Skip if ViPE output (run/depth) or priors exist.
     if replace or not (have_vipe_run or have_vipe_depth or have_priors):
         if prior_source == "da3":
-            # DA3 streaming over ALL frames (no keyframe filter) — depth+poses only.
-            _run_da3(pipe, frames_dir, output_dir, None, recon_cfg, config, lean=True)
+            # DA3 streaming on the strided frame set (1-of-N) — depth+poses only.
+            sel = _write_stride_selection(frames_dir, output_dir, stride) if stride > 1 else None
+            if stride > 1:
+                pipe.send_log(f"Frame stride: 1-of-{stride} (DA3 + ViPE use the same subset)")
+            _run_da3(pipe, frames_dir, output_dir, sel, recon_cfg, config, lean=True)
             _cp = float(recon_cfg.get("da3", {}).get("prior_conf_percentile", 35))
             _extract_da3_priors(pipe, frames_dir, output_dir, conf_percentile=_cp)
             # da3_run fully consumed (vipe_priors is self-contained) → free it BEFORE
@@ -617,7 +639,7 @@ def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     #    (monocular) we feed ONLY depth and let ViPE solve poses freely.
     if replace or not (have_vipe_run or have_vipe_depth):
         _run_vipe_with_priors(pipe, frames_dir, output_dir, vcfg,
-                              inject_poses=(prior_source == "stray"))
+                              inject_poses=(prior_source == "stray"), stride=stride)
     else:
         pipe.send_log("[resume] vipe_run present → skipping ViPE")
 

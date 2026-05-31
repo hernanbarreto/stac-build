@@ -267,6 +267,10 @@ bim:
 reconstruction:
   backend: "da3"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
+  # Temporal subsample for the ViPE pipeline (DA3 priors + ViPE). 30fps video is
+  # highly redundant; 1-of-N halves/thirds the work with ~no coverage loss. Applies
+  # to DA3 and ViPE on the SAME frame subset. 1 = all frames. (Monocular AND stray.)
+  frame_stride: 2
   use_keyframes: false                 # ViPE arch: NO cosine keyframes — fuse ALL frames
 
   # Pose source: "da3" (legacy DA3 chunk loop-closure) | "vipe".
