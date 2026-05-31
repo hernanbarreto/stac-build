@@ -272,13 +272,14 @@ def _resolve_da3_frame_source(output_dir: Path, conf_percentile: Optional[float]
 def _resolve_vipe_depth(output_dir: Path, conf_percentile: Optional[float] = None
                         ) -> Optional[Tuple[Callable[[int], Optional[dict]],
                                             Tuple[int, int]]]:
-    """ViPE pipeline depth: ``da3_depth/{frame:06d}.npz`` — DA3 metric depth used
-    DIRECTLY (no per-frame calibration), bundling depth + intrinsics (+ conf), keyed
-    by ORIGINAL frame number. The ViPE poses (camera_poses.txt, scaled by the single
-    global g) bring the cameras into this DA3 metric. Same per-frame loader shape as
+    """ViPE pipeline depth: ``vipe_depth/{frame:06d}.npz`` — metric ViPE depth
+    (multi-view consistent, already × global g), bundling depth + intrinsics, keyed
+    by ORIGINAL frame number. The ViPE poses (camera_poses.txt, also × g) are in the
+    same metric. ViPE depth fuses cleanly (co-optimized with the poses), unlike
+    per-image DA3 isolated depth. Same per-frame loader shape as
     _resolve_da3_frame_source so the integrate loop uses each frame's own K.
     Returns ``(loader, (H, W))`` or None."""
-    cal_dir = output_dir / "da3_depth"
+    cal_dir = output_dir / "vipe_depth"
     if not cal_dir.exists():
         return None
     sample = next(iter(cal_dir.glob("[0-9]*.npz")), None)
@@ -444,7 +445,7 @@ def _load_da3_refined_poses(output_dir: Path, frames_dir: Path
                                      dtype=np.float64).reshape(4, 4))
 
     # ViPE pipeline: a camera_frames.txt sidecar gives the REAL frame number per
-    # pose line → key by that (matches da3_depth/{frame:06d}.npz and the
+    # pose line → key by that (matches vipe_depth/{frame:06d}.npz and the
     # per-point frame_global). This is the all-frames-indexed path.
     frames_txt = poses_txt.parent / "camera_frames.txt"
     if not frames_txt.exists():
@@ -947,7 +948,7 @@ def export_tsdf_scene(
     )
 
     # Depth source priority:
-    #   1. ViPE pipeline: DA3 metric depth direct (da3_depth/) + scaled ViPE poses
+    #   1. ViPE pipeline: metric ViPE depth (vipe_depth/, multi-view consistent) + ViPE poses
     #   2. DA3 / DA3+LiDAR fused (da3_run / da3_full)
     #   3. raw LiDAR
     _cp = da3_conf_percentile if da3_conf_percentile > 0 else None
@@ -956,9 +957,8 @@ def export_tsdf_scene(
     frame_loader = None
     if vipe_src is not None:
         frame_loader, (depth_h, depth_w) = vipe_src
-        depth_kind = ("DA3 metric depth (direct) · ViPE poses"
-                      + (f" · conf≥p{da3_conf_percentile:.0f}" if _cp else ""))
-        logger.info(f"[TSDF-scene] per-frame source: DA3 metric depth (direct) + ViPE poses "
+        depth_kind = "ViPE metric depth (multi-view) · ViPE poses"
+        logger.info(f"[TSDF-scene] per-frame source: metric ViPE depth + ViPE poses "
                     f"@ {depth_w}x{depth_h}")
     elif da3_depth is not None:
         depth_loader, (depth_h, depth_w) = da3_depth

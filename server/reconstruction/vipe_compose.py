@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
 Pose-driven cloud composer for the ViPE SLAM pipeline. Back-projects each frame's
-DA3 metric depth (used DIRECTLY — no per-frame calibration) with its ViPE c2w pose
-(translations pre-scaled by the single global g into DA3 metric) into world space,
-emitting chunk PLYs + chunk_*_origins.npz (frame_global, pixel_row, pixel_col,
-confidence) 1:1 with the points — the SAME schema map_worker._generate_origins /
-CloudComPy expect, so the downstream merge + cleaned_cloud + TSDF are unchanged.
+metric ViPE depth (vipe_depth/, already × global g) with its ViPE c2w pose
+(translations also × g) into world space, emitting chunk PLYs + chunk_*_origins.npz
+(frame_global, pixel_row, pixel_col, confidence) 1:1 with the points — the SAME
+schema map_worker._generate_origins / CloudComPy expect, so the downstream merge +
+cleaned_cloud + TSDF are unchanged. ViPE depth is multi-view consistent (co-optimized
+with the poses) so it fuses cleanly, unlike per-image DA3 isolated depth.
 
 Replaces DA3's world_points chunks when pose_source == "vipe". frame_global is the
 ORIGINAL frame number, not a keyframe index.
 
-Runs in the da3 env (numpy + open3d; DA3 depth is plain npz). No EXR/ViPE.
+Runs in the da3 env (numpy + open3d; vipe_depth is plain npz). No EXR/ViPE.
 """
 import json
 from pathlib import Path
@@ -35,24 +36,24 @@ def _load_rgb_at(frames_dir: Path, frame: int, H: int, W: int) -> Optional[np.nd
 def compose_chunks_from_vipe(
     output_dir: Path,
     frames_dir: Path,
-    da3_dir: Path,                       # da3_depth (npz: depth,intrinsics,conf) — used DIRECTLY
+    depth_dir: Path,                     # vipe_depth (npz: depth(metric, ×g), intrinsics)
     pose_map: Dict[int, np.ndarray],     # frame# -> scaled c2w (DA3 metric)
     depth_min: float = 0.3,
     depth_max: float = 8.0,
     edge_thresh: float = 0.04,
-    conf_percentile: float = 25.0,       # drop per-frame bottom 25% confidence (keep 75%)
+    conf_percentile: float = 25.0,       # drop per-frame bottom % conf (only if npz has conf)
     voxel_size: float = 0.005,           # voxel-dedup per chunk (m) — bounds disk
     chunk_size: int = 120,               # frames per chunk PLY
     progress_cb: Optional[Callable[[int, str], None]] = None,
 ) -> int:
-    """Compose chunk_*.ply + chunk_*_origins.npz from DA3 metric depth + scaled ViPE
+    """Compose chunk_*.ply + chunk_*_origins.npz from metric ViPE depth + scaled ViPE
     poses. Returns the number of chunks written. Points/origins are 1:1 from the same mask."""
-    output_dir = Path(output_dir); frames_dir = Path(frames_dir); da3_dir = Path(da3_dir)
-    # only frames with both a DA3 depth map and a pose
+    output_dir = Path(output_dir); frames_dir = Path(frames_dir); depth_dir = Path(depth_dir)
+    # only frames with both a depth map and a pose
     frames = sorted(f for f in pose_map
-                    if (da3_dir / f"{int(f):06d}.npz").exists())
+                    if (depth_dir / f"{int(f):06d}.npz").exists())
     if not frames:
-        raise RuntimeError("[vipe-compose] no frames with DA3 depth + pose")
+        raise RuntimeError("[vipe-compose] no frames with depth + pose")
 
     # clear any prior chunk artifacts (no leftovers / no duplicates)
     for old in output_dir.glob("chunk_*"):
@@ -64,7 +65,7 @@ def compose_chunks_from_vipe(
         grp = frames[ci:ci + chunk_size]
         pts, cols, fg, pr, pc, cf = [], [], [], [], [], []
         for fr in grp:
-            z = np.load(da3_dir / f"{fr:06d}.npz")
+            z = np.load(depth_dir / f"{fr:06d}.npz")
             d = z["depth"].astype(np.float32); K = z["intrinsics"]
             conf = z["conf"].astype(np.float32) if "conf" in z else None
             H, W = d.shape

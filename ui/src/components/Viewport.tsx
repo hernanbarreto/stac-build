@@ -1879,6 +1879,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         setFlythroughActive: (active: boolean) => {
             // disable orbit controls while the flythrough drives the camera
             if (controlsRef.current) controlsRef.current.enabled = !active
+            // hide the camera-pose markers during playback; restore on close
+            // (on normal load they're shown + toggleable). cameraGroupRef holds them.
+            if (cameraGroupRef.current) cameraGroupRef.current.visible = !active
         },
         setCameraToPose: (c2wRowMajor: number[]) => {
             const cam = cameraRef.current

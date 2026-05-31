@@ -96,12 +96,19 @@ scene_analysis:
     - { label: "ceiling" }
 
 
+# ── Frame Quality (blur detection) ─────────────────────────────────
+# In the ViPE prior-driven architecture ViPE + DA3 priors run on ALL frames,
+# so blur filtering is OFF (it does not execute when enabled: false).
+frame_quality:
+  enabled: false
+
 # ── Frame Selection (visual novelty filter) ────────────────────────
 # Two methods: DINO cosine similarity (default, more reliable) or ORB-SLAM
 # H/F ratio (legacy fallback). Consumed by frame_selector.py and triggered
 # at start of reconstruction in workers/map_worker.py.
+# OFF for the ViPE architecture: cosine keyframes are not used (all-frames fusion).
 frame_selection:
-  enabled: true
+  enabled: false
   method: "dino"                       # "dino" | "hf_ratio"
 
   # DINO settings
@@ -260,12 +267,19 @@ bim:
 reconstruction:
   backend: "da3"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
-  use_keyframes: true                  # use frame_selector keyframes (recommended)
+  use_keyframes: false                 # ViPE arch: NO cosine keyframes — fuse ALL frames
 
-  # Pose source: "da3" (DA3 chunk loop-closure) | "vipe" (ViPE continuous SLAM).
-  # vipe → DA3 depth over ALL frames (metric ref) + ViPE poses+depth (all frames) +
-  # per-frame depth calibration + cloud composed from ViPE poses. ViPE IS the SLAM.
+  # Pose source: "da3" (legacy DA3 chunk loop-closure) | "vipe".
+  # vipe → ViPE is the UNIVERSAL refinement engine, ALWAYS run, fed per-frame PRIORS
+  # (metric depth + poses). ViPE consumes them natively (METRIC_DEPTH = BA depth
+  # constraint → continuous metric anchor, kills drift; POSE = trajectory seed →
+  # smooths chunk jumps). Output: refined metric poses + depth → cloud + TSDF.
   pose_source: "vipe"
+  # Prior source for ViPE (where depth+poses come from), by available data:
+  #   "da3"   → DA3 streaming (all frames, blur-only). We take its per-frame depth +
+  #             poses (NOT its chunks) and inject them into ViPE.
+  #   "stray" → ARKit poses + LiDAR depth.  [future]
+  prior_source: "da3"
   vipe:
     venv: "/workspace/stac-build/vendor/vipe/.venv"
     vipe_dir: "/workspace/stac-build/vendor/vipe"

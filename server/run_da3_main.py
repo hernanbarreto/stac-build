@@ -76,11 +76,16 @@ def main():
         torch.cuda.empty_cache()
     gc.collect()
 
-    all_ply_path = os.path.join(save_dir, "pcd/combined_pcd.ply")
-    input_dir = os.path.join(save_dir, "pcd")
-    print("Saving all the point clouds")
-    merge_ply_files(input_dir, all_ply_path)
-    print("DA3-Streaming done.")
+    # Lean prior-source mode: we only need depth + poses (read directly from
+    # da3_run), so skip merging the per-chunk PLYs into combined_pcd.ply.
+    if os.environ.get("DA3_LEAN_PRIORS") == "1":
+        print("DA3-Streaming done (lean priors: skipped combined-PLY merge).")
+    else:
+        all_ply_path = os.path.join(save_dir, "pcd/combined_pcd.ply")
+        input_dir = os.path.join(save_dir, "pcd")
+        print("Saving all the point clouds")
+        merge_ply_files(input_dir, all_ply_path)
+        print("DA3-Streaming done.")
 
 
 if __name__ == "__main__":

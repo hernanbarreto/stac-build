@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """
-Compute the SINGLE global scale g that maps ViPE pose translations into the DA3
-depth metric, so DA3 depth (used DIRECTLY, no per-frame calibration) is coherent
-with ViPE poses.
+Export ViPE's REFINED depth (EXR → per-frame npz) for the fusion keyframes.
 
-ViPE pose+depth are self-consistent at ViPE's scale; DA3 depth is metric, with
-DA3_depth ≈ g · ViPE_depth. So g = robust median of (DA3_depth / ViPE_depth) over
-co-located pixels across a sample of frames. Apply g to ViPE pose translations.
+In the prior-driven architecture ViPE runs WITH metric-depth + pose priors, so its
+output depth is already metric and multi-view consistent — there is NO global scale
+to estimate anymore (g = 1). This step only transcodes the ViPE EXR depth + ViPE
+intrinsics into plain npz that the composer (da3 env) and TSDF (server env) read
+without OpenEXR. Exported only for the fusion keyframes to bound disk.
 
-(We deliberately do NOT do per-frame affine calibration anymore — it injected
-~6cm median depth error + ~10% garbage-scale frames → noisy TSDF. DA3 depth is
-clean and used as-is; only the global pose scale is needed.)
-
-Runs in ViPE's .venv (reads ViPE EXR depth). Writes vipe_run/pose_scale.json.
+Runs in ViPE's .venv (reads the ViPE EXR). Writes vipe_depth/{frame:06d}.npz
+{depth (metric), intrinsics} + pose_scale.json (always 1.0, for the pose writer).
 
     vendor/vipe/.venv/bin/python server/reconstruction/vipe_calibrate.py \
-        --vipe-out <session>/output/vipe_run \
-        --da3-depth <session>/output/da3_depth \
-        --out <session>/output/vipe_run/pose_scale.json [--max-frames 60]
+        --vipe-out <out>/vipe_run --depth-out <out>/vipe_depth \
+        --out <out>/vipe_run/pose_scale.json [--selected-frames <sf>.json]
 """
 import argparse
 import json
@@ -41,63 +37,63 @@ def read_vipe_exr(zf: zipfile.ZipFile, orig_frame: int):
     return z
 
 
+def _k_for_res(fxfycxcy, H_exr, W_exr):
+    fx, fy, cx, cy = [float(v) for v in fxfycxcy]
+    W_v, H_v = max(1.0, 2.0 * cx), max(1.0, 2.0 * cy)
+    sx, sy = W_exr / W_v, H_exr / H_v
+    if abs(sx - 1) > 0.02 or abs(sy - 1) > 0.02:
+        fx *= sx; cx *= sx; fy *= sy; cy *= sy
+    return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], np.float64)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--vipe-out", required=True, type=Path)
-    ap.add_argument("--da3-depth", required=True, type=Path)
+    ap.add_argument("--depth-out", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--max-frames", type=int, default=60)
-    ap.add_argument("--depth-lo", type=float, default=0.3)
-    ap.add_argument("--depth-hi", type=float, default=6.0)
+    ap.add_argument("--selected-frames", default=None,
+                    help="selected_frames.json — restrict export to fusion keyframes")
     args = ap.parse_args()
 
-    inds = np.asarray(np.load(args.vipe_out / "pose" / "frames.npz")["inds"]).astype(int)
+    intr = np.load(args.vipe_out / "intrinsics" / "frames.npz")
+    intr_map = {int(fi): intr["data"][i] for i, fi in enumerate(np.asarray(intr["inds"]).astype(int))}
     zdepth = zipfile.ZipFile(args.vipe_out / "depth" / "frames.zip")
-    da3_files = sorted(int(p.stem) for p in args.da3_depth.glob("[0-9]*.npz"))
-    if not da3_files:
-        raise RuntimeError(f"[scale] no DA3 depth in {args.da3_depth}")
+    exr_frames = sorted(int(n[:-4]) for n in zdepth.namelist() if n.endswith(".exr"))
 
-    # sample evenly across the DA3-covered frames
-    step = max(1, len(da3_files) // args.max_frames)
-    sample = da3_files[::step]
-    inds_set = set(int(x) for x in inds)
+    keep = None
+    if args.selected_frames and Path(args.selected_frames).exists():
+        sf = json.load(open(args.selected_frames))
+        names = sf if isinstance(sf, list) else sf.get("selected_files", sf.get("selected", []))
+        keep = {int(Path(n).stem) for n in names}
 
-    ratios = []
-    for fr in sample:
-        if fr not in inds_set:
+    args.depth_out.mkdir(parents=True, exist_ok=True)
+    n = 0; last = None
+    for fr in exr_frames:
+        if keep is not None and fr not in keep:
+            continue
+        if fr not in intr_map:
             continue
         dv = read_vipe_exr(zdepth, fr)
         if dv is None:
             continue
-        try:
-            dd = np.load(args.da3_depth / f"{fr:06d}.npz")["depth"].astype(np.float32)
-        except Exception:
-            continue
-        Hd, Wd = dd.shape
-        ys = np.linspace(0, dv.shape[0] - 1, Hd).astype(int)
-        xs = np.linspace(0, dv.shape[1] - 1, Wd).astype(int)
-        dvr = dv[np.ix_(ys, xs)]
-        m = ((dd > args.depth_lo) & (dd < args.depth_hi) &
-             (dvr > args.depth_lo) & (dvr < args.depth_hi) &
-             np.isfinite(dd) & np.isfinite(dvr))
-        if m.sum() < 500:
-            continue
-        # per-frame median ratio; aggregate medians across frames (robust)
-        ratios.append(float(np.median(dd[m] / dvr[m])))
+        K = _k_for_res(intr_map[fr], dv.shape[0], dv.shape[1])
+        np.savez_compressed(args.depth_out / f"{fr:06d}.npz",
+                            depth=dv.astype(np.float32), intrinsics=K.astype(np.float64))
+        n += 1; last = dv.shape
 
-    if not ratios:
-        g = 1.0
-        print("[scale] WARNING: no overlap to estimate scale — using g=1.0", flush=True)
-    else:
-        g = float(np.median(ratios))
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    with open(args.out, "w") as f:
-        json.dump({"pose_scale": g, "n_frames": len(ratios),
-                   "ratio_min": float(np.min(ratios)) if ratios else None,
-                   "ratio_max": float(np.max(ratios)) if ratios else None}, f)
-    print(f"[scale] global ViPE→DA3-metric pose scale g={g:.4f} "
-          f"(median over {len(ratios)} frames)", flush=True)
+    json.dump({"pose_scale": 1.0}, open(args.out, "w"))   # ViPE output is metric (priors)
+    print(f"[vipe-depth] exported {n} ViPE depth maps "
+          f"({last[1]}x{last[0]} px) → {args.depth_out.name}/ (metric, g=1)", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    import traceback
+    try:
+        main()
+    except Exception:
+        print("[vipe-depth] FATAL — traceback follows:", flush=True)
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.exit(1)
