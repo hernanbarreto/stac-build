@@ -870,6 +870,64 @@ async def serve_bim_file(session_id: str, filename: str):
         headers={"Cache-Control": "public, max-age=3600"},
     )
 
+
+@app.get("/api/sessions/{session_id}/video")
+async def serve_session_video(session_id: str):
+    """Serve the session's source video (for the synced video↔3D flythrough)."""
+    from fastapi.responses import FileResponse
+    ctx = _ctx(session_id)
+    for ext in (".mp4", ".mov", ".avi", ".mkv", ".m4v"):
+        p = ctx.source_dir / f"source_video{ext}"
+        if p.exists():
+            return FileResponse(str(p), media_type="video/mp4",
+                                headers={"Accept-Ranges": "bytes"})
+    raise HTTPException(status_code=404, detail="source video not found")
+
+
+@app.get("/api/sessions/{session_id}/flythrough")
+async def get_flythrough(session_id: str):
+    """Per-frame ViPE camera poses for the synced flythrough. Returns ALL frames'
+    c2w poses scaled to the cloud's metric frame (same frame as cleaned_cloud), so
+    the 3D camera can follow the video frame-by-frame. The UI applies whatever
+    alignment transform it uses for the displayed cloud to this path too."""
+    import numpy as np
+    ctx = _ctx(session_id)
+    vipe_out = ctx.output_dir / "vipe_run"
+    pose_npz = vipe_out / "pose" / "frames.npz"
+    if not pose_npz.exists():
+        raise HTTPException(status_code=404, detail="no ViPE poses (run reconstruction with pose_source=vipe)")
+    d = np.load(str(pose_npz))
+    inds = np.asarray(d["inds"]).astype(int)
+    mats = np.asarray(d["data"], dtype=np.float64)  # (N,4,4) c2w
+    # global metric scale (same factor compose used) — reuse the calibration manifest
+    scale = 1.0
+    try:
+        sys.path.insert(0, str(SERVER_DIR))
+        from reconstruction.vipe_poses import global_scale_from_calibration
+        cal_dir = vipe_out / "depth_calibrated"
+        if (cal_dir / "calibration_manifest.json").exists():
+            scale = global_scale_from_calibration(cal_dir)
+    except Exception:
+        pass
+    order = np.argsort(inds)
+    frames = inds[order].tolist()
+    poses = []
+    for i in order:
+        c2w = mats[i].copy()
+        c2w[:3, 3] *= scale
+        poses.append([float(x) for x in c2w.reshape(-1)])
+    K = None
+    ip = vipe_out / "intrinsics" / "frames.npz"
+    if ip.exists():
+        try:
+            z = np.load(str(ip)); kd = np.asarray(z["data"])
+            K = [float(x) for x in kd[0][:4]]  # fx fy cx cy (representative)
+        except Exception:
+            pass
+    return {"n_frames": len(frames), "frames": frames, "poses": poses,
+            "scale": float(scale), "intrinsics": K,
+            "video_url": f"/api/sessions/{session_id}/video"}
+
 # Mount auth routes
 from auth.routes_auth import router as auth_router
 app.include_router(auth_router)

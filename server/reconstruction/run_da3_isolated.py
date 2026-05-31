@@ -25,6 +25,8 @@ def main():
     ap.add_argument("--model", default="depth-anything/DA3NESTED-GIANT-LARGE-1.1")
     ap.add_argument("--process-res", type=int, default=504)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--selected-frames", default=None,
+                    help="selected_frames.json — restrict inference to these keyframes")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -42,6 +44,12 @@ def main():
 
     frames = sorted(glob.glob(str(args.frames_dir / "*.jpg")) +
                     glob.glob(str(args.frames_dir / "*.png")))
+    if args.selected_frames and Path(args.selected_frames).exists():
+        import json
+        sf = json.load(open(args.selected_frames))
+        keep = set(sf if isinstance(sf, list) else sf.get("selected_files", []))
+        frames = [f for f in frames if Path(f).name in keep]
+        print(f"[da3-iso] restricted to {len(frames)} keyframes (selected_frames)", flush=True)
     print(f"[da3-iso] {len(frames)} frames", flush=True)
 
     done = 0
@@ -51,9 +59,11 @@ def main():
         if out_npz.exists():
             done += 1
             continue
-        # N=1 → isolated monocular metric depth (no cross-frame influence)
+        # N=1 → isolated monocular metric depth (no cross-frame influence).
+        # export_dir=None → nothing written; export_format must stay a valid
+        # string (DA3 does `"gs" in export_format` before the export_dir check).
         pred = model.inference([fp], process_res=args.process_res,
-                               export_dir=None, export_format=None)
+                               export_dir=None, export_format="mini_npz")
         depth = np.asarray(pred.depth[0], dtype=np.float32)            # (H,W)
         K = (np.asarray(pred.intrinsics[0], dtype=np.float64)
              if pred.intrinsics is not None else None)

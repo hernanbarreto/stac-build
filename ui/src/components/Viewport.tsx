@@ -74,6 +74,9 @@ export interface ViewportHandle {
     reloadReconScene: (sessionId: string) => Promise<void>
     setReconElementVisibility: (instanceId: number, visible: boolean) => void
     clearReconScene: () => void
+    // Flythrough (synced video↔3D): drive the camera to a per-frame c2w pose.
+    setFlythroughActive: (active: boolean) => void
+    setCameraToPose: (c2wRowMajor: number[]) => void
 }
 
 // Vertex shader — matches FusionRenderer.js point size formula
@@ -1871,6 +1874,37 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 cam.lookAt(0, 0, 0)
                 ctrl.target.set(0, 0, 0)
                 ctrl.update()
+            }
+        },
+        setFlythroughActive: (active: boolean) => {
+            // disable orbit controls while the flythrough drives the camera
+            if (controlsRef.current) controlsRef.current.enabled = !active
+        },
+        setCameraToPose: (c2wRowMajor: number[]) => {
+            const cam = cameraRef.current
+            const ctrl = controlsRef.current
+            if (!cam || !c2wRowMajor || c2wRowMajor.length < 16) return
+            // c2w in the cloud's NATIVE frame (row-major). fromArray expects
+            // column-major → transpose. Apply the same group transform used for
+            // the displayed cloud (floor align). Convert OpenCV cam convention
+            // (+Z forward, +Y down) → three.js (-Z forward, +Y up) via diag(1,-1,-1).
+            // NOTE: if the flythrough view comes out mirrored/upside-down, this
+            // CV→GL flip is the knob to adjust.
+            const c2w = new THREE.Matrix4().fromArray(c2wRowMajor).transpose()
+            const cvToGl = new THREE.Matrix4().makeScale(1, -1, -1)
+            c2w.multiply(cvToGl)
+            const groupM = cameraGroupRef.current
+                ? cameraGroupRef.current.matrixWorld.clone()
+                : new THREE.Matrix4()
+            const world = groupM.multiply(c2w)
+            const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), scl = new THREE.Vector3()
+            world.decompose(pos, quat, scl)
+            cam.position.copy(pos)
+            cam.quaternion.copy(quat)
+            cam.updateMatrixWorld(true)
+            if (ctrl) {
+                const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(quat)
+                ctrl.target.copy(pos).add(fwd.multiplyScalar(2.0))
             }
         },
         clearScene,

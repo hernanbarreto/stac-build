@@ -265,7 +265,7 @@ reconstruction:
   # Pose source: "da3" (DA3 chunk loop-closure) | "vipe" (ViPE continuous SLAM).
   # vipe → DA3 depth over ALL frames (metric ref) + ViPE poses+depth (all frames) +
   # per-frame depth calibration + cloud composed from ViPE poses. ViPE IS the SLAM.
-  pose_source: "da3"
+  pose_source: "vipe"
   vipe:
     venv: "/workspace/stac-build/vendor/vipe/.venv"
     vipe_dir: "/workspace/stac-build/vendor/vipe"

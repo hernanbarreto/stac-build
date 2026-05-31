@@ -39,6 +39,8 @@ def compose_chunks_from_vipe(
     depth_min: float = 0.3,
     depth_max: float = 8.0,
     edge_thresh: float = 0.04,
+    conf_percentile: float = 15.0,       # drop per-frame bottom 15% confidence (keep 85%)
+    voxel_size: float = 0.005,           # voxel-dedup per chunk (m) — bounds disk
     chunk_size: int = 120,               # frames per chunk PLY
     progress_cb: Optional[Callable[[int, str], None]] = None,
 ) -> int:
@@ -71,6 +73,10 @@ def compose_chunks_from_vipe(
             gx = np.abs(np.diff(dd, axis=1, prepend=dd[:, :1]))
             gy = np.abs(np.diff(dd, axis=0, prepend=dd[:1, :]))
             m &= (gx < edge_thresh) & (gy < edge_thresh)
+            # confidence filter: drop the per-frame bottom `conf_percentile`%
+            if conf is not None and conf_percentile > 0 and m.any():
+                thr = float(np.percentile(conf[m], conf_percentile))
+                m &= (conf >= thr)
             if not m.any():
                 continue
             vv, uu = np.nonzero(m); zz = d[vv, uu].astype(np.float64)
@@ -89,16 +95,24 @@ def compose_chunks_from_vipe(
         if not pts:
             continue
         P = np.concatenate(pts); C = np.concatenate(cols)
+        FG = np.concatenate(fg); PR = np.concatenate(pr)
+        PC = np.concatenate(pc); CF = np.concatenate(cf)
+        # voxel dedup: keep one point per voxel cell. np.unique on the voxel key
+        # gives a single index per cell, applied to points AND origins so the
+        # 1:1 traceability (frame_global, pixel, confidence) is preserved.
+        if voxel_size > 0:
+            keys = np.floor(P / voxel_size).astype(np.int64)
+            _, idx = np.unique(keys, axis=0, return_index=True)
+            idx.sort()
+            P, C = P[idx], C[idx]
+            FG, PR, PC, CF = FG[idx], PR[idx], PC[idx], CF[idx]
         cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(P.astype(np.float64)))
         cloud.colors = o3d.utility.Vector3dVector(C.astype(np.float64) / 255.0)
         o3d.io.write_point_cloud(str(output_dir / f"chunk_{n_chunks:03d}.ply"), cloud)
-        # origins 1:1 with the PLY points (same order, same mask)
+        # origins 1:1 with the PLY points (same order, same voxel-dedup index)
         np.savez_compressed(
             output_dir / f"chunk_{n_chunks:03d}_origins.npz",
-            frame_global=np.concatenate(fg),
-            pixel_row=np.concatenate(pr),
-            pixel_col=np.concatenate(pc),
-            confidence=np.concatenate(cf),
+            frame_global=FG, pixel_row=PR, pixel_col=PC, confidence=CF,
             scaled_resolution=np.array([H, W], np.int32),
         )
         with open(output_dir / f"chunk_{n_chunks:03d}_meta.json", "w") as f:

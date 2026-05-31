@@ -6,6 +6,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
 import './App.css'
 import Viewport, { ViewportHandle, SegmentInstance } from './components/Viewport'
+import { SyncPlayer } from './components/SyncPlayer'
 import { BIMAnalysisPanel } from './components/BIMAnalysisPanel'
 import TeamPanel from './components/TeamPanel'
 import WebRTCCall from './components/WebRTCCall'
@@ -95,6 +96,7 @@ function App() {
   const [openMenu, setOpenMenu] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<ViewportHandle>(null)
+  const [flythroughOpen, setFlythroughOpen] = useState<string | null>(null)
   const [adminOpen, setAdminOpen] = useState(false)
 
   // ── Sábana state ──
@@ -1538,6 +1540,12 @@ function App() {
                               style={!s.hasCloud ? { opacity: 0.3 } : undefined}
                               onClick={(e) => { e.stopPropagation(); handleSessionLoad(s.id) }}
                             ><FolderOpen size={14} /></button>
+                            <button className="session-action-btn flythrough"
+                              title={s.hasCloud ? 'Flythrough: video ↔ escena 3D' : 'Sin nube todavía'}
+                              disabled={!s.hasCloud}
+                              style={!s.hasCloud ? { opacity: 0.3 } : undefined}
+                              onClick={(e) => { e.stopPropagation(); handleSessionLoad(s.id); setFlythroughOpen(s.id) }}
+                            ><Play size={14} /></button>
                             {s.id in extractingSessions ? (
                               <button className="session-action-btn reconstruct"
                                 title={`Extracting frames… ${extractingSessions[s.id] || 0}%`}
@@ -2179,8 +2187,17 @@ function App() {
           </div>
         )}
 
+        {/* Synced video↔3D flythrough overlay (shrinks the viewport to the right half) */}
+        {flythroughOpen && (
+          <SyncPlayer
+            sessionId={flythroughOpen}
+            viewportRef={viewportRef}
+            onClose={() => setFlythroughOpen(null)}
+          />
+        )}
+
         {/* 3D Viewport — don't hide during pipeline runs (pipeline panel shows progress) */}
-        <div className={`viewport-container${sessionLoading && !(pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession) ? ' viewport-hidden' : ''}`}>
+        <div className={`viewport-container${sessionLoading && !(pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession) ? ' viewport-hidden' : ''}${flythroughOpen ? ' viewport-flythrough' : ''}`}>
           <Viewport
             ref={viewportRef}
             pointSize={pointSize}

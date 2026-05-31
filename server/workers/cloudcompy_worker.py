@@ -113,6 +113,21 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         size_mb = output_ply.stat().st_size / (1024 * 1024)
         pipe.send_log(f"Cleaned cloud: {size_mb:.1f} MB")
 
+        # Chunks are now redundant — their points + per-point traceability are
+        # baked into cleaned_cloud.ply, and nothing downstream (Potree, TSDF,
+        # segmentation) reads the chunks. Delete them (gate to keep if ever
+        # re-running ONLY cloudcompy without re-running reconstruction).
+        if config.get("postprocessing", {}).get("delete_chunks_after_merge", True):
+            removed = 0
+            for pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
+                for f in output_dir.glob(pat):
+                    try:
+                        f.unlink(); removed += 1
+                    except Exception:
+                        pass
+            if removed:
+                pipe.send_log(f"[cleanup] removed {removed} redundant chunk files (baked into cleaned_cloud)")
+
         # ── Link to project merged/ dir (new-style projects) ──
         # SourceContext.merged_cloud expects merged/merged_cloud.ply
         # but the pipeline writes to src_xxx/output/cleaned_cloud.ply.

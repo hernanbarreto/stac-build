@@ -3912,3 +3912,45 @@
   margin-top: 4px;
   font-style: italic;
 }
+/* ── Synced video↔3D flythrough ───────────────────────────────────── */
+/* viewport shrinks to the RIGHT half (above the control row); the video
+   fills the LEFT half; the thin control row spans BOTH at the bottom. */
+.viewport-container.viewport-flythrough {
+  position: absolute;
+  left: 50%;
+  right: 0;
+  top: 0;
+  bottom: 44px;
+  flex: none;
+}
+.sync-player-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 25;
+  pointer-events: none;          /* right half passes through to the live 3D */
+}
+.sync-video-col {
+  position: absolute;
+  left: 0; width: 50%;
+  top: 0; bottom: 44px;
+  background: #000;
+  pointer-events: auto;
+  display: flex; align-items: center; justify-content: center;
+}
+.sync-control-row {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 44px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 12px;
+  background: var(--bg-panel, #16181d);
+  border-top: 1px solid var(--border, #2a2d34);
+  pointer-events: auto;
+}
+.sync-seek { flex: 1; cursor: pointer; }
+.sync-btn {
+  background: none; border: none; color: var(--text, #d8dbe0);
+  cursor: pointer; display: flex; align-items: center; padding: 4px;
+}
+.sync-btn:hover { color: var(--accent, #5b9dd9); }
+.sync-err { color: #ff8888; font-size: 12px; padding: 12px; text-align: center; }
