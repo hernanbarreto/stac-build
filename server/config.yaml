@@ -301,12 +301,21 @@ reconstruction:
     conf_min_normalized: 0.25          # drop bottom 25% by confidence (0 = keep all)
     sample_ratio: 1.0
     save_depth_conf_result: true       # save per-frame depth+conf .npz
+    # ViPE depth-PRIOR confidence filter: before feeding DA3 depth to ViPE, zero-out
+    # the bottom N% lowest-confidence pixels PER FRAME (far/unreliable depth corrupts
+    # ViPE → "onion" duplications). 35 = keep top 65%. 0 = off. Tune: more onion →
+    # higher (stricter); too sparse / ViPE loses scale → lower.
+    prior_conf_percentile: 35
 
   # LiDAR / Stray Scanner / Hybrid
   lidar:
     trust_range: 5.0                   # max LiDAR depth (m) — iPad LiDAR ≈ 5m
     confidence_threshold: 1            # 0=low, 1=medium, 2=high
     fallback_to_da3: true              # use DA3 if no Stray data found
+    # ViPE depth-PRIOR confidence for stray: ARKit conf is DISCRETE 0/1/2 (NOT a
+    # percentile like DA3 — distinta escala). Keep pixels with conf >= this (far
+    # unreliable LiDAR points come as 0/1). 2 = only high. Used when prior_source=stray.
+    prior_conf_min: 2
     stride: 4                          # frame stride for Stray depth extraction
 
   # MapAnything (VGGT-Long) — legacy

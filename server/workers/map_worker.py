@@ -449,16 +449,19 @@ def _clean_da3_scratch(da3_dir: Path):
         shutil.rmtree(da3_dir / name, ignore_errors=True)
 
 
-def _extract_da3_priors(pipe: WorkerPipe, frames_dir: Path, output_dir: Path):
+def _extract_da3_priors(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
+                        conf_percentile: float = 0.0):
     """Extract per-frame depth + c2w poses from the DA3 streaming run (da3_run/)
     into vipe_priors/ (depth/*.npy + poses.txt + frames.txt) for ViPE injection.
+    conf_percentile > 0 zeroes-out the bottom N% lowest-confidence DA3 depth pixels
+    per frame (so ViPE isn't corrupted by far/unreliable depth → no onion).
     We take ONLY DA3's depth + poses, not its chunks. Runs in the da3 env (numpy)."""
     server_dir = Path(__file__).resolve().parent.parent
     inner = (f"source {_conda_root()}/etc/profile.d/conda.sh && "
              f"conda activate {os.environ.get('DA3_CONDA_ENV', 'da3')} && "
              f"python -u {server_dir / 'reconstruction' / 'extract_da3_priors.py'} "
              f"--da3-run {output_dir / 'da3_run'} --frames-dir {frames_dir} "
-             f"--out {output_dir / 'vipe_priors'}")
+             f"--out {output_dir / 'vipe_priors'} --conf-percentile {conf_percentile}")
     pipe.send_progress(40, "Extracting DA3 depth+poses → ViPE priors...", stage="reconstruction")
     proc = subprocess.Popen(["bash", "-lc", inner], stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -594,7 +597,8 @@ def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         if prior_source == "da3":
             # DA3 streaming over ALL frames (no keyframe filter) — depth+poses only.
             _run_da3(pipe, frames_dir, output_dir, None, recon_cfg, config, lean=True)
-            _extract_da3_priors(pipe, frames_dir, output_dir)
+            _cp = float(recon_cfg.get("da3", {}).get("prior_conf_percentile", 35))
+            _extract_da3_priors(pipe, frames_dir, output_dir, conf_percentile=_cp)
             # da3_run fully consumed (vipe_priors is self-contained) → free it BEFORE
             # the long ViPE run instead of holding ~25GB of DA3 scratch on disk.
             shutil.rmtree(output_dir / "da3_run", ignore_errors=True)

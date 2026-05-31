@@ -58,11 +58,24 @@ def _load_depth(kind: str, p: Path):
     return z["depth"].astype(np.float32) if "depth" in z else None
 
 
+def _load_conf(kind: str, p: Path):
+    """Per-pixel DA3 confidence aligned with the depth, or None if unavailable."""
+    if kind == "npy":
+        cp = Path(str(p).replace("_depth.npy", "_conf.npy"))
+        return np.load(cp).astype(np.float32) if cp.exists() else None
+    z = np.load(p)
+    return z["conf"].astype(np.float32) if "conf" in z else None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--da3-run", required=True, type=Path)
     ap.add_argument("--frames-dir", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--conf-percentile", type=float, default=0.0,
+                    help="Per-frame: zero-out depth pixels whose DA3 confidence is "
+                         "below this percentile (e.g. 35 = drop bottom 35%, keep top "
+                         "65%). ViPE then ignores those pixels (depth<=0). 0 = off.")
     args = ap.parse_args()
     out_dir = args.da3_run.parent  # = .../output
 
@@ -105,26 +118,43 @@ def main():
     for old in (out / "depth").glob("*.npy"):   # clear stale priors
         old.unlink()
 
-    # SYMLINK npy depth (no duplication); copy npz-extracted depth.
+    P = float(args.conf_percentile)
+    filt_on = P > 0
+    n_conf = 0
+    drop_frac = []
     with open(out / "poses.txt", "w") as fp, open(out / "frames.txt", "w") as ff:
         for line, fr, dpath in zip(pose_lines, frame_nums, depth_files):
             fp.write(line.strip() + "\n")
             ff.write(f"{fr}\n")
             link = out / "depth" / f"{fr:06d}.npy"
-            if kind == "npy":
+            # No filtering → symlink npy (no duplication).
+            if not filt_on and kind == "npy":
                 try:
-                    os.symlink(os.path.abspath(dpath), link)
-                    continue
+                    os.symlink(os.path.abspath(dpath), link); continue
                 except FileExistsError:
                     continue
                 except OSError:
                     pass
             d = _load_depth(kind, dpath)
-            if d is not None:
-                np.save(link, d.astype(np.float32))
+            if d is None:
+                continue
+            d = d.astype(np.float32)
+            if filt_on:
+                conf = _load_conf(kind, dpath)
+                if conf is not None and conf.shape == d.shape:
+                    valid = np.isfinite(d) & (d > 0)
+                    if valid.any():
+                        thr = float(np.percentile(conf[valid], P))
+                        before = int(valid.sum())
+                        d = np.where((conf >= thr) & valid, d, 0.0).astype(np.float32)
+                        drop_frac.append(1.0 - (d > 0).sum() / max(before, 1))
+                        n_conf += 1
+            np.save(link, d)
 
+    extra = (f" | conf-filter p{P:.0f}: {n_conf} frames, "
+             f"avg dropped {100*np.mean(drop_frac):.0f}%" if filt_on and drop_frac else "")
     print(f"[da3-priors] {len(frame_nums)} priors ({kind}) → {out} "
-          f"(poses.txt + frames.txt + depth/*.npy)", flush=True)
+          f"(poses.txt + frames.txt + depth/*.npy){extra}", flush=True)
 
 
 if __name__ == "__main__":

@@ -265,7 +265,8 @@ async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, we
                 break
             line_str = line.decode('utf-8', errors='replace').strip()
             if line_str:
-                _olog.info(f"[on-load cloudcompy] {line_str}")   # → server.log
+                print(f"  [on-load cloudcompy] {line_str}", flush=True)  # → console
+                _olog.info(f"[on-load cloudcompy] {line_str}")           # → server.log
         
         await process.wait()
         
@@ -1062,15 +1063,9 @@ _file_log_handler.setFormatter(
 _file_log_handler.setLevel(logging.INFO)
 logging.getLogger().addHandler(_file_log_handler)
 logging.getLogger().setLevel(logging.INFO)
-
-# ALSO stream everything to the server's stdout (the start.sh console) so runs are
-# visible LIVE on screen, not only in server.log. Covers pipeline_manager relays
-# ([reconstruction]/[cloudcompy]) AND the on-load cloudcompy/Potree.
-import sys as _sys
-_console_log_handler = logging.StreamHandler(_sys.stdout)
-_console_log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
-_console_log_handler.setLevel(logging.INFO)
-logging.getLogger().addHandler(_console_log_handler)
+# (No console StreamHandler here: pipeline_manager already print()s its relayed
+# worker logs to stdout, and the on-load cloudcompy print()s too — a root
+# StreamHandler would DOUBLE every pipeline line on screen.)
 
 sys.stdout = StreamCapture(sys.__stdout__, "info")
 sys.stderr = StreamCapture(sys.__stderr__, "error")
