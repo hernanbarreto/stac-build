@@ -682,10 +682,18 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # estimated by MapAnything — DA3 poses are intentionally NOT used). Image-only stays
     # the default. Consumed by MapAnythingAdapter.infer_chunk (base_model.py).
     if ma_cfg.get("use_da3_priors", False):
-        pipe.send_log("MapAnything DA3-priors mode: extracting DA3 metric depth first")
         try:
-            da3_dir = _run_da3(pipe, frames_dir, output_dir, selected_frames_path,
-                               recon_cfg, config, depth_only=True)
+            # Resume: if DA3 depth was already extracted (e.g. a prior run that crashed
+            # later in MapAnything), reuse it instead of re-running DA3 — unless replace.
+            _replace = config.get("_pipeline_replace", True)
+            _existing = output_dir / "da3_run" / "results_output"
+            if not _replace and _existing.exists() and any(_existing.glob("frame_*.npz")):
+                da3_dir = output_dir / "da3_run"
+                pipe.send_log(f"DA3 priors already present ({_existing}) — skipping DA3 extraction")
+            else:
+                pipe.send_log("MapAnything DA3-priors mode: extracting DA3 metric depth first")
+                da3_dir = _run_da3(pipe, frames_dir, output_dir, selected_frames_path,
+                                   recon_cfg, config, depth_only=True)
             priors_dir = Path(da3_dir) / "results_output"
             if priors_dir.exists() and any(priors_dir.glob("frame_*.npz")):
                 vggt_config["Model"]["da3_priors_dir"] = str(priors_dir)
@@ -883,6 +891,18 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
             size_mb = sum(f.stat().st_size for f in tmp_dir.rglob("*") if f.is_file()) / (1024 * 1024)
             shutil.rmtree(tmp_dir, ignore_errors=True)
             pipe.send_log(f"Cleaned up {tmp_dir_name}/ ({size_mb:.0f} MB freed)")
+
+    # DA3-priors cleanup: in the mapanything backend, da3_run/ holds ONLY the consumed
+    # DA3 depth priors (+ DA3's own intermediate cloud) — MapAnything already ingested
+    # them during inference and nothing downstream needs them → delete (can be tens of GB).
+    # NOT for the da3 backend, where da3_run IS the reconstruction output.
+    if backend == "mapanything":
+        for _d in ("da3_run", "da3_full"):
+            prior_dir = output_dir / _d
+            if prior_dir.exists():
+                size_mb = sum(f.stat().st_size for f in prior_dir.rglob("*") if f.is_file()) / (1024 * 1024)
+                shutil.rmtree(prior_dir, ignore_errors=True)
+                pipe.send_log(f"Cleaned up {_d}/ consumed DA3 priors ({size_mb:.0f} MB freed)")
 
     import gc
     gc.collect()
