@@ -264,17 +264,6 @@ reconstruction:
                                        # backend and let it chunk (VGGT-Long globs the full dir).
                                        # Also keeps loop-detector + chunks on the SAME set.
 
-  # Pose source: only "vipe" has special meaning (short-circuits to ViPE BEFORE the
-  # backend check). ANY other value just falls through to the backend, which then
-  # computes its OWN poses. mapanything/VGGT-Long makes its own poses — it ignores
-  # this. "none" = "not vipe, let the backend do its thing".
-  pose_source: "none"
-  vipe:
-    venv: "/workspace/stac-build/vendor/vipe/.venv"
-    vipe_dir: "/workspace/stac-build/vendor/vipe"
-    pipeline: "dav3"
-    skip_if_exists: true               # reuse vipe_run if already present
-
   # DA3 Streaming (Depth Anything 3)
   da3:
     conda_env: "da3"
@@ -310,6 +299,9 @@ reconstruction:
     loop_closure: true
     conf_threshold_coef: 0.75
     sample_ratio: 1.0
+    use_da3_priors: false               # true = multi-modal: run DA3 first, feed its metric
+                                        # depth + intrinsics into MapAnything (poses still
+                                        # estimated by MapAnything). false = image-only.
 
   # GauS-SLAM (Gaussian Surfel SLAM)
   # Pipeline: DA3 depth+poses → TUM bridge → GauS-SLAM (2DGS surfels).

@@ -51,8 +51,6 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if server_dir not in sys.path:
         sys.path.insert(0, server_dir)
 
-    pose_source = recon_cfg.get("pose_source", "da3")
-
     # ── Step 1: Frame quality analysis (blur detection) ──
     fq_path = frames_dir / "frame_quality.json"
     if not replace and fq_path.exists():
@@ -68,9 +66,6 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
             pipe.send_log(f"Frame quality analysis skipped: {e}", level="warning")
 
     # ── Step 2: Frame selection (DINO cosine novelty) ──
-    # For pose_source=vipe these keyframes are the FUSION set: DA3 isolated depth
-    # + calibration + cloud composition run ONLY on them (keeps it manageable on
-    # disk). ViPE itself still tracks ALL frames to get the poses.
     selected_frames_path = None
     use_keyframes = recon_cfg.get("use_keyframes", True)
     sf_path = frames_dir / "selected_frames.json"
@@ -92,11 +87,7 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         pipe.send_log(f"Using keyframes from {sf_path}")
 
     # ── Step 3: Dispatch to backend ──
-    # pose_source == "vipe": ViPE is the SLAM (poses, all frames), DA3 isolated is
-    # the metric depth ref; the cloud is fused on the cosine keyframes (selected_frames).
-    if pose_source == "vipe":
-        _run_vipe_slam(pipe, frames_dir, output_dir, recon_cfg, config, selected_frames_path)
-    elif backend == "da3":
+    if backend == "da3":
         _run_da3(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
     elif backend == "lidar":
         _run_lidar_only(pipe, frames_dir, output_dir, recon_cfg, session_path, selected_frames_path)
@@ -287,8 +278,10 @@ def _run_lidar_only(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
 
 
 def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
-             selected_frames_path: str, recon_cfg: dict, config: dict):
-    """Run DA3 Streaming as subprocess."""
+             selected_frames_path: str, recon_cfg: dict, config: dict, depth_only: bool = False):
+    """Run DA3 Streaming as subprocess. depth_only=True: just produce per-frame
+    results_output/frame_*.npz (depth+conf+intrinsics) for MapAnything priors and skip
+    the postprocess (no DA3 cloud/chunks). Returns the da3 save dir."""
     import yaml
 
     da3_cfg = recon_cfg.get("da3", {})
@@ -382,163 +375,16 @@ def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     if proc.returncode != 0:
         raise RuntimeError(f"DA3 Streaming exited with code {proc.returncode}")
 
+    if depth_only:
+        pipe.send_log("DA3 depth extraction complete (priors mode) — skipping postprocess")
+        return da3_save_dir
+
     pipe.send_progress(85, "DA3 complete, post-processing...", stage="reconstruction")
 
     # ── Post-process DA3 output (same format as VGGT-Long) ──
     _postprocess_reconstruction(pipe, da3_save_dir, output_dir, da3_config, backend="da3")
+    return da3_save_dir
 
-
-# ────────────────────────────────────────────────────────────────────
-#  ViPE SLAM pose-source pipeline (pose_source == "vipe")
-#  DA3(all frames, depth ref) → ViPE(all frames, poses+depth) →
-#  per-frame calibrate ViPE→DA3 metric → compose cloud + traceability.
-#  ViPE IS the SLAM. Cleans its own scratch — no temporaries/leftovers.
-# ────────────────────────────────────────────────────────────────────
-
-def _vipe_cfg(recon_cfg: dict) -> dict:
-    v = recon_cfg.get("vipe", {})
-    return {
-        "venv": v.get("venv", "/workspace/stac-build/vendor/vipe/.venv"),
-        "vipe_dir": v.get("vipe_dir", "/workspace/stac-build/vendor/vipe"),
-        "pipeline": v.get("pipeline", "dav3"),
-        "skip_if_exists": v.get("skip_if_exists", True),
-    }
-
-
-def _conda_root() -> str:
-    return os.environ.get("CONDA_ROOT", "/workspace/miniforge3")
-
-
-def _stream_proc(pipe: WorkerPipe, proc, tag: str):
-    for line in proc.stdout:
-        line = line.rstrip()
-        if line:
-            pipe.send_log(f"[{tag}] {line}")
-    proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError(f"{tag} failed (exit {proc.returncode})")
-
-
-def _clean_da3_scratch(da3_dir: Path):
-    """Remove the streaming scratch so nothing temporary is left behind."""
-    for name in ("_tmp_results_unaligned", "_tmp_results_aligned",
-                 "_tmp_results_loop", "pcd", "gs_ply"):
-        shutil.rmtree(da3_dir / name, ignore_errors=True)
-
-
-def _run_da3_isolated(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
-                      recon_cfg: dict, selected_frames_path: str = None):
-    """Isolated DA3 metric depth per image (no streaming/SLAM/poses) → da3_depth/.
-    Only the metric reference for calibrating ViPE depth, computed ONLY on the
-    fusion keyframes (selected_frames) to keep it light."""
-    server_dir = Path(__file__).resolve().parent.parent
-    model = recon_cfg.get("da3", {}).get("model", "depth-anything/DA3NESTED-GIANT-LARGE-1.1")
-    out = output_dir / "da3_depth"
-    sel = f" --selected-frames {selected_frames_path}" if selected_frames_path else ""
-    inner = (f"source {_conda_root()}/etc/profile.d/conda.sh && "
-             f"conda activate {os.environ.get('DA3_CONDA_ENV', 'da3')} && "
-             f"python -u {server_dir / 'reconstruction' / 'run_da3_isolated.py'} "
-             f"--frames-dir {frames_dir} --out {out} --model {model}{sel}")
-    pipe.send_progress(15, "DA3 isolated metric depth (keyframes)...", stage="reconstruction")
-    proc = subprocess.Popen(["bash", "-lc", inner], stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1)
-    _stream_proc(pipe, proc, "da3-iso")
-
-
-def _clean_vipe_inputs(pipe: WorkerPipe, output_dir: Path):
-    """Once the global pose scale is computed, the ViPE raw EXR depth + masks are
-    redundant. KEEP da3_depth — the cloud composition AND the TSDF use the DA3
-    metric depth DIRECTLY (no per-frame calibration). Keep poses + intrinsics."""
-    targets = [
-        output_dir / "vipe_run" / "depth" / "frames.zip",
-        output_dir / "vipe_run" / "mask",
-    ]
-    for t in targets:
-        try:
-            if t.is_dir():
-                shutil.rmtree(t, ignore_errors=True)
-            elif t.exists():
-                t.unlink()
-            pipe.send_log(f"[cleanup] removed reconstruction scratch: {t.name}")
-        except Exception as e:
-            pipe.send_log(f"[cleanup] could not remove {t}: {e}", level="warning")
-
-
-def _run_vipe(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, vcfg: dict):
-    vipe_out = output_dir / "vipe_run"
-    if vcfg["skip_if_exists"] and (vipe_out / "pose" / "frames.npz").exists():
-        pipe.send_log("[vipe] reusing existing vipe_run/pose/frames.npz")
-        return
-    vipe_out.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["PATH"] = f"{vcfg['venv']}/bin:" + env.get("PATH", "")
-    cmd = [f"{vcfg['venv']}/bin/vipe", "infer", "--image-dir", str(frames_dir),
-           "-o", str(vipe_out), "-p", vcfg["pipeline"]]
-    pipe.send_progress(45, "Running ViPE SLAM (all frames)...", stage="reconstruction")
-    pipe.send_log(f"[vipe] {' '.join(cmd)}")
-    proc = subprocess.Popen(cmd, cwd=vcfg["vipe_dir"], stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
-    _stream_proc(pipe, proc, "vipe")
-    # drop the redundant rgb video (we already have frames/)
-    (vipe_out / "rgb" / "frames.mp4").unlink(missing_ok=True)
-
-
-def _run_vipe_pose_scale(pipe: WorkerPipe, output_dir: Path, vcfg: dict):
-    """Compute the SINGLE global ViPE→DA3-metric pose scale g (median DA3/ViPE
-    depth ratio) → vipe_run/pose_scale.json. No per-frame depth calibration."""
-    server_dir = Path(__file__).resolve().parent.parent
-    cmd = [f"{vcfg['venv']}/bin/python",
-           str(server_dir / "reconstruction" / "vipe_calibrate.py"),
-           "--vipe-out", str(output_dir / "vipe_run"),
-           "--da3-depth", str(output_dir / "da3_depth"),
-           "--out", str(output_dir / "vipe_run" / "pose_scale.json")]
-    pipe.send_progress(75, "Computing global pose scale (ViPE → DA3 metric)...",
-                       stage="reconstruction")
-    pipe.send_log(f"[scale] {' '.join(cmd[1:])}")
-    proc = subprocess.Popen(cmd, cwd=vcfg["vipe_dir"], stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1)
-    _stream_proc(pipe, proc, "scale")
-
-
-def _run_vipe_compose(pipe: WorkerPipe, frames_dir: Path, output_dir: Path):
-    """Compose chunks + poses in the da3 env (open3d)."""
-    server_dir = Path(__file__).resolve().parent.parent
-    script = server_dir / "reconstruction" / "run_vipe_compose.py"
-    inner = (f"source {_conda_root()}/etc/profile.d/conda.sh && "
-             f"conda activate {os.environ.get('DA3_CONDA_ENV', 'da3')} && "
-             f"PYTHONPATH={server_dir}:$PYTHONPATH python -u {script} "
-             f"--output-dir {output_dir} --frames-dir {frames_dir}")
-    pipe.send_progress(82, "Composing cloud (ViPE poses + calibrated depth)...",
-                       stage="reconstruction")
-    proc = subprocess.Popen(["bash", "-lc", inner], stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1)
-    _stream_proc(pipe, proc, "vipe-compose")
-
-
-def _run_vipe_slam(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
-                   recon_cfg: dict, config: dict, selected_frames_path: str = None):
-    """ViPE SLAM reconstruction. ViPE tracks ALL frames → continuous poses. The
-    cloud is fused on the cosine KEYFRAMES (selected_frames) using DA3 metric depth
-    DIRECTLY (no per-frame calibration) + ViPE poses scaled by ONE global factor."""
-    vcfg = _vipe_cfg(recon_cfg)
-    pipe.send_log("Reconstruction backend: ViPE SLAM (poses=all frames, depth=DA3 direct)")
-
-    # 1. Isolated DA3 metric depth on the FUSION KEYFRAMES (used DIRECTLY for the cloud/TSDF).
-    _run_da3_isolated(pipe, frames_dir, output_dir, recon_cfg, selected_frames_path)
-
-    # 2. ViPE SLAM over ALL frames → continuous poses + dense depth.
-    _run_vipe(pipe, frames_dir, output_dir, vcfg)
-
-    # 3. Single global pose scale g (median DA3/ViPE depth ratio) → pose_scale.json.
-    _run_vipe_pose_scale(pipe, output_dir, vcfg)
-
-    # 3b. Scale computed → drop the redundant ViPE raw EXR + masks (KEEP da3_depth).
-    _clean_vipe_inputs(pipe, output_dir)
-
-    # 4. Compose chunks (cloud + origins) from DA3 metric depth + scaled ViPE poses.
-    _run_vipe_compose(pipe, frames_dir, output_dir)
-
-    pipe.send_progress(90, "ViPE SLAM reconstruction complete", stage="reconstruction")
 
 
 def _run_hybrid_or_lidar(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
@@ -830,6 +676,27 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     pipe.send_progress(8, "Generating VGGT-Long config...", stage="reconstruction")
 
     vggt_config = _build_vggt_config(config)
+
+    # ── DA3 priors (multi-modal MapAnything) ── Opt-in. Run DA3 depth extraction first,
+    # then feed its per-frame METRIC depth + intrinsics into MapAnything (poses are still
+    # estimated by MapAnything — DA3 poses are intentionally NOT used). Image-only stays
+    # the default. Consumed by MapAnythingAdapter.infer_chunk (base_model.py).
+    if ma_cfg.get("use_da3_priors", False):
+        pipe.send_log("MapAnything DA3-priors mode: extracting DA3 metric depth first")
+        try:
+            da3_dir = _run_da3(pipe, frames_dir, output_dir, selected_frames_path,
+                               recon_cfg, config, depth_only=True)
+            priors_dir = Path(da3_dir) / "results_output"
+            if priors_dir.exists() and any(priors_dir.glob("frame_*.npz")):
+                vggt_config["Model"]["da3_priors_dir"] = str(priors_dir)
+                pipe.send_log(f"DA3 priors → {priors_dir} (depth+intrinsics fed to MapAnything)")
+            else:
+                pipe.send_log("DA3 priors not produced — MapAnything runs image-only",
+                              level="warning")
+        except Exception as _e:
+            pipe.send_log(f"DA3 priors extraction failed ({_e}) — MapAnything image-only",
+                          level="warning")
+
     vggt_config_path = output_dir / "vggt_long_config.yaml"
     with open(vggt_config_path, 'w') as f:
         yaml.dump(vggt_config, f, default_flow_style=False)

@@ -388,55 +388,6 @@ def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float
     return _load, (h, w)
 
 
-def _resolve_vipe_depth(output_dir: Path, conf_percentile: Optional[float] = None
-                        ) -> Optional[Tuple[Callable[[int], Optional[dict]],
-                                            Tuple[int, int]]]:
-    """ViPE pipeline depth: ``da3_depth/{frame:06d}.npz`` — DA3 metric depth used
-    DIRECTLY (no per-frame calibration), bundling depth + intrinsics (+ conf), keyed
-    by ORIGINAL frame number. The ViPE poses (camera_poses.txt, scaled by the single
-    global g) bring the cameras into this DA3 metric. Same per-frame loader shape as
-    _resolve_da3_frame_source so the integrate loop uses each frame's own K.
-    Returns ``(loader, (H, W))`` or None."""
-    cal_dir = output_dir / "da3_depth"
-    if not cal_dir.exists():
-        return None
-    sample = next(iter(cal_dir.glob("[0-9]*.npz")), None)
-    if sample is None:
-        return None
-    try:
-        probe = np.load(str(sample))
-        if "depth" not in probe:
-            return None
-        h, w = probe["depth"].shape
-    except Exception:
-        return None
-
-    def _load(frame_idx: int) -> Optional[dict]:
-        p = cal_dir / f"{int(frame_idx):06d}.npz"
-        if not p.exists():
-            return None
-        try:
-            z = np.load(str(p))
-        except Exception:
-            return None
-        if "depth" not in z:
-            return None
-        d = z["depth"].astype(np.float32)
-        valid = np.isfinite(d)
-        if conf_percentile is not None and "conf" in z:
-            conf = z["conf"].astype(np.float32)
-            if conf.shape == d.shape:
-                thr = float(np.percentile(conf, conf_percentile))
-                valid &= conf >= thr
-        K = (np.asarray(z["intrinsics"], np.float64).reshape(3, 3)
-             if "intrinsics" in z else None)
-        return {"depth": d, "valid": valid, "K": K, "rgb": None, "hw": d.shape}
-
-    return _load, (h, w)
-
-
-# ── Per-frame mask construction ────────────────────────────────────
-
 def _dilate_mask(mask: np.ndarray, radius: int) -> np.ndarray:
     """Square dilation via a single boolean-OR shift loop.
 
@@ -563,9 +514,9 @@ def _load_da3_refined_poses(output_dir: Path, frames_dir: Path
                 mats.append(np.array([float(v) for v in vals],
                                      dtype=np.float64).reshape(4, 4))
 
-    # ViPE pipeline: a camera_frames.txt sidecar gives the REAL frame number per
-    # pose line → key by that (matches da3_depth/{frame:06d}.npz and the
-    # per-point frame_global). This is the all-frames-indexed path.
+    # camera_frames.txt sidecar (written for mapanything) gives the REAL frame number
+    # per pose line → key poses by that (matches the per-point frame_global). This is
+    # the all-frames-indexed path.
     frames_txt = poses_txt.parent / "camera_frames.txt"
     if not frames_txt.exists():
         frames_txt = output_dir / "camera_frames.txt"
@@ -1067,7 +1018,7 @@ def export_tsdf_scene(
     )
 
     # Depth source priority:
-    #   1. ViPE pipeline: DA3 metric depth direct (da3_depth/) + scaled ViPE poses
+    #   1. MapAnything (maplong_run chunk .npy)
     #   2. DA3 / DA3+LiDAR fused (da3_run / da3_full)
     #   3. raw LiDAR
     _cp = da3_conf_percentile if da3_conf_percentile > 0 else None
@@ -1075,7 +1026,6 @@ def export_tsdf_scene(
     mapany_src = None
     if (backend or "").startswith("mapanything") or (output_dir / "maplong_run").exists():
         mapany_src = _resolve_mapanything_depth(output_dir, conf_percentile=_cp)
-    vipe_src = _resolve_vipe_depth(output_dir, conf_percentile=_cp)
     depth_loader = None
     frame_loader = None
     if mapany_src is not None:
@@ -1084,12 +1034,6 @@ def export_tsdf_scene(
                       + (f" · conf≥p{da3_conf_percentile:.0f}" if _cp else ""))
         logger.info(f"[TSDF-scene] per-frame source: MapAnything depth (chunk .npy) "
                     f"@ {depth_w}x{depth_h} — native per-frame K, no rescaling")
-    elif vipe_src is not None:
-        frame_loader, (depth_h, depth_w) = vipe_src
-        depth_kind = ("DA3 metric depth (direct) · ViPE poses"
-                      + (f" · conf≥p{da3_conf_percentile:.0f}" if _cp else ""))
-        logger.info(f"[TSDF-scene] per-frame source: DA3 metric depth (direct) + ViPE poses "
-                    f"@ {depth_w}x{depth_h}")
     elif da3_depth is not None:
         depth_loader, (depth_h, depth_w) = da3_depth
         _base = ("DA3+LiDAR fused" if (backend or "") == "da3_hybrid"

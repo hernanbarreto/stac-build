@@ -923,81 +923,46 @@ async def serve_session_video(session_id: str):
 
 @app.get("/api/sessions/{session_id}/flythrough")
 async def get_flythrough(session_id: str):
-    """Per-frame ViPE camera poses for the synced flythrough. Returns ALL frames'
-    c2w poses scaled to the cloud's metric frame (same frame as cleaned_cloud), so
-    the 3D camera can follow the video frame-by-frame. The UI applies whatever
-    alignment transform it uses for the displayed cloud to this path too."""
+    """Per-frame camera poses for the synced flythrough. Reads camera_poses.txt (+
+    camera_frames.txt for the REAL frame numbers). Poses are already in the cloud's
+    metric frame → scale 1.0. Source: mapanything (maplong_run) / DA3 / lidar."""
     import numpy as np
     ctx = _ctx(session_id)
-    vipe_out = ctx.output_dir / "vipe_run"
-    pose_npz = vipe_out / "pose" / "frames.npz"
-    if not pose_npz.exists():
-        # ── Fallback: mapanything / DA3 — camera_poses.txt (+ camera_frames.txt for the
-        # REAL frame numbers). Poses are already in the cloud's metric frame → scale 1.0.
-        poses_txt = next((c for c in (ctx.output_dir / "maplong_run" / "camera_poses.txt",
-                                      ctx.output_dir / "camera_poses.txt",
-                                      ctx.output_dir / "da3_run" / "camera_poses.txt")
-                          if c.exists()), None)
-        if poses_txt is None:
-            raise HTTPException(status_code=404, detail="no camera poses for this session")
-        mats = []
-        with open(poses_txt) as f:
-            for line in f:
-                v = line.split()
-                if len(v) >= 16:
-                    mats.append([float(x) for x in v[:16]])
-        frames = list(range(len(mats)))
-        fr_txt = poses_txt.parent / "camera_frames.txt"
-        if not fr_txt.exists():
-            fr_txt = ctx.output_dir / "camera_frames.txt"
-        if fr_txt.exists():
-            try:
-                nums = [int(x) for x in open(fr_txt).read().split()]
-                if len(nums) == len(mats):
-                    frames = nums
-            except Exception:
-                pass
-        K = None
-        for ip in (poses_txt.parent / "intrinsic.txt", ctx.output_dir / "intrinsic.txt"):
-            if ip.exists():
-                try:
-                    arr = np.loadtxt(str(ip))
-                    row = arr if arr.ndim == 1 else arr[len(arr) // 2]
-                    K = [float(x) for x in np.asarray(row).reshape(-1)[:4]]
-                except Exception:
-                    pass
-                break
-        return {"n_frames": len(frames), "frames": frames, "poses": mats,
-                "scale": 1.0, "intrinsics": K,
-                "video_url": f"/api/sessions/{session_id}/video"}
-    d = np.load(str(pose_npz))
-    inds = np.asarray(d["inds"]).astype(int)
-    mats = np.asarray(d["data"], dtype=np.float64)  # (N,4,4) c2w
-    # global metric scale (the SAME single factor compose applied to the poses)
-    scale = 1.0
-    try:
-        sys.path.insert(0, str(SERVER_DIR))
-        from reconstruction.vipe_poses import global_scale_from_file
-        scale = global_scale_from_file(vipe_out / "pose_scale.json")
-    except Exception:
-        pass
-    order = np.argsort(inds)
-    frames = inds[order].tolist()
-    poses = []
-    for i in order:
-        c2w = mats[i].copy()
-        c2w[:3, 3] *= scale
-        poses.append([float(x) for x in c2w.reshape(-1)])
-    K = None
-    ip = vipe_out / "intrinsics" / "frames.npz"
-    if ip.exists():
+    poses_txt = next((c for c in (ctx.output_dir / "maplong_run" / "camera_poses.txt",
+                                  ctx.output_dir / "camera_poses.txt",
+                                  ctx.output_dir / "da3_run" / "camera_poses.txt")
+                      if c.exists()), None)
+    if poses_txt is None:
+        raise HTTPException(status_code=404, detail="no camera poses for this session")
+    mats = []
+    with open(poses_txt) as f:
+        for line in f:
+            v = line.split()
+            if len(v) >= 16:
+                mats.append([float(x) for x in v[:16]])
+    frames = list(range(len(mats)))
+    fr_txt = poses_txt.parent / "camera_frames.txt"
+    if not fr_txt.exists():
+        fr_txt = ctx.output_dir / "camera_frames.txt"
+    if fr_txt.exists():
         try:
-            z = np.load(str(ip)); kd = np.asarray(z["data"])
-            K = [float(x) for x in kd[0][:4]]  # fx fy cx cy (representative)
+            nums = [int(x) for x in open(fr_txt).read().split()]
+            if len(nums) == len(mats):
+                frames = nums
         except Exception:
             pass
-    return {"n_frames": len(frames), "frames": frames, "poses": poses,
-            "scale": float(scale), "intrinsics": K,
+    K = None
+    for ip in (poses_txt.parent / "intrinsic.txt", ctx.output_dir / "intrinsic.txt"):
+        if ip.exists():
+            try:
+                arr = np.loadtxt(str(ip))
+                row = arr if arr.ndim == 1 else arr[len(arr) // 2]
+                K = [float(x) for x in np.asarray(row).reshape(-1)[:4]]
+            except Exception:
+                pass
+            break
+    return {"n_frames": len(frames), "frames": frames, "poses": mats,
+            "scale": 1.0, "intrinsics": K,
             "video_url": f"/api/sessions/{session_id}/video"}
 
 # Mount auth routes
@@ -1100,7 +1065,7 @@ logging.getLogger("uvicorn").addHandler(_ws_log_handler)
 logging.getLogger("uvicorn.access").addHandler(_ws_log_handler)
 
 # Persist EVERYTHING to disk so runs are auditable after the fact (server +
-# pipeline + relayed worker logs: DA3, [vipe], [calib], [vipe-compose], errors).
+# pipeline + relayed worker logs: DA3, MapAnything, cloudcompy, TSDF, errors).
 # pipeline_manager relays each worker `send_log` via logger.info → captured here.
 from logging.handlers import RotatingFileHandler as _RFH
 _log_dir = Path(__file__).parent / "logs"

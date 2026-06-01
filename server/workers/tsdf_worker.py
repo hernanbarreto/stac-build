@@ -3,10 +3,9 @@ Whole-scene TSDF stage — final pipeline step, runs AFTER CloudCompy (cleaned_c
 + Potree) so one pipeline run produces cloud → Potree → TSDF mesh in one go.
 
 Integrates every posed frame's depth into a single TSDF volume on the GPU and bakes
-photo colour, writing output/tsdf/scene/scene.glb (+ scene.meta.json). For the
-pose_source=vipe pipeline the depth source is DA3 metric depth (da3_depth/, used
-directly) and the poses are ViPE's, scaled by the single global g — resolved
-automatically inside export_tsdf_scene (_resolve_vipe_depth + camera_frames.txt).
+photo colour, writing output/tsdf/scene/scene.glb (+ scene.meta.json). Depth + poses
+are resolved automatically inside export_tsdf_scene per backend (mapanything chunk
+.npy / DA3 / LiDAR; poses keyed by real frame number via camera_frames.txt).
 
 Runs in the SERVER env (Open3D-CUDA), spawned by PipelineManager like the other
 workers via run(conn, session_dir, config).
