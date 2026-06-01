@@ -967,11 +967,37 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
         if src.exists():
             shutil.copyfile(src, output_dir / dst_name)
 
+    # Real-frame pose traceability: keep camera_poses.txt under output/ AND emit
+    # camera_frames.txt mapping each pose line -> REAL frame number (from
+    # frame_list.json, the exact ordered frames the backend processed). The TSDF
+    # then keys poses by real frame number, matching the per-point frame_global and
+    # the per-frame depth loader. Only present for backends that write frame_list.json.
+    _cp_txt = save_dir / "camera_poses.txt"
+    _fl = save_dir / "frame_list.json"
+    if _cp_txt.exists():
+        shutil.copyfile(_cp_txt, output_dir / "camera_poses.txt")
+    if _fl.exists():
+        try:
+            import re as _re
+            _names = json.loads(_fl.read_text())
+            _nums = []
+            for _n in _names:
+                _m = _re.search(r"(\d+)", str(_n))
+                _nums.append(str(int(_m.group(1))) if _m else "-1")
+            (output_dir / "camera_frames.txt").write_text("\n".join(_nums) + "\n")
+            shutil.copyfile(_fl, output_dir / "frame_list.json")
+            pipe.send_log(f"Wrote camera_frames.txt ({len(_nums)} frames) for real-frame "
+                          f"pose/depth traceability")
+        except Exception as _e:
+            pipe.send_log(f"Could not write camera_frames.txt: {_e}", level="warning")
+
     pipe.send_progress(100, f"{backend.upper()} reconstruction complete", stage="reconstruction")
     pipe.send_log(f"{backend} complete: {len(ply_files)} chunks")
 
-    # Cleanup temp .npy files
-    for tmp_dir_name in ["_tmp_results_unaligned", "_tmp_results_aligned", "_tmp_results_loop"]:
+    # Cleanup temp .npy files. KEEP _tmp_results_aligned — the whole-scene TSDF reads
+    # per-frame depth from it (_resolve_mapanything_depth), and origins were generated
+    # from it too. Unaligned is already deleted incrementally during alignment.
+    for tmp_dir_name in ["_tmp_results_unaligned", "_tmp_results_loop"]:
         tmp_dir = save_dir / tmp_dir_name
         if tmp_dir.exists():
             size_mb = sum(f.stat().st_size for f in tmp_dir.glob("*")) / (1024 * 1024)
@@ -1080,6 +1106,8 @@ def _build_vggt_config(config: dict) -> dict:
     cfg["Model"]["chunk_size"] = ma.get("chunk_size", cfg["Model"]["chunk_size"])
     cfg["Model"]["overlap"] = ma.get("chunk_overlap", cfg["Model"]["overlap"])
     cfg["Model"]["loop_enable"] = ma.get("loop_closure", cfg["Model"].get("loop_enable", True))
+    # Single stride for the WHOLE VGGT-Long pipeline (loop detector + chunks + poses)
+    cfg["Model"]["frame_stride"] = ma.get("frame_stride", cfg["Model"].get("frame_stride", 1))
     cfg["Model"]["delete_temp_files"] = False  # Keep .npy for origin traceability
 
     pc = cfg["Model"].get("Pointcloud_Save", {})
@@ -1120,19 +1148,26 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
     cleaned_cloud.ply (so every final point is traceable to its keyframe + pixel
     + confidence).
 
-    `frame_global` indexes self.img_list, i.e. the SELECTED KEYFRAMES — map it
-    through selected_frames.json["selected_files"][frame_global] to get the
-    source frame file.
+    `frame_global` is the REAL frame number (numeric part of the original filename),
+    resolved from the processed-list position via frame_list.json (written by
+    VGGT-Long with the exact ordered frames it used, after any keyframe filter +
+    stride). This keeps per-point traceability correct under stride/keyframe subsets.
+    Falls back to the raw processed-list index if frame_list.json is absent (legacy).
 
     Legacy MapAnything/VGGT-Long chunks (dicts with 'world_points', no per-point
     confidence) keep the original all-points behavior.
     """
     import numpy as np
 
-    unaligned_dir = vggt_save_dir / "_tmp_results_unaligned"
+    # Read ALIGNED chunks (full dict; only world_points is sim3-transformed,
+    # depth/conf/intrinsic/world_points_conf are identical to unaligned). Unaligned
+    # is deleted incrementally during alignment to avoid keeping 2x copies on disk.
+    chunks_dir = vggt_save_dir / "_tmp_results_aligned"
+    if not chunks_dir.exists():
+        chunks_dir = vggt_save_dir / "_tmp_results_unaligned"   # legacy fallback
     pcd_dir = vggt_save_dir / "pcd"
-    if not unaligned_dir.exists():
-        pipe.send_log("No unaligned chunk data found — origins not generated", level="warning")
+    if not chunks_dir.exists():
+        pipe.send_log("No chunk data found — origins not generated", level="warning")
         return
 
     # _postprocess copied save_dir/pcd/K_pcd.ply (K = real chunk number), sorted
@@ -1148,6 +1183,26 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
     chunk_size = vggt_config["Model"]["chunk_size"]
     overlap = vggt_config["Model"]["overlap"]
     chunk_step = chunk_size - overlap
+
+    # STAC: map img_list position -> REAL frame number (numeric part of the original
+    # filename), so frame_global stays correct under stride / keyframe subsetting.
+    # frame_list.json is written by VGGT-Long with the exact ordered frames it used.
+    import re as _re
+    frame_numbers = None
+    _flp = vggt_save_dir / "frame_list.json"
+    if _flp.exists():
+        try:
+            _names = json.loads(_flp.read_text())
+            _fn = []
+            for _nm in _names:
+                _m = _re.search(r"(\d+)", str(_nm))
+                _fn.append(int(_m.group(1)) if _m else -1)
+            frame_numbers = np.asarray(_fn, dtype=np.int64)
+            pipe.send_log(f"Origins: frame_global mapped to real frame numbers "
+                          f"via frame_list.json ({len(frame_numbers)} frames)")
+        except Exception as _e:
+            pipe.send_log(f"Origins: frame_list.json unreadable ({_e}) — "
+                          f"frame_global will be the processed-list index", level="warning")
     ps = vggt_config["Model"].get("Pointcloud_Save", {})
     coef = ps.get("conf_threshold_coef", 0.75)
     sample_ratio = ps.get("sample_ratio", 1.0)
@@ -1174,7 +1229,7 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                 except ValueError:
                     K = i  # fallback
 
-                npy_path = unaligned_dir / f"chunk_{K}.npy"
+                npy_path = chunks_dir / f"chunk_{K}.npy"
                 if not npy_path.exists():
                     pipe.send_log(f"Chunk {i:03d}: missing {npy_path.name}; origins skipped", level="warning")
                     continue
@@ -1197,6 +1252,15 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                     if wp.ndim == 5:
                         wp = wp[0]
                     S, H, W = wp.shape[:3]
+                    # MapAnything/VGGT-Long: the PLY is conf-filtered by
+                    # world_points_conf (save_confident_pointcloud_batch). Replicate
+                    # that SAME mask below so origins line up 1:1 with the PLY points
+                    # (otherwise CloudComPy drops the size-mismatched origins → no
+                    # traceability). conf is pose-invariant, so the unaligned chunk's
+                    # world_points_conf matches the aligned PLY's.
+                    wpc = chunk_data.get("world_points_conf")
+                    if wpc is not None:
+                        conf_flat = np.asarray(wpc, dtype=np.float32).reshape(-1)
                 else:
                     pipe.send_log(f"Chunk {i:03d} (src {K}): unrecognized data format", level="warning")
                     continue
@@ -1221,7 +1285,15 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                 within = surviving % HW
                 pixel_row = (within // W).astype(np.int16)
                 pixel_col = (within % W).astype(np.int16)
-                frame_global = (frame_local + K * chunk_step).astype(np.int32)
+                abs_idx = frame_local + K * chunk_step          # position in processed img_list
+                if frame_numbers is not None:
+                    safe = np.clip(abs_idx, 0, len(frame_numbers) - 1)
+                    if np.any(abs_idx >= len(frame_numbers)) or np.any(abs_idx < 0):
+                        pipe.send_log(f"Chunk {i:03d} (src {K}): frame index out of "
+                                      f"frame_list range — clipped", level="warning")
+                    frame_global = frame_numbers[safe].astype(np.int32)
+                else:
+                    frame_global = abs_idx.astype(np.int32)
 
                 # Sanity: must match the copied chunk_{i:03d}.ply point count, or
                 # CloudComPy will drop the (size-mismatched) origins on merge.

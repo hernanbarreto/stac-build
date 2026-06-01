@@ -269,6 +269,125 @@ def _resolve_da3_frame_source(output_dir: Path, conf_percentile: Optional[float]
     return _load, (h, w)
 
 
+def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float] = None
+                               ) -> Optional[Tuple[Callable[[int], Optional[dict]],
+                                                   Tuple[int, int]]]:
+    """VGGT-Long ('mapanything' backend): per-frame depth lives INSIDE the per-chunk
+    dicts ``maplong_run/_tmp_results_unaligned/chunk_K.npy`` (keys: ``depth`` (S,H,W),
+    ``intrinsic`` (S,3,3), optional ``conf``). ``frame_list.json`` lists the exact
+    ordered frames the backend processed (after any keyframe filter + stride), so we
+    map each REAL frame number → (chunk K, frame_local) and load depth + native K on
+    demand. Returns a per-frame loader dict ``{depth, valid, K, rgb, hw}`` keyed by
+    REAL frame number. ``rgb`` is None → the caller re-decodes ``{frame:06d}.jpg``,
+    which is correct because the key IS the real frame number.
+    """
+    run_dir = output_dir / "maplong_run"
+    # ALIGNED chunks (kept after postproc); depth/conf/intrinsic identical to unaligned.
+    chunks = run_dir / "_tmp_results_aligned"
+    if not chunks.exists():
+        chunks = run_dir / "_tmp_results_unaligned"   # legacy fallback
+    flp = run_dir / "frame_list.json"
+    if not flp.exists():
+        flp = output_dir / "frame_list.json"
+    if not chunks.exists() or not flp.exists():
+        return None
+    try:
+        names = json.loads(flp.read_text())
+    except Exception:
+        return None
+    import re as _re
+    frame_to_pos: Dict[int, int] = {}
+    for p, n in enumerate(names):
+        m = _re.search(r"(\d+)", str(n))
+        if m:
+            frame_to_pos.setdefault(int(m.group(1)), p)
+    if not frame_to_pos:
+        return None
+
+    # chunk_step (= chunk_size - overlap) — from our origin meta sidecar; else the
+    # vendor config copy. Needed to map list position → (chunk K, frame_local).
+    chunk_step: Optional[int] = None
+    for mp in sorted(output_dir.glob("chunk_*_meta.json")):
+        try:
+            chunk_step = int(json.load(open(mp)).get("chunk_step"))
+            if chunk_step:
+                break
+        except Exception:
+            continue
+    if not chunk_step:
+        try:
+            import yaml as _yaml
+            c = _yaml.safe_load(open(run_dir / "vggt_long_config.yaml"))
+            chunk_step = int(c["Model"]["chunk_size"]) - int(c["Model"]["overlap"])
+        except Exception:
+            chunk_step = None
+    if not chunk_step or chunk_step < 1:
+        return None
+
+    def _load_chunk(K: int):
+        p = chunks / f"chunk_{K}.npy"
+        if not p.exists():
+            return None
+        try:
+            return np.load(str(p), allow_pickle=True).item()
+        except Exception:
+            return None
+
+    def _depth_stack(arr):
+        a = np.asarray(arr)
+        while a.ndim > 3:
+            a = a[0]
+        if a.ndim == 2:
+            a = a[None]
+        return a
+
+    probe = _load_chunk(0)
+    if not isinstance(probe, dict) or "depth" not in probe:
+        return None
+    d0 = _depth_stack(probe["depth"])
+    h, w = int(d0.shape[-2]), int(d0.shape[-1])
+
+    cache: Dict[str, object] = {"K": None, "data": None}
+
+    def _load(frame_idx: int) -> Optional[dict]:
+        pos = frame_to_pos.get(int(frame_idx))
+        if pos is None:
+            return None
+        K = pos // chunk_step
+        local = pos - K * chunk_step
+        if cache["K"] != K:
+            data = _load_chunk(K)
+            if data is None:
+                return None
+            cache["K"], cache["data"] = K, data
+        cd = cache["data"]
+        depth = _depth_stack(cd.get("depth"))
+        if local >= depth.shape[0]:
+            return None
+        d = depth[local].astype(np.float32)
+        valid = np.ones_like(d, dtype=bool)
+        conf = cd.get("conf", cd.get("depth_conf"))
+        if conf_percentile is not None and conf is not None:
+            cstack = _depth_stack(conf)
+            if local < cstack.shape[0] and cstack[local].shape == d.shape:
+                cf = cstack[local].astype(np.float32)
+                thr = float(np.percentile(cf, conf_percentile))
+                valid = cf >= thr
+        K_intr = None
+        ki = cd.get("intrinsic", cd.get("intrinsics"))
+        if ki is not None:
+            ki = np.asarray(ki, dtype=np.float64)
+            while ki.ndim > 3:
+                ki = ki[0]
+            if ki.ndim == 3 and local < ki.shape[0]:
+                K_intr = ki[local].reshape(3, 3)
+            elif ki.shape == (3, 3):
+                K_intr = ki.reshape(3, 3)
+        return {"depth": d, "valid": valid, "K": K_intr, "rgb": None, "hw": d.shape}
+
+    return _load, (h, w)
+
+
 def _resolve_vipe_depth(output_dir: Path, conf_percentile: Optional[float] = None
                         ) -> Optional[Tuple[Callable[[int], Optional[dict]],
                                             Tuple[int, int]]]:
@@ -424,16 +543,17 @@ def _load_da3_refined_poses(output_dir: Path, frames_dir: Path
     if poses_txt is None:
         return None
 
+    # selected_frames.json is OPTIONAL: when camera_frames.txt is present (backends
+    # that record the exact processed frames, e.g. mapanything/VGGT-Long), poses are
+    # keyed by real frame number from that sidecar — no keyframe list needed.
     sel_json = frames_dir / "selected_frames.json"
-    if not sel_json.exists():
-        return None
-    try:
-        with open(sel_json) as f:
-            kf_files = sorted(json.load(f).get("selected_files", []))
-    except Exception:
-        return None
-    if not kf_files:
-        return None
+    kf_files: List[str] = []
+    if sel_json.exists():
+        try:
+            with open(sel_json) as f:
+                kf_files = sorted(json.load(f).get("selected_files", []))
+        except Exception:
+            kf_files = []
 
     mats: List[np.ndarray] = []
     with open(poses_txt) as f:
@@ -951,10 +1071,20 @@ def export_tsdf_scene(
     #   2. DA3 / DA3+LiDAR fused (da3_run / da3_full)
     #   3. raw LiDAR
     _cp = da3_conf_percentile if da3_conf_percentile > 0 else None
+    # Backend-driven: VGGT-Long ('mapanything') depth lives in maplong_run chunk .npy.
+    mapany_src = None
+    if (backend or "").startswith("mapanything") or (output_dir / "maplong_run").exists():
+        mapany_src = _resolve_mapanything_depth(output_dir, conf_percentile=_cp)
     vipe_src = _resolve_vipe_depth(output_dir, conf_percentile=_cp)
     depth_loader = None
     frame_loader = None
-    if vipe_src is not None:
+    if mapany_src is not None:
+        frame_loader, (depth_h, depth_w) = mapany_src
+        depth_kind = ("MapAnything/VGGT-Long neural depth"
+                      + (f" · conf≥p{da3_conf_percentile:.0f}" if _cp else ""))
+        logger.info(f"[TSDF-scene] per-frame source: MapAnything depth (chunk .npy) "
+                    f"@ {depth_w}x{depth_h} — native per-frame K, no rescaling")
+    elif vipe_src is not None:
         frame_loader, (depth_h, depth_w) = vipe_src
         depth_kind = ("DA3 metric depth (direct) · ViPE poses"
                       + (f" · conf≥p{da3_conf_percentile:.0f}" if _cp else ""))

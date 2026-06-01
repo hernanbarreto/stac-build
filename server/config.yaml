@@ -260,7 +260,9 @@ bim:
 reconstruction:
   backend: "mapanything"                # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
-  use_keyframes: true                  # use frame_selector keyframes (recommended)
+  use_keyframes: false                 # false = NO blur/cosine filter; pass ALL frames to the
+                                       # backend and let it chunk (VGGT-Long globs the full dir).
+                                       # Also keeps loop-detector + chunks on the SAME set.
 
   # Pose source: only "vipe" has special meaning (short-circuits to ViPE BEFORE the
   # backend check). ANY other value just falls through to the backend, which then
@@ -302,6 +304,9 @@ reconstruction:
     model_weights: "facebook/map-anything-apache"
     chunk_size: 120
     chunk_overlap: 60
+    frame_stride: 2                     # 1-of-N uniform temporal subsample. SINGLE source of
+                                        # truth: loop detector + chunks + poses all use this.
+                                        # 1 = all frames, 2 = 1 of every 2, etc.
     loop_closure: true
     conf_threshold_coef: 0.75
     sample_ratio: 1.0
@@ -336,7 +341,7 @@ postprocessing:
   conda_env: "CloudComPy310"
 
   # Pipeline toggles
-  skip_duplicates: false
+  skip_duplicates: true
   skip_sor: false
   skip_noise: true                     # noise filter is O(n²), hangs on >1M points
   skip_normals: true                   # not needed for the point cloud viewer
@@ -350,7 +355,7 @@ postprocessing:
   noise_sigma: 2.0
 
   # Voxel subsampling
-  voxel_size: 0.001                    # 1mm voxel (keeps cloud under 100M pts)
+  voxel_size: 0.005                    # 1mm voxel (keeps cloud under 100M pts)
   max_points: 0                        # 0 = unlimited
 
 
