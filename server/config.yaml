@@ -266,6 +266,9 @@ tsdf:
   tsdf_block_count: 200000   # more GPU hash slots — bigger scene, no block starvation
   texture: true
   texture_mode: "vertex_gpu" # multi-view photo bake (falls back to integrated colour)
+  keep_aligned_chunks: false # true = keep maplong_run/_tmp_results_aligned (14G) after the
+                             # mesh, so you can re-run JUST the TSDF stage with different
+                             # params (coverage tuning) without re-running MapAnything.
 
 
 # ── 3D Reconstruction ──────────────────────────────────────────────
