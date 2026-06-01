@@ -899,10 +899,26 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
     if backend == "mapanything":
         for _d in ("da3_run", "da3_full"):
             prior_dir = output_dir / _d
-            if prior_dir.exists():
-                size_mb = sum(f.stat().st_size for f in prior_dir.rglob("*") if f.is_file()) / (1024 * 1024)
-                shutil.rmtree(prior_dir, ignore_errors=True)
-                pipe.send_log(f"Cleaned up {_d}/ consumed DA3 priors ({size_mb:.0f} MB freed)")
+            if not prior_dir.exists():
+                continue
+            # KEEP results_output/ (per-frame DA3 depth) — the vertex_gpu photo bake uses
+            # it as the occlusion oracle (nvdiffrast_bake reads da3_run/results_output).
+            # Delete only the heavy rest (DA3's own intermediate cloud + chunks).
+            freed = 0
+            for child in prior_dir.iterdir():
+                if child.name == "results_output":
+                    continue
+                try:
+                    if child.is_dir():
+                        freed += sum(f.stat().st_size for f in child.rglob("*") if f.is_file())
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        freed += child.stat().st_size
+                        child.unlink()
+                except OSError:
+                    pass
+            pipe.send_log(f"Cleaned up {_d}/ (kept results_output for texture bake; "
+                          f"{freed / (1024 * 1024):.0f} MB freed)")
 
     import gc
     gc.collect()

@@ -246,6 +246,28 @@ bim:
       regular_threshold: 50            # >=50% = REGULAR (yellow), else BAD
 
 
+# ── Whole-scene TSDF mesh ──────────────────────────────────────────
+# Consumed by workers/tsdf_worker.py → segmentation/tsdf_export.export_tsdf_scene.
+# PHILOSOPHY: the cleaned_cloud already passed ALL filters (confidence, SOR, voxel,
+# in cloudcompy) → it is the source of truth. The TSDF must TRUST it and mesh
+# EVERYTHING in it — NO extra re-filtering. So mask to the cloud and disable the
+# per-frame cutoffs (distance / confidence / weight / edge) that were dropping real
+# surfaces (distant walls/doors) that show fine in the cloud.
+tsdf:
+  mask_to_cleaned_cloud: true  # integrate EXACTLY the cloud's pixels (the source of truth)
+  cleaned_cloud_dilate: 3
+  depth_trunc: 100.0         # effectively no distance cut — trust the cloud's range
+  depth_min: 0.05            # only drop sensor-touching artifacts
+  da3_conf_percentile: 0     # NO confidence re-filter (the cloud already filtered)
+  tsdf_weight_thresh: 1.0    # extract single-view voxels too (floor; 0 = garbage)
+  edge_thresh: 1.0           # ~disable flying-pixel cull (the cloud is already clean)
+  voxel_length: 0.015        # 1.5 cm
+  sdf_trunc: 0.05
+  tsdf_block_count: 200000   # more GPU hash slots — bigger scene, no block starvation
+  texture: true
+  texture_mode: "vertex_gpu" # multi-view photo bake (falls back to integrated colour)
+
+
 # ── 3D Reconstruction ──────────────────────────────────────────────
 # Backends supported by workers/map_worker.py:
 #   "da3"               → DA3 Streaming (neural, no LiDAR)
@@ -299,7 +321,7 @@ reconstruction:
     loop_closure: true
     conf_threshold_coef: 0.75
     sample_ratio: 1.0
-    use_da3_priors: false               # true = multi-modal: run DA3 first, feed its metric
+    use_da3_priors: true               # true = multi-modal: run DA3 first, feed its metric
                                         # depth + intrinsics into MapAnything (poses still
                                         # estimated by MapAnything). false = image-only.
 
