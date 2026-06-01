@@ -65,26 +65,47 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         except Exception as e:
             pipe.send_log(f"Frame quality analysis skipped: {e}", level="warning")
 
-    # ── Step 2: Frame selection (DINO cosine novelty) ──
+    # ── Step 2: Frame selection — ALWAYS produce frames/selected_frames.json, the SINGLE
+    # source of truth for the processed frame set (read by SAM3 / scene_analyzer / TSDF /
+    # the backends). use_keyframes=true → blur + DINO-cosine keyframes. false → blur-valid
+    # frames with an optional uniform stride (mapanything.frame_stride). Both write the
+    # SAME file, so there is no stride-vs-keyframes divergence.
     selected_frames_path = None
     use_keyframes = recon_cfg.get("use_keyframes", True)
     sf_path = frames_dir / "selected_frames.json"
-    if use_keyframes:
-        if not replace and sf_path.exists():
-            pipe.send_log("Reusing existing selected_frames.json (replace=off — skipping keyframe selection)")
-        else:
-            frame_sel_cfg = config.get("frame_selection", {})
-            if frame_sel_cfg.get("enabled", False):
-                from frame_selector import select_keyframes
-                try:
-                    pipe.send_progress(5, "Selecting keyframes...", stage="reconstruction")
-                    sel = select_keyframes(str(frames_dir), frame_sel_cfg)
-                    pipe.send_log(f"Selected {sel['selected_count']}/{sel['total_frames']} keyframes")
-                except Exception as e:
-                    pipe.send_log(f"Frame selection failed: {e}", level="warning")
+    if not replace and sf_path.exists():
+        pipe.send_log("Reusing existing selected_frames.json (replace=off)")
+    elif use_keyframes:
+        frame_sel_cfg = config.get("frame_selection", {})
+        if frame_sel_cfg.get("enabled", False):
+            from frame_selector import select_keyframes
+            try:
+                pipe.send_progress(5, "Selecting keyframes (blur + DINO cosine)...", stage="reconstruction")
+                sel = select_keyframes(str(frames_dir), frame_sel_cfg)
+                pipe.send_log(f"Selected {sel['selected_count']}/{sel['total_frames']} keyframes")
+            except Exception as e:
+                pipe.send_log(f"Frame selection failed: {e}", level="warning")
+    else:
+        # No keyframes: write the full (blur-valid) frame set with an optional uniform
+        # stride, so selected_frames.json still records EXACTLY what gets processed.
+        try:
+            from frame_selector import _load_valid_frame_list
+            valid = sorted(_load_valid_frame_list(frames_dir),
+                           key=lambda f: int(os.path.splitext(os.path.basename(f))[0]))
+            valid = [os.path.basename(f) for f in valid]
+            stride = int(recon_cfg.get("mapanything", {}).get("frame_stride", 1) or 1)
+            chosen = valid[::stride] if stride > 1 else valid
+            with open(sf_path, "w") as _f:
+                json.dump({"version": "2.0", "method": f"stride_{stride}",
+                           "total_frames": len(valid), "selected_count": len(chosen),
+                           "selected_files": chosen}, _f)
+            pipe.send_log(f"Frame set: {len(chosen)}/{len(valid)} frames "
+                          f"(stride {stride}, blur-valid) → selected_frames.json")
+        except Exception as e:
+            pipe.send_log(f"Could not build frame list: {e}", level="warning")
     if sf_path.exists():
         selected_frames_path = str(sf_path)
-        pipe.send_log(f"Using keyframes from {sf_path}")
+        pipe.send_log(f"Using frames from {sf_path}")
 
     # ── Step 3: Dispatch to backend ──
     if backend == "da3":
@@ -692,7 +713,10 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 pipe.send_log(f"DA3 priors already present ({_existing}) — skipping DA3 extraction")
             else:
                 pipe.send_log("MapAnything DA3-priors mode: extracting DA3 metric depth first")
-                da3_dir = _run_da3(pipe, frames_dir, output_dir, selected_frames_path,
+                # Run DA3 on ALL frames (selected_frames=None) so results_output/frame_<n>.npz
+                # is keyed by the REAL frame number. MapAnything then matches its frames (keyframes
+                # OR strided) by real number — robust regardless of the keyframe selection.
+                da3_dir = _run_da3(pipe, frames_dir, output_dir, None,
                                    recon_cfg, config, depth_only=True)
             priors_dir = Path(da3_dir) / "results_output"
             if priors_dir.exists() and any(priors_dir.glob("frame_*.npz")):
@@ -1022,8 +1046,9 @@ def _build_vggt_config(config: dict) -> dict:
     cfg["Model"]["chunk_size"] = ma.get("chunk_size", cfg["Model"]["chunk_size"])
     cfg["Model"]["overlap"] = ma.get("chunk_overlap", cfg["Model"]["overlap"])
     cfg["Model"]["loop_enable"] = ma.get("loop_closure", cfg["Model"].get("loop_enable", True))
-    # Single stride for the WHOLE VGGT-Long pipeline (loop detector + chunks + poses)
-    cfg["Model"]["frame_stride"] = ma.get("frame_stride", cfg["Model"].get("frame_stride", 1))
+    # Stride is applied UPFRONT now (Step 2 bakes it into selected_frames.json), so
+    # VGGT-Long must NOT stride again — it processes exactly the list it's given.
+    cfg["Model"]["frame_stride"] = 1
     cfg["Model"]["delete_temp_files"] = False  # Keep .npy for origin traceability
 
     pc = cfg["Model"].get("Pointcloud_Save", {})

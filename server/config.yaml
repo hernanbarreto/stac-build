@@ -106,7 +106,8 @@ frame_selection:
 
   # DINO settings
   dino_model: "dinov2_vitb14"          # ViT-B/14 ~330MB, same as VGGT-Long
-  dino_threshold: 0.97                 # cosine sim threshold (higher = more keyframes)
+  dino_threshold: 0.97                 # cosine sim threshold (higher = more keyframes = denser
+                                       # overlap, gentler than 0.97; 0.97 made gaps → jumps)
   dino_device: "cuda"                  # "cuda" | "cpu" (auto-falls back)
 
   # Legacy H/F ratio (used if method=hf_ratio or DINO fails)
@@ -285,9 +286,9 @@ tsdf:
 reconstruction:
   backend: "mapanything"                # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
-  use_keyframes: false                 # false = NO blur/cosine filter; pass ALL frames to the
-                                       # backend and let it chunk (VGGT-Long globs the full dir).
-                                       # Also keeps loop-detector + chunks on the SAME set.
+  use_keyframes: true                  # true = blur + DINO-cosine keyframe selection (adaptive:
+                                       # drops redundancy, keeps overlap on fast/rotation parts).
+                                       # false = no filter, VGGT-Long globs all + frame_stride.
 
   # DA3 Streaming (Depth Anything 3)
   da3:
@@ -318,13 +319,14 @@ reconstruction:
     model_weights: "facebook/map-anything-apache"
     chunk_size: 120
     chunk_overlap: 60
-    frame_stride: 2                     # 1-of-N uniform temporal subsample. SINGLE source of
+    frame_stride: 1                     # 1 = none (use_keyframes:true does the selection). 1-of-N
+                                        # uniform subsample only when use_keyframes:false. SINGLE source of
                                         # truth: loop detector + chunks + poses all use this.
                                         # 1 = all frames, 2 = 1 of every 2, etc.
     loop_closure: true
     conf_threshold_coef: 0.75
     sample_ratio: 1.0
-    use_da3_priors: true               # true = multi-modal: run DA3 first, feed its metric
+    use_da3_priors: true               # multi-modal: run DA3 first, feed its metric
                                         # depth + intrinsics into MapAnything (poses still
                                         # estimated by MapAnything). false = image-only.
 
