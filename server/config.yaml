@@ -258,14 +258,14 @@ bim:
 #   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
-  backend: "da3"
+  backend: "mapanything"                # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
   use_keyframes: true                  # use frame_selector keyframes (recommended)
 
-  # Pose source: "da3" (DA3 chunk loop-closure) | "vipe" (ViPE continuous SLAM).
-  # vipe → DA3 depth over ALL frames (metric ref) + ViPE poses+depth (all frames) +
-  # per-frame depth calibration + cloud composed from ViPE poses. ViPE IS the SLAM.
-  pose_source: "vipe"
+  # Pose source: "da3" | "vipe". MUST be non-"vipe" to use the backend dispatch
+  # (pose_source=="vipe" short-circuits to ViPE BEFORE the backend check).
+  # → "da3" here lets backend="mapanything" route to VGGT-Long.
+  pose_source: "da3"
   vipe:
     venv: "/workspace/stac-build/vendor/vipe/.venv"
     vipe_dir: "/workspace/stac-build/vendor/vipe"
