@@ -262,10 +262,11 @@ reconstruction:
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
   use_keyframes: true                  # use frame_selector keyframes (recommended)
 
-  # Pose source: "da3" | "vipe". MUST be non-"vipe" to use the backend dispatch
-  # (pose_source=="vipe" short-circuits to ViPE BEFORE the backend check).
-  # → "da3" here lets backend="mapanything" route to VGGT-Long.
-  pose_source: "da3"
+  # Pose source: only "vipe" has special meaning (short-circuits to ViPE BEFORE the
+  # backend check). ANY other value just falls through to the backend, which then
+  # computes its OWN poses. mapanything/VGGT-Long makes its own poses — it ignores
+  # this. "none" = "not vipe, let the backend do its thing".
+  pose_source: "none"
   vipe:
     venv: "/workspace/stac-build/vendor/vipe/.venv"
     vipe_dir: "/workspace/stac-build/vendor/vipe"
