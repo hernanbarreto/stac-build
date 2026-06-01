@@ -273,6 +273,18 @@ async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, we
         if process.returncode == 0 and output_ply.exists():
             file_size_mb = output_ply.stat().st_size / (1024 * 1024)
             print(f"[PostProc] ✅ Cleaned cloud saved: {output_ply} ({file_size_mb:.1f} MB)")
+            # Cascade cleanup (same as the pipeline cloudcompy worker): once cleaned_cloud
+            # exists, the per-chunk PLYs are baked in → delete them so they don't linger
+            # and don't re-trigger a rebuild on the next open.
+            _removed = 0
+            for _pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
+                for _f in scans_dir.glob(_pat):
+                    try:
+                        _f.unlink(); _removed += 1
+                    except Exception:
+                        pass
+            if _removed:
+                print(f"[PostProc] [cleanup] removed {_removed} chunk files (baked into cleaned_cloud)")
         else:
             print(f"[PostProc] ❌ CloudCompPy failed (exit code: {process.returncode})")
     
@@ -920,7 +932,44 @@ async def get_flythrough(session_id: str):
     vipe_out = ctx.output_dir / "vipe_run"
     pose_npz = vipe_out / "pose" / "frames.npz"
     if not pose_npz.exists():
-        raise HTTPException(status_code=404, detail="no ViPE poses (run reconstruction with pose_source=vipe)")
+        # ── Fallback: mapanything / DA3 — camera_poses.txt (+ camera_frames.txt for the
+        # REAL frame numbers). Poses are already in the cloud's metric frame → scale 1.0.
+        poses_txt = next((c for c in (ctx.output_dir / "maplong_run" / "camera_poses.txt",
+                                      ctx.output_dir / "camera_poses.txt",
+                                      ctx.output_dir / "da3_run" / "camera_poses.txt")
+                          if c.exists()), None)
+        if poses_txt is None:
+            raise HTTPException(status_code=404, detail="no camera poses for this session")
+        mats = []
+        with open(poses_txt) as f:
+            for line in f:
+                v = line.split()
+                if len(v) >= 16:
+                    mats.append([float(x) for x in v[:16]])
+        frames = list(range(len(mats)))
+        fr_txt = poses_txt.parent / "camera_frames.txt"
+        if not fr_txt.exists():
+            fr_txt = ctx.output_dir / "camera_frames.txt"
+        if fr_txt.exists():
+            try:
+                nums = [int(x) for x in open(fr_txt).read().split()]
+                if len(nums) == len(mats):
+                    frames = nums
+            except Exception:
+                pass
+        K = None
+        for ip in (poses_txt.parent / "intrinsic.txt", ctx.output_dir / "intrinsic.txt"):
+            if ip.exists():
+                try:
+                    arr = np.loadtxt(str(ip))
+                    row = arr if arr.ndim == 1 else arr[len(arr) // 2]
+                    K = [float(x) for x in np.asarray(row).reshape(-1)[:4]]
+                except Exception:
+                    pass
+                break
+        return {"n_frames": len(frames), "frames": frames, "poses": mats,
+                "scale": 1.0, "intrinsics": K,
+                "video_url": f"/api/sessions/{session_id}/video"}
     d = np.load(str(pose_npz))
     inds = np.asarray(d["inds"]).astype(int)
     mats = np.asarray(d["data"], dtype=np.float64)  # (N,4,4) c2w

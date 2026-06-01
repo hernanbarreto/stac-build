@@ -76,6 +76,18 @@ def _tsdf_work(pipe: WorkerPipe, session_dir: str, config: dict):
     pipe.send_progress(100, f"TSDF mesh written: {Path(path).name}", stage="tsdf")
     pipe.send_log(f"TSDF scene mesh: {path}")
 
+    # Cascade cleanup (step 3/3): the mesh is built, so the aligned chunk depth
+    # (maplong_run/_tmp_results_aligned, ~tens of GB) is no longer needed. Default ON.
+    # Set tsdf.keep_aligned_chunks: true to retain it for TSDF param re-tuning.
+    if not tcfg.get("keep_aligned_chunks", False):
+        import shutil
+        aligned = output_dir / "maplong_run" / "_tmp_results_aligned"
+        if aligned.exists():
+            size_mb = sum(f.stat().st_size for f in aligned.rglob("*") if f.is_file()) / (1024 * 1024)
+            shutil.rmtree(aligned, ignore_errors=True)
+            pipe.send_log(f"[cleanup] removed _tmp_results_aligned/ ({size_mb:.0f} MB freed) "
+                          f"— set tsdf.keep_aligned_chunks: true to keep for re-tuning")
+
 
 def run(conn: Connection, session_dir: str, config: dict):
     """Entry point called by PipelineManager."""

@@ -924,12 +924,23 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
     """
     # ── Copy PLY files to output dir ──
     pcd_dir = save_dir / "pcd"
-    if not pcd_dir.exists():
-        raise FileNotFoundError(f"Reconstruction output not found: {pcd_dir}")
-
-    ply_files = sorted(glob.glob(str(pcd_dir / "*_pcd.ply")))
+    ply_files = (sorted(glob.glob(str(pcd_dir / "*_pcd.ply"))) if pcd_dir.exists() else [])
     ply_files = [f for f in ply_files if "combined" not in Path(f).name]
     if not ply_files:
+        # No new chunk PLYs. EXPECTED when VGGT-Long early-exited a resume
+        # (camera_poses.txt already present → reconstruction already complete) or when
+        # the cascade cleanup already removed pcd/. If the products already exist there
+        # is nothing to post-process → skip gracefully instead of crashing. To force a
+        # full rebuild, reconstruct WITH replace (clears camera_poses → VGGT-Long re-runs).
+        already_done = ((output_dir / "cleaned_cloud.ply").exists()
+                        or any(output_dir.glob("chunk_*.ply"))
+                        or (output_dir / "camera_poses.txt").exists()
+                        or (save_dir / "camera_poses.txt").exists())
+        if already_done:
+            pipe.send_log("Reconstruction already complete (no new chunks produced) — "
+                          "skipping post-process. Use replace to force a full rebuild.")
+            pipe.send_progress(100, f"{backend.upper()} already complete", stage="reconstruction")
+            return
         raise FileNotFoundError(f"No chunk PLY files found in {pcd_dir}")
 
     pipe.send_log(f"Found {len(ply_files)} chunk PLYs")
@@ -994,13 +1005,15 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
     pipe.send_progress(100, f"{backend.upper()} reconstruction complete", stage="reconstruction")
     pipe.send_log(f"{backend} complete: {len(ply_files)} chunks")
 
-    # Cleanup temp .npy files. KEEP _tmp_results_aligned — the whole-scene TSDF reads
-    # per-frame depth from it (_resolve_mapanything_depth), and origins were generated
-    # from it too. Unaligned is already deleted incrementally during alignment.
-    for tmp_dir_name in ["_tmp_results_unaligned", "_tmp_results_loop"]:
+    # Cascade cleanup (step 1/3). The per-chunk PLYs were just copied to
+    # output/chunk_NNN.ply, so maplong_run/pcd/ (incl. VGGT-Long's huge unused
+    # combined_pcd.ply, tens of GB) is now dead → delete it. KEEP _tmp_results_aligned —
+    # the whole-scene TSDF reads per-frame depth from it (_resolve_mapanything_depth) and
+    # origins were generated from it. Unaligned/loop are intermediate → delete.
+    for tmp_dir_name in ["_tmp_results_unaligned", "_tmp_results_loop", "pcd"]:
         tmp_dir = save_dir / tmp_dir_name
         if tmp_dir.exists():
-            size_mb = sum(f.stat().st_size for f in tmp_dir.glob("*")) / (1024 * 1024)
+            size_mb = sum(f.stat().st_size for f in tmp_dir.rglob("*") if f.is_file()) / (1024 * 1024)
             shutil.rmtree(tmp_dir, ignore_errors=True)
             pipe.send_log(f"Cleaned up {tmp_dir_name}/ ({size_mb:.0f} MB freed)")
 
@@ -1229,6 +1242,27 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                 except ValueError:
                     K = i  # fallback
 
+                # STAC: prefer the INLINE origins VGGT-Long wrote with the SAME mask as
+                # the PLY (guaranteed 1:1 — no cross-process float-boundary drift that
+                # made CloudComPy drop origins → lost confidence + TSDF traceability).
+                # Falls through to the re-derivation below for DA3 / legacy runs.
+                inline = pcd_dir / f"{K}_origins.npz"
+                if inline.exists():
+                    z = np.load(inline)
+                    n = int(len(z["frame_global"]))
+                    out_ply = output_dir / f"chunk_{i:03d}.ply"
+                    ply_n = _read_ply_point_count(out_ply) if out_ply.exists() else None
+                    if ply_n is not None and ply_n != n:
+                        pipe.send_log(f"Chunk {i:03d} (src {K}): inline origins {n} vs PLY "
+                                      f"{ply_n} — mismatch (will be dropped at merge)", level="warning")
+                    np.savez_compressed(output_dir / f"chunk_{i:03d}_origins.npz",
+                                        **{k: z[k] for k in z.files})
+                    with open(output_dir / f"chunk_{i:03d}_meta.json", "w") as f:
+                        json.dump({"chunk_id": i, "source_chunk": int(K),
+                                   "n_points": n, "chunk_step": int(chunk_step)}, f)
+                    pipe.send_log(f"Saved origins chunk_{i:03d} (src {K}, inline 1:1): {n} pts")
+                    continue
+
                 npy_path = chunks_dir / f"chunk_{K}.npy"
                 if not npy_path.exists():
                     pipe.send_log(f"Chunk {i:03d}: missing {npy_path.name}; origins skipped", level="warning")
@@ -1237,6 +1271,7 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                 chunk_data = np.load(npy_path, allow_pickle=True).item()
 
                 conf_flat = None
+                mapany_thr = None   # exact VGGT-Long threshold for the mapanything branch
                 if hasattr(chunk_data, "conf") and getattr(chunk_data, "conf") is not None:
                     # DA3 Prediction — replicate the PLY's confidence mask
                     conf = np.asarray(chunk_data.conf, dtype=np.float32)
@@ -1260,7 +1295,15 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                     # world_points_conf matches the aligned PLY's.
                     wpc = chunk_data.get("world_points_conf")
                     if wpc is not None:
-                        conf_flat = np.asarray(wpc, dtype=np.float32).reshape(-1)
+                        _wpc = np.asarray(wpc).reshape(-1)
+                        # Threshold EXACTLY as VGGT-Long computes it: mean over the RAW
+                        # dtype (float16/float32), NOT cast to float32 first. The float32
+                        # cast shifted the mean → ±N points flipped at the boundary →
+                        # origin/PLY count mismatch → CloudComPy dropped ALL origins (no
+                        # confidence, no TSDF traceability). conf_flat stays float32 for
+                        # the mask comparison itself (matches save_confident_pointcloud_batch).
+                        mapany_thr = float(np.mean(_wpc)) * coef
+                        conf_flat = _wpc.astype(np.float32)
                 else:
                     pipe.send_log(f"Chunk {i:03d} (src {K}): unrecognized data format", level="warning")
                     continue
@@ -1268,8 +1311,9 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                 HW = H * W
 
                 if conf_flat is not None:
-                    # Exact replica of save_confident_pointcloud_batch's mask.
-                    thr = float(np.mean(conf_flat)) * coef
+                    # Exact replica of save_confident_pointcloud_batch's mask. Use the
+                    # raw-dtype threshold for mapanything (mapany_thr) so the count matches.
+                    thr = mapany_thr if mapany_thr is not None else float(np.mean(conf_flat)) * coef
                     surviving = np.flatnonzero((conf_flat >= thr) & (conf_flat > 1e-5))
                     confidence = conf_flat[surviving].astype(np.float32)
                 else:
