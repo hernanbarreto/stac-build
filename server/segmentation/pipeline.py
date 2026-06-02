@@ -152,7 +152,9 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
     sel_path = frames_dir / "selected_frames.json"
     use_novelty = False
     
-    if frame_sel_cfg and frame_sel_cfg.get("enabled", False) and sel_path.exists():
+    # selected_frames.json is the single source of truth (always written by map_worker
+    # step 2 for every frames_selector mode: dino / stride / none). Consume it if present.
+    if sel_path.exists():
         try:
             from frame_selector import load_selected_frames
             selected_files = load_selected_frames(str(frames_dir))

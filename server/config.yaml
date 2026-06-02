@@ -96,15 +96,12 @@ scene_analysis:
     - { label: "ceiling" }
 
 
-# ── Frame Selection (visual novelty filter) ────────────────────────
-# Two methods: DINO cosine similarity (default, more reliable) or ORB-SLAM
-# H/F ratio (legacy fallback). Consumed by frame_selector.py and triggered
-# at start of reconstruction in workers/map_worker.py.
+# ── Frame Selection params (mode is reconstruction.frames_selector) ─
+# These are the SUB-PARAMS for the selector mode chosen in
+# reconstruction.frames_selector (dino | stride | none). Consumed by
+# frames/selector.py, triggered in workers/map_worker.py step 2.
 frame_selection:
-  enabled: false
-  method: "dino"                       # "dino" | "hf_ratio"
-
-  # DINO settings
+  # DINO settings (used when frames_selector: dino)
   dino_model: "dinov2_vitb14"          # ViT-B/14 ~330MB, same as VGGT-Long
   dino_threshold: 0.977                 # cosine sim threshold (higher = more keyframes = denser
                                        # overlap, gentler than 0.97; 0.97 made gaps → jumps)
@@ -289,9 +286,10 @@ tsdf:
 reconstruction:
   backend: "mapanything"                # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
-  use_keyframes: true                  # true = blur + DINO-cosine keyframe selection (adaptive:
-                                       # drops redundancy, keeps overlap on fast/rotation parts).
-                                       # false = no filter, VGGT-Long globs all + frame_stride.
+  frames_selector: "none"              # SINGLE source of frame-set mode (writes selected_frames.json):
+                                       #   "dino"   = blur + DINO-cosine keyframes (params in frame_selection:)
+                                       #   "stride" = uniform 1-of-N subsample (mapanything.frame_stride)
+                                       #   "none"   = all blur-valid frames (no decimation)
 
   # DA3 Streaming (Depth Anything 3)
   da3:
