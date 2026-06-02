@@ -1220,12 +1220,31 @@ def export_tsdf_scene(
             o3c.Tensor(np.ascontiguousarray(color_np).astype(np.float32), device=o3d_device))
         K_t = o3c.Tensor(np.ascontiguousarray(K_d), o3c.float64)
         ext_t = o3c.Tensor(np.ascontiguousarray(extrinsic), o3c.float64)
-        coords = volume.compute_unique_block_coordinates(
-            depth_t, K_t, ext_t, depth_scale=1.0, depth_max=depth_trunc,
-            trunc_voxel_multiplier=trunc_mult)
-        volume.integrate(coords, depth_t, color_t, K_t, K_t, ext_t,
-                         depth_scale=1.0, depth_max=depth_trunc,
-                         trunc_voxel_multiplier=trunc_mult)
+        # Open3D raises "No block is touched in TSDF volume" (a RuntimeError) when
+        # a single frame unprojects to zero active blocks — degenerate K/pose, or
+        # all depth out of (depth_min, depth_trunc). Guard PER FRAME so one bad
+        # frame is skipped instead of aborting the entire scene mesh.
+        try:
+            coords = volume.compute_unique_block_coordinates(
+                depth_t, K_t, ext_t, depth_scale=1.0, depth_max=depth_trunc,
+                trunc_voxel_multiplier=trunc_mult)
+            volume.integrate(coords, depth_t, color_t, K_t, K_t, ext_t,
+                             depth_scale=1.0, depth_max=depth_trunc,
+                             trunc_voxel_multiplier=trunc_mult)
+        except RuntimeError as e:
+            if "No block is touched" in str(e):
+                skipped_empty += 1
+                if skipped_empty <= 5:
+                    _dv = depth_masked[depth_masked > 0]
+                    logger.warning(
+                        f"[TSDF-scene] frame {fidx}: no block touched — skipping "
+                        f"(valid_px={int((depth_masked > 0).sum())}, "
+                        f"depth_min={_dv.min():.3f} max={_dv.max():.3f} "
+                        f"K_fx={K_d[0, 0]:.1f} hw={depth_h}x{depth_w})"
+                        if _dv.size else
+                        f"[TSDF-scene] frame {fidx}: no block touched, empty depth")
+                continue
+            raise
         n_integrated += 1
 
         if progress_cb and n_integrated % 50 == 0:

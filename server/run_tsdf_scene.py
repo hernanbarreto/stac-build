@@ -16,6 +16,7 @@ Everything else printed is plain log forwarded to the server console.
 """
 import argparse
 import json
+import logging
 import sys
 import traceback
 from pathlib import Path
@@ -24,6 +25,12 @@ from pathlib import Path
 _SERVER_DIR = Path(__file__).resolve().parent
 if str(_SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(_SERVER_DIR))
+
+# Route the export_tsdf_scene logger ("TSDFExport") to stdout so its coverage
+# diagnostics (per-frame source, mask points, n_integrated / skipped) reach the
+# server console — main.py forwards this subprocess's stdout line by line.
+# Without this the INFO records are dropped (no handler) and we fly blind.
+logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
 
 def main():
