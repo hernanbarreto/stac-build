@@ -3667,16 +3667,21 @@ async def export_tsdf_scene_endpoint(request: Request):
     """
     body = await request.json()
     session_id = body.get("session_id")
-    # 1.5 cm voxel / 5 cm trunc — matched to the ~1-2 cm iPad-LiDAR footprint.
-    # A finer voxel just over-resolves sensor noise into floaters + a doubled
-    # shell (see plans/polycam-quality-reconstruction.md).
-    voxel_length = float(body.get("voxel_length", 0.015))
-    sdf_trunc = float(body.get("sdf_trunc", 0.05))
-    depth_trunc = float(body.get("depth_trunc", 5.0))
-    depth_min = float(body.get("depth_min", 0.15))
-    edge_thresh = float(body.get("edge_thresh", 0.04))
-    conf_min = int(body.get("conf_min", 2))
-    smooth_iterations = int(body.get("smooth_iterations", 2))
+    # Defaults come from config.yaml `tsdf:` so the manual TSDF button honours the
+    # SAME tuning as the pipeline worker. Previously this endpoint used hardcoded
+    # defaults (depth_trunc=5m, da3_conf_percentile=50, no mask/weight passthrough)
+    # and ignored config entirely → far walls truncated at 5 m + half the depth
+    # dropped by confidence → "the TSDF doesn't cover the whole cloud". Body keys
+    # still override per-request.
+    _VALID_TSDF_KW = {
+        "voxel_length", "sdf_trunc", "depth_trunc", "depth_min", "edge_thresh",
+        "conf_min", "da3_conf_percentile", "mask_to_cleaned_cloud",
+        "cleaned_cloud_dilate", "smooth_iterations", "tsdf_block_count",
+        "tsdf_weight_thresh", "texture", "texture_mode",
+    }
+    _tcfg = cfg.get("tsdf", {}) or {}
+    params = {k: _tcfg[k] for k in _VALID_TSDF_KW if k in _tcfg}
+    params.update({k: body[k] for k in _VALID_TSDF_KW if k in body})
 
     if not session_id:
         raise HTTPException(status_code=400, detail="Missing session_id")
@@ -3687,9 +3692,7 @@ async def export_tsdf_scene_endpoint(request: Request):
 
     print(f"[TSDF-scene] ━━━ /tsdf/scene_export request ━━━")
     print(f"[TSDF-scene]   session={session_id}")
-    print(f"[TSDF-scene]   voxel={voxel_length}m  trunc={sdf_trunc}m  "
-          f"depth_max={depth_trunc}m  edge={edge_thresh}m  "
-          f"conf_min={conf_min}  smooth={smooth_iterations}")
+    print(f"[TSDF-scene]   params (config tsdf + body overrides): {params}")
 
     async with _tsdf_progress_lock:
         sess_state = _tsdf_progress.setdefault(session_id, {})
@@ -3702,12 +3705,7 @@ async def export_tsdf_scene_endpoint(request: Request):
     # a thread still saturates this process + the GIL and blocks the event loop,
     # so /health times out and the UI falsely reports "server down" during a
     # reconstruction. A subprocess read with async streams keeps the loop free.
-    params = {
-        "voxel_length": voxel_length, "sdf_trunc": sdf_trunc,
-        "depth_trunc": depth_trunc, "depth_min": depth_min,
-        "edge_thresh": edge_thresh, "conf_min": conf_min,
-        "smooth_iterations": smooth_iterations,
-    }
+    # params already built above from config.yaml `tsdf:` + body overrides
     worker = Path(SERVER_DIR) / "run_tsdf_scene.py"
 
     async def _bg():

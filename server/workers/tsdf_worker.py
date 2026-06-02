@@ -61,6 +61,26 @@ def _tsdf_work(pipe: WorkerPipe, session_dir: str, config: dict):
     pipe.send_log(f"TSDF kwargs (overrides): {kwargs}" if kwargs
                   else "TSDF using export defaults")
 
+    # Forward the export_tsdf_scene logger ("TSDFExport") to server.log via the pipe so
+    # its coverage diagnostics (n_integrated / skipped / mask points / depth source /
+    # "integrating unmasked") are visible — otherwise they only hit the worker console.
+    import logging as _logging
+    _tsdf_logger = _logging.getLogger("TSDFExport")
+
+    class _PipeLogHandler(_logging.Handler):
+        def emit(self, record):
+            try:
+                pipe.send_log(f"[TSDF] {record.getMessage()}",
+                              level="warning" if record.levelno >= _logging.WARNING else "info")
+            except Exception:
+                pass
+
+    _ph = _PipeLogHandler()
+    _ph.setLevel(_logging.INFO)
+    if not any(isinstance(h, _PipeLogHandler) for h in _tsdf_logger.handlers):
+        _tsdf_logger.addHandler(_ph)
+    _tsdf_logger.setLevel(_logging.INFO)
+
     from segmentation.tsdf_export import export_tsdf_scene
     path = export_tsdf_scene(
         output_dir=output_dir,
