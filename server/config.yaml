@@ -286,7 +286,7 @@ tsdf:
 reconstruction:
   backend: "mapanything"                # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
-  frames_selector: "none"              # SINGLE source of frame-set mode (writes selected_frames.json):
+  frames_selector: "stride"            # SINGLE source of frame-set mode (writes selected_frames.json):
                                        #   "dino"   = blur + DINO-cosine keyframes (params in frame_selection:)
                                        #   "stride" = uniform 1-of-N subsample (mapanything.frame_stride)
                                        #   "none"   = all blur-valid frames (no decimation)
