@@ -3954,3 +3954,24 @@
 }
 .sync-btn:hover { color: var(--accent, #5b9dd9); }
 .sync-err { color: #ff8888; font-size: 12px; padding: 12px; text-align: center; }
+
+/* Loading / buffering indicator — shown in the video zone and mirrored over the
+   3D zone (right half) so it's obvious the player isn't ready to play yet. */
+.sync-loading {
+  position: absolute;
+  inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px;
+  background: rgba(0, 0, 0, 0.45);
+  color: var(--text, #d8dbe0);
+  pointer-events: none;
+  z-index: 2;
+}
+.sync-loading-3d {
+  /* right half (the live 3D viewport); left:50% mirrors .sync-video-col width */
+  left: 50%; right: 0; top: 0; bottom: 44px;
+  background: rgba(0, 0, 0, 0.30);
+}
+.sync-loading-label { font-size: 13px; letter-spacing: 0.02em; }
+.sync-spin { animation: sync-spin 0.9s linear infinite; color: var(--accent, #5b9dd9); }
+@keyframes sync-spin { to { transform: rotate(360deg); } }
