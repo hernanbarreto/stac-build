@@ -101,12 +101,12 @@ scene_analysis:
 # H/F ratio (legacy fallback). Consumed by frame_selector.py and triggered
 # at start of reconstruction in workers/map_worker.py.
 frame_selection:
-  enabled: true
+  enabled: false
   method: "dino"                       # "dino" | "hf_ratio"
 
   # DINO settings
   dino_model: "dinov2_vitb14"          # ViT-B/14 ~330MB, same as VGGT-Long
-  dino_threshold: 0.97                 # cosine sim threshold (higher = more keyframes = denser
+  dino_threshold: 0.977                 # cosine sim threshold (higher = more keyframes = denser
                                        # overlap, gentler than 0.97; 0.97 made gaps → jumps)
   dino_device: "cuda"                  # "cuda" | "cpu" (auto-falls back)
 
@@ -260,10 +260,13 @@ tsdf:
   depth_trunc: 100.0         # effectively no distance cut — trust the cloud's range
   depth_min: 0.05            # only drop sensor-touching artifacts
   da3_conf_percentile: 0     # NO confidence re-filter (the cloud already filtered)
-  tsdf_weight_thresh: 1.0    # extract single-view voxels too (floor; 0 = garbage)
+  tsdf_weight_thresh: 2.0    # require ≥2 views per voxel — drops UNreconciled single-view
+                             # voxels (raw depth noise → thick/bumpy surfaces). Not a cloud
+                             # filter: it just refuses to mesh what multi-view never agreed on.
+                             # Small gaps closed by fill_holes. (was 1.0 = single-view = noisy)
   edge_thresh: 1.0           # ~disable flying-pixel cull (the cloud is already clean)
-  voxel_length: 0.015        # 1.5 cm
-  sdf_trunc: 0.05
+  voxel_length: 0.010        # 1.0 cm — finer detail; the cleaned cloud supports it (was 1.5cm)
+  sdf_trunc: 0.035           # ~3.5× voxel — reconciliation band kept proportional to voxel
   tsdf_block_count: 200000   # more GPU hash slots — bigger scene, no block starvation
   texture: true
   texture_mode: "vertex_gpu" # multi-view photo bake (falls back to integrated colour)
@@ -319,7 +322,7 @@ reconstruction:
     model_weights: "facebook/map-anything-apache"
     chunk_size: 120
     chunk_overlap: 60
-    frame_stride: 1                     # 1 = none (use_keyframes:true does the selection). 1-of-N
+    frame_stride: 2                     # 1 = none (use_keyframes:true does the selection). 1-of-N
                                         # uniform subsample only when use_keyframes:false. SINGLE source of
                                         # truth: loop detector + chunks + poses all use this.
                                         # 1 = all frames, 2 = 1 of every 2, etc.
@@ -329,6 +332,14 @@ reconstruction:
     use_da3_priors: true               # multi-modal: run DA3 first, feed its metric
                                         # depth + intrinsics into MapAnything (poses still
                                         # estimated by MapAnything). false = image-only.
+    da3_prior_conf_percentile: 30      # per-frame floor on the DA3 prior depth: drop the
+                                        # bottom N% least-confident pixels (set depth=0 →
+                                        # MapAnything treats as "no prior" and infers them).
+                                        # Kills floor/ceiling onion from low-conf DA3 depth
+                                        # anchoring the metric scale. 0 = feed raw (no filter).
+    map_conf_percentile: 25            # MapAnything inference confidence floor (absolute
+                                        # percentile, no ceiling — best points pass). Drops
+                                        # the bottom N% by model confidence per chunk. 0 = off.
 
   # GauS-SLAM (Gaussian Surfel SLAM)
   # Pipeline: DA3 depth+poses → TUM bridge → GauS-SLAM (2DGS surfels).

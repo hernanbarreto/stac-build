@@ -1056,6 +1056,12 @@ def _build_vggt_config(config: dict) -> dict:
     pc["conf_threshold_coef"] = ma.get("conf_threshold_coef", pc.get("conf_threshold_coef", 0.75))
     cfg["Model"]["Pointcloud_Save"] = pc
 
+    # Confidence floors (consumed in base_models/base_model.py). Both configurable from
+    # config.yaml — nothing hardcoded. da3_prior_conf_percentile filters the DA3 metric
+    # depth prior per frame; map_conf_percentile is MapAnything's own inference floor.
+    cfg["Model"]["da3_prior_conf_percentile"] = ma.get("da3_prior_conf_percentile", 0)
+    cfg["Model"]["map_conf_percentile"] = ma.get("map_conf_percentile", 10)
+
     if ma.get("model_weights"):
         cfg["Weights"]["Map"] = ma["model_weights"]
 
