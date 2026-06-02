@@ -206,6 +206,59 @@ class StrayDA3Streaming(DA3_Streaming):
 
         self.process_long_sequence()
 
+        # ── Unify on the REAL frame number (single identity across the pipeline) ──
+        # DA3 names each per-frame npz frame_<POSITION>.npz (its index in img_list)
+        # and camera_poses.txt is in the same position order. That only equals the
+        # REAL frame number when img_list is the full ordered set; under a strided /
+        # keyframe subset, position != real number, so the npz mispair with how
+        # base_model.py (MapAnything priors) and tsdf_export look them up — by the
+        # real number parsed from the image filename. We re-key the npz to the real
+        # number and write frame_list.json (the exact ordered processed frames), so
+        # the postprocess emits camera_frames.txt and _generate_origins keys
+        # frame_global by real number too — i.e. the WHOLE da3 path matches the
+        # VGGT-Long path. (No-op when img_list is the full set: position == real.)
+        self._finalize_real_frame_keying()
+
+    def _finalize_real_frame_keying(self):
+        """Re-key per-frame npz position-index → real frame number, and write
+        frame_list.json. See the call site in run() for the rationale."""
+        import re as _re
+        # frame_list.json: exact ordered processed frames (basenames). Read by
+        # map_worker postprocess (→ camera_frames.txt) and _generate_origins.
+        try:
+            names = [os.path.basename(p) for p in self.img_list]
+            Path(self.output_dir).joinpath("frame_list.json").write_text(json.dumps(names))
+        except Exception as e:
+            print(f"[StrayDA3] could not write frame_list.json: {e}")
+
+        # Re-key frame_<position>.npz → frame_<realnum>.npz. Two-phase (→ .tmp →
+        # final) so overlapping renames (e.g. frame_1→frame_2 while frame_2 exists)
+        # can't clobber each other. Real numbers are unique per frame, so phase 2
+        # never collides.
+        res_dir = Path(getattr(self, "result_output_dir", ""))
+        if not res_dir or not res_dir.exists():
+            return
+        pos_to_real = {}
+        for i, p in enumerate(self.img_list):
+            m = _re.search(r"(\d+)", os.path.basename(p))
+            if m:
+                pos_to_real[i] = int(m.group(1))
+        staged = []
+        for f in res_dir.glob("frame_*.npz"):
+            m = _re.match(r"frame_(\d+)\.npz$", f.name)
+            if not m:
+                continue
+            real = pos_to_real.get(int(m.group(1)))
+            if real is None:
+                continue
+            tmp = f.with_name(f"{f.name}.rekey_tmp")
+            f.rename(tmp)
+            staged.append((tmp, real))
+        for tmp, real in staged:
+            tmp.rename(res_dir / f"frame_{real}.npz")
+        if staged:
+            print(f"[StrayDA3] re-keyed {len(staged)} npz to real frame numbers")
+
     def process_single_chunk(self, range_1, chunk_idx=None, range_2=None,
                              is_loop=False):
         """Override: run DA3 inference, then inject Stray Scanner data."""

@@ -717,11 +717,11 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 pipe.send_log(f"DA3 priors already present ({_existing}) — skipping DA3 extraction")
             else:
                 pipe.send_log("MapAnything DA3-priors mode: extracting DA3 metric depth first")
-                # Honor the SAME frame set MapAnything will use (selected_frames.json) so DA3
-                # only computes depth for those frames — no wasted DA3 streaming over frames
-                # MapAnything never reconstructs. npz stays keyed by REAL frame number, so the
-                # per-frame prior lookup in base_model.py matches exactly. Falls back to ALL
-                # frames when no selection was produced (selected_frames_path is None).
+                # Honor the SAME frame set MapAnything reconstructs (selected_frames.json):
+                # DA3 only computes depth for those frames. Safe because StrayDA3Streaming
+                # re-keys its per-frame npz to the REAL frame number (see
+                # _finalize_real_frame_keying), so base_model.py's per-frame prior lookup
+                # (frame_<realnum>.npz) matches regardless of stride/keyframe subset.
                 da3_dir = _run_da3(pipe, frames_dir, output_dir, selected_frames_path,
                                    recon_cfg, config, depth_only=True)
             priors_dir = Path(da3_dir) / "results_output"
