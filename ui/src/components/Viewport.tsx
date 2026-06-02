@@ -77,6 +77,9 @@ export interface ViewportHandle {
     // Flythrough (synced video↔3D): drive the camera to a per-frame c2w pose.
     setFlythroughActive: (active: boolean) => void
     setCameraToPose: (c2wRowMajor: number[]) => void
+    // Match the 3D camera's vertical FOV to the real camera (from intrinsics) so
+    // the flythrough frames the scene exactly like the video. Restored on close.
+    setCameraFov: (fovYDeg: number) => void
 }
 
 // Vertex shader — matches FusionRenderer.js point size formula
@@ -1882,6 +1885,24 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             // hide the camera-pose markers during playback; restore on close
             // (on normal load they're shown + toggleable). cameraGroupRef holds them.
             if (cameraGroupRef.current) cameraGroupRef.current.visible = !active
+            // Save the user's FOV on enter; restore it on exit (setCameraFov sets
+            // the real-camera FOV during the flythrough).
+            const cam = cameraRef.current
+            if (cam) {
+                if (active) {
+                    if (cam.userData.savedFov == null) cam.userData.savedFov = cam.fov
+                } else if (cam.userData.savedFov != null) {
+                    cam.fov = cam.userData.savedFov
+                    cam.userData.savedFov = null
+                    cam.updateProjectionMatrix()
+                }
+            }
+        },
+        setCameraFov: (fovYDeg: number) => {
+            const cam = cameraRef.current
+            if (!cam || !isFinite(fovYDeg) || fovYDeg <= 0 || fovYDeg >= 180) return
+            cam.fov = fovYDeg
+            cam.updateProjectionMatrix()
         },
         setCameraToPose: (c2wRowMajor: number[]) => {
             const cam = cameraRef.current

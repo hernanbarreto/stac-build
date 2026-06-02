@@ -3953,6 +3953,7 @@
   cursor: pointer; display: flex; align-items: center; padding: 4px;
 }
 .sync-btn:hover { color: var(--accent, #5b9dd9); }
+.sync-btn:disabled, .sync-seek:disabled { opacity: 0.4; cursor: not-allowed; }
 .sync-err { color: #ff8888; font-size: 12px; padding: 12px; text-align: center; }
 
 /* Loading / buffering indicator — shown in the video zone and mirrored over the
