@@ -103,7 +103,7 @@ scene_analysis:
 frame_selection:
   # DINO settings (used when frames_selector: dino)
   dino_model: "dinov2_vitb14"          # ViT-B/14 ~330MB, same as VGGT-Long
-  dino_threshold: 0.977                 # cosine sim threshold (higher = more keyframes = denser
+  dino_threshold: 0.975                 # cosine sim threshold (higher = more keyframes = denser
                                        # overlap, gentler than 0.97; 0.97 made gaps → jumps)
   dino_device: "cuda"                  # "cuda" | "cpu" (auto-falls back)
 
@@ -284,9 +284,9 @@ tsdf:
 #   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
-  backend: "mapanything"                # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
+  backend: "da3"                        # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
-  frames_selector: "stride"            # SINGLE source of frame-set mode (writes selected_frames.json):
+  frames_selector: "none"              # SINGLE source of frame-set mode (writes selected_frames.json):
                                        #   "dino"   = blur + DINO-cosine keyframes (params in frame_selection:)
                                        #   "stride" = uniform 1-of-N subsample (mapanything.frame_stride)
                                        #   "none"   = all blur-valid frames (no decimation)
@@ -330,12 +330,12 @@ reconstruction:
     use_da3_priors: true               # multi-modal: run DA3 first, feed its metric
                                         # depth + intrinsics into MapAnything (poses still
                                         # estimated by MapAnything). false = image-only.
-    da3_prior_conf_percentile: 30      # per-frame floor on the DA3 prior depth: drop the
+    da3_prior_conf_percentile: 50      # per-frame floor on the DA3 prior depth: drop the
                                         # bottom N% least-confident pixels (set depth=0 →
                                         # MapAnything treats as "no prior" and infers them).
                                         # Kills floor/ceiling onion from low-conf DA3 depth
                                         # anchoring the metric scale. 0 = feed raw (no filter).
-    map_conf_percentile: 25            # MapAnything inference confidence floor (absolute
+    map_conf_percentile: 15            # MapAnything inference confidence floor (absolute
                                         # percentile, no ceiling — best points pass). Drops
                                         # the bottom N% by model confidence per chunk. 0 = off.
 

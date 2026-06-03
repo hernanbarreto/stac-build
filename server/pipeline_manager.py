@@ -578,7 +578,7 @@ def build_pipeline_stages(
                  Used to auto-disable stages incompatible with certain backends.
     """
     if ordered_stages is None:
-        stage_order = DEFAULT_STAGE_ORDER
+        stage_order = list(DEFAULT_STAGE_ORDER)   # copy — never mutate the module list
     else:
         # Convert strings back to Enums, ignoring invalid ones
         stage_order = []
@@ -596,6 +596,23 @@ def build_pipeline_stages(
         # GauS-SLAM produces clean Gaussian surfels — CloudCompPy cleaning is unnecessary
         enabled_dict.setdefault("cloudcompy", False)
         logger.info(f"[Pipeline] Auto-disabled CloudCompPy (backend={backend})")
+    else:
+        # CloudCompy produces the cleaned_cloud + Potree the viewer needs. If
+        # reconstruction runs WITHOUT it, the session has only raw chunk_*.ply, and
+        # opening it lazily triggers an on-load CloudCompy+Potree (main.py ~4640) —
+        # which can hang and forces a server restart. So finish the cloud in the
+        # same run: whenever reconstruction is enabled, force CloudCompy on right
+        # after it. It only consumes the reconstruction chunks — it does NOT re-run
+        # reconstruction. TSDF/VLM/SAM3 stay exactly as the user chose.
+        recon_on = (StageId.RECONSTRUCTION in stage_order
+                    and enabled_dict.get(StageId.RECONSTRUCTION.value, True))
+        if recon_on:
+            enabled_dict[StageId.CLOUDCOMPY.value] = True
+            if StageId.CLOUDCOMPY not in stage_order:
+                ri = stage_order.index(StageId.RECONSTRUCTION)
+                stage_order.insert(ri + 1, StageId.CLOUDCOMPY)
+            logger.info("[Pipeline] Reconstruction enabled → CloudCompy forced on to "
+                        "finish the cloud (avoids fragile on-load regeneration)")
     stages = []
     
     for stage_id in stage_order:
