@@ -52,8 +52,13 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         sys.path.insert(0, server_dir)
 
     # ── Step 1: Frame quality analysis (blur detection) ──
+    # Toggleable via reconstruction.blur_filter (default ON). OFF = keep ALL frames,
+    # no Laplacian cull, no frame_quality.json gating in Step 2.
+    blur_on = bool(recon_cfg.get("blur_filter", True))
     fq_path = frames_dir / "frame_quality.json"
-    if not replace and fq_path.exists():
+    if not blur_on:
+        pipe.send_log("Blur filter OFF (reconstruction.blur_filter: false) — keeping ALL frames")
+    elif not replace and fq_path.exists():
         pipe.send_log("Reusing existing frame_quality.json (replace=off — skipping blur analysis)")
     else:
         pipe.send_progress(2, "Analyzing frame quality...", stage="reconstruction")
@@ -90,8 +95,14 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         # "stride" or "none": write the FULL blur-valid set, optionally strided. Writing
         # it explicitly (vs leaving it unset) keeps selected_frames.json the single source.
         try:
-            from frame_selector import _load_valid_frame_list
-            valid = sorted(_load_valid_frame_list(frames_dir),
+            if blur_on:
+                from frame_selector import _load_valid_frame_list
+                _files = _load_valid_frame_list(frames_dir)
+            else:
+                # blur OFF → ALL frames on disk, no quality cull.
+                _files = (glob.glob(str(frames_dir / "*.jpg"))
+                          + glob.glob(str(frames_dir / "*.png")))
+            valid = sorted(_files,
                            key=lambda f: int(os.path.splitext(os.path.basename(f))[0]))
             valid = [os.path.basename(f) for f in valid]
             stride = (int(recon_cfg.get("mapanything", {}).get("frame_stride", 1) or 1)
@@ -104,7 +115,7 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
                            "selected_files": chosen}, _f)
             pipe.send_log(f"Frame set: {len(chosen)}/{len(valid)} frames "
                           f"({mode}{f', stride {stride}' if mode == 'stride' else ''}, "
-                          f"blur-valid) → selected_frames.json")
+                          f"{'blur-valid' if blur_on else 'no blur'}) → selected_frames.json")
         except Exception as e:
             pipe.send_log(f"Could not build frame list: {e}", level="warning")
     if sf_path.exists():

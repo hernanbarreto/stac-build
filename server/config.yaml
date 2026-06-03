@@ -286,10 +286,13 @@ tsdf:
 reconstruction:
   backend: "mapanything"                # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
-  frames_selector: "none"              # SINGLE source of frame-set mode (writes selected_frames.json):
+  frames_selector: "stride"            # SINGLE source of frame-set mode (writes selected_frames.json):
                                        #   "dino"   = blur + DINO-cosine keyframes (params in frame_selection:)
                                        #   "stride" = uniform 1-of-N subsample (mapanything.frame_stride)
-                                       #   "none"   = all blur-valid frames (no decimation)
+                                       #   "none"   = all frames (no decimation)
+  blur_filter: false                   # true = drop blurry frames (Laplacian, via frame_quality.json)
+                                       # before selection; false = keep ALL frames (no blur cull).
+                                       # Toggleable; applies to stride/none modes.
 
   # DA3 Streaming (Depth Anything 3)
   da3:
@@ -320,12 +323,12 @@ reconstruction:
     model_weights: "facebook/map-anything-apache"
     chunk_size: 120
     chunk_overlap: 60
-    frame_stride: 1                     # 1 = none (use_keyframes:true does the selection). 1-of-N
+    frame_stride: 2                     # 1 = none (use_keyframes:true does the selection). 1-of-N
                                         # uniform subsample only when use_keyframes:false. SINGLE source of
                                         # truth: loop detector + chunks + poses all use this.
                                         # 1 = all frames, 2 = 1 of every 2, etc.
     loop_closure: true
-    conf_threshold_coef: 0.50
+    conf_threshold_coef: 0.75
     sample_ratio: 1.0
     use_da3_priors: false              # multi-modal: run DA3 first, feed its metric
                                         # depth + intrinsics into MapAnything (poses still
