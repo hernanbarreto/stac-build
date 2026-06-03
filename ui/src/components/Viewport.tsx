@@ -302,6 +302,16 @@ function adaptGrid(
     gridRef.current = grid
 }
 
+// Pre-allocated scratch for setCameraToPose — called every video frame during the
+// flythrough. Reused so the per-frame camera update allocates nothing (no GC churn).
+const _ctpC2W = new THREE.Matrix4()
+const _ctpCvToGl = new THREE.Matrix4().makeScale(1, -1, -1)   // constant CV→GL flip
+const _ctpGroup = new THREE.Matrix4()
+const _ctpPos = new THREE.Vector3()
+const _ctpQuat = new THREE.Quaternion()
+const _ctpScl = new THREE.Vector3()
+const _ctpFwd = new THREE.Vector3()
+
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses },
     ref
@@ -1537,6 +1547,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     }
                 })
             }
+            // Hidden Three.js objects keep their GPU buffers, so visible=false alone
+            // does NOT free VRAM — the Potree nodes kept occupying it and slowing the
+            // whole scene (incl. the TSDF). Free the GPU geometry on hide; the LOD
+            // loop reloads the visible nodes on show.
+            const loader = potreeLoaderRef.current
+            if (loader) {
+                if (!visible) loader.releaseGPUMemory()
+                else if (loader.isLoaded) loader.updateVisibility()   // reload promptly
+            }
         },
         reloadShapes: async (sessionId: string) => {
             // Reuse current octreeGroup as parent if a cloud is loaded; otherwise
@@ -1914,24 +1933,23 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             // (+Z forward, +Y down) → three.js (-Z forward, +Y up) via diag(1,-1,-1).
             // NOTE: if the flythrough view comes out mirrored/upside-down, this
             // CV→GL flip is the knob to adjust.
-            const c2w = new THREE.Matrix4().fromArray(c2wRowMajor).transpose()
-            const cvToGl = new THREE.Matrix4().makeScale(1, -1, -1)
-            c2w.multiply(cvToGl)
+            const c2w = _ctpC2W.fromArray(c2wRowMajor).transpose()
+            c2w.multiply(_ctpCvToGl)
             // Apply the SAME transform the displayed cloud uses (floor_transform /
             // alignment) so the camera path lives in the cloud's displayed frame.
             // (Earlier this used cameraGroupRef.matrixWorld — wrong matrix → camera
             // ended up far below. floorTransformRef is what the cloud bbox uses.)
             const groupM = floorTransformRef.current
-                ? floorTransformRef.current.clone()
-                : new THREE.Matrix4()
+                ? _ctpGroup.copy(floorTransformRef.current)
+                : _ctpGroup.identity()
             const world = groupM.multiply(c2w)
-            const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), scl = new THREE.Vector3()
+            const pos = _ctpPos, quat = _ctpQuat, scl = _ctpScl
             world.decompose(pos, quat, scl)
             cam.position.copy(pos)
             cam.quaternion.copy(quat)
             cam.updateMatrixWorld(true)
             if (ctrl) {
-                const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(quat)
+                const fwd = _ctpFwd.set(0, 0, -1).applyQuaternion(quat)
                 ctrl.target.copy(pos).add(fwd.multiplyScalar(2.0))
             }
         },

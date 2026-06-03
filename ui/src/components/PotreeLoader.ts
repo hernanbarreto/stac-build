@@ -100,6 +100,16 @@ export class PotreeOctreeLoader {
     private _hasConfidence = false
     private _forceClassId: number | undefined = undefined
 
+    // Pre-allocated scratch for updateVisibility() (runs ~10 Hz over hundreds of
+    // nodes). Reused every call so the LOD pass allocates nothing → no GC churn,
+    // which otherwise builds up as the camera moves and shows as growing jank.
+    private _frustum = new THREE.Frustum()
+    private _projMat = new THREE.Matrix4()
+    private _camPos = new THREE.Vector3()
+    private _groupInv = new THREE.Matrix4()
+    private _ctr = new THREE.Vector3()
+    private _sz = new THREE.Vector3()
+
     constructor(
         scene: THREE.Scene,
         camera: THREE.PerspectiveCamera,
@@ -380,8 +390,8 @@ export class PotreeOctreeLoader {
             return
         }
 
-        const frustum = new THREE.Frustum()
-        const projScreenMatrix = new THREE.Matrix4()
+        const frustum = this._frustum
+        const projScreenMatrix = this._projMat
         // Include the octreeGroup's world matrix so local-space bounding boxes
         // are correctly tested against the camera's frustum
         const groupWorldMatrix = this.octreeGroup.matrixWorld
@@ -390,8 +400,8 @@ export class PotreeOctreeLoader {
         frustum.setFromProjectionMatrix(projScreenMatrix)
 
         // Transform camera position to local space for distance calculations
-        const cameraPos = this.camera.position.clone()
-        const groupWorldInverse = groupWorldMatrix.clone().invert()
+        const cameraPos = this._camPos.copy(this.camera.position)
+        const groupWorldInverse = this._groupInv.copy(groupWorldMatrix).invert()
         cameraPos.applyMatrix4(groupWorldInverse)
 
         const domHeight = window.innerHeight || 800
@@ -459,15 +469,14 @@ export class PotreeOctreeLoader {
                 if (!childNode) continue
 
                 // Calculate screen pixel radius of child
-                const center = new THREE.Vector3()
-                childNode.boundingBox.getCenter(center)
+                const center = childNode.boundingBox.getCenter(this._ctr)
 
                 const dx = cameraPos.x - center.x
                 const dy = cameraPos.y - center.y
                 const dz = cameraPos.z - center.z
                 const distance = Math.sqrt(dx * dx + dy * dy + dz * dz)
 
-                const childSize = childNode.boundingBox.getSize(new THREE.Vector3())
+                const childSize = childNode.boundingBox.getSize(this._sz)
                 const radius = childSize.length() * 0.5
 
                 const projFactor = (0.5 * domHeight) / (slope * Math.max(distance, 0.001))
@@ -720,7 +729,10 @@ export class PotreeOctreeLoader {
     /** LRU eviction: when cached (off-screen) geometry exceeds the cap, dispose
      *  the least-recently-shown NOT-in-scene nodes until back under budget. */
     private _evictCache(): void {
-        const cap = Math.max(this.pointBudget * 2, 15_000_000)
+        // Off-screen retention cap. Kept at ~the visible budget (not the old 15M
+        // floor) so total resident VRAM stays ≈ 2× budget instead of growing to
+        // ~20M points as the camera explores new regions.
+        const cap = this.pointBudget
         if (this._cachedPoints <= cap) return
 
         const evictable: OctreeNode[] = []
@@ -735,6 +747,27 @@ export class PotreeOctreeLoader {
             n.points = null
             this._cachedPoints -= n.numPoints
         }
+    }
+
+    /** Free ALL GPU geometry (in-scene + cached) but KEEP the octree structure
+     *  (metadata, hierarchy, node tree) so updateVisibility() can reload on demand.
+     *  Hidden Three.js objects keep their GPU buffers uploaded, so merely setting
+     *  visible=false does NOT free VRAM — call this when the cloud is hidden so it
+     *  stops occupying VRAM (which was slowing the TSDF mesh too). On show, the LOD
+     *  loop reloads the visible nodes (re-fetch from the byte ranges). */
+    releaseGPUMemory(): void {
+        for (const [, node] of this.nodes) {
+            if (node.points) {
+                this.octreeGroup.remove(node.points)
+                node.points.geometry.dispose()
+                node.points = null
+            }
+            node.loaded = false
+            node.loading = false
+        }
+        this.totalLoadedPoints = 0
+        this._cachedPoints = 0
+        this.visiblePoints = 0
     }
 
     /** Remove everything and reset (disposes both in-scene and cached geometry) */
