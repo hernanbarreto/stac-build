@@ -284,7 +284,7 @@ tsdf:
 #   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
-  backend: "da3"                        # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
+  backend: "mapanything"                # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
   frames_selector: "none"              # SINGLE source of frame-set mode (writes selected_frames.json):
                                        #   "dino"   = blur + DINO-cosine keyframes (params in frame_selection:)
@@ -302,7 +302,7 @@ reconstruction:
     align_method: "sim3"               # "sim3" | "se3" | "scale+se3"
     align_lib: "torch"                 # "numpy" (CPU) | "triton"/"torch" (GPU)
     depth_threshold: 20.0              # max depth (m)
-    conf_threshold_coef: 0.75
+    conf_threshold_coef: 0.5
     conf_min_normalized: 0.25          # drop bottom 25% by confidence (0 = keep all)
     sample_ratio: 1.0
     save_depth_conf_result: true       # save per-frame depth+conf .npz
@@ -320,14 +320,14 @@ reconstruction:
     model_weights: "facebook/map-anything-apache"
     chunk_size: 120
     chunk_overlap: 60
-    frame_stride: 2                     # 1 = none (use_keyframes:true does the selection). 1-of-N
+    frame_stride: 1                     # 1 = none (use_keyframes:true does the selection). 1-of-N
                                         # uniform subsample only when use_keyframes:false. SINGLE source of
                                         # truth: loop detector + chunks + poses all use this.
                                         # 1 = all frames, 2 = 1 of every 2, etc.
     loop_closure: true
-    conf_threshold_coef: 0.75
+    conf_threshold_coef: 0.50
     sample_ratio: 1.0
-    use_da3_priors: true               # multi-modal: run DA3 first, feed its metric
+    use_da3_priors: false              # multi-modal: run DA3 first, feed its metric
                                         # depth + intrinsics into MapAnything (poses still
                                         # estimated by MapAnything). false = image-only.
     da3_prior_conf_percentile: 50      # per-frame floor on the DA3 prior depth: drop the
