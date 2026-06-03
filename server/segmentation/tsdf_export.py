@@ -992,13 +992,33 @@ def export_tsdf_scene(
     # Keyframe-index → real keyframe filename, so RGB colour loads the correct
     # frame (poses/depth are keyed by keyframe-sequence index, but the JPGs on
     # disk use the original frame numbers, e.g. kf 1 == 000020.jpg).
+    # The name map MUST be keyed in the SAME space as cam.pose_map / sorted_frames,
+    # because the integrate loop and the texture bakers both do name_map.get(fidx)
+    # with fidx ∈ pose_map.keys():
+    #   • mapanything / VGGT-Long (camera_frames.txt): poses keyed by the REAL frame
+    #     number → key the name map by the JPG's numeric stem.
+    #   • keyframe-sequence path: poses keyed by 0..N-1 → key by enumerate index.
+    # With stride>1 these two spaces DIVERGE: enumerate-keying made frame 2·i's JPG
+    # load for camera i, mis-texturing the first half of the trajectory while the
+    # tail (no map entry → {fidx:06d}.jpg fallback) came out correct.
     kf_name_map: Dict[int, str] = {}
     _sel = frames_dir / "selected_frames.json"
     if _sel.exists():
         try:
             with open(_sel) as _f:
                 _kf = sorted(json.load(_f).get("selected_files", []))
-            kf_name_map = {i: n for i, n in enumerate(_kf)}
+            _pose_keys = {int(k) for k in cam.pose_map.keys()}
+            _stem_map: Dict[int, str] = {}
+            for _n in _kf:
+                try:
+                    _stem_map[int(Path(_n).stem)] = _n
+                except ValueError:
+                    _stem_map = {}
+                    break
+            if _stem_map and _pose_keys and _pose_keys.issubset(_stem_map.keys()):
+                kf_name_map = _stem_map                       # real-frame-number keyed
+            else:
+                kf_name_map = {i: n for i, n in enumerate(_kf)}  # sequence-index keyed
         except Exception:
             kf_name_map = {}
 

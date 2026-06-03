@@ -262,8 +262,10 @@ tsdf:
                              # filter: it just refuses to mesh what multi-view never agreed on.
                              # Small gaps closed by fill_holes. (was 1.0 = single-view = noisy)
   edge_thresh: 1.0           # ~disable flying-pixel cull (the cloud is already clean)
-  voxel_length: 0.010        # 1.0 cm — finer detail; the cleaned cloud supports it (was 1.5cm)
-  sdf_trunc: 0.035           # ~3.5× voxel — reconciliation band kept proportional to voxel
+  voxel_length: 0.015        # 1.5 cm — reverted from 1.0cm: at 1cm a 91M-pt scene overflowed
+                             # the VoxelBlockGrid (CUDA illegal memory access). 1.5cm cuts the
+                             # occupied-block count ~3.4× so it fits the 200k hash slots.
+  sdf_trunc: 0.0525          # ~3.5× voxel — reconciliation band kept proportional to voxel
   tsdf_block_count: 200000   # more GPU hash slots — bigger scene, no block starvation
   texture: true
   texture_mode: "vertex_gpu" # multi-view photo bake (falls back to integrated colour)
