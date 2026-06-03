@@ -262,11 +262,17 @@ tsdf:
                              # filter: it just refuses to mesh what multi-view never agreed on.
                              # Small gaps closed by fill_holes. (was 1.0 = single-view = noisy)
   edge_thresh: 1.0           # ~disable flying-pixel cull (the cloud is already clean)
-  voxel_length: 0.015        # 1.5 cm — reverted from 1.0cm: at 1cm a 91M-pt scene overflowed
-                             # the VoxelBlockGrid (CUDA illegal memory access). 1.5cm cuts the
-                             # occupied-block count ~3.4× so it fits the 200k hash slots.
-  sdf_trunc: 0.0525          # ~3.5× voxel — reconciliation band kept proportional to voxel
+  voxel_length: 0.010        # 1.0 cm — finer detail. At 1cm a 91M-pt/144m scene yields ~435k
+                             # occupied blocks (overflows a single 200k VoxelBlockGrid), so
+                             # tsdf_tiling splits it into ~5 tiles that each stay under the cap.
+  sdf_trunc: 0.035           # ~3.5× voxel — reconciliation band kept proportional to voxel
   tsdf_block_count: 200000   # more GPU hash slots — bigger scene, no block starvation
+  tsdf_tiling: auto          # "auto" | "off" | <int N>. Big scenes overflow a single
+                             # VoxelBlockGrid (CUDA illegal memory access). "auto" splits
+                             # the scene along its longest axis into enough tiles that each
+                             # stays under tsdf_block_count, then crops+merges the cores.
+  tsdf_tile_halo: 0.6        # m of overlap between adjacent tiles — keeps the seam surface
+                             # continuous (≥ several × sdf_trunc) before the core-crop merge
   texture: true
   texture_mode: "vertex_gpu" # multi-view photo bake (falls back to integrated colour)
   keep_aligned_chunks: false # true = keep maplong_run/_tmp_results_aligned (14G) after the

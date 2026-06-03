@@ -940,6 +940,12 @@ def export_tsdf_scene(
     variant_label: Optional[str] = None, # human label for the viewer panel
     tsdf_block_count: int = 120_000,     # GPU VoxelBlockGrid hash slots (~10GB @120k)
     tsdf_weight_thresh: float = 2.0,     # min observations per voxel to extract
+    tsdf_tiling: object = "auto",        # "auto" | "off" | int N — spatial tiling for big
+                                         # scenes: split along the longest axis into N grids
+                                         # so each stays under block_count (auto sizes N from
+                                         # the cleaned-cloud occupied-block count)
+    tsdf_tile_halo: float = 0.6,         # m of overlap between adjacent tiles — keeps the
+                                         # seam surface continuous before the core-crop merge
     progress_cb: Optional[Callable[[str, Optional[float], Optional[str]], None]] = None,
 ) -> Optional[Path]:
     """Integrate the entire scan's depth maps into a single TSDF volume.
@@ -1101,18 +1107,21 @@ def export_tsdf_scene(
     _dev_str = "cuda:0" if o3d.core.cuda.is_available() else "CPU:0"
     o3d_device = o3c.Device(_dev_str)
     trunc_mult = max(1.0, float(sdf_trunc) / float(voxel_length))
-    volume = o3d.t.geometry.VoxelBlockGrid(
-        attr_names=("tsdf", "weight", "color"),
-        attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
-        attr_channels=(o3c.SizeVector((1,)), o3c.SizeVector((1,)), o3c.SizeVector((3,))),
-        voxel_size=float(voxel_length),
-        block_resolution=16,
-        block_count=int(tsdf_block_count),
-        device=o3d_device,
-    )
+
+    def _make_vbg():
+        # One fresh bounded grid per tile (a single grid overflows on big scans).
+        return o3d.t.geometry.VoxelBlockGrid(
+            attr_names=("tsdf", "weight", "color"),
+            attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
+            attr_channels=(o3c.SizeVector((1,)), o3c.SizeVector((1,)), o3c.SizeVector((3,))),
+            voxel_size=float(voxel_length),
+            block_resolution=16,
+            block_count=int(tsdf_block_count),
+            device=o3d_device,
+        )
     logger.info(f"[TSDF-scene] VoxelBlockGrid on {_dev_str} "
                 f"(voxel={voxel_length}m, trunc_mult={trunc_mult:.1f}, "
-                f"blocks={tsdf_block_count})")
+                f"blocks={tsdf_block_count}/grid)")
 
     # ── Option A: restrict integration to pixels present in cleaned_cloud.ply ──
     # cleaned_cloud is the CloudCompPy-cleaned merge (DA3 + LiDAR). Each point
@@ -1121,6 +1130,7 @@ def export_tsdf_scene(
     # nothing the cleaned cloud doesn't.
     cc_frame_pix = None
     cc_ply_hw = None
+    cc_xyz = cc_fg = cc_pr = cc_pc = None  # kept for spatial tiling (point→tile assignment)
     if mask_to_cleaned_cloud:
         from segmentation.pipeline import _load_ply_origins
         cc_path = output_dir / "cleaned_cloud.ply"
@@ -1135,10 +1145,11 @@ def export_tsdf_scene(
                            "traceability found — integrating unmasked")
         else:
             _xyz, fg, pr, pc = origins
-            del _xyz
             fg = np.asarray(fg).astype(np.int64)
             pr = np.asarray(pr).astype(np.int32)
             pc = np.asarray(pc).astype(np.int32)
+            cc_xyz = np.asarray(_xyz, dtype=np.float64)  # (N,3) world points → tile assign
+            cc_fg, cc_pr, cc_pc = fg, pr, pc
             cc_ply_hw = (int(pr.max()) + 1 if len(pr) else 1,
                          int(pc.max()) + 1 if len(pc) else 1)
             cc_frame_pix = {}
@@ -1150,127 +1161,233 @@ def export_tsdf_scene(
                         f"trace {cc_ply_hw[1]}x{cc_ply_hw[0]}")
 
     sorted_frames = sorted(cam.pose_map.keys())
-    n_integrated = 0
     skipped_no_depth = skipped_no_K = skipped_empty = 0
     native_K_map: Dict[int, np.ndarray] = {}  # per-frame npz K (depth res) for texturing
+    integrated_frames: set = set()            # distinct frames integrated across all tiles
 
-    for i, fidx in enumerate(sorted_frames):
-        fidx = int(fidx)
-        c2w = cam.pose_map.get(fidx)
-        if c2w is None:
-            continue
-        # Prefer the data-driven per-frame npz (depth + native K + native rgb,
-        # same resolution, zero rescaling). Fall back to the legacy depth_loader
-        # + scaled-global-K + re-decoded JPG when the rich source is absent.
-        frame_K = None
-        frame_rgb = None
-        if frame_loader is not None:
-            fr = frame_loader(fidx)
-            if fr is None:
-                skipped_no_depth += 1
+    def _integrate(volume, cc_fp):
+        """Integrate every posed frame into `volume`. When `cc_fp` (frame → (rows,
+        cols)) is given, only those cleaned-cloud pixels contribute — this is also
+        how a tile restricts itself to its slice of the scene. Returns the number
+        of frames that touched this grid."""
+        nonlocal skipped_no_depth, skipped_no_K, skipped_empty
+        n_local = 0
+        for fidx in sorted_frames:
+            fidx = int(fidx)
+            c2w = cam.pose_map.get(fidx)
+            if c2w is None:
                 continue
-            depth_m, depth_valid = fr["depth"], fr["valid"]
-            frame_K, frame_rgb = fr["K"], fr["rgb"]
-        else:
-            depth_pair = depth_loader(fidx)
-            if depth_pair is None:
-                skipped_no_depth += 1
-                continue
-            depth_m, depth_valid = depth_pair
+            # Prefer the data-driven per-frame npz (depth + native K + native rgb,
+            # same resolution, zero rescaling). Fall back to the legacy depth_loader
+            # + scaled-global-K + re-decoded JPG when the rich source is absent.
+            frame_K = None
+            frame_rgb = None
+            if frame_loader is not None:
+                fr = frame_loader(fidx)
+                if fr is None:
+                    skipped_no_depth += 1
+                    continue
+                depth_m, depth_valid = fr["depth"], fr["valid"]
+                frame_K, frame_rgb = fr["K"], fr["rgb"]
+            else:
+                depth_pair = depth_loader(fidx)
+                if depth_pair is None:
+                    skipped_no_depth += 1
+                    continue
+                depth_m, depth_valid = depth_pair
 
-        # Full-frame mask: depth validity + range. No per-instance filtering.
-        mask = depth_valid & (depth_m > depth_min) & (depth_m < depth_trunc)
+            # Full-frame mask: depth validity + range. No per-instance filtering.
+            mask = depth_valid & (depth_m > depth_min) & (depth_m < depth_trunc)
 
-        # Drop flying pixels at depth discontinuities — same heuristic as the
-        # per-instance path, prevents "ghost" surfaces between objects and
-        # background.
-        d = np.where(mask, depth_m, 0.0)
-        gx = np.abs(np.diff(d, axis=1, prepend=d[:, :1]))
-        gy = np.abs(np.diff(d, axis=0, prepend=d[:1, :]))
-        mask &= (gx < edge_thresh) & (gy < edge_thresh)
+            # Drop flying pixels at depth discontinuities — same heuristic as the
+            # per-instance path, prevents "ghost" surfaces between objects and
+            # background.
+            d = np.where(mask, depth_m, 0.0)
+            gx = np.abs(np.diff(d, axis=1, prepend=d[:, :1]))
+            gy = np.abs(np.diff(d, axis=0, prepend=d[:1, :]))
+            mask &= (gx < edge_thresh) & (gy < edge_thresh)
 
-        # Option A — keep only pixels that produced a cleaned_cloud point.
-        if cc_frame_pix is not None:
-            fp = cc_frame_pix.get(fidx)
-            if fp is None:
+            # Option A — keep only pixels that produced a cleaned_cloud point (and,
+            # under tiling, only this tile's slice of them via cc_fp).
+            if cc_fp is not None:
+                fp = cc_fp.get(fidx)
+                if fp is None:
+                    skipped_empty += 1
+                    continue
+                mask &= _build_segment_mask_at_depth(
+                    fp[0], fp[1], depth_h, depth_w,
+                    cc_ply_hw[0], cc_ply_hw[1], cleaned_cloud_dilate,
+                )
+
+            if not mask.any():
                 skipped_empty += 1
                 continue
-            mask &= _build_segment_mask_at_depth(
-                fp[0], fp[1], depth_h, depth_w,
-                cc_ply_hw[0], cc_ply_hw[1], cleaned_cloud_dilate,
-            )
 
-        if not mask.any():
-            skipped_empty += 1
-            continue
+            depth_masked = np.where(mask, depth_m, 0.0).astype(np.float32)
 
-        depth_masked = np.where(mask, depth_m, 0.0).astype(np.float32)
+            # Intrinsics: use the frame's OWN K (native to this depth grid) when the
+            # rich npz source is active — no rescaling. Otherwise scale the global K
+            # from RGB→depth resolution (legacy path).
+            if frame_K is not None:
+                K_d = frame_K
+                native_K_map[fidx] = frame_K  # reuse for texturing (scaled to JPG res)
+            else:
+                K_rgb = cam.K_for(fidx)
+                if K_rgb is None:
+                    skipped_no_K += 1
+                    continue
+                K_d = _intrinsics_for_depth(K_rgb, rgb_h, rgb_w, depth_h, depth_w)
 
-        # Intrinsics: use the frame's OWN K (native to this depth grid) when the
-        # rich npz source is active — no rescaling. Otherwise scale the global K
-        # from RGB→depth resolution (legacy path).
-        if frame_K is not None:
-            K_d = frame_K
-            native_K_map[fidx] = frame_K  # reuse for texturing (scaled to JPG res)
+            # Color: the npz image is already aligned to the depth grid (same
+            # source, same resolution). Fall back to re-decoding the full-res JPG.
+            if frame_rgb is not None:
+                color_np = frame_rgb
+            else:
+                color_np = _load_rgb_at_depth(frames_dir, fidx, depth_h, depth_w,
+                                              frame_name=kf_name_map.get(fidx))
+
+            c2w_4 = np.eye(4, dtype=np.float64)
+            c2w_4[:c2w.shape[0], :c2w.shape[1]] = c2w
+            extrinsic = np.linalg.inv(c2w_4)  # world → cam
+
+            # GPU integrate: depth/color as device Images; K & extrinsic as host
+            # float64 tensors (Open3D requires intrinsics/extrinsics on CPU).
+            # VBG.integrate requires (float, float) or (uint16, uint8) for
+            # (depth, color) — pass color as float32 to match the float depth.
+            depth_t = o3d.t.geometry.Image(o3c.Tensor(depth_masked, device=o3d_device))
+            color_t = o3d.t.geometry.Image(
+                o3c.Tensor(np.ascontiguousarray(color_np).astype(np.float32), device=o3d_device))
+            K_t = o3c.Tensor(np.ascontiguousarray(K_d), o3c.float64)
+            ext_t = o3c.Tensor(np.ascontiguousarray(extrinsic), o3c.float64)
+            # Open3D raises "No block is touched in TSDF volume" (a RuntimeError) when
+            # a single frame unprojects to zero active blocks — degenerate K/pose, or
+            # all depth out of (depth_min, depth_trunc). Guard PER FRAME so one bad
+            # frame is skipped instead of aborting the entire scene mesh.
+            try:
+                coords = volume.compute_unique_block_coordinates(
+                    depth_t, K_t, ext_t, depth_scale=1.0, depth_max=depth_trunc,
+                    trunc_voxel_multiplier=trunc_mult)
+                volume.integrate(coords, depth_t, color_t, K_t, K_t, ext_t,
+                                 depth_scale=1.0, depth_max=depth_trunc,
+                                 trunc_voxel_multiplier=trunc_mult)
+            except RuntimeError as e:
+                if "No block is touched" in str(e):
+                    skipped_empty += 1
+                    if skipped_empty <= 5:
+                        _dv = depth_masked[depth_masked > 0]
+                        logger.warning(
+                            f"[TSDF-scene] frame {fidx}: no block touched — skipping "
+                            f"(valid_px={int((depth_masked > 0).sum())}, "
+                            f"depth_min={_dv.min():.3f} max={_dv.max():.3f} "
+                            f"K_fx={K_d[0, 0]:.1f} hw={depth_h}x{depth_w})"
+                            if _dv.size else
+                            f"[TSDF-scene] frame {fidx}: no block touched, empty depth")
+                    continue
+                raise
+            n_local += 1
+            integrated_frames.add(fidx)
+            if progress_cb and n_local % 50 == 0:
+                progress_cb("integrating", time.time() - t0, None)
+        return n_local
+
+    # ── Spatial tiling: split the scene along its longest axis so each grid stays
+    #    under block_count. A single VoxelBlockGrid has a FIXED hash capacity; a
+    #    144m scan overflowed it (CUDA illegal memory access). Each tile is its own
+    #    bounded grid; adjacent tiles share a `tsdf_tile_halo` overlap so the seam
+    #    surface is meshed continuously, then each tile mesh is cropped to its core
+    #    (triangles whose centroid lies inside the tile) and the cores concatenated.
+    #    VBG voxel coords are GLOBAL (anchored at world origin, fixed voxel size), so
+    #    the shared-halo surface is identical in adjacent tiles → cropping at the same
+    #    plane gives gapless, non-overlapping joins. ──
+    block_side = float(voxel_length) * 16.0
+    tiles = [(-np.inf, np.inf)]
+    tile_axis = 0
+    ax = None
+    if cc_xyz is not None and len(cc_xyz):
+        ext = cc_xyz.max(0) - cc_xyz.min(0)
+        tile_axis = int(np.argmax(ext))
+        ax = cc_xyz[:, tile_axis]
+        # Occupied 16³ blocks, and the axis block-index of each UNIQUE block — the
+        # tile boundaries are balanced by BLOCK count, not point count. Point density
+        # varies wildly (close walls = many pts/block, far surfaces = few), so an
+        # equal-population split leaves the sparse-but-spread tiles overloaded with
+        # blocks and they still overflow. Equal-block boundaries keep every grid level.
+        blk = np.floor(cc_xyz / block_side).astype(np.int64)
+        key = blk[:, 0] * 73856093 ^ blk[:, 1] * 19349663 ^ blk[:, 2] * 83492791
+        _, _uidx = np.unique(key, return_index=True)
+        ublk_axis = blk[_uidx, tile_axis].astype(np.float64)  # one per unique block
+        occ = int(len(_uidx))
+        _t = tsdf_tiling
+        if isinstance(_t, bool):
+            n_tiles = 1
+        elif isinstance(_t, int):
+            n_tiles = max(1, _t)
+        elif isinstance(_t, str) and _t.strip().lstrip("-").isdigit():
+            n_tiles = max(1, int(_t))
+        elif isinstance(_t, str) and _t.strip().lower() == "off":
+            n_tiles = 1
+        else:  # "auto" — size N so each tile ≈ 0.45·block_count blocks (room for the
+               # truncation-band dilation that inflates the active set ~1.3–1.6×)
+            usable = max(1.0, float(tsdf_block_count) * 0.45)
+            n_tiles = max(1, int(np.ceil(occ / usable)))
+        if n_tiles > 1:
+            # quantiles over per-unique-block axis positions → equal blocks per tile
+            qb = np.quantile(np.sort(ublk_axis), np.linspace(0.0, 1.0, n_tiles + 1))
+            qs = qb * block_side  # block-index → world coordinate
+            qs[0], qs[-1] = -np.inf, np.inf
+            tiles = [(float(qs[k]), float(qs[k + 1])) for k in range(n_tiles)]
+        logger.info(f"[TSDF-scene] tiling: {len(tiles)} tile(s) along "
+                    f"{'XYZ'[tile_axis]}  (~{occ:,} occupied blocks @ {block_side:.2f}m, "
+                    f"cap {int(tsdf_block_count):,}/tile)")
+    else:
+        logger.info("[TSDF-scene] single grid (no cleaned-cloud xyz to tile by)")
+
+    halo = float(tsdf_tile_halo)
+    tile_meshes = []
+    for ti, (lo, hi) in enumerate(tiles):
+        if len(tiles) > 1:
+            sel = (ax >= lo - halo) & (ax < hi + halo)
+            _fg, _pr, _pc = cc_fg[sel], cc_pr[sel], cc_pc[sel]
+            cc_fp = {}
+            for f in np.unique(_fg):
+                m = _fg == f
+                cc_fp[int(f)] = (_pr[m], _pc[m])
+            logger.info(f"[TSDF-scene] tile {ti+1}/{len(tiles)} "
+                        f"{'XYZ'[tile_axis]}∈[{lo:.2f},{hi:.2f}) +{halo:.2f}m halo — "
+                        f"{len(cc_fp)} frames")
         else:
-            K_rgb = cam.K_for(fidx)
-            if K_rgb is None:
-                skipped_no_K += 1
-                continue
-            K_d = _intrinsics_for_depth(K_rgb, rgb_h, rgb_w, depth_h, depth_w)
+            cc_fp = cc_frame_pix  # None (unmasked) or the full dict
 
-        # Color: the npz image is already aligned to the depth grid (same
-        # source, same resolution). Fall back to re-decoding the full-res JPG.
-        if frame_rgb is not None:
-            color_np = frame_rgb
-        else:
-            color_np = _load_rgb_at_depth(frames_dir, fidx, depth_h, depth_w,
-                                          frame_name=kf_name_map.get(fidx))
-
-        c2w_4 = np.eye(4, dtype=np.float64)
-        c2w_4[:c2w.shape[0], :c2w.shape[1]] = c2w
-        extrinsic = np.linalg.inv(c2w_4)  # world → cam
-
-        # GPU integrate: depth/color as device Images; K & extrinsic as host
-        # float64 tensors (Open3D requires intrinsics/extrinsics on CPU).
-        # VBG.integrate requires (float, float) or (uint16, uint8) for
-        # (depth, color) — pass color as float32 to match the float depth.
-        depth_t = o3d.t.geometry.Image(o3c.Tensor(depth_masked, device=o3d_device))
-        color_t = o3d.t.geometry.Image(
-            o3c.Tensor(np.ascontiguousarray(color_np).astype(np.float32), device=o3d_device))
-        K_t = o3c.Tensor(np.ascontiguousarray(K_d), o3c.float64)
-        ext_t = o3c.Tensor(np.ascontiguousarray(extrinsic), o3c.float64)
-        # Open3D raises "No block is touched in TSDF volume" (a RuntimeError) when
-        # a single frame unprojects to zero active blocks — degenerate K/pose, or
-        # all depth out of (depth_min, depth_trunc). Guard PER FRAME so one bad
-        # frame is skipped instead of aborting the entire scene mesh.
-        try:
-            coords = volume.compute_unique_block_coordinates(
-                depth_t, K_t, ext_t, depth_scale=1.0, depth_max=depth_trunc,
-                trunc_voxel_multiplier=trunc_mult)
-            volume.integrate(coords, depth_t, color_t, K_t, K_t, ext_t,
-                             depth_scale=1.0, depth_max=depth_trunc,
-                             trunc_voxel_multiplier=trunc_mult)
-        except RuntimeError as e:
-            if "No block is touched" in str(e):
-                skipped_empty += 1
-                if skipped_empty <= 5:
-                    _dv = depth_masked[depth_masked > 0]
-                    logger.warning(
-                        f"[TSDF-scene] frame {fidx}: no block touched — skipping "
-                        f"(valid_px={int((depth_masked > 0).sum())}, "
-                        f"depth_min={_dv.min():.3f} max={_dv.max():.3f} "
-                        f"K_fx={K_d[0, 0]:.1f} hw={depth_h}x{depth_w})"
-                        if _dv.size else
-                        f"[TSDF-scene] frame {fidx}: no block touched, empty depth")
-                continue
-            raise
-        n_integrated += 1
-
-        if progress_cb and n_integrated % 50 == 0:
+        if progress_cb:
             progress_cb("integrating", time.time() - t0, None)
+        vol = _make_vbg()
+        ni = _integrate(vol, cc_fp)
+        if ni == 0:
+            logger.warning(f"[TSDF-scene] tile {ti+1}: 0 frames integrated — skipped")
+            del vol
+            continue
+        if progress_cb:
+            progress_cb("extracting", time.time() - t0, None)
+        tmesh = vol.extract_triangle_mesh(
+            weight_threshold=float(tsdf_weight_thresh)).to_legacy()
+        del vol  # free the tile's GPU grid before building the next one
 
-    if n_integrated == 0:
+        if len(tiles) > 1 and len(tmesh.triangles):
+            # Crop to the tile core: keep triangles whose centroid is in [lo,hi) on
+            # the tiling axis (the halo belongs to the neighbour). End tiles use ±inf
+            # bounds, so nothing is lost at the scene extremities.
+            v = np.asarray(tmesh.vertices)
+            tri = np.asarray(tmesh.triangles)
+            cax = v[:, tile_axis][tri].mean(axis=1)
+            drop = ~((cax >= lo) & (cax < hi))
+            if drop.any():
+                tmesh.remove_triangles_by_mask(drop)
+                tmesh.remove_unreferenced_vertices()
+        if len(tmesh.triangles):
+            tile_meshes.append(tmesh)
+
+    n_integrated = len(integrated_frames)
+    if not tile_meshes:
         logger.error(f"[TSDF-scene] no frames integrated "
                      f"(no_depth={skipped_no_depth} no_K={skipped_no_K} "
                      f"empty={skipped_empty})")
@@ -1278,12 +1395,19 @@ def export_tsdf_scene(
             progress_cb("error", time.time() - t0, None)
         return None
 
-    if progress_cb:
-        progress_cb("extracting", time.time() - t0, None)
+    # Concatenate tile cores → one mesh; weld the seam vertices (identical across
+    # tiles thanks to the global voxel grid) so the joins are watertight.
+    mesh = tile_meshes[0]
+    for _m in tile_meshes[1:]:
+        mesh += _m
+    if len(tile_meshes) > 1:
+        mesh = mesh.merge_close_vertices(float(voxel_length) * 0.5)
+        mesh.remove_duplicated_triangles()
+        mesh.remove_duplicated_vertices()
+        mesh.remove_unreferenced_vertices()
+        logger.info(f"[TSDF-scene] merged {len(tile_meshes)} tiles → "
+                    f"{len(mesh.vertices):,} verts / {len(mesh.triangles):,} tris")
 
-    # Extract from the GPU grid → legacy mesh for the existing cleanup/texture path.
-    mesh = volume.extract_triangle_mesh(
-        weight_threshold=float(tsdf_weight_thresh)).to_legacy()
     # VBG's float-color path stores colours in 0-255; legacy meshes and GLB
     # expect 0-1, so normalise (the smoke test confirmed the 0-255 range).
     if mesh.has_vertex_colors():

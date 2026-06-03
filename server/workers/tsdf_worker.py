@@ -21,7 +21,7 @@ _PASSTHROUGH = (
     "conf_min", "da3_conf_percentile", "mask_to_cleaned_cloud",
     "cleaned_cloud_dilate", "smooth_iterations", "smooth_method",
     "decimate_target", "texture", "texture_mode", "tsdf_block_count",
-    "tsdf_weight_thresh",
+    "tsdf_weight_thresh", "tsdf_tiling", "tsdf_tile_halo",
 )
 
 # Coarse phase → percentage mapping for the UI progress bar.
