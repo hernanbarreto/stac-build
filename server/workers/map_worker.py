@@ -1235,6 +1235,12 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                     # traceability). conf is pose-invariant, so the unaligned chunk's
                     # world_points_conf matches the aligned PLY's.
                     wpc = chunk_data.get("world_points_conf")
+                    if wpc is None:
+                        # da3 aligned chunk dicts store the per-point conf under "conf"
+                        # (da3_streaming.py: aligned_chunk_data["conf"] = chunk_data.conf),
+                        # and the PLY is masked with that SAME array. mapanything uses
+                        # "world_points_conf". Read whichever the backend wrote.
+                        wpc = chunk_data.get("conf")
                     if wpc is not None:
                         _wpc = np.asarray(wpc).reshape(-1)
                         # Threshold EXACTLY as VGGT-Long computes it: mean over the RAW
