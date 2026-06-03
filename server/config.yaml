@@ -266,7 +266,9 @@ tsdf:
                              # occupied blocks (overflows a single 200k VoxelBlockGrid), so
                              # tsdf_tiling splits it into ~5 tiles that each stay under the cap.
   sdf_trunc: 0.035           # ~3.5× voxel — reconciliation band kept proportional to voxel
-  tsdf_block_count: 200000   # more GPU hash slots — bigger scene, no block starvation
+  tsdf_block_count: 300000   # GPU hash slots PER TILE (~24GB; only one grid alive at a time,
+                             # 48GB GPU). Bigger per-tile budget = fewer tiles, more headroom
+                             # for the truncation-band block dilation.
   tsdf_tiling: auto          # "auto" | "off" | <int N>. Big scenes overflow a single
                              # VoxelBlockGrid (CUDA illegal memory access). "auto" splits
                              # the scene along its longest axis into enough tiles that each
@@ -294,10 +296,10 @@ tsdf:
 reconstruction:
   backend: "mapanything"                # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
-  frames_selector: "stride"            # SINGLE source of frame-set mode (writes selected_frames.json):
+  frames_selector: "none"              # SINGLE source of frame-set mode (writes selected_frames.json):
                                        #   "dino"   = blur + DINO-cosine keyframes (params in frame_selection:)
                                        #   "stride" = uniform 1-of-N subsample (mapanything.frame_stride)
-                                       #   "none"   = all frames (no decimation)
+                                       #   "none"   = all frames (no decimation)  ← ALL frames, no stride
   blur_filter: false                   # true = drop blurry frames (Laplacian, via frame_quality.json)
                                        # before selection; false = keep ALL frames (no blur cull).
                                        # Toggleable; applies to stride/none modes.
@@ -313,8 +315,8 @@ reconstruction:
     align_method: "sim3"               # "sim3" | "se3" | "scale+se3"
     align_lib: "torch"                 # "numpy" (CPU) | "triton"/"torch" (GPU)
     depth_threshold: 20.0              # max depth (m)
-    conf_threshold_coef: 0.5
-    conf_min_normalized: 0.25          # drop bottom 25% by confidence (0 = keep all)
+    conf_threshold_coef: 0.0           # keep all (was 0.5) — no depth-point removal
+    conf_min_normalized: 0.0           # keep ALL points (was 0.25) — no depth-point removal
     sample_ratio: 1.0
     save_depth_conf_result: true       # save per-frame depth+conf .npz
 
@@ -331,22 +333,17 @@ reconstruction:
     model_weights: "facebook/map-anything-apache"
     chunk_size: 120
     chunk_overlap: 60
-    frame_stride: 2                     # 1 = none (use_keyframes:true does the selection). 1-of-N
-                                        # uniform subsample only when use_keyframes:false. SINGLE source of
-                                        # truth: loop detector + chunks + poses all use this.
-                                        # 1 = all frames, 2 = 1 of every 2, etc.
+    frame_stride: 1                     # ALL frames (was 2). frames_selector:"none" already
+                                        # forces all frames; kept at 1 for consistency.
     loop_closure: true
-    conf_threshold_coef: 0.75
+    conf_threshold_coef: 0.0           # keep all (was 0.75) — no depth-point removal
     sample_ratio: 1.0
-    use_da3_priors: false              # multi-modal: run DA3 first, feed its metric
+    use_da3_priors: true               # multi-modal: run DA3 first, feed its metric
                                         # depth + intrinsics into MapAnything (poses still
-                                        # estimated by MapAnything). false = image-only.
-    da3_prior_conf_percentile: 50      # per-frame floor on the DA3 prior depth: drop the
-                                        # bottom N% least-confident pixels (set depth=0 →
-                                        # MapAnything treats as "no prior" and infers them).
-                                        # Kills floor/ceiling onion from low-conf DA3 depth
-                                        # anchoring the metric scale. 0 = feed raw (no filter).
-    map_conf_percentile: 15            # MapAnything inference confidence floor (absolute
+                                        # estimated by MapAnything). "map fed by DA3 depth".
+    da3_prior_conf_percentile: 0       # 0 = feed raw DA3 prior depth, no per-pixel cull
+                                        # (was 50) — no depth-point removal.
+    map_conf_percentile: 0             # 0 = off (was 15) — no depth-point removal. MapAnything
                                         # percentile, no ceiling — best points pass). Drops
                                         # the bottom N% by model confidence per chunk. 0 = off.
 

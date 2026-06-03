@@ -1141,8 +1141,23 @@ def export_tsdf_scene(
                     break
         origins = _load_ply_origins(cc_path) if cc_path.exists() else None
         if origins is None:
+            # No per-point (frame,pixel) trace → can't mask depth to the cloud. Without
+            # it the integrate runs unmasked out to depth_trunc (100m), so the TSDF
+            # meshes a far larger volume than the cloud (the test3 symptom). Load the
+            # cloud POINTS anyway (no trace needed) so we can still (a) tile by bbox and
+            # (b) clamp depth + crop the final mesh to the cloud's extent.
             logger.warning("[TSDF-scene] mask_to_cleaned_cloud on, but no PLY "
-                           "traceability found — integrating unmasked")
+                           "traceability found — integrating UNMASKED, bounding the "
+                           "TSDF to the cloud bbox instead (regenerate the cloud with "
+                           "sample_ratio=1.0 + conf filters off to restore traceability)")
+            if cc_path.exists():
+                try:
+                    _cc = o3d.io.read_point_cloud(str(cc_path))
+                    if len(_cc.points):
+                        cc_xyz = np.asarray(_cc.points, dtype=np.float64)
+                except Exception as _e:
+                    logger.warning(f"[TSDF-scene] could not read cloud points for "
+                                   f"bbox bound ({_e})")
         else:
             _xyz, fg, pr, pc = origins
             fg = np.asarray(fg).astype(np.int64)
@@ -1159,6 +1174,19 @@ def export_tsdf_scene(
             logger.info(f"[TSDF-scene] mask_to_cleaned_cloud: {len(fg):,} cloud "
                         f"points, {len(cc_frame_pix)} frames, "
                         f"trace {cc_ply_hw[1]}x{cc_ply_hw[0]}")
+
+    # Cloud bbox — used to bound the TSDF to the cloud's extent (esp. in the unmasked
+    # fallback, where depth_trunc=100m would otherwise mesh far beyond the cloud).
+    cloud_bbox = None
+    if cc_xyz is not None and len(cc_xyz):
+        _mn, _mx = cc_xyz.min(0), cc_xyz.max(0)
+        cloud_bbox = (_mn, _mx)
+        if cc_frame_pix is None:  # unmasked fallback — clamp the integration distance
+            _diag = float(np.linalg.norm(_mx - _mn))
+            if 0 < _diag * 1.1 < depth_trunc:
+                logger.info(f"[TSDF-scene] clamping depth_trunc {depth_trunc:.1f}m → "
+                            f"{_diag * 1.1:.1f}m (cloud diagonal — unmasked bound)")
+                depth_trunc = _diag * 1.1
 
     sorted_frames = sorted(cam.pose_map.keys())
     skipped_no_depth = skipped_no_K = skipped_empty = 0
@@ -1286,8 +1314,31 @@ def export_tsdf_scene(
                 raise
             n_local += 1
             integrated_frames.add(fidx)
-            if progress_cb and n_local % 50 == 0:
-                progress_cb("integrating", time.time() - t0, None)
+            # Last-resort overflow net: VBG.integrate corrupts the CUDA context (illegal
+            # memory access) the moment the active block set exceeds the hash capacity,
+            # and that error is async — it surfaces later in extract, killing the whole
+            # process. Poll the live block count and stop THIS tile before it overflows.
+            # Conservative tile sizing should keep this from ever firing.
+            if n_local % 20 == 0:
+                try:
+                    _active = int(volume.hashmap().size())
+                except Exception:
+                    _active = -1
+                if 0 <= int(tsdf_block_count) * 0.92 < _active:
+                    logger.warning(
+                        f"[TSDF-scene] grid near capacity ({_active:,}/"
+                        f"{int(tsdf_block_count):,} blocks) after {n_local} frames — "
+                        f"stopping this tile early to avoid overflow (raise tsdf_block_count "
+                        f"or add tiles)")
+                    break
+                if progress_cb:
+                    progress_cb("integrating", time.time() - t0, None)
+        try:
+            logger.info(f"[TSDF-scene]   tile integrated {n_local} frames → "
+                        f"{int(volume.hashmap().size()):,} active blocks "
+                        f"(cap {int(tsdf_block_count):,})")
+        except Exception:
+            pass
         return n_local
 
     # ── Spatial tiling: split the scene along its longest axis so each grid stays
@@ -1326,9 +1377,12 @@ def export_tsdf_scene(
             n_tiles = max(1, int(_t))
         elif isinstance(_t, str) and _t.strip().lower() == "off":
             n_tiles = 1
-        else:  # "auto" — size N so each tile ≈ 0.45·block_count blocks (room for the
-               # truncation-band dilation that inflates the active set ~1.3–1.6×)
-            usable = max(1.0, float(tsdf_block_count) * 0.45)
+        else:  # "auto" — size N conservatively: the truncation band activates empty
+               # neighbour blocks around every surface, inflating the active set well
+               # above the cloud's surface-block count (observed 2–3×). Target only
+               # 0.25·block_count surface blocks/tile so the dilated active set stays clear
+               # of the cap. The per-tile hashmap guard below is the last-resort net.
+            usable = max(1.0, float(tsdf_block_count) * 0.25)
             n_tiles = max(1, int(np.ceil(occ / usable)))
         if n_tiles > 1:
             # quantiles over per-unique-block axis positions → equal blocks per tile
@@ -1415,6 +1469,19 @@ def export_tsdf_scene(
         if _vc.size and _vc.max() > 1.5:
             mesh.vertex_colors = o3d.utility.Vector3dVector(np.clip(_vc / 255.0, 0.0, 1.0))
     mesh.compute_vertex_normals()
+
+    # Bound the mesh to the cloud's volume (+margin). In the unmasked fallback the TSDF
+    # can extend well past the cloud (depth ballooning); cropping guarantees the mesh
+    # stays within the cloud's extent — fixes "TSDF volume larger than the cloud".
+    if cloud_bbox is not None and cc_frame_pix is None and len(mesh.vertices):
+        _mn, _mx = cloud_bbox
+        _margin = max(0.1, float(sdf_trunc) * 4.0)
+        _v = np.asarray(mesh.vertices)
+        _keep = np.all((_v >= _mn - _margin) & (_v <= _mx + _margin), axis=1)
+        if not _keep.all():
+            mesh.remove_vertices_by_mask(~_keep)
+            logger.info(f"[TSDF-scene] cropped {int((~_keep).sum()):,} verts outside "
+                        f"cloud bbox (+{_margin:.2f}m margin)")
 
     # Optional: drop tiny floating shells (same heuristic as per-instance).
     try:
