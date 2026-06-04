@@ -388,6 +388,118 @@ class StrayDA3Streaming(DA3_Streaming):
         return predictions
 
 
+class StrayDA3CondStreaming(StrayDA3Streaming):
+    """Backend "hybrid_cond": ARKit poses CONDITION DA3 via its native cam_enc, instead
+    of the parent's "estimate then inject". Per chunk it calls
+    ``inference(images, extrinsics=ARKit_w2c, intrinsics=RGB_K)`` so DA3's geometry is
+    consistent with the ARKit trajectory from the start (``align_to_input_ext_scale``
+    then locks the metric scale to ARKit). After inference the DENSE DA3 depth is
+    calibrated to the LiDAR (robust scale/offset, kept dense — NOT overwritten with raw
+    LiDAR). The result — dense, metric, pose-consistent depth + poses + K — is the full
+    prior handed to MapAnything (use_da3_priors), which still loop-closes globally.
+
+    Leaves the existing "hybrid" (StrayDA3Streaming) untouched.
+    """
+
+    def __init__(self, image_dir, save_dir, config, stray_data=None, lidar_cfg=None):
+        super().__init__(image_dir, save_dir, config,
+                         stray_data=stray_data, lidar_cfg=lidar_cfg)
+        self._rgb_hw = None  # (H, W) of the RGB frames — to scale LiDAR K to RGB res
+
+    def _frame_rgb_hw(self):
+        if self._rgb_hw is None and self.img_list:
+            _im = cv2.imread(self.img_list[0])
+            if _im is not None:
+                self._rgb_hw = (_im.shape[0], _im.shape[1])
+        return self._rgb_hw
+
+    def _stac_chunk_camera_priors(self, chunk_image_paths):
+        """ARKit poses (w2c 4x4) + RGB-resolution K per chunk frame -> DA3 cam_enc.
+        All-or-nothing: if ANY frame lacks Stray data, return (None, None) so the chunk
+        falls back to pure estimation (cam_enc conditions all N frames or none). The
+        LiDAR K is stored at 256x192; scaled to the RGB frame resolution that
+        ``inference`` loads (DA3's preprocess then scales it to the process resolution)."""
+        if self.stray_data is None:
+            return None, None
+        hw = self._frame_rgb_hw()
+        if hw is None:
+            return None, None
+        rgb_H, rgb_W = hw
+        lidar_K = np.asarray(self.stray_data['intrinsics'], dtype=np.float64)  # @256x192
+        sx, sy = rgb_W / 256.0, rgb_H / 192.0
+        exts, ixts = [], []
+        for p in chunk_image_paths:
+            si = self._stray_index.get(Path(p).name)
+            if si is None:
+                return None, None  # all-or-nothing
+            c2w = np.asarray(self.stray_data['poses'][si], dtype=np.float64)  # (4,4)
+            w2c = np.linalg.inv(c2w)                                          # (4,4)
+            K = lidar_K.copy()
+            K[0, 0] *= sx; K[0, 2] *= sx   # fx, cx -> RGB resolution
+            K[1, 1] *= sy; K[1, 2] *= sy   # fy, cy -> RGB resolution
+            exts.append(w2c.astype(np.float32))
+            ixts.append(K.astype(np.float32))
+        return np.stack(exts), np.stack(ixts)
+
+    def process_single_chunk(self, range_1, chunk_idx=None, range_2=None, is_loop=False):
+        # DA3 inference WITH cam_enc conditioning (via the hook). Call the GRANDPARENT
+        # (DA3_Streaming) directly, skipping StrayDA3Streaming's estimate-then-inject path.
+        predictions = DA3_Streaming.process_single_chunk(
+            self, range_1, chunk_idx=chunk_idx, range_2=range_2, is_loop=is_loop)
+        if self.stray_data is None or predictions is None:
+            return predictions
+
+        start_idx, end_idx = range_1
+        chunk_images = self.img_list[start_idx:end_idx]
+        if range_2 is not None:
+            s2, e2 = range_2
+            chunk_images += self.img_list[s2:e2]
+
+        da3_H, da3_W = predictions.depth.shape[-2], predictions.depth.shape[-1]
+        n_cal = 0
+        scale, offset = 1.0, 0.0
+        for local_idx in range(len(chunk_images)):
+            si = self._stray_index.get(Path(chunk_images[local_idx]).name)
+            if si is None:
+                continue
+            depth_da3 = predictions.depth[local_idx]
+            depth_lidar = cv2.resize(self.stray_data['depths'][si], (da3_W, da3_H),
+                                     interpolation=cv2.INTER_NEAREST)
+            valid = ((depth_lidar > self.CALIB_MIN_DEPTH) &
+                     (depth_lidar < self.LIDAR_TRUST_M))
+            if valid.sum() > 50 and float(depth_da3.max()) > 0.01:
+                scale, offset = _robust_linear_fit(
+                    depth_da3[valid], depth_lidar[valid],
+                    self.INLIER_ROUNDS, self.INLIER_SIGMA)
+                depth_cal = depth_da3 * scale + offset
+            else:
+                depth_cal = depth_da3.copy()
+            # Dense + metric: calibrate the WHOLE DA3 depth to the LiDAR scale. Unlike
+            # the parent we do NOT overwrite the near field with raw LiDAR — MapAnything
+            # wants a dense prior; the LiDAR is the metric anchor, not the data itself.
+            depth_cal = np.clip(depth_cal, 0, self.DA3_MAX_RANGE_M).astype(np.float32)
+            predictions.depth[local_idx] = depth_cal
+            np.save(str(self.da3_full_dir /
+                        f"{Path(chunk_images[local_idx]).stem}_depth.npy"), depth_cal)
+            n_cal += 1
+
+        if n_cal > 0:
+            # Re-save the chunk so the calibrated depth flows to the aligned chunk and,
+            # via save_depth_conf_result, to the frame_*.npz MapAnything reads as priors.
+            # Extrinsics are DA3's (cam_enc-conditioned, ARKit-aligned) — not re-injected.
+            if is_loop:
+                save_dir = self.result_loop_dir
+                filename = (f"loop_{range_1[0]}_{range_1[1]}_"
+                            f"{range_2[0]}_{range_2[1]}.npy")
+            else:
+                save_dir = self.result_unaligned_dir
+                filename = f"chunk_{chunk_idx}.npy"
+            np.save(os.path.join(save_dir, filename), predictions)
+            print(f"[StrayDA3Cond] cam_enc + LiDAR-calibrated {n_cal}/"
+                  f"{len(chunk_images)} frames | last S={scale:.4f} off={offset:.4f}")
+        return predictions
+
+
 class StrayLiDAROnly(StrayDA3Streaming):
     """DA3-streaming SLAM with LiDAR-only depth (no neural inference).
 

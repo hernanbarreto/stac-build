@@ -42,12 +42,15 @@ def main():
                         help="Output directory")
     parser.add_argument("--selected_frames", type=str, required=False, default=None,
                         help="Optional path to selected_frames.json (keyframe filter)")
+    parser.add_argument("--cond-stray", dest="cond_stray", type=str, default=None,
+                        help="Stray Scanner dir → hybrid_cond: condition DA3 on ARKit "
+                             "poses (cam_enc) + calibrate its depth to LiDAR")
     args = parser.parse_args()
 
     # da3_streaming re-exports load_config / copy_file; subclass lives in server/
     from da3_streaming import load_config, copy_file, warmup_numba
     from loop_utils.sim3utils import merge_ply_files
-    from stray_da3_streaming import StrayDA3Streaming
+    from stray_da3_streaming import StrayDA3Streaming, StrayDA3CondStreaming
 
     config = load_config(args.config)
 
@@ -66,8 +69,25 @@ def main():
     if config["Model"]["align_lib"] == "numba":
         warmup_numba()
 
-    # stray_data=None → pure DA3 behaviour; run() applies the keyframe filter.
-    da3_streaming = StrayDA3Streaming(image_dir, save_dir, config, stray_data=None)
+    if args.cond_stray:
+        # hybrid_cond: condition DA3 on ARKit poses (cam_enc) + calibrate depth to LiDAR.
+        # NOTE: prepare_stray_data folder/format/stride params below are the data-wiring
+        # to confirm against the real Stray dataset.
+        from ingestors.stray_scanner import prepare_stray_data
+        stray = prepare_stray_data(
+            data_dir=args.cond_stray,
+            frames_output_dir=image_dir,
+            stride=1,                       # selected_frames already did the subsampling
+            max_frames=0,
+            confidence_threshold=1,
+            selected_frames_path=args.selected_frames,
+        )
+        print(f"[hybrid_cond] Stray loaded: {len(stray.get('frame_paths', []))} frames "
+              f"-> DA3 cam_enc pose-conditioning + LiDAR depth calibration")
+        da3_streaming = StrayDA3CondStreaming(image_dir, save_dir, config, stray_data=stray)
+    else:
+        # stray_data=None → pure DA3 behaviour; run() applies the keyframe filter.
+        da3_streaming = StrayDA3Streaming(image_dir, save_dir, config, stray_data=None)
     da3_streaming.run(selected_frames_path=args.selected_frames)
     da3_streaming.close()
 

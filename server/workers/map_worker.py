@@ -132,20 +132,31 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
             pipe, frames_dir, output_dir, selected_frames_path,
             recon_cfg, config, session_path, mode=backend
         )
+    elif backend == "hybrid_cond":
+        # Stray → DA3 (cam_enc pose conditioning + LiDAR depth calibration) → MapAnything
+        # with the FULL prior (depth + intrinsics + poses). MapAnything still loop-closes.
+        _run_mapanything(pipe, frames_dir, output_dir, selected_frames_path,
+                         recon_cfg, config, session_path=session_path, cond=True)
     else:
         _run_mapanything(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
 
 
 def _find_stray_dir(session_path: Path) -> Path:
-    """Find the Stray Scanner raw data directory (sibling of src_default/)."""
-    if (session_path / "odometry.csv").exists() and (session_path / "depth").is_dir():
-        return session_path
+    """Find the Stray Scanner raw data dir (odometry.csv + depth/). Checks the session
+    dir, a ``stray/`` subdir of it, and the same in sibling dirs (Stray data may sit in
+    src_default/, src_default/stray/, or a sibling)."""
+    def _ok(d: Path) -> bool:
+        return (d / "odometry.csv").exists() and (d / "depth").is_dir()
+    for cand in (session_path, session_path / "stray"):
+        if _ok(cand):
+            return cand
     parent = session_path.parent
     for child in parent.iterdir():
         if not child.is_dir() or child.name == session_path.name:
             continue
-        if (child / "odometry.csv").exists() and (child / "depth").is_dir():
-            return child
+        for cand in (child, child / "stray"):
+            if _ok(cand):
+                return cand
     return None
 
 
@@ -314,10 +325,13 @@ def _run_lidar_only(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
 
 
 def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
-             selected_frames_path: str, recon_cfg: dict, config: dict, depth_only: bool = False):
+             selected_frames_path: str, recon_cfg: dict, config: dict, depth_only: bool = False,
+             cond_stray_dir: str = None):
     """Run DA3 Streaming as subprocess. depth_only=True: just produce per-frame
     results_output/frame_*.npz (depth+conf+intrinsics) for MapAnything priors and skip
-    the postprocess (no DA3 cloud/chunks). Returns the da3 save dir."""
+    the postprocess (no DA3 cloud/chunks). cond_stray_dir set (hybrid_cond): DA3 is
+    conditioned on ARKit poses via cam_enc + its depth calibrated to LiDAR. Returns the
+    da3 save dir."""
     import yaml
 
     da3_cfg = recon_cfg.get("da3", {})
@@ -366,6 +380,11 @@ def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # Pass selected keyframes filter if available
     if selected_frames_path and Path(selected_frames_path).exists():
         cmd.extend(["--selected_frames", str(selected_frames_path)])
+
+    # hybrid_cond: run_da3_main loads Stray from this dir and uses StrayDA3CondStreaming
+    # (cam_enc pose conditioning + LiDAR depth calibration) instead of plain DA3.
+    if cond_stray_dir:
+        cmd.extend(["--cond-stray", str(cond_stray_dir)])
 
     # Set CUDA visibility and prevent CPU lockups
     env = os.environ.copy()
@@ -707,8 +726,11 @@ def _generate_lidar_complement(pipe: WorkerPipe, da3_save_dir: Path, output_dir:
 
 
 def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
-                     selected_frames_path: str, recon_cfg: dict, config: dict):
-    """Run VGGT-Long (MapAnything) as subprocess — legacy backend."""
+                     selected_frames_path: str, recon_cfg: dict, config: dict,
+                     session_path: Path = None, cond: bool = False):
+    """Run VGGT-Long (MapAnything) as subprocess — legacy backend. cond=True (backend
+    hybrid_cond): the DA3 priors are produced Stray-conditioned (ARKit poses via cam_enc
+    + LiDAR-calibrated depth) and MapAnything gets the FULL prior (depth + K + poses)."""
     import yaml
 
     ma_cfg = recon_cfg.get("mapanything", config.get("mapanything", {}))
@@ -718,11 +740,23 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
 
     vggt_config = _build_vggt_config(config)
 
+    # hybrid_cond: force the full-prior path (poses too) regardless of config defaults.
+    cond_stray_dir = None
+    if cond:
+        vggt_config["Model"]["da3_prior_use_poses"] = True
+        if session_path is not None:
+            try:
+                _sd = _find_stray_dir(Path(session_path))
+                cond_stray_dir = str(_sd) if _sd is not None else None
+            except Exception as _e:
+                pipe.send_log(f"hybrid_cond: Stray dir not found ({_e}) — DA3 runs "
+                              f"image-only (no pose conditioning)", level="warning")
+
     # ── DA3 priors (multi-modal MapAnything) ── Opt-in. Run DA3 depth extraction first,
     # then feed its per-frame METRIC depth + intrinsics into MapAnything (poses are still
     # estimated by MapAnything — DA3 poses are intentionally NOT used). Image-only stays
     # the default. Consumed by MapAnythingAdapter.infer_chunk (base_model.py).
-    if ma_cfg.get("use_da3_priors", False):
+    if ma_cfg.get("use_da3_priors", False) or cond:
         try:
             # Resume: if DA3 depth was already extracted (e.g. a prior run that crashed
             # later in MapAnything), reuse it instead of re-running DA3 — unless replace.
@@ -739,8 +773,13 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 # its DA3 depth in that dictionary. DA3 stays the metric ANCHOR (only the
                 # confident pixels, after the da3_prior_conf_percentile floor); MapAnything
                 # infers the rest. Density comes from MapAnything's output, not DA3.
-                da3_dir = _run_da3(pipe, frames_dir, output_dir, None,
-                                   recon_cfg, config, depth_only=True)
+                # cond: pass the keyframe list so prepare_stray_data uses the frames
+                # already on disk (no rgb.mp4 needed) and indexes depth/poses to them.
+                # non-cond: None → DA3 over all frames (image-only priors).
+                da3_dir = _run_da3(pipe, frames_dir, output_dir,
+                                   selected_frames_path if cond else None,
+                                   recon_cfg, config, depth_only=True,
+                                   cond_stray_dir=cond_stray_dir)
             priors_dir = Path(da3_dir) / "results_output"
             if priors_dir.exists() and any(priors_dir.glob("frame_*.npz")):
                 vggt_config["Model"]["da3_priors_dir"] = str(priors_dir)
@@ -837,6 +876,50 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _postprocess_reconstruction(pipe, vggt_save_dir, output_dir, vggt_config, backend="mapanything")
 
 
+def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: WorkerPipe):
+    """Delete reconstruction temporaries that are dead once chunks + origins exist:
+    maplong_run/{_tmp_results_unaligned,_tmp_results_loop,pcd} and (mapanything only)
+    da3_run/da3_full except results_output (kept for the texture bake). KEEPS
+    _tmp_results_aligned — the TSDF reads per-frame depth from it.
+
+    Idempotent (skips what's already gone), so it is safe — and now called — on BOTH the
+    normal path AND the resume early-exit. Previously the resume path returned before the
+    cleanup, so temps (tens of GB) accumulated across resumed runs and never got freed."""
+    for tmp_dir_name in ["_tmp_results_unaligned", "_tmp_results_loop", "pcd"]:
+        tmp_dir = save_dir / tmp_dir_name
+        if tmp_dir.exists():
+            size_mb = sum(f.stat().st_size for f in tmp_dir.rglob("*") if f.is_file()) / (1024 * 1024)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            pipe.send_log(f"Cleaned up {tmp_dir_name}/ ({size_mb:.0f} MB freed)")
+
+    # DA3-priors cleanup: in the mapanything backend, da3_run/ holds ONLY the consumed
+    # DA3 depth priors (+ DA3's own intermediate cloud) — MapAnything already ingested
+    # them and nothing downstream needs them → delete (can be tens of GB). NOT for the
+    # da3 backend, where da3_run IS the reconstruction output.
+    if backend == "mapanything":
+        for _d in ("da3_run", "da3_full"):
+            prior_dir = output_dir / _d
+            if not prior_dir.exists():
+                continue
+            # KEEP results_output/ (per-frame DA3 depth) — the vertex_gpu photo bake uses
+            # it as the occlusion oracle (nvdiffrast_bake reads da3_run/results_output).
+            freed = 0
+            for child in prior_dir.iterdir():
+                if child.name == "results_output":
+                    continue
+                try:
+                    if child.is_dir():
+                        freed += sum(f.stat().st_size for f in child.rglob("*") if f.is_file())
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        freed += child.stat().st_size
+                        child.unlink()
+                except OSError:
+                    pass
+            pipe.send_log(f"Cleaned up {_d}/ (kept results_output for texture bake; "
+                          f"{freed / (1024 * 1024):.0f} MB freed)")
+
+
 def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Path,
                                  run_config: dict, backend: str = "da3"):
     """Post-process reconstruction output (shared by DA3 and MapAnything).
@@ -846,7 +929,16 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
     """
     # ── Copy PLY files to output dir ──
     pcd_dir = save_dir / "pcd"
-    ply_files = (sorted(glob.glob(str(pcd_dir / "*_pcd.ply"))) if pcd_dir.exists() else [])
+
+    def _chunk_idx(p):
+        # Files are "<N>_pcd.ply" with N the chunk number. Sort NUMERICALLY — plain
+        # sorted() is lexicographic ("10_pcd" < "1_pcd") and scrambles the chunk order
+        # (chunk_001 ← 10_pcd, chunk_011 ← 1_pcd …), mismatching poses/frame ranges.
+        stem = Path(p).name.split("_", 1)[0]
+        return int(stem) if stem.isdigit() else (1 << 30)
+
+    ply_files = (sorted(glob.glob(str(pcd_dir / "*_pcd.ply")), key=_chunk_idx)
+                 if pcd_dir.exists() else [])
     ply_files = [f for f in ply_files if "combined" not in Path(f).name]
     if not ply_files:
         # No new chunk PLYs. EXPECTED when VGGT-Long early-exited a resume
@@ -861,6 +953,9 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
         if already_done:
             pipe.send_log("Reconstruction already complete (no new chunks produced) — "
                           "skipping post-process. Use replace to force a full rebuild.")
+            # Still reclaim dead temporaries on a resume — they accumulate (tens of GB)
+            # across resumed runs because this path used to return before any cleanup.
+            _cleanup_recon_temps(save_dir, output_dir, backend, pipe)
             pipe.send_progress(100, f"{backend.upper()} already complete", stage="reconstruction")
             return
         raise FileNotFoundError(f"No chunk PLY files found in {pcd_dir}")
@@ -927,45 +1022,10 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
     pipe.send_progress(100, f"{backend.upper()} reconstruction complete", stage="reconstruction")
     pipe.send_log(f"{backend} complete: {len(ply_files)} chunks")
 
-    # Cascade cleanup (step 1/3). The per-chunk PLYs were just copied to
-    # output/chunk_NNN.ply, so maplong_run/pcd/ (incl. VGGT-Long's huge unused
-    # combined_pcd.ply, tens of GB) is now dead → delete it. KEEP _tmp_results_aligned —
-    # the whole-scene TSDF reads per-frame depth from it (_resolve_mapanything_depth) and
-    # origins were generated from it. Unaligned/loop are intermediate → delete.
-    for tmp_dir_name in ["_tmp_results_unaligned", "_tmp_results_loop", "pcd"]:
-        tmp_dir = save_dir / tmp_dir_name
-        if tmp_dir.exists():
-            size_mb = sum(f.stat().st_size for f in tmp_dir.rglob("*") if f.is_file()) / (1024 * 1024)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            pipe.send_log(f"Cleaned up {tmp_dir_name}/ ({size_mb:.0f} MB freed)")
-
-    # DA3-priors cleanup: in the mapanything backend, da3_run/ holds ONLY the consumed
-    # DA3 depth priors (+ DA3's own intermediate cloud) — MapAnything already ingested
-    # them during inference and nothing downstream needs them → delete (can be tens of GB).
-    # NOT for the da3 backend, where da3_run IS the reconstruction output.
-    if backend == "mapanything":
-        for _d in ("da3_run", "da3_full"):
-            prior_dir = output_dir / _d
-            if not prior_dir.exists():
-                continue
-            # KEEP results_output/ (per-frame DA3 depth) — the vertex_gpu photo bake uses
-            # it as the occlusion oracle (nvdiffrast_bake reads da3_run/results_output).
-            # Delete only the heavy rest (DA3's own intermediate cloud + chunks).
-            freed = 0
-            for child in prior_dir.iterdir():
-                if child.name == "results_output":
-                    continue
-                try:
-                    if child.is_dir():
-                        freed += sum(f.stat().st_size for f in child.rglob("*") if f.is_file())
-                        shutil.rmtree(child, ignore_errors=True)
-                    else:
-                        freed += child.stat().st_size
-                        child.unlink()
-                except OSError:
-                    pass
-            pipe.send_log(f"Cleaned up {_d}/ (kept results_output for texture bake; "
-                          f"{freed / (1024 * 1024):.0f} MB freed)")
+    # Cascade cleanup (step 1/3): chunks were copied to output/chunk_NNN.ply and origins
+    # generated from _tmp_results_aligned, so the unaligned/loop/pcd temps + the consumed
+    # DA3 priors are dead → free them (keeps _tmp_results_aligned for the TSDF depth).
+    _cleanup_recon_temps(save_dir, output_dir, backend, pipe)
 
     import gc
     gc.collect()
@@ -1084,6 +1144,10 @@ def _build_vggt_config(config: dict) -> dict:
     # depth prior per frame; map_conf_percentile is MapAnything's own inference floor.
     cfg["Model"]["da3_prior_conf_percentile"] = ma.get("da3_prior_conf_percentile", 0)
     cfg["Model"]["map_conf_percentile"] = ma.get("map_conf_percentile", 10)
+    # "Full prior" path (hybrid_cond): also feed DA3's per-frame poses (camera_poses) to
+    # MapAnything, not just depth+K. Off by default — only meaningful when the DA3 priors
+    # were produced with real ARKit pose conditioning (Stray + StrayDA3CondStreaming).
+    cfg["Model"]["da3_prior_use_poses"] = bool(ma.get("da3_prior_use_poses", False))
 
     if ma.get("model_weights"):
         cfg["Weights"]["Map"] = ma["model_weights"]

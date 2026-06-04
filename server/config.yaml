@@ -286,7 +286,9 @@ tsdf:
 # Backends supported by workers/map_worker.py:
 #   "da3"               → DA3 Streaming (neural, no LiDAR)
 #   "lidar"             → Pure LiDAR backprojection (Stray Scanner only)
-#   "hybrid"            → DA3 calibrated with LiDAR depth
+#   "hybrid"            → DA3 calibrated with LiDAR depth (estimate-then-inject poses)
+#   "hybrid_cond"       → Stray → DA3 (ARKit poses via cam_enc + LiDAR-calibrated depth)
+#                         → MapAnything with FULL prior (depth + K + poses) → loop closure
 #   "mapanything"       → VGGT-Long (legacy fallback)
 #   "gaus_slam"         → Gaussian Surfel SLAM via DA3
 #   "gaus_slam_lidar"   → GauS-SLAM with LiDAR+ARKit
@@ -349,6 +351,11 @@ reconstruction:
     map_conf_percentile: 0             # 0 = off (was 15) — no depth-point removal. MapAnything
                                         # percentile, no ceiling — best points pass). Drops
                                         # the bottom N% by model confidence per chunk. 0 = off.
+    da3_prior_use_poses: false         # "full prior": also feed DA3's per-frame poses
+                                        # (camera_poses) to MapAnything, not just depth+K.
+                                        # Forced ON by backend "hybrid_cond". Only meaningful
+                                        # when the DA3 priors carry real ARKit-conditioned
+                                        # poses (Stray + StrayDA3CondStreaming).
 
   # GauS-SLAM (Gaussian Surfel SLAM)
   # Pipeline: DA3 depth+poses → TUM bridge → GauS-SLAM (2DGS surfels).
