@@ -1422,23 +1422,23 @@ def export_tsdf_scene(
             continue
         if progress_cb:
             progress_cb("extracting", time.time() - t0, None)
-        # Size the extract vertex buffer EXPLICITLY. Open3D's auto-estimate
-        # (estimated_vertex_number=-1) undershoots on DENSE grids — many isosurface
-        # crossings per block, exactly what keep-all depth + hundreds of overlapping
-        # views produce. The marching-cubes kernel then writes past the buffer → CUDA
-        # "illegal memory access" surfacing at the next alloc in extract (NOT a block-
-        # count overflow: this fires at ~20% of capacity). Bound it from the live active
-        # block count at ≤4096 verts/block — generous (~20× the observed ~120/block) but
-        # well within VRAM since tiling keeps the active set small.
+        # Extract on CPU. Marching-cubes mesh extraction is what blows the VRAM on big/
+        # dense tiles — on GPU it fails as either "illegal memory access" (dense grids:
+        # the buffer estimate overflows) or "out of memory" (large buffers). The Open3D-
+        # recommended fix (issue #4824 / VBG docs) is to keep integration on the GPU but
+        # move the grid to CPU for extraction: vol.cpu().extract_triangle_mesh() runs the
+        # exact two-pass marching cubes in RAM (plentiful), so estimated_vertex_number
+        # stays -1 (no over/under allocation). Then free the GPU grid + cached VRAM so the
+        # next tile starts clean.
         try:
-            _act = int(vol.hashmap().size())
-        except Exception:
-            _act = 0
-        _est_verts = max(2_000_000, _act * 4096)
-        tmesh = vol.extract_triangle_mesh(
-            weight_threshold=float(tsdf_weight_thresh),
-            estimated_vertex_number=_est_verts).to_legacy()
-        del vol  # free the tile's GPU grid before building the next one
+            tmesh = vol.cpu().extract_triangle_mesh(
+                weight_threshold=float(tsdf_weight_thresh)).to_legacy()
+        finally:
+            del vol  # free the tile's GPU grid before building the next one
+            try:
+                o3d.core.cuda.release_cache()   # release Open3D's cached CUDA memory
+            except Exception:
+                pass
 
         if len(tiles) > 1 and len(tmesh.triangles):
             # Crop to the tile core: keep triangles whose centroid is in [lo,hi) on
