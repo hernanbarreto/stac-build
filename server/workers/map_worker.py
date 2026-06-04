@@ -953,6 +953,20 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
         if already_done:
             pipe.send_log("Reconstruction already complete (no new chunks produced) — "
                           "skipping post-process. Use replace to force a full rebuild.")
+            # Complete origins if a prior run crashed mid-generation (e.g. on disk): the
+            # cloud has N chunk_*.ply but fewer chunk_*_origins.npz → CloudComPy drops the
+            # size-mismatched origins → lost traceability (frame_global) → TSDF can't mask
+            # to the cloud. Regenerate BEFORE the cleanup, which deletes pcd/ (the source).
+            _n_ply = len(list(output_dir.glob("chunk_*.ply")))
+            _n_org = len(list(output_dir.glob("chunk_*_origins.npz")))
+            if _n_ply and _n_org < _n_ply:
+                pipe.send_log(f"Origins incomplete ({_n_org}/{_n_ply}) — regenerating "
+                              f"before cleanup")
+                run_config["_backend"] = backend
+                try:
+                    _generate_origins(save_dir, output_dir, run_config, pipe)
+                except Exception as _e:
+                    pipe.send_log(f"Origins regeneration failed ({_e})", level="warning")
             # Still reclaim dead temporaries on a resume — they accumulate (tens of GB)
             # across resumed runs because this path used to return before any cleanup.
             _cleanup_recon_temps(save_dir, output_dir, backend, pipe)
@@ -1208,7 +1222,13 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
     # lexicographically, to output/chunk_{i:03d}.ply. Mirror that ordering so
     # chunk_{i:03d}_origins.npz pairs with chunk_{i:03d}.ply — but use the REAL
     # chunk number K for frame_global (lexicographic sort puts "10" before "2").
-    pcd_files = sorted(glob.glob(str(pcd_dir / "*_pcd.ply")))
+    def _pcd_num(p):
+        # MUST match the NUMERIC ordering _postprocess uses to copy N_pcd.ply →
+        # chunk_{i:03d}.ply, so chunk_{i:03d}_origins pairs with chunk_{i:03d}.ply.
+        # (Plain sorted() is lexicographic → origins would pair with the wrong chunk.)
+        s = Path(p).name.split("_", 1)[0]
+        return int(s) if s.isdigit() else (1 << 30)
+    pcd_files = sorted(glob.glob(str(pcd_dir / "*_pcd.ply")), key=_pcd_num)
     pcd_files = [f for f in pcd_files if "combined" not in Path(f).name]
     if not pcd_files:
         pipe.send_log("No chunk PLYs found — origins not generated", level="warning")
