@@ -341,15 +341,19 @@ reconstruction:
     frame_stride: 1                     # ALL frames (was 2). frames_selector:"none" already
                                         # forces all frames; kept at 1 for consistency.
     loop_closure: true
-    conf_threshold_coef: 0.0           # keep all (was 0.75) — no depth-point removal
+    conf_threshold_coef: 0.75          # chunk PLY filter: drop points with conf < 0.75×mean.
+                                        # VGGT-Long's proven default; cuts the noisy low-conf
+                                        # tail (0.0 = keep all = pass all noise).
     sample_ratio: 1.0
     use_da3_priors: true               # multi-modal: run DA3 first, feed its metric
                                         # depth + intrinsics into MapAnything (poses still
                                         # estimated by MapAnything). "map fed by DA3 depth".
     da3_prior_conf_percentile: 0       # 0 = feed raw DA3 prior depth, no per-pixel cull
                                         # (was 50) — no depth-point removal.
-    map_conf_percentile: 0             # 0 = off (was 15) — no depth-point removal. MapAnything
-                                        # percentile, no ceiling — best points pass). Drops
+    map_conf_percentile: 40            # drop the bottom 40% least-confident per chunk — the
+                                        # DA3/MapAnything model default (conf_thresh_percentile
+                                        # =40.0). Sweet spot: cuts noise without holing far/
+                                        # low-texture geometry (0 = off). MapAnything
                                         # the bottom N% by model confidence per chunk. 0 = off.
     da3_prior_use_poses: false         # "full prior": also feed DA3's per-frame poses
                                         # (camera_poses) to MapAnything, not just depth+K.
