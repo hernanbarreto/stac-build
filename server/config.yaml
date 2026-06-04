@@ -308,6 +308,9 @@ reconstruction:
   da3:
     conda_env: "da3"
     model_id: "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
+    remove_sky: true                   # standalone da3 backend: drop sky pixels via DA3's
+                                       # own sky head. Ignored in MapAnything-priors mode
+                                       # (map removes sky with skyseg). true = always on.
     chunk_size: 120
     overlap: 60
     loop_enable: true                  # SALAD loop closure

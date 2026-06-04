@@ -327,6 +327,11 @@ def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
 
     # Build DA3 config YAML from our config.yaml settings
     da3_config = _build_da3_config(recon_cfg)
+    # Sky removal via DA3's OWN sky head: ON for the standalone `da3` backend, OFF when
+    # DA3 only feeds MapAnything priors (depth_only) — there MapAnything strips the sky
+    # itself with skyseg. Toggle with reconstruction.da3.remove_sky (default True).
+    da3_config["Model"]["remove_sky"] = (not depth_only) and bool(
+        recon_cfg.get("da3", {}).get("remove_sky", True))
 
     # Write temporary config for this run
     da3_config_path = output_dir / "da3_streaming_config.yaml"
