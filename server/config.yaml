@@ -266,9 +266,9 @@ tsdf:
                              # occupied blocks (overflows a single 200k VoxelBlockGrid), so
                              # tsdf_tiling splits it into ~5 tiles that each stay under the cap.
   sdf_trunc: 0.035           # ~3.5× voxel — reconciliation band kept proportional to voxel
-  tsdf_block_count: 300000   # GPU hash slots PER TILE (~24GB; only one grid alive at a time,
-                             # 48GB GPU). Bigger per-tile budget = fewer tiles, more headroom
-                             # for the truncation-band block dilation.
+  tsdf_block_count: 200000   # GPU hash slots PER TILE (~16GB). NOT the bottleneck: tiles run
+                             # at ~20% of this. Kept moderate so the grid pre-alloc leaves
+                             # VRAM for the explicit extract vertex buffer (the real limit).
   tsdf_tiling: auto          # "auto" | "off" | <int N>. Big scenes overflow a single
                              # VoxelBlockGrid (CUDA illegal memory access). "auto" splits
                              # the scene along its longest axis into enough tiles that each

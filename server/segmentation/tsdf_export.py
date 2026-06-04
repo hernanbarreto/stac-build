@@ -1422,8 +1422,22 @@ def export_tsdf_scene(
             continue
         if progress_cb:
             progress_cb("extracting", time.time() - t0, None)
+        # Size the extract vertex buffer EXPLICITLY. Open3D's auto-estimate
+        # (estimated_vertex_number=-1) undershoots on DENSE grids — many isosurface
+        # crossings per block, exactly what keep-all depth + hundreds of overlapping
+        # views produce. The marching-cubes kernel then writes past the buffer → CUDA
+        # "illegal memory access" surfacing at the next alloc in extract (NOT a block-
+        # count overflow: this fires at ~20% of capacity). Bound it from the live active
+        # block count at ≤4096 verts/block — generous (~20× the observed ~120/block) but
+        # well within VRAM since tiling keeps the active set small.
+        try:
+            _act = int(vol.hashmap().size())
+        except Exception:
+            _act = 0
+        _est_verts = max(2_000_000, _act * 4096)
         tmesh = vol.extract_triangle_mesh(
-            weight_threshold=float(tsdf_weight_thresh)).to_legacy()
+            weight_threshold=float(tsdf_weight_thresh),
+            estimated_vertex_number=_est_verts).to_legacy()
         del vol  # free the tile's GPU grid before building the next one
 
         if len(tiles) > 1 and len(tmesh.triangles):
