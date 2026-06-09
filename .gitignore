@@ -143,3 +143,6 @@ vendor/CloudComPy_Conda310_Linux64_*.tgz
 
 # nvdiffrast clone (compiled CUDA ext)
 vendor/nvdiffrast/
+
+# secret: GitHub token — never commit
+server/git.txt
