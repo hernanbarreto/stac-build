@@ -53,6 +53,7 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         "--sor-sigma", str(postproc.get("sor_sigma", 1.0)),
         "--noise-radius", str(postproc.get("noise_radius", 0.01)),
         "--noise-sigma", str(postproc.get("noise_sigma", 1.0)),
+        "--conf-min-norm", str(postproc.get("conf_min_norm", 0.0)),
     ]
     max_points = postproc.get("max_points", 0)
     if max_points > 0:

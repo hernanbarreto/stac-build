@@ -519,6 +519,40 @@ def _group_rows_by_frame(fg: np.ndarray, pr: np.ndarray, pc: np.ndarray,
             for i in range(len(uniq))}
 
 
+def _load_ply_confidence(ply_path: Path) -> Optional[np.ndarray]:
+    """Read the per-point ``confidence`` scalar from a binary PLY (same layout as
+    ``_load_ply_origins``). Returns an (N,) float32 array, or None if the field is
+    absent. Used by the TSDF confidence gate to drop the noisy low/mid-confidence
+    tail before meshing."""
+    _ply_type = {
+        'float': '<f4', 'float32': '<f4', 'double': '<f8', 'float64': '<f8',
+        'uchar': 'u1', 'uint8': 'u1', 'char': 'i1', 'int8': 'i1',
+        'ushort': '<u2', 'uint16': '<u2', 'short': '<i2', 'int16': '<i2',
+        'uint': '<u4', 'uint32': '<u4', 'int': '<i4', 'int32': '<i4',
+    }
+    try:
+        with open(ply_path, 'rb') as f:
+            n_pts = 0
+            props = []
+            while True:
+                line = f.readline().decode('ascii').strip()
+                if line.startswith('element vertex'):
+                    n_pts = int(line.split()[-1])
+                elif line.startswith('property') and n_pts > 0:
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[1] in _ply_type:
+                        props.append((parts[2], _ply_type[parts[1]]))
+                elif line == 'end_header':
+                    break
+            if n_pts == 0 or 'confidence' not in {p[0] for p in props}:
+                return None
+            data = np.frombuffer(f.read(), dtype=np.dtype(props))
+            return data['confidence'].astype(np.float32)
+    except Exception as e:
+        logger.warning(f"[TSDF] could not read confidence from {ply_path}: {e}")
+        return None
+
+
 # ── Camera intrinsics scaling ──────────────────────────────────────
 
 def _intrinsics_for_depth(K_rgb: np.ndarray, rgb_h: int, rgb_w: int,
@@ -1019,6 +1053,12 @@ def export_tsdf_scene(
                                          # phantoms. Needs PLY traceability; else falls back.
     cloud_splat_radius: int = 1,         # px splat (same z) when rasterizing — fills single-
                                          # point gaps so coverage matches the cloud's density
+    conf_min_norm: float = 0.0,          # confidence gate in [0,1] — SAME min-max normalisation
+                                         # as the UI slider: keep cloud points whose
+                                         # (conf-min)/(max-min) ≥ this before meshing. 0 = off.
+                                         # 0.1 ≈ the UI slider at 0.1 — drops the noisy low/mid-
+                                         # confidence tail (vertical smear). Needs the cloud's
+                                         # 'confidence' field (present in cleaned_cloud.ply).
     smooth_iterations: int = 2,          # smoothing iterations post-extract
     smooth_method: str = "simple",       # winner of visual A/B over taubin (LiDAR-noise data)
     fill_holes: bool = False,            # off: texrecon leaves filled holes untextured
@@ -1254,17 +1294,37 @@ def export_tsdf_scene(
                                    f"bbox bound ({_e})")
         else:
             _xyz, fg, pr, pc = origins
-            fg = np.asarray(fg).astype(np.int64)
-            pr = np.asarray(pr).astype(np.int32)
-            pc = np.asarray(pc).astype(np.int32)
+            cc_fg = np.asarray(fg).astype(np.int64)
+            cc_pr = np.asarray(pr).astype(np.int32)
+            cc_pc = np.asarray(pc).astype(np.int32)
             cc_xyz = np.asarray(_xyz, dtype=np.float64)  # (N,3) world points → tile assign
-            cc_fg, cc_pr, cc_pc = fg, pr, pc
-            cc_ply_hw = (int(pr.max()) + 1 if len(pr) else 1,
-                         int(pc.max()) + 1 if len(pc) else 1)
-            logger.info(f"[TSDF-scene] indexing {len(fg):,} cloud points by frame "
+
+            # ── Confidence gate (matches the UI slider) ──
+            # Keep only points whose min-max-normalised confidence ≥ conf_min_norm —
+            # the SAME (conf-min)/(max-min) normalisation the viewer's slider uses, so
+            # `conf_min_norm: 0.1` means exactly the UI slider at 0.1. Drops the noisy
+            # low/mid-confidence tail (the vertical smear) BEFORE meshing.
+            if conf_min_norm and conf_min_norm > 0:
+                conf = _load_ply_confidence(cc_path)
+                if conf is not None and len(conf) == len(cc_fg):
+                    cmin, cmax = float(conf.min()), float(conf.max())
+                    thr = cmin + float(conf_min_norm) * max(cmax - cmin, 1e-6)
+                    keep = conf >= thr
+                    logger.info(f"[TSDF-scene] confidence gate: conf_min_norm={conf_min_norm} "
+                                f"→ raw conf ≥ {thr:.1f} (range {cmin:.1f}..{cmax:.1f}) → kept "
+                                f"{int(keep.sum()):,}/{len(conf):,} ({100*keep.mean():.1f}%)")
+                    cc_xyz = cc_xyz[keep]; cc_fg = cc_fg[keep]
+                    cc_pr = cc_pr[keep]; cc_pc = cc_pc[keep]
+                else:
+                    logger.warning("[TSDF-scene] conf_min_norm set but no usable 'confidence' "
+                                   "field in the cloud — skipping the gate")
+
+            cc_ply_hw = (int(cc_pr.max()) + 1 if len(cc_pr) else 1,
+                         int(cc_pc.max()) + 1 if len(cc_pc) else 1)
+            logger.info(f"[TSDF-scene] indexing {len(cc_fg):,} cloud points by frame "
                         f"(single argsort)…")
-            cc_frame_pix = _group_rows_by_frame(fg, pr, pc, cc_xyz)
-            logger.info(f"[TSDF-scene] mask_to_cleaned_cloud: {len(fg):,} cloud "
+            cc_frame_pix = _group_rows_by_frame(cc_fg, cc_pr, cc_pc, cc_xyz)
+            logger.info(f"[TSDF-scene] mask_to_cleaned_cloud: {len(cc_fg):,} cloud "
                         f"points, {len(cc_frame_pix)} frames, "
                         f"trace {cc_ply_hw[1]}x{cc_ply_hw[0]}")
 

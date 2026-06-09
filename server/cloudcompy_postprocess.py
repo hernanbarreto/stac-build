@@ -55,7 +55,13 @@ def main():
     # Max points
     parser.add_argument("--max-points", type=int, default=0,
                         help="Max points in output (0=unlimited)")
-    
+
+    # Confidence gate (min-max normalised, same as the viewer slider)
+    parser.add_argument("--conf-min-norm", type=float, default=0.0,
+                        help="Keep points whose min-max-normalised 'confidence' >= this "
+                             "[0,1] (0=off). 0.1 ≈ the UI slider at 0.1. Drops the noisy "
+                             "low/mid-confidence tail so cleaned_cloud is denoised at source.")
+
     # Skip flags
     parser.add_argument("--skip-duplicates", action="store_true", help="Skip duplicate removal")
     parser.add_argument("--skip-sor", action="store_true", help="Skip SOR filter")
@@ -165,6 +171,37 @@ def main():
             print(f"  ✅ Injected scalar fields {injected} ({n_cloud:,} pts) ({time.time()-t_orig:.1f}s)\n")
         else:
             print(f"  ⚠️ Origin size mismatch: {len(fields[0][1])} vs cloud {n_cloud} — NOT injected\n")
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 1c: CONFIDENCE GATE (min-max normalised == the viewer slider)
+    # Keep points where (conf-min)/(max-min) >= conf_min_norm. Run BEFORE
+    # voxel/SOR so they process fewer points AND the saved cleaned_cloud is
+    # already denoised at source — the downstream TSDF then needs no extra
+    # confidence filtering.
+    # ══════════════════════════════════════════════════════════════
+    if args.conf_min_norm and args.conf_min_norm > 0:
+        sfdic = current.getScalarFieldDic()
+        ci = sfdic.get("confidence", -1)
+        if ci is not None and ci >= 0:
+            t1c = time.time()
+            sf = current.getScalarField(ci)
+            sf.computeMinAndMax()
+            cmin, cmax = float(sf.getMin()), float(sf.getMax())
+            thr = cmin + float(args.conf_min_norm) * max(cmax - cmin, 1e-6)
+            n_before = current.size()
+            current.setCurrentScalarField(ci)
+            current.setCurrentOutScalarField(ci)
+            filtered = cc.filterBySFValue(thr, cmax + 1.0, current)
+            if filtered is not None and filtered.size() > 0:
+                pct = 100.0 * filtered.size() / max(n_before, 1)
+                print(f"[Step 1c] Confidence gate: norm>={args.conf_min_norm} → raw>={thr:.1f} "
+                      f"(range {cmin:.1f}..{cmax:.1f})  {n_before:,} → {filtered.size():,} "
+                      f"({pct:.1f}% kept)  ({time.time()-t1c:.1f}s)\n")
+                current = filtered
+            else:
+                print("[Step 1c] Confidence gate produced empty/None — keeping all points\n")
+        else:
+            print("[Step 1c] Confidence gate requested but no 'confidence' SF — skipped\n")
 
     # ══════════════════════════════════════════════════════════════
     # STEP 2: NEAR-DUPLICATE REMOVAL (micro-voxel 0.1mm)
