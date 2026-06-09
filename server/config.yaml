@@ -265,12 +265,11 @@ tsdf:
                               # cloud points (which fragments the surface into small patches).
   cloud_splat_radius: 1        # px splat (same z) — fills single-point gaps so the mesh
                               # coverage matches the cloud's surface density
-  conf_min_norm: 0.1          # filter at mesh time — the CURRENT cleaned_cloud is NOT yet
-                              # CloudCompy-filtered (that only happens on the next FULL
-                              # reconstruction), so for re-meshing the existing cloud we still
-                              # gate confidence here (drops the noisy low/mid-conf tail).
-                              # ⚠️ Set to 0.0 BEFORE the next full reconstruction — by then
-                              # CloudCompy denoises at source and this would double-filter.
+  conf_min_norm: 0            # OFF this run — no confidence filtering anywhere (postprocessing
+                              # conf_min_norm is also 0). The literature-driven experiment: with
+                              # blur+DINO+asymmetric reconstruction, SEE the raw cloud quality
+                              # before re-introducing any gate. (Also avoids double-filtering once
+                              # CloudCompy gates at source.)
   cleaned_cloud_dilate: 3     # legacy raw-depth path only (ignored when raster is on)
   depth_trunc: 100.0         # raster mode: only a loose sanity bound (the cloud has no
                              # far phantoms to clip); legacy mode: max integration distance
@@ -473,10 +472,11 @@ postprocessing:
   # ⚠️ EMPIRICAL-TUNE AFTER the blur+DINO reconstruction: the literature (deep-research 2026)
   # says aggressive confidence filtering is a SYMPTOM of noisy input — outliers concentrate in
   # low-baseline / occluded / blurred regions, which blur-drop + keyframing remove at source. So
-  # with cleaner frames the conf tail should be smaller and this gate can likely RELAX (e.g.
-  # 0.1 → 0.05) without re-admitting noise. No measured curve exists → A/B it on the new cloud,
-  # don't lower it blind. Change ONE variable at a time: frames first (this run), gate next.
-  conf_min_norm: 0.1
+  # with cleaner frames the conf tail should be smaller and this gate can likely RELAX without
+  # re-admitting noise. No measured curve exists → A/B it on the new cloud, don't lower it blind.
+  # THIS RUN: 0 = OFF — keep ALL points and SEE how clean the blur+DINO+asymmetric cloud really
+  # is before deciding any gate (the literature-driven experiment). Raise later only if needed.
+  conf_min_norm: 0
 
   # Statistical Outlier Removal
   sor_knn: 8                           # neighbors (lower = keeps isolated objects)
