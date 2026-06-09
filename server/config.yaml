@@ -492,9 +492,12 @@ postprocessing:
   # low-baseline / occluded / blurred regions, which blur-drop + keyframing remove at source. So
   # with cleaner frames the conf tail should be smaller and this gate can likely RELAX without
   # re-admitting noise. No measured curve exists → A/B it on the new cloud, don't lower it blind.
-  # THIS RUN: 0 = OFF — keep ALL points and SEE how clean the blur+DINO+asymmetric cloud really
-  # is before deciding any gate (the literature-driven experiment). Raise later only if needed.
-  conf_min_norm: 0
+  # 0.01 = LIGHT gate: drops only the very lowest-confidence tail (≈ conf < min + 1% of range,
+  # ~the noisiest points) while keeping almost everything. Applied at source in CloudCompy before
+  # SOR/voxel. Preserves origins/confidence per point (same code validated at 0.1). Takes effect
+  # on the next FULL reconstruction (re-running cloudcompy alone isn't possible — its chunk inputs
+  # are deleted after baking). tsdf.conf_min_norm stays 0 to avoid double-filtering.
+  conf_min_norm: 0.01
 
   # Statistical Outlier Removal
   sor_knn: 8                           # neighbors (lower = keeps isolated objects)
