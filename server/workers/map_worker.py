@@ -801,11 +801,14 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 # infers the rest. Density comes from MapAnything's output, not DA3.
                 # cond: pass the keyframe list so prepare_stray_data uses the frames
                 # already on disk (no rgb.mp4 needed) and indexes depth/poses to them.
-                # non-cond: the BLUR-VALID dense set (da3_frames.json) → DA3 over all
-                # sharp frames (excludes blurry), the dense fusion set for the TSDF.
-                # Falls back to None (all frames on disk) when blur is off.
+                # non-cond: the BLUR-VALID dense set (da3_frames.json, written by run()
+                # Step 2b) → DA3 over all sharp frames (excludes blurry), the dense fusion
+                # set for the TSDF. Read by PATH here because run()'s local is out of this
+                # function's scope. Falls back to None (all frames on disk) if absent.
+                _da3_dense = frames_dir / "da3_frames.json"
+                _da3_dense_arg = str(_da3_dense) if _da3_dense.exists() else None
                 da3_dir = _run_da3(pipe, frames_dir, output_dir,
-                                   selected_frames_path if cond else da3_dense_frames_path,
+                                   selected_frames_path if cond else _da3_dense_arg,
                                    recon_cfg, config, depth_only=True,
                                    cond_stray_dir=cond_stray_dir)
             priors_dir = Path(da3_dir) / "results_output"
