@@ -253,15 +253,26 @@ bim:
 # surfaces (distant walls/doors) that show fine in the cloud.
 tsdf:
   mask_to_cleaned_cloud: true  # integrate EXACTLY the cloud's pixels (the source of truth)
-  cleaned_cloud_dilate: 3
-  depth_trunc: 100.0         # effectively no distance cut — trust the cloud's range
+  # FAITHFUL cloud-raster integration: z-buffer the cleaned_cloud's OWN points back into
+  # each frame and integrate THAT, instead of the raw neural depth. The raw depth still
+  # carries the flying-pixel/far-phantom returns that CloudCompPy's SOR + noise filter
+  # already stripped from the cloud — integrating it made the mesh grow streaks and
+  # phantom surfaces the cloud doesn't have ("no copia la nube" / "líneas incorrectas").
+  # With raster ON every depth sample IS a cleaned cloud point → the mesh copies the cloud.
+  rasterize_cloud_depth: true
+  cloud_splat_radius: 1        # px splat (same z) — fills single-point gaps so the mesh
+                              # coverage matches the cloud's surface density
+  cleaned_cloud_dilate: 3     # legacy raw-depth path only (ignored when raster is on)
+  depth_trunc: 100.0         # raster mode: only a loose sanity bound (the cloud has no
+                             # far phantoms to clip); legacy mode: max integration distance
   depth_min: 0.05            # only drop sensor-touching artifacts
-  da3_conf_percentile: 0     # NO confidence re-filter (the cloud already filtered)
+  da3_conf_percentile: 0     # raster mode: moot (cloud already filtered); legacy: conf re-filter
   tsdf_weight_thresh: 2.0    # require ≥2 views per voxel — drops UNreconciled single-view
                              # voxels (raw depth noise → thick/bumpy surfaces). Not a cloud
                              # filter: it just refuses to mesh what multi-view never agreed on.
                              # Small gaps closed by fill_holes. (was 1.0 = single-view = noisy)
-  edge_thresh: 1.0           # ~disable flying-pixel cull (the cloud is already clean)
+  edge_thresh: 1.0           # legacy raw-depth path only (bypassed in raster mode). If you
+                             # ever turn raster OFF, set this to ~0.05 to cull flying pixels.
   voxel_length: 0.010        # 1.0 cm — finer detail. At 1cm a 91M-pt/144m scene yields ~435k
                              # occupied blocks (overflows a single 200k VoxelBlockGrid), so
                              # tsdf_tiling splits it into ~5 tiles that each stay under the cap.
@@ -277,9 +288,11 @@ tsdf:
                              # continuous (≥ several × sdf_trunc) before the core-crop merge
   texture: true
   texture_mode: "vertex_gpu" # multi-view photo bake (falls back to integrated colour)
-  keep_aligned_chunks: false # true = keep maplong_run/_tmp_results_aligned (14G) after the
-                             # mesh, so you can re-run JUST the TSDF stage with different
-                             # params (coverage tuning) without re-running MapAnything.
+  keep_aligned_chunks: true  # KEEP maplong_run/_tmp_results_aligned (the MapAnything dense
+                             # depth+K, ~14G) after the mesh. This is the depth that MATCHES
+                             # cleaned_cloud.ply — required to re-run the TSDF stage (param
+                             # tuning, dense integration) WITHOUT re-running MapAnything (hours).
+                             # Set false only to reclaim disk when you'll never re-mesh.
 
 
 # ── 3D Reconstruction ──────────────────────────────────────────────
@@ -320,8 +333,8 @@ reconstruction:
     align_method: "sim3"               # "sim3" | "se3" | "scale+se3"
     align_lib: "torch"                 # "numpy" (CPU) | "triton"/"torch" (GPU)
     depth_threshold: 20.0              # max depth (m)
-    conf_threshold_coef: 0.0           # keep all (was 0.5) — no depth-point removal
-    conf_min_normalized: 0.0           # keep ALL points (was 0.25) — no depth-point removal
+    conf_threshold_coef: 0.75          # DA3/VGGT recommended default (drop conf < 0.75×mean)
+    conf_min_normalized: 0.25          # DA3 recommended floor on normalized confidence
     sample_ratio: 1.0
     save_depth_conf_result: true       # save per-frame depth+conf .npz
 
@@ -348,8 +361,9 @@ reconstruction:
     use_da3_priors: true               # multi-modal: run DA3 first, feed its metric
                                         # depth + intrinsics into MapAnything (poses still
                                         # estimated by MapAnything). "map fed by DA3 depth".
-    da3_prior_conf_percentile: 0       # 0 = feed raw DA3 prior depth, no per-pixel cull
-                                        # (was 50) — no depth-point removal.
+    da3_prior_conf_percentile: 40      # DA3 recommended default (conf_thresh_percentile=40):
+                                        # drop the bottom 40% least-confident DA3 prior pixels
+                                        # per frame before feeding MapAnything (was 0 = raw/noisy).
     map_conf_percentile: 40            # drop the bottom 40% least-confident per chunk — the
                                         # DA3/MapAnything model default (conf_thresh_percentile
                                         # =40.0). Sweet spot: cuts noise without holing far/

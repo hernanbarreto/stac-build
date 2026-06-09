@@ -3673,15 +3673,13 @@ async def export_tsdf_scene_endpoint(request: Request):
     # and ignored config entirely → far walls truncated at 5 m + half the depth
     # dropped by confidence → "the TSDF doesn't cover the whole cloud". Body keys
     # still override per-request.
-    _VALID_TSDF_KW = {
-        "voxel_length", "sdf_trunc", "depth_trunc", "depth_min", "edge_thresh",
-        "conf_min", "da3_conf_percentile", "mask_to_cleaned_cloud",
-        "cleaned_cloud_dilate", "smooth_iterations", "tsdf_block_count",
-        "tsdf_weight_thresh", "texture", "texture_mode",
-    }
-    _tcfg = cfg.get("tsdf", {}) or {}
-    params = {k: _tcfg[k] for k in _VALID_TSDF_KW if k in _tcfg}
-    params.update({k: body[k] for k in _VALID_TSDF_KW if k in body})
+    # Single source of truth (shared with workers/tsdf_worker.py): the manual
+    # /tsdf/scene_export button forwards the SAME config keys to export_tsdf_scene
+    # as the in-pipeline TSDF stage, so the two reconstruct identically. Per-request
+    # body keys override config. Derived from export_tsdf_scene's signature → cannot
+    # drift when a kwarg is added/removed.
+    from segmentation.tsdf_export import build_tsdf_scene_kwargs
+    params = build_tsdf_scene_kwargs(cfg, overrides=body)
 
     if not session_id:
         raise HTTPException(status_code=400, detail="Missing session_id")
@@ -3720,6 +3718,7 @@ async def export_tsdf_scene_endpoint(request: Request):
                 cwd=str(SERVER_DIR),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"},
             )
             assert proc.stdout is not None
             async for raw in proc.stdout:
@@ -3730,6 +3729,9 @@ async def export_tsdf_scene_endpoint(request: Request):
                     try:
                         upd = json.loads(line[len("[TSDF-PROGRESS]"):])
                         await _tsdf_scene_apply_progress(session_id, upd)
+                        print(f"[TSDF-scene] phase={upd.get('phase')}"
+                              + (f" {upd.get('elapsed'):.0f}s" if upd.get('elapsed') else ""),
+                              flush=True)  # store phase transitions in the server log
                     except Exception:
                         pass
                 elif line.startswith("[TSDF-RESULT]"):

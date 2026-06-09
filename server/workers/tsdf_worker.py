@@ -15,15 +15,6 @@ from pathlib import Path
 
 from workers.base import WorkerPipe, run_worker_safe
 
-# export_tsdf_scene kwargs we forward from config["tsdf"] when present.
-_PASSTHROUGH = (
-    "voxel_length", "sdf_trunc", "depth_trunc", "depth_min", "edge_thresh",
-    "conf_min", "da3_conf_percentile", "mask_to_cleaned_cloud",
-    "cleaned_cloud_dilate", "smooth_iterations", "smooth_method",
-    "decimate_target", "texture", "texture_mode", "tsdf_block_count",
-    "tsdf_weight_thresh", "tsdf_tiling", "tsdf_tile_halo",
-)
-
 # Coarse phase → percentage mapping for the UI progress bar.
 _PHASE_PCT = {
     "starting": 2, "loading": 5, "masking": 12, "integrating": 45,
@@ -47,7 +38,10 @@ def _tsdf_work(pipe: WorkerPipe, session_dir: str, config: dict):
         return
 
     tcfg = config.get("tsdf", {}) or {}
-    kwargs = {k: tcfg[k] for k in _PASSTHROUGH if k in tcfg}
+    # Single source of truth (shared with main.py /tsdf/scene_export) → both run
+    # paths forward the SAME config keys to export_tsdf_scene, never diverging.
+    from segmentation.tsdf_export import build_tsdf_scene_kwargs
+    kwargs = build_tsdf_scene_kwargs(config)
 
     def _cb(phase, elapsed=None, mesh=None):
         pct = _PHASE_PCT.get(str(phase), None)
@@ -95,17 +89,22 @@ def _tsdf_work(pipe: WorkerPipe, session_dir: str, config: dict):
     pipe.send_progress(100, f"TSDF mesh written: {Path(path).name}", stage="tsdf")
     pipe.send_log(f"TSDF scene mesh: {path}")
 
-    # Cascade cleanup (step 3/3): the mesh is built, so the aligned chunk depth
-    # (maplong_run/_tmp_results_aligned, ~tens of GB) is no longer needed. Default ON.
-    # Set tsdf.keep_aligned_chunks: true to retain it for TSDF param re-tuning.
-    if not tcfg.get("keep_aligned_chunks", False):
+    # Cascade cleanup (step 3/3): the aligned chunk depth (maplong_run/_tmp_results_aligned)
+    # is the MapAnything dense depth+K that MATCHES cleaned_cloud.ply — it is REQUIRED to
+    # re-run the TSDF stage (param tuning, dense integration) without re-running MapAnything
+    # (hours). Default KEEP. Set tsdf.keep_aligned_chunks: false ONLY to reclaim disk when
+    # you are certain you will never re-mesh this scan.
+    if not tcfg.get("keep_aligned_chunks", True):
         import shutil
         aligned = output_dir / "maplong_run" / "_tmp_results_aligned"
         if aligned.exists():
             size_mb = sum(f.stat().st_size for f in aligned.rglob("*") if f.is_file()) / (1024 * 1024)
             shutil.rmtree(aligned, ignore_errors=True)
             pipe.send_log(f"[cleanup] removed _tmp_results_aligned/ ({size_mb:.0f} MB freed) "
-                          f"— set tsdf.keep_aligned_chunks: true to keep for re-tuning")
+                          f"— TSDF re-runs will now require re-running MapAnything")
+    else:
+        pipe.send_log("[cleanup] keeping _tmp_results_aligned/ (MapAnything dense depth) "
+                      "so the TSDF stage can be re-run without re-running MapAnything")
 
 
 def run(conn: Connection, session_dir: str, config: dict):

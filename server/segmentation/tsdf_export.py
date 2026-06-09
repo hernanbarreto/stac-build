@@ -433,6 +433,92 @@ def _build_segment_mask_at_depth(pr_rgb: np.ndarray, pc_rgb: np.ndarray,
     return _dilate_mask(seed, dilate_radius)
 
 
+def _rasterize_cloud_depth(xyz: np.ndarray, c2w: np.ndarray, K: np.ndarray,
+                           depth_h: int, depth_w: int,
+                           splat_radius: int = 0) -> np.ndarray:
+    """Z-buffer a frame's cleaned-cloud points back into its depth grid.
+
+    This is the faithful inverse of how the cloud was built, and the core of the
+    "TSDF must copy the cloud" fix. Integrating the RAW neural/LiDAR depth fuses
+    the very outliers (flying pixels at silhouettes, far depth guesses) that
+    CloudCompPy's SOR + noise filter already stripped from ``cleaned_cloud.ply``,
+    so the mesh grows streaks and phantom surfaces the cloud doesn't have. Here
+    we instead project the SURVIVING cloud points this frame observed through its
+    own pose+K and keep the nearest z per pixel — every depth sample IS a cleaned
+    cloud point, so the TSDF can only ever mesh what the cloud contains.
+
+    Projecting + unprojecting with the SAME (pose, K) is self-consistent
+    regardless of any global pose drift: Open3D unprojects pixel (u,v) at depth z
+    back to exactly the world point we projected. The stored traceability pixels
+    are therefore only used upstream to decide WHICH points a frame saw, never to
+    place them.
+
+    Args:
+        xyz: (N,3) world points this frame observed (a cleaned-cloud subset).
+        c2w: (≤4,4) camera-to-world pose.
+        K:   (3,3) pinhole intrinsics at the (depth_h, depth_w) grid.
+        splat_radius: optional px splat (same z) to fill single-point gaps so the
+            rasterized depth matches the cloud's surface density.
+
+    Returns (depth_h, depth_w) float32 depth in metres, 0 where empty.
+    """
+    empty = np.zeros((depth_h, depth_w), dtype=np.float32)
+    if xyz is None or len(xyz) == 0:
+        return empty
+    c2w_4 = np.eye(4, dtype=np.float64)
+    c2w_4[:c2w.shape[0], :c2w.shape[1]] = c2w
+    w2c = np.linalg.inv(c2w_4)
+    cam = np.asarray(xyz, dtype=np.float64) @ w2c[:3, :3].T + w2c[:3, 3]  # world→cam
+    z = cam[:, 2]
+    front = z > 1e-6
+    if not front.any():
+        return empty
+    cam, z = cam[front], z[front]
+    u = (K[0, 0] * cam[:, 0]) / z + K[0, 2]
+    v = (K[1, 1] * cam[:, 1]) / z + K[1, 2]
+    ui = np.rint(u).astype(np.int64)
+    vi = np.rint(v).astype(np.int64)
+    inb = (ui >= 0) & (ui < depth_w) & (vi >= 0) & (vi < depth_h)
+    if not inb.any():
+        return empty
+    ui, vi, z = ui[inb], vi[inb], z[inb]
+
+    depth = np.full((depth_h, depth_w), np.inf, dtype=np.float64)
+    if splat_radius and splat_radius > 0:
+        for dy in range(-splat_radius, splat_radius + 1):
+            for dx in range(-splat_radius, splat_radius + 1):
+                yy, xx = vi + dy, ui + dx
+                ok = (yy >= 0) & (yy < depth_h) & (xx >= 0) & (xx < depth_w)
+                np.minimum.at(depth, (yy[ok], xx[ok]), z[ok])  # nearest-z wins
+    else:
+        np.minimum.at(depth, (vi, ui), z)
+    depth[np.isinf(depth)] = 0.0
+    return depth.astype(np.float32)
+
+
+def _group_rows_by_frame(fg: np.ndarray, pr: np.ndarray, pc: np.ndarray,
+                         xyz: np.ndarray) -> Dict[int, tuple]:
+    """Group per-point ``(pr, pc, xyz)`` by frame with ONE argsort.
+
+    The obvious ``for f in unique(fg): m = fg == f`` does a full 67M-element scan
+    PER frame → O(frames · N) on a single core (minutes, no GPU, no progress — the
+    "everything at 0%" stall). Sorting once by frame and slicing contiguous runs is
+    O(N log N): seconds for the same 67M points × ~1500 frames.
+    Returns ``{frame: (pr_slice, pc_slice, xyz_slice)}``.
+    """
+    if len(fg) == 0:
+        return {}
+    order = np.argsort(fg, kind="stable")
+    fs = fg[order]
+    uniq, starts = np.unique(fs, return_index=True)
+    ends = np.append(starts[1:], len(fs))
+    pr_s, pc_s, xyz_s = pr[order], pc[order], xyz[order]
+    return {int(uniq[i]): (pr_s[starts[i]:ends[i]],
+                           pc_s[starts[i]:ends[i]],
+                           xyz_s[starts[i]:ends[i]])
+            for i in range(len(uniq))}
+
+
 # ── Camera intrinsics scaling ──────────────────────────────────────
 
 def _intrinsics_for_depth(K_rgb: np.ndarray, rgb_h: int, rgb_w: int,
@@ -925,6 +1011,14 @@ def export_tsdf_scene(
     da3_conf_percentile: float = 50.0,   # drop the lowest-conf % of each DA3 frame (0 = off)
     mask_to_cleaned_cloud: bool = True,  # integrate only pixels present in cleaned_cloud.ply
     cleaned_cloud_dilate: int = 3,       # px dilation of the cleaned-cloud pixel mask
+                                         # (legacy raw-depth path only)
+    rasterize_cloud_depth: bool = True,  # FAITHFUL mode: integrate the cloud's OWN points
+                                         # (z-buffered back into each frame) instead of the
+                                         # raw neural depth, so the TSDF meshes EXACTLY the
+                                         # cleaned cloud — no SOR-stripped outliers/streaks/
+                                         # phantoms. Needs PLY traceability; else falls back.
+    cloud_splat_radius: int = 1,         # px splat (same z) when rasterizing — fills single-
+                                         # point gaps so coverage matches the cloud's density
     smooth_iterations: int = 2,          # smoothing iterations post-extract
     smooth_method: str = "simple",       # winner of visual A/B over taubin (LiDAR-noise data)
     fill_holes: bool = False,            # off: texrecon leaves filled holes untextured
@@ -1167,10 +1261,9 @@ def export_tsdf_scene(
             cc_fg, cc_pr, cc_pc = fg, pr, pc
             cc_ply_hw = (int(pr.max()) + 1 if len(pr) else 1,
                          int(pc.max()) + 1 if len(pc) else 1)
-            cc_frame_pix = {}
-            for f in np.unique(fg):
-                m = fg == f
-                cc_frame_pix[int(f)] = (pr[m], pc[m])
+            logger.info(f"[TSDF-scene] indexing {len(fg):,} cloud points by frame "
+                        f"(single argsort)…")
+            cc_frame_pix = _group_rows_by_frame(fg, pr, pc, cc_xyz)
             logger.info(f"[TSDF-scene] mask_to_cleaned_cloud: {len(fg):,} cloud "
                         f"points, {len(cc_frame_pix)} frames, "
                         f"trace {cc_ply_hw[1]}x{cc_ply_hw[0]}")
@@ -1188,16 +1281,33 @@ def export_tsdf_scene(
                             f"{_diag * 1.1:.1f}m (cloud diagonal — unmasked bound)")
                 depth_trunc = _diag * 1.1
 
+    # FAITHFUL cloud-raster integration is active only when we have per-frame cloud
+    # traceability (cc_frame_pix); otherwise we fall back to raw-depth integration.
+    raster_active = bool(rasterize_cloud_depth and cc_frame_pix is not None)
+    if raster_active:
+        depth_kind = (f"cleaned-cloud raster (splat={cloud_splat_radius}px) "
+                      f"[{depth_kind} → K/RGB only]")
+        logger.info("[TSDF-scene] integration mode: FAITHFUL cloud-raster — z-buffering "
+                    "cleaned_cloud points per frame (raw depth used only for K/RGB); "
+                    "edge/conf/dilate/depth_trunc cutoffs bypassed → the mesh copies the cloud")
+    elif rasterize_cloud_depth and mask_to_cleaned_cloud:
+        logger.warning("[TSDF-scene] rasterize_cloud_depth requested but no cloud "
+                       "traceability available — using raw-depth integration "
+                       "(regenerate the cloud with traceability to enable faithful mode)")
+
     sorted_frames = sorted(cam.pose_map.keys())
     skipped_no_depth = skipped_no_K = skipped_empty = 0
     native_K_map: Dict[int, np.ndarray] = {}  # per-frame npz K (depth res) for texturing
     integrated_frames: set = set()            # distinct frames integrated across all tiles
 
     def _integrate(volume, cc_fp):
-        """Integrate every posed frame into `volume`. When `cc_fp` (frame → (rows,
-        cols)) is given, only those cleaned-cloud pixels contribute — this is also
-        how a tile restricts itself to its slice of the scene. Returns the number
-        of frames that touched this grid."""
+        """Integrate every posed frame into `volume`. `cc_fp` maps frame → (rows,
+        cols, world_xyz) for the cleaned-cloud points this frame observed (and,
+        under tiling, only this tile's slice). In FAITHFUL mode (raster_active) the
+        frame's world_xyz is z-buffered back into its depth grid and THAT is fused
+        — so the mesh copies the cloud. In legacy mode the (rows, cols) pixels mask
+        the raw neural/LiDAR depth instead. Returns the number of frames that
+        touched this grid."""
         nonlocal skipped_no_depth, skipped_no_K, skipped_empty
         n_local = 0
         for fidx in sorted_frames:
@@ -1205,57 +1315,41 @@ def export_tsdf_scene(
             c2w = cam.pose_map.get(fidx)
             if c2w is None:
                 continue
-            # Prefer the data-driven per-frame npz (depth + native K + native rgb,
-            # same resolution, zero rescaling). Fall back to the legacy depth_loader
-            # + scaled-global-K + re-decoded JPG when the rich source is absent.
+            # Whether THIS frame integrates the faithful cloud-raster depth: needs
+            # rasterize_cloud_depth ON and per-frame cloud traceability (cc_fp).
+            use_raster = rasterize_cloud_depth and cc_fp is not None
+
+            # In raster mode, a frame with no points in THIS tile contributes nothing —
+            # skip it BEFORE loading its npz. With many small tiles (the extract-safe
+            # split) most frames miss most tiles, so this avoids thousands of wasted
+            # per-frame npz reads.
+            if use_raster and cc_fp.get(fidx) is None:
+                skipped_empty += 1
+                continue
+
+            # Resolve the frame's native intrinsics + RGB first. The rich per-frame
+            # npz source carries both at the depth grid (zero rescaling); the raster
+            # path needs K up front to project the cloud, the legacy path needs the
+            # neural depth too. Fall back to the scaled global K + re-decoded JPG.
             frame_K = None
             frame_rgb = None
+            depth_m = depth_valid = None
             if frame_loader is not None:
                 fr = frame_loader(fidx)
-                if fr is None:
-                    skipped_no_depth += 1
+                if fr is not None:
+                    depth_m, depth_valid = fr["depth"], fr["valid"]
+                    frame_K, frame_rgb = fr["K"], fr["rgb"]
+                elif not use_raster:
+                    skipped_no_depth += 1   # legacy path can't proceed without depth
                     continue
-                depth_m, depth_valid = fr["depth"], fr["valid"]
-                frame_K, frame_rgb = fr["K"], fr["rgb"]
-            else:
+            elif not use_raster:
                 depth_pair = depth_loader(fidx)
                 if depth_pair is None:
                     skipped_no_depth += 1
                     continue
                 depth_m, depth_valid = depth_pair
 
-            # Full-frame mask: depth validity + range. No per-instance filtering.
-            mask = depth_valid & (depth_m > depth_min) & (depth_m < depth_trunc)
-
-            # Drop flying pixels at depth discontinuities — same heuristic as the
-            # per-instance path, prevents "ghost" surfaces between objects and
-            # background.
-            d = np.where(mask, depth_m, 0.0)
-            gx = np.abs(np.diff(d, axis=1, prepend=d[:, :1]))
-            gy = np.abs(np.diff(d, axis=0, prepend=d[:1, :]))
-            mask &= (gx < edge_thresh) & (gy < edge_thresh)
-
-            # Option A — keep only pixels that produced a cleaned_cloud point (and,
-            # under tiling, only this tile's slice of them via cc_fp).
-            if cc_fp is not None:
-                fp = cc_fp.get(fidx)
-                if fp is None:
-                    skipped_empty += 1
-                    continue
-                mask &= _build_segment_mask_at_depth(
-                    fp[0], fp[1], depth_h, depth_w,
-                    cc_ply_hw[0], cc_ply_hw[1], cleaned_cloud_dilate,
-                )
-
-            if not mask.any():
-                skipped_empty += 1
-                continue
-
-            depth_masked = np.where(mask, depth_m, 0.0).astype(np.float32)
-
-            # Intrinsics: use the frame's OWN K (native to this depth grid) when the
-            # rich npz source is active — no rescaling. Otherwise scale the global K
-            # from RGB→depth resolution (legacy path).
+            # Intrinsics at the depth grid: prefer the frame's OWN K (no rescaling).
             if frame_K is not None:
                 K_d = frame_K
                 native_K_map[fidx] = frame_K  # reuse for texturing (scaled to JPG res)
@@ -1265,6 +1359,46 @@ def export_tsdf_scene(
                     skipped_no_K += 1
                     continue
                 K_d = _intrinsics_for_depth(K_rgb, rgb_h, rgb_w, depth_h, depth_w)
+
+            if use_raster:
+                # FAITHFUL path: z-buffer the cleaned cloud's own surviving points
+                # (this frame's slice, restricted to this tile via cc_fp) back into
+                # the frame. No raw neural depth, so no flying-pixel streaks and no
+                # far phantoms — the TSDF can only mesh what the cloud contains. The
+                # edge/conf/dilate cutoffs are moot here (the cloud is already clean).
+                fp = cc_fp.get(fidx)
+                if fp is None:
+                    skipped_empty += 1
+                    continue
+                depth_m = _rasterize_cloud_depth(
+                    fp[2], c2w, K_d, depth_h, depth_w, cloud_splat_radius)
+                mask = (depth_m > depth_min) & (depth_m < depth_trunc)
+            else:
+                # LEGACY path: raw neural/LiDAR depth, masked to the cloud's pixels.
+                mask = depth_valid & (depth_m > depth_min) & (depth_m < depth_trunc)
+                # Drop flying pixels at depth discontinuities — prevents "ghost"
+                # surfaces between objects and background.
+                d = np.where(mask, depth_m, 0.0)
+                gx = np.abs(np.diff(d, axis=1, prepend=d[:, :1]))
+                gy = np.abs(np.diff(d, axis=0, prepend=d[:1, :]))
+                mask &= (gx < edge_thresh) & (gy < edge_thresh)
+                # Keep only pixels that produced a cleaned_cloud point (and, under
+                # tiling, only this tile's slice of them via cc_fp).
+                if cc_fp is not None:
+                    fp = cc_fp.get(fidx)
+                    if fp is None:
+                        skipped_empty += 1
+                        continue
+                    mask &= _build_segment_mask_at_depth(
+                        fp[0], fp[1], depth_h, depth_w,
+                        cc_ply_hw[0], cc_ply_hw[1], cleaned_cloud_dilate,
+                    )
+
+            if not mask.any():
+                skipped_empty += 1
+                continue
+
+            depth_masked = np.where(mask, depth_m, 0.0).astype(np.float32)
 
             # Color: the npz image is already aligned to the depth grid (same
             # source, same resolution). Fall back to re-decoding the full-res JPG.
@@ -1377,12 +1511,18 @@ def export_tsdf_scene(
             n_tiles = max(1, int(_t))
         elif isinstance(_t, str) and _t.strip().lower() == "off":
             n_tiles = 1
-        else:  # "auto" — size N conservatively: the truncation band activates empty
-               # neighbour blocks around every surface, inflating the active set well
-               # above the cloud's surface-block count (observed 2–3×). Target only
-               # 0.25·block_count surface blocks/tile so the dilated active set stays clear
-               # of the cap. The per-tile hashmap guard below is the last-resort net.
-            usable = max(1.0, float(tsdf_block_count) * 0.25)
+        else:  # "auto" — the binding limit is NOT the hash capacity but Open3D's
+               # extract_triangle_mesh(), which SEGFAULTS on a large grid (#4824): a
+               # 36,881-active-block tile aborted the process, while ~2,700 extracted
+               # fine. So cap each tile at a small, extract-safe occupied-block count
+               # (≈2× the proven-safe size) — NOT 0.25·block_count, which was sized for
+               # the (much larger) hash capacity and let tiles grow until extract died.
+            _EXTRACT_SAFE_OCC = 7_000   # occupied 16³ blocks/tile → ~8-9k active. PROBED
+                                        # with real data: extract is clean up to 13,234
+                                        # active blocks and aborts at 36,881, so this
+                                        # leaves a wide margin while minimizing tile count.
+            usable = max(1.0, min(float(tsdf_block_count) * 0.25,
+                                  float(_EXTRACT_SAFE_OCC)))
             n_tiles = max(1, int(np.ceil(occ / usable)))
         if n_tiles > 1:
             # quantiles over per-unique-block axis positions → equal blocks per tile
@@ -1401,11 +1541,7 @@ def export_tsdf_scene(
     for ti, (lo, hi) in enumerate(tiles):
         if len(tiles) > 1:
             sel = (ax >= lo - halo) & (ax < hi + halo)
-            _fg, _pr, _pc = cc_fg[sel], cc_pr[sel], cc_pc[sel]
-            cc_fp = {}
-            for f in np.unique(_fg):
-                m = _fg == f
-                cc_fp[int(f)] = (_pr[m], _pc[m])
+            cc_fp = _group_rows_by_frame(cc_fg[sel], cc_pr[sel], cc_pc[sel], cc_xyz[sel])
             logger.info(f"[TSDF-scene] tile {ti+1}/{len(tiles)} "
                         f"{'XYZ'[tile_axis]}∈[{lo:.2f},{hi:.2f}) +{halo:.2f}m halo — "
                         f"{len(cc_fp)} frames")
@@ -1422,14 +1558,19 @@ def export_tsdf_scene(
             continue
         if progress_cb:
             progress_cb("extracting", time.time() - t0, None)
-        # Extract on CPU. Marching-cubes mesh extraction is what blows the VRAM on big/
-        # dense tiles — on GPU it fails as either "illegal memory access" (dense grids:
-        # the buffer estimate overflows) or "out of memory" (large buffers). The Open3D-
-        # recommended fix (issue #4824 / VBG docs) is to keep integration on the GPU but
-        # move the grid to CPU for extraction: vol.cpu().extract_triangle_mesh() runs the
-        # exact two-pass marching cubes in RAM (plentiful), so estimated_vertex_number
-        # stays -1 (no over/under allocation). Then free the GPU grid + cached VRAM so the
-        # next tile starts clean.
+        # Extract on CPU (marching cubes in RAM). Two findings (probed with real data):
+        #   • estimated_vertex_number MUST stay default (-1): passing an explicit value
+        #     forces the output to EXACTLY that many vertices, padding the mesh with
+        #     ~1.5M unreferenced garbage verts (2,000,000 verts for 1.08M tris). Default
+        #     returns the true count (622k for the same tile).
+        #   • the native extract crash is purely SIZE-driven: a 36,881-active-block tile
+        #     aborts the process, while ≤13,234 extract cleanly. The extract-safe tiling
+        #     above (_EXTRACT_SAFE_OCC) keeps every tile well under that — so -1 is safe.
+        try:
+            _active = int(vol.hashmap().size())
+        except Exception:
+            _active = -1
+        logger.info(f"[TSDF-scene]   extracting tile ({_active:,} active blocks)")
         try:
             tmesh = vol.cpu().extract_triangle_mesh(
                 weight_threshold=float(tsdf_weight_thresh)).to_legacy()
@@ -1674,6 +1815,9 @@ def export_tsdf_scene(
         "conf_min": int(conf_min),
         "da3_conf_percentile": float(da3_conf_percentile),
         "mask_to_cleaned_cloud": bool(mask_to_cleaned_cloud),
+        "integration_mode": "cloud_raster" if raster_active else "raw_depth",
+        "rasterize_cloud_depth": bool(rasterize_cloud_depth),
+        "cloud_splat_radius": int(cloud_splat_radius),
         "smooth_iterations": int(smooth_iterations),
         "smooth_method": smooth_method,
         "fill_hole_size": float(fill_hole_size) if fill_holes else 0.0,
@@ -1896,3 +2040,35 @@ def export_poisson_scene(
     if progress_cb:
         progress_cb("done", elapsed, str(glb_path))
     return glb_path
+
+
+# ── Single source of truth for the scene-TSDF config → kwargs mapping ───────
+# The in-pipeline worker (workers/tsdf_worker.py) and the manual endpoint
+# (main.py /tsdf/scene_export) MUST forward the same config.yaml `tsdf:` keys, or
+# the two reconstruct differently. Keeping two hand-maintained allowlists made
+# them silently drift. Instead, derive the forwardable keys from the
+# export_tsdf_scene SIGNATURE so adding/removing a kwarg updates BOTH paths at
+# once — they can never diverge again.
+import inspect as _inspect
+
+# Args provided by the caller at runtime, NOT taken from config.yaml `tsdf:`.
+_TSDF_RUNTIME_ARGS = {"output_dir", "frames_dir", "session_dir", "progress_cb"}
+
+
+def tsdf_scene_config_keys() -> set:
+    """The config.yaml ``tsdf:`` keys forwarded to ``export_tsdf_scene`` — derived
+    from its signature, so the pipeline worker and the manual endpoint stay
+    identical automatically."""
+    return {n for n in _inspect.signature(export_tsdf_scene).parameters
+            if n not in _TSDF_RUNTIME_ARGS}
+
+
+def build_tsdf_scene_kwargs(config: dict, overrides: Optional[dict] = None) -> dict:
+    """Build ``export_tsdf_scene`` kwargs from ``config['tsdf']`` (+ optional
+    per-request ``overrides``). The ONE place both run paths build their params."""
+    keys = tsdf_scene_config_keys()
+    tcfg = (config or {}).get("tsdf", {}) or {}
+    kw = {k: tcfg[k] for k in keys if k in tcfg}
+    if overrides:
+        kw.update({k: overrides[k] for k in keys if k in overrides})
+    return kw
