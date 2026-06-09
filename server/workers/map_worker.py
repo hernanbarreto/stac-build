@@ -122,6 +122,32 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         selected_frames_path = str(sf_path)
         pipe.send_log(f"Using frames from {sf_path}")
 
+    # ── Step 2b: DA3-dense fusion frame set ──
+    # The asymmetric design feeds DA3 the FULL blur-valid set (a superset of the VGGT
+    # keyframes) so it produces per-frame depth for every sharp frame → the TSDF fuses
+    # that dense set (DENSITY win), while VGGT/MapAnything still reconstructs only the
+    # keyframes for the loop-closed poses. "full" = all blur-valid, NOT all frames on
+    # disk (excludes the blurry ones) and NOT the keyframe decimation.
+    da3_dense_frames_path = None
+    try:
+        if blur_on:
+            from frame_selector import _load_valid_frame_list
+            _valid = _load_valid_frame_list(frames_dir)  # blur-valid basenames
+            _dpath = frames_dir / "da3_frames.json"
+            with open(_dpath, "w") as _f:
+                json.dump({"version": "2.0", "method": "blur_valid_dense",
+                           "total_frames": len(_valid), "selected_count": len(_valid),
+                           "selected_files": sorted(_valid,
+                               key=lambda f: int(os.path.splitext(os.path.basename(f))[0]))}, _f)
+            da3_dense_frames_path = str(_dpath)
+            pipe.send_log(f"DA3-dense frame set: {len(_valid)} blur-valid frames "
+                          f"(excludes blurry) → da3_frames.json")
+        else:
+            pipe.send_log("blur_filter OFF → DA3 dense over ALL frames on disk")
+    except Exception as e:
+        pipe.send_log(f"Could not build DA3-dense frame list ({e}) — DA3 over all frames",
+                      level="warning")
+
     # ── Step 3: Dispatch to backend ──
     if backend == "da3":
         _run_da3(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
@@ -775,9 +801,11 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 # infers the rest. Density comes from MapAnything's output, not DA3.
                 # cond: pass the keyframe list so prepare_stray_data uses the frames
                 # already on disk (no rgb.mp4 needed) and indexes depth/poses to them.
-                # non-cond: None → DA3 over all frames (image-only priors).
+                # non-cond: the BLUR-VALID dense set (da3_frames.json) → DA3 over all
+                # sharp frames (excludes blurry), the dense fusion set for the TSDF.
+                # Falls back to None (all frames on disk) when blur is off.
                 da3_dir = _run_da3(pipe, frames_dir, output_dir,
-                                   selected_frames_path if cond else None,
+                                   selected_frames_path if cond else da3_dense_frames_path,
                                    recon_cfg, config, depth_only=True,
                                    cond_stray_dir=cond_stray_dir)
             priors_dir = Path(da3_dir) / "results_output"

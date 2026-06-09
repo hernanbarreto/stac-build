@@ -761,6 +761,95 @@ def _read_recon_backend(output_dir: Path) -> Optional[str]:
     return None
 
 
+# ── Asymmetric design: DA3 dense fusion (DA3 over all blur-valid frames, VGGT
+#    keyframes for the loop-closed poses) ─────────────────────────────────────
+
+def _list_da3_frame_indices(output_dir: Path) -> List[int]:
+    """Real frame numbers DA3 produced dense depth for — the npz keys in
+    ``da3_run/results_output/frame_<N>.npz``. This is the DENSE fusion frame set
+    (all blur-valid frames), a superset of the VGGT keyframes."""
+    import re as _re
+    for d in (output_dir / "da3_run" / "results_output",
+              output_dir / "results_output",
+              output_dir / "gaus_slam_run" / "results_output"):
+        if not d.exists():
+            continue
+        ids = []
+        for p in d.glob("frame_*.npz"):
+            m = _re.search(r"frame_(\d+)\.npz", p.name)
+            if m:
+                ids.append(int(m.group(1)))
+        if ids:
+            return sorted(ids)
+    return []
+
+
+def _interpolate_poses(pose_map: Dict[int, np.ndarray],
+                       target_frames: List[int]) -> Dict[int, np.ndarray]:
+    """Fill poses for the DENSE frames that have no VGGT keyframe pose, by
+    interpolating the loop-closed keyframe trajectory (SLERP on rotation, linear
+    on translation, by real frame number). Keyframes are chosen with high overlap
+    (DINO 0.975), so inter-keyframe motion is small and interpolation is accurate.
+    Frames outside the keyframe span clamp to the nearest keyframe (extrapolation
+    is unsafe). Returns the keyframe poses PLUS the interpolated ones, all 4x4 c2w."""
+    try:
+        from scipy.spatial.transform import Rotation, Slerp
+    except Exception as e:
+        logger.warning(f"[TSDF-scene] scipy unavailable for pose interpolation ({e}) "
+                       "— dense frames without a keyframe pose will be skipped")
+        return {int(k): np.asarray(v, dtype=np.float64) for k, v in pose_map.items()}
+
+    def _to4(m):
+        M = np.eye(4, dtype=np.float64)
+        m = np.asarray(m, dtype=np.float64)
+        M[:m.shape[0], :m.shape[1]] = m
+        return M
+
+    kf = sorted(int(k) for k in pose_map.keys())
+    out: Dict[int, np.ndarray] = {int(k): _to4(pose_map[k]) for k in kf}
+    if len(kf) < 2:
+        return out
+    kf_arr = np.asarray(kf, dtype=np.float64)
+    rots = Rotation.from_matrix([out[k][:3, :3] for k in kf])
+    slerp = Slerp(kf_arr, rots)
+    trans = {k: out[k][:3, 3] for k in kf}
+    n_interp = 0
+    for t in target_frames:
+        t = int(t)
+        if t in out:
+            continue
+        if t <= kf[0]:
+            out[t] = out[kf[0]].copy(); continue
+        if t >= kf[-1]:
+            out[t] = out[kf[-1]].copy(); continue
+        j = int(np.searchsorted(kf_arr, t))     # kf[j-1] < t < kf[j]
+        k0, k1 = kf[j - 1], kf[j]
+        a = (t - k0) / float(k1 - k0)
+        M = np.eye(4, dtype=np.float64)
+        M[:3, :3] = slerp([float(t)]).as_matrix()[0]
+        M[:3, 3] = (1.0 - a) * trans[k0] + a * trans[k1]
+        out[t] = M
+        n_interp += 1
+    logger.info(f"[TSDF-scene] pose interpolation: {len(kf)} keyframe poses → "
+                f"{len(out)} frames (+{n_interp} interpolated for DA3 dense fusion)")
+    return out
+
+
+def _depth_axis_world_coord(depth: np.ndarray, K: np.ndarray, c2w: np.ndarray,
+                            axis: int) -> np.ndarray:
+    """Per-pixel WORLD coordinate along ``axis`` of each depth sample, for the
+    spatial tile crop in DA3-dense mode (the cloud-pixel mask can't cover the
+    non-keyframe dense frames, so each tile keeps only the depth that unprojects
+    into its axis-slab). Returns (H,W) float64; meaningless where depth==0."""
+    H, W = depth.shape
+    vv, uu = np.indices((H, W))
+    z = depth.astype(np.float64)
+    x = (uu - K[0, 2]) * z / K[0, 0]
+    y = (vv - K[1, 2]) * z / K[1, 1]
+    c2w = np.asarray(c2w, dtype=np.float64)
+    return c2w[axis, 0] * x + c2w[axis, 1] * y + c2w[axis, 2] * z + c2w[axis, 3]
+
+
 # ── Public API ─────────────────────────────────────────────────────
 
 def export_tsdf_meshes(
@@ -1279,6 +1368,11 @@ def export_tsdf_scene(
     #   3. raw LiDAR
     _cp = da3_conf_percentile if da3_conf_percentile > 0 else None
     _ds = str(depth_source or "auto").lower()
+    # DA3-DENSE FUSION (asymmetric design): integrate DA3's per-frame depth for EVERY
+    # blur-valid frame (a superset of the VGGT keyframes), not the keyframe-only
+    # MapAnything depth. The cloud/poses are keyframe-based, so this also drives pose
+    # interpolation (below) and a spatial tile crop instead of the cloud-pixel mask.
+    dense_da3 = (_ds == "da3")
     # Backend-driven: VGGT-Long ('mapanything') depth lives in maplong_run chunk .npy.
     # depth_source="da3" forces the DA3 dense per-frame source (skip MapAnything);
     # "mapanything" forces the chunk depth; "auto" keeps the legacy priority.
@@ -1424,12 +1518,18 @@ def export_tsdf_scene(
 
             cc_ply_hw = (int(cc_pr.max()) + 1 if len(cc_pr) else 1,
                          int(cc_pc.max()) + 1 if len(cc_pc) else 1)
-            logger.info(f"[TSDF-scene] indexing {len(cc_fg):,} cloud points by frame "
-                        f"(single argsort)…")
-            cc_frame_pix = _group_rows_by_frame(cc_fg, cc_pr, cc_pc, cc_xyz)
-            logger.info(f"[TSDF-scene] mask_to_cleaned_cloud: {len(cc_fg):,} cloud "
-                        f"points, {len(cc_frame_pix)} frames, "
-                        f"trace {cc_ply_hw[1]}x{cc_ply_hw[0]}")
+            if dense_da3:
+                # DA3-dense bypasses the per-frame cloud mask (spatial tile crop instead)
+                # — keep cc_xyz for bbox/tiling but SKIP the 57M-point argsort it'd waste.
+                logger.info(f"[TSDF-scene] dense-DA3: loaded {len(cc_fg):,} cloud points for "
+                            f"bbox/tiling only (per-frame cloud mask skipped)")
+            else:
+                logger.info(f"[TSDF-scene] indexing {len(cc_fg):,} cloud points by frame "
+                            f"(single argsort)…")
+                cc_frame_pix = _group_rows_by_frame(cc_fg, cc_pr, cc_pc, cc_xyz)
+                logger.info(f"[TSDF-scene] mask_to_cleaned_cloud: {len(cc_fg):,} cloud "
+                            f"points, {len(cc_frame_pix)} frames, "
+                            f"trace {cc_ply_hw[1]}x{cc_ply_hw[0]}")
 
     # Cloud bbox — used to bound the TSDF to the cloud's extent (esp. in the unmasked
     # fallback, where depth_trunc=100m would otherwise mesh far beyond the cloud).
@@ -1466,19 +1566,63 @@ def export_tsdf_scene(
         logger.info("[TSDF-scene] (A) upsample_depth set but raster mode active → skipped "
                     "(cloud points have no grid to upsample)")
 
+    # ── DA3-dense fusion setup ──────────────────────────────────────────────────
+    # Integrate DA3's per-frame depth for every blur-valid frame (a superset of the
+    # VGGT keyframes). The loop-closed poses cover only the keyframes, so interpolate
+    # them to the in-between dense frames; and ensure the cloud points are loaded for
+    # the bbox/tiling bounds even though the per-frame cloud mask is bypassed (the
+    # spatial tile crop replaces it — see _integrate).
+    if dense_da3:
+        da3_frames = _list_da3_frame_indices(output_dir)
+        if not da3_frames:
+            logger.warning("[TSDF-scene] depth_source='da3' but no DA3 dense frames found "
+                           "(da3_run/results_output/) — falling back to keyframe poses only")
+        else:
+            cam.pose_map = _interpolate_poses(cam.pose_map, da3_frames)
+            poses_src = poses_src + "+interp"
+        if cc_xyz is None and not mask_to_cleaned_cloud:
+            # Cloud points weren't loaded (mask off) — load them just for bbox/tiling.
+            cc_path = output_dir / "cleaned_cloud.ply"
+            for alt in ("cleaned_cloud.ply", "cleaned_cloud_symlink.ply", "merged.ply"):
+                if (output_dir / alt).exists():
+                    cc_path = output_dir / alt
+                    break
+            try:
+                _cc = o3d.io.read_point_cloud(str(cc_path))
+                if len(_cc.points):
+                    cc_xyz = np.asarray(_cc.points, dtype=np.float64)
+            except Exception as _e:
+                logger.warning(f"[TSDF-scene] dense-DA3: could not load cloud for bbox/tiling ({_e})")
+        # Re-derive the cloud bbox if it wasn't set (mask-off path).
+        if cloud_bbox is None and cc_xyz is not None and len(cc_xyz):
+            cloud_bbox = (cc_xyz.min(0), cc_xyz.max(0))
+        # Clamp the integration distance to the cloud's extent — DA3 raw depth has no
+        # cloud mask now, so an over-long depth_trunc would mesh far phantoms.
+        if cloud_bbox is not None:
+            _diag = float(np.linalg.norm(cloud_bbox[1] - cloud_bbox[0]))
+            if 0 < _diag * 1.1 < depth_trunc:
+                logger.info(f"[TSDF-scene] dense-DA3: clamping depth_trunc {depth_trunc:.1f}m → "
+                            f"{_diag * 1.1:.1f}m (cloud diagonal)")
+                depth_trunc = _diag * 1.1
+        logger.info(f"[TSDF-scene] integration mode: DA3-DENSE — {len(_list_da3_frame_indices(output_dir))} "
+                    f"DA3 frames, poses interpolated to dense, cloud-pixel mask OFF "
+                    f"(spatial tile crop + edge_thresh={edge_thresh}m + weight≥{tsdf_weight_thresh})")
+
     sorted_frames = sorted(cam.pose_map.keys())
     skipped_no_depth = skipped_no_K = skipped_empty = 0
     native_K_map: Dict[int, np.ndarray] = {}  # per-frame npz K (depth res) for texturing
     integrated_frames: set = set()            # distinct frames integrated across all tiles
 
-    def _integrate(volume, cc_fp):
+    def _integrate(volume, cc_fp, tile_bounds=None):
         """Integrate every posed frame into `volume`. `cc_fp` maps frame → (rows,
         cols, world_xyz) for the cleaned-cloud points this frame observed (and,
         under tiling, only this tile's slice). In FAITHFUL mode (raster_active) the
         frame's world_xyz is z-buffered back into its depth grid and THAT is fused
         — so the mesh copies the cloud. In legacy mode the (rows, cols) pixels mask
-        the raw neural/LiDAR depth instead. Returns the number of frames that
-        touched this grid."""
+        the raw neural/LiDAR depth instead. In DA3-DENSE mode (dense_da3) there is no
+        cloud mask: every posed frame's DA3 depth integrates, cropped per tile by
+        `tile_bounds`=(axis, lo, hi, halo) — the unprojected world axis-coord must lie
+        in the tile slab. Returns the number of frames that touched this grid."""
         nonlocal skipped_no_depth, skipped_no_K, skipped_empty
         n_local = 0
         for fidx in sorted_frames:
@@ -1586,6 +1730,14 @@ def export_tsdf_scene(
                         fp[0], fp[1], cur_h, cur_w,
                         cc_ply_hw[0], cc_ply_hw[1], cleaned_cloud_dilate,
                     )
+
+                # DA3-DENSE spatial tile crop: no cloud mask, so keep only the depth
+                # whose unprojected WORLD axis-coord lands in this tile's slab (+halo).
+                # Bounds the tile's grid to its axis range without the cloud pixels.
+                if dense_da3 and tile_bounds is not None:
+                    _ax, _lo, _hi, _halo = tile_bounds
+                    _wa = _depth_axis_world_coord(depth_m, K_d, c2w, _ax)
+                    mask &= (_wa >= _lo - _halo) & (_wa < _hi + _halo)
 
             if not mask.any():
                 skipped_empty += 1
@@ -1735,7 +1887,18 @@ def export_tsdf_scene(
     halo = float(tsdf_tile_halo)
     tile_meshes = []
     for ti, (lo, hi) in enumerate(tiles):
-        if len(tiles) > 1:
+        tile_bounds = None
+        if dense_da3:
+            # No cloud-pixel mask: every posed frame integrates, cropped to this tile's
+            # axis slab by the spatial test in _integrate (tile_bounds). Single tile →
+            # no crop (the bbox crop at the end bounds the extent).
+            cc_fp = None
+            if len(tiles) > 1:
+                tile_bounds = (tile_axis, lo, hi, halo)
+                logger.info(f"[TSDF-scene] tile {ti+1}/{len(tiles)} DA3-DENSE "
+                            f"{'XYZ'[tile_axis]}∈[{lo:.2f},{hi:.2f}) +{halo:.2f}m halo "
+                            f"(spatial crop)")
+        elif len(tiles) > 1:
             sel = (ax >= lo - halo) & (ax < hi + halo)
             cc_fp = _group_rows_by_frame(cc_fg[sel], cc_pr[sel], cc_pc[sel], cc_xyz[sel])
             logger.info(f"[TSDF-scene] tile {ti+1}/{len(tiles)} "
@@ -1747,7 +1910,7 @@ def export_tsdf_scene(
         if progress_cb:
             progress_cb("integrating", time.time() - t0, None)
         vol = _make_vbg()
-        ni = _integrate(vol, cc_fp)
+        ni = _integrate(vol, cc_fp, tile_bounds)
         if ni == 0:
             logger.warning(f"[TSDF-scene] tile {ti+1}: 0 frames integrated — skipped")
             del vol
@@ -1824,7 +1987,7 @@ def export_tsdf_scene(
     # Bound the mesh to the cloud's volume (+margin). In the unmasked fallback the TSDF
     # can extend well past the cloud (depth ballooning); cropping guarantees the mesh
     # stays within the cloud's extent — fixes "TSDF volume larger than the cloud".
-    if cloud_bbox is not None and cc_frame_pix is None and len(mesh.vertices):
+    if cloud_bbox is not None and (cc_frame_pix is None or dense_da3) and len(mesh.vertices):
         _mn, _mx = cloud_bbox
         _margin = max(0.1, float(sdf_trunc) * 4.0)
         _v = np.asarray(mesh.vertices)
