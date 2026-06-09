@@ -103,8 +103,11 @@ scene_analysis:
 frame_selection:
   # DINO settings (used when frames_selector: dino)
   dino_model: "dinov2_vitb14"          # ViT-B/14 ~330MB, same as VGGT-Long
-  dino_threshold: 0.975                 # cosine sim threshold (higher = more keyframes = denser
-                                       # overlap, gentler than 0.97; 0.97 made gaps → jumps)
+  dino_threshold: 0.98                  # cosine sim threshold: a frame becomes a keyframe once its
+                                       # similarity to the last keyframe drops BELOW this → HIGHER =
+                                       # MORE keyframes = denser overlap. 0.98 (was 0.975) → denser
+                                       # keyframe set: better VGGT pose overlap + denser cloud, and
+                                       # tighter gaps for the DA3-dense pose interpolation.
   dino_device: "cuda"                  # "cuda" | "cpu" (auto-falls back)
 
   # Legacy H/F ratio (used if method=hf_ratio or DINO fails)
