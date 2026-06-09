@@ -252,11 +252,12 @@ async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, we
     
     try:
         # Run as async subprocess
-        process = await asyncio.create_subprocess_exec(
+        process = _track_worker(await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-        )
+            preexec_fn=_die_with_parent_sigkill,
+        ))
         
         # Read output line by line
         while True:
@@ -699,6 +700,75 @@ def apply_gravity_correction(points: np.ndarray, s: float, R: np.ndarray, t: np.
 HOST = cfg["server"]["host"]
 PORT = cfg["server"]["port"]
 STATIC_DIR = Path(__file__).parent / cfg["server"]["static_dir"]
+
+
+# Load libc ONCE in the parent (at import) so the preexec_fn below never does a
+# dlopen inside the post-fork child — dlopen there can deadlock on the dynamic-linker
+# lock if another thread held it at fork time. The child only calls the cached fn ptr.
+try:
+    import ctypes as _ctypes
+    _LIBC = _ctypes.CDLL("libc.so.6", use_errno=True)
+except Exception:
+    _LIBC = None
+
+
+def _die_with_parent_sigkill():
+    """preexec_fn for spawned worker subprocesses: ask the kernel to SIGKILL this
+    child the instant its parent (this server) dies. Without it, restarting/killing
+    the server ORPHANS its heavy workers (TSDF/Poisson/ShapeR/CloudCompPy) — they
+    reparent to init and keep pegging CPU/GPU forever (the 'zombie Poisson at 2300%
+    CPU after a server restart' incident). Linux-only; silently no-ops elsewhere.
+
+    Belt-and-suspenders with the _ACTIVE_WORKERS registry + lifespan shutdown kill:
+    PR_SET_PDEATHSIG covers a HARD parent death (SIGKILL / crash); the shutdown kill
+    covers a graceful Ctrl+C; together no worker is ever orphaned."""
+    if _LIBC is None:
+        return
+    try:
+        import signal as _sig
+        _PR_SET_PDEATHSIG = 1
+        _LIBC.prctl(_PR_SET_PDEATHSIG, _sig.SIGKILL)
+    except Exception:
+        pass
+
+
+# Every spawned worker subprocess registers here so a graceful shutdown (Ctrl+C →
+# uvicorn → lifespan shutdown) can kill any still running. PR_SET_PDEATHSIG handles
+# the hard-kill path; this handles the clean one.
+_ACTIVE_WORKERS: set = set()
+
+
+def _track_worker(proc):
+    """Register a spawned worker and auto-deregister it when it exits."""
+    _ACTIVE_WORKERS.add(proc)
+    try:
+        import asyncio as _aio
+        _aio.ensure_future(_reap_worker(proc))
+    except Exception:
+        pass
+    return proc
+
+
+async def _reap_worker(proc):
+    try:
+        await proc.wait()
+    except Exception:
+        pass
+    finally:
+        _ACTIVE_WORKERS.discard(proc)
+
+
+def _kill_active_workers(reason: str = "shutdown"):
+    """SIGKILL every still-running tracked worker. Called from the lifespan shutdown
+    so Ctrl+C never leaves an orphan pegging CPU/GPU."""
+    for p in list(_ACTIVE_WORKERS):
+        try:
+            if p.returncode is None:
+                p.kill()
+                print(f"[Server] killed worker pid={getattr(p, 'pid', '?')} ({reason})")
+        except Exception:
+            pass
+    _ACTIVE_WORKERS.clear()
 # Read chunk settings from active reconstruction backend
 _recon = cfg.get("reconstruction", {})
 _backend = _recon.get("backend", "mapanything")
@@ -835,6 +905,12 @@ async def lifespan(app: FastAPI):
         print("[Server] access-log noise filter re-applied (206/health/polling)")
 
     yield
+
+    # ── Shutdown (Ctrl+C → uvicorn → here): kill any worker still running so none
+    #    is orphaned. PR_SET_PDEATHSIG is the hard-kill backstop; this is the clean one.
+    if _ACTIVE_WORKERS:
+        print(f"[Server] shutdown — killing {len(_ACTIVE_WORKERS)} active worker(s)")
+        _kill_active_workers("server shutdown")
 
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -2915,12 +2991,13 @@ async def _run_shaper_subprocess(session_id: str, output_dir: Path,
                        total=len(pkl_paths), done=0, started_at=time.time())
 
     try:
-        proc = await asyncio.create_subprocess_exec(
+        proc = _track_worker(await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},  # force CPU per user request
-        )
+            preexec_fn=_die_with_parent_sigkill,
+        ))
         print(f"[Shape]   subprocess pid={proc.pid}")
     except Exception as e:
         print(f"[Shape] ❌ failed to spawn subprocess: {e}")
@@ -3709,7 +3786,7 @@ async def export_tsdf_scene_endpoint(request: Request):
     async def _bg():
         result_path = None
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = _track_worker(await asyncio.create_subprocess_exec(
                 sys.executable, str(worker),
                 "--output-dir", str(output_dir),
                 "--frames-dir", str(frames_dir),
@@ -3719,7 +3796,8 @@ async def export_tsdf_scene_endpoint(request: Request):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"},
-            )
+                preexec_fn=_die_with_parent_sigkill,
+            ))
             assert proc.stdout is not None
             async for raw in proc.stdout:
                 line = raw.decode("utf-8", "ignore").rstrip()
@@ -3812,7 +3890,7 @@ async def export_poisson_scene_endpoint(request: Request):
     async def _bg():
         result_path = None
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = _track_worker(await asyncio.create_subprocess_exec(
                 sys.executable, str(worker),
                 "--output-dir", str(output_dir),
                 "--frames-dir", str(frames_dir),
@@ -3822,7 +3900,8 @@ async def export_poisson_scene_endpoint(request: Request):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"},
-            )
+                preexec_fn=_die_with_parent_sigkill,
+            ))
             assert proc.stdout is not None
             async for raw in proc.stdout:
                 line = raw.decode("utf-8", "ignore").rstrip()
