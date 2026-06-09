@@ -357,13 +357,23 @@ poisson:
 reconstruction:
   backend: "mapanything"                # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
-  frames_selector: "none"              # SINGLE source of frame-set mode (writes selected_frames.json):
+  frames_selector: "dino"              # SINGLE source of frame-set mode (writes selected_frames.json):
                                        #   "dino"   = blur + DINO-cosine keyframes (params in frame_selection:)
                                        #   "stride" = uniform 1-of-N subsample (mapanything.frame_stride)
-                                       #   "none"   = all frames (no decimation)  ← ALL frames, no stride
-  blur_filter: false                   # true = drop blurry frames (Laplacian, via frame_quality.json)
+                                       #   "none"   = all frames (no decimation)
+                                       # LITERATURE (2026 deep-research): do NOT feed all dense handheld-
+                                       # video frames to the transformer multi-view stage. Cost scales
+                                       # steeply (VGGT 21GB@100fr, OOM>300fr) and redundant low-baseline
+                                       # frames AMPLIFY drift (FastVGGT: redundancy-cut → ATE 0.196→0.164;
+                                       # Chamfer worsens 0.416@300fr→0.471@1000fr). Content/overlap keyframing
+                                       # (DINO-cosine) is the recommended family (≈ DROID-SLAM flow / MapAnything
+                                       # 25% covisibility). "stride" is motion-blind → inferior. Threshold in
+                                       # frame_selection.dino_threshold (0.975 = conservative, coverage-preserving).
+  blur_filter: true                    # true = drop blurry frames (Laplacian, via frame_quality.json)
                                        # before selection; false = keep ALL frames (no blur cull).
-                                       # Toggleable; applies to stride/none modes.
+                                       # LITERATURE: motion blur corrupts SfM poses (COLMAP ATE 0.128 vs 0.050
+                                       # sharp) AND violates the sharp-image assumption — dropping blurry frames
+                                       # is standard NeRF/3DGS/MVS preprocessing. Toggleable; applies to all modes.
 
   # DA3 Streaming (Depth Anything 3)
   da3:
@@ -460,6 +470,12 @@ postprocessing:
   # Min-max normalised, SAME as the viewer slider: keep points with (conf-min)/(max-min) >=
   # this. 0.1 ≈ the UI slider at 0.1 (≈ raw conf ≥ 22, ~17% kept) → drops the noisy low/mid-
   # confidence vertical smear. 0 = off. Applied BEFORE voxel/SOR (also speeds them up).
+  # ⚠️ EMPIRICAL-TUNE AFTER the blur+DINO reconstruction: the literature (deep-research 2026)
+  # says aggressive confidence filtering is a SYMPTOM of noisy input — outliers concentrate in
+  # low-baseline / occluded / blurred regions, which blur-drop + keyframing remove at source. So
+  # with cleaner frames the conf tail should be smaller and this gate can likely RELAX (e.g.
+  # 0.1 → 0.05) without re-admitting noise. No measured curve exists → A/B it on the new cloud,
+  # don't lower it blind. Change ONE variable at a time: frames first (this run), gate next.
   conf_min_norm: 0.1
 
   # Statistical Outlier Removal
