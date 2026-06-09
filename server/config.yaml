@@ -312,6 +312,16 @@ tsdf:
                              # continuous (≥ several × sdf_trunc) before the core-crop merge
   texture: true
   texture_mode: "vertex_gpu" # multi-view photo bake (falls back to integrated colour)
+  depth_source: auto         # which per-frame depth the TSDF integrates:
+                             #   "auto"        → MapAnything chunk depth (294×518), else DA3, else LiDAR
+                             #   "da3"         → force DA3 dense depth (da3_run/results_output, ~280×504).
+                             #                   DA3 runs on ALL frames (asymmetric design) and its depth
+                             #                   IS retained on disk. ⚠️ ~SAME resolution as MapAnything —
+                             #                   the win would be DENSITY, but with mask_to_cleaned_cloud
+                             #                   the cloud is keyframe-based so only keyframes integrate;
+                             #                   full dense fusion needs pose-interpolation + unmasked
+                             #                   tiling (TODO). Kept "auto" this run (one variable at a time).
+                             #   "mapanything" → force MapAnything chunk depth
   keep_aligned_chunks: true  # KEEP maplong_run/_tmp_results_aligned (the MapAnything dense
                              # depth+K, ~14G) after the mesh. This is the depth that MATCHES
                              # cleaned_cloud.ply — required to re-run the TSDF stage (param

@@ -1153,6 +1153,19 @@ def export_tsdf_scene(
                                          # blend, GPU, keeps geometry) | "texrecon"
                                          # (CPU UV atlas) | "none"
     use_refined_poses: bool = True,      # DA3 loop-closure poses, not raw ARKit
+    depth_source: str = "auto",          # which per-frame depth the TSDF integrates:
+                                         #   "auto"        → MapAnything chunk depth if present,
+                                         #                   else DA3, else LiDAR (legacy default)
+                                         #   "da3"         → force DA3 dense per-frame depth
+                                         #                   (da3_run/results_output/frame_*.npz);
+                                         #                   ~same res as MapAnything but DA3 runs
+                                         #                   on ALL frames (asymmetric design). NOTE:
+                                         #                   with mask_to_cleaned_cloud the cloud is
+                                         #                   keyframe-based, so only frames present in
+                                         #                   the cloud integrate — for the full dense
+                                         #                   benefit also needs pose interpolation +
+                                         #                   unmasked tiling (not yet implemented).
+                                         #   "mapanything" → force MapAnything chunk depth
     scene_name: str = "scene",           # output subfolder under output/tsdf/
     variant_label: Optional[str] = None, # human label for the viewer panel
     tsdf_block_count: int = 120_000,     # GPU VoxelBlockGrid hash slots (~10GB @120k)
@@ -1265,10 +1278,17 @@ def export_tsdf_scene(
     #   2. DA3 / DA3+LiDAR fused (da3_run / da3_full)
     #   3. raw LiDAR
     _cp = da3_conf_percentile if da3_conf_percentile > 0 else None
+    _ds = str(depth_source or "auto").lower()
     # Backend-driven: VGGT-Long ('mapanything') depth lives in maplong_run chunk .npy.
+    # depth_source="da3" forces the DA3 dense per-frame source (skip MapAnything);
+    # "mapanything" forces the chunk depth; "auto" keeps the legacy priority.
     mapany_src = None
-    if (backend or "").startswith("mapanything") or (output_dir / "maplong_run").exists():
+    if _ds != "da3" and ((backend or "").startswith("mapanything")
+                         or (output_dir / "maplong_run").exists()):
         mapany_src = _resolve_mapanything_depth(output_dir, conf_percentile=_cp)
+    if _ds == "da3" and da3_depth is None:
+        logger.warning("[TSDF-scene] depth_source='da3' but no DA3 per-frame depth found "
+                       "(da3_run/results_output/frame_*.npz) — falling back to auto")
     depth_loader = None
     frame_loader = None
     if mapany_src is not None:
