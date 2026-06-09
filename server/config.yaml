@@ -336,11 +336,12 @@ tsdf:
 # denser than the 518×294 neural depth the TSDF integrates — so it captures the cloud's
 # full detail and is watertight. Writes output/tsdf/scene_poisson/scene_poisson.glb, which
 # appears as its own toggleable row alongside the TSDF mesh.
-poisson:
-  max_points: 4000000        # cheap uniform pre-downsample cap (fits 12 GB) before any
-                             # hash-based op or Poisson. 0 = no cap.
-  voxel_downsample: 0.005    # m — voxel-downsample the cloud before Poisson (even surface
-                             # density → cleaner normals/reconstruction). 0 = off.
+  max_points: 2000000        # cheap uniform pre-downsample cap before any hash-based op or
+                             # Poisson. KEEP ≤~2M: orient_normals_consistent_tangent_plane builds
+                             # a global MST over every point and gets very slow / looks hung above
+                             # ~2-3M (the "Poisson stuck at starting" symptom). 0 = no cap.
+  voxel_downsample: 0.008    # m — voxel-downsample the cloud before Poisson (even surface density
+                             # → cleaner normals/reconstruction AND fewer points for the MST). 0 = off.
   poisson_depth: 11          # octree depth (resolution). 10≈coarse, 11≈fine, 12≈very fine
                              # (slower, more RAM). 11 is the room-scale sweet spot.
   density_quantile: 0.03     # trim the lowest-density 3% of Poisson vertices (the balloon

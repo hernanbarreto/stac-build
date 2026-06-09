@@ -560,7 +560,11 @@ function App() {
           setTsdfScene(scene)
           const poisson = data.poisson || { phase: 'idle' }
           setPoissonScene(poisson)
-          if (data.overall?.phase === 'done' || data.overall?.phase === 'error') {
+          // Each completion block is gated on ITS running flag so a PERSISTED
+          // 'done'/'error' phase from an earlier job can't re-fire every tick
+          // (which reloaded scene.glb on a loop and hung the UI while another
+          // job — e.g. Poisson — was the one actually running).
+          if (tsdfRunning && (data.overall?.phase === 'done' || data.overall?.phase === 'error')) {
             await refreshTsdfStatus()
             if (activeSession) {
               try { await viewportRef.current?.reloadTsdf?.(activeSession) } catch { /* ignore */ }
@@ -568,7 +572,7 @@ function App() {
             }
             setTsdfRunning(false)
           }
-          if (scene.phase === 'done' || scene.phase === 'error') {
+          if (tsdfSceneRunning && (scene.phase === 'done' || scene.phase === 'error')) {
             if (scene.phase === 'done' && activeSession) {
               // Whole-scene TSDF wrote output/tsdf/scene/scene.glb — pull it
               // into the viewport (tsdf/list already includes the scene/ dir).
@@ -577,7 +581,7 @@ function App() {
             }
             setTsdfSceneRunning(false)
           }
-          if (poisson.phase === 'done' || poisson.phase === 'error') {
+          if (poissonSceneRunning && (poisson.phase === 'done' || poisson.phase === 'error')) {
             if (poisson.phase === 'done' && activeSession) {
               // Poisson wrote output/tsdf/scene_poisson/scene_poisson.glb — pull it
               // into the viewport (tsdf/list iterates all tsdf/ subfolders).

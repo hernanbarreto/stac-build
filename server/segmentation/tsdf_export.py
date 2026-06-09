@@ -2115,9 +2115,19 @@ def export_poisson_scene(
         logger.info(f"[Poisson-scene] voxel-down {voxel_downsample}m → "
                     f"{len(pcd.points):,} pts")
     if not pcd.has_normals():
+        # NOTE: orient_normals_consistent_tangent_plane builds a global MST over
+        # every point — the dominant cost (minutes, can look hung on >2-3M pts).
+        # max_points/voxel_downsample keep the working set tractable. Emit a phase
+        # so the UI shows it's WORKING, not stuck at "starting".
+        n_norm = len(pcd.points)
+        if progress_cb:
+            progress_cb("normals", time.time() - t0, None)
+        logger.info(f"[Poisson-scene] estimating + orienting normals on "
+                    f"{n_norm:,} pts (global MST — the slow step)…")
         pcd.estimate_normals(
             o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
         pcd.orient_normals_consistent_tangent_plane(20)
+        logger.info(f"[Poisson-scene] normals done ({time.time() - t0:.0f}s elapsed)")
 
     # ── Poisson surface reconstruction ──
     if progress_cb:
