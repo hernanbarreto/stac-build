@@ -1612,6 +1612,14 @@ def export_tsdf_scene(
     skipped_no_depth = skipped_no_K = skipped_empty = 0
     native_K_map: Dict[int, np.ndarray] = {}  # per-frame npz K (depth res) for texturing
     integrated_frames: set = set()            # distinct frames integrated across all tiles
+    # DA3-dense: per-frame [min,max] world coord along the tiling axis, so each tile
+    # integrates ONLY the frames whose depth reaches into its slab (else every tile
+    # re-loads all 1245 frames). Populated after the tiling split (axis known).
+    frame_axis_extent: Dict[int, tuple] = {}
+    # Extract-safe active-block ceiling: Open3D's marching-cubes ABORTS the process on
+    # a too-large grid (~36k blocks). Dense fill balloons block count, so stop a tile
+    # before it gets there (a tiny gap in one slab beats crashing the whole mesh).
+    _EXTRACT_SAFE_ACTIVE = 12_000
 
     def _integrate(volume, cc_fp, tile_bounds=None):
         """Integrate every posed frame into `volume`. `cc_fp` maps frame → (rows,
@@ -1641,6 +1649,16 @@ def export_tsdf_scene(
             if use_raster and cc_fp.get(fidx) is None:
                 skipped_empty += 1
                 continue
+
+            # DA3-DENSE: skip a frame BEFORE loading its npz if its precomputed world
+            # axis-extent doesn't reach this tile's slab (+halo). This is what makes many
+            # small tiles viable — without it every tile re-loads+integrates ALL frames.
+            if dense_da3 and tile_bounds is not None:
+                _ax, _lo, _hi, _halo = tile_bounds
+                _ext = frame_axis_extent.get(fidx)
+                if _ext is not None and (_ext[1] < _lo - _halo or _ext[0] >= _hi + _halo):
+                    skipped_empty += 1
+                    continue
 
             # Resolve the frame's native intrinsics + RGB first. The rich per-frame
             # npz source carries both at the depth grid (zero rescaling); the raster
@@ -1801,11 +1819,20 @@ def export_tsdf_scene(
             # and that error is async — it surfaces later in extract, killing the whole
             # process. Poll the live block count and stop THIS tile before it overflows.
             # Conservative tile sizing should keep this from ever firing.
-            if n_local % 20 == 0:
+            if n_local % 10 == 0:
                 try:
                     _active = int(volume.hashmap().size())
                 except Exception:
                     _active = -1
+                # Dense mode: stop at the EXTRACT-safe ceiling, not the hash cap — the
+                # extract aborts long before the hash fills. A stopped tile loses a few
+                # late frames' contribution to that slab (minor) vs crashing the run.
+                if dense_da3 and 0 <= _EXTRACT_SAFE_ACTIVE < _active:
+                    logger.warning(
+                        f"[TSDF-scene] DA3-DENSE tile hit extract-safe ceiling "
+                        f"({_active:,}/{_EXTRACT_SAFE_ACTIVE:,} blocks) after {n_local} "
+                        f"frames — stopping tile (finer tiling would avoid this)")
+                    break
                 if 0 <= int(tsdf_block_count) * 0.92 < _active:
                     logger.warning(
                         f"[TSDF-scene] grid near capacity ({_active:,}/"
@@ -1871,7 +1898,13 @@ def export_tsdf_scene(
                                         # leaves a wide margin while minimizing tile count.
             usable = max(1.0, min(float(tsdf_block_count) * 0.25,
                                   float(_EXTRACT_SAFE_OCC)))
-            n_tiles = max(1, int(np.ceil(occ / usable)))
+            # DA3-DENSE fills FAR more blocks than the sparse cloud's occupied set —
+            # measured ≈15× (a tile sized for 6.7k cloud blocks integrated to 103.8k
+            # active and crashed the extract). Inflate the block estimate so the tiles
+            # are split fine enough to stay extract-safe. The per-frame extent skip
+            # keeps the extra tiles cheap; the active-block break is the final net.
+            _dense_mult = 16.0 if dense_da3 else 1.0
+            n_tiles = max(1, int(np.ceil(occ * _dense_mult / usable)))
         if n_tiles > 1:
             # quantiles over per-unique-block axis positions → equal blocks per tile
             qb = np.quantile(np.sort(ublk_axis), np.linspace(0.0, 1.0, n_tiles + 1))
@@ -1883,6 +1916,33 @@ def export_tsdf_scene(
                     f"cap {int(tsdf_block_count):,}/tile)")
     else:
         logger.info("[TSDF-scene] single grid (no cleaned-cloud xyz to tile by)")
+
+    # DA3-DENSE: precompute each frame's [min,max] world coord along the tiling axis
+    # (one cheap sub-sampled unprojection per frame) so the tile loop can skip frames
+    # that don't reach a tile BEFORE loading their npz. Only worthwhile when tiling.
+    if dense_da3 and len(tiles) > 1 and frame_loader is not None:
+        logger.info(f"[TSDF-scene] dense-DA3: precomputing axis extents for "
+                    f"{len(sorted_frames)} frames…")
+        _t_pre = time.time()
+        for _fi in sorted_frames:
+            _fi = int(_fi)
+            _c2w = cam.pose_map.get(_fi)
+            if _c2w is None:
+                continue
+            _fr = frame_loader(_fi)
+            if not _fr or _fr.get("K") is None:
+                continue
+            _d = _fr["depth"][::8, ::8]                 # sub-sample 8× for speed
+            _m = _d > depth_min
+            if not _m.any():
+                continue
+            # K must match the sub-sampled grid: scale fx,fy,cx,cy by 1/8.
+            _K = np.asarray(_fr["K"], dtype=np.float64).copy()
+            _K[:2, :] /= 8.0
+            _wa = _depth_axis_world_coord(_d, _K, _c2w, tile_axis)[_m]
+            frame_axis_extent[_fi] = (float(_wa.min()), float(_wa.max()))
+        logger.info(f"[TSDF-scene] dense-DA3: extents ready ({len(frame_axis_extent)} frames, "
+                    f"{time.time() - _t_pre:.0f}s)")
 
     halo = float(tsdf_tile_halo)
     tile_meshes = []
