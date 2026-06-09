@@ -282,10 +282,26 @@ tsdf:
                              # Small gaps closed by fill_holes. (was 1.0 = single-view = noisy)
   edge_thresh: 1.0           # legacy raw-depth path only (bypassed in raster mode). If you
                              # ever turn raster OFF, set this to ~0.05 to cull flying pixels.
-  voxel_length: 0.010        # 1.0 cm — finer detail. At 1cm a 91M-pt/144m scene yields ~435k
-                             # occupied blocks (overflows a single 200k VoxelBlockGrid), so
-                             # tsdf_tiling splits it into ~5 tiles that each stay under the cap.
-  sdf_trunc: 0.035           # ~3.5× voxel — reconciliation band kept proportional to voxel
+  voxel_length: 0.008        # 0.8 cm — finer detail (B). Finer than the depth footprint at
+                             # distance, so it's the guided-upsample (A) that actually feeds it
+                             # real high-frequency geometry. tsdf_tiling auto-splits so each
+                             # grid stays under the block cap.
+  sdf_trunc: 0.028           # ~3.5× voxel — reconciliation band kept proportional to voxel
+  upsample_depth: 2          # A — guided (joint-bilateral) ×N upsample of the 518×294 neural
+                             # depth using the full-res photo as an edge guide, integrated at
+                             # the finer grid. The depth resolution WAS the geometry ceiling;
+                             # this lifts it (sharper edges/surfaces at mid/far range) WITHOUT
+                             # re-running recon. 1 = off. Dense/raw-depth path only (moot in
+                             # raster mode — the cloud points have no grid to upsample).
+  smooth_method: taubin      # B — shrinkage-free λ/μ smoothing: denoises wall/floor planes
+                             # WITHOUT rounding edges or eroding the mesh (unlike "simple"
+                             # neighbour-averaging, which blurred detail and shrank corners).
+  smooth_iterations: 5       # taubin is gentle per-iter (no shrink) → ~5 ≈ simple ×2 in
+                             # denoise strength but keeps sharp features.
+  decimate_target: 0         # B — keep the FULL marching-cubes resolution (no decimation).
+                             # vertex_gpu texturing keeps geometry exact, so detail is not
+                             # spent on a texture atlas. ⚠️ Larger GLB — set a cap (e.g.
+                             # 2_500_000) if the viewer struggles.
   tsdf_block_count: 200000   # GPU hash slots PER TILE (~16GB). NOT the bottleneck: tiles run
                              # at ~20% of this. Kept moderate so the grid pre-alloc leaves
                              # VRAM for the explicit extract vertex buffer (the real limit).
@@ -302,6 +318,27 @@ tsdf:
                              # cleaned_cloud.ply — required to re-run the TSDF stage (param
                              # tuning, dense integration) WITHOUT re-running MapAnything (hours).
                              # Set false only to reclaim disk when you'll never re-mesh.
+
+
+# ── Whole-scene Poisson mesh (Option B — direct from cleaned_cloud) ─────────
+# Consumed by run_poisson_scene.py → segmentation/tsdf_export.export_poisson_scene,
+# triggered by the UI "🟣 Poisson whole scene" button (/poisson/scene_export). Screened
+# Poisson reconstructs the surface straight from the ALREADY-CLEANED cloud (57M pts) —
+# denser than the 518×294 neural depth the TSDF integrates — so it captures the cloud's
+# full detail and is watertight. Writes output/tsdf/scene_poisson/scene_poisson.glb, which
+# appears as its own toggleable row alongside the TSDF mesh.
+poisson:
+  max_points: 4000000        # cheap uniform pre-downsample cap (fits 12 GB) before any
+                             # hash-based op or Poisson. 0 = no cap.
+  voxel_downsample: 0.005    # m — voxel-downsample the cloud before Poisson (even surface
+                             # density → cleaner normals/reconstruction). 0 = off.
+  poisson_depth: 11          # octree depth (resolution). 10≈coarse, 11≈fine, 12≈very fine
+                             # (slower, more RAM). 11 is the room-scale sweet spot.
+  density_quantile: 0.03     # trim the lowest-density 3% of Poisson vertices (the balloon
+                             # of extrapolated surface beyond the real samples). 0 = keep all.
+  decimate_target: 1500000   # target tri count before texturing (0 = off)
+  texture: true              # UV-atlas (texrecon) photo texture, same path as the TSDF scene
+  use_refined_poses: true    # DA3 loop-closure poses for texturing (raw ARKit drifts)
 
 
 # ── 3D Reconstruction ──────────────────────────────────────────────

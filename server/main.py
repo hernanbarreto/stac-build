@@ -3768,6 +3768,109 @@ async def _tsdf_scene_apply_progress(session_id: str, update: Dict[str, Any]):
         scene.update(update)
 
 
+# ── Whole-scene Poisson (Option B — surface straight from the cleaned cloud) ──
+
+@app.post("/api/segmentation/poisson/scene_export")
+async def export_poisson_scene_endpoint(request: Request):
+    """Reconstruct ONE screened-Poisson mesh from the cleaned cloud.
+
+    Sibling of /tsdf/scene_export: meshes the ALREADY-cleaned point cloud directly
+    (denser than the neural depth the TSDF integrates) and writes
+    output/tsdf/scene_poisson/scene_poisson.glb — which surfaces as its own
+    toggleable row next to the TSDF mesh. Progress lives under the
+    ``__poisson_scene__`` state key and is exposed as ``poisson`` on /tsdf/progress.
+
+    Body: session_id (+ optional per-request overrides of config.yaml `poisson:`).
+    """
+    body = await request.json()
+    session_id = body.get("session_id")
+    # Config-driven, same pattern as the TSDF endpoint: defaults from config.yaml
+    # `poisson:` (so this button honours the project tuning), body keys override.
+    from segmentation.tsdf_export import build_poisson_scene_kwargs
+    params = build_poisson_scene_kwargs(cfg, overrides=body)
+
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id")
+
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
+    frames_dir = ctx.frames_dir
+
+    print(f"[Poisson-scene] ━━━ /poisson/scene_export request ━━━")
+    print(f"[Poisson-scene]   session={session_id}")
+    print(f"[Poisson-scene]   params (config poisson + body overrides): {params}")
+
+    async with _tsdf_progress_lock:
+        sess_state = _tsdf_progress.setdefault(session_id, {})
+        sess_state["__poisson_scene__"] = {
+            "phase": "starting",
+            "started_at": time.time(),
+        }
+
+    worker = Path(SERVER_DIR) / "run_poisson_scene.py"
+
+    async def _bg():
+        result_path = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, str(worker),
+                "--output-dir", str(output_dir),
+                "--frames-dir", str(frames_dir),
+                "--session-dir", str(frames_dir.parent),
+                "--params", json.dumps(params),
+                cwd=str(SERVER_DIR),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"},
+            )
+            assert proc.stdout is not None
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", "ignore").rstrip()
+                if not line:
+                    continue
+                if line.startswith("[TSDF-PROGRESS]"):
+                    try:
+                        upd = json.loads(line[len("[TSDF-PROGRESS]"):])
+                        await _poisson_scene_apply_progress(session_id, upd)
+                        print(f"[Poisson-scene] phase={upd.get('phase')}"
+                              + (f" {upd.get('elapsed'):.0f}s" if upd.get('elapsed') else ""),
+                              flush=True)
+                    except Exception:
+                        pass
+                elif line.startswith("[TSDF-RESULT]"):
+                    r = line[len("[TSDF-RESULT]"):].strip()
+                    result_path = None if r == "NONE" else r
+                else:
+                    print(line, flush=True)  # forward worker logs to server console
+            await proc.wait()
+            async with _tsdf_progress_lock:
+                _tsdf_progress.setdefault(session_id, {})["__poisson_scene__"] = {
+                    "phase": "done" if result_path else "error",
+                    "mesh": result_path,
+                    "finished_at": time.time(),
+                }
+            print(f"[Poisson-scene] ✅ wrote {result_path}" if result_path
+                  else "[Poisson-scene] ❌ failed")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            async with _tsdf_progress_lock:
+                _tsdf_progress.setdefault(session_id, {})["__poisson_scene__"] = {
+                    "phase": "error", "error": str(e),
+                }
+
+    asyncio.create_task(_bg())
+
+    return {"ok": True, "started": True}
+
+
+async def _poisson_scene_apply_progress(session_id: str, update: Dict[str, Any]):
+    async with _tsdf_progress_lock:
+        state = _tsdf_progress.setdefault(session_id, {})
+        scene = state.setdefault("__poisson_scene__", {})
+        scene.update(update)
+
+
 @app.get("/api/segmentation/tsdf/progress/{session_id}")
 async def tsdf_progress(session_id: str):
     """Live state for the TSDF pipeline. UI polls this every ~1s during a run."""
@@ -3775,11 +3878,13 @@ async def tsdf_progress(session_id: str):
         state = _tsdf_progress.get(session_id, {})
         per_instance = [
             v for k, v in state.items()
-            if k != "__overall__" and k != "__scene__"
+            if k not in ("__overall__", "__scene__", "__poisson_scene__")
         ]
         overall = state.get("__overall__", {"phase": "idle"})
         scene = state.get("__scene__", {"phase": "idle"})
-    return {"ok": True, "overall": overall, "instances": per_instance, "scene": scene}
+        poisson = state.get("__poisson_scene__", {"phase": "idle"})
+    return {"ok": True, "overall": overall, "instances": per_instance,
+            "scene": scene, "poisson": poisson}
 
 
 @app.get("/api/segmentation/tsdf/status/{session_id}")

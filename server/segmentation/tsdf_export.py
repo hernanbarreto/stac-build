@@ -496,6 +496,83 @@ def _rasterize_cloud_depth(xyz: np.ndarray, c2w: np.ndarray, K: np.ndarray,
     return depth.astype(np.float32)
 
 
+def _joint_bilateral_upsample_depth(
+        depth_lo: np.ndarray, valid_lo: Optional[np.ndarray],
+        guide_hi: np.ndarray, factor: int,
+        radius: int = 2, sigma_space: float = 2.0, sigma_range: float = 0.06,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Edge-aware ×``factor`` depth upsample guided by the full-res photo (A).
+
+    The neural depth (≈518×294) is the geometry ceiling — the TSDF can't be sharper
+    than it. This lifts that ceiling WITHOUT re-running recon: nearest-upsample the
+    low-res depth to ``factor``× and cross-bilateral filter it using the high-res
+    RGB as a guide, so depth EDGES snap to image edges (no bilinear smear across
+    silhouettes) while flat regions are smoothed. Classic joint-bilateral upsampling
+    (Kopf et al.), in its filtering form, on the GPU via torch.
+
+    Hallucination-free: each output pixel averages ONLY valid upsampled depth
+    samples, weighted by guide similarity — where no valid neighbour shares the
+    pixel's colour, the output stays 0 (invalid), so it never invents geometry.
+
+    Args:
+        depth_lo: (h,w) float32 metres, 0 = invalid.
+        valid_lo: (h,w) bool or None (None → depth>0).
+        guide_hi: (H,W,3) or (H,W) uint8 photo at the TARGET resolution (H=factor·h,
+                  W=factor·w). The edge guide AND the integration colour.
+        factor:   integer upsample factor (≥2).
+        radius / sigma_space / sigma_range: bilateral window + falloffs (sigma_range
+                  on 0..1 guide intensity).
+
+    Returns (depth_hi (H,W) float32, valid_hi (H,W) bool), or None on any failure
+    (caller falls back to the native-resolution depth).
+    """
+    try:
+        import torch
+        import torch.nn.functional as F
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        h, w = depth_lo.shape
+        H, W = h * factor, w * factor
+        if guide_hi.shape[0] != H or guide_hi.shape[1] != W:
+            return None  # guide must already be at the target grid
+
+        d = torch.from_numpy(np.ascontiguousarray(depth_lo)).to(dev).float()[None, None]
+        if valid_lo is None:
+            v = (d > 0).float()
+        else:
+            v = torch.from_numpy(np.ascontiguousarray(valid_lo)).to(dev).float()[None, None]
+            v = v * (d > 0).float()
+
+        d_nn = F.interpolate(d, size=(H, W), mode="nearest")
+        v_nn = F.interpolate(v, size=(H, W), mode="nearest")
+        d_nn = d_nn * v_nn  # zero the invalid samples so they never bias the average
+
+        g = torch.from_numpy(np.ascontiguousarray(guide_hi)).to(dev).float()
+        if g.ndim == 3:
+            g = g.mean(dim=2)
+        g = (g / 255.0)[None, None]
+
+        k = 2 * radius + 1
+        off = torch.arange(-radius, radius + 1, device=dev).float()
+        oy, ox = torch.meshgrid(off, off, indexing="ij")
+        w_space = torch.exp(-(oy ** 2 + ox ** 2) / (2 * sigma_space ** 2)).reshape(1, k * k, 1, 1)
+
+        d_u = F.unfold(d_nn, k, padding=radius).reshape(1, k * k, H, W)
+        v_u = F.unfold(v_nn, k, padding=radius).reshape(1, k * k, H, W)
+        g_u = F.unfold(g, k, padding=radius).reshape(1, k * k, H, W)
+        w_range = torch.exp(-((g_u - g) ** 2) / (2 * sigma_range ** 2))
+        wgt = w_space * w_range * v_u
+        num = (wgt * d_u).sum(dim=1)
+        den = wgt.sum(dim=1)
+        out = torch.where(den > 1e-6, num / den, torch.zeros_like(num))
+        valid = (den > 1e-6) & (out > 0)
+        return (out[0].detach().cpu().numpy().astype(np.float32),
+                valid[0].detach().cpu().numpy())
+    except Exception as e:
+        logger.warning(f"[TSDF-scene] guided depth upsample failed ({e}) — "
+                       "falling back to native-resolution depth")
+        return None
+
+
 def _group_rows_by_frame(fg: np.ndarray, pr: np.ndarray, pc: np.ndarray,
                          xyz: np.ndarray) -> Dict[int, tuple]:
     """Group per-point ``(pr, pc, xyz)`` by frame with ONE argsort.
@@ -1059,6 +1136,12 @@ def export_tsdf_scene(
                                          # 0.1 ≈ the UI slider at 0.1 — drops the noisy low/mid-
                                          # confidence tail (vertical smear). Needs the cloud's
                                          # 'confidence' field (present in cleaned_cloud.ply).
+    upsample_depth: int = 1,             # A — guided ×N joint-bilateral upsample of the neural
+                                         # depth using the full-res photo as an edge guide,
+                                         # integrated at the finer grid. Lifts the depth-
+                                         # resolution ceiling (sharper geometry at distance)
+                                         # without re-running recon. 1 = off. Dense-depth path
+                                         # only (moot in raster mode).
     smooth_iterations: int = 2,          # smoothing iterations post-extract
     smooth_method: str = "simple",       # winner of visual A/B over taubin (LiDAR-noise data)
     fill_holes: bool = False,            # off: texrecon leaves filled holes untextured
@@ -1355,6 +1438,14 @@ def export_tsdf_scene(
                        "traceability available — using raw-depth integration "
                        "(regenerate the cloud with traceability to enable faithful mode)")
 
+    if upsample_depth and upsample_depth > 1 and not raster_active:
+        logger.info(f"[TSDF-scene] (A) guided depth upsample ×{int(upsample_depth)} ON — "
+                    f"integrating at {depth_w*int(upsample_depth)}x{depth_h*int(upsample_depth)} "
+                    f"(joint-bilateral, photo-guided)")
+    elif upsample_depth and upsample_depth > 1 and raster_active:
+        logger.info("[TSDF-scene] (A) upsample_depth set but raster mode active → skipped "
+                    "(cloud points have no grid to upsample)")
+
     sorted_frames = sorted(cam.pose_map.keys())
     skipped_no_depth = skipped_no_K = skipped_empty = 0
     native_K_map: Dict[int, np.ndarray] = {}  # per-frame npz K (depth res) for texturing
@@ -1420,6 +1511,28 @@ def export_tsdf_scene(
                     continue
                 K_d = _intrinsics_for_depth(K_rgb, rgb_h, rgb_w, depth_h, depth_w)
 
+            # ── A: guided depth upsample ──────────────────────────────────────
+            # Lift the depth-resolution ceiling for the DENSE path: ×factor joint-
+            # bilateral upsample of the neural depth using the full-res photo as an
+            # edge guide, then integrate at the finer grid with a correspondingly-
+            # scaled K. Native K is already stashed in native_K_map above, so
+            # texturing is unaffected. Skipped in raster mode (cloud points, no grid).
+            cur_h, cur_w = depth_h, depth_w
+            up_color = None
+            if (upsample_depth and upsample_depth > 1 and not use_raster
+                    and depth_m is not None):
+                f = int(upsample_depth)
+                Hh, Ww = depth_h * f, depth_w * f
+                guide = _load_rgb_at_depth(frames_dir, fidx, Hh, Ww,
+                                           frame_name=kf_name_map.get(fidx))
+                up = _joint_bilateral_upsample_depth(depth_m, depth_valid, guide, f)
+                if up is not None:
+                    depth_m, depth_valid = up
+                    K_d = np.asarray(K_d, dtype=np.float64).copy()
+                    K_d[:2, :] *= f            # fx,fy,cx,cy (+skew) scale with the grid
+                    cur_h, cur_w = Hh, Ww
+                    up_color = guide           # reuse the high-res photo as integ. colour
+
             if use_raster:
                 # FAITHFUL path: z-buffer the cleaned cloud's own surviving points
                 # (this frame's slice, restricted to this tile via cc_fp) back into
@@ -1450,7 +1563,7 @@ def export_tsdf_scene(
                         skipped_empty += 1
                         continue
                     mask &= _build_segment_mask_at_depth(
-                        fp[0], fp[1], depth_h, depth_w,
+                        fp[0], fp[1], cur_h, cur_w,
                         cc_ply_hw[0], cc_ply_hw[1], cleaned_cloud_dilate,
                     )
 
@@ -1460,12 +1573,15 @@ def export_tsdf_scene(
 
             depth_masked = np.where(mask, depth_m, 0.0).astype(np.float32)
 
-            # Color: the npz image is already aligned to the depth grid (same
-            # source, same resolution). Fall back to re-decoding the full-res JPG.
-            if frame_rgb is not None:
+            # Color at the integration grid (cur_h×cur_w). Upsample (A) reuses the
+            # already-decoded high-res guide; the npz image is used only when it
+            # matches the grid; else re-decode the JPG at the grid resolution.
+            if up_color is not None:
+                color_np = up_color
+            elif frame_rgb is not None and frame_rgb.shape[:2] == (cur_h, cur_w):
                 color_np = frame_rgb
             else:
-                color_np = _load_rgb_at_depth(frames_dir, fidx, depth_h, depth_w,
+                color_np = _load_rgb_at_depth(frames_dir, fidx, cur_h, cur_w,
                                               frame_name=kf_name_map.get(fidx))
 
             c2w_4 = np.eye(4, dtype=np.float64)
@@ -2129,6 +2245,28 @@ def build_tsdf_scene_kwargs(config: dict, overrides: Optional[dict] = None) -> d
     keys = tsdf_scene_config_keys()
     tcfg = (config or {}).get("tsdf", {}) or {}
     kw = {k: tcfg[k] for k in keys if k in tcfg}
+    if overrides:
+        kw.update({k: overrides[k] for k in keys if k in overrides})
+    return kw
+
+
+# ── Poisson scene config → kwargs (mirror of the TSDF mapping) ──────────────
+_POISSON_RUNTIME_ARGS = {"output_dir", "frames_dir", "session_dir", "progress_cb"}
+
+
+def poisson_scene_config_keys() -> set:
+    """The config.yaml ``poisson:`` keys forwarded to ``export_poisson_scene`` —
+    derived from its signature, so the endpoint/worker stay in lockstep with it."""
+    return {n for n in _inspect.signature(export_poisson_scene).parameters
+            if n not in _POISSON_RUNTIME_ARGS}
+
+
+def build_poisson_scene_kwargs(config: dict, overrides: Optional[dict] = None) -> dict:
+    """Build ``export_poisson_scene`` kwargs from ``config['poisson']`` (+ optional
+    per-request ``overrides``)."""
+    keys = poisson_scene_config_keys()
+    pcfg = (config or {}).get("poisson", {}) or {}
+    kw = {k: pcfg[k] for k in keys if k in pcfg}
     if overrides:
         kw.update({k: overrides[k] for k in keys if k in overrides})
     return kw

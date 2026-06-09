@@ -503,6 +503,11 @@ function App() {
   const [tsdfSceneRunning, setTsdfSceneRunning] = useState(false)
   const [tsdfScene, setTsdfScene] = useState<{ phase: string; elapsed?: number; mesh?: string; error?: string }>({ phase: 'idle' })
 
+  // Whole-scene Poisson (Option B — meshes the cleaned cloud directly). Same modal,
+  // tracked independently so it can run/show alongside the TSDF scene job.
+  const [poissonSceneRunning, setPoissonSceneRunning] = useState(false)
+  const [poissonScene, setPoissonScene] = useState<{ phase: string; elapsed?: number; mesh?: string; error?: string }>({ phase: 'idle' })
+
   const refreshTsdfStatus = useCallback(async () => {
     if (!activeSession) return
     try {
@@ -539,7 +544,7 @@ function App() {
 
   // Poll TSDF progress while running (per-instance OR whole-scene)
   useEffect(() => {
-    if ((!tsdfRunning && !tsdfSceneRunning) || !activeSession) return
+    if ((!tsdfRunning && !tsdfSceneRunning && !poissonSceneRunning) || !activeSession) return
     let alive = true
     const tick = async () => {
       try {
@@ -553,6 +558,8 @@ function App() {
           setTsdfOverall(data.overall || { phase: 'idle' })
           const scene = data.scene || { phase: 'idle' }
           setTsdfScene(scene)
+          const poisson = data.poisson || { phase: 'idle' }
+          setPoissonScene(poisson)
           if (data.overall?.phase === 'done' || data.overall?.phase === 'error') {
             await refreshTsdfStatus()
             if (activeSession) {
@@ -570,13 +577,22 @@ function App() {
             }
             setTsdfSceneRunning(false)
           }
+          if (poisson.phase === 'done' || poisson.phase === 'error') {
+            if (poisson.phase === 'done' && activeSession) {
+              // Poisson wrote output/tsdf/scene_poisson/scene_poisson.glb — pull it
+              // into the viewport (tsdf/list iterates all tsdf/ subfolders).
+              try { await viewportRef.current?.reloadTsdf?.(activeSession) } catch { /* ignore */ }
+              await refreshTsdfMeshList(activeSession)
+            }
+            setPoissonSceneRunning(false)
+          }
         }
       } catch { /* ignore */ }
     }
     tick()
     const id = window.setInterval(tick, 1200)
     return () => { alive = false; window.clearInterval(id) }
-  }, [tsdfRunning, tsdfSceneRunning, activeSession, refreshTsdfStatus, refreshTsdfMeshList])
+  }, [tsdfRunning, tsdfSceneRunning, poissonSceneRunning, activeSession, refreshTsdfStatus, refreshTsdfMeshList])
 
   // Refresh shape/TSDF mesh lists when the active session changes (or clear
   // them on session unload). The Viewport already auto-loads the GLBs into
@@ -3208,6 +3224,59 @@ function App() {
                     )}
                     {tsdfSceneRunning && tsdfScene.phase !== 'done' && tsdfScene.phase !== 'error' && (
                       <>Phase: <b>{tsdfScene.phase}</b>{tsdfScene.elapsed !== undefined && ` · ${tsdfScene.elapsed.toFixed(0)}s`}</>
+                    )}
+                  </div>
+                )}
+
+                {/* Whole-scene Poisson (Option B) — meshes the cleaned cloud
+                    directly (denser than the neural depth the TSDF integrates),
+                    watertight. Writes its own scene_poisson/ folder → appears as a
+                    separate toggleable row in the TSDF mesh list below. */}
+                <button
+                  className="bim-action-btn upload"
+                  style={{
+                    width: '100%', padding: 12, fontWeight: 600, fontSize: 14, marginTop: 10,
+                    opacity: poissonSceneRunning || tsdfRunning ? 0.5 : 1,
+                  }}
+                  disabled={poissonSceneRunning || tsdfRunning}
+                  title="Screened-Poisson surface straight from the cleaned point cloud (denser than the TSDF's neural depth, watertight). Adds a separate toggleable mesh."
+                  onClick={async () => {
+                    if (!activeSession) return
+                    setPoissonSceneRunning(true)
+                    setPoissonScene({ phase: 'starting' })
+                    try {
+                      const res = await fetch('/api/segmentation/poisson/scene_export', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: activeSession }),
+                      })
+                      const data = await res.json()
+                      if (data.ok) {
+                        setStatusMessage('Poisson scene: meshing the cleaned cloud in background')
+                      } else {
+                        setStatusMessage(`Poisson scene error: ${data.detail || 'Unknown'}`)
+                        setPoissonSceneRunning(false)
+                      }
+                    } catch (err: any) {
+                      setStatusMessage(`Poisson scene error: ${err.message}`)
+                      setPoissonSceneRunning(false)
+                    }
+                  }}
+                >
+                  {poissonSceneRunning
+                    ? `🔄 Meshing Poisson (${poissonScene.phase})…`
+                    : '🟣 Poisson whole scene'}
+                </button>
+                {(poissonScene.phase === 'done' || poissonScene.phase === 'error' || poissonSceneRunning) && (
+                  <div style={{ fontSize: 12, color: '#888', marginTop: 6 }}>
+                    {poissonScene.phase === 'done' && (
+                      <>✅ Poisson mesh written: <code>{poissonScene.mesh}</code></>
+                    )}
+                    {poissonScene.phase === 'error' && (
+                      <>❌ {poissonScene.error || 'Poisson reconstruction failed'}</>
+                    )}
+                    {poissonSceneRunning && poissonScene.phase !== 'done' && poissonScene.phase !== 'error' && (
+                      <>Phase: <b>{poissonScene.phase}</b>{poissonScene.elapsed !== undefined && ` · ${poissonScene.elapsed.toFixed(0)}s`}</>
                     )}
                   </div>
                 )}
