@@ -278,25 +278,35 @@ tsdf:
                              # far phantoms to clip); legacy mode: max integration distance
   depth_min: 0.05            # only drop sensor-touching artifacts
   da3_conf_percentile: 0     # raster mode: moot (cloud already filtered); legacy: conf re-filter
-  tsdf_weight_thresh: 2.0    # require ≥2 views per voxel — drops UNreconciled single-view
-                             # voxels (raw depth noise → thick/bumpy surfaces). Not a cloud
-                             # filter: it just refuses to mesh what multi-view never agreed on.
-                             # Small gaps closed by fill_holes. (was 1.0 = single-view = noisy)
+  tsdf_weight_thresh: 2.0    # require ≥2 views per voxel. THIS IS THE FIX FOR THE "lines in the
+                             # middle": weight=1 meshed every SINGLE-VIEW voxel, including the
+                             # flying-pixels at silhouette edges that no other view confirms →
+                             # thin floating sheets/lines. weight≥2 drops them (need 2 views to
+                             # agree). fill_holes (below) recovers the genuine coverage. (Was 1.0
+                             # for "max coverage" but that traded clean for noise — wrong call.)
+  fill_holes: false          # OFF with texrecon — texrecon does NOT texture the filled holes
+                             # (they have no source view) → scattered GREY patches in the atlas.
+                             # Coverage must come from geometry (sdf_trunc + not deleting clusters),
+                             # not from hole-fill. (Only safe to enable under vertex_gpu colouring.)
   edge_thresh: 0.05          # cull flying pixels at depth discontinuities (silhouettes).
                              # ACTIVE in DA3-dense mode (depth_source: da3) — DA3 raw depth has
                              # flying pixels and there's no cloud mask to drop them, so the 8cm→5cm
                              # gradient cutoff matters. (Bypassed only in faithful raster mode.)
-  voxel_length: 0.008        # 0.8 cm — finer detail (B). Finer than the depth footprint at
-                             # distance, so it's the guided-upsample (A) that actually feeds it
-                             # real high-frequency geometry. tsdf_tiling auto-splits so each
-                             # grid stays under the block cap.
-  sdf_trunc: 0.028           # ~3.5× voxel — reconciliation band kept proportional to voxel
-  upsample_depth: 2          # A — guided (joint-bilateral) ×N upsample of the 518×294 neural
-                             # depth using the full-res photo as an edge guide, integrated at
-                             # the finer grid. The depth resolution WAS the geometry ceiling;
-                             # this lifts it (sharper edges/surfaces at mid/far range) WITHOUT
-                             # re-running recon. 1 = off. Dense/raw-depth path only (moot in
-                             # raster mode — the cloud points have no grid to upsample).
+  voxel_length: 0.012        # 1.2 cm — back COARSER. The 0.8cm "for detail" was a mistake: with
+                             # the masked depth being patchy (discrete cloud-pixel projections), a
+                             # fine voxel isolates each patch → the mesh comes out as disconnected
+                             # "brushstrokes". A coarser voxel + wide truncation MERGES neighbouring
+                             # patches into one continuous surface (what the working version used).
+  sdf_trunc: 0.060           # 5× voxel (0.012). LITERATURE (deep-research, verified): truncation
+                             # of 4-8× voxel is the norm (andyzeng 5×, VoxBlox 4×, Open3D 8×); the
+                             # old 3.5× was TOO LOW → fragmented surface → disconnected clusters →
+                             # the cluster-cleanup then DELETED them (the missing 2m). Raising it
+                             # reconciles neighbouring observations into one connected surface.
+  upsample_depth: 1          # OFF — back to the clean baseline. The ×2 joint-bilateral upsample
+                             # SMOOTHED the depth edges so the flying-pixel filter (edge_thresh)
+                             # could no longer detect the silhouette jumps → flying pixels leaked
+                             # in as the "lines in the middle". The clean TSDF that worked had no
+                             # upsample. Re-enable ONLY if edges are verified clean. (1 = off.)
   smooth_method: taubin      # B — shrinkage-free λ/μ smoothing: denoises wall/floor planes
                              # WITHOUT rounding edges or eroding the mesh (unlike "simple"
                              # neighbour-averaging, which blurred detail and shrank corners).
@@ -316,9 +326,16 @@ tsdf:
   tsdf_tile_halo: 0.6        # m of overlap between adjacent tiles — keeps the seam surface
                              # continuous (≥ several × sdf_trunc) before the core-crop merge
   texture: true
-  texture_mode: "vertex_gpu" # multi-view photo bake (falls back to integrated colour)
-  depth_source: da3          # which per-frame depth the TSDF integrates:
+  texture_mode: "texrecon"   # UV-atlas photo texture (MVS-Texturing, Waechter et al. 2014):
+                             # per-face view selection + photo-consistency MRF labeling + global
+                             # colour adjustment → sharp texture on a decimated mesh (detail lives
+                             # in the texture, Polycam-style). vertex_gpu = fallback per-vertex bake.
+  depth_source: auto         # which per-frame depth the TSDF integrates:
                              #   "auto"        → MapAnything chunk depth (294×518), else DA3, else LiDAR
+                             #                   MASKED to the cleaned cloud → mesh COPIES the cloud (clean).
+                             #                   ← REVERTED from "da3": dense mode dropped the cloud mask and
+                             #                     reintroduced flying-pixel streaks the cloud doesn't have,
+                             #                     with no resolution gain (DA3≈Map). Masked is clean.
                              #   "da3"         → DA3-DENSE FUSION (asymmetric design, NOW WIRED): integrate
                              #                   DA3's per-frame depth for EVERY blur-valid frame (the dense
                              #                   set, ~1245), not the keyframe-only MapAnything depth. Loop-

@@ -2057,21 +2057,33 @@ def export_tsdf_scene(
             logger.info(f"[TSDF-scene] cropped {int((~_keep).sum()):,} verts outside "
                         f"cloud bbox (+{_margin:.2f}m margin)")
 
-    # Optional: drop tiny floating shells (same heuristic as per-instance).
+    # Drop ONLY true noise specks — NOT real disconnected geometry. LITERATURE
+    # (deep-research, verified): small-cluster removal is non-standard and deletes
+    # real surface; BundleFusion repairs by re-integration, not deletion. The old
+    # `0.01 × largest-cluster` threshold scaled with mesh size (→ 50k tris on a 5M
+    # mesh) and deleted whole ~2m regions that fragmented off (low truncation). Use a
+    # tiny FIXED floor so only genuine specks go, and CAP the total fraction removed
+    # so a fragmented mesh never loses a big chunk silently.
     try:
         tri_clusters, n_per_cluster, _ = mesh.cluster_connected_triangles()
         tri_clusters = np.asarray(tri_clusters)
         n_per_cluster = np.asarray(n_per_cluster)
         if len(n_per_cluster) > 1:
-            min_tri = max(500, int(0.01 * int(n_per_cluster.max())))
+            min_tri = 200                       # absolute speck floor (was max(500, 1% of max))
             keep = n_per_cluster >= min_tri
             drop_tris = ~keep[tri_clusters]
             n_drop = int(drop_tris.sum())
-            if n_drop > 0:
+            # Safety: never drop more than 5% of the mesh as "specks" — if we would,
+            # the mesh is fragmented (raise sdf_trunc), don't silently delete coverage.
+            if 0 < n_drop <= 0.05 * len(tri_clusters):
                 mesh.remove_triangles_by_mask(drop_tris)
                 mesh.remove_unreferenced_vertices()
-                logger.info(f"[TSDF-scene] dropped {int((~keep).sum())} small clusters "
-                            f"({n_drop:,} tris)")
+                logger.info(f"[TSDF-scene] dropped {int((~keep).sum())} speck clusters "
+                            f"({n_drop:,} tris, <{min_tri} tris each)")
+            elif n_drop > 0.05 * len(tri_clusters):
+                logger.warning(f"[TSDF-scene] speck cleanup would drop {n_drop:,} tris "
+                               f"(>5% — mesh fragmented, raise sdf_trunc) — SKIPPING to "
+                               f"preserve coverage")
     except Exception as e:
         logger.warning(f"[TSDF-scene] cluster cleanup skipped ({e})")
 
