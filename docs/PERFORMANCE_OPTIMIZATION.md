@@ -32,14 +32,18 @@ closure → cloud merge → TSDF). Ordered by expected return, honest about what
 
 | Stage | Today | Opportunity | Confidence |
 |---|---|---|---|
+| **Blur filter** (FrameQuality: FFT + Laplacian, per frame) | **CPU** ❌ | batch on GPU (torch FFT/conv) — 1690 frames/scan | medium |
+| **Frame selection** (DINOv2 embeddings) | GPU ✅ (cosine loop CPU, cheap) | already on GPU | — |
 | **DA3** (depth) | GPU bf16 | ONNX → **TensorRT** (FP16/INT8) | high ✅ |
 | **MapAnything** (per-chunk 3D) | GPU bf16 | `torch.compile` / quantization — **not ONNX** | medium |
 | **Loop closure** | DINOv2 (GPU) + Sim3 (classical) | DINOv2 → TensorRT; Sim3 already small | medium |
+| **Dense fusion ICP** (`dense_pose_fusion.py`, colored ICP per filler) | **CPU** ❌ legacy `o3d.pipelines.registration` | **`open3d.t.pipelines.registration.multi_scale_icp` (CUDA)** + tensor normals/voxel | **high — current bottleneck** |
 | **CloudComPy** (SOR + voxel, ~68 M pts) | **CPU** ❌ | **move to Open3D tensor (CUDA)** | **high — big win** |
 | **TSDF integrate** | GPU (VBG CUDA) ✅ | already on GPU | — |
 | **TSDF extract** | **CPU** (forced) | blocked by Open3D VBG bug (GPU extract aborts) | — |
+| **TSDF mesh post** (cluster/taubin/decimate/merge) | **CPU** (Open3D legacy) | some have tensor equivalents; cluster/decimate hard | low–medium |
 | **TSDF rasterization** (`_rasterize_cloud_depth`) | **CPU** (numpy `minimum.at`) | **move z-buffer to torch/cupy (GPU)** | high |
-| **TSDF texture bake** | GPU (nvdiffrast) ✅ | already on GPU | — |
+| **TSDF texture bake** | **CPU (texrecon, default, ~10 min)** ❌ — nvdiffrast (`vertex_gpu`) GPU path exists but is NOT the default | **switch default to nvdiffrast / GPU bake** | **high — biggest single CPU cost** |
 | **Potree conversion** | CPU | I/O-bound, little headroom | low |
 
 ---
@@ -81,6 +85,29 @@ GPU tensor ops (`voxel_down_sample`, `remove_statistical_outlier` on `cuda:0`).
 - Expected: large reduction in non-neural time.
 - Risk: low–medium. Validate point counts / cloud quality match CloudComPy.
 - Note: the noise filter is already off (O(n²)).
+
+### Step 1b — Dense fusion ICP → GPU (current bottleneck)
+`reconstruction/dense_pose_fusion.py` registers each inter-keyframe filler by **colored
+ICP** using the **legacy CPU** API (`o3d.pipelines.registration.registration_colored_icp`).
+Port to the **tensor API on CUDA**: `open3d.t.pipelines.registration.multi_scale_icp`
+(+ tensor `estimate_normals`, `voxel_down_sample`) with `device=cuda:0`.
+- Expected: large — this is the step that pinned the CPU at ~20 cores for minutes.
+- Risk: low–medium. Per-frame host↔device transfer overhead on small clouds; the loop
+  stays sequential per frame (GPU speeds each registration, not cross-frame parallelism).
+- Validate: registered/rejected counts + pose fitness match the CPU path.
+
+### Step 1c — TSDF texture: default texrecon (CPU) → nvdiffrast (GPU)
+The texture bake defaults to **texrecon** (MVS-Texturing, CPU, ~10 min — the single biggest
+CPU cost in the whole run). The **GPU `vertex_gpu` (nvdiffrast)** path already exists.
+Make the GPU bake the default (or auto-select), keep texrecon as a quality fallback.
+- Expected: **very large** (~10 min → seconds) on the texture stage.
+- Risk: low–medium. Validate texture quality vs texrecon (vertex colour MAE ≈ 17/255 noted);
+  texrecon gives a UV atlas, vertex_gpu gives per-vertex colour — confirm the viewer/use case.
+
+### Step 1d — Blur filter → GPU (batch)
+FrameQuality runs FFT + Laplacian **per frame on CPU** over ~1690 frames/scan. Batch it on
+GPU (torch `fft` / conv2d).
+- Expected: medium (front-of-pipeline, many frames). Risk: low.
 
 ### Step 2 — DA3 → ONNX → TensorRT (FP16)
 Export DA3 to ONNX, build a TensorRT FP16 engine, swap inference behind a flag.
