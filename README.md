@@ -29,17 +29,22 @@ Orchestrated by `pipeline_manager.py`; each stage runs as an isolated subprocess
     │
     ▼
 🔨 1. 3D Reconstruction   (backend: da3 │ mapanything │ hybrid │ hybrid_cond │ lidar)
-    ├─ Frame selection (H/F-ratio keyframes │ stride │ all) + optional blur filter
+    ├─ Blur filter, then TWO-TIER DINOv2 frame sets:
+    │     • 0.98 keyframes (selected_frames.json) → MapAnything poses + cloud (sparse = accurate)
+    │     • 0.99 dense set (da3_frames.json)      → DA3 per-frame depth (keyframes ∪ fillers)
     ├─ DA3 metric depth + K  →  MapAnything (per-chunk, inside the VGGT-Long framework)
     │     • mapanything   : MapAnything estimates the poses (DA3 poses NOT used)
     │     • hybrid_cond   : ARKit-conditioned DA3 → MapAnything FULL prior (depth+K+poses)
     ├─ SALAD/DINOv2 loop closure + Sim3 global alignment
+    ├─ Dense fusion (opt-in): localize the inter-keyframe (low-parallax) fillers by colored
+    │     ICP against the nearest keyframe — anchored, NO multi-view "onion" → extra coverage
     └─ RANSAC auto-leveling (floor → gravity)
     │
     ▼
 🧹 2. Cloud Cleaning      → CloudCompPy SOR + voxel merge → cleaned_cloud.ply
     ▼
 🧊 3. TSDF Mesh           → textured surface mesh (Open3D VoxelBlockGrid, GPU, tiling + photo bake)
+                            hybrid depth: MapAnything (keyframes) + DA3 resized (fillers)
     ▼
 🔍 4. Scene Analysis      → VLM (InternVL3): object inventory that prompts segmentation
     ▼
@@ -60,6 +65,28 @@ Orchestrated by `pipeline_manager.py`; each stage runs as an isolated subprocess
     ├─ BIM overlay: Three.js + IFC rendering
     └─ Per-element metrics: coverage %, deviation stats
 ```
+
+### Inter-keyframe densification (non-trivial pipeline change)
+
+VGGT-Long estimates poses + builds the cloud from **keyframes only** (DINOv2 0.98), so the
+cloud — and the TSDF masked to it — inherit keyframe sparsity (inter-keyframe holes). The
+extra frames are **low-parallax by construction** (that is why they were not keyframes), so
+feeding them through a multi-view model degrades ("onion" artifacts). Instead:
+
+1. **Two-tier DINOv2 frame sets.** `selected_frames.json` (0.98) → MapAnything (poses/cloud).
+   `da3_frames.json` (0.99, **unioned with the 0.98 keyframes** so it is a true superset) →
+   DA3 per-frame depth for keyframes **and** the inter-keyframe fillers.
+2. **Frame-to-keyframe ICP** (`server/reconstruction/dense_pose_fusion.py`, opt-in via
+   `reconstruction.dense_fusion.enabled`). Each filler is **localized** by colored ICP against
+   the nearest keyframe's depth cloud (init at the keyframe pose → anchored, no triangulation,
+   no drift). DA3 filler depth is **resized to MapAnything resolution** so the cloud has uniform
+   density + consistent traceability. Confidence filtering matches the backend exactly.
+3. **Hybrid TSDF depth loader** (`depth_source: da3_frames`). Per frame: **MapAnything depth for
+   keyframes** (consistent with the cloud), **DA3 depth (resized) for fillers**. Each frame's own
+   pose is used (keyframe poses + the dense-fusion-appended filler poses).
+
+> The keyframe poses/cloud from VGGT-Long are **never modified** — this is a posterior, opt-in,
+> non-fatal step that only **adds** inter-keyframe coverage.
 
 ---
 
@@ -284,12 +311,48 @@ The API endpoint `GET /api/sessions/{id}/available_backends` auto-detects which 
 
 ## Quick Start
 
+### 1. Clone WITH submodules (required — a plain `git clone` will NOT work)
+
+Several vendored dependencies are pinned as **git submodules**, including two **STAC forks
+that carry local patches the pipeline depends on**:
+
+| Submodule | Remote | Notes |
+|-----------|--------|-------|
+| `vendor/VGGT-Long` | `hernanbarreto/VGGT-Long` (STAC fork) | loop-closure + sky-removal + DA3-prior patches |
+| `vendor/depth-anything-3` | `hernanbarreto/Depth-Anything-3` (STAC fork, **private**) | cam-encoder pose conditioning + sky drop |
+| `vendor/DepthLM_Official`, `vendor/perception_models` | upstream | unpatched |
+
 ```bash
-# Clone the repository
-git clone https://github.com/hernanbarreto/stac-build.git
+# Clone the repo AND all submodules in one step (recommended)
+git clone --recursive https://github.com/hernanbarreto/stac-build.git
 cd stac-build
 
-# Build and run with Docker
+# If you already cloned without --recursive:
+git submodule update --init --recursive
+```
+
+> ⚠️ `vendor/depth-anything-3` points to a **PRIVATE** STAC fork. You need GitHub access to
+> `hernanbarreto/Depth-Anything-3` (a PAT / SSH key configured) or the submodule fetch fails.
+> The patches there are **required** — without them DA3 behaves differently than here.
+
+### 2. Provision the git-ignored vendors (NOT in the repo)
+
+Heavy/third-party vendors are **git-ignored** and are **not** fetched by clone or by Docker
+(`Dockerfile` does `COPY vendor/ ./vendor/`, i.e. it copies whatever is already on disk).
+They must be placed under `vendor/` manually before building:
+`ShapeR`, `mvs-texturing`, `nvdiffrast`, `oneTBB` / `oneTBB-src`, `CloudComPy310`,
+`dn-splatter`, `gaus-slam`, `scenescript`, `vipe`, plus the `*/checkpoints/` weight dirs.
+
+### 3. Download model weights
+
+```bash
+./setup_weights.sh    # DA3 DINO-SALAD, SAM3, VLM (others auto-download via HF Hub on first run)
+```
+
+### 4. Build and run
+
+```bash
+# Docker (copies the local vendor/ tree into the image)
 docker compose up --build
 
 # Or run locally
