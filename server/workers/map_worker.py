@@ -128,20 +128,38 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # that dense set (DENSITY win), while VGGT/MapAnything still reconstructs only the
     # keyframes for the loop-closed poses. "full" = all blur-valid, NOT all frames on
     # disk (excludes the blurry ones) and NOT the keyframe decimation.
+    # DA3 runs on this DENSER set: DINO at dino_threshold_dense (0.99) → keyframes PLUS the
+    # extra inter-keyframe frames that add NEW coverage, but DEDUPED (a camera that filmed the
+    # same spot for minutes is NOT included). MapAnything still uses the 0.98 keyframes
+    # (selected_frames.json) for poses. The 0.99 set is a SUPERSET-in-spirit: it gives DA3 depth
+    # for every frame the dense-fusion step will need, without the redundancy of all-blur-valid.
     da3_dense_frames_path = None
     try:
-        if blur_on:
+        fcfg = dict(config.get("frame_selection", {}) or {})
+        _dense_thr = fcfg.get("dino_threshold_dense", 0.99)
+        _dpath = frames_dir / "da3_frames.json"
+        if mode == "dino" and blur_on:
+            from frame_selector import dino_select_keyframes
+            fcfg["dino_threshold"] = _dense_thr     # 0.99 — denser than the 0.98 keyframes
+            _sel = dino_select_keyframes(str(frames_dir), fcfg)
+            _files = _sel.get("selected_files", [])
+            with open(_dpath, "w") as _f:
+                json.dump({"version": "2.0", "method": f"dino_dense_{_dense_thr}",
+                           "total_frames": _sel.get("total_frames", len(_files)),
+                           "selected_count": len(_files), "selected_files": _files}, _f)
+            da3_dense_frames_path = str(_dpath)
+            pipe.send_log(f"DA3-dense set: DINO {_dense_thr} → {len(_files)} frames "
+                          f"(keyframes + deduped inter-keyframe) → da3_frames.json")
+        elif blur_on:
             from frame_selector import _load_valid_frame_list
             _valid = _load_valid_frame_list(frames_dir)  # blur-valid basenames
-            _dpath = frames_dir / "da3_frames.json"
             with open(_dpath, "w") as _f:
                 json.dump({"version": "2.0", "method": "blur_valid_dense",
                            "total_frames": len(_valid), "selected_count": len(_valid),
                            "selected_files": sorted(_valid,
                                key=lambda f: int(os.path.splitext(os.path.basename(f))[0]))}, _f)
             da3_dense_frames_path = str(_dpath)
-            pipe.send_log(f"DA3-dense frame set: {len(_valid)} blur-valid frames "
-                          f"(excludes blurry) → da3_frames.json")
+            pipe.send_log(f"DA3-dense set: {len(_valid)} blur-valid frames → da3_frames.json")
         else:
             pipe.send_log("blur_filter OFF → DA3 dense over ALL frames on disk")
     except Exception as e:
@@ -165,6 +183,41 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
                          recon_cfg, config, session_path=session_path, cond=True)
     else:
         _run_mapanything(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
+
+    # ── Step 4 (opt-in): dense pose densification + fusion ("ventana-VGGT") ──
+    # Anchor the non-keyframe DA3 depths to the VGGT keyframe poses and back-project
+    # them → extra cloud points with inter-keyframe coverage, written as a chunk PLY
+    # that CloudCompPy merges. Runs BEFORE CloudCompPy → the cleaned cloud (and hence
+    # the TSDF, which is masked to it) comes out MORE COMPLETE. Opt-in + non-fatal.
+    if (recon_cfg.get("dense_fusion", {}) or {}).get("enabled"):
+        try:
+            _run_dense_fusion(pipe, frames_dir, output_dir, config, recon_cfg)
+        except Exception as e:
+            pipe.send_log(f"[dense-fusion] skipped ({e}) — cloud unchanged", level="warning")
+
+
+def _run_dense_fusion(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
+                      config: dict, recon_cfg: dict):
+    """Run reconstruction/dense_pose_fusion.py in the mapanything env (it needs the
+    MapAnything model). Streams its stdout to the pipe. Writes chunk_998_densefusion.*
+    for CloudCompPy to merge."""
+    import subprocess, sys, tempfile, json as _json
+    dcfg = recon_cfg.get("dense_fusion", {}) or {}
+    py = dcfg.get("python", "/workspace/miniforge3/envs/mapanything/bin/python")
+    script = Path(__file__).resolve().parent.parent / "reconstruction" / "dense_pose_fusion.py"
+    # Pass the live config via a temp JSON (dense_fusion + frame_selection params).
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+        _json.dump(config, tf); cfg_path = tf.name
+    pipe.send_progress(50, "Dense fusion: densifying non-keyframe poses...", stage="reconstruction")
+    pipe.send_log("[dense-fusion] starting (ventana-VGGT) — anchors non-keyframe DA3 depths")
+    proc = subprocess.Popen(
+        [py, str(script), "--output-dir", str(output_dir), "--frames-dir", str(frames_dir),
+         "--config", cfg_path],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    for line in proc.stdout:
+        pipe.send_log(line.rstrip())
+    rc = proc.wait()
+    pipe.send_log(f"[dense-fusion] exit={rc}")
 
 
 def _find_stray_dir(session_path: Path) -> Path:

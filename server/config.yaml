@@ -108,6 +108,11 @@ frame_selection:
                                        # MORE keyframes = denser overlap. 0.98 (was 0.975) → denser
                                        # keyframe set: better VGGT pose overlap + denser cloud, and
                                        # tighter gaps for the DA3-dense pose interpolation.
+  dino_threshold_dense: 0.99           # DA3's DENSER set (da3_frames.json): keyframes + the extra
+                                       # inter-keyframe frames that add coverage, DEDUPED. DA3 runs on
+                                       # THIS (0.99); MapAnything uses the 0.98 keyframes above. The
+                                       # extra frames (0.99 \ 0.98) get their poses refined by ICP
+                                       # (dense_fusion) and feed the TSDF as DA3 depth.
   dino_device: "cuda"                  # "cuda" | "cpu" (auto-falls back)
 
   # Legacy H/F ratio (used if method=hf_ratio or DINO fails)
@@ -262,32 +267,58 @@ tsdf:
   # already stripped from the cloud — integrating it made the mesh grow streaks and
   # phantom surfaces the cloud doesn't have ("no copia la nube" / "líneas incorrectas").
   # With raster ON every depth sample IS a cleaned cloud point → the mesh copies the cloud.
-  rasterize_cloud_depth: false # DENSE depth mode (the old flat/continuous mesh): integrate
-                              # MapAnything's dense per-frame depth (matches the cloud — it
-                              # built it) masked to the cloud, instead of z-buffering sparse
-                              # cloud points (which fragments the surface into small patches).
-  cloud_splat_radius: 1        # px splat (same z) — fills single-point gaps so the mesh
-                              # coverage matches the cloud's surface density
+  rasterize_cloud_depth: false # DENSE depth (solid continuous surface). Raster z-buffered sparse
+                              # cloud points → 3.5M disconnected fragments (dust) + 83m bridge tris on
+                              # test4 — wrong technique here. Dense gives ONE connected surface.
+                              # points back into each frame and integrate THAT. Unlike raw dense
+                              # depth (capped at reliable_depth_m=8m by auto_tune → drops the far
+                              # half of long scans seen from >8m away, the test4 missing-tail bug),
+                              # the clean cloud has no far-noise, so auto_tune opens depth_trunc to
+                              # the full cloud diagonal → the WHOLE cloud meshes. Tradeoff: sparse
+                              # regions can fragment into patches — raise cloud_splat_radius if so.
+  cloud_splat_radius: 1        # (moot in dense mode) px splat (same z) — fills single-point gaps
+                              # coverage matches the cloud's surface density. 2 (was 1) closes
+                              # the pinhole gaps raster leaves between sparse projected points →
+                              # fewer "cloud-here-but-no-mesh" holes in the near zone.
   conf_min_norm: 0            # OFF this run — no confidence filtering anywhere (postprocessing
                               # conf_min_norm is also 0). The literature-driven experiment: with
                               # blur+DINO+asymmetric reconstruction, SEE the raw cloud quality
                               # before re-introducing any gate. (Also avoids double-filtering once
                               # CloudCompy gates at source.)
   cleaned_cloud_dilate: 3     # legacy raw-depth path only (ignored when raster is on)
-  depth_trunc: 100.0         # raster mode: only a loose sanity bound (the cloud has no
-                             # far phantoms to clip); legacy mode: max integration distance
+  depth_trunc: 100.0         # UPPER bound; auto_tune caps it to reliable_depth_m (8m). With auto_tune ON this is
+                             # tightened per-scene to reliable_depth_m (far neural depth is noisy).
   depth_min: 0.05            # only drop sensor-touching artifacts
+  # ── AUTO-TUNE: adapt scale-sensitive params to the scene (measured from the cloud) ──
+  # A fixed config can't serve a 5m room AND a 26m corridor. Before integrating, measure the
+  # cloud's extent and tighten depth_trunc + scale decimate_target accordingly.
+  auto_tune: true
+  reliable_depth_m: 8.0      # neural depth reliable to ~8m → auto_tune caps depth_trunc here.
+                             #          this. 150 fused noisy far depth → fuzzy/streaky. cameras stop at
+                             # Z76.8, cloud goes to 106, seen from ~18-30m) so the far half integrates as a
+                             # SOLID surface. Far depth is a bit fuzzier but it's a surface, not missing.
+                             # capped to min(this, depth_trunc) so far NOISY depth isn't fused (the
+                             # "fuzzy/thick walls on big scenes" fix). Raise if depth stays sharp far.
+  max_decimate: 4000000      # ceiling for the auto-scaled decimate_target. Big scenes scale UP from
+                             # decimate_target (∝ scene diagonal) so they keep detail, up to this cap.
   da3_conf_percentile: 0     # raster mode: moot (cloud already filtered); legacy: conf re-filter
-  tsdf_weight_thresh: 2.0    # require ≥2 views per voxel. THIS IS THE FIX FOR THE "lines in the
-                             # middle": weight=1 meshed every SINGLE-VIEW voxel, including the
-                             # flying-pixels at silhouette edges that no other view confirms →
-                             # thin floating sheets/lines. weight≥2 drops them (need 2 views to
-                             # agree). fill_holes (below) recovers the genuine coverage. (Was 1.0
-                             # for "max coverage" but that traded clean for noise — wrong call.)
-  fill_holes: false          # OFF with texrecon — texrecon does NOT texture the filled holes
-                             # (they have no source view) → scattered GREY patches in the atlas.
-                             # Coverage must come from geometry (sdf_trunc + not deleting clusters),
-                             # not from hole-fill. (Only safe to enable under vertex_gpu colouring.)
+  tsdf_weight_thresh: 2.0    # back to 2 for DENSE depth: drops single-view flying pixels at
+                             # silhouettes (the real "lines in the middle"). (1.0 was only safe in raster.)
+                             # the middle" — single-view FLYING PIXELS from RAW neural depth at
+                             # silhouette edges. BUT in raster mode (rasterize_cloud_depth: true)
+                             # the integrated depth IS the already-clean cloud, so there are NO
+                             # flying pixels to drop — requiring 2 views then just DELETES real
+                             # surface the cloud captured from a single frame (grazing/edge/far
+                             # coverage) → "cloud-here-but-no-mesh" holes. With raster, weight=1 is
+                             # both safe and necessary for completeness. ⚠ If you switch back to
+                             # raw depth (rasterize_cloud_depth: false), set this back to 2.0.
+  fill_holes: false          # OFF (known-good): texrecon leaves filled holes GREY. Coverage comes
+                             # from the cloud (dense_fusion), not hole-fill.
+                             # (only adds patch triangles, leaves existing geometry exact). Guard
+                             # rejects a runaway fill (>50% tris) so the real empty band stays open.
+                             # Cost: filled patches have no source photo → texrecon leaves them GREY.
+  fill_hole_size: 0.25       # max hole boundary size to fill (m). 0.25 closes dropouts/small gaps;
+                             # keep modest so real openings (doors/windows) and the empty band stay open.
   edge_thresh: 0.05          # cull flying pixels at depth discontinuities (silhouettes).
                              # ACTIVE in DA3-dense mode (depth_source: da3) — DA3 raw depth has
                              # flying pixels and there's no cloud mask to drop them, so the 8cm→5cm
@@ -297,7 +328,10 @@ tsdf:
                              # fine voxel isolates each patch → the mesh comes out as disconnected
                              # "brushstrokes". A coarser voxel + wide truncation MERGES neighbouring
                              # patches into one continuous surface (what the working version used).
-  sdf_trunc: 0.060           # 5× voxel (0.012). LITERATURE (deep-research, verified): truncation
+  sdf_trunc: 0.06            # 5× voxel — back to the dense-mode value (0.10 was a raster patch-merge
+                             # hack). LITERATURE: 4-8× voxel is the norm; for dense depth 5× is clean.
+                             # (fixed the "fragmented mesh / speck-cleanup >5%" on test4). Was 0.060.
+                             # 0.060 = 5× voxel (0.012). LITERATURE (deep-research, verified): truncation
                              # of 4-8× voxel is the norm (andyzeng 5×, VoxBlox 4×, Open3D 8×); the
                              # old 3.5× was TOO LOW → fragmented surface → disconnected clusters →
                              # the cluster-cleanup then DELETED them (the missing 2m). Raising it
@@ -312,7 +346,10 @@ tsdf:
                              # neighbour-averaging, which blurred detail and shrank corners).
   smooth_iterations: 5       # taubin is gentle per-iter (no shrink) → ~5 ≈ simple ×2 in
                              # denoise strength but keeps sharp features.
-  decimate_target: 0         # B — keep the FULL marching-cubes resolution (no decimation).
+  decimate_target: 4000000   # decimate BEFORE texturing → ~5× less texrecon work + much smaller
+                             # GLB (detail lives in the texture, Polycam-style). Was 0 (full 21M
+                             # tris) which made texrecon crawl and the GLB huge. auto_tune scales
+                             # this up ∝ scene diagonal, capped at max_decimate (4M).
                              # vertex_gpu texturing keeps geometry exact, so detail is not
                              # spent on a texture atlas. ⚠️ Larger GLB — set a cap (e.g.
                              # 2_500_000) if the viewer struggles.
@@ -330,7 +367,17 @@ tsdf:
                              # per-face view selection + photo-consistency MRF labeling + global
                              # colour adjustment → sharp texture on a decimated mesh (detail lives
                              # in the texture, Polycam-style). vertex_gpu = fallback per-vertex bake.
-  depth_source: auto         # which per-frame depth the TSDF integrates:
+  texture_max_views: 400     # texrecon view cap (evenly subsampled). 400 spread over a 62m corridor
+                             # thins to ~1 view/2.4 frames → patchy/untextured swaths. With auto_tune
+                             # ON this scales UP ∝ scene diagonal (10m ref), capped at the ceiling below,
+                             # so long scans keep view density. Higher ⇒ better coverage but slower MRF.
+  texture_max_views_ceiling: 600   # hard cap on the auto-scaled view count (texrecon cost grows with it).
+                                   # 600 (was 1200) ~halves the View-selection MRF — the slow stage.
+  depth_source: da3_frames   # da3_frames → DA3 per-frame depth for ALL posed frames (keyframes +
+                             # the inter-keyframe frames localized by dense_fusion), masked to the
+                             # cloud, real poses, NO interpolation. This is what integrates the extra
+                             # frames so the mesh gains inter-keyframe coverage. (was "auto" =
+                             # MapAnything keyframe-only depth → ignored the extra frames.)
                              #   "auto"        → MapAnything chunk depth (294×518), else DA3, else LiDAR
                              #                   MASKED to the cleaned cloud → mesh COPIES the cloud (clean).
                              #                   ← REVERTED from "da3": dense mode dropped the cloud mask and
@@ -360,6 +407,12 @@ tsdf:
 # denser than the 518×294 neural depth the TSDF integrates — so it captures the cloud's
 # full detail and is watertight. Writes output/tsdf/scene_poisson/scene_poisson.glb, which
 # appears as its own toggleable row alongside the TSDF mesh.
+#
+# NOTE: this MUST be its own top-level `poisson:` mapping. Without the header below these
+# keys folded into `tsdf:` above, where `decimate_target: 1500000` SILENTLY clobbered the
+# tsdf `decimate_target: 0` (so the TSDF mesh was decimated despite "keep FULL resolution"),
+# and the Poisson worker — which reads config['poisson'] — saw nothing and used code defaults.
+poisson:
   max_points: 2000000        # cheap uniform pre-downsample cap before any hash-based op or
                              # Poisson. KEEP ≤~2M: orient_normals_consistent_tangent_plane builds
                              # a global MST over every point and gets very slow / looks hung above
@@ -391,6 +444,23 @@ tsdf:
 reconstruction:
   backend: "mapanything"                # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
+
+  # ── Dense frame fusion (frame-to-keyframe ICP) — cloud-stage completeness ──
+  # VGGT-Long poses+cloud use KEYFRAMES only → inter-keyframe holes the TSDF inherits.
+  # The extra frames are LOW-PARALLAX (that's why they weren't keyframes) → multi-view
+  # (VGGT) on them degrades ("onion"). Instead this LOCALIZES each extra frame by colored
+  # ICP against the nearest keyframe's depth cloud (init at the keyframe pose → anchored,
+  # no drift, no triangulation), then back-projects its DA3 depth → extra cloud coverage
+  # CloudCompPy merges → MORE COMPLETE cloud → TSDF inherits it. Keyframes/VGGT-Long are
+  # NOT touched. Confidence filtering is IDENTICAL to the backend's. Runs in the recon env.
+  dense_fusion:
+    enabled: true                       # OPT-IN. true → run after the backend, before CloudCompPy.
+    dedup_cosine: 0.99                  # keep a non-keyframe only if its DINO cosine to the last-kept
+                                        # fusion frame is < this → drops "filmed the same spot for
+                                        # minutes" redundancy ("not all frames, just new coverage").
+    min_fitness: 0.3                    # reject an ICP registration whose overlap (fitness) is below
+                                        # this → a frame that can't be reliably localized is skipped.
+    # python: /workspace/miniforge3/envs/mapanything/bin/python   # override the env if needed
   frames_selector: "dino"              # SINGLE source of frame-set mode (writes selected_frames.json):
                                        #   "dino"   = blur + DINO-cosine keyframes (params in frame_selection:)
                                        #   "stride" = uniform 1-of-N subsample (mapanything.frame_stride)
@@ -423,8 +493,10 @@ reconstruction:
     align_method: "sim3"               # "sim3" | "se3" | "scale+se3"
     align_lib: "torch"                 # "numpy" (CPU) | "triton"/"torch" (GPU)
     depth_threshold: 20.0              # max depth (m)
-    conf_threshold_coef: 0.75          # DA3/VGGT recommended default (drop conf < 0.75×mean)
-    conf_min_normalized: 0.25          # DA3 recommended floor on normalized confidence
+    conf_threshold_coef: 0.75          # VGGT-Long's OWN cloud-point filter (its base_config.yaml
+                                       # default = 0.75): keep conf >= 0.75×mean. Native to the vendor
+                                       # (loop_utils/sim3utils.save_confident_pointcloud), NOT a STAC
+                                       # invention — leave it.
     sample_ratio: 1.0
     save_depth_conf_result: true       # save per-frame depth+conf .npz
 
@@ -454,11 +526,12 @@ reconstruction:
     da3_prior_conf_percentile: 40      # DA3 recommended default (conf_thresh_percentile=40):
                                         # drop the bottom 40% least-confident DA3 prior pixels
                                         # per frame before feeding MapAnything (was 0 = raw/noisy).
-    map_conf_percentile: 40            # drop the bottom 40% least-confident per chunk — the
-                                        # DA3/MapAnything model default (conf_thresh_percentile
-                                        # =40.0). Sweet spot: cuts noise without holing far/
-                                        # low-texture geometry (0 = off). MapAnything
-                                        # the bottom N% by model confidence per chunk. 0 = off.
+    map_conf_percentile: 10            # MapAnything's confidence_percentile — drop the bottom N%
+                                        # by model confidence during inference. CORRECTED 40→10:
+                                        # 10 is MapAnything's ACTUAL default (base_model.py:413
+                                        # `.get('map_conf_percentile', 10)`). The old 40 conflated
+                                        # this with DA3's conf_thresh_percentile=40 (a different
+                                        # param) → it was 4× too aggressive (less complete). 0 = off.
     da3_prior_use_poses: false         # "full prior": also feed DA3's per-frame poses
                                         # (camera_poses) to MapAnything, not just depth+K.
                                         # Forced ON by backend "hybrid_cond". Only meaningful

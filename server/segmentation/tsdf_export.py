@@ -1238,10 +1238,29 @@ def export_tsdf_scene(
     fill_hole_size: float = 0.1,         # max hole size to fill when enabled
     decimate_target: int = 1_500_000,    # target tri count before texturing (0 = off)
     texture: bool = True,                # apply photo colour/texture
+    texture_max_views: int = 400,        # texrecon view cap (evenly subsampled). 400 over a
+                                         # 62m corridor thins to ~1 view/2.4 frames → patchy
+                                         # texture on long scans. With auto_tune ON this is
+                                         # scaled UP ∝ scene diagonal (vs a 10m reference),
+                                         # capped at texture_max_views_ceiling, so long scenes
+                                         # keep view density. More views ⇒ better coverage but
+                                         # slower texrecon MRF (the bottleneck). 0 = use bake default.
+    texture_max_views_ceiling: int = 1200,  # hard cap on the auto-scaled view count (texrecon
+                                         # MRF cost grows with it — keep runtime sane).
     texture_mode: str = "vertex_gpu",    # "vertex_gpu" (full-mesh multi-view photo
                                          # blend, GPU, keeps geometry) | "texrecon"
                                          # (CPU UV atlas) | "none"
     use_refined_poses: bool = True,      # DA3 loop-closure poses, not raw ARKit
+    auto_tune: bool = False,             # measure the cleaned cloud BEFORE integrating and adapt
+                                         # scale-sensitive params to the scene — a 5 m room and a
+                                         # 26 m corridor can't share fixed params. Currently tunes
+                                         # depth_trunc (cap to the neural-depth reliable range so
+                                         # far noisy depth isn't fused → the "fuzzy/thick" fix) and
+                                         # decimate_target (scale with scene size so big scenes keep
+                                         # detail). Manual values are the UPPER bounds it tightens.
+    reliable_depth_m: float = 8.0,       # neural depth (≈294×518) is reliable to ~this range;
+                                         # auto_tune caps depth_trunc to min(this, depth_trunc).
+    max_decimate: int = 4_000_000,       # ceiling for the auto-scaled decimate_target (viewer/RAM).
     depth_source: str = "auto",          # which per-frame depth the TSDF integrates:
                                          #   "auto"        → MapAnything chunk depth if present,
                                          #                   else DA3, else LiDAR (legacy default)
@@ -1376,12 +1395,18 @@ def export_tsdf_scene(
     # Backend-driven: VGGT-Long ('mapanything') depth lives in maplong_run chunk .npy.
     # depth_source="da3" forces the DA3 dense per-frame source (skip MapAnything);
     # "mapanything" forces the chunk depth; "auto" keeps the legacy priority.
+    # depth_source="da3_frames": use DA3's per-frame depth for ALL posed frames (da3_run/
+    # results_output, which now covers the DINO-0.99 set: keyframes + the inter-keyframe
+    # frames localized by dense_fusion), MASKED to the cloud, with the REAL poses (keyframe
+    # poses + the dense_fusion-appended ones). NO interpolation, NO spatial tiling — unlike
+    # "da3" (dense_da3). This is what lets the TSDF integrate the extra frames' depth so the
+    # mesh gains inter-keyframe coverage. MapAnything's keyframe-only depth is skipped.
     mapany_src = None
-    if _ds != "da3" and ((backend or "").startswith("mapanything")
-                         or (output_dir / "maplong_run").exists()):
+    if _ds not in ("da3", "da3_frames") and ((backend or "").startswith("mapanything")
+                                             or (output_dir / "maplong_run").exists()):
         mapany_src = _resolve_mapanything_depth(output_dir, conf_percentile=_cp)
-    if _ds == "da3" and da3_depth is None:
-        logger.warning("[TSDF-scene] depth_source='da3' but no DA3 per-frame depth found "
+    if _ds in ("da3", "da3_frames") and da3_depth is None:
+        logger.warning(f"[TSDF-scene] depth_source='{_ds}' but no DA3 per-frame depth found "
                        "(da3_run/results_output/frame_*.npz) — falling back to auto")
     depth_loader = None
     frame_loader = None
@@ -1531,6 +1556,12 @@ def export_tsdf_scene(
                             f"points, {len(cc_frame_pix)} frames, "
                             f"trace {cc_ply_hw[1]}x{cc_ply_hw[0]}")
 
+    # FAITHFUL cloud-raster active? (computed here, BEFORE auto_tune, because auto_tune's
+    # depth_trunc cap must NOT apply in raster mode — the z-buffered depth IS clean cloud
+    # geometry, so capping it to the neural-depth reliable range would silently drop the
+    # real far surface the cloud captured from >reliable_depth_m away.)
+    raster_active = bool(rasterize_cloud_depth and cc_frame_pix is not None)
+
     # Cloud bbox — used to bound the TSDF to the cloud's extent (esp. in the unmasked
     # fallback, where depth_trunc=100m would otherwise mesh far beyond the cloud).
     cloud_bbox = None
@@ -1544,9 +1575,51 @@ def export_tsdf_scene(
                             f"{_diag * 1.1:.1f}m (cloud diagonal — unmasked bound)")
                 depth_trunc = _diag * 1.1
 
+    # ── AUTO-TUNE: adapt scale-sensitive params to the scene the cloud reveals ──
+    # A fixed config can't serve a 5 m room AND a 26 m corridor: the neural depth
+    # (≈294×518) is noisy past a few metres, so a 100 m depth_trunc fuses far junk →
+    # "fuzzy/thick" walls on big scenes; and a 1.5 M-tri decimate over-coarsens a big
+    # scene. Measure the cloud once and tighten depth_trunc + scale decimate_target.
+    if auto_tune and cloud_bbox is not None:
+        _mn, _mx = cloud_bbox
+        diag = float(np.linalg.norm(_mx - _mn))
+        ext = _mx - _mn
+        # depth_trunc:
+        #  • RAW-depth mode: cap to the neural-depth reliable range — far noisy per-frame
+        #    depth is what blurs big scenes (the "fuzzy walls" fix).
+        #  • RASTER mode: the integrated depth IS the already-clean cloud z-buffered back
+        #    in, so there is NO far-noise to cap against — capping it to reliable_depth_m
+        #    silently DROPS real far surface the cloud captured from farther away (test4:
+        #    a 2.36M-pt cluster 18-30m from the cameras was culled, the far half missing).
+        #    Instead open it up to cover the whole cloud (diagonal +10%).
+        if raster_active:
+            _dt_new = max(float(depth_trunc), diag * 1.1)
+        else:
+            _dt_new = min(float(depth_trunc), max(float(reliable_depth_m), 2.0))
+        # decimate_target: scale ∝ scene diagonal vs a ~10 m reference, floor at the
+        # configured value, ceil at max_decimate → big scenes keep detail, small don't bloat.
+        _REF_DIAG = 10.0
+        _dec_new = int(np.clip(decimate_target * (diag / _REF_DIAG),
+                               decimate_target, max_decimate)) if decimate_target > 0 else 0
+        # texture_max_views: scale ∝ scene diagonal too (same reference), floor at the
+        # configured value, ceil at texture_max_views_ceiling — a long corridor needs more
+        # views than a small room or texrecon leaves large patchy/untextured swaths.
+        _tmv_new = (int(np.clip(texture_max_views * (diag / _REF_DIAG),
+                                texture_max_views, max(texture_max_views, texture_max_views_ceiling)))
+                    if texture_max_views > 0 else texture_max_views)
+        logger.info(f"[TSDF-scene] AUTO-TUNE: scene diag={diag:.1f}m "
+                    f"extent={ext[0]:.1f}×{ext[1]:.1f}×{ext[2]:.1f}m  "
+                    f"→ depth_trunc {depth_trunc:.1f}→{_dt_new:.1f}m  "
+                    f"decimate {decimate_target:,}→{_dec_new:,}  "
+                    f"tex_views {texture_max_views}→{_tmv_new}")
+        depth_trunc = _dt_new
+        decimate_target = _dec_new
+        texture_max_views = _tmv_new
+
     # FAITHFUL cloud-raster integration is active only when we have per-frame cloud
     # traceability (cc_frame_pix); otherwise we fall back to raw-depth integration.
-    raster_active = bool(rasterize_cloud_depth and cc_frame_pix is not None)
+    # (raster_active was computed above, before auto_tune, so the depth_trunc cap could
+    # be skipped in raster mode.)
     if raster_active:
         depth_kind = (f"cleaned-cloud raster (splat={cloud_splat_radius}px) "
                       f"[{depth_kind} → K/RGB only]")
@@ -1617,9 +1690,13 @@ def export_tsdf_scene(
     # re-loads all 1245 frames). Populated after the tiling split (axis known).
     frame_axis_extent: Dict[int, tuple] = {}
     # Extract-safe active-block ceiling: Open3D's marching-cubes ABORTS the process on
-    # a too-large grid (~36k blocks). Dense fill balloons block count, so stop a tile
-    # before it gets there (a tiny gap in one slab beats crashing the whole mesh).
-    _EXTRACT_SAFE_ACTIVE = 12_000
+    # a too-large grid. PROBED on CPU extract (Open3D 0.19, vol.cpu().extract_…):
+    # clean at 51,703 active blocks, SEGFAULTS at 61,201 → real ceiling ≈ 55k (the old
+    # ~36k figure was the GPU-extract era, before the move to CPU extract). 45k leaves a
+    # safe margin under the 52k-clean / 61k-crash band while letting tiles grow far bigger
+    # than the old 12k → fewer tiles on long scenes. Applies to ALL paths (a too-big
+    # legacy tile crashes the extract exactly like a dense one), not just dense_da3.
+    _EXTRACT_SAFE_ACTIVE = 45_000
 
     def _integrate(volume, cc_fp, tile_bounds=None):
         """Integrate every posed frame into `volume`. `cc_fp` maps frame → (rows,
@@ -1647,6 +1724,17 @@ def export_tsdf_scene(
             # split) most frames miss most tiles, so this avoids thousands of wasted
             # per-frame npz reads.
             if use_raster and cc_fp.get(fidx) is None:
+                skipped_empty += 1
+                continue
+
+            # LEGACY MASKED mode (the default scene path: raster OFF, not dense): a
+            # frame with no cleaned-cloud points in THIS tile is masked away later
+            # (its mask comes out empty), but only AFTER frame_loader() has paid to
+            # np.load its depth chunk. With N tiles every tile re-loaded ALL frames
+            # (test7: 4×978 = 3,912 loads for 935 integrated). Skip it up front —
+            # equivalent to the post-load empty-mask skip below, minus the I/O.
+            if (cc_fp is not None and not use_raster and not dense_da3
+                    and cc_fp.get(fidx) is None):
                 skipped_empty += 1
                 continue
 
@@ -1819,17 +1907,20 @@ def export_tsdf_scene(
             # and that error is async — it surfaces later in extract, killing the whole
             # process. Poll the live block count and stop THIS tile before it overflows.
             # Conservative tile sizing should keep this from ever firing.
-            if n_local % 10 == 0:
+            if n_local % 5 == 0:   # poll every 5 frames — bound the overshoot between
+                                   # checks well under the 52k-clean / 61k-crash band
                 try:
                     _active = int(volume.hashmap().size())
                 except Exception:
                     _active = -1
-                # Dense mode: stop at the EXTRACT-safe ceiling, not the hash cap — the
-                # extract aborts long before the hash fills. A stopped tile loses a few
-                # late frames' contribution to that slab (minor) vs crashing the run.
-                if dense_da3 and 0 <= _EXTRACT_SAFE_ACTIVE < _active:
+                # Stop at the EXTRACT-safe ceiling (ALL paths, not just dense) — the
+                # extract aborts long before the hash fills, and a too-big legacy tile
+                # crashes it exactly like a dense one. A stopped tile loses a few late
+                # frames' contribution to that slab (minor) vs crashing the run. The
+                # occ-based pre-split sizes tiles well under this, so it rarely fires.
+                if 0 <= _EXTRACT_SAFE_ACTIVE < _active:
                     logger.warning(
-                        f"[TSDF-scene] DA3-DENSE tile hit extract-safe ceiling "
+                        f"[TSDF-scene] tile hit extract-safe ceiling "
                         f"({_active:,}/{_EXTRACT_SAFE_ACTIVE:,} blocks) after {n_local} "
                         f"frames — stopping tile (finer tiling would avoid this)")
                     break
@@ -1887,15 +1978,19 @@ def export_tsdf_scene(
         elif isinstance(_t, str) and _t.strip().lower() == "off":
             n_tiles = 1
         else:  # "auto" — the binding limit is NOT the hash capacity but Open3D's
-               # extract_triangle_mesh(), which SEGFAULTS on a large grid (#4824): a
-               # 36,881-active-block tile aborted the process, while ~2,700 extracted
-               # fine. So cap each tile at a small, extract-safe occupied-block count
-               # (≈2× the proven-safe size) — NOT 0.25·block_count, which was sized for
-               # the (much larger) hash capacity and let tiles grow until extract died.
-            _EXTRACT_SAFE_OCC = 7_000   # occupied 16³ blocks/tile → ~8-9k active. PROBED
-                                        # with real data: extract is clean up to 13,234
-                                        # active blocks and aborts at 36,881, so this
-                                        # leaves a wide margin while minimizing tile count.
+               # extract_triangle_mesh(), which SEGFAULTS on a large grid. So cap each
+               # tile at an extract-safe occupied-block count — NOT 0.25·block_count,
+               # which was sized for the (much larger) hash capacity and let tiles grow
+               # until extract died.
+            _EXTRACT_SAFE_OCC = 20_000  # occupied 16³ blocks/tile. RE-PROBED on the CPU
+                                        # extract path (Open3D 0.19): clean to 51,703
+                                        # active, crash at 61,201 → ceiling ≈55k (the old
+                                        # 7k cap was the GPU-extract era and over-tiled
+                                        # long scans). In the non-dense masked path active
+                                        # ≈ occ (test7: 7k occ → ≤7.2k active), so 20k occ
+                                        # → ≤~25k active, well under 45k EXTRACT_SAFE. This
+                                        # cuts test7 from 4 tiles → 2 (fewer seams + less
+                                        # per-tile re-scan); dense inflates via _dense_mult.
             usable = max(1.0, min(float(tsdf_block_count) * 0.25,
                                   float(_EXTRACT_SAFE_OCC)))
             # DA3-DENSE fills FAR more blocks than the sparse cloud's occupied set —
@@ -2219,6 +2314,7 @@ def export_tsdf_scene(
                 intrinsics_map=tex_intrinsics,
                 name_map=kf_name_map,  # keyframe-index → real JPG (sparse originals)
                 out_glb=glb_path,
+                **({"max_views": int(texture_max_views)} if texture_max_views > 0 else {}),
             )
             textured = res is not None
             if not textured:
