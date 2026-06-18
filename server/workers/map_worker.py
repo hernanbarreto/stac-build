@@ -141,8 +141,23 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         if mode == "dino" and blur_on:
             from frame_selector import dino_select_keyframes
             fcfg["dino_threshold"] = _dense_thr     # 0.99 — denser than the 0.98 keyframes
-            _sel = dino_select_keyframes(str(frames_dir), fcfg)
-            _files = _sel.get("selected_files", [])
+            # segment_id="dense" → writes selected_frames_segdense.json (a throwaway), NOT the main
+            # selected_frames.json. Without it dino_select_keyframes CLOBBERS selected_frames.json
+            # (the 0.98 keyframes) with the 0.99 set → MapAnything would run on 0.99 (the bug).
+            _sel = dino_select_keyframes(str(frames_dir), fcfg, segment_id="dense")
+            (frames_dir / "selected_frames_segdense.json").unlink(missing_ok=True)  # drop throwaway
+            _files = list(_sel.get("selected_files", []))
+            # UNION with the 0.98 keyframes: the two DINO selections are INDEPENDENT sequential
+            # runs, so a 0.98 keyframe is NOT guaranteed to be in the 0.99 set. DA3 must cover
+            # every keyframe (else dense_fusion has no ICP target there → fillers skipped). Add
+            # any missing keyframes so da3_frames is a true superset of selected_frames.
+            try:
+                _kf = json.load(open(sf_path)).get("selected_files", []) if sf_path.exists() else []
+                _have = set(_files)
+                _files = _files + [n for n in _kf if n not in _have]
+            except Exception:
+                pass
+            _files = sorted(set(_files), key=lambda f: int(os.path.splitext(os.path.basename(f))[0]))
             with open(_dpath, "w") as _f:
                 json.dump({"version": "2.0", "method": f"dino_dense_{_dense_thr}",
                            "total_frames": _sel.get("total_frames", len(_files)),

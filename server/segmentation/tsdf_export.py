@@ -1402,15 +1402,60 @@ def export_tsdf_scene(
     # "da3" (dense_da3). This is what lets the TSDF integrate the extra frames' depth so the
     # mesh gains inter-keyframe coverage. MapAnything's keyframe-only depth is skipped.
     mapany_src = None
-    if _ds not in ("da3", "da3_frames") and ((backend or "").startswith("mapanything")
-                                             or (output_dir / "maplong_run").exists()):
+    if _ds != "da3" and ((backend or "").startswith("mapanything")
+                         or (output_dir / "maplong_run").exists()):
         mapany_src = _resolve_mapanything_depth(output_dir, conf_percentile=_cp)
     if _ds in ("da3", "da3_frames") and da3_depth is None:
         logger.warning(f"[TSDF-scene] depth_source='{_ds}' but no DA3 per-frame depth found "
                        "(da3_run/results_output/frame_*.npz) — falling back to auto")
     depth_loader = None
     frame_loader = None
-    if mapany_src is not None:
+
+    def _resize_nn_2d(a, TH, TW):
+        H, W = a.shape
+        yi = np.clip((np.arange(TH) * H / TH).astype(np.int64), 0, H - 1)
+        xi = np.clip((np.arange(TW) * W / TW).astype(np.int64), 0, W - 1)
+        return a[yi][:, xi]
+
+    # HYBRID (depth_source="da3_frames"): MapAnything depth for the KEYFRAMES (consistent with
+    # the cloud, which was built from MapAnything depth+poses), DA3 depth (resized to the
+    # MapAnything grid) for the inter-keyframe FILLERS that MapAnything never reconstructed.
+    # Each frame's own pose is already in pose_map (keyframes + dense_fusion-appended fillers).
+    if _ds == "da3_frames" and mapany_src is not None:
+        _ma_loader, (depth_h, depth_w) = mapany_src
+        _da3_src = _resolve_da3_frame_source(output_dir, conf_percentile=_cp)
+        if _da3_src is None:
+            frame_loader = _ma_loader
+            depth_kind = "MapAnything (no DA3 per-frame source — keyframes only)"
+            logger.warning("[TSDF-scene] da3_frames: no DA3 per-frame source → keyframes only")
+        else:
+            _da3_loader, _ = _da3_src
+            _mh, _mw = depth_h, depth_w
+
+            def _hybrid(fidx, _ma=_ma_loader, _da3=_da3_loader, _mh=_mh, _mw=_mw):
+                fr = _ma(fidx)                      # keyframe → MapAnything depth (native grid)
+                if fr is not None:
+                    return fr
+                fr = _da3(fidx)                     # filler → DA3 depth, resized to MapAnything
+                if fr is None:
+                    return None
+                d, v, K = fr.get("depth"), fr.get("valid"), fr.get("K")
+                if d is not None and d.shape != (_mh, _mw):
+                    H0, W0 = d.shape
+                    d = _resize_nn_2d(d, _mh, _mw)
+                    if v is not None:
+                        v = _resize_nn_2d(v.astype(np.uint8), _mh, _mw).astype(bool)
+                    if K is not None:
+                        K = np.asarray(K, np.float64).copy()
+                        K[0, 0] *= _mw / W0; K[0, 2] *= _mw / W0
+                        K[1, 1] *= _mh / H0; K[1, 2] *= _mh / H0
+                return {"depth": d, "valid": v if v is not None else (d > 0),
+                        "K": K, "rgb": None, "hw": (_mh, _mw)}
+
+            frame_loader = _hybrid
+            depth_kind = f"HYBRID: MapAnything (keyframes) + DA3 resized→{_mw}x{_mh} (fillers)"
+            logger.info(f"[TSDF-scene] per-frame source: {depth_kind}")
+    elif mapany_src is not None:
         frame_loader, (depth_h, depth_w) = mapany_src
         depth_kind = ("MapAnything/VGGT-Long neural depth"
                       + (f" · conf≥p{da3_conf_percentile:.0f}" if _cp else ""))

@@ -233,6 +233,48 @@ def _register_to_keyframe(src_cam, tgt_world, init_c2w, voxels=(0.04, 0.02, 0.01
     return T, fit
 
 
+def _mapanything_hw(output_dir: Path):
+    """MapAnything's depth resolution (H,W) = the KEYFRAME-cloud resolution. The DA3
+    filler depth (a different, lower res) is resized to THIS before back-projection so
+    the cloud has uniform density + consistent pixel traceability across keyframes and
+    fillers. Returns (H,W) or None (then no resize → DA3 native res)."""
+    run = output_dir / "maplong_run"
+    # 1) any MapAnything chunk .npy → depth (S,H,W) (present right after MapAnything, when
+    #    dense_fusion runs — before the optional aligned-chunk cleanup).
+    for sub in ("_tmp_results_aligned", "_tmp_results_unaligned"):
+        sd = run / sub
+        if not sd.exists():
+            continue
+        for p in sorted(sd.glob("chunk_*.npy")):
+            try:
+                d = np.load(str(p), allow_pickle=True).item()
+                a = np.asarray(d.get("depth"))
+                while a.ndim > 3:
+                    a = a[0]
+                if a.ndim == 2:
+                    a = a[None]
+                return int(a.shape[-2]), int(a.shape[-1])
+            except Exception:
+                continue
+    # 2) fallback: the keyframe cloud's pixel traceability max (chunk_*_origins.npz).
+    for p in sorted(output_dir.glob("chunk_*_origins.npz")):
+        try:
+            z = np.load(p)
+            return int(z["pixel_row"].max()) + 1, int(z["pixel_col"].max()) + 1
+        except Exception:
+            continue
+    return None
+
+
+def _resize_nn(a: np.ndarray, TH: int, TW: int) -> np.ndarray:
+    """Nearest-neighbour resize (H,W)→(TH,TW). NN, not bilinear: depth/conf must NOT be
+    blended across discontinuities. Dependency-free (pure index map)."""
+    H, W = a.shape
+    yi = np.clip((np.arange(TH) * H / TH).astype(np.int64), 0, H - 1)
+    xi = np.clip((np.arange(TW) * W / TW).astype(np.int64), 0, W - 1)
+    return a[yi][:, xi]
+
+
 def densify_and_fuse(output_dir: Path, frames_dir: Path, config: dict) -> Optional[Path]:
     """Main entry — see module docstring."""
     import open3d as o3d
@@ -318,6 +360,12 @@ def densify_and_fuse(output_dir: Path, frames_dir: Path, config: dict) -> Option
     # applying the SAME confidence gate as the cloud; carry REAL conf for CloudCompy.
     logger.info(f"[dense-fusion] confidence gate = conf_threshold_coef={coef} (== backend), "
                 "per frame; CloudCompy conf_min_norm applies after")
+    # Unify the filler depth resolution to MapAnything's (the keyframe-cloud res, the
+    # higher one) so the cloud has uniform density + consistent traceability.
+    _tgt = _mapanything_hw(output_dir)
+    if _tgt:
+        logger.info(f"[dense-fusion] resizing DA3 filler depth → MapAnything res "
+                    f"{_tgt[1]}x{_tgt[0]} (uniform cloud + consistent trace)")
     all_xyz, all_rgb, all_fg, all_pr, all_pc, all_cf = [], [], [], [], [], []
     for f, c2w in dense_poses.items():
         d = depth_loader(f)
@@ -326,6 +374,14 @@ def densify_and_fuse(output_dir: Path, frames_dir: Path, config: dict) -> Option
         depth, K, conf = d
         if conf is None or conf.shape != depth.shape:
             continue
+        if _tgt and depth.shape != _tgt:
+            TH, TW = _tgt
+            H0, W0 = depth.shape
+            depth = _resize_nn(depth, TH, TW)
+            conf = _resize_nn(conf, TH, TW)
+            K = np.asarray(K, np.float64).copy()
+            K[0, 0] *= TW / W0; K[0, 2] *= TW / W0   # scale fx,cx to the new width
+            K[1, 1] *= TH / H0; K[1, 2] *= TH / H0   # scale fy,cy to the new height
         H, W = depth.shape
         vv, uu = np.indices((H, W))
         m = (depth > 0.05) & _conf_keep_mask(conf, coef)
