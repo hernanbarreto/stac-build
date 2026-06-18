@@ -7,3 +7,6 @@
 [submodule "vendor/VGGT-Long"]
 	path = vendor/VGGT-Long
 	url = https://github.com/hernanbarreto/VGGT-Long.git
+[submodule "vendor/depth-anything-3"]
+	path = vendor/depth-anything-3
+	url = https://github.com/hernanbarreto/Depth-Anything-3.git
