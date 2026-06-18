@@ -582,12 +582,13 @@ postprocessing:
   # low-baseline / occluded / blurred regions, which blur-drop + keyframing remove at source. So
   # with cleaner frames the conf tail should be smaller and this gate can likely RELAX without
   # re-admitting noise. No measured curve exists → A/B it on the new cloud, don't lower it blind.
-  # 0.01 = LIGHT gate: drops only the very lowest-confidence tail (≈ conf < min + 1% of range,
-  # ~the noisiest points) while keeping almost everything. Applied at source in CloudCompy before
-  # SOR/voxel. Preserves origins/confidence per point (same code validated at 0.1). Takes effect
-  # on the next FULL reconstruction (re-running cloudcompy alone isn't possible — its chunk inputs
-  # are deleted after baking). tsdf.conf_min_norm stays 0 to avoid double-filtering.
-  conf_min_norm: 0.01
+  # 0 = OFF. The min-max normalization is FRAGILE when the merged cloud mixes confidence
+  # SCALES (dense_fusion DA3 conf 0..13.8 vs MapAnything ~1.5..19): the bulk piles up near the
+  # min, so even 0.01 dropped 92% of points (134M→11M) → the cloud collapsed to 111 frames and
+  # the TSDF came out sparse. The backend ALREADY filters confidence per-source (DA3 p40 +
+  # MapAnything p10 + 0.75×mean on the chunk PLYs), so this CloudCompy gate is a redundant THIRD
+  # filter — leave it OFF. (Was 0.01; re-enable only if you fix the cross-source conf scaling.)
+  conf_min_norm: 0
 
   # Statistical Outlier Removal
   sor_knn: 8                           # neighbors (lower = keeps isolated objects)
