@@ -363,10 +363,12 @@ tsdf:
   tsdf_tile_halo: 0.6        # m of overlap between adjacent tiles — keeps the seam surface
                              # continuous (≥ several × sdf_trunc) before the core-crop merge
   texture: true
-  texture_mode: "texrecon"   # UV-atlas photo texture (MVS-Texturing, Waechter et al. 2014):
-                             # per-face view selection + photo-consistency MRF labeling + global
-                             # colour adjustment → sharp texture on a decimated mesh (detail lives
-                             # in the texture, Polycam-style). vertex_gpu = fallback per-vertex bake.
+  texture_mode: "vertex_gpu" # GPU multi-view photo bake (nvdiffrast, CUDA) → per-VERTEX colour in
+                             # SECONDS (verified is_available()=True on the A100). Switched from
+                             # "texrecon" (MVS-Texturing, CPU, ~10 min — the biggest single CPU cost).
+                             # TRADE-OFF: vertex_gpu colour resolution ≈ the mesh vertex spacing
+                             # (~voxel, 1.2cm) — fast + good for iterating; "texrecon" gives a sharper
+                             # UV atlas for a FINAL render. Switch back to texrecon only for delivery.
   texture_max_views: 400     # texrecon view cap (evenly subsampled). 400 spread over a 62m corridor
                              # thins to ~1 view/2.4 frames → patchy/untextured swaths. With auto_tune
                              # ON this scales UP ∝ scene diagonal (10m ref), capped at the ceiling below,

@@ -205,32 +205,32 @@ def _to_o3d(xyz: np.ndarray, rgb01: Optional[np.ndarray]):
 
 
 def _register_to_keyframe(src_cam, tgt_world, init_c2w, voxels=(0.04, 0.02, 0.01)):
-    """Multiscale COLORED ICP (joint photometric+geometric — robust on flat walls,
-    where pure ICP slides). src in camera frame, tgt in world; init = keyframe c2w.
-    Returns (c2w 4x4, fitness) — fitness in [0,1], higher = better overlap."""
+    """Multiscale COLORED ICP **on the GPU** (Open3D tensor `multi_scale_icp`, CUDA).
+    src in camera frame, tgt in world; init = keyframe c2w. Returns (c2w 4x4, fitness).
+
+    GPU-ONLY by design — there is NO CPU fallback: the legacy CPU colored ICP is
+    unviably slow at this scale (validated: ~35 min for ~380 fillers). If CUDA is not
+    available the run FAILS loudly so the environment gets fixed, never silently degrades."""
     import open3d as o3d
-    T = np.asarray(init_c2w, np.float64).copy()
-    fit = 0.0
-    for v in voxels:
-        s = src_cam.voxel_down_sample(v)
-        t = tgt_world.voxel_down_sample(v)
-        if len(s.points) < 50 or len(t.points) < 50:
-            continue
-        for c in (s, t):
-            c.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=v * 2, max_nn=30))
-        try:
-            res = o3d.pipelines.registration.registration_colored_icp(
-                s, t, v * 1.4, T,
-                o3d.pipelines.registration.TransformationEstimationForColoredICP(),
-                o3d.pipelines.registration.ICPConvergenceCriteria(
-                    relative_fitness=1e-6, relative_rmse=1e-6, max_iteration=50))
-        except Exception:
-            # colored ICP needs colors+normals; fall back to point-to-plane geometry-only
-            res = o3d.pipelines.registration.registration_icp(
-                s, t, v * 1.4, T,
-                o3d.pipelines.registration.TransformationEstimationPointToPlane())
-        T, fit = res.transformation.copy(), res.fitness
-    return T, fit
+    import open3d.core as o3c
+    if not o3d.core.cuda.is_available():
+        raise RuntimeError("dense_fusion ICP requires CUDA (GPU). No GPU available — the CPU "
+                           "colored ICP is unviably slow; fix the env, do NOT fall back to CPU.")
+    dev = o3c.Device("CUDA:0")
+    T = np.ascontiguousarray(np.asarray(init_c2w, np.float64))
+    s = o3d.t.geometry.PointCloud.from_legacy(src_cam, o3c.float32, dev)
+    t = o3d.t.geometry.PointCloud.from_legacy(tgt_world, o3c.float32, dev)
+    t.estimate_normals(max_nn=30, radius=voxels[0] * 2)
+    s.estimate_normals(max_nn=30, radius=voxels[0] * 2)
+    vs = o3d.utility.DoubleVector(list(voxels))
+    crit = [o3d.t.pipelines.registration.ICPConvergenceCriteria(1e-6, 1e-6, it)
+            for it in (50, 30, 14)[:len(voxels)]]
+    maxc = o3d.utility.DoubleVector([v * 1.4 for v in voxels])
+    reg = o3d.t.pipelines.registration
+    init = o3c.Tensor(T, o3c.float64)
+    res = reg.multi_scale_icp(s, t, vs, crit, maxc, init,
+                              reg.TransformationEstimationForColoredICP())
+    return res.transformation.numpy(), float(res.fitness)
 
 
 def _mapanything_hw(output_dir: Path):
@@ -313,6 +313,9 @@ def densify_and_fuse(output_dir: Path, frames_dir: Path, config: dict) -> Option
     _kf_cache: Dict[int, object] = {}
 
     def _kf_target(kf: int):
+        """Keyframe WORLD cloud + per-point NORMALS + RGB (xyz, normals, rgb) as float32
+        numpy — the COLORED-ICP target. Normals (Open3D, one-time per keyframe) + colour
+        feed the torch colored ICP. Cached."""
         if kf in _kf_cache:
             return _kf_cache[kf]
         d = depth_loader(kf)
@@ -321,15 +324,23 @@ def densify_and_fuse(output_dir: Path, frames_dir: Path, config: dict) -> Option
         depth, K, _ = d
         xyz_cam, idx = _unproject(depth, K, stride=2)            # stride for ICP speed
         c2w = kf_poses[kf]
-        world = xyz_cam @ c2w[:3, :3].T + c2w[:3, 3]
+        world = (xyz_cam @ c2w[:3, :3].T + c2w[:3, 3]).astype(np.float32)
+        import open3d as o3d
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(world)
+        pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.08, max_nn=30))
         H, W = depth.shape
         col = _rgb01(kf, H, W)
-        col = col.reshape(-1, 3)[idx] if col is not None else None
-        _kf_cache[kf] = _to_o3d(world, col)
+        rgb = (col.reshape(-1, 3)[idx] if col is not None
+               else np.full((len(world), 3), 0.5, np.float32)).astype(np.float32)
+        _kf_cache[kf] = (world, np.asarray(pcd.normals, np.float32), rgb)
         return _kf_cache[kf]
 
+    from reconstruction.torch_icp import multiscale_icp_cuda
     dense_poses: Dict[int, np.ndarray] = {}
     n_ok = n_rej = 0
+    logger.info(f"[dense-fusion] frame-to-keyframe COLORED ICP over {len(fusion)} fillers "
+                f"(geometric+photometric on CUDA, pure torch — GPU-verified)…")
     for f in fusion:
         d = depth_loader(f)
         if d is None:
@@ -339,18 +350,21 @@ def densify_and_fuse(output_dir: Path, frames_dir: Path, config: dict) -> Option
         tgt = _kf_target(kf)
         if tgt is None:
             continue
+        tgt_xyz, tgt_n, tgt_rgb = tgt
         H, W = depth.shape
         xyz_cam, idx = _unproject(depth, K, stride=2)
-        col = _rgb01(f, H, W)
-        src = _to_o3d(xyz_cam, col.reshape(-1, 3)[idx] if col is not None else None)
-        c2w, fit = _register_to_keyframe(src, tgt, kf_poses[kf])
+        scol = _rgb01(f, H, W)
+        src_rgb = (scol.reshape(-1, 3)[idx] if scol is not None
+                   else np.full((len(xyz_cam), 3), 0.5, np.float32)).astype(np.float32)
+        c2w, fit = multiscale_icp_cuda(xyz_cam.astype(np.float32), src_rgb,
+                                       tgt_xyz, tgt_n, tgt_rgb, kf_poses[kf])
         if fit < min_fitness:
             n_rej += 1; continue                                  # bad registration → skip
         dense_poses[f] = c2w
         n_ok += 1
-        if n_ok % 50 == 0:
-            logger.info(f"[dense-fusion] registered {n_ok} frames (rej {n_rej}) "
-                        f"{time.time()-t0:.0f}s")
+        if (n_ok + n_rej) % 25 == 0:
+            logger.info(f"[dense-fusion] {n_ok+n_rej}/{len(fusion)} processed "
+                        f"({n_ok} ok, {n_rej} rej) {time.time()-t0:.0f}s")
     logger.info(f"[dense-fusion] frame-to-keyframe ICP: {n_ok} registered, {n_rej} rejected "
                 f"(fitness<{min_fitness}) in {time.time()-t0:.0f}s")
     if not dense_poses:
@@ -422,13 +436,37 @@ def densify_and_fuse(output_dir: Path, frames_dir: Path, config: dict) -> Option
                    f"property float confidence\nend_header\n".encode())
         vd.tofile(fobj)
 
-    with open(poses_path, "a") as fp, open(frames_path, "a") as ff:
-        for f, c2w in sorted(dense_poses.items()):
-            fp.write(" ".join(f"{v:.8g}" for v in c2w.reshape(-1)) + "\n")
-            ff.write(f"{f}\n")
+    # Append the filler poses to EVERY camera_poses.txt / camera_frames.txt copy the consumers
+    # read — in the SAME order — so they stay consistent. The TSDF reads output/ (or da3_run/),
+    # but the UI camera-pose viz + the synced flythrough read maplong_run/camera_poses.txt FIRST
+    # (main.py). If only one copy were updated, the UI would show 845 keyframes while the TSDF
+    # used keyframes+fillers. Only append to a copy whose keyframe count still matches (845) so
+    # we never double-append or desync. The UI pairs poses[i] ↔ frames[i] by line index.
+    _sorted = sorted(dense_poses.items())
+    _n_kf = len(kf_nums)
+    _updated = []
+    for _base in (output_dir, output_dir / "maplong_run", output_dir / "da3_run"):
+        _pp = _base / "camera_poses.txt"
+        if not _pp.exists():
+            continue
+        try:
+            _have = sum(1 for ln in _pp.read_text().splitlines() if len(ln.split()) == 16)
+        except Exception:
+            continue
+        if _have != _n_kf:          # already has fillers, or a different set → skip (no desync)
+            continue
+        with open(_pp, "a") as fp:
+            for _f, _c2w in _sorted:
+                fp.write(" ".join(f"{v:.8g}" for v in _c2w.reshape(-1)) + "\n")
+        _fr = _base / "camera_frames.txt"
+        if _fr.exists():
+            with open(_fr, "a") as ff:
+                for _f, _ in _sorted:
+                    ff.write(f"{_f}\n")
+        _updated.append(_pp.parent.name or "output")
 
     logger.info(f"[dense-fusion] ✅ {len(xyz):,} extra cloud pts from {len(dense_poses)} frames "
-                f"→ {ply.name} (+ poses appended) in {time.time()-t0:.0f}s")
+                f"→ {ply.name} (+ poses appended to: {', '.join(_updated)}) in {time.time()-t0:.0f}s")
     return ply
 
 
@@ -438,6 +476,26 @@ def main():
     ap.add_argument("--frames-dir", required=True)
     ap.add_argument("--config", default=None)
     args = ap.parse_args()
+    # The module logger has propagate=False, so basicConfig (root) never sees its records
+    # → the subprocess was SILENT (no ICP progress). Attach a flushing handler DIRECTLY to
+    # the module logger + line-buffer stdout so the parent forwards every line live.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
+    class _Flushing(logging.StreamHandler):
+        def emit(self, record):
+            super().emit(record)
+            try:
+                self.flush()
+            except Exception:
+                pass
+
+    _h = _Flushing(sys.stdout)
+    _h.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
+    logger.setLevel(logging.INFO)
+    logger.addHandler(_h)
     logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
     cfg = {}
     if args.config and Path(args.config).exists():
