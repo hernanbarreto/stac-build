@@ -850,6 +850,22 @@ def _depth_axis_world_coord(depth: np.ndarray, K: np.ndarray, c2w: np.ndarray,
     return c2w[axis, 0] * x + c2w[axis, 1] * y + c2w[axis, 2] * z + c2w[axis, 3]
 
 
+def _depth_world_xyz(depth: np.ndarray, K: np.ndarray, c2w: np.ndarray) -> np.ndarray:
+    """Per-pixel WORLD (x,y,z) of each depth sample → (H,W,3) float64, for the 3D
+    CUBE crop (tsdf_tile_length_m): a dense frame keeps only the depth that
+    unprojects INTO this cube's box on ALL three axes. Meaningless where depth==0."""
+    H, W = depth.shape
+    vv, uu = np.indices((H, W))
+    z = depth.astype(np.float64)
+    x = (uu - K[0, 2]) * z / K[0, 0]
+    y = (vv - K[1, 2]) * z / K[1, 1]
+    c2w = np.asarray(c2w, dtype=np.float64)
+    out = np.empty((H, W, 3), dtype=np.float64)
+    for a in range(3):
+        out[..., a] = c2w[a, 0] * x + c2w[a, 1] * y + c2w[a, 2] * z + c2w[a, 3]
+    return out
+
+
 # ── Public API ─────────────────────────────────────────────────────
 
 def export_tsdf_meshes(
@@ -1198,6 +1214,27 @@ def delete_tsdf_folder(output_dir: Path, label: str, instance_id: int) -> bool:
 
 # ── Whole-scene TSDF (single mesh from entire scan) ─────────────────────────
 
+def _drop_long_edge_tris(mesh, max_edge: float, logger_prefix: str = ""):
+    """Remove triangles with any edge longer than max_edge metres — the spurious
+    'bridge'/spike triangles (e.g. near↔far) that sparse regions + decimation create.
+    Real TSDF surfaces have edges ≈ voxel size, so this only touches the garbage."""
+    if not max_edge or max_edge <= 0 or len(mesh.triangles) == 0:
+        return mesh
+    v = np.asarray(mesh.vertices)
+    t = np.asarray(mesh.triangles)
+    e0 = np.linalg.norm(v[t[:, 0]] - v[t[:, 1]], axis=1)
+    e1 = np.linalg.norm(v[t[:, 1]] - v[t[:, 2]], axis=1)
+    e2 = np.linalg.norm(v[t[:, 2]] - v[t[:, 0]], axis=1)
+    bad = (e0 > max_edge) | (e1 > max_edge) | (e2 > max_edge)
+    n = int(bad.sum())
+    if n > 0:
+        mesh.remove_triangles_by_mask(bad)
+        mesh.remove_unreferenced_vertices()
+        logger.info(f"[TSDF-scene]{logger_prefix} dropped {n:,} long-edge tris "
+                    f"(>{max_edge:.2f}m — bridge/spike lines)")
+    return mesh
+
+
 def export_tsdf_scene(
     output_dir: Path,
     frames_dir: Path,
@@ -1284,6 +1321,17 @@ def export_tsdf_scene(
                                          # the cleaned-cloud occupied-block count)
     tsdf_tile_halo: float = 0.6,         # m of overlap between adjacent tiles — keeps the
                                          # seam surface continuous before the core-crop merge
+    tsdf_tile_length_m: float = 0.0,     # if >0, tile by FIXED physical length (m) along the
+                                         # longest axis (equal-length SECTIONS) instead of the
+                                         # equal-block "auto" split. Short sections (~10 m) keep
+                                         # each TSDF LOCAL → far fewer global marching-cubes/merge
+                                         # artifacts on long scans. The sections are still welded
+                                         # into ONE mesh (the shared-voxel seams are identical).
+    tsdf_max_edge_m: float = 0.0,        # if >0, drop any triangle with an edge longer than this
+                                         # (m). Kills the spurious long "bridge"/spike triangles
+                                         # (near↔far) that sparse regions + global decimation create
+                                         # — the "lines" across the mesh. Applied after merge AND
+                                         # after decimation. Real surfaces have edges ≈ voxel size.
     progress_cb: Optional[Callable[[str, Optional[float], Optional[str]], None]] = None,
 ) -> Optional[Path]:
     """Integrate the entire scan's depth maps into a single TSDF volume.
@@ -1359,8 +1407,15 @@ def export_tsdf_scene(
                 except ValueError:
                     _stem_map = {}
                     break
-            if _stem_map and _pose_keys and _pose_keys.issubset(_stem_map.keys()):
-                kf_name_map = _stem_map                       # real-frame-number keyed
+            # Use REAL-frame-number keying whenever pose_map is real-number-keyed — detected
+            # by the largest keyframe number being a pose key. The old `issubset` test broke
+            # the moment dense-fusion FILLER frames (real numbers NOT in selected_frames.json)
+            # were appended to pose_map: issubset→False flipped this to SEQUENCE-INDEX keying,
+            # which then handed every frame whose real number ≤ #keyframes the WRONG image
+            # (the n-th keyframe by order) → "texture from elsewhere in the video" exactly
+            # where fillers exist. Fillers now correctly fall back to {num:06d}.jpg in the bake.
+            if _stem_map and max(_stem_map) in _pose_keys:    # real-frame-number keyed
+                kf_name_map = _stem_map
             else:
                 kf_name_map = {i: n for i, n in enumerate(_kf)}  # sequence-index keyed
         except Exception:
@@ -1734,6 +1789,7 @@ def export_tsdf_scene(
     # integrates ONLY the frames whose depth reaches into its slab (else every tile
     # re-loads all 1245 frames). Populated after the tiling split (axis known).
     frame_axis_extent: Dict[int, tuple] = {}
+    frame_box_extent: Dict[int, tuple] = {}   # cube mode: fidx → (min_xyz, max_xyz)
     # Extract-safe active-block ceiling: Open3D's marching-cubes ABORTS the process on
     # a too-large grid. PROBED on CPU extract (Open3D 0.19, vol.cpu().extract_…):
     # clean at 51,703 active blocks, SEGFAULTS at 61,201 → real ceiling ≈ 55k (the old
@@ -1784,14 +1840,22 @@ def export_tsdf_scene(
                 continue
 
             # DA3-DENSE: skip a frame BEFORE loading its npz if its precomputed world
-            # axis-extent doesn't reach this tile's slab (+halo). This is what makes many
-            # small tiles viable — without it every tile re-loads+integrates ALL frames.
+            # extent doesn't reach this tile (+halo). This is what makes many small tiles
+            # viable — without it every tile re-loads+integrates ALL frames.
             if dense_da3 and tile_bounds is not None:
-                _ax, _lo, _hi, _halo = tile_bounds
-                _ext = frame_axis_extent.get(fidx)
-                if _ext is not None and (_ext[1] < _lo - _halo or _ext[0] >= _hi + _halo):
-                    skipped_empty += 1
-                    continue
+                if tile_bounds[0] == "box3d":
+                    _, _lo, _hi, _halo = tile_bounds          # _lo,_hi are xyz vectors
+                    _bx = frame_box_extent.get(fidx)
+                    if _bx is not None and (np.any(_bx[1] < _lo - _halo)
+                                            or np.any(_bx[0] >= _hi + _halo)):
+                        skipped_empty += 1
+                        continue
+                else:
+                    _ax, _lo, _hi, _halo = tile_bounds
+                    _ext = frame_axis_extent.get(fidx)
+                    if _ext is not None and (_ext[1] < _lo - _halo or _ext[0] >= _hi + _halo):
+                        skipped_empty += 1
+                        continue
 
             # Resolve the frame's native intrinsics + RGB first. The rich per-frame
             # npz source carries both at the depth grid (zero rescaling); the raster
@@ -1883,12 +1947,19 @@ def export_tsdf_scene(
                     )
 
                 # DA3-DENSE spatial tile crop: no cloud mask, so keep only the depth
-                # whose unprojected WORLD axis-coord lands in this tile's slab (+halo).
-                # Bounds the tile's grid to its axis range without the cloud pixels.
+                # whose unprojected WORLD coord lands in this tile (+halo). Bounds the
+                # tile's grid without the cloud pixels.
                 if dense_da3 and tile_bounds is not None:
-                    _ax, _lo, _hi, _halo = tile_bounds
-                    _wa = _depth_axis_world_coord(depth_m, K_d, c2w, _ax)
-                    mask &= (_wa >= _lo - _halo) & (_wa < _hi + _halo)
+                    if tile_bounds[0] == "box3d":
+                        # 3D CUBE: the pixel must be inside the cube box on ALL three axes.
+                        _, _lo, _hi, _halo = tile_bounds
+                        _wxyz = _depth_world_xyz(depth_m, K_d, c2w)
+                        mask &= np.all((_wxyz >= _lo - _halo)
+                                       & (_wxyz < _hi + _halo), axis=2)
+                    else:
+                        _ax, _lo, _hi, _halo = tile_bounds
+                        _wa = _depth_axis_world_coord(depth_m, K_d, c2w, _ax)
+                        mask &= (_wa >= _lo - _halo) & (_wa < _hi + _halo)
 
             if not mask.any():
                 skipped_empty += 1
@@ -1996,10 +2067,45 @@ def export_tsdf_scene(
     #    the shared-halo surface is identical in adjacent tiles → cropping at the same
     #    plane gives gapless, non-overlapping joins. ──
     block_side = float(voxel_length) * 16.0
+    vox = float(voxel_length)
+    cube_mode = bool(tsdf_tile_length_m and tsdf_tile_length_m > 0
+                     and cc_xyz is not None and len(cc_xyz))
+    cubes = None            # list of (lo_xyz, hi_xyz) np arrays when cube_mode
     tiles = [(-np.inf, np.inf)]
     tile_axis = 0
     ax = None
-    if cc_xyz is not None and len(cc_xyz):
+    if cube_mode:
+        # ── 3D CUBE tiling: cover the cloud's bbox with cubes of side ~tsdf_tile_length_m.
+        # The VBG voxel grid is GLOBAL (anchored at the world origin, fixed voxel size),
+        # so adjacent cubes that share the `tsdf_tile_halo` overlap emit IDENTICAL vertices
+        # on the shared face → the weld is exact. Each cube is bounded on ALL three axes,
+        # so no cube can overflow the grid regardless of the cloud's shape. Empty cubes
+        # (no cloud points) are skipped. Bounds are FINITE (the bbox outer faces are padded
+        # by a margin, not ±inf) so an oversized cube can be split cleanly at a midpoint.
+        L = max(vox, round(float(tsdf_tile_length_m) / vox) * vox)   # cube side, voxel-aligned
+        gmin = np.floor(cc_xyz.min(0) / vox) * vox                   # snapped global origin
+        gmax = cc_xyz.max(0)
+        _mrg = float(tsdf_tile_halo) + float(sdf_trunc) + 2.0 * vox  # outer-face padding
+        ncell = np.maximum(1, np.ceil((gmax - gmin) / L).astype(np.int64))  # cubes per axis
+        bnds = []
+        for a in range(3):
+            e = gmin[a] + L * np.arange(ncell[a] + 1)
+            e[0] = e[0] - _mrg                       # extend outer faces (no neighbour there)
+            e[-1] = e[-1] + _mrg                     # → nothing is clipped at the bbox edges
+            bnds.append(e)
+        # only emit cubes that actually contain cloud points (the rest are empty volume)
+        cell = np.clip(np.floor((cc_xyz - gmin) / L).astype(np.int64), 0, ncell - 1)
+        occ_keys = sorted(map(tuple, np.unique(cell, axis=0)))
+        cubes = []
+        for (i, j, k) in occ_keys:
+            lo = np.array([bnds[0][i], bnds[1][j], bnds[2][k]], dtype=np.float64)
+            hi = np.array([bnds[0][i + 1], bnds[1][j + 1], bnds[2][k + 1]], dtype=np.float64)
+            cubes.append((lo, hi))
+        n_tiles = len(cubes)
+        logger.info(f"[TSDF-scene] tiling: 3D CUBES side={L:.2f}m  grid="
+                    f"{ncell[0]}×{ncell[1]}×{ncell[2]}  occupied={n_tiles} cubes "
+                    f"(empty skipped)")
+    elif cc_xyz is not None and len(cc_xyz):
         ext = cc_xyz.max(0) - cc_xyz.min(0)
         tile_axis = int(np.argmax(ext))
         ax = cc_xyz[:, tile_axis]
@@ -2057,11 +2163,13 @@ def export_tsdf_scene(
     else:
         logger.info("[TSDF-scene] single grid (no cleaned-cloud xyz to tile by)")
 
-    # DA3-DENSE: precompute each frame's [min,max] world coord along the tiling axis
-    # (one cheap sub-sampled unprojection per frame) so the tile loop can skip frames
-    # that don't reach a tile BEFORE loading their npz. Only worthwhile when tiling.
-    if dense_da3 and len(tiles) > 1 and frame_loader is not None:
-        logger.info(f"[TSDF-scene] dense-DA3: precomputing axis extents for "
+    # DA3-DENSE: precompute each frame's world extent (one cheap sub-sampled
+    # unprojection per frame) so the tile loop can skip frames that don't reach a tile
+    # BEFORE loading their npz. Cube mode stores the full 3D box; slab mode the 1D axis
+    # span. Only worthwhile when tiling.
+    _n_tiles_now = len(cubes) if cube_mode else len(tiles)
+    if dense_da3 and (cube_mode or _n_tiles_now > 1) and frame_loader is not None:
+        logger.info(f"[TSDF-scene] dense-DA3: precomputing world extents for "
                     f"{len(sorted_frames)} frames…")
         _t_pre = time.time()
         for _fi in sorted_frames:
@@ -2079,29 +2187,59 @@ def export_tsdf_scene(
             # K must match the sub-sampled grid: scale fx,fy,cx,cy by 1/8.
             _K = np.asarray(_fr["K"], dtype=np.float64).copy()
             _K[:2, :] /= 8.0
-            _wa = _depth_axis_world_coord(_d, _K, _c2w, tile_axis)[_m]
-            frame_axis_extent[_fi] = (float(_wa.min()), float(_wa.max()))
-        logger.info(f"[TSDF-scene] dense-DA3: extents ready ({len(frame_axis_extent)} frames, "
+            if cube_mode:
+                _w = _depth_world_xyz(_d, _K, _c2w)[_m]      # (n,3) valid world pts
+                frame_box_extent[_fi] = (_w.min(0), _w.max(0))
+            else:
+                _wa = _depth_axis_world_coord(_d, _K, _c2w, tile_axis)[_m]
+                frame_axis_extent[_fi] = (float(_wa.min()), float(_wa.max()))
+        _ne = len(frame_box_extent) if cube_mode else len(frame_axis_extent)
+        logger.info(f"[TSDF-scene] dense-DA3: extents ready ({_ne} frames, "
                     f"{time.time() - _t_pre:.0f}s)")
 
     halo = float(tsdf_tile_halo)
+    # Active 16³-block ceiling the CPU marching-cubes extracts WITHOUT aborting (probed:
+    # clean ≤51,703, crash ≥61,201). A cube above this is split into sub-cubes and re-queued.
+    _CUBE_SAFE_ACTIVE = 45_000
+    _CUBE_MIN_SIDE = 1.0                     # don't split below ~1 m (recursion floor)
     tile_meshes = []
-    for ti, (lo, hi) in enumerate(tiles):
+    # Work QUEUE (not a fixed list): cube_mode can PUSH sub-cubes onto it when a cube's grid
+    # is too big to extract — the subdivision guard. Slab mode never grows the queue.
+    work = list(cubes) if cube_mode else list(tiles)
+    n_tiles_tot = len(work)
+    need_crop = cube_mode or n_tiles_tot > 1
+    ti = 0
+    wi = 0
+    while wi < len(work):
+        tile = work[wi]
+        wi += 1
+        ti += 1
+        lo, hi = tile                       # cube: lo,hi are xyz vectors; slab: scalars
         tile_bounds = None
         if dense_da3:
-            # No cloud-pixel mask: every posed frame integrates, cropped to this tile's
-            # axis slab by the spatial test in _integrate (tile_bounds). Single tile →
-            # no crop (the bbox crop at the end bounds the extent).
+            # No cloud-pixel mask: every posed frame integrates, cropped to this tile by
+            # the spatial test in _integrate (tile_bounds).
             cc_fp = None
-            if len(tiles) > 1:
+            if cube_mode:
+                tile_bounds = ("box3d", lo, hi, halo)
+                logger.info(f"[TSDF-scene] cube {ti} ({len(work)} queued) DA3-DENSE "
+                            f"x∈[{lo[0]:.1f},{hi[0]:.1f}) y∈[{lo[1]:.1f},{hi[1]:.1f}) "
+                            f"z∈[{lo[2]:.1f},{hi[2]:.1f}) +{halo:.2f}m halo")
+            elif n_tiles_tot > 1:
                 tile_bounds = (tile_axis, lo, hi, halo)
-                logger.info(f"[TSDF-scene] tile {ti+1}/{len(tiles)} DA3-DENSE "
+                logger.info(f"[TSDF-scene] tile {ti}/{n_tiles_tot} DA3-DENSE "
                             f"{'XYZ'[tile_axis]}∈[{lo:.2f},{hi:.2f}) +{halo:.2f}m halo "
                             f"(spatial crop)")
-        elif len(tiles) > 1:
+        elif cube_mode:
+            sel = np.all((cc_xyz >= lo - halo) & (cc_xyz < hi + halo), axis=1)
+            cc_fp = _group_rows_by_frame(cc_fg[sel], cc_pr[sel], cc_pc[sel], cc_xyz[sel])
+            logger.info(f"[TSDF-scene] cube {ti} ({len(work)} queued) "
+                        f"x∈[{lo[0]:.1f},{hi[0]:.1f}) y∈[{lo[1]:.1f},{hi[1]:.1f}) "
+                        f"z∈[{lo[2]:.1f},{hi[2]:.1f}) — {len(cc_fp)} frames")
+        elif n_tiles_tot > 1:
             sel = (ax >= lo - halo) & (ax < hi + halo)
             cc_fp = _group_rows_by_frame(cc_fg[sel], cc_pr[sel], cc_pc[sel], cc_xyz[sel])
-            logger.info(f"[TSDF-scene] tile {ti+1}/{len(tiles)} "
+            logger.info(f"[TSDF-scene] tile {ti}/{n_tiles_tot} "
                         f"{'XYZ'[tile_axis]}∈[{lo:.2f},{hi:.2f}) +{halo:.2f}m halo — "
                         f"{len(cc_fp)} frames")
         else:
@@ -2112,23 +2250,50 @@ def export_tsdf_scene(
         vol = _make_vbg()
         ni = _integrate(vol, cc_fp, tile_bounds)
         if ni == 0:
-            logger.warning(f"[TSDF-scene] tile {ti+1}: 0 frames integrated — skipped")
+            logger.warning(f"[TSDF-scene] tile {ti}: 0 frames integrated — skipped")
             del vol
             continue
-        if progress_cb:
-            progress_cb("extracting", time.time() - t0, None)
-        # Extract on CPU (marching cubes in RAM). Two findings (probed with real data):
-        #   • estimated_vertex_number MUST stay default (-1): passing an explicit value
-        #     forces the output to EXACTLY that many vertices, padding the mesh with
-        #     ~1.5M unreferenced garbage verts (2,000,000 verts for 1.08M tris). Default
-        #     returns the true count (622k for the same tile).
-        #   • the native extract crash is purely SIZE-driven: a 36,881-active-block tile
-        #     aborts the process, while ≤13,234 extract cleanly. The extract-safe tiling
-        #     above (_EXTRACT_SAFE_OCC) keeps every tile well under that — so -1 is safe.
         try:
             _active = int(vol.hashmap().size())
         except Exception:
             _active = -1
+
+        # ── SUBDIVISION GUARD: the CPU marching-cubes ABORTS the process on a grid with
+        # too many active blocks. If this cube is over the ceiling, split it into ≤8
+        # sub-cubes (halving each axis longer than _CUBE_MIN_SIDE, at a voxel-snapped
+        # midpoint) and re-queue them INSTEAD of extracting. The global voxel grid + the
+        # halo overlap keep the sub-seams weldable. ──
+        if cube_mode and _active > _CUBE_SAFE_ACTIVE:
+            ext = hi - lo
+            if np.any(ext > _CUBE_MIN_SIDE):
+                mid = np.where(ext > _CUBE_MIN_SIDE,
+                               lo + np.maximum(vox, np.round(ext / 2.0 / vox) * vox), hi)
+                subs = []
+                for dx in (0, 1):
+                    for dy in (0, 1):
+                        for dz in (0, 1):
+                            slo = np.array([lo[0] if dx == 0 else mid[0],
+                                            lo[1] if dy == 0 else mid[1],
+                                            lo[2] if dz == 0 else mid[2]])
+                            shi = np.array([mid[0] if dx == 0 else hi[0],
+                                            mid[1] if dy == 0 else hi[1],
+                                            mid[2] if dz == 0 else hi[2]])
+                            if np.all(shi - slo > 1e-6):        # skip degenerate (unsplit axis)
+                                subs.append((slo, shi))
+                logger.info(f"[TSDF-scene]   cube {ti} too big ({_active:,} active blocks "
+                            f"> {_CUBE_SAFE_ACTIVE:,}) → split into {len(subs)} sub-cubes")
+                work.extend(subs)
+                del vol
+                try:
+                    o3d.core.cuda.release_cache()
+                except Exception:
+                    pass
+                continue
+
+        if progress_cb:
+            progress_cb("extracting", time.time() - t0, None)
+        # Extract on CPU (marching cubes in RAM). estimated_vertex_number stays default
+        # (-1): passing a value pads the mesh with garbage unreferenced verts.
         logger.info(f"[TSDF-scene]   extracting tile ({_active:,} active blocks)")
         try:
             tmesh = vol.cpu().extract_triangle_mesh(
@@ -2140,14 +2305,19 @@ def export_tsdf_scene(
             except Exception:
                 pass
 
-        if len(tiles) > 1 and len(tmesh.triangles):
-            # Crop to the tile core: keep triangles whose centroid is in [lo,hi) on
-            # the tiling axis (the halo belongs to the neighbour). End tiles use ±inf
-            # bounds, so nothing is lost at the scene extremities.
+        if need_crop and len(tmesh.triangles):
+            # Crop to the tile core: keep triangles whose centroid is in [lo,hi) — on the
+            # tiling axis for slabs, or inside the box on ALL 3 axes for cubes (the halo
+            # belongs to the neighbour). The shared global voxel grid makes seam vertices
+            # coincide across neighbours, so cropping here gives gapless, weldable joins.
             v = np.asarray(tmesh.vertices)
             tri = np.asarray(tmesh.triangles)
-            cax = v[:, tile_axis][tri].mean(axis=1)
-            drop = ~((cax >= lo) & (cax < hi))
+            if cube_mode:
+                cen = v[tri].mean(axis=1)                      # (n,3) centroids
+                drop = ~np.all((cen >= lo) & (cen < hi), axis=1)
+            else:
+                cax = v[:, tile_axis][tri].mean(axis=1)
+                drop = ~((cax >= lo) & (cax < hi))
             if drop.any():
                 tmesh.remove_triangles_by_mask(drop)
                 tmesh.remove_unreferenced_vertices()
@@ -2175,6 +2345,10 @@ def export_tsdf_scene(
         mesh.remove_unreferenced_vertices()
         logger.info(f"[TSDF-scene] merged {len(tile_meshes)} tiles → "
                     f"{len(mesh.vertices):,} verts / {len(mesh.triangles):,} tris")
+
+    # Kill the spurious 'bridge'/spike triangles (near↔far long edges) BEFORE the
+    # global decimate — quadric simplification would otherwise smear them around.
+    mesh = _drop_long_edge_tris(mesh, tsdf_max_edge_m, " post-weld")
 
     # VBG's float-color path stores colours in 0-255; legacy meshes and GLB
     # expect 0-1, so normalise (the smoke test confirmed the 0-255 range).
@@ -2232,6 +2406,16 @@ def export_tsdf_scene(
     # only sensor gaps close — not real openings or the open scan boundary.
     if fill_holes and fill_hole_size > 0:
         try:
+            # SANITIZE first: fill_holes() triangulates every boundary loop via VTK's
+            # vtkPolygon, which ABORTS (vtkPolygon.cxx:956 "start>=end") on a degenerate
+            # / non-manifold boundary. Welding tiles + dropping long-edge & speck tris
+            # opens exactly those ragged loops, so clean the mesh to simple, manifold
+            # boundaries before handing it to VTK.
+            mesh.remove_degenerate_triangles()
+            mesh.remove_duplicated_triangles()
+            mesh.remove_duplicated_vertices()
+            mesh.remove_non_manifold_edges()
+            mesh.remove_unreferenced_vertices()
             tm = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
             filled = tm.fill_holes(hole_size=float(fill_hole_size)).to_legacy()
             n_new = len(filled.triangles) - len(mesh.triangles)
@@ -2278,6 +2462,10 @@ def export_tsdf_scene(
         except Exception as e:
             logger.warning(f"[TSDF-scene] decimation skipped ({e})")
 
+    # Final long-edge pass: decimation can MERGE short edges into a few long ones,
+    # so re-run the line-killer after simplifying.
+    mesh = _drop_long_edge_tris(mesh, tsdf_max_edge_m, " post-decimate")
+
     # Sit under the same ``output/tsdf/`` root as the per-instance meshes so
     # the ``/tsdf/list/`` endpoint (which iterates subfolders) picks it up
     # automatically and the viewport loads it alongside everything else.
@@ -2315,6 +2503,7 @@ def export_tsdf_scene(
             vc = bake_vertex_colors_gpu(
                 vertices=np.asarray(mesh.vertices),
                 vertex_normals=np.asarray(mesh.vertex_normals),
+                faces=np.asarray(mesh.triangles),   # → TRUE mesh z-buffer occlusion
                 frames_dir=frames_dir, pose_map=cam.pose_map,
                 intrinsics_map=tex_intrinsics, output_dir=output_dir,
                 name_map=kf_name_map, init_colors=_init,

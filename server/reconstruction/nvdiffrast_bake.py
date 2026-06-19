@@ -64,13 +64,15 @@ def bake_vertex_colors_gpu(
     frames_dir: Path,
     pose_map: Dict[int, np.ndarray],         # keyframe-idx → (4,4) c2w
     intrinsics_map: Dict[int, np.ndarray],   # keyframe-idx → (3,3) K (depth res)
+    faces: Optional[np.ndarray] = None,      # (M,3) triangles → TRUE mesh z-buffer occlusion
     output_dir: Optional[Path] = None,       # to locate results_output npz (depth)
     name_map: Optional[Dict[int, str]] = None,
     init_colors: Optional[np.ndarray] = None,  # (N,3) [0,1] fallback for unseen verts
     frame_indices: Optional[List[int]] = None,
     max_views: int = 800,
     cos_power: float = 3.0,
-    depth_tol: float = 0.06,
+    depth_tol: float = 0.06,                  # sensor-depth fallback tol (faces=None path)
+    occ_tol: float = 0.03,                    # mesh z-buffer occlusion tol (m)
     device: str = "cuda",
     progress_cb: Optional[Callable[[str], None]] = None,
 ) -> Optional[np.ndarray]:
@@ -89,6 +91,21 @@ def bake_vertex_colors_gpu(
     t0 = time.time()
     frames_dir = Path(frames_dir)
     dev = torch.device(device)
+
+    # TRUE occlusion needs the mesh faces to rasterize a real per-view z-buffer. If they
+    # are provided, set up nvdiffrast once; otherwise fall back to the sensor-depth oracle.
+    use_zbuffer = faces is not None and len(faces) > 0
+    glctx = faces_i = None
+    if use_zbuffer:
+        try:
+            import nvdiffrast.torch as dr
+            glctx = dr.RasterizeCudaContext(device=dev)
+            faces_i = torch.tensor(np.asarray(faces, dtype=np.int32),
+                                   device=dev, dtype=torch.int32).contiguous()
+        except Exception as e:
+            logger.warning(f"[VertBake] nvdiffrast unavailable ({e}) — "
+                           "falling back to sensor-depth occlusion")
+            use_zbuffer = False
 
     def _name(fi: int) -> Path:
         if name_map and fi in name_map:
@@ -151,10 +168,35 @@ def bake_vertex_colors_gpu(
             inb = front & (u_n >= 0) & (u_n < 1) & (v_n >= 0) & (v_n < 1)
             grid = torch.stack([u_n * 2 - 1, v_n * 2 - 1], dim=-1)[None, :, None, :]
 
-            depth_t = torch.tensor(depth_np, device=dev)[None, None]
-            dsamp = torch.nn.functional.grid_sample(
-                depth_t, grid, mode="bilinear", align_corners=False)[0, 0, :, 0]
-            vis = inb & (dsamp > 1e-3) & ((zc - dsamp).abs() < depth_tol)
+            if use_zbuffer:
+                # ── TRUE occlusion: rasterize the MESH from this camera (exact z-buffer at
+                # depth resolution) and keep a vertex only if it is the FRONTMOST surface in
+                # this view. Replaces the noisy low-res sensor-depth oracle that let photos
+                # bleed through thin/edge occluders onto surfaces they don't actually see.
+                # The clip mapping and the read-back grid use the SAME ndc formula, so the
+                # test is internally self-consistent (no y-flip bookkeeping needed). ──
+                Wr = (Wd + 7) // 8 * 8                       # nvdiffrast wants multiples of 8
+                Hr = (Hd + 7) // 8 * 8
+                nx = 2.0 * (fx * Xc[:, 0] / zc_safe + cx) / Wr - 1.0
+                ny = 2.0 * (fy * Xc[:, 1] / zc_safe + cy) / Hr - 1.0
+                _n = 0.05
+                _f = (float(zc[front].max().item()) * 1.1 + 1.0) if bool(front.any()) else 100.0
+                z_ndc = (_f + _n) / (_f - _n) - (2.0 * _f * _n) / ((_f - _n) * zc_safe)
+                w_cl = zc                                    # real z → verts behind cam clip out
+                pos_clip = torch.stack([nx * w_cl, ny * w_cl, z_ndc * w_cl, w_cl],
+                                       dim=-1)[None].contiguous()
+                rast, _ = dr.rasterize(glctx, pos_clip, faces_i, resolution=[Hr, Wr])
+                rzc, _ = dr.interpolate(zc_safe[None, :, None].contiguous(), rast, faces_i)
+                occ_grid = torch.stack([nx, ny], dim=-1)[None, :, None, :]
+                samp_z = torch.nn.functional.grid_sample(
+                    rzc.permute(0, 3, 1, 2), occ_grid, mode="nearest",
+                    align_corners=False)[0, 0, :, 0]
+                vis = inb & (samp_z > 1e-3) & ((zc - samp_z).abs() < occ_tol)
+            else:
+                depth_t = torch.tensor(depth_np, device=dev)[None, None]
+                dsamp = torch.nn.functional.grid_sample(
+                    depth_t, grid, mode="nearest", align_corners=False)[0, 0, :, 0]
+                vis = inb & (dsamp > 1e-3) & ((zc - dsamp).abs() < depth_tol)
 
             with Image.open(_name(fi)) as im:
                 rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0

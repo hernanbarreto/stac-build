@@ -3816,7 +3816,10 @@ async def export_tsdf_scene_endpoint(request: Request):
                     r = line[len("[TSDF-RESULT]"):].strip()
                     result_path = None if r == "NONE" else r
                 else:
-                    print(line, flush=True)  # forward worker logs to server console
+                    try:
+                        print(line, flush=True)  # forward worker logs to server console
+                    except (BrokenPipeError, OSError):
+                        pass  # dead stdout must NOT abort the task or mark the scene "error"
             await proc.wait()
             async with _tsdf_progress_lock:
                 _tsdf_progress.setdefault(session_id, {})["__scene__"] = {
@@ -3920,7 +3923,10 @@ async def export_poisson_scene_endpoint(request: Request):
                     r = line[len("[TSDF-RESULT]"):].strip()
                     result_path = None if r == "NONE" else r
                 else:
-                    print(line, flush=True)  # forward worker logs to server console
+                    try:
+                        print(line, flush=True)  # forward worker logs to server console
+                    except (BrokenPipeError, OSError):
+                        pass  # dead stdout must NOT abort the task or mark the scene "error"
             await proc.wait()
             async with _tsdf_progress_lock:
                 _tsdf_progress.setdefault(session_id, {})["__poisson_scene__"] = {

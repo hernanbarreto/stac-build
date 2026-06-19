@@ -146,3 +146,6 @@ vendor/nvdiffrast/
 
 # secret: GitHub token — never commit
 server/git.txt
+vendor/vggt-omega/
+vendor/vggt-omega-weights/
+.claude/

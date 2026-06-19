@@ -196,6 +196,11 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         # with the FULL prior (depth + intrinsics + poses). MapAnything still loop-closes.
         _run_mapanything(pipe, frames_dir, output_dir, selected_frames_path,
                          recon_cfg, config, session_path=session_path, cond=True)
+    elif backend == "vggtomega":
+        # SOTA pose backbone (CVPR 2026), dynamic-scene robust (worksite default). DA3
+        # per-frame metric depth (NO streaming) is the metric anchor; VGGT-Long[Omega]
+        # gives up-to-scale poses; scale_align makes them metric. No ICP dense-fusion.
+        _run_vggtomega(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
     else:
         _run_mapanything(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
 
@@ -204,7 +209,9 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # them → extra cloud points with inter-keyframe coverage, written as a chunk PLY
     # that CloudCompPy merges. Runs BEFORE CloudCompPy → the cleaned cloud (and hence
     # the TSDF, which is masked to it) comes out MORE COMPLETE. Opt-in + non-fatal.
-    if (recon_cfg.get("dense_fusion", {}) or {}).get("enabled"):
+    # The VGGT-Omega path does NOT use ICP dense-fusion (its poses are SOTA + globally
+    # optimised; the local ICP was a stopgap that also caused the texture mis-mapping).
+    if backend != "vggtomega" and (recon_cfg.get("dense_fusion", {}) or {}).get("enabled"):
         try:
             _run_dense_fusion(pipe, frames_dir, output_dir, config, recon_cfg)
         except Exception as e:
@@ -973,6 +980,144 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     pipe.send_progress(85, "VGGT-Long complete, post-processing...", stage="reconstruction")
 
     _postprocess_reconstruction(pipe, vggt_save_dir, output_dir, vggt_config, backend="mapanything")
+
+
+def _build_vggtomega_config(config: dict) -> dict:
+    """Load stac_vggtomega.yaml and override the same user-configurable params as the
+    MapAnything path (chunk size/overlap/loop), keeping the Omega-specific keys."""
+    import yaml as _yaml
+    ma = config.get("reconstruction", {}).get("mapanything", config.get("mapanything", {}))
+    project_root = Path(__file__).resolve().parent.parent.parent
+    base = project_root / "vendor" / "VGGT-Long" / "configs" / "stac_vggtomega.yaml"
+    if not base.exists():
+        raise FileNotFoundError(f"Omega base config not found: {base}")
+    with open(base) as f:
+        cfg = _yaml.safe_load(f)
+    om = config.get("reconstruction", {}).get("vggtomega", {})
+    cfg["Model"]["chunk_size"] = om.get("chunk_size", ma.get("chunk_size", cfg["Model"]["chunk_size"]))
+    cfg["Model"]["overlap"] = om.get("chunk_overlap", ma.get("chunk_overlap", cfg["Model"]["overlap"]))
+    cfg["Model"]["loop_enable"] = om.get("loop_closure", cfg["Model"].get("loop_enable", True))
+    cfg["Model"]["frame_stride"] = 1
+    cfg["Model"]["delete_temp_files"] = False
+    cfg["Model"]["omega_resolution"] = om.get("resolution", cfg["Model"].get("omega_resolution", 512))
+    cfg["Model"]["omega_mode"] = om.get("mode", cfg["Model"].get("omega_mode", "balanced"))
+    return cfg
+
+
+def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap: int,
+                      selected_frames_path: str, pipe: WorkerPipe) -> None:
+    """Write per-frame VGGT-Omega depth (globally scale-consistent) to
+    omega_run/results_output/frame_<num>.npz so scale_align can compare it to DA3.
+    The omega 'depth' is recovered from the ALIGNED world_points projected onto each
+    camera's forward axis → it carries the same global (up-to-scale) units as the poses."""
+    import numpy as np, json, glob
+    sel = json.load(open(selected_frames_path))
+    files = sorted(sel.get("selected_files", sel if isinstance(sel, list) else []))
+    stems = [int(Path(f).stem) for f in files]
+    N = len(stems)
+    step = max(1, chunk_size - overlap)
+    out_dir = output_dir / "omega_run" / "results_output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    aligned = save_dir / "_tmp_results_aligned"
+    n_written = 0
+    for cp in sorted(glob.glob(str(aligned / "chunk_*.npy"))):
+        try:
+            k = int(Path(cp).stem.split("_")[1])
+            cd = np.load(cp, allow_pickle=True).item()
+            wp = np.asarray(cd["world_points"])            # [S,H,W,3] aligned world
+            ext = np.asarray(cd["extrinsic"])              # [S,4,4] c2w
+            S = wp.shape[0]
+            start = k * step
+            for j in range(S):
+                gi = start + j
+                if gi >= N:
+                    break
+                c2w = ext[j]
+                cam_c = c2w[:3, 3]
+                fwd = c2w[:3, 2]                           # camera +z in world
+                d = (wp[j] - cam_c) @ fwd                  # [H,W] depth along view axis
+                np.savez_compressed(out_dir / f"frame_{stems[gi]}.npz",
+                                    depth=d.astype(np.float32))
+                n_written += 1
+        except Exception as e:
+            pipe.send_log(f"[omega-depth] chunk {cp} skipped ({e})", level="warning")
+    pipe.send_log(f"[omega-depth] wrote {n_written} per-frame omega depths for scale align")
+
+
+def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
+                   selected_frames_path: str, recon_cfg: dict, config: dict):
+    """VGGT-Omega backbone: DA3 per-frame metric depth (anchor) + VGGT-Long[Omega] poses
+    (up-to-scale) + metric scale alignment. No ICP dense-fusion."""
+    import yaml, re as _re
+    device = recon_cfg.get("device", "cpu")
+
+    # ── DA3 per-frame metric depth (NO streaming) on the dense/keyframe set ──
+    pipe.send_progress(6, "VGGT-Omega: extracting DA3 metric depth (per-frame)...",
+                       stage="reconstruction")
+    _da3_dense = frames_dir / "da3_frames.json"
+    _da3_arg = str(_da3_dense) if _da3_dense.exists() else selected_frames_path
+    da3_dir = _run_da3(pipe, frames_dir, output_dir, _da3_arg, recon_cfg, config,
+                       depth_only=True)
+    pipe.send_log(f"DA3 metric depth → {Path(da3_dir) / 'results_output'} (anchor + cloud depth)")
+
+    # ── VGGT-Long with the Omega backbone ──
+    vggt_config = _build_vggtomega_config(config)
+    vggt_config_path = output_dir / "vggt_omega_config.yaml"
+    with open(vggt_config_path, "w") as f:
+        yaml.dump(vggt_config, f, default_flow_style=False)
+    pipe.send_log(f"VGGT-Long[Omega] config: {vggt_config_path}")
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    vggt_script = project_root / "vendor" / "VGGT-Long" / "vggt_long.py"
+    vggt_save_dir = output_dir / "maplong_run"
+    script_path = Path(__file__).resolve().parent.parent / "run_mapanything.sh"
+    if not script_path.exists():
+        raise FileNotFoundError(f"run_mapanything.sh not found: {script_path}")
+    cmd = ["bash", str(script_path), "--image_dir", str(frames_dir),
+           "--config", str(vggt_config_path), "--save_dir", str(vggt_save_dir)]
+    if selected_frames_path:
+        cmd.extend(["--selected_frames", selected_frames_path])
+    env = os.environ.copy()
+    if device == "cpu":
+        env["CUDA_VISIBLE_DEVICES"] = ""
+
+    pipe.send_progress(10, "Starting VGGT-Long[Omega] reconstruction...", stage="reconstruction")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1, env=env, cwd=str(vggt_script.parent))
+    chunk_pattern = _re.compile(r'\[Progress\]:\s*(\d+)/(\d+)')
+    for line in proc.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        if pipe.check_cancel():
+            proc.terminate(); pipe.send_log("Cancelled by user", level="warning"); return
+        m = chunk_pattern.search(line)
+        if m:
+            done, total = int(m.group(1)), int(m.group(2))
+            pipe.send_progress(10 + (done / max(total, 1)) * 65, f"Chunk {done}/{total}",
+                               stage="reconstruction")
+        pipe.send_log(line)
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"VGGT-Long[Omega] exited with code {proc.returncode}")
+
+    pipe.send_progress(78, "VGGT-Long[Omega] complete, post-processing...", stage="reconstruction")
+    _postprocess_reconstruction(pipe, vggt_save_dir, output_dir, vggt_config, backend="mapanything")
+
+    # ── metric scale: emit omega per-frame depth, then align to DA3 ──
+    pipe.send_progress(86, "VGGT-Omega: aligning metric scale to DA3...", stage="reconstruction")
+    try:
+        _emit_omega_depth(vggt_save_dir, output_dir,
+                          int(vggt_config["Model"]["chunk_size"]),
+                          int(vggt_config["Model"]["overlap"]),
+                          selected_frames_path, pipe)
+        from reconstruction.scale_align import run as _scale_run
+        s = _scale_run(output_dir, dry_run=False)
+        pipe.send_log(f"[scale-align] metric scale s={s}" if s else
+                      "[scale-align] could not estimate scale — poses stay up-to-scale",
+                      level=("info" if s else "warning"))
+    except Exception as e:
+        pipe.send_log(f"[scale-align] failed ({e}) — poses up-to-scale", level="warning")
 
 
 def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: WorkerPipe):
