@@ -28,17 +28,23 @@ Orchestrated by `pipeline_manager.py`; each stage runs as an isolated subprocess
 📱 Capture: smartphone video (MP4)  +  optional 📷 Stray Scanner (LiDAR + ARKit)
     │
     ▼
-🔨 1. 3D Reconstruction   (backend: da3 │ mapanything │ hybrid │ hybrid_cond │ lidar)
-    ├─ Blur filter, then TWO-TIER DINOv2 frame sets:
-    │     • 0.98 keyframes (selected_frames.json) → MapAnything poses + cloud (sparse = accurate)
-    │     • 0.99 dense set (da3_frames.json)      → DA3 per-frame depth (keyframes ∪ fillers)
-    ├─ DA3 metric depth + K  →  MapAnything (per-chunk, inside the VGGT-Long framework)
-    │     • mapanything   : MapAnything estimates the poses (DA3 poses NOT used)
-    │     • hybrid_cond   : ARKit-conditioned DA3 → MapAnything FULL prior (depth+K+poses)
+🔨 1. 3D Reconstruction   (backend: mapanything │ vggtomega │ da3 │ hybrid │ hybrid_cond │ lidar)
+    ├─ Blur filter, then GEOMETRIC keyframe selection (default `frames_selector: parallax`):
+    │     • DA3 metric depth+pose on ALL blur-valid frames, then keyframes by TRIANGULATION
+    │       ANGLE (baseline), not appearance → selected_frames.json. Pure rotation aborts.
+    │     • DINO-cosine 0.99 dense set (da3_frames.json) → DA3 per-frame depth (keyframes ∪ fillers)
+    ├─ MapAnything per-chunk (VGGT-Long framework), fed DA3 metric depth+K → poses + cloud
+    │     • mapanything : MapAnything estimates the poses (DA3 poses NOT used)
+    │     • vggtomega   : VGGT-Omega backbone (CVPR'26) up-to-scale → scale-aligned to DA3 metric
+    │     • hybrid_cond : ARKit-conditioned DA3 → MapAnything FULL prior (depth+K+poses)
     ├─ SALAD/DINOv2 loop closure + Sim3 global alignment
-    ├─ Dense fusion (opt-in): localize the inter-keyframe (low-parallax) fillers by colored
-    │     ICP against the nearest keyframe — anchored, NO multi-view "onion" → extra coverage
-    └─ RANSAC auto-leveling (floor → gravity)
+    ├─ GLOBAL POSE REFINEMENT — dense two-pass bundle adjustment (the gold standard):
+    │     • VGGSfM learned tracks over keyframes + fillers → COLMAP/Ceres BA
+    │     • pass 1: pose-prior BA over keyframes → refined poses + 3D landmarks (the map)
+    │     • pass 2: keyframes + landmarks FIXED, fillers localised against the map
+    ├─ DENSIFY: back-project each localised filler's DA3 depth at its BA pose → extra cloud
+    │     (replaces the old ICP; fillers are now globally consistent with the keyframe backbone)
+    └─ RANSAC auto-leveling (floor → gravity).  NO silent fallbacks — any stage that fails ABORTS.
     │
     ▼
 🧹 2. Cloud Cleaning      → CloudCompPy SOR + voxel merge → cleaned_cloud.ply
@@ -66,27 +72,40 @@ Orchestrated by `pipeline_manager.py`; each stage runs as an isolated subprocess
     └─ Per-element metrics: coverage %, deviation stats
 ```
 
-### Inter-keyframe densification (non-trivial pipeline change)
+### Pose refinement & densification — dense two-pass bundle adjustment
 
-VGGT-Long estimates poses + builds the cloud from **keyframes only** (DINOv2 0.98), so the
-cloud — and the TSDF masked to it — inherit keyframe sparsity (inter-keyframe holes). The
-extra frames are **low-parallax by construction** (that is why they were not keyframes), so
-feeding them through a multi-view model degrades ("onion" artifacts). Instead:
+The reconstruction follows classical SfM/SLAM best practice rather than appearance shortcuts:
 
-1. **Two-tier DINOv2 frame sets.** `selected_frames.json` (0.98) → MapAnything (poses/cloud).
-   `da3_frames.json` (0.99, **unioned with the 0.98 keyframes** so it is a true superset) →
-   DA3 per-frame depth for keyframes **and** the inter-keyframe fillers.
-2. **Frame-to-keyframe ICP** (`server/reconstruction/dense_pose_fusion.py`, opt-in via
-   `reconstruction.dense_fusion.enabled`). Each filler is **localized** by colored ICP against
-   the nearest keyframe's depth cloud (init at the keyframe pose → anchored, no triangulation,
-   no drift). DA3 filler depth is **resized to MapAnything resolution** so the cloud has uniform
-   density + consistent traceability. Confidence filtering matches the backend exactly.
-3. **Hybrid TSDF depth loader** (`depth_source: da3_frames`). Per frame: **MapAnything depth for
-   keyframes** (consistent with the cloud), **DA3 depth (resized) for fillers**. Each frame's own
-   pose is used (keyframe poses + the dense-fusion-appended filler poses).
+**1. Geometric keyframe selection (parallax).** Cosine-DINO measures *appearance*, not the
+geometric *baseline* a multi-view backbone needs — it adds a degenerate keyframe on pure
+rotation and misses frontal advance. Instead (`frames_selector: parallax`,
+`server/frames/selector.py::select_keyframes_parallax`), DA3 runs metric depth+pose on all
+blur-valid frames first, then a keyframe is taken when the **median triangulation angle** vs the
+last keyframe reaches `theta_parallax` (≈1.5°). Pure rotation → C_i≈C_j → ~0 parallax → never
+fires; a clip with no baseline **aborts** with a clear UI message. Cosine stays only for DA3's
+dense set.
 
-> The keyframe poses/cloud from VGGT-Long are **never modified** — this is a posterior, opt-in,
-> non-fatal step that only **adds** inter-keyframe coverage.
+**2. Global pose refinement — two-pass BA** (`reconstruction/{vggt_tracks,colmap_ba,run_colmap_ba}.py`).
+MapAnything's per-chunk poses drift; we refine them with the **battle-tested COLMAP/Ceres**
+bundle adjuster over **learned VGGSfM correspondences** (robust to low-texture indoors):
+  - **Pass 1** — pose-prior BA over the keyframes → refined poses + triangulated 3D landmarks (the
+    map). Pose priors anchor to MapAnything → stays metric, no gauge drift.
+  - **Pass 2** — add the inter-keyframe **fillers**, link their observations to the landmarks, hold
+    the keyframes **and** the landmarks **constant**, and optimise only the filler poses
+    (localisation against the fixed map). Keyframes are never degraded; fillers become globally
+    consistent with the keyframe backbone.
+
+**3. Densification** (`reconstruction/densify_fillers.py`, replaces the old ICP). Each localised
+filler's DA3 metric depth is back-projected at its **BA pose** → extra cloud points
+(`chunk_997_densefusion.ply`) that CloudCompPy merges, with the same confidence filter as the
+backbone. The keyframe chunks are re-projected to the refined keyframe poses
+(`reproject_chunks.py`), and the TSDF integrates depth at the **same** refined keyframe + BA
+filler poses (`filler_poses.npz`, used over SLERP) → **cloud and mesh are dense AND consistent**
+(same poses everywhere).
+
+> **Fail-fast everywhere.** Every stage (frame selection, DA3 priors, BA, densification, cloud
+> cleaning, TSDF) **raises on failure** instead of silently degrading — a successful finish means
+> every stage actually worked. There are no "skipped / image-only / keeping previous" escapes.
 
 ---
 
@@ -98,12 +117,16 @@ feeding them through a multi-view model degrades ("onion" artifacts). Instead:
 |-----------|-----------|---------|
 | **DA3** | [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3) | Metric monocular depth (+ optional poses). Runs standalone (`da3` backend) **or** as the per-frame **metric depth prior fed into MapAnything**. In `hybrid_cond` it is ARKit-pose-conditioned + LiDAR-calibrated |
 | **MapAnything** (default) | [MapAnything](https://github.com/facebookresearch/map-anything) (Meta) inside the [VGGT-Long](https://github.com/DengKaiCQ/VGGT-Long) framework | Feed-forward metric 3D, run **per chunk** with chunk overlap + **SALAD/DINOv2 loop closure + Sim3** global alignment. Fed DA3 depth+K as prior (poses too in `hybrid_cond`); generates the global point cloud |
+| **VGGT-Omega** (option) | [VGGT-Ω](https://vggt-omega.github.io/) (CVPR 2026) | Optional SOTA camera/pose backbone, dynamic-scene robust. Up-to-scale → metric scale recovered by aligning to DA3 depth (`scale_align.py`). Selected via `backend: vggtomega` |
+| **Keyframe selection** | Parallax (triangulation angle) / DINOv2-cosine | **Geometric** keyframing for the SLAM backbone (`select_keyframes_parallax`); cosine kept for DA3's dense set |
+| **Correspondences** | [VGGSfM](https://github.com/facebookresearch/vggsfm) tracker | Learned 2D-2D tracks (robust to low-texture indoors) feeding the bundle adjustment |
+| **Bundle adjustment** | [pycolmap](https://github.com/colmap/colmap) / COLMAP Ceres | Dense two-pass pose-prior BA: keyframes refined, fillers localised against the fixed map |
 | **Loop closure** | [DINOv2](https://github.com/facebookresearch/dinov2) / SALAD | Place-recognition retrieval for loop detection; Sim3 optimization closes drift over long sequences |
 | **Stray Scanner** | [Stray Scanner](https://apps.apple.com/app/stray-scanner/id1557051662) (iOS) | iPhone/iPad Pro LiDAR + ARKit capture for `hybrid` / `hybrid_cond` / `lidar` modes |
 | **Scene Analysis (VLM)** | [InternVL3](https://github.com/OpenGVLab/InternVL) | Scans frames to build an object inventory that prompts segmentation |
 | **Segmentation** | [SAM3](https://github.com/facebookresearch/sam2) (Segment Anything 3) | Open-vocabulary instance segmentation of construction elements |
 | **Cloud merge** | [CloudCompPy](https://www.cloudcompare.org/) | SOR outlier removal + voxel downsample, chunk/LiDAR-complement merge → `cleaned_cloud.ply` |
-| **TSDF mesh** | [Open3D](https://www.open3d.org/) VoxelBlockGrid (CUDA) | Textured surface mesh from the cleaned cloud (GPU integrate, spatial tiling, photo bake) |
+| **TSDF mesh** | [Open3D](https://www.open3d.org/) VoxelBlockGrid (CUDA) | Textured surface mesh from the cleaned cloud (GPU integrate, **3D cube tiling welded into one mesh**, long-edge cull, hole-fill, GPU multi-view photo bake with true mesh z-buffer occlusion) |
 | **Point Cloud Viz** | [Potree](https://potree.github.io/) + [Three.js](https://threejs.org/) | Level-of-detail point cloud rendering |
 
 ### Platform
@@ -121,7 +144,8 @@ feeding them through a multi-view model degrades ("onion" artifacts). Instead:
 
 ### Dense 3D Reconstruction
 - **Multi-backend architecture** (`reconstruction.backend` in `config.yaml`, dispatched in `map_worker.py`):
-  - **`mapanything`** (default, video-only): DA3 produces per-frame **metric depth + intrinsics** → fed as a **prior** into **MapAnything** (run per-chunk inside the VGGT-Long framework). MapAnything **estimates its own poses** (DA3 poses are intentionally NOT used) and closes loops via SALAD/DINOv2 + Sim3 → global point cloud.
+  - **`mapanything`** (default, video-only): DA3 produces per-frame **metric depth + intrinsics** → fed as a **prior** into **MapAnything** (run per-chunk inside the VGGT-Long framework). MapAnything **estimates its own poses** (DA3 poses are intentionally NOT used) and closes loops via SALAD/DINOv2 + Sim3 → global point cloud, then the **dense two-pass BA** refines keyframe poses + localises fillers.
+  - **`vggtomega`** (video-only, SOTA poses): **VGGT-Ω** (CVPR 2026) replaces MapAnything as the backbone (+77% camera accuracy, dynamic-scene robust). It is up-to-scale → metric scale is recovered by aligning to DA3 depth. No ICP (its poses are globally optimised).
   - **`hybrid_cond`** (Stray / LiDAR, full prior): Stray ARKit + LiDAR → DA3 is **pose-conditioned** (ARKit poses via cam_enc) with **LiDAR-calibrated** metric depth → MapAnything receives the **FULL prior (depth + K + poses injected)** → loop closure.
   - **`da3`**: DA3 streaming standalone (neural depth + SLAM, no LiDAR, no MapAnything).
   - **`hybrid`**: DA3 calibrated with Stray LiDAR depth (estimate-then-inject poses).
@@ -130,10 +154,12 @@ feeding them through a multi-view model degrades ("onion" artifacts). Instead:
 - **DA3-as-prior** is opt-in (`mapanything.use_da3_priors`), forced ON for `hybrid_cond`. Poses are injected only when `da3_prior_use_poses` (auto-true in `hybrid_cond`); otherwise only depth + K.
 - **Stray Scanner integration**: auto-detection of iOS data (`odometry.csv`, `depth/`, intrinsics).
 - Chunk-based MapAnything inference (`chunk_size` / `overlap`) with Sim3 overlap alignment for long sequences.
-- Frame selection (H/F-ratio keyframes, uniform stride, or all-frames) + optional Laplacian blur filter.
+- **Geometric (parallax) keyframe selection** by default — triangulation angle, not appearance; pure-rotation clips abort with a clear message. DINO-cosine + uniform stride + all-frames remain available. Optional Laplacian blur filter.
+- **Global pose refinement**: dense two-pass COLMAP/Ceres bundle adjustment over learned VGGSfM correspondences (keyframes refined, fillers localised, then densified back into the cloud).
 - Confidence filtering at the authors' defaults (DA3 `conf_thresh_percentile ≈ 40`, MapAnything/VGGT `conf_threshold_coef 0.75`).
 - RANSAC auto-leveling (floor detection and gravity alignment).
-- **TSDF meshing** (final stage): the cleaned cloud is meshed into a textured surface — Open3D VoxelBlockGrid on GPU, spatial tiling for large scenes, multi-view photo bake.
+- **Fail-fast pipeline**: every stage aborts on failure (no silent fallbacks) — a finished run means every stage actually worked.
+- **TSDF meshing** (final stage): the cleaned cloud is meshed into a textured surface — Open3D VoxelBlockGrid on GPU, **3D cube tiling welded into one mesh**, long-edge cull + hole-fill, GPU multi-view photo bake with true mesh z-buffer occlusion.
 
 ### Semantic Segmentation
 - **Scene Analysis (VLM)**: InternVL3 scans frames and generates an object inventory that prompts segmentation
@@ -177,7 +203,8 @@ stac-builder/
 │   ├─ pipeline_manager.py    # 6-stage pipeline orchestrator
 │   ├─ workers/               # Subprocess workers (GPU-isolated)
 │   │   ├─ base.py            # WorkerPipe IPC protocol
-│   │   ├─ map_worker.py      # 1. Reconstruction dispatcher (da3/mapanything/hybrid/hybrid_cond/lidar)
+│   │   ├─ map_worker.py      # 1. Reconstruction dispatcher (mapanything/vggtomega/da3/hybrid/...)
+│   │   │                      #    + parallax keyframe selection + the global BA / densify step
 │   │   ├─ cloudcompy_worker.py # 2. Cloud cleaning (SOR + voxel) + LiDAR complement merge
 │   │   ├─ tsdf_worker.py     # 3. TSDF textured mesh (Open3D VoxelBlockGrid, GPU)
 │   │   ├─ vlm_worker.py      # 4. InternVL3 scene analysis
@@ -190,7 +217,14 @@ stac-builder/
 │   │   ├─ stray_detector.py  # Auto-detect Stray Scanner data in sessions
 │   │   └─ stray_scanner.py   # Load ARKit poses, LiDAR depth, intrinsics
 │   ├─ frame_quality.py       # Blur detection (Laplacian)
-│   ├─ frame_selector.py      # Visual novelty filter (H/F ratio)
+│   ├─ frames/selector.py     # Keyframe selection: parallax (geometric) + DINOv2-cosine
+│   ├─ reconstruction/        # Global pose refinement + densification
+│   │   ├─ vggt_tracks.py     #   learned VGGSfM correspondences (dense: keyframes + fillers)
+│   │   ├─ colmap_ba.py       #   COLMAP/Ceres two-pass bundle adjustment engine
+│   │   ├─ run_colmap_ba.py   #   BA runner: keyframes refined + fillers localised
+│   │   ├─ densify_fillers.py #   back-project filler depth at BA poses → extra cloud
+│   │   ├─ reproject_chunks.py#   re-project keyframe chunks to refined poses (cloud↔mesh)
+│   │   └─ scale_align.py     #   metric scale for the VGGT-Omega path (align to DA3)
 │   ├─ alignment_manager.py   # SIM3 alignment + auto-leveling
 │   ├─ scene_analyzer.py      # InternVL3 scene inventory
 │   ├─ segmentation/pipeline.py # 2D instance masks → display-time cloud matching
@@ -209,8 +243,10 @@ stac-builder/
 │           └─ LoginPage.tsx   # Authentication
 │
 ├─ vendor/                    # AI model integrations
-│   ├─ depth-anything-3/      # DA3 — metric depth (prior into MapAnything, or standalone)
+│   ├─ depth-anything-3/      # DA3 — metric depth + per-frame pose (prior, scale anchor, standalone)
 │   ├─ VGGT-Long/             # framework: per-chunk MapAnything + SALAD/DINOv2 loop closure + Sim3
+│   │                          #   + vendored VGGSfM tracker (correspondences) + VGGTOmega adapter
+│   ├─ vggt-omega/            # VGGT-Ω backbone (optional `vggtomega` backend; imported, unmodified)
 │   ├─ MapAnything2/          # MapAnything model (per-chunk feed-forward metric 3D)
 │   ├─ dinov3/                # DINO backbone (loop-closure place retrieval)
 │   ├─ sam3/                  # SAM3 open-vocabulary segmentation
@@ -246,7 +282,7 @@ Accurate camera poses drive the whole pipeline — they place every depth observ
 - **`hybrid_cond`:** Stray **ARKit poses condition DA3** (cam_enc) and are **injected into MapAnything as the full prior** (depth + K + poses). MapAnything still loop-closes them, so the priors initialize but do not freeze the solution.
 - **`da3` standalone:** DA3's own neural SLAM (SALAD features) handles all pose estimation.
 
-**Global consistency**: over long sequences, per-chunk poses drift; SALAD/DINOv2 place-recognition detects loops and Sim3 optimization closes them, keeping the global cloud metrically consistent. The refined poses are written to `camera_poses.txt` and reused by every downstream stage (TSDF, texture bake, BIM overlay).
+**Global consistency**: over long sequences, per-chunk poses drift. Two layers fix it: (1) SALAD/DINOv2 place-recognition + Sim3 loop closure inside VGGT-Long, then (2) a **dense two-pass bundle adjustment** (COLMAP/Ceres over learned VGGSfM tracks) that refines the keyframe poses (pose-prior anchored → metric) and localises the inter-keyframe fillers against the fixed keyframe map. The refined keyframe poses are written to `camera_poses.txt` and the localised filler poses to `ba_run/filler_poses.npz`; every downstream stage (densification, TSDF, texture bake, BIM overlay) integrates at these **same** poses → cloud and mesh stay consistent.
 
 ---
 
@@ -257,29 +293,38 @@ All pipeline parameters are centralized in `server/config.yaml`:
 ```yaml
 # Key configuration sections
 reconstruction:
-  backend: mapanything         # da3 | mapanything | hybrid | hybrid_cond | lidar | gaus_slam*
-  da3:                         # Depth Anything 3 (depth prior, or standalone backend)
-    chunk_size: 120
-    overlap: 60
-    conf_threshold_coef: 0.75  # author default: drop conf < 0.75×mean
+  backend: mapanything         # mapanything | vggtomega | da3 | hybrid | hybrid_cond | lidar
+  frames_selector: parallax    # parallax (geometric, default) | dino | stride | none
   mapanything:                 # MapAnything model, run inside the VGGT-Long framework
     use_da3_priors: true       # feed DA3 metric depth + intrinsics as prior
     da3_prior_use_poses: false # also inject DA3 poses (auto-true in hybrid_cond)
     conf_threshold_coef: 0.75  # VGGT-Long point-cloud confidence filter
-    map_conf_percentile: 40    # MapAnything inference confidence floor
-  lidar:                       # Stray Scanner (hybrid / hybrid_cond / lidar)
-    trust_range: 5.0           # LiDAR depth trust range (meters, iPad ≈ 5m)
-    confidence_threshold: 1    # ARKit confidence: 0=low, 1=medium, 2=high
-    fallback_to_da3: true      # use DA3 if no Stray data found
+  vggtomega:                   # optional VGGT-Ω backbone (gated weights → vendor/vggt-omega-weights)
+    resolution: 512
+  bundle_adjust:               # global pose refinement (dense two-pass BA), runs after the backend
+    enabled: true
+    track_window: 24           # VGGSfM tracking window (keyframes + fillers)
+    prior_stddev_m: 0.10       # how tightly the BA anchors to the backbone poses
+  dense_fusion:
+    enabled: false             # OFF — superseded by the two-pass BA + densify_fillers
+  lidar:
+    trust_range: 5.0
+    fallback_to_da3: true
 
 tsdf:                          # final stage: textured mesh from cleaned_cloud.ply
-  voxel_length: 0.01           # 1 cm voxels
-  tsdf_tiling: auto            # spatial tiling so large scenes fit the GPU grid
-  texture_mode: vertex_gpu     # multi-view photo bake (nvdiffrast)
+  voxel_length: 0.012          # ~1.2 cm voxels
+  depth_source: da3_frames     # hybrid: MapAnything depth (keyframes) + DA3 depth (fillers)
+  tsdf_tile_length_m: 10.0     # 3D CUBE tiling (10 m cubes) welded into one mesh
+  tsdf_max_edge_m: 0.30        # cull spurious long "bridge" triangles
+  fill_holes: true             # close small dropouts (mesh sanitised before VTK)
+  texture_mode: vertex_gpu     # GPU multi-view photo bake (nvdiffrast, true mesh z-buffer occlusion)
 
-frame_selection:
-  enabled: true               # Visual novelty filter
-  hf_ratio_threshold: 0.45    # H/F ratio for parallax detection
+frame_selection:               # keyframe selection params
+  theta_parallax: 1.5          # deg: new keyframe once the median triangulation angle reaches this
+  overlap_min: 0.5             # force a keyframe if overlap drops (only with real translation)
+  min_global_baseline_m: 0.3   # pure rotation / no baseline → ABORT
+  min_keyframes: 20            # too few keyframes → ABORT
+  dino_threshold: 0.98         # cosine threshold (used by frames_selector: dino, and DA3 dense set)
 
 alignment:
   method: "scale+se3"         # SIM3 alignment
