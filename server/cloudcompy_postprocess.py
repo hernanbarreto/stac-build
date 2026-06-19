@@ -25,8 +25,11 @@ def _clone_from_ref(source_cloud, ref_cloud, step_name="step"):
     """Convert ReferenceCloud to ccPointCloud via partialClone."""
     clone_result = source_cloud.partialClone(ref_cloud)
     if clone_result is None:
-        print(f"  ⚠️  {step_name}: partialClone returned None, keeping previous cloud")
-        return source_cloud
+        # NO FALLBACK: partialClone returns None only on real failure (a valid ref always
+        # clones) → discarding the filter result and keeping the unfiltered cloud is a
+        # silent degradation. Fail.
+        print(f"[CloudCompPy] ❌ {step_name}: partialClone returned None")
+        sys.exit(1)
     cloud = clone_result[0] if isinstance(clone_result, tuple) else clone_result
     return cloud
 
@@ -107,8 +110,10 @@ def main():
     for i, ply_path in enumerate(chunk_files):
         cloud = cc.loadPointCloud(ply_path)
         if cloud is None:
-            print(f"  ⚠️  Failed to load {os.path.basename(ply_path)}, skipping")
-            continue
+            # NO FALLBACK: a chunk that won't load = a whole spatial region silently
+            # missing from the cloud. Fail.
+            print(f"[CloudCompPy] ❌ Failed to load {os.path.basename(ply_path)}")
+            sys.exit(1)
         n_pts = cloud.size()
         total_input += n_pts
         clouds.append(cloud)
@@ -170,7 +175,12 @@ def main():
                 injected.append(name)
             print(f"  ✅ Injected scalar fields {injected} ({n_cloud:,} pts) ({time.time()-t_orig:.1f}s)\n")
         else:
-            print(f"  ⚠️ Origin size mismatch: {len(fields[0][1])} vs cloud {n_cloud} — NOT injected\n")
+            # NO FALLBACK: without per-point frame_global/pixel the cleaned cloud is NOT
+            # traceable → the TSDF (mask_to_cleaned_cloud) cannot mask it. A size mismatch
+            # means a chunk PLY/origins desync — a real bug. Fail.
+            print(f"[CloudCompPy] ❌ Origin size mismatch: {len(fields[0][1])} vs cloud "
+                  f"{n_cloud} — cannot inject traceability")
+            sys.exit(1)
 
     # ══════════════════════════════════════════════════════════════
     # STEP 1c: CONFIDENCE GATE (min-max normalised == the viewer slider)
@@ -199,9 +209,15 @@ def main():
                       f"({pct:.1f}% kept)  ({time.time()-t1c:.1f}s)\n")
                 current = filtered
             else:
-                print("[Step 1c] Confidence gate produced empty/None — keeping all points\n")
+                # NO FALLBACK: the gate was explicitly requested (conf_min_norm>0) → None
+                # (failure) or 0 points (threshold drops everything) must not silently pass.
+                print(f"[CloudCompPy] ❌ Confidence gate produced empty/None at norm="
+                      f"{args.conf_min_norm} (threshold too aggressive or filter failed)")
+                sys.exit(1)
         else:
-            print("[Step 1c] Confidence gate requested but no 'confidence' SF — skipped\n")
+            # NO FALLBACK: gate requested but there is no 'confidence' field to gate on.
+            print("[CloudCompPy] ❌ Confidence gate requested but no 'confidence' scalar field")
+            sys.exit(1)
 
     # ══════════════════════════════════════════════════════════════
     # STEP 2: NEAR-DUPLICATE REMOVAL (micro-voxel 0.1mm)
@@ -222,7 +238,8 @@ def main():
             print(f"  ✅ {n_before:,} → {deduped.size():,} ({n_removed:,} near-duplicates, {pct:.1f}%)")
             current = deduped
         else:
-            print(f"  ℹ️  Micro-voxel returned None, keeping original")
+            print(f"[CloudCompPy] ❌ Near-duplicate micro-voxel returned None")
+            sys.exit(1)
         
         print(f"  ({time.time()-t1:.1f}s)\n")
     else:
@@ -243,7 +260,8 @@ def main():
         reduction = (1 - current.size() / n_before) * 100
         print(f"  ✅ {n_before:,} → {current.size():,} ({reduction:.1f}% reduction)")
     else:
-        print(f"  ⚠️  Voxel returned None, keeping original")
+        print(f"[CloudCompPy] ❌ Voxel subsampling returned None")
+        sys.exit(1)
     
     current.setName("subsampled")
     print(f"  ({time.time()-t3:.1f}s)\n")
@@ -265,7 +283,8 @@ def main():
             pct = (n_removed / n_before) * 100
             print(f"  ✅ {n_before:,} → {current.size():,} ({n_removed:,} outliers, {pct:.1f}%)")
         else:
-            print(f"  ⚠️  SOR returned None")
+            print(f"[CloudCompPy] ❌ SOR filter returned None")
+            sys.exit(1)
         
         current.setName("sor_cleaned")
         print(f"  ({time.time()-t4:.1f}s)\n")
@@ -295,7 +314,8 @@ def main():
                 pct = (n_removed / n_before) * 100
                 print(f"  ✅ {n_before:,} → {current.size():,} ({n_removed:,} noisy pts, {pct:.1f}%)")
         else:
-            print(f"  ⚠️  Noise filter returned None")
+            print(f"[CloudCompPy] ❌ Noise filter returned None")
+            sys.exit(1)
         
         current.setName("denoised")
         print(f"  ({time.time()-t5:.1f}s)\n")
@@ -319,23 +339,10 @@ def main():
     # ══════════════════════════════════════════════════════════════
     # STEP 6: NORMAL ESTIMATION
     # ══════════════════════════════════════════════════════════════
-    if not args.skip_normals:
-        t6 = time.time()
-        print(f"[Step 6/6] Computing normals...")
-        
-        cc.computeNormals([current])
-        
-        if current.hasNormals():
-            print(f"  Orienting normals (MST)...")
-            current.orientNormalsWithMST()
-            print(f"  ✅ Normals computed and oriented ({current.size():,} points)")
-        else:
-            print(f"  ⚠️  Normal computation failed")
-        
-        current.setName("with_normals")
-        print(f"  ({time.time()-t6:.1f}s)\n")
-    else:
-        print(f"[Step 6/6] Normal estimation: SKIPPED\n")
+    # Step 6 (normals) DISABLED: the PLY writer below does not emit normal properties and no
+    # downstream consumer reads cloud normals — computing + MST-orienting them on millions of
+    # points was wasted work. Re-enable AND add nx/ny/nz to the writer if a consumer needs them.
+    print(f"[Step 6/6] Normal estimation: DISABLED (not written to PLY / not used)\n")
 
     # ══════════════════════════════════════════════════════════════
     # SAVE (Binary PLY — with origin fields preserved if available)
