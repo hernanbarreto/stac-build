@@ -284,9 +284,11 @@ def extract_tracks(
                 inv = np.argsort(order)
                 stack_o = stack[order][None]                          # (1,S,3,H,W)
                 fmaps_o = fmaps[:, order]
+                # fine_tracking ON: sub-pixel refinement (better tracks → better BA). The
+                # H!=W out-of-bounds bug in refine_track (clamped x to H instead of W) is
+                # patched in our VGGT-Long fork, so this is safe on 280x504 inputs.
                 ft, _ct, vis, score = tracker(
-                    stack_o, qpts[None], fmaps=fmaps_o,
-                    fine_tracking=(not smoke))
+                    stack_o, qpts[None], fmaps=fmaps_o, fine_tracking=(not smoke))
                 ft = ft[0][inv].float().cpu().numpy()                 # (S,N,2) back to window order
                 vis = vis[0][inv].float().cpu().numpy()               # (S,N)
                 score = score[0][inv].float().cpu().numpy()           # (S,N)

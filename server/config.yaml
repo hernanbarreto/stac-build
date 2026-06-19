@@ -485,6 +485,19 @@ reconstruction:
   # no drift, no triangulation), then back-projects its DA3 depth → extra cloud coverage
   # CloudCompPy merges → MORE COMPLETE cloud → TSDF inherits it. Keyframes/VGGT-Long are
   # NOT touched. Confidence filtering is IDENTICAL to the backend's. Runs in the recon env.
+  # ── Global pose refinement (bundle adjustment) — runs after the backend, before CloudCompPy ──
+  # VGGSfM learned correspondences (robust to low texture) → COLMAP/Ceres POSE-PRIOR bundle
+  # adjustment (anchored to the backbone's metric poses → fixes gauge, stays metric, refines
+  # relative drift) → refined camera_poses.txt. The TSDF then integrates depth at the refined
+  # poses. Applies to the map/da3 backends (vggtomega does its own global optimisation).
+  bundle_adjust:
+    enabled: true
+    python: "/workspace/miniforge3/envs/mapanything/bin/python"
+    track_window: 24                    # keyframes per VGGSfM tracking window
+    track_stride: 12
+    track_grid: 48                      # query-point grid density per query frame
+    prior_stddev_m: 0.10                # how tightly to anchor to the backbone poses (m)
+
   dense_fusion:
     enabled: false                      # OFF — superseded by the global pose-prior BA (run_colmap_ba).
                                         # The inter-keyframe ICP was a stopgap that also caused the

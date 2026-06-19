@@ -217,6 +217,17 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         except Exception as e:
             pipe.send_log(f"[dense-fusion] skipped ({e}) — cloud unchanged", level="warning")
 
+    # ── Step 5 (opt-in): GLOBAL POSE REFINEMENT (BA) ──
+    # Refine the backbone's keyframe poses with VGGSfM learned correspondences + COLMAP's
+    # pose-prior Ceres bundle adjustment → refined camera_poses.txt. The TSDF then integrates
+    # depth at the REFINED poses (less drift). Runs BEFORE CloudCompPy. Non-fatal. The
+    # vggtomega path already does its own global optimisation, so the BA targets map/da3.
+    if backend != "vggtomega" and (recon_cfg.get("bundle_adjust", {}) or {}).get("enabled"):
+        try:
+            _run_bundle_adjust_step(pipe, frames_dir, output_dir, recon_cfg)
+        except Exception as e:
+            pipe.send_log(f"[bundle-adjust] skipped ({e}) — poses unchanged", level="warning")
+
 
 def _run_dense_fusion(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                       config: dict, recon_cfg: dict):
@@ -240,6 +251,56 @@ def _run_dense_fusion(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         pipe.send_log(line.rstrip())
     rc = proc.wait()
     pipe.send_log(f"[dense-fusion] exit={rc}")
+
+
+def _run_bundle_adjust_step(pipe: WorkerPipe, frames_dir: Path, output_dir: Path, recon_cfg: dict):
+    """Global pose refinement: VGGSfM learned correspondences → COLMAP/Ceres pose-prior
+    bundle adjustment → refined camera_poses.txt (all copies). Runs in the mapanything env
+    (GPU tracker + pycolmap). The TSDF then integrates depth at the REFINED poses."""
+    import subprocess
+    bcfg = recon_cfg.get("bundle_adjust", {}) or {}
+    py = bcfg.get("python", "/workspace/miniforge3/envs/mapanything/bin/python")
+    server_dir = Path(__file__).resolve().parent.parent
+
+    pipe.send_progress(50, "Pose refinement: extracting VGGSfM tracks...", stage="reconstruction")
+    pipe.send_log("[bundle-adjust] step 1/2 — learned correspondences (VGGSfM tracker)")
+    p1 = subprocess.Popen(
+        [py, "-m", "reconstruction.vggt_tracks", "--output-dir", str(output_dir),
+         "--frames-dir", str(frames_dir),
+         "--win", str(bcfg.get("track_window", 24)),
+         "--stride", str(bcfg.get("track_stride", 12)),
+         "--grid-side", str(bcfg.get("track_grid", 48))],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(server_dir))
+    for line in p1.stdout:
+        pipe.send_log("[ba-tracks] " + line.rstrip())
+    if p1.wait() != 0:
+        pipe.send_log("[bundle-adjust] tracks failed — poses UNCHANGED", level="warning")
+        return
+
+    pipe.send_progress(62, "Pose refinement: COLMAP/Ceres bundle adjustment...", stage="reconstruction")
+    pipe.send_log("[bundle-adjust] step 2/2 — pose-prior BA (pycolmap/Ceres)")
+    p2 = subprocess.Popen(
+        [py, "-m", "reconstruction.run_colmap_ba", "--output-dir", str(output_dir),
+         "--prior-stddev-m", str(bcfg.get("prior_stddev_m", 0.10))],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(server_dir))
+    for line in p2.stdout:
+        pipe.send_log("[ba] " + line.rstrip())
+    rc = p2.wait()
+    if rc != 0:
+        pipe.send_log(f"[bundle-adjust] BA failed (exit {rc}) — poses unchanged", level="warning")
+        return
+    pipe.send_log("[bundle-adjust] refined poses written")
+
+    # Re-project the chunk clouds to the refined poses so the CLOUD (built by CloudCompPy
+    # from the chunks) matches the TSDF (which integrates at the refined poses) — consistent.
+    pipe.send_progress(66, "Pose refinement: re-projecting cloud to refined poses...",
+                       stage="reconstruction")
+    p3 = subprocess.Popen(
+        [py, "-m", "reconstruction.reproject_chunks", "--output-dir", str(output_dir)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(server_dir))
+    for line in p3.stdout:
+        pipe.send_log("[ba-reproj] " + line.rstrip())
+    pipe.send_log(f"[bundle-adjust] cloud re-projection exit={p3.wait()}")
 
 
 def _find_stray_dir(session_path: Path) -> Path:
