@@ -291,7 +291,12 @@ def extract_tracks(
                     stack_o, qpts[None], fmaps=fmaps_o, fine_tracking=(not smoke))
                 ft = ft[0][inv].float().cpu().numpy()                 # (S,N,2) back to window order
                 vis = vis[0][inv].float().cpu().numpy()               # (S,N)
-                score = score[0][inv].float().cpu().numpy()           # (S,N)
+                # fine_tracking refines with compute_score=False → score is None; visibility
+                # is then the only quality signal (use it for both gates).
+                if score is not None:
+                    score = score[0][inv].float().cpu().numpy()      # (S,N)
+                else:
+                    score = vis
                 N = ft.shape[1]
                 good = (vis > vis_thresh) & (score > score_thresh)
                 seen = good.sum(axis=0)                               # per-track #frames seen
