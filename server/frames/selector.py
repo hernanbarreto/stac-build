@@ -762,11 +762,18 @@ def select_keyframes_parallax(frames_dir: str, npz_dir: str, config: dict = None
 
     centers = np.asarray(centers)
     global_baseline = float(np.linalg.norm(centers - centers[0], axis=1).max())
-    geometric_ok = (global_baseline >= min_global_baseline) and (len(selected) >= 2)
-    reason = "" if geometric_ok else (
-        f"insufficient geometric baseline (max camera displacement {global_baseline:.2f}m < "
-        f"{min_global_baseline}m) — the clip is essentially pure rotation / no parallax for "
-        f"triangulation")
+    min_keyframes = int(config.get("min_keyframes", 20))
+    if global_baseline < min_global_baseline:
+        geometric_ok, reason = False, (
+            f"insufficient geometric baseline (max camera displacement {global_baseline:.2f}m < "
+            f"{min_global_baseline}m) — the clip is essentially pure rotation / no parallax for "
+            f"triangulation")
+    elif len(selected) < min_keyframes:
+        geometric_ok, reason = False, (
+            f"too few keyframes ({len(selected)} < {min_keyframes}) — not enough geometric "
+            f"coverage to reconstruct (raise the capture length or lower theta_parallax)")
+    else:
+        geometric_ok, reason = True, ""
     a = np.asarray(medians) if medians else np.zeros(1)
     elapsed = time.time() - t0
     out = {

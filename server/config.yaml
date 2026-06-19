@@ -126,6 +126,8 @@ frame_selection:
                                        # (baseline≈0) never forces a degenerate (un-triangulable) kf.
   min_global_baseline_m: 0.3           # if the WHOLE clip's max camera displacement < this →
                                        # pure rotation / no parallax → ABORT (cannot reconstruct).
+  min_keyframes: 20                    # if fewer keyframes than this are selected → ABORT
+                                       # (not enough geometric coverage to reconstruct).
   parallax_stride: 8                   # sub-sample every Nth pixel for the angle median.
 
   # Legacy H/F ratio (used if method=hf_ratio or DINO fails)

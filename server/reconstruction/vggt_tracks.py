@@ -77,6 +77,24 @@ def _add_vendor_to_path() -> None:
         sys.path.insert(0, p)
 
 
+def _load_list_from_json(json_path: Path, frames_dir: Path) -> List[Tuple[int, Path]]:
+    """Load a frame list (e.g. da3_frames.json / selected_frames.json) → [(num, img)]
+    sorted by frame number. Used for DENSE tracking (keyframes + fillers)."""
+    d = json.loads(json_path.read_text())
+    names = d.get("selected_files", d.get("frames", d.get("selected", []))) if isinstance(d, dict) else d
+    out = []
+    for nm in names:
+        stem = Path(str(nm)).stem
+        digits = "".join(ch for ch in stem if ch.isdigit())
+        if not digits:
+            continue
+        n = int(digits)
+        img = _resolve_image(frames_dir, n, str(nm))
+        if img is not None:
+            out.append((n, img))
+    return sorted(out, key=lambda t: t[0])
+
+
 def _load_keyframe_list(output_dir: Path, frames_dir: Path) -> List[Tuple[int, Path]]:
     """Return [(global_frame_num, image_path), …] for the loop-closed keyframes,
     in trajectory order. Prefers camera_frames.txt (the numbers the poses use);
@@ -206,8 +224,11 @@ def extract_tracks(
     loop_window: int = 8,
     smoke: bool = False,
     device: str = "cuda",
+    frame_list_json: Optional[str] = None,
 ) -> Optional[Path]:
-    """Extract VGGSfM tracks over keyframe windows → tracks.npz. Returns the path."""
+    """Extract VGGSfM tracks over windows → tracks.npz. By default the windows are the
+    keyframes; pass frame_list_json (e.g. da3_frames.json) to track the DENSE set
+    (keyframes + fillers) for the two-pass BA. Returns the path."""
     import torch
 
     _add_vendor_to_path()
@@ -232,7 +253,11 @@ def extract_tracks(
     RES_W, RES_H = _detect_res(output_dir)
     logger.info(f"working resolution (W,H) = {RES_W}×{RES_H} (auto from backbone npz)")
 
-    kfs = _load_keyframe_list(output_dir, frames_dir)
+    if frame_list_json:
+        kfs = _load_list_from_json(Path(frame_list_json), frames_dir)
+        logger.info(f"DENSE tracking over {len(kfs)} frames from {Path(frame_list_json).name}")
+    else:
+        kfs = _load_keyframe_list(output_dir, frames_dir)
     if len(kfs) < 2:
         logger.error("need ≥2 keyframes")
         return None
@@ -357,11 +382,13 @@ def main():
     ap.add_argument("--win", type=int, default=24)
     ap.add_argument("--stride", type=int, default=12)
     ap.add_argument("--grid-side", type=int, default=48)
+    ap.add_argument("--frame-list", default=None, help="json (e.g. da3_frames.json) for DENSE tracking")
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
     out = extract_tracks(
         Path(args.output_dir), Path(args.frames_dir),
         win=args.win, stride=args.stride, grid_side=args.grid_side, smoke=args.smoke,
+        frame_list_json=args.frame_list,
     )
     print(f"[TRACKS-RESULT] {out if out else 'NONE'}")
     if out is None:                       # NO FALLBACK: signal failure to the caller

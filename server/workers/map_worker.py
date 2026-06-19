@@ -290,15 +290,20 @@ def _run_bundle_adjust_step(pipe: WorkerPipe, frames_dir: Path, output_dir: Path
     py = bcfg.get("python", "/workspace/miniforge3/envs/mapanything/bin/python")
     server_dir = Path(__file__).resolve().parent.parent
 
-    pipe.send_progress(50, "Pose refinement: extracting VGGSfM tracks...", stage="reconstruction")
-    pipe.send_log("[bundle-adjust] step 1/2 — learned correspondences (VGGSfM tracker)")
-    p1 = subprocess.Popen(
-        [py, "-m", "reconstruction.vggt_tracks", "--output-dir", str(output_dir),
-         "--frames-dir", str(frames_dir),
-         "--win", str(bcfg.get("track_window", 24)),
-         "--stride", str(bcfg.get("track_stride", 12)),
-         "--grid-side", str(bcfg.get("track_grid", 48))],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(server_dir))
+    pipe.send_progress(50, "Pose refinement: extracting VGGSfM tracks (dense)...", stage="reconstruction")
+    pipe.send_log("[bundle-adjust] step 1/3 — learned correspondences (VGGSfM, dense set)")
+    _cmd = [py, "-m", "reconstruction.vggt_tracks", "--output-dir", str(output_dir),
+            "--frames-dir", str(frames_dir),
+            "--win", str(bcfg.get("track_window", 24)),
+            "--stride", str(bcfg.get("track_stride", 12)),
+            "--grid-side", str(bcfg.get("track_grid", 48))]
+    # DENSE two-pass BA: track keyframes + fillers (the da3_frames set) so the fillers can be
+    # localised against the keyframe map. Falls back to keyframe-only if da3_frames.json is absent.
+    _da3_dense = frames_dir / "da3_frames.json"
+    if _da3_dense.exists():
+        _cmd += ["--frame-list", str(_da3_dense)]
+    p1 = subprocess.Popen(_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, bufsize=1, cwd=str(server_dir))
     for line in p1.stdout:
         pipe.send_log("[ba-tracks] " + line.rstrip())
     if p1.wait() != 0:
@@ -314,11 +319,25 @@ def _run_bundle_adjust_step(pipe: WorkerPipe, frames_dir: Path, output_dir: Path
         pipe.send_log("[ba] " + line.rstrip())
     if p2.wait() != 0:
         raise RuntimeError("COLMAP/Ceres bundle adjustment failed — aborting (no fallback)")
-    pipe.send_log("[bundle-adjust] refined poses written")
+    pipe.send_log("[bundle-adjust] refined keyframe poses + localised filler poses written")
 
-    # Re-project the chunk clouds to the refined poses so the CLOUD (built by CloudCompPy
-    # from the chunks) matches the TSDF (which integrates at the refined poses) — consistent.
-    pipe.send_progress(66, "Pose refinement: re-projecting cloud to refined poses...",
+    # ── step 3/3a: DENSIFY — back-project the BA-localised filler poses → extra cloud points
+    # (replaces the old ICP dense-fusion; the fillers are now globally consistent with the
+    # keyframe map). Writes chunk_997_densefusion.ply that CloudCompPy merges. ──
+    pipe.send_progress(64, "Pose refinement: densifying cloud (filler back-projection)...",
+                       stage="reconstruction")
+    p_d = subprocess.Popen(
+        [py, "-m", "reconstruction.densify_fillers", "--output-dir", str(output_dir),
+         "--stride", str(bcfg.get("densify_stride", 2))],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(server_dir))
+    for line in p_d.stdout:
+        pipe.send_log("[ba-densify] " + line.rstrip())
+    if p_d.wait() != 0:
+        raise RuntimeError("filler densification failed — aborting (no fallback)")
+
+    # ── step 3/3b: re-project the KEYFRAME chunk clouds to the refined keyframe poses so the
+    # CLOUD matches the TSDF (which integrates at the refined poses) — consistent. ──
+    pipe.send_progress(66, "Pose refinement: re-projecting keyframe cloud to refined poses...",
                        stage="reconstruction")
     p3 = subprocess.Popen(
         [py, "-m", "reconstruction.reproject_chunks", "--output-dir", str(output_dir)],
@@ -327,7 +346,7 @@ def _run_bundle_adjust_step(pipe: WorkerPipe, frames_dir: Path, output_dir: Path
         pipe.send_log("[ba-reproj] " + line.rstrip())
     if p3.wait() != 0:
         raise RuntimeError("cloud re-projection to refined poses failed — aborting (no fallback)")
-    pipe.send_log("[bundle-adjust] cloud re-projected to refined poses (cloud↔TSDF consistent)")
+    pipe.send_log("[bundle-adjust] cloud densified + re-projected (cloud↔TSDF consistent, dense)")
 
 
 def _find_stray_dir(session_path: Path) -> Path:

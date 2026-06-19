@@ -1753,6 +1753,22 @@ def export_tsdf_scene(
         else:
             cam.pose_map = _interpolate_poses(cam.pose_map, da3_frames)
             poses_src = poses_src + "+interp"
+            # If the two-pass BA localised the filler frames, use those ACCURATE poses
+            # instead of the SLERP interpolation (so the integrated filler depth lands
+            # exactly where the densified cloud points are → cloud↔mesh consistent).
+            _fp = output_dir / "ba_run" / "filler_poses.npz"
+            if _fp.exists():
+                try:
+                    _z = np.load(_fp)
+                    _ff = _z["frames"].astype(int); _fc = _z["c2w"].astype(np.float64)
+                    _n = 0
+                    for _k in range(len(_ff)):
+                        cam.pose_map[int(_ff[_k])] = _fc[_k]; _n += 1
+                    logger.info(f"[TSDF-scene] using {_n} BA-localised filler poses "
+                                f"(filler_poses.npz) over SLERP interpolation")
+                    poses_src = poses_src + "+ba_fillers"
+                except Exception as _e:
+                    logger.warning(f"[TSDF-scene] could not load filler_poses.npz ({_e})")
         if cc_xyz is None and not mask_to_cleaned_cloud:
             # Cloud points weren't loaded (mask off) — load them just for bbox/tiling.
             cc_path = output_dir / "cleaned_cloud.ply"

@@ -58,8 +58,8 @@ def run(output_dir: Path) -> int:
     n_chunks = 0
     for ply in sorted(output_dir.glob("chunk_*.ply")):
         stem = ply.stem
-        if stem.startswith("chunk_998") or stem.startswith("chunk_999"):
-            continue  # dense-fusion / LiDAR use other poses
+        if stem.startswith(("chunk_997", "chunk_998", "chunk_999")):
+            continue  # densify-fillers (already at refined poses) / dense-fusion / LiDAR
         # NO FALLBACK: a backbone chunk MUST be re-projectable — missing origins, a length
         # mismatch or a read error means the cloud would stay at old poses (inconsistent with
         # the TSDF), so we raise instead of silently leaving it.
