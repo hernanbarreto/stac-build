@@ -28,14 +28,13 @@ def _tsdf_work(pipe: WorkerPipe, session_dir: str, config: dict):
     frames_dir = (session_path / "frames").resolve()
     output_dir = (session_path / "output").resolve()
 
+    # NO FALLBACK: the TSDF mesh is a required output — fail if its inputs are missing.
     if not output_dir.exists():
-        pipe.send_log("No output/ dir, skipping TSDF", level="warning")
-        return
+        raise FileNotFoundError(f"No output/ dir at {output_dir} — TSDF cannot run")
     # The whole-scene TSDF needs the cleaned cloud (mask) from CloudCompy.
     if not (output_dir / "cleaned_cloud.ply").exists():
-        pipe.send_log("cleaned_cloud.ply not found (CloudCompy stage missing?), "
-                      "skipping TSDF", level="warning")
-        return
+        raise FileNotFoundError("cleaned_cloud.ply not found — the CloudCompy stage did not "
+                                "produce a cloud; TSDF cannot run")
 
     tcfg = config.get("tsdf", {}) or {}
     # Single source of truth (shared with main.py /tsdf/scene_export) → both run

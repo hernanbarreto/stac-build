@@ -157,7 +157,10 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--prior-stddev-m", type=float, default=0.10)
     a = ap.parse_args()
-    run(Path(a.output_dir), smoke=a.smoke, dry_run=a.dry_run, prior_stddev_m=a.prior_stddev_m)
+    res = run(Path(a.output_dir), smoke=a.smoke, dry_run=a.dry_run, prior_stddev_m=a.prior_stddev_m)
+    if not res:                           # NO FALLBACK: the BA did not run → fail
+        import sys
+        sys.exit(1)
 
 
 if __name__ == "__main__":

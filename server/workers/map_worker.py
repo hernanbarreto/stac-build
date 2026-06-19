@@ -62,13 +62,12 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         pipe.send_log("Reusing existing frame_quality.json (replace=off — skipping blur analysis)")
     else:
         pipe.send_progress(2, "Analyzing frame quality...", stage="reconstruction")
-        try:
-            from frame_quality import analyze_frames, save_manifest
-            fq = analyze_frames(str(frames_dir))
-            if "error" not in fq:
-                save_manifest(str(frames_dir), fq)
-        except Exception as e:
-            pipe.send_log(f"Frame quality analysis skipped: {e}", level="warning")
+        # NO FALLBACK: blur/quality analysis feeds frame selection — if it fails, fail.
+        from frame_quality import analyze_frames, save_manifest
+        fq = analyze_frames(str(frames_dir))
+        if "error" in fq:
+            raise RuntimeError(f"Frame quality analysis failed: {fq['error']}")
+        save_manifest(str(frames_dir), fq)
 
     # ── Step 2: Frame selection — ALWAYS produce frames/selected_frames.json, the SINGLE
     # source of truth for the processed frame set (read by SAM3 / scene_analyzer / TSDF /
@@ -85,42 +84,40 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         pipe.send_log("Reusing existing selected_frames.json (replace=off)")
     elif mode == "dino":
         from frame_selector import select_keyframes
-        try:
-            pipe.send_progress(5, "Selecting keyframes (blur + DINO cosine)...", stage="reconstruction")
-            sel = select_keyframes(str(frames_dir), config.get("frame_selection", {}))
-            pipe.send_log(f"Selected {sel['selected_count']}/{sel['total_frames']} keyframes (dino)")
-        except Exception as e:
-            pipe.send_log(f"DINO frame selection failed: {e}", level="warning")
+        # NO FALLBACK: keyframe selection is foundational (writes selected_frames.json).
+        pipe.send_progress(5, "Selecting keyframes (blur + DINO cosine)...", stage="reconstruction")
+        sel = select_keyframes(str(frames_dir), config.get("frame_selection", {}))
+        pipe.send_log(f"Selected {sel['selected_count']}/{sel['total_frames']} keyframes (dino)")
     else:
         # "stride" or "none": write the FULL blur-valid set, optionally strided. Writing
         # it explicitly (vs leaving it unset) keeps selected_frames.json the single source.
-        try:
-            if blur_on:
-                from frame_selector import _load_valid_frame_list
-                _files = _load_valid_frame_list(frames_dir)
-            else:
-                # blur OFF → ALL frames on disk, no quality cull.
-                _files = (glob.glob(str(frames_dir / "*.jpg"))
-                          + glob.glob(str(frames_dir / "*.png")))
-            valid = sorted(_files,
-                           key=lambda f: int(os.path.splitext(os.path.basename(f))[0]))
-            valid = [os.path.basename(f) for f in valid]
-            stride = (int(recon_cfg.get("mapanything", {}).get("frame_stride", 1) or 1)
-                      if mode == "stride" else 1)
-            chosen = valid[::stride] if stride > 1 else valid
-            with open(sf_path, "w") as _f:
-                json.dump({"version": "2.0",
-                           "method": (f"stride_{stride}" if mode == "stride" else "none"),
-                           "total_frames": len(valid), "selected_count": len(chosen),
-                           "selected_files": chosen}, _f)
-            pipe.send_log(f"Frame set: {len(chosen)}/{len(valid)} frames "
-                          f"({mode}{f', stride {stride}' if mode == 'stride' else ''}, "
-                          f"{'blur-valid' if blur_on else 'no blur'}) → selected_frames.json")
-        except Exception as e:
-            pipe.send_log(f"Could not build frame list: {e}", level="warning")
-    if sf_path.exists():
-        selected_frames_path = str(sf_path)
-        pipe.send_log(f"Using frames from {sf_path}")
+        # NO FALLBACK: if the frame set can't be built, fail.
+        if blur_on:
+            from frame_selector import _load_valid_frame_list
+            _files = _load_valid_frame_list(frames_dir)
+        else:
+            # blur OFF → ALL frames on disk, no quality cull.
+            _files = (glob.glob(str(frames_dir / "*.jpg"))
+                      + glob.glob(str(frames_dir / "*.png")))
+        valid = sorted(_files,
+                       key=lambda f: int(os.path.splitext(os.path.basename(f))[0]))
+        valid = [os.path.basename(f) for f in valid]
+        stride = (int(recon_cfg.get("mapanything", {}).get("frame_stride", 1) or 1)
+                  if mode == "stride" else 1)
+        chosen = valid[::stride] if stride > 1 else valid
+        with open(sf_path, "w") as _f:
+            json.dump({"version": "2.0",
+                       "method": (f"stride_{stride}" if mode == "stride" else "none"),
+                       "total_frames": len(valid), "selected_count": len(chosen),
+                       "selected_files": chosen}, _f)
+        pipe.send_log(f"Frame set: {len(chosen)}/{len(valid)} frames "
+                      f"({mode}{f', stride {stride}' if mode == 'stride' else ''}, "
+                      f"{'blur-valid' if blur_on else 'no blur'}) → selected_frames.json")
+    # selected_frames.json is the single source of truth downstream → it MUST exist now.
+    if not sf_path.exists():
+        raise RuntimeError("selected_frames.json was not produced — frame selection failed")
+    selected_frames_path = str(sf_path)
+    pipe.send_log(f"Using frames from {sf_path}")
 
     # ── Step 2b: DA3-dense fusion frame set ──
     # The asymmetric design feeds DA3 the FULL blur-valid set (a superset of the VGGT
@@ -178,8 +175,8 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         else:
             pipe.send_log("blur_filter OFF → DA3 dense over ALL frames on disk")
     except Exception as e:
-        pipe.send_log(f"Could not build DA3-dense frame list ({e}) — DA3 over all frames",
-                      level="warning")
+        # NO FALLBACK: the DA3-dense set drives TSDF density — don't silently degrade.
+        raise RuntimeError(f"Could not build DA3-dense frame list: {e}") from e
 
     # ── Step 3: Dispatch to backend ──
     if backend == "da3":
@@ -219,14 +216,13 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     # ── Step 5 (opt-in): GLOBAL POSE REFINEMENT (BA) ──
     # Refine the backbone's keyframe poses with VGGSfM learned correspondences + COLMAP's
-    # pose-prior Ceres bundle adjustment → refined camera_poses.txt. The TSDF then integrates
-    # depth at the REFINED poses (less drift). Runs BEFORE CloudCompPy. Non-fatal. The
+    # pose-prior Ceres bundle adjustment → refined camera_poses.txt → re-project the cloud.
+    # The TSDF then integrates depth at the REFINED poses. Runs BEFORE CloudCompPy. The
     # vggtomega path already does its own global optimisation, so the BA targets map/da3.
+    # NO FALLBACK: if the BA fails, the reconstruction FAILS (we never silently ship
+    # un-refined poses presented as refined).
     if backend != "vggtomega" and (recon_cfg.get("bundle_adjust", {}) or {}).get("enabled"):
-        try:
-            _run_bundle_adjust_step(pipe, frames_dir, output_dir, recon_cfg)
-        except Exception as e:
-            pipe.send_log(f"[bundle-adjust] skipped ({e}) — poses unchanged", level="warning")
+        _run_bundle_adjust_step(pipe, frames_dir, output_dir, recon_cfg)
 
 
 def _run_dense_fusion(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
@@ -274,8 +270,7 @@ def _run_bundle_adjust_step(pipe: WorkerPipe, frames_dir: Path, output_dir: Path
     for line in p1.stdout:
         pipe.send_log("[ba-tracks] " + line.rstrip())
     if p1.wait() != 0:
-        pipe.send_log("[bundle-adjust] tracks failed — poses UNCHANGED", level="warning")
-        return
+        raise RuntimeError("VGGSfM track extraction failed — aborting (no fallback)")
 
     pipe.send_progress(62, "Pose refinement: COLMAP/Ceres bundle adjustment...", stage="reconstruction")
     pipe.send_log("[bundle-adjust] step 2/2 — pose-prior BA (pycolmap/Ceres)")
@@ -285,10 +280,8 @@ def _run_bundle_adjust_step(pipe: WorkerPipe, frames_dir: Path, output_dir: Path
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(server_dir))
     for line in p2.stdout:
         pipe.send_log("[ba] " + line.rstrip())
-    rc = p2.wait()
-    if rc != 0:
-        pipe.send_log(f"[bundle-adjust] BA failed (exit {rc}) — poses unchanged", level="warning")
-        return
+    if p2.wait() != 0:
+        raise RuntimeError("COLMAP/Ceres bundle adjustment failed — aborting (no fallback)")
     pipe.send_log("[bundle-adjust] refined poses written")
 
     # Re-project the chunk clouds to the refined poses so the CLOUD (built by CloudCompPy
@@ -300,7 +293,9 @@ def _run_bundle_adjust_step(pipe: WorkerPipe, frames_dir: Path, output_dir: Path
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(server_dir))
     for line in p3.stdout:
         pipe.send_log("[ba-reproj] " + line.rstrip())
-    pipe.send_log(f"[bundle-adjust] cloud re-projection exit={p3.wait()}")
+    if p3.wait() != 0:
+        raise RuntimeError("cloud re-projection to refined poses failed — aborting (no fallback)")
+    pipe.send_log("[bundle-adjust] cloud re-projected to refined poses (cloud↔TSDF consistent)")
 
 
 def _find_stray_dir(session_path: Path) -> Path:
@@ -948,15 +943,15 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                    recon_cfg, config, depth_only=True,
                                    cond_stray_dir=cond_stray_dir)
             priors_dir = Path(da3_dir) / "results_output"
-            if priors_dir.exists() and any(priors_dir.glob("frame_*.npz")):
-                vggt_config["Model"]["da3_priors_dir"] = str(priors_dir)
-                pipe.send_log(f"DA3 priors → {priors_dir} (depth+intrinsics fed to MapAnything)")
-            else:
-                pipe.send_log("DA3 priors not produced — MapAnything runs image-only",
-                              level="warning")
+            # NO FALLBACK: use_da3_priors was requested AND the per-frame DA3 depth npz are
+            # also what the bundle adjustment + TSDF (da3_frames) depend on — don't silently
+            # drop to image-only.
+            if not (priors_dir.exists() and any(priors_dir.glob("frame_*.npz"))):
+                raise RuntimeError(f"DA3 priors not produced at {priors_dir} (no frame_*.npz)")
+            vggt_config["Model"]["da3_priors_dir"] = str(priors_dir)
+            pipe.send_log(f"DA3 priors → {priors_dir} (depth+intrinsics fed to MapAnything)")
         except Exception as _e:
-            pipe.send_log(f"DA3 priors extraction failed ({_e}) — MapAnything image-only",
-                          level="warning")
+            raise RuntimeError(f"DA3 priors extraction failed: {_e}") from _e
 
     vggt_config_path = output_dir / "vggt_long_config.yaml"
     with open(vggt_config_path, 'w') as f:

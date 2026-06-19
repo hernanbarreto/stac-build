@@ -25,14 +25,13 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
     postproc = config.get("postprocessing", {})
     voxel_size = postproc.get("voxel_size", 0.001)
 
+    # NO FALLBACK: CloudCompy produces cleaned_cloud.ply, mandatory for the TSDF/viewers.
     if not script_path.exists():
-        pipe.send_log("run_cloudcompy.sh not found, skipping", level="warning")
-        return
+        raise FileNotFoundError(f"run_cloudcompy.sh not found at {script_path}")
 
     chunks = sorted(output_dir.glob("chunk_*.ply"))
     if not chunks:
-        pipe.send_log("No chunk PLYs found, skipping", level="warning")
-        return
+        raise RuntimeError(f"No chunk_*.ply in {output_dir} — reconstruction produced no cloud")
 
     # For legacy sessions, check old name as well (new sessions use chunk_999_lidar.ply)
     for ext_cloud in ["lidar_complement.ply", "chunk_999_lidar.ply"]:

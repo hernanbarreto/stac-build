@@ -60,34 +60,33 @@ def run(output_dir: Path) -> int:
         stem = ply.stem
         if stem.startswith("chunk_998") or stem.startswith("chunk_999"):
             continue  # dense-fusion / LiDAR use other poses
+        # NO FALLBACK: a backbone chunk MUST be re-projectable — missing origins, a length
+        # mismatch or a read error means the cloud would stay at old poses (inconsistent with
+        # the TSDF), so we raise instead of silently leaving it.
         orig = output_dir / f"{stem}_origins.npz"
         if not orig.exists():
-            continue
-        try:
-            fg = np.load(orig)["frame_global"].astype(np.int64)
-            pd = PlyData.read(str(ply))
-            v = pd["vertex"].data                      # structured array
-            xyz = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float64)
-            if len(fg) != len(xyz):
-                logger.warning(f"{ply.name}: origins ({len(fg)}) != points ({len(xyz)}) — skip")
-                continue
-            moved = 0
-            for f in np.unique(fg):
-                d = delta.get(int(f))
-                if d is None:
-                    continue
-                m = fg == f
-                xyz[m] = xyz[m] @ d[:3, :3].T + d[:3, 3]
-                moved += int(m.sum())
-            v["x"] = xyz[:, 0].astype(v["x"].dtype)
-            v["y"] = xyz[:, 1].astype(v["y"].dtype)
-            v["z"] = xyz[:, 2].astype(v["z"].dtype)
-            PlyData([PlyElement.describe(v, "vertex")],
-                    text=False, byte_order="<").write(str(ply))
-            n_chunks += 1
-            logger.info(f"  re-projected {ply.name}: {moved:,}/{len(xyz):,} pts")
-        except Exception as e:
-            logger.warning(f"{ply.name}: re-projection failed ({e}) — left as-is")
+            raise FileNotFoundError(f"{ply.name}: no {orig.name} — cannot re-project this chunk")
+        fg = np.load(orig)["frame_global"].astype(np.int64)
+        pd = PlyData.read(str(ply))
+        v = pd["vertex"].data                          # structured array
+        xyz = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float64)
+        if len(fg) != len(xyz):
+            raise ValueError(f"{ply.name}: origins ({len(fg)}) != points ({len(xyz)})")
+        moved = 0
+        for f in np.unique(fg):
+            d = delta.get(int(f))
+            if d is None:
+                continue                               # a point from a frame the BA didn't touch
+            m = fg == f
+            xyz[m] = xyz[m] @ d[:3, :3].T + d[:3, 3]
+            moved += int(m.sum())
+        v["x"] = xyz[:, 0].astype(v["x"].dtype)
+        v["y"] = xyz[:, 1].astype(v["y"].dtype)
+        v["z"] = xyz[:, 2].astype(v["z"].dtype)
+        PlyData([PlyElement.describe(v, "vertex")],
+                text=False, byte_order="<").write(str(ply))
+        n_chunks += 1
+        logger.info(f"  re-projected {ply.name}: {moved:,}/{len(xyz):,} pts")
     logger.info(f"✅ re-projected {n_chunks} backbone chunks to refined poses "
                 f"(cloud now consistent with the BA / TSDF)")
     return n_chunks
@@ -98,7 +97,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--output-dir", required=True)
     a = ap.parse_args()
-    run(Path(a.output_dir))
+    n = run(Path(a.output_dir))
+    if n == 0:                            # NO FALLBACK: BA ran but no chunk was re-projected → fail
+        import sys
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -359,6 +359,8 @@ def main():
         win=args.win, stride=args.stride, grid_side=args.grid_side, smoke=args.smoke,
     )
     print(f"[TRACKS-RESULT] {out if out else 'NONE'}")
+    if out is None:                       # NO FALLBACK: signal failure to the caller
+        sys.exit(1)
 
 
 if __name__ == "__main__":
