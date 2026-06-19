@@ -115,6 +115,19 @@ frame_selection:
                                        # (dense_fusion) and feed the TSDF as DA3 depth.
   dino_device: "cuda"                  # "cuda" | "cpu" (auto-falls back)
 
+  # ── PARALLAX (geometric) keyframe selection — used when frames_selector: parallax ──
+  # For the SLAM backbone (MapAnything), keyframes by TRIANGULATION ANGLE (baseline), not
+  # appearance. Needs DA3 per-frame metric depth+pose (DA3 runs on all blur-valid frames
+  # first). Cosine stays for DA3's dense set. Pure rotation → no baseline → aborts.
+  theta_parallax: 1.5                  # deg: new keyframe once the MEDIAN triangulation angle
+                                       # vs the last keyframe reaches this (SLAM uses ~1-2°).
+  overlap_min: 0.5                     # force a keyframe if overlap with the last drops below…
+  min_baseline_m: 0.05                 # …but ONLY with real camera translation, so pure rotation
+                                       # (baseline≈0) never forces a degenerate (un-triangulable) kf.
+  min_global_baseline_m: 0.3           # if the WHOLE clip's max camera displacement < this →
+                                       # pure rotation / no parallax → ABORT (cannot reconstruct).
+  parallax_stride: 8                   # sub-sample every Nth pixel for the angle median.
+
   # Legacy H/F ratio (used if method=hf_ratio or DINO fails)
   max_features: 2000
   sigma: 1.0
@@ -509,10 +522,14 @@ reconstruction:
     min_fitness: 0.3                    # reject an ICP registration whose overlap (fitness) is below
                                         # this → a frame that can't be reliably localized is skipped.
     # python: /workspace/miniforge3/envs/mapanything/bin/python   # override the env if needed
-  frames_selector: "dino"              # SINGLE source of frame-set mode (writes selected_frames.json):
-                                       #   "dino"   = blur + DINO-cosine keyframes (params in frame_selection:)
-                                       #   "stride" = uniform 1-of-N subsample (mapanything.frame_stride)
-                                       #   "none"   = all frames (no decimation)
+  frames_selector: "parallax"          # SINGLE source of frame-set mode (writes selected_frames.json):
+                                       #   "parallax" = DEFAULT: GEOMETRIC triangulation-angle keyframes
+                                       #                (baseline) for the SLAM backbone (VGGT-Long). Needs
+                                       #                DA3 depth+pose (runs DA3 on all blur-valid frames
+                                       #                first). Aborts on pure rotation. Cosine stays for DA3.
+                                       #   "dino"     = blur + DINO-cosine keyframes (appearance, legacy)
+                                       #   "stride"   = uniform 1-of-N subsample (mapanything.frame_stride)
+                                       #   "none"     = all frames (no decimation)
                                        # LITERATURE (2026 deep-research): do NOT feed all dense handheld-
                                        # video frames to the transformer multi-view stage. Cost scales
                                        # steeply (VGGT 21GB@100fr, OOM>300fr) and redundant low-baseline

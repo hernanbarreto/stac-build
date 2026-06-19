@@ -88,6 +88,38 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         pipe.send_progress(5, "Selecting keyframes (blur + DINO cosine)...", stage="reconstruction")
         sel = select_keyframes(str(frames_dir), config.get("frame_selection", {}))
         pipe.send_log(f"Selected {sel['selected_count']}/{sel['total_frames']} keyframes (dino)")
+    elif mode == "parallax":
+        # GEOMETRIC keyframe selection for the SLAM backbone: triangulation angle, not
+        # appearance. Needs per-frame depth+pose → DA3 runs depth-only on ALL blur-valid
+        # frames FIRST (the reorder), then we select by parallax. NO cosine fallback.
+        from frames.selector import _load_valid_frame_list, select_keyframes_parallax
+        pipe.send_progress(4, "Parallax selection: DA3 depth on all blur-valid frames...",
+                           stage="reconstruction")
+        if blur_on:
+            _bv = _load_valid_frame_list(frames_dir)
+        else:
+            _bv = sorted([os.path.basename(f) for f in
+                          (glob.glob(str(frames_dir / "*.jpg")) + glob.glob(str(frames_dir / "*.png")))],
+                         key=lambda f: int(os.path.splitext(f)[0]))
+        _bv_path = frames_dir / "_parallax_blur_valid.json"
+        with open(_bv_path, "w") as _f:
+            json.dump({"version": "2.0", "method": "blur_valid", "total_frames": len(_bv),
+                       "selected_count": len(_bv), "selected_files": _bv}, _f)
+        _da3_dir = _run_da3(pipe, frames_dir, output_dir, str(_bv_path), recon_cfg, config,
+                            depth_only=True)
+        _npz_dir = Path(_da3_dir) / "results_output"
+        pipe.send_progress(6, "Parallax selection: triangulation-angle keyframes...",
+                           stage="reconstruction")
+        sel = select_keyframes_parallax(str(frames_dir), str(_npz_dir),
+                                        config.get("frame_selection", {}))
+        if not sel.get("geometric_ok", False):
+            # Decision #1: abort with a clear English message the UI surfaces.
+            raise RuntimeError("Reconstruction not possible: " + (sel.get("reason") or
+                               "insufficient geometric parallax (camera rotation only)"))
+        pipe.send_log(f"Selected {sel['selected_count']}/{sel['total_frames']} keyframes "
+                      f"(parallax, baseline {sel['parallax_stats']['global_baseline_m']}m)")
+        # DA3 already ran on the full blur-valid set → the backend must NOT re-run it.
+        recon_cfg.setdefault("mapanything", {})["_da3_already_extracted"] = True
     else:
         # "stride" or "none": write the FULL blur-valid set, optionally strided. Writing
         # it explicitly (vs leaving it unset) keeps selected_frames.json the single source.
@@ -915,11 +947,13 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # the default. Consumed by MapAnythingAdapter.infer_chunk (base_model.py).
     if ma_cfg.get("use_da3_priors", False) or cond:
         try:
-            # Resume: if DA3 depth was already extracted (e.g. a prior run that crashed
-            # later in MapAnything), reuse it instead of re-running DA3 — unless replace.
+            # Resume: if DA3 depth was already extracted (a prior crashed run, OR the parallax
+            # keyframe selector already ran DA3 on all blur-valid frames this session), reuse
+            # it instead of re-running DA3 — unless replace AND it wasn't this session.
             _replace = config.get("_pipeline_replace", True)
+            _already = ma_cfg.get("_da3_already_extracted", False)  # parallax selector ran DA3
             _existing = output_dir / "da3_run" / "results_output"
-            if not _replace and _existing.exists() and any(_existing.glob("frame_*.npz")):
+            if (_already or not _replace) and _existing.exists() and any(_existing.glob("frame_*.npz")):
                 da3_dir = output_dir / "da3_run"
                 pipe.send_log(f"DA3 priors already present ({_existing}) — skipping DA3 extraction")
             else:

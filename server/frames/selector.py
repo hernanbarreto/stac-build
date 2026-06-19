@@ -670,6 +670,128 @@ def select_keyframes(frames_dir: str, config: dict = None,
         return select_keyframes_hf(frames_dir, config, file_list, segment_id)
 
 
+def select_keyframes_parallax(frames_dir: str, npz_dir: str, config: dict = None,
+                              file_list: list = None, segment_id: int = None) -> Dict:
+    """GEOMETRIC keyframe selection (triangulation angle / parallax) for the SLAM backbone.
+
+    Cosine-DINO measures APPEARANCE, not the geometric BASELINE a SLAM/multi-view backbone
+    needs. It fails two ways in a corridor: (a) PURE ROTATION — appearance changes a lot but
+    baseline ≈ 0, cosine adds a degenerate (un-triangulable) keyframe; (b) FRONTAL ADVANCE —
+    appearance changes slowly but there IS translation, cosine misses it. Parallax angle
+    captures both: a new keyframe is taken when the MEDIAN triangulation angle vs the last
+    keyframe reaches `theta_parallax`. Pure rotation gives C_i≈C_j → near-identical rays →
+    parallax ≈ 0 → never fires alone.
+
+    Needs per-frame metric depth + pose (DA3 npz: depth, intrinsics, extrinsics[3x4, w2c]).
+    NO cosine fallback: if poses are missing it RAISES; if the whole clip has no baseline
+    (pure rotation) it returns geometric_ok=False so the caller can abort with a clear message.
+    Writes the SAME selected_frames.json schema as the cosine selector (drop-in).
+    """
+    config = config or {}
+    theta = float(config.get("theta_parallax", 1.5))            # deg, min triangulation angle
+    overlap_min = float(config.get("overlap_min", 0.5))         # force a kf if overlap drops below
+    min_baseline = float(config.get("min_baseline_m", 0.05))    # …but ONLY with real translation
+    min_global_baseline = float(config.get("min_global_baseline_m", 0.3))  # pure-rotation abort
+    stride = int(config.get("parallax_stride", 8))
+    dmin = float(config.get("parallax_depth_min", 0.1))
+    dmax = float(config.get("parallax_depth_max", config.get("reliable_depth_m", 8.0)))
+
+    frames_dir = Path(frames_dir); npz_dir = Path(npz_dir)
+    frame_files = file_list if file_list is not None else _load_valid_frame_list(frames_dir)
+
+    def _npz(fname):
+        p = npz_dir / f"frame_{int(os.path.splitext(fname)[0])}.npz"
+        return p if p.exists() else None
+
+    if len(frame_files) < 2:
+        return {"version": "2.0", "method": f"parallax_{theta}", "total_frames": len(frame_files),
+                "selected_count": len(frame_files), "selected_files": list(frame_files),
+                "geometric_ok": False, "reason": "fewer than 2 valid frames", "processing_time": 0}
+
+    # Fail-fast: every frame MUST have its DA3 depth+pose (no silent cosine fallback).
+    missing = [f for f in frame_files if _npz(f) is None]
+    if missing:
+        raise RuntimeError(f"parallax selection: {len(missing)}/{len(frame_files)} frames have no "
+                           f"DA3 npz (depth+pose) in {npz_dir} — DA3 must run on all blur-valid "
+                           f"frames first")
+
+    def _load(p):
+        z = np.load(p); ex = np.asarray(z["extrinsics"], np.float64)   # 3x4 world→cam (w2c)
+        T = np.eye(4); T[:3] = ex; c2w = np.linalg.inv(T)
+        return np.asarray(z["depth"], np.float32), np.asarray(z["intrinsics"], np.float64), c2w, T
+
+    def _backproj(depth, K, c2w):
+        H, W = depth.shape
+        vv, uu = np.mgrid[0:H:stride, 0:W:stride]
+        d = depth[::stride, ::stride]
+        m = (d > dmin) & (d < dmax) & np.isfinite(d)
+        u, v, d = uu[m], vv[m], d[m]
+        x = (u - K[0, 2]) * d / K[0, 0]; y = (v - K[1, 2]) * d / K[1, 1]
+        cam = np.stack([x, y, d], 1)
+        return cam @ c2w[:3, :3].T + c2w[:3, 3]                        # world (N,3)
+
+    def _parallax_overlap(P, Ci, Cj, Kj, w2cj, hw):
+        vi = P - Ci; vj = P - Cj
+        ni = np.linalg.norm(vi, axis=1); nj = np.linalg.norm(vj, axis=1)
+        ok = (ni > 1e-6) & (nj > 1e-6)
+        if not ok.any():
+            return 0.0, 0.0
+        cos = np.clip((vi[ok] * vj[ok]).sum(1) / (ni[ok] * nj[ok]), -1, 1)
+        ang = np.degrees(np.arccos(cos))
+        Pc = P @ w2cj[:3, :3].T + w2cj[:3, 3]; z = Pc[:, 2]
+        zc = np.clip(z, 1e-6, None)
+        u = Kj[0, 0] * Pc[:, 0] / zc + Kj[0, 2]; vp = Kj[1, 1] * Pc[:, 1] / zc + Kj[1, 2]
+        H, W = hw
+        inb = (z > 0) & (u >= 0) & (u < W) & (vp >= 0) & (vp < H)
+        return float(np.median(ang)), float(inb.mean())
+
+    t0 = time.time()
+    selected = [frame_files[0]]
+    di, Ki, c2wi, _ = _load(_npz(frame_files[0])); Pi = _backproj(di, Ki, c2wi); Ci = c2wi[:3, 3]
+    medians = []; centers = [Ci]
+    for j in range(1, len(frame_files)):
+        dj, Kj, c2wj, w2cj = _load(_npz(frame_files[j])); Cj = c2wj[:3, 3]; centers.append(Cj)
+        med, ov = _parallax_overlap(Pi, Ci, Cj, Kj, w2cj, dj.shape)
+        medians.append(med)
+        baseline = float(np.linalg.norm(Cj - Ci))
+        # primary: enough triangulation angle. secondary: overlap dropped AND we actually
+        # translated (so pure rotation, baseline≈0, never forces a degenerate keyframe).
+        if med >= theta or (ov < overlap_min and baseline > min_baseline):
+            selected.append(frame_files[j])
+            Pi = _backproj(dj, Kj, c2wj); Ci = Cj
+
+    centers = np.asarray(centers)
+    global_baseline = float(np.linalg.norm(centers - centers[0], axis=1).max())
+    geometric_ok = (global_baseline >= min_global_baseline) and (len(selected) >= 2)
+    reason = "" if geometric_ok else (
+        f"insufficient geometric baseline (max camera displacement {global_baseline:.2f}m < "
+        f"{min_global_baseline}m) — the clip is essentially pure rotation / no parallax for "
+        f"triangulation")
+    a = np.asarray(medians) if medians else np.zeros(1)
+    elapsed = time.time() - t0
+    out = {
+        "version": "2.0", "method": f"parallax_{theta}",
+        "total_frames": len(frame_files), "selected_count": len(selected),
+        "reduction": round(1 - len(selected) / len(frame_files), 4),
+        "config": {"theta_parallax": theta, "overlap_min": overlap_min,
+                   "min_baseline_m": min_baseline, "parallax_stride": stride,
+                   "depth_min": dmin, "depth_max": dmax},
+        "parallax_stats": {"p50": round(float(np.median(a)), 3),
+                           "p90": round(float(np.percentile(a, 90)), 3),
+                           "max": round(float(a.max()), 3),
+                           "global_baseline_m": round(global_baseline, 3)},
+        "geometric_ok": geometric_ok, "reason": reason,
+        "selected_files": selected, "processing_time": round(elapsed, 1),
+    }
+    suffix = f"_seg{segment_id}" if segment_id is not None else ""
+    with open(frames_dir / f"selected_frames{suffix}.json", "w") as f:
+        json.dump(out, f, indent=2)
+    print(f"[Parallax] {len(selected)}/{len(frame_files)} keyframes (θ={theta}°, "
+          f"p50={out['parallax_stats']['p50']}°, baseline={global_baseline:.1f}m, "
+          f"ok={geometric_ok}) in {elapsed:.0f}s")
+    return out
+
+
 def load_selected_frames(frames_dir: str) -> Optional[List[str]]:
     """
     Load previously computed keyframe selection.
