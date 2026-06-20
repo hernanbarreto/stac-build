@@ -68,7 +68,10 @@ def run(output_dir: Path) -> int:
             raise FileNotFoundError(f"{ply.name}: no {orig.name} — cannot re-project this chunk")
         fg = np.load(orig)["frame_global"].astype(np.int64)
         pd = PlyData.read(str(ply))
-        v = pd["vertex"].data                          # structured array
+        # plyfile mmaps the vertex block to the source file. Writing back to the SAME path
+        # truncates that file, invalidating the mmap pages → stream.write() reads dead
+        # addresses → OSError 14 (EFAULT). Materialise to a RAM-owned copy to detach.
+        v = np.array(pd["vertex"].data)                # structured array (RAM, not mmap)
         xyz = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float64)
         if len(fg) != len(xyz):
             raise ValueError(f"{ply.name}: origins ({len(fg)}) != points ({len(xyz)})")
