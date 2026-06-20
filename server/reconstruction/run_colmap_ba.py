@@ -146,6 +146,20 @@ def run(output_dir: Path, smoke: bool = False, dry_run: bool = False,
     moved = np.array([np.linalg.norm(kf_refined[fn][:3, 3] - kf_c2w[fn][:3, 3]) for fn in kf_refined])
     logger.info(f"keyframe pose shift: median {np.median(moved):.3f} m, max {moved.max():.3f} m")
 
+    # ── RECONCILIATION CHECK: did the BA smooth the backbone's per-window scale gradient
+    #    (chunk jumps) while keeping metric scale? The decisive numbers for this run. ──
+    kf_fns = sorted(kf_refined)
+    def _smooth(getter):
+        C = np.array([getter(fn)[:3, 3] for fn in kf_fns])
+        st = np.linalg.norm(np.diff(C, axis=0), axis=1)
+        span = float(np.linalg.norm(C - C[0], axis=1).max())
+        return span, float(np.median(st)), int((st > 0.5).sum()), int((st > 1.0).sum())
+    b = _smooth(lambda fn: kf_c2w[fn]); a = _smooth(lambda fn: kf_refined[fn])
+    logger.info(f"[reconcile] BACKBONE traj: span={b[0]:.1f}m med_step={b[1]:.3f}m jumps>0.5m={b[2]} >1m={b[3]}")
+    logger.info(f"[reconcile] BA-OUT   traj: span={a[0]:.1f}m med_step={a[1]:.3f}m jumps>0.5m={a[2]} >1m={a[3]}")
+    verdict = "RECONCILED ✓" if (a[3] <= b[3] and a[2] <= b[2] and a[0] > 0.3 * b[0]) else "NOT reconciled ✗"
+    logger.info(f"[reconcile] {verdict}  (jumps>1m {b[3]}→{a[3]}, scale span {b[0]:.1f}→{a[0]:.1f}m)")
+
     if dry_run:
         logger.info("[dry-run] not writing poses")
         return {"info": info, "moved_median": float(np.median(moved)), "n_kf": n_kf, "n_fl": n_fl}

@@ -518,7 +518,11 @@ reconstruction:
     track_grid: 24                      # query-point grid density per query frame (24×24=576 pts/kf;
                                         # grid=48 over-produced 1.4M tracks/2.2h — BA only needs enough
                                         # landmarks to anchor poses + localize fillers; 24 ≈ 350K/~35min)
-    prior_stddev_m: 0.10                # how tightly to anchor to the backbone poses (m)
+    prior_stddev_m: 2.0                 # LOOSE anchor (was 0.10): the backbone trajectory has a
+                                        # per-window scale gradient (chunk jumps); a tight prior
+                                        # pinned the BA to it. 2.0m lets the VGGSfM tracks reconcile
+                                        # the trajectory while the prior ensemble still anchors metric
+                                        # scale. THE key knob under test — watch the trajectory logs.
 
   dense_fusion:
     enabled: false                      # OFF — superseded by the global pose-prior BA (run_colmap_ba).
