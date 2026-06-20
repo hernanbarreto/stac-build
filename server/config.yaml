@@ -126,7 +126,9 @@ frame_selection:
                                        # (baseline≈0) never forces a degenerate (un-triangulable) kf.
   min_global_baseline_m: 0.3           # if the WHOLE clip's max camera displacement < this →
                                        # pure rotation / no parallax → ABORT (cannot reconstruct).
-  min_keyframes: 20                    # if fewer keyframes than this are selected → ABORT
+  min_keyframes_pct: 0.015             # min keyframes = max(floor, pct × #frames) → ABORT below it.
+  min_keyframes_floor: 8               # a PERCENTAGE (not a fixed 20) so the bar scales with capture
+                                       # length: 251 frames → max(8,4)=8; 1500 → 23; 3000 → 45.
                                        # (not enough geometric coverage to reconstruct).
   parallax_stride: 8                   # sub-sample every Nth pixel for the angle median.
 

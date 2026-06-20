@@ -762,7 +762,12 @@ def select_keyframes_parallax(frames_dir: str, npz_dir: str, config: dict = None
 
     centers = np.asarray(centers)
     global_baseline = float(np.linalg.norm(centers - centers[0], axis=1).max())
-    min_keyframes = int(config.get("min_keyframes", 20))
+    # min keyframes is a PERCENTAGE of the evaluated frames (+ an absolute floor), not a fixed
+    # count: a flat 20 is far too strict for a 300-frame clip yet lenient for 1500+. Scaling with
+    # input size keeps the geometric-coverage bar coherent across capture lengths.
+    mk_pct = float(config.get("min_keyframes_pct", 0.015))
+    mk_floor = int(config.get("min_keyframes_floor", 8))
+    min_keyframes = max(mk_floor, int(round(mk_pct * len(frame_files))))
     if global_baseline < min_global_baseline:
         geometric_ok, reason = False, (
             f"insufficient geometric baseline (max camera displacement {global_baseline:.2f}m < "
@@ -770,8 +775,9 @@ def select_keyframes_parallax(frames_dir: str, npz_dir: str, config: dict = None
             f"triangulation")
     elif len(selected) < min_keyframes:
         geometric_ok, reason = False, (
-            f"too few keyframes ({len(selected)} < {min_keyframes}) — not enough geometric "
-            f"coverage to reconstruct (raise the capture length or lower theta_parallax)")
+            f"too few keyframes ({len(selected)} < {min_keyframes} = max({mk_floor}, "
+            f"{mk_pct:.1%}×{len(frame_files)})) — not enough geometric coverage to reconstruct "
+            f"(raise the capture length or lower theta_parallax)")
     else:
         geometric_ok, reason = True, ""
     a = np.asarray(medians) if medians else np.zeros(1)
