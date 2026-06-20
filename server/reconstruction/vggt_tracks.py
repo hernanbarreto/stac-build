@@ -217,7 +217,9 @@ def extract_tracks(
     frames_dir: Path,
     win: int = 24,
     stride: int = 12,
-    query_frames_per_win: int = 3,
+    query_frames_per_win: int = 2,      # was 3: the per-window tracker forward (fine_tracking) runs
+                                        # once per query frame → 3→2 cuts the inner loop by a third.
+                                        # 2 query anchors per window still seed dense, long tracks.
     grid_side: int = 48,
     vis_thresh: float = 0.2,
     score_thresh: float = 0.2,

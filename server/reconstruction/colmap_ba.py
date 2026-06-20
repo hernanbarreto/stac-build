@@ -28,6 +28,39 @@ def _rigid(T_w2c, pycolmap):
     return pycolmap.Rigid3d(pycolmap.Rotation3d(q), np.asarray(T_w2c[:3, 3], float))
 
 
+def _tune_ceres(opts, max_iter: int = 500):
+    """Ceres solver options for guaranteed convergence. pycolmap's defaults are
+    max_num_iterations=100 (too low — the pose-prior BA was hitting the cap while the
+    cost was STILL dropping steeply → NO_CONVERGENCE) and function/parameter_tolerance=0.0
+    (the tolerance-based stop is DISABLED, so only the loose gradient test could trip).
+    We raise the cap and enable the relative-cost / step-size stops so the solver reaches
+    a real CONVERGENCE well before the (now generous) cap."""
+    so = opts.ceres.solver_options
+    so.max_num_iterations  = int(max_iter)
+    so.function_tolerance  = 1e-6      # was 0.0 (disabled): stop on tiny relative cost drop
+    so.parameter_tolerance = 1e-8      # was 0.0 (disabled): stop on tiny step
+    so.gradient_tolerance  = 1e-8      # was 1e-4: tighter (tolerances above trip first)
+    return opts
+
+
+def _solve_checked(adjuster, label: str):
+    """Solve and HARD-FAIL on non-convergence (no fallback). The user's requirement:
+    Ceres must always converge; a run that finishes is a run where every BA converged."""
+    import pycolmap
+    summary = adjuster.solve()
+    TT = pycolmap.BundleAdjustmentTerminationType
+    tt = getattr(summary, "termination_type", None)
+    if tt is None:
+        raise RuntimeError(f"{label}: solver returned no summary/termination_type — "
+                           "cannot confirm convergence (aborting, no fallback)")
+    if tt not in (TT.CONVERGENCE, TT.USER_SUCCESS):
+        raise RuntimeError(f"{label}: Ceres did NOT converge (termination={tt.name}). "
+                           "BA must converge — aborting with no fallback. Increase iterations / "
+                           "track quality or check problem conditioning.")
+    logger.info(f"  [ceres] {label}: {tt.name}")
+    return summary
+
+
 def refine_poses_ba(
     poses_w2c: np.ndarray,        # (N,4,4) initial world→camera (MapAnything)
     K: np.ndarray,                # (N,3,3) intrinsics
@@ -105,8 +138,9 @@ def refine_poses_ba(
     prior_opts.prior_position_fallback_stddev = float(prior_stddev_m)
 
     reproj0 = rec.compute_mean_reprojection_error()
+    _tune_ceres(opts)
     adj = pycolmap.create_pose_prior_bundle_adjuster(opts, prior_opts, cfg, priors, rec)
-    adj.solve()
+    _solve_checked(adj, "pose-prior BA")
     reproj1 = rec.compute_mean_reprojection_error()
 
     out = np.tile(np.eye(4), (N, 1, 1))
@@ -194,7 +228,9 @@ def refine_poses_ba_twopass(
         cfg1.add_image(int(i) + 1)
     prior_opts = pycolmap.PosePriorBundleAdjustmentOptions()
     prior_opts.prior_position_fallback_stddev = float(prior_stddev_m)
-    pycolmap.create_pose_prior_bundle_adjuster(opts1, prior_opts, cfg1, priors, rec).solve()
+    _tune_ceres(opts1)
+    _solve_checked(pycolmap.create_pose_prior_bundle_adjuster(opts1, prior_opts, cfg1, priors, rec),
+                   "two-pass BA PASS 1 (pose-prior, keyframes)")
     reproj1 = rec.compute_mean_reprojection_error()
 
     # ── PASS 2: fillers localised against the fixed map ──
@@ -221,7 +257,9 @@ def refine_poses_ba_twopass(
         if filler_localized[int(i)]:
             cfg2.add_image(int(i) + 1); n_fl += 1
     if n_fl:
-        pycolmap.create_default_bundle_adjuster(opts2, cfg2, rec).solve()
+        _tune_ceres(opts2)
+        _solve_checked(pycolmap.create_default_bundle_adjuster(opts2, cfg2, rec),
+                       "two-pass BA PASS 2 (filler localisation)")
     reproj2 = rec.compute_mean_reprojection_error()
 
     out = np.tile(np.eye(4), (N, 1, 1))

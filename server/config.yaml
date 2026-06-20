@@ -508,8 +508,11 @@ reconstruction:
   bundle_adjust:
     enabled: true
     python: "/workspace/miniforge3/envs/mapanything/bin/python"
-    track_window: 24                    # keyframes per VGGSfM tracking window
-    track_stride: 12
+    track_window: 32                    # keyframes per VGGSfM tracking window (was 24: longer windows
+                                        # → longer tracks, fewer windows needed)
+    track_stride: 24                    # was 12. Window count ≈ (n_kf-win)/stride drives wall-clock
+                                        # (per-window cost ~constant). 24 = 25% overlap (was 50%) →
+                                        # ~half the windows, BA still coupled across adjacent windows.
     track_grid: 24                      # query-point grid density per query frame (24×24=576 pts/kf;
                                         # grid=48 over-produced 1.4M tracks/2.2h — BA only needs enough
                                         # landmarks to anchor poses + localize fillers; 24 ≈ 350K/~35min)
