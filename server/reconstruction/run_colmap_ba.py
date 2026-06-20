@@ -188,8 +188,11 @@ def _writeback(output_dir: Path, refined_c2w: Dict[int, np.ndarray]) -> None:
         if len([l for l in plines if len(l.split()) == 16]) != len(nums):
             logger.warning(f"{pp}: poses/frames not aligned — skip"); continue
         bak = pp.with_suffix(".txt.precolmapba")
-        if not bak.exists():
-            shutil.copy(pp, bak)
+        # ALWAYS refresh the backup with THIS run's backbone. `pp` here is still the pre-BA
+        # backbone (we overwrite it below). The old `if not bak.exists()` guard left a STALE
+        # backup from a previous run (e.g. 320-keyframe MapAnything vs 1209-frame DA3) →
+        # reproject_chunks then saw poses(refined) ≠ frames(backbone) and aborted the run.
+        shutil.copy(pp, bak)
         out, pi = [], 0
         for ln in plines:
             if len(ln.split()) == 16:

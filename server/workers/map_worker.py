@@ -105,8 +105,11 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         with open(_bv_path, "w") as _f:
             json.dump({"version": "2.0", "method": "blur_valid", "total_frames": len(_bv),
                        "selected_count": len(_bv), "selected_files": _bv}, _f)
+        # da3 backbone: run DA3 FULL on the DENSE set (poses + loop closure + chunks = the
+        # backbone). Otherwise depth-only (just priors for the maplong backbone).
+        _da3_backbone = (backend == "da3")
         _da3_dir = _run_da3(pipe, frames_dir, output_dir, str(_bv_path), recon_cfg, config,
-                            depth_only=True)
+                            depth_only=not _da3_backbone)
         _npz_dir = Path(_da3_dir) / "results_output"
         pipe.send_progress(6, "Parallax selection: triangulation-angle keyframes...",
                            stage="reconstruction")
@@ -120,6 +123,10 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
                       f"(parallax, baseline {sel['parallax_stats']['global_baseline_m']}m)")
         # DA3 already ran on the full blur-valid set → the backend must NOT re-run it.
         recon_cfg.setdefault("mapanything", {})["_da3_already_extracted"] = True
+        if _da3_backbone:
+            # DA3 FULL already produced the dense backbone (poses+loops+chunks, postprocessed
+            # to output/) → the backend dispatch must NOT re-run it on the sparse keyframes.
+            recon_cfg.setdefault("da3", {})["_da3_backbone_done"] = True
     else:
         # "stride" or "none": write the FULL blur-valid set, optionally strided. Writing
         # it explicitly (vs leaving it unset) keeps selected_frames.json the single source.
@@ -212,7 +219,8 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     # ── Step 3: Dispatch to backend ──
     if backend == "da3":
-        _run_da3(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
+        if not recon_cfg.get("da3", {}).get("_da3_backbone_done"):
+            _run_da3(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
     elif backend == "lidar":
         _run_lidar_only(pipe, frames_dir, output_dir, recon_cfg, session_path, selected_frames_path)
     elif backend == "hybrid":
@@ -249,11 +257,13 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # ── Step 5 (opt-in): GLOBAL POSE REFINEMENT (BA) ──
     # Refine the backbone's keyframe poses with VGGSfM learned correspondences + COLMAP's
     # pose-prior Ceres bundle adjustment → refined camera_poses.txt → re-project the cloud.
-    # The TSDF then integrates depth at the REFINED poses. Runs BEFORE CloudCompPy. The
-    # vggtomega path already does its own global optimisation, so the BA targets map/da3.
-    # NO FALLBACK: if the BA fails, the reconstruction FAILS (we never silently ship
-    # un-refined poses presented as refined).
-    if backend != "vggtomega" and (recon_cfg.get("bundle_adjust", {}) or {}).get("enabled"):
+    # The TSDF then integrates depth at the REFINED poses. Runs BEFORE CloudCompPy. ALL
+    # chunked backbones (da3, mapanything, AND vggtomega) get the BA: a Sim3-aligned chunked
+    # reconstruction still drifts per-window, and the BA over VGGSfM tracks reconciles it.
+    # For vggtomega the order is Omega → scale_align (metric via DA3) → BA, so the BA refines
+    # already-metric poses. NO FALLBACK: if the BA fails, the reconstruction FAILS (we never
+    # silently ship un-refined poses presented as refined).
+    if (recon_cfg.get("bundle_adjust", {}) or {}).get("enabled"):
         _run_bundle_adjust_step(pipe, frames_dir, output_dir, recon_cfg)
 
 

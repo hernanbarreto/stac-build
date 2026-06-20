@@ -103,11 +103,12 @@ scene_analysis:
 frame_selection:
   # DINO settings (used when frames_selector: dino)
   dino_model: "dinov2_vitb14"          # ViT-B/14 ~330MB, same as VGGT-Long
-  dino_threshold: 0.98                  # cosine sim threshold: a frame becomes a keyframe once its
+  dino_threshold: 0.99                  # cosine sim threshold: a frame becomes a keyframe once its
                                        # similarity to the last keyframe drops BELOW this → HIGHER =
-                                       # MORE keyframes = denser overlap. 0.98 (was 0.975) → denser
-                                       # keyframe set: better VGGT pose overlap + denser cloud, and
-                                       # tighter gaps for the DA3-dense pose interpolation.
+                                       # MORE keyframes = denser overlap. 0.99 = light dedup: drops only
+                                       # near-identical frames (the worst cebolla offenders) but keeps
+                                       # dense overlap → DA3 backbone alignment + loops intact. NO DA3
+                                       # needed to select (DINO is image-only) → no circular dependency.
   dino_threshold_dense: 0.99           # DA3's DENSER set (da3_frames.json): keyframes + the extra
                                        # inter-keyframe frames that add coverage, DEDUPED. DA3 runs on
                                        # THIS (0.99); MapAnything uses the 0.98 keyframes above. The
@@ -476,7 +477,10 @@ poisson:
 #   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
-  backend: "mapanything"                # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid" | "vggtomega"
+  backend: "da3"                        # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid" | "vggtomega"
+                                        # da3 = DENSE backbone: cm-level chunk alignment + loops + metric
+                                        # depth (vs maplong's per-window scale gradient / 13m jumps). BA
+                                        # corrects DA3's smooth drift; dedup moves to fusion.
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
 
   # ── VGGT-Omega backbone (backend: "vggtomega") ──
@@ -535,7 +539,7 @@ reconstruction:
     min_fitness: 0.3                    # reject an ICP registration whose overlap (fitness) is below
                                         # this → a frame that can't be reliably localized is skipped.
     # python: /workspace/miniforge3/envs/mapanything/bin/python   # override the env if needed
-  frames_selector: "parallax"          # SINGLE source of frame-set mode (writes selected_frames.json):
+  frames_selector: "dino"              # SINGLE source of frame-set mode (writes selected_frames.json):
                                        #   "parallax" = DEFAULT: GEOMETRIC triangulation-angle keyframes
                                        #                (baseline) for the SLAM backbone (VGGT-Long). Needs
                                        #                DA3 depth+pose (runs DA3 on all blur-valid frames
