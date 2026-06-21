@@ -167,11 +167,17 @@ def run(output_dir: Path, smoke: bool = False, dry_run: bool = False,
     _writeback(output_dir, kf_refined)           # refined KEYFRAME poses → camera_poses.txt
     # emit localised FILLER poses (c2w) for the densification step
     fl_frames = [fn for i, fn in enumerate(use_frames) if (not is_kf[fn]) and loc[i]]
+    _fp = output_dir / "ba_run" / "filler_poses.npz"
     if fl_frames:
-        (output_dir / "ba_run").mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(output_dir / "ba_run" / "filler_poses.npz",
+        _fp.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(_fp,
                             frames=np.asarray(fl_frames, np.int64),
                             c2w=np.stack([refined_c2w[fn] for fn in fl_frames]).astype(np.float32))
+    elif _fp.exists():
+        # THIS run localised 0 fillers (e.g. dense DA3 backbone = all keyframes). Remove any
+        # STALE filler_poses.npz from a previous run, else densify_fillers back-projects DA3
+        # depth at the OLD backbone's poses → a misplaced chunk_997 that pollutes the cloud.
+        _fp.unlink()
     logger.info(f"✅ {n_kf} keyframe poses refined + {len(fl_frames)} filler poses localised "
                 f"→ filler_poses.npz")
     return {"info": info, "moved_median": float(np.median(moved)), "n_kf": n_kf,
