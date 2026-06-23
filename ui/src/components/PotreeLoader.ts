@@ -554,6 +554,12 @@ export class PotreeOctreeLoader {
         try {
             const resp = await fetch(this.baseUrl + 'octree.bin', {
                 headers: { 'Range': `bytes=${byteOffset}-${byteOffset + byteSize - 1}` },
+                // no-store: a Range fetch against a disk-cached octree.bin trips
+                // Chromium's ERR_CACHE_OPERATION_NOT_SUPPORTED (it can't satisfy a
+                // partial range from the HTTP cache). Bypassing the cache also keeps
+                // us consistent with metadata.json/hierarchy.bin — a corrected cloud
+                // may replace octree.bin at the same URL.
+                cache: 'no-store',
                 signal: this._abort.signal,
             })
             if (resp.status !== 206 && resp.status !== 200) throw new Error(`HTTP ${resp.status}`)
