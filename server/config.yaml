@@ -477,10 +477,11 @@ poisson:
 #   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
-  backend: "da3"                        # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid" | "vggtomega"
-                                        # da3 = DENSE backbone: cm-level chunk alignment + loops + metric
-                                        # depth (vs maplong's per-window scale gradient / 13m jumps). BA
-                                        # corrects DA3's smooth drift; dedup moves to fusion.
+  backend: "vggtomega"                  # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid" | "vggtomega"
+                                        # vggtomega = SOTA pose backbone (CVPR 2026), dynamic-scene robust:
+                                        # DA3 metric depth (anchor) → Omega up-to-scale poses → scale_align
+                                        # (metric) → BA. da3 = DENSE backbone: cm-level chunk alignment +
+                                        # loops + metric depth; BA corrects its smooth drift.
   device: "cuda"                        # "cpu" | "cuda" — keep "cpu" while RTX3060 is broken
 
   # ── VGGT-Omega backbone (backend: "vggtomega") ──
@@ -510,7 +511,8 @@ reconstruction:
   # VGGSfM learned correspondences (robust to low texture) → COLMAP/Ceres POSE-PRIOR bundle
   # adjustment (anchored to the backbone's metric poses → fixes gauge, stays metric, refines
   # relative drift) → refined camera_poses.txt. The TSDF then integrates depth at the refined
-  # poses. Applies to the map/da3 backends (vggtomega does its own global optimisation).
+  # poses. Applies to ALL chunked backbones — da3, mapanything AND vggtomega (for omega
+  # the order is Omega → scale_align → BA, so the BA refines already-metric poses).
   bundle_adjust:
     enabled: true
     python: "/workspace/miniforge3/envs/mapanything/bin/python"
