@@ -163,6 +163,37 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(dot / norm)
 
 
+def _emb_cache_path(frames_dir: Path, model_name: str) -> Path:
+    return Path(frames_dir) / f".dino_emb_{model_name}.npz"
+
+
+def _load_embedding_cache(frames_dir: Path, frame_files: list, model_name: str):
+    """Return cached (N,D) embeddings iff a cache for the EXACT frame list + model
+    exists. The keyframe pass and the DA3-dense pass run DINO over the SAME frames
+    (only the threshold differs), so without this they recompute every embedding
+    twice. Embeddings depend only on the images → reuse is exact. Returns None on miss."""
+    p = _emb_cache_path(Path(frames_dir), model_name)
+    if not p.exists():
+        return None
+    try:
+        z = np.load(p, allow_pickle=True)
+        if list(z["files"]) == list(frame_files):
+            emb = z["emb"]
+            if emb.shape[0] == len(frame_files):
+                return emb
+    except Exception:
+        pass
+    return None
+
+
+def _save_embedding_cache(frames_dir: Path, frame_files: list, model_name: str, embs) -> None:
+    p = _emb_cache_path(Path(frames_dir), model_name)
+    try:
+        np.savez(p, emb=np.asarray(embs), files=np.array(list(frame_files), dtype=object))
+    except Exception as e:
+        print(f"  [embeddings] cache write failed: {e}")
+
+
 def dino_select_keyframes(frames_dir: str, config: dict = None,
                           file_list: list = None, segment_id: int = None) -> Dict:
     """
@@ -219,27 +250,35 @@ def dino_select_keyframes(frames_dir: str, config: dict = None,
 
     t0 = time.time()
 
-    # Load model
-    model = _load_dino_model(model_name, device)
-    transform = _get_dino_transform()
-    model_load_time = time.time() - t0
-
     # ── Precompute ALL embeddings in batches (the expensive part) ──
     # Decoupled from the sequential selection logic below, since a frame's
     # embedding never depends on which frames were accepted.
+    # Cache: the keyframe pass and the DA3-dense pass run DINO over the SAME frames
+    # with only a different threshold → reuse the cached embeddings on the 2nd pass
+    # (skips both the model load AND the forward — the "double cosine" cost).
     batch_size = int(config.get("dino_batch_size", 32))
     num_workers = int(config.get("dino_num_workers", 8))
     use_amp = bool(config.get("dino_fp16", False))
-    embs = _extract_embeddings_batched(
-        model, frames_dir, frame_files, transform, device,
-        batch_size=batch_size, num_workers=num_workers, use_amp=use_amp,
-    )  # (N, D) L2-normalized; NaN rows = failed loads
-    embed_time = time.time() - t0 - model_load_time
-
-    # Model no longer needed — the rest is pure numpy.
-    del model
-    if device == "cuda":
-        torch.cuda.empty_cache()
+    embs = _load_embedding_cache(frames_dir, frame_files, model_name)
+    if embs is not None:
+        print(f"  [embeddings] reusing cache for {len(frame_files)} frames "
+              f"(skipped model load + forward)")
+        model_load_time = 0.0
+        embed_time = time.time() - t0
+    else:
+        model = _load_dino_model(model_name, device)
+        transform = _get_dino_transform()
+        model_load_time = time.time() - t0
+        embs = _extract_embeddings_batched(
+            model, frames_dir, frame_files, transform, device,
+            batch_size=batch_size, num_workers=num_workers, use_amp=use_amp,
+        )  # (N, D) L2-normalized; NaN rows = failed loads
+        embed_time = time.time() - t0 - model_load_time
+        _save_embedding_cache(frames_dir, frame_files, model_name, embs)
+        # Model no longer needed — the rest is pure numpy.
+        del model
+        if device == "cuda":
+            torch.cuda.empty_cache()
 
     # ── Sequential keyframe decision over precomputed embeddings ──
     # Bit-identical logic to the per-frame version: compare each candidate
