@@ -1138,20 +1138,40 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap
     out_dir = output_dir / "omega_run" / "results_output"
     out_dir.mkdir(parents=True, exist_ok=True)
     aligned = save_dir / "_tmp_results_aligned"
+
+    # STAC fix: the omega depth MUST use the ALIGNED per-frame pose, NOT the raw chunk
+    # extrinsic. world_points are aligned (per-chunk Sim3) but cd['extrinsic'] is raw →
+    # mixing them gave a wrong omega depth → scale_align underestimated s by ~1.37x
+    # (measured: gauge came out <1m instead of ~1.4m). Use camera_poses.txt (already
+    # aligned at this point, up-to-scale like world_points) keyed by camera_frames.txt.
+    pose_map = {}
+    for base in (output_dir, save_dir):
+        pp, fp = base / "camera_poses.txt", base / "camera_frames.txt"
+        if pp.exists() and fp.exists():
+            plines = [l for l in pp.read_text().splitlines() if len(l.split()) == 16]
+            pnums = [int(float(x)) for x in fp.read_text().split()]
+            if len(plines) == len(pnums) and plines:
+                pose_map = {n: np.array(list(map(float, l.split())), np.float64).reshape(4, 4)
+                            for n, l in zip(pnums, plines)}
+                break
+    if not pose_map:
+        pipe.send_log("[omega-depth] no aligned camera_poses.txt found — falling back to "
+                      "raw chunk extrinsic (scale may be off)", level="warning")
+
     n_written = 0
     for cp in sorted(glob.glob(str(aligned / "chunk_*.npy"))):
         try:
             k = int(Path(cp).stem.split("_")[1])
             cd = np.load(cp, allow_pickle=True).item()
             wp = np.asarray(cd["world_points"])            # [S,H,W,3] aligned world
-            ext = np.asarray(cd["extrinsic"])              # [S,4,4] c2w
+            ext = np.asarray(cd["extrinsic"])              # [S,4,4] c2w (RAW — fallback only)
             S = wp.shape[0]
             start = k * step
             for j in range(S):
                 gi = start + j
                 if gi >= N:
                     break
-                c2w = ext[j]
+                c2w = pose_map.get(stems[gi], ext[j])     # ALIGNED pose; raw extrinsic fallback
                 cam_c = c2w[:3, 3]
                 fwd = c2w[:3, 2]                           # camera +z in world
                 d = (wp[j] - cam_c) @ fwd                  # [H,W] depth along view axis
