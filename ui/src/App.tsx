@@ -97,6 +97,10 @@ function App() {
   const [openMenu, setOpenMenu] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<ViewportHandle>(null)
+  // Timestamp (ms) of the last time a cloud actually loaded into the viewer (point
+  // count > 0). Used by the pipeline-done handler to tell "the cloud arrived on this
+  // live socket" from "WS reconnected mid-pipeline → potree_ready went to a dead socket".
+  const lastCloudLoadAtRef = useRef(0)
   const [flythroughOpen, setFlythroughOpen] = useState<string | null>(null)
   const [adminOpen, setAdminOpen] = useState(false)
 
@@ -993,10 +997,16 @@ function App() {
       current_stage_idx: (data.current_stage_idx as number) ?? -1,
       stages: (data.stages as PipelineStageInfo[]) || [],
     }
-    setPipelineRunning(prev => {
-      const merged = { ...newState, scans: prev?.scans }
-      return merged
-    })
+    const terminal = newState.status === 'done' || newState.status === 'failed'
+      || newState.status === 'cancelled'
+    // Exit the "stage pipeline" UI IMMEDIATELY on completion. The old code kept the
+    // running state for 5s, so right after the cloud arrived the viewer still looked
+    // like the pipeline was running ("vuelve a poner stage pipeline").
+    if (terminal) {
+      setPipelineRunning(null)
+    } else {
+      setPipelineRunning(prev => ({ ...newState, scans: prev?.scans }))
+    }
     // Update status bar with current stage info (concise: stage + percentage only)
     const currentStage = newState.stages[newState.current_stage_idx]
     if (currentStage) {
@@ -1007,20 +1017,20 @@ function App() {
         : currentStage.message
       setStatusMessage(`${currentStage.icon} ${currentStage.label}: ${shortMsg || ''} ${pct}%`)
     }
-    if (newState.status === 'done' || newState.status === 'failed' || newState.status === 'cancelled') {
+    // Dead-socket FALLBACK only: if the WS reconnected during a long pipeline, the
+    // backend's _on_pipeline_complete closure sent potree_ready on the now-dead socket,
+    // so no cloud arrives on THIS live socket → reload the session. If the cloud DID load
+    // here (the normal case), do NOTHING. The old code unconditionally clearScene()'d +
+    // reloaded, which WIPED the cloud potree_ready had just loaded → the viewer got stuck
+    // and only a backend restart + manual reload recovered it. No clearScene now: the
+    // potree_ready handler already disposes/replaces the loader on reload.
+    if (newState.status === 'done' && newState.session_id) {
+      const sid = newState.session_id
+      const doneAt = Date.now()
       setTimeout(() => {
-        setPipelineRunning(null)
-        // After pipeline completes successfully, reload the session in the viewer.
-        // This handles the case where the WebSocket reconnected during a long pipeline
-        // (the original _on_pipeline_complete closure sent potree_ready on a dead socket)
-        if (newState.status === 'done' && newState.session_id) {
-          viewportRef.current?.clearScene()
-          viewportRef.current?.sendCommand({
-            type: 'load_session',
-            session_id: newState.session_id,
-          })
-        }
-      }, 5000)
+        if (lastCloudLoadAtRef.current >= doneAt) return  // cloud arrived on this socket → keep it
+        viewportRef.current?.sendCommand({ type: 'load_session', session_id: sid })
+      }, 8000)
     }
   }, [])
 
@@ -2236,7 +2246,7 @@ function App() {
             showAxes={showAxes}
             showGrid={showGrid}
             pipelineRunning={!!pipelineRunning && pipelineRunning.status === 'running'}
-            onPointCount={setPointCount}
+            onPointCount={(n) => { setPointCount(n); if (n > 0) lastCloudLoadAtRef.current = Date.now() }}
             onFps={setFps}
             onStatusMessage={setStatusMessage}
             onSegments={setSegments}
