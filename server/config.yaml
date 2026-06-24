@@ -416,7 +416,12 @@ tsdf:
                              # so long scans keep view density. Higher ⇒ better coverage but slower MRF.
   texture_max_views_ceiling: 600   # hard cap on the auto-scaled view count (texrecon cost grows with it).
                                    # 600 (was 1200) ~halves the View-selection MRF — the slow stage.
-  depth_source: da3_frames   # da3_frames → DA3 per-frame depth for ALL posed frames (keyframes +
+  depth_source: mapanything  # omega keyframe depth ONLY (same source as the cloud) → the TSDF
+                             # matches the cloud. da3_frames mixed in DA3 filler depth (a DIFFERENT
+                             # source than the omega cloud) → mesh didn't coincide (1.4-1.7x extent,
+                             # 22% of verts outside the cloud bbox). Revert to omega-only.
+                             # --- da3_frames (old default) ---
+                             # da3_frames → DA3 per-frame depth for ALL posed frames (keyframes +
                              # the inter-keyframe frames localized by dense_fusion), masked to the
                              # cloud, real poses, NO interpolation. This is what integrates the extra
                              # frames so the mesh gains inter-keyframe coverage. (was "auto" =
