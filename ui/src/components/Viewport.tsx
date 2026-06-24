@@ -129,12 +129,14 @@ const vertexShader = `
     gl_Position = projectionMatrix * mvPosition;
 
     // Perspective-attenuated size. The *20 factor matters: without it,
-    // pointSize/depth at normal viewing distances (~10m) falls below the 2.0
-    // clamp floor, so the slider had no visible effect. With it, pointSize
-    // 1..5 maps to ~2..10px at 10m and scales with zoom.
+    // pointSize/depth at normal viewing distances (~10m) falls below the
+    // clamp floor, so the slider had no visible effect. Floor lowered to 0.25
+    // so small pointSize values (slider min 0.01) actually render tiny points.
+    // NOTE: most GPUs enforce their own ~1px minimum, so sub-pixel sizes may
+    // not get smaller than 1px on screen regardless of this floor.
     float depth = -mvPosition.z;
     float size = pointSize * 20.0 / depth;
-    gl_PointSize = clamp(size, 2.0, 40.0);
+    gl_PointSize = clamp(size, 0.25, 40.0);
   }
 `
 

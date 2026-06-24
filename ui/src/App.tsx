@@ -1356,11 +1356,11 @@ function App() {
               <div className="menu-separator" />
               <div className="menu-dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <Palette size={14} /> Point Size
-                <input type="range" min="0.5" max="5" step="0.1" value={pointSize}
+                <input type="range" min="0.01" max="5" step="0.01" value={pointSize}
                   onChange={e => setPointSize(parseFloat(e.target.value))}
                   onClick={e => e.stopPropagation()}
                   style={{ width: 80, accentColor: 'var(--accent)' }} />
-                <span style={{ fontSize: 11, color: '#aaa', minWidth: 24 }}>{pointSize.toFixed(1)}</span>
+                <span style={{ fontSize: 11, color: '#aaa', minWidth: 24 }}>{pointSize.toFixed(2)}</span>
               </div>
             </div>
           )}
@@ -2129,9 +2129,9 @@ function App() {
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span className="control-label" style={{ minWidth: 74 }}>Point Size</span>
                         <input className="control-slider" type="range" style={{ flex: 1 }}
-                          min="0.5" max="5" step="0.1" value={pointSize}
+                          min="0.01" max="5" step="0.01" value={pointSize}
                           onChange={e => setPointSize(parseFloat(e.target.value))} />
-                        <span className="control-value" style={{ minWidth: 30 }}>{pointSize.toFixed(1)}</span>
+                        <span className="control-value" style={{ minWidth: 30 }}>{pointSize.toFixed(2)}</span>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span className="control-label" style={{ minWidth: 74 }}
