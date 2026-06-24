@@ -517,9 +517,10 @@ reconstruction:
   # poses. Applies to ALL chunked backbones — da3, mapanything AND vggtomega (for omega
   # the order is Omega → scale_align → BA, so the BA refines already-metric poses).
   bundle_adjust:
-    enabled: true                       # TEST: BA over metric+consistent recon → reconcile per-chunk
-                                        # scale drift (omega chunks ±16%) that the single global s can't.
-                                        # Baseline (no-BA) saved in baseline_noBA/ for A/B compare.
+    enabled: false                      # OFF — the global BA DEGRADED the result on the metric
+                                        # vggtomega recon (A/B vs baseline_noBA was worse). Omega
+                                        # poses + global scale_align are kept as-is. Do NOT re-enable
+                                        # for vggtomega without re-validating against the no-BA baseline.
     python: "/workspace/miniforge3/envs/mapanything/bin/python"
     track_window: 32                    # keyframes per VGGSfM tracking window (was 24: longer windows
                                         # → longer tracks, fewer windows needed)
