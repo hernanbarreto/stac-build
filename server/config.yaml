@@ -303,7 +303,9 @@ tsdf:
                               # blur+DINO+asymmetric reconstruction, SEE the raw cloud quality
                               # before re-introducing any gate. (Also avoids double-filtering once
                               # CloudCompy gates at source.)
-  cleaned_cloud_dilate: 3     # legacy raw-depth path only (ignored when raster is on)
+  cleaned_cloud_dilate: 1     # tightened 3→1 to hug the cloud (dilate 3 leaked lateral X/Y pixels
+                              # beyond the cloud → ~24% of TSDF verts outside the cloud bbox).
+                              # legacy raw-depth path only (ignored when raster is on)
   depth_trunc: 100.0         # UPPER bound; auto_tune caps it to reliable_depth_m (8m). With auto_tune ON this is
                              # tightened per-scene to reliable_depth_m (far neural depth is noisy).
   depth_min: 0.05            # only drop sensor-touching artifacts
@@ -311,7 +313,9 @@ tsdf:
   # A fixed config can't serve a 5m room AND a 26m corridor. Before integrating, measure the
   # cloud's extent and tighten depth_trunc + scale decimate_target accordingly.
   auto_tune: true
-  reliable_depth_m: 30.0     # was 8 → cut depth_trunc to 8m and DROPPED the far tail (cloud reaches
+  reliable_depth_m: 15.0     # 30→15: clip the far Z tail (omega depth p95≈15m; cloud reaches ~12m).
+                             # 30 let the >15m noise mesh → Z spill past the cloud. (test2 scene.)
+                             # was 8 → cut depth_trunc to 8m and DROPPED the far tail (cloud reaches
                              # 106m, far surfaces are seen from ~18-30m away → never integrated =
                              # "partes faltantes"). 30m lets the far half mesh as a SOLID surface.
                              # Tradeoff: far depth a bit fuzzier; weight_thresh+edge_thresh+max_edge
@@ -392,7 +396,9 @@ tsdf:
                              # the global marching-cubes 'bridge/line' artifacts, then weld back
                              # into ONE mesh (shared global voxel grid → seams are identical).
                              # Set 0 to fall back to tsdf_tiling=auto.
-  tsdf_max_edge_m: 0.30      # >0 → drop any triangle with an edge longer than this (m). Real
+  tsdf_max_edge_m: 0.10      # 0.30→0.10: drop triangles that bridge gaps/discontinuities (the main
+                             # source of the lateral spill beyond the cloud). >0 → drop any triangle
+                             # with an edge longer than this (m). Real
                              # TSDF surfaces have edges ≈ voxel size; this only removes the
                              # spurious near↔far 'bridge'/spike lines. Run post-weld + post-decimate.
   texture: true
