@@ -1171,13 +1171,21 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     device = recon_cfg.get("device", "cpu")
 
     # ── DA3 per-frame metric depth (NO streaming) on the dense/keyframe set ──
-    pipe.send_progress(6, "VGGT-Omega: extracting DA3 metric depth (per-frame)...",
-                       stage="reconstruction")
-    _da3_dense = frames_dir / "da3_frames.json"
-    _da3_arg = str(_da3_dense) if _da3_dense.exists() else selected_frames_path
-    da3_dir = _run_da3(pipe, frames_dir, output_dir, _da3_arg, recon_cfg, config,
-                       depth_only=True)
-    pipe.send_log(f"DA3 metric depth → {Path(da3_dir) / 'results_output'} (anchor + cloud depth)")
+    # DA3 here is ONLY the metric anchor consumed by scale_align (and the TSDF depth
+    # source). The Omega backbone itself does NOT use it. So when scale_align is OFF
+    # (testing raw Omega), skip DA3 entirely — otherwise it re-runs for hours for nothing.
+    _scale_align_on = bool((recon_cfg.get("vggtomega", {}) or {}).get("scale_align", True))
+    if _scale_align_on:
+        pipe.send_progress(6, "VGGT-Omega: extracting DA3 metric depth (per-frame)...",
+                           stage="reconstruction")
+        _da3_dense = frames_dir / "da3_frames.json"
+        _da3_arg = str(_da3_dense) if _da3_dense.exists() else selected_frames_path
+        da3_dir = _run_da3(pipe, frames_dir, output_dir, _da3_arg, recon_cfg, config,
+                           depth_only=True)
+        pipe.send_log(f"DA3 metric depth → {Path(da3_dir) / 'results_output'} (anchor + cloud depth)")
+    else:
+        pipe.send_log("scale_align OFF → skipping DA3 (its only role here is the metric "
+                      "anchor for scale_align) — running Omega ONLY")
 
     # ── VGGT-Long with the Omega backbone ──
     vggt_config = _build_vggtomega_config(config)
@@ -1224,6 +1232,12 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _postprocess_reconstruction(pipe, vggt_save_dir, output_dir, vggt_config, backend="mapanything")
 
     # ── metric scale: emit omega per-frame depth, then align to DA3 ──
+    # Opt-out (scale_align: false) leaves poses UP-TO-SCALE — used to isolate whether a
+    # bad result comes from the scale alignment vs the raw Omega backbone.
+    if not (recon_cfg.get("vggtomega", {}) or {}).get("scale_align", True):
+        pipe.send_log("[scale-align] DISABLED (vggtomega.scale_align: false) — poses stay up-to-scale",
+                      level="warning")
+        return
     pipe.send_progress(86, "VGGT-Omega: aligning metric scale to DA3...", stage="reconstruction")
     try:
         _emit_omega_depth(vggt_save_dir, output_dir,

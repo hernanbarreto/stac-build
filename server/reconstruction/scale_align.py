@@ -122,9 +122,127 @@ def estimate_scale(output_dir: Path) -> Optional[float]:
     return s
 
 
+_PLY_NP = {"float": "f4", "float32": "f4", "double": "f8", "float64": "f8",
+           "uchar": "u1", "uint8": "u1", "char": "i1", "int8": "i1",
+           "ushort": "u2", "uint16": "u2", "short": "i2", "int16": "i2",
+           "uint": "u4", "uint32": "u4", "int": "i4", "int32": "i4"}
+
+
+def _scale_ply_xyz(path: Path, s: float) -> bool:
+    """Multiply the x,y,z of every vertex of a PLY by s, in place. Handles
+    binary_little/big_endian and ascii. Other properties (rgb, confidence…) untouched.
+    Assumes the vertex element has no list properties (true for point clouds). Returns
+    False if the layout is unexpected (no x/y/z) so the caller can abort."""
+    raw = path.read_bytes()
+    hend = raw.find(b"end_header")
+    if hend < 0:
+        return False
+    nl = raw.find(b"\n", hend)
+    header = raw[:nl + 1].decode("ascii", "replace")
+    body = raw[nl + 1:]
+
+    fmt = None
+    props: List[Tuple[str, str]] = []   # (name, ply_type) for the vertex element
+    n = 0
+    in_vertex = False
+    for ln in header.splitlines():
+        t = ln.split()
+        if not t:
+            continue
+        if t[0] == "format":
+            fmt = t[1]
+        elif t[0] == "element":
+            in_vertex = (t[1] == "vertex")
+            if in_vertex:
+                n = int(t[2])
+        elif t[0] == "property" and in_vertex:
+            props.append((t[-1], t[1]))    # property <type> <name>
+
+    names = [p[0] for p in props]
+    if not all(c in names for c in ("x", "y", "z")):
+        return False
+
+    if fmt == "ascii":
+        xi, yi, zi = names.index("x"), names.index("y"), names.index("z")
+        out_lines = []
+        for bl in body.decode("ascii", "replace").splitlines()[:n]:
+            v = bl.split()
+            if len(v) >= len(names):
+                v[xi] = f"{float(v[xi]) * s:.8g}"
+                v[yi] = f"{float(v[yi]) * s:.8g}"
+                v[zi] = f"{float(v[zi]) * s:.8g}"
+            out_lines.append(" ".join(v))
+        path.write_bytes(raw[:nl + 1] + ("\n".join(out_lines) + "\n").encode("ascii"))
+        return True
+
+    endian = "<" if (fmt and "little" in fmt) else ">"
+    try:
+        dt = np.dtype([(nm, endian + _PLY_NP[ty]) for nm, ty in props])
+    except KeyError:
+        return False
+    nbytes = n * dt.itemsize
+    arr = np.frombuffer(body[:nbytes], dtype=dt).copy()
+    for c in ("x", "y", "z"):
+        arr[c] = (arr[c].astype(np.float64) * s).astype(arr[c].dtype)
+    path.write_bytes(raw[:nl + 1] + arr.tobytes() + body[nbytes:])
+    return True
+
+
+def _scale_aligned_depth(output_dir: Path, s: float, dry_run: bool = False) -> None:
+    """Scale the per-frame OMEGA depth the TSDF reads (maplong_run/_tmp_results_aligned/
+    chunk_*.npy, key 'depth') by s. Without this, scale_align leaves this depth UP-TO-SCALE
+    while the poses are metric → the TSDF integrates omega keyframe depth ~s× too small at
+    metric poses → collapsed/garbage mesh (the "TSDF espantoso"). Scales 'depth' and
+    'world_points'; intrinsics / conf / images are untouched (K does not change with metric
+    scale). Safe to call standalone to retro-fix a run whose scale_align predates this."""
+    aligned = output_dir / "maplong_run" / "_tmp_results_aligned"
+    if not aligned.exists():
+        return
+    for p in sorted(aligned.glob("chunk_*.npy")):
+        if dry_run:
+            logger.info(f"[dry-run] would scale aligned depth {p.name} ×{s:.4f}")
+            continue
+        try:
+            d = np.load(str(p), allow_pickle=True).item()
+        except Exception as e:
+            logger.warning(f"  could not load {p.name}: {e}")
+            continue
+        if d.get("depth") is not None:
+            d["depth"] = (np.asarray(d["depth"], np.float32) * s).astype(np.float32)
+        if d.get("world_points") is not None:
+            d["world_points"] = (np.asarray(d["world_points"], np.float32) * s).astype(np.float32)
+        np.save(str(p), d)
+        logger.info(f"  scaled aligned depth {p.name} ×{s:.4f}")
+
+
 def apply_scale(output_dir: Path, s: float, dry_run: bool = False) -> None:
-    """Multiply every camera-centre translation by s in every camera_poses.txt copy
-    (c2w: scale the [:3,3] column). Rotations unchanged. Backs up to .prescale."""
+    """Apply s as a GLOBAL SIMILARITY to the whole reconstruction: every chunk_*.ply
+    point XYZ ×s, the per-frame omega depth the TSDF reads (_tmp_results_aligned) ×s,
+    AND every camera-centre translation ×s. Rotations and the metric DA3 depth are
+    untouched.
+
+    Why both: scaling ONLY the camera centres (the old behaviour) left the chunk clouds
+    in up-to-scale units → cameras de-synced from geometry → the BA reprojection / TSDF
+    shifted each chunk (the per-chunk "ghosting"), and the 5mm CloudCompy voxel — huge
+    relative to the tiny up-to-scale cloud — over-decimated it (~290k pts). Scaling BOTH
+    keeps it consistent AND restores density (≈ s³ more voxels filled).
+
+    Clouds are scaled FIRST and a failure RAISES before any pose is touched, so a partial
+    failure degrades safely to the consistent up-to-scale state (cameras never de-sync)."""
+    # ── 1) the cloud (chunk PLYs CloudCompy will merge) ──
+    for ply in sorted(output_dir.glob("chunk_*.ply")):
+        if dry_run:
+            logger.info(f"[dry-run] would scale {ply.name} XYZ ×{s:.4f}")
+            continue
+        if not _scale_ply_xyz(ply, s):
+            raise RuntimeError(f"could not scale {ply.name} (unexpected PLY layout) — "
+                               f"aborting so cameras and cloud never de-sync")
+        logger.info(f"  scaled cloud {ply.name} XYZ ×{s:.4f}")
+
+    # ── 2) the per-frame omega depth the TSDF integrates ──
+    _scale_aligned_depth(output_dir, s, dry_run=dry_run)
+
+    # ── 3) the camera centres (every camera_poses.txt copy) ──
     for base in (output_dir, output_dir / "maplong_run", output_dir / "da3_run"):
         pp = base / "camera_poses.txt"
         if not pp.exists():
@@ -149,10 +267,19 @@ def apply_scale(output_dir: Path, s: float, dry_run: bool = False) -> None:
 
 
 def run(output_dir: Path, dry_run: bool = False) -> Optional[float]:
+    # Idempotency guard: a metric scale is a one-shot global similarity. If a resume
+    # re-enters here after it already ran, scaling again would DOUBLE it (cloud and
+    # poses ×s²). The marker records it was applied → skip.
+    marker = output_dir / ".metric_scale_applied"
+    if marker.exists() and not dry_run:
+        logger.info(f"metric scale already applied ({marker.read_text().strip()}) — skipping")
+        return None
     s = estimate_scale(output_dir)
     if s is None:
         return None
     apply_scale(output_dir, s, dry_run=dry_run)
+    if not dry_run:
+        marker.write_text(f"s={s:.6f}\n")
     logger.info(f"✅ metric scale {'(dry-run) ' if dry_run else ''}s={s:.4f} applied")
     return s
 

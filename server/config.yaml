@@ -498,6 +498,9 @@ reconstruction:
     loop_closure: true
     resolution: 512                     # load_and_preprocess_images(image_resolution=…)
     mode: "balanced"                    # "balanced" (≈res² tokens) | "max_size" (less VRAM)
+    scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
+                                        # scales cloud + poses by s = median DA3/Omega depth).
+                                        # false → up-to-scale (raw Omega isolation test).
 
   # ── Dense frame fusion (frame-to-keyframe ICP) — cloud-stage completeness ──
   # VGGT-Long poses+cloud use KEYFRAMES only → inter-keyframe holes the TSDF inherits.
@@ -514,7 +517,9 @@ reconstruction:
   # poses. Applies to ALL chunked backbones — da3, mapanything AND vggtomega (for omega
   # the order is Omega → scale_align → BA, so the BA refines already-metric poses).
   bundle_adjust:
-    enabled: true
+    enabled: true                       # TEST: BA over metric+consistent recon → reconcile per-chunk
+                                        # scale drift (omega chunks ±16%) that the single global s can't.
+                                        # Baseline (no-BA) saved in baseline_noBA/ for A/B compare.
     python: "/workspace/miniforge3/envs/mapanything/bin/python"
     track_window: 32                    # keyframes per VGGSfM tracking window (was 24: longer windows
                                         # → longer tracks, fewer windows needed)
