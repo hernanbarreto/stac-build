@@ -315,12 +315,19 @@ def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float
         except Exception:
             continue
     if not chunk_step:
-        try:
-            import yaml as _yaml
-            c = _yaml.safe_load(open(run_dir / "vggt_long_config.yaml"))
-            chunk_step = int(c["Model"]["chunk_size"]) - int(c["Model"]["overlap"])
-        except Exception:
-            chunk_step = None
+        # The vendor config copy is named per backend: mapanything → vggt_long_config.yaml,
+        # vggtomega → vggt_omega_config.yaml. Try BOTH — looking only for vggt_long_config
+        # made this return None for vggtomega, so the TSDF fell back to DA3 depth (a
+        # DIFFERENT model than the omega cloud) → mesh ~1.6× off / displaced vs the cloud.
+        import yaml as _yaml
+        for _cfg in ("vggt_long_config.yaml", "vggt_omega_config.yaml"):
+            try:
+                c = _yaml.safe_load(open(run_dir / _cfg))
+                chunk_step = int(c["Model"]["chunk_size"]) - int(c["Model"]["overlap"])
+                if chunk_step:
+                    break
+            except Exception:
+                chunk_step = None
     if not chunk_step or chunk_step < 1:
         return None
 
