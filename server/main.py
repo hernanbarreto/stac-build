@@ -5126,12 +5126,15 @@ async def viewer_websocket(websocket: WebSocket):
                 _pipeline_tid = _tm.start(session_id, "pipeline", "Running Pipeline")
 
                 async def _on_pipeline_progress(sid, job_dict):
+                    # BROADCAST to all live viewers, NOT the socket captured at run start: a
+                    # pipeline runs for hours and outlives the WS (ping timeout → reconnect),
+                    # so the captured socket dies and progress/'done'/potree_ready were sent to
+                    # a dead socket → UI stuck on "pipeline running", cloud never loaded.
                     try:
-                        # Update task manager with pipeline progress
                         stage = job_dict.get("current_stage", "")
                         pct = job_dict.get("pct", 0)
                         _tm.update(_pipeline_tid, pct=pct, detail=f"Stage: {stage}")
-                        await websocket.send_text(json.dumps({
+                        await viewer_manager.broadcast_text(json.dumps({
                             "type": "pipeline_progress",
                             "session_id": sid,
                             **job_dict,
@@ -5144,7 +5147,7 @@ async def viewer_websocket(websocket: WebSocket):
                     if not success:
                         _tm.fail(_pipeline_tid, "Pipeline failed")
                         try:
-                            await websocket.send_text(json.dumps({
+                            await viewer_manager.broadcast_text(json.dumps({
                                 "type": "error",
                                 "message": f"Pipeline failed for {sid}. Check server logs."
                             }))
@@ -5155,7 +5158,7 @@ async def viewer_websocket(websocket: WebSocket):
                     # Convert to Potree octree and notify viewer
                     try:
                         session_path = _ctx(sid).session_dir
-                        await websocket.send_text(json.dumps({
+                        await viewer_manager.broadcast_text(json.dumps({
                             "type": "status",
                             "message": "Building LOD octree..."
                         }))
@@ -5206,11 +5209,11 @@ async def viewer_websocket(websocket: WebSocket):
                             }
                             if floor_transform_4x4:
                                 pipe_msg["floorTransform"] = floor_transform_4x4
-                            await websocket.send_text(json.dumps(pipe_msg))
+                            await viewer_manager.broadcast_text(json.dumps(pipe_msg))
                             print(f"[Pipeline] ✅ Potree ready for {sid}")
                         else:
                             print(f"[Pipeline] ⚠️ Potree conversion failed, sending raw cloud")
-                            await _send_cleaned_cloud(websocket, sid)
+                            await _send_cleaned_cloud_broadcast(sid)
                     except Exception as e:
                         print(f"[Pipeline] Send cloud error: {e}")
 
@@ -5226,14 +5229,14 @@ async def viewer_websocket(websocket: WebSocket):
                             None, apply_segmentation_to_cloud, _seg_output_dir
                         )
                         if seg_data and seg_data.get("instances"):
-                            await websocket.send_text(json.dumps(seg_data))
+                            await viewer_manager.broadcast_text(json.dumps(seg_data))
                             print(f"[Pipeline] Sent {len(seg_data['instances'])} segments")
                     except Exception as e:
                         print(f"[Pipeline] Broadcast error: {e}")
 
                     try:
                         _tm.finish(_pipeline_tid)
-                        await websocket.send_text(json.dumps({
+                        await viewer_manager.broadcast_text(json.dumps({
                             "type": "status",
                             "message": f"Pipeline complete for {sid}"
                         }))
