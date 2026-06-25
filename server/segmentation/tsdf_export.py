@@ -354,13 +354,25 @@ def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float
     d0 = _depth_stack(probe["depth"])
     h, w = int(d0.shape[-2]), int(d0.shape[-1])
 
+    # How many chunks exist (chunk_0 … chunk_{n-1}). The LAST chunk is longer than
+    # chunk_step (it keeps its full overlap tail with no successor), so its tail frames
+    # live at positions ≥ n_chunks*chunk_step. The naive K = pos // chunk_step sends those
+    # to a non-existent chunk → they get NO depth and are skipped, leaving the mesh short
+    # of the cloud's end (test3: 50 of 230 frames dropped → last section uncovered). Clamp
+    # K to the last chunk so the tail is read from it (local index stays < its depth len).
+    n_chunks = 0
+    while (chunks / f"chunk_{n_chunks}.npy").exists():
+        n_chunks += 1
+    if n_chunks == 0:
+        return None
+
     cache: Dict[str, object] = {"K": None, "data": None}
 
     def _load(frame_idx: int) -> Optional[dict]:
         pos = frame_to_pos.get(int(frame_idx))
         if pos is None:
             return None
-        K = pos // chunk_step
+        K = min(pos // chunk_step, n_chunks - 1)
         local = pos - K * chunk_step
         if cache["K"] != K:
             data = _load_chunk(K)
@@ -1242,25 +1254,29 @@ def _drop_long_edge_tris(mesh, max_edge: float, logger_prefix: str = ""):
     return mesh
 
 
-def _snap_mesh_to_cloud(glb_path: Path, output_dir: Path, logger_prefix: str = "[TSDF-scene]") -> dict:
-    """Register the finished mesh to the cleaned cloud (ICP) and bake the rigid transform
-    into the GLB, so the mesh always lands in the cloud's frame.
+def _icp_mesh_to_cloud(mesh, output_dir: Path):
+    """Compute the gated rigid transform that registers the (untextured) TSDF mesh onto the
+    cleaned cloud. Returns ``(T, metrics)`` where T is a 4x4 np.ndarray to apply to the mesh
+    AND to the camera poses (so texrecon then bakes texture in the cloud frame), or
+    ``(None, metrics)`` if the snap is skipped.
 
     Why: the cloud (CloudCompPy of omega world_points) and the mesh (TSDF of omega
     depth+poses) are SUPPOSED to share omega's aligned frame, but an intermittent
-    loop-closure inconsistency can leave the mesh rigidly offset from the cloud — measured
-    on test3: 11.46° + 0.57 m, while test7 (same code) was perfect. The cloud is the
-    authoritative reference (it's what the user aligns to BIM and what the viewer
-    floor-levels), so we snap the mesh onto it. Both are in the same raw (pre-floor) frame
-    here, so ICP from identity converges to the nearby correct pose.
+    loop-closure inconsistency can leave the mesh rigidly offset — measured on test3: 11.46°
+    + 0.57 m, while test7 (same code) was perfect. The cloud is the authoritative reference
+    (what the user aligns to BIM, what the viewer floor-levels), so we snap the mesh onto it.
 
-    GATED — only baked when the fit is good AND the move is small enough to be a genuine
-    correction, never a large ICP slide along a repetitive railway. Returns metrics always
-    (``applied`` True/False); on skip the GLB is left untouched (mesh stays in pose frame).
+    Done BEFORE texturing and applied to BOTH the mesh vertices and the camera poses: a
+    rigid move of mesh+cameras together leaves the texrecon projection geometry unchanged,
+    so the texture bakes correctly and the output is already in the cloud frame with BAKED
+    vertices (no post-texture GLB round-trip, which would corrupt texrecon's UV atlas, and
+    no node-matrix that BIM-side trimesh/open3d readers might ignore).
+
+    GATED — only when the fit is good AND the move is small enough to be a genuine
+    correction, never a large ICP slide along a repetitive railway, and only if it improves.
     """
-    out = {"applied": False, "fitness": 0.0, "rmse": None,
-           "rot_deg": None, "trans_m": None, "reason": ""}
-    # Same cloud resolution order as the rest of the module.
+    metrics = {"applied": False, "fitness": 0.0, "rmse": None,
+               "rot_deg": None, "trans_m": None, "reason": ""}
     cloud_path = output_dir / "cleaned_cloud.ply"
     if not cloud_path.exists():
         for alt in ("cleaned_cloud_symlink.ply", "merged.ply"):
@@ -1269,27 +1285,22 @@ def _snap_mesh_to_cloud(glb_path: Path, output_dir: Path, logger_prefix: str = "
                 break
     try:
         if not cloud_path.exists():
-            out["reason"] = "no cleaned_cloud.ply"; return out
+            metrics["reason"] = "no cleaned_cloud.ply"; return None, metrics
         import open3d as o3d  # local import — heavy, matches the rest of this module
-        import trimesh as _tm
         from scipy.spatial import cKDTree as _KDT
         tgt = o3d.io.read_point_cloud(str(cloud_path))
         if len(tgt.points) == 0:
-            out["reason"] = "empty cloud"; return out
-        # force="mesh" concatenates to a single Trimesh with vertices in WORLD space (node
-        # transforms baked) and the texture/material preserved — so apply_transform() bakes
-        # the snap into the vertices (not just a scene-graph node) and any reader sees it.
-        mesh = _tm.load(str(glb_path), force="mesh")
+            metrics["reason"] = "empty cloud"; return None, metrics
         V = np.asarray(mesh.vertices)
         if len(V) < 100:
-            out["reason"] = "mesh too small"; return out
+            metrics["reason"] = "mesh too small"; return None, metrics
         src = o3d.geometry.PointCloud()
         src.points = o3d.utility.Vector3dVector(V.astype(np.float64))
         tgt_d = tgt.voxel_down_sample(0.05)
         src_d = src.voxel_down_sample(0.05)
         A = np.asarray(src_d.points); B = np.asarray(tgt_d.points)
         if len(A) < 100 or len(B) < 100:
-            out["reason"] = "too few points after downsample"; return out
+            metrics["reason"] = "too few points after downsample"; return None, metrics
 
         def _median_nn(P, Q):
             return float(np.median(_KDT(Q).query(P, k=1)[0]))
@@ -1303,29 +1314,26 @@ def _snap_mesh_to_cloud(glb_path: Path, output_dir: Path, logger_prefix: str = "
         rot_deg = float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))))
         trans_m = float(np.linalg.norm(t))
         after = _median_nn((R @ A.T).T + t, B)
-        out.update(fitness=float(reg.fitness), rmse=float(reg.inlier_rmse),
-                   rot_deg=rot_deg, trans_m=trans_m,
-                   before_median=before, after_median=after)
+        metrics.update(fitness=float(reg.fitness), rmse=float(reg.inlier_rmse),
+                       rot_deg=rot_deg, trans_m=trans_m,
+                       before_median=before, after_median=after)
         # Gates: good fit, genuine (small) correction, and it must actually improve.
         if reg.fitness < 0.7:
-            out["reason"] = f"low fitness {reg.fitness:.2f}"; return out
+            metrics["reason"] = f"low fitness {reg.fitness:.2f}"; return None, metrics
         if reg.inlier_rmse > 0.06:
-            out["reason"] = f"high rmse {reg.inlier_rmse:.3f}"; return out
+            metrics["reason"] = f"high rmse {reg.inlier_rmse:.3f}"; return None, metrics
         if rot_deg > 30.0 or trans_m > 2.5:
-            out["reason"] = (f"transform too large ({rot_deg:.1f}deg/{trans_m:.2f}m) — "
-                             "refusing (possible ICP slide)"); return out
+            metrics["reason"] = (f"transform too large ({rot_deg:.1f}deg/{trans_m:.2f}m) — "
+                                 "refusing (possible ICP slide)"); return None, metrics
         if after > before + 1e-4:
-            out["reason"] = f"would not improve ({before:.3f}->{after:.3f} m)"; return out
-        # Bake the rigid transform into the mesh VERTICES and re-export. A rigid move keeps
-        # UVs unchanged → texture stays correct.
-        mesh.apply_transform(T)
-        mesh.export(str(glb_path))
-        out["applied"] = True
-        out["reason"] = "ok"
-        return out
+            metrics["reason"] = f"would not improve ({before:.3f}->{after:.3f} m)"
+            return None, metrics
+        metrics["applied"] = True
+        metrics["reason"] = "ok"
+        return T, metrics
     except Exception as e:
-        out["reason"] = f"error: {e}"
-        return out
+        metrics["reason"] = f"error: {e}"
+        return None, metrics
 
 
 def export_tsdf_scene(
@@ -2575,6 +2583,33 @@ def export_tsdf_scene(
     # so re-run the line-killer after simplifying.
     mesh = _drop_long_edge_tris(mesh, tsdf_max_edge_m, " post-decimate")
 
+    # ── Snap mesh to the cleaned cloud (ICP, gated) BEFORE texturing ──
+    # Guarantees the mesh shares the cloud's frame even if an upstream loop-closure
+    # inconsistency left it rigidly offset (test3: 11.46°/0.57 m). Applied to the mesh AND
+    # the camera poses together, so texturing below projects in the SAME (cloud) frame —
+    # the texture bakes correctly and the GLB ships with BAKED vertices (no post-texture
+    # round-trip that corrupts texrecon's UV atlas; no node-matrix that BIM-side readers
+    # might ignore).
+    if progress_cb:
+        progress_cb("aligning", time.time() - t0, None)
+    _icp_T, icp_snap = _icp_mesh_to_cloud(mesh, output_dir)
+    if _icp_T is not None:
+        mesh.transform(_icp_T)
+        def _T_pose(p):
+            p = np.asarray(p, dtype=np.float64)
+            if p.shape != (4, 4):
+                M = np.eye(4); M[:p.shape[0], :p.shape[1]] = p; p = M
+            return _icp_T @ p
+        cam.pose_map = {k: _T_pose(v) for k, v in cam.pose_map.items()}
+        logger.info(f"[TSDF-scene] ICP-snap → cloud: rot {icp_snap['rot_deg']:.2f}° "
+                    f"trans {icp_snap['trans_m']:.3f} m (fitness {icp_snap['fitness']:.2f}, "
+                    f"rmse {icp_snap['rmse']:.3f}, median "
+                    f"{icp_snap['before_median']:.3f}→{icp_snap['after_median']:.3f} m) — "
+                    f"mesh+poses moved together before texturing")
+    else:
+        logger.info(f"[TSDF-scene] ICP-snap not applied ({icp_snap.get('reason')}) — "
+                    "mesh left in pose frame")
+
     # Sit under the same ``output/tsdf/`` root as the per-instance meshes so
     # the ``/tsdf/list/`` endpoint (which iterates subfolders) picks it up
     # automatically and the viewport loads it alongside everything else.
@@ -2668,22 +2703,6 @@ def export_tsdf_scene(
                            "keeping the vertex-colour preview")
         finally:
             tex_in.unlink(missing_ok=True)
-
-    # ── Snap the finished mesh onto the cleaned cloud (ICP, gated) ──
-    # Guarantees the mesh shares the cloud's frame even if an upstream loop-closure
-    # inconsistency left it rigidly offset (test3: 11.46°/0.57 m). Runs after texturing so
-    # the bake uses pose-frame geometry (correct projection); a rigid move preserves UVs.
-    if progress_cb:
-        progress_cb("aligning", time.time() - t0, None)
-    icp_snap = _snap_mesh_to_cloud(glb_path, output_dir)
-    if icp_snap.get("applied"):
-        logger.info(f"[TSDF-scene] ICP-snap → cloud: rot {icp_snap['rot_deg']:.2f}° "
-                    f"trans {icp_snap['trans_m']:.3f} m (fitness {icp_snap['fitness']:.2f}, "
-                    f"rmse {icp_snap['rmse']:.3f}, median "
-                    f"{icp_snap['before_median']:.3f}→{icp_snap['after_median']:.3f} m)")
-    else:
-        logger.info(f"[TSDF-scene] ICP-snap not applied ({icp_snap.get('reason')}) — "
-                    "mesh left in pose frame")
 
     elapsed = time.time() - t0
     meta = {
