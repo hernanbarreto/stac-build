@@ -248,7 +248,9 @@ class PipelineManager:
                       "gaus_slam_run", "da3_depth",
                       "vggt_long_config.yaml", "vggt_omega_config.yaml", "da3_streaming_config.yaml",
                       "camera_poses_mapanything.json", "camera_poses.txt", "camera_frames.txt",
-                      "intrinsic.txt", "lidar_complement.ply"],
+                      "intrinsic.txt", "lidar_complement.ply", "omega_run",
+                      ".metric_scale_applied"],  # ← idempotency marker: MUST be cleared on
+                      # Replace, else scale_align skips on every re-run → not metric (the bug).
         StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "floor_transform.npz"],
         StageId.TSDF: ["tsdf/scene"],
         StageId.VLM: ["scene_analysis.json", "vlm_analysis.json"],
