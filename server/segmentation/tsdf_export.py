@@ -1242,6 +1242,92 @@ def _drop_long_edge_tris(mesh, max_edge: float, logger_prefix: str = ""):
     return mesh
 
 
+def _snap_mesh_to_cloud(glb_path: Path, output_dir: Path, logger_prefix: str = "[TSDF-scene]") -> dict:
+    """Register the finished mesh to the cleaned cloud (ICP) and bake the rigid transform
+    into the GLB, so the mesh always lands in the cloud's frame.
+
+    Why: the cloud (CloudCompPy of omega world_points) and the mesh (TSDF of omega
+    depth+poses) are SUPPOSED to share omega's aligned frame, but an intermittent
+    loop-closure inconsistency can leave the mesh rigidly offset from the cloud — measured
+    on test3: 11.46° + 0.57 m, while test7 (same code) was perfect. The cloud is the
+    authoritative reference (it's what the user aligns to BIM and what the viewer
+    floor-levels), so we snap the mesh onto it. Both are in the same raw (pre-floor) frame
+    here, so ICP from identity converges to the nearby correct pose.
+
+    GATED — only baked when the fit is good AND the move is small enough to be a genuine
+    correction, never a large ICP slide along a repetitive railway. Returns metrics always
+    (``applied`` True/False); on skip the GLB is left untouched (mesh stays in pose frame).
+    """
+    out = {"applied": False, "fitness": 0.0, "rmse": None,
+           "rot_deg": None, "trans_m": None, "reason": ""}
+    # Same cloud resolution order as the rest of the module.
+    cloud_path = output_dir / "cleaned_cloud.ply"
+    if not cloud_path.exists():
+        for alt in ("cleaned_cloud_symlink.ply", "merged.ply"):
+            if (output_dir / alt).exists():
+                cloud_path = output_dir / alt
+                break
+    try:
+        if not cloud_path.exists():
+            out["reason"] = "no cleaned_cloud.ply"; return out
+        import open3d as o3d  # local import — heavy, matches the rest of this module
+        import trimesh as _tm
+        from scipy.spatial import cKDTree as _KDT
+        tgt = o3d.io.read_point_cloud(str(cloud_path))
+        if len(tgt.points) == 0:
+            out["reason"] = "empty cloud"; return out
+        # force="mesh" concatenates to a single Trimesh with vertices in WORLD space (node
+        # transforms baked) and the texture/material preserved — so apply_transform() bakes
+        # the snap into the vertices (not just a scene-graph node) and any reader sees it.
+        mesh = _tm.load(str(glb_path), force="mesh")
+        V = np.asarray(mesh.vertices)
+        if len(V) < 100:
+            out["reason"] = "mesh too small"; return out
+        src = o3d.geometry.PointCloud()
+        src.points = o3d.utility.Vector3dVector(V.astype(np.float64))
+        tgt_d = tgt.voxel_down_sample(0.05)
+        src_d = src.voxel_down_sample(0.05)
+        A = np.asarray(src_d.points); B = np.asarray(tgt_d.points)
+        if len(A) < 100 or len(B) < 100:
+            out["reason"] = "too few points after downsample"; return out
+
+        def _median_nn(P, Q):
+            return float(np.median(_KDT(Q).query(P, k=1)[0]))
+        before = _median_nn(A, B)
+        reg = o3d.pipelines.registration.registration_icp(
+            src_d, tgt_d, 0.6, np.eye(4),
+            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=80))
+        T = np.asarray(reg.transformation)
+        R, t = T[:3, :3], T[:3, 3]
+        rot_deg = float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))))
+        trans_m = float(np.linalg.norm(t))
+        after = _median_nn((R @ A.T).T + t, B)
+        out.update(fitness=float(reg.fitness), rmse=float(reg.inlier_rmse),
+                   rot_deg=rot_deg, trans_m=trans_m,
+                   before_median=before, after_median=after)
+        # Gates: good fit, genuine (small) correction, and it must actually improve.
+        if reg.fitness < 0.7:
+            out["reason"] = f"low fitness {reg.fitness:.2f}"; return out
+        if reg.inlier_rmse > 0.06:
+            out["reason"] = f"high rmse {reg.inlier_rmse:.3f}"; return out
+        if rot_deg > 30.0 or trans_m > 2.5:
+            out["reason"] = (f"transform too large ({rot_deg:.1f}deg/{trans_m:.2f}m) — "
+                             "refusing (possible ICP slide)"); return out
+        if after > before + 1e-4:
+            out["reason"] = f"would not improve ({before:.3f}->{after:.3f} m)"; return out
+        # Bake the rigid transform into the mesh VERTICES and re-export. A rigid move keeps
+        # UVs unchanged → texture stays correct.
+        mesh.apply_transform(T)
+        mesh.export(str(glb_path))
+        out["applied"] = True
+        out["reason"] = "ok"
+        return out
+    except Exception as e:
+        out["reason"] = f"error: {e}"
+        return out
+
+
 def export_tsdf_scene(
     output_dir: Path,
     frames_dir: Path,
@@ -2583,6 +2669,22 @@ def export_tsdf_scene(
         finally:
             tex_in.unlink(missing_ok=True)
 
+    # ── Snap the finished mesh onto the cleaned cloud (ICP, gated) ──
+    # Guarantees the mesh shares the cloud's frame even if an upstream loop-closure
+    # inconsistency left it rigidly offset (test3: 11.46°/0.57 m). Runs after texturing so
+    # the bake uses pose-frame geometry (correct projection); a rigid move preserves UVs.
+    if progress_cb:
+        progress_cb("aligning", time.time() - t0, None)
+    icp_snap = _snap_mesh_to_cloud(glb_path, output_dir)
+    if icp_snap.get("applied"):
+        logger.info(f"[TSDF-scene] ICP-snap → cloud: rot {icp_snap['rot_deg']:.2f}° "
+                    f"trans {icp_snap['trans_m']:.3f} m (fitness {icp_snap['fitness']:.2f}, "
+                    f"rmse {icp_snap['rmse']:.3f}, median "
+                    f"{icp_snap['before_median']:.3f}→{icp_snap['after_median']:.3f} m)")
+    else:
+        logger.info(f"[TSDF-scene] ICP-snap not applied ({icp_snap.get('reason')}) — "
+                    "mesh left in pose frame")
+
     elapsed = time.time() - t0
     meta = {
         "method": "tsdf_scene",
@@ -2621,6 +2723,7 @@ def export_tsdf_scene(
         "recon_backend": backend or "unknown",
         "depth_source": depth_kind,
         "poses_source": poses_src,
+        "icp_snap_to_cloud": icp_snap,
     }
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
