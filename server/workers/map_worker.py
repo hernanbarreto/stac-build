@@ -1198,9 +1198,11 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     if _scale_align_on:
         pipe.send_progress(6, "VGGT-Omega: extracting DA3 metric depth (per-frame)...",
                            stage="reconstruction")
-        _da3_dense = frames_dir / "da3_frames.json"
-        _da3_arg = str(_da3_dense) if _da3_dense.exists() else selected_frames_path
-        da3_dir = _run_da3(pipe, frames_dir, output_dir, _da3_arg, recon_cfg, config,
+        # DA3 on the KEYFRAMES only (selected_frames), NOT the dense da3_frames set: for
+        # vggtomega DA3 is just the metric anchor for scale_align (per-keyframe omega↔DA3),
+        # and the TSDF uses omega depth (depth_source: mapanything), not DA3. Running it on
+        # the dense set produced ~25GB of unused da3_run that overflowed the disk.
+        da3_dir = _run_da3(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config,
                            depth_only=True)
         pipe.send_log(f"DA3 metric depth → {Path(da3_dir) / 'results_output'} (anchor + cloud depth)")
     else:
@@ -1269,6 +1271,17 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         pipe.send_log(f"[scale-align] metric scale s={s}" if s else
                       "[scale-align] could not estimate scale — poses stay up-to-scale",
                       level=("info" if s else "warning"))
+        # Free da3_run as soon as it is no longer used: scale_align already consumed it,
+        # and the TSDF reads omega depth (depth_source: mapanything) — NOT DA3. Keep it only
+        # if the TSDF depth source is DA3-based (da3 / da3_frames / auto-fallback). ~25GB.
+        _ds = str((config.get("tsdf", {}) or {}).get("depth_source", "auto")).lower()
+        if _ds not in ("da3", "da3_frames", "auto"):
+            _da3_run = output_dir / "da3_run"
+            if _da3_run.exists():
+                _mb = sum(f.stat().st_size for f in _da3_run.rglob("*") if f.is_file()) / (1024 * 1024)
+                shutil.rmtree(_da3_run, ignore_errors=True)
+                pipe.send_log(f"[scale-align] freed da3_run/ ({_mb:.0f} MB) — TSDF uses omega "
+                              f"depth (depth_source={_ds}), DA3 no longer needed")
     except Exception as e:
         pipe.send_log(f"[scale-align] failed ({e}) — poses up-to-scale", level="warning")
 
