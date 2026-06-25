@@ -89,21 +89,30 @@ def _ratio(da3: np.ndarray, omega: np.ndarray) -> Optional[float]:
     return float(np.median(da3[m] / omega[m]))
 
 
-def estimate_scale(output_dir: Path) -> Optional[float]:
+def estimate_scale(output_dir: Path, log=None) -> Optional[float]:
+    # `log` (if given) mirrors every message to the caller's sink (e.g. the worker pipe →
+    # server log file AND the UI) so WHAT HAPPENED is always visible, not just in this
+    # module's logger (which the worker does not forward).
+    _log = log if log is not None else (lambda m: logger.info(m))
     da3_dir = _da3_npz_dir(output_dir)
     if da3_dir is None:
-        logger.error("no DA3 results_output/*.npz (metric depth) found")
+        _log("FAIL: no DA3 results_output/*.npz (metric depth) found → cannot estimate scale")
         return None
     omega_depth = _omega_depth(output_dir)
     if not omega_depth:
-        logger.error("no VGGT-Omega per-frame depth found (omega_run/results_output) — "
-                     "the omega worker must emit per-frame depth npz for scale alignment")
+        _log("FAIL: no VGGT-Omega per-frame depth (omega_run/results_output) found "
+             "→ cannot estimate scale")
         return None
+    import glob as _g
+    n_da3 = len(_g.glob(str(da3_dir / "frame_*.npz")))
+    matched = 0
+    bad_ratio = 0
     ratios = []
     for n, od in omega_depth.items():
         p = da3_dir / f"frame_{n}.npz"
         if not p.exists():
             continue
+        matched += 1
         try:
             dd = np.load(p)["depth"].astype(np.float32)
         except Exception:
@@ -111,14 +120,19 @@ def estimate_scale(output_dir: Path) -> Optional[float]:
         r = _ratio(dd, od)
         if r is not None and np.isfinite(r) and r > 0:
             ratios.append(r)
+        else:
+            bad_ratio += 1
+    _log(f"inputs: DA3 frames={n_da3}, omega frames={len(omega_depth)}, "
+         f"matched frame#={matched}, usable ratios={len(ratios)}, rejected ratios={bad_ratio}")
     if len(ratios) < 3:
-        logger.error(f"only {len(ratios)} usable keyframes for scale — abort")
+        _log(f"FAIL: only {len(ratios)} usable keyframes (need ≥3) → abort, poses stay up-to-scale "
+             f"(matched {matched}/{len(omega_depth)} omega frames to DA3)")
         return None
     ratios = np.array(ratios)
     lo, hi = np.percentile(ratios, [10, 90])           # trim outliers
     s = float(np.median(ratios[(ratios >= lo) & (ratios <= hi)]))
-    logger.info(f"scale s = {s:.4f} (median over {len(ratios)} keyframes, "
-                f"spread {ratios.min():.3f}–{ratios.max():.3f})")
+    _log(f"OK: metric scale s={s:.4f} (median over {len(ratios)} keyframes, "
+         f"spread {ratios.min():.3f}–{ratios.max():.3f})")
     return s
 
 
@@ -266,21 +280,32 @@ def apply_scale(output_dir: Path, s: float, dry_run: bool = False) -> None:
         logger.info(f"  scaled {pp} (backup {bak.name})")
 
 
-def run(output_dir: Path, dry_run: bool = False) -> Optional[float]:
+def run(output_dir: Path, dry_run: bool = False, log=None) -> Optional[float]:
+    """Estimate + apply the metric scale. Returns the scale s (float) on success OR when
+    it was ALREADY applied (marker present → output is already metric). Returns None ONLY
+    when the scale could not be estimated (genuine failure) — the caller MUST treat None
+    as fatal (a non-metric reconstruction is useless for BIM comparison)."""
+    _log = log if log is not None else (lambda m: logger.info(m))
     # Idempotency guard: a metric scale is a one-shot global similarity. If a resume
-    # re-enters here after it already ran, scaling again would DOUBLE it (cloud and
-    # poses ×s²). The marker records it was applied → skip.
+    # re-enters here after it already ran, scaling again would DOUBLE it (cloud + poses
+    # ×s²). The marker records it was applied. (Replace clears the marker → re-scales.)
     marker = output_dir / ".metric_scale_applied"
     if marker.exists() and not dry_run:
-        logger.info(f"metric scale already applied ({marker.read_text().strip()}) — skipping")
-        return None
-    s = estimate_scale(output_dir)
+        txt = marker.read_text().strip()
+        try:
+            s_prev = float(txt.split("=")[-1])
+        except Exception:
+            s_prev = float("nan")
+        _log(f"ALREADY METRIC: marker present ({txt}) → output already scaled, not re-scaling "
+             f"(Replace clears the marker to re-scale)")
+        return s_prev          # non-None → caller knows it IS metric (not a failure)
+    s = estimate_scale(output_dir, log=log)
     if s is None:
-        return None
+        return None            # genuine failure → caller makes it FATAL
     apply_scale(output_dir, s, dry_run=dry_run)
     if not dry_run:
         marker.write_text(f"s={s:.6f}\n")
-    logger.info(f"✅ metric scale {'(dry-run) ' if dry_run else ''}s={s:.4f} applied")
+    _log(f"✅ metric scale {'(dry-run) ' if dry_run else ''}s={s:.4f} applied")
     return s
 
 
