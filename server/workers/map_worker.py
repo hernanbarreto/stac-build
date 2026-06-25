@@ -655,6 +655,16 @@ def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
 
     if depth_only:
         pipe.send_log("DA3 depth extraction complete (priors mode) — skipping postprocess")
+        # depth_only: only results_output/ (per-frame depth) is consumed downstream
+        # (scale_align anchor). DA3's vendor streaming still wrote its OWN chunk byproducts
+        # (_tmp_results_*, pcd) ~10x bigger than results_output → free them NOW (before omega)
+        # so they don't sit through the whole run and overflow the disk (~22GB on test1).
+        for _sub in ("_tmp_results_unaligned", "_tmp_results_aligned", "_tmp_results_loop", "pcd"):
+            _d = da3_save_dir / _sub
+            if _d.exists():
+                _mb = sum(f.stat().st_size for f in _d.rglob("*") if f.is_file()) / (1024 * 1024)
+                shutil.rmtree(_d, ignore_errors=True)
+                pipe.send_log(f"[da3 depth_only] freed da3_run/{_sub} ({_mb:.0f} MB) — not used by vggtomega")
         return da3_save_dir
 
     pipe.send_progress(85, "DA3 complete, post-processing...", stage="reconstruction")
