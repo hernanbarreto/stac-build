@@ -141,6 +141,22 @@ frame_selection:
   min_displacement: 3.0
   force_accept_interval: 30            # Force accept every N frames as safety net
 
+  # ── Anchor rescue: fill long REAL-frame gaps left by motion-blur pans ──
+  # The blur filter + DINO select over blur-VALID frames only, and the force-accept
+  # interval counts in that decimated list — so a fast pan that motion-blurs a whole
+  # stretch is invisible to it and leaves a big gap in the REAL video timeline
+  # (e.g. 126 frames ≈ 4s in test7) with no keyframe → low overlap between the
+  # surrounding keyframes → reconstruction backbone can drift / lose tracking.
+  # When a real-frame gap exceeds max_gap_frames, graft the SHARPEST frame in it
+  # (looking at blur-REJECTED frames too) as an anchor — but only if it clears
+  # rescue_min_sharpness_frac of the blur threshold. If nothing clears it (the
+  # whole pan is unusable mush), leave the gap and log it rather than inject a
+  # frame so blurry it would poison matching.
+  max_gap_frames: 45                   # 0 disables. ~1.5s @30fps. Real-frame gap above
+                                       # which we try to rescue an anchor.
+  rescue_min_sharpness_frac: 0.6       # min sharpness of a rescued frame, as a fraction of the
+                                       # blur threshold (worst of laplacian/fft). Below it → leave the gap.
+
 
 # ── Models: Segmentation (SAM 3 / SAM 3.1) ─────────────────────────
 models:

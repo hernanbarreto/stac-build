@@ -194,6 +194,98 @@ def _save_embedding_cache(frames_dir: Path, frame_files: list, model_name: str, 
         print(f"  [embeddings] cache write failed: {e}")
 
 
+def _rescue_sharp_anchors_in_gaps(selected_files: list, frames_dir, config: dict):
+    """Graft the sharpest available frame into long inter-keyframe gaps.
+
+    The DINO/blur selectors run over BLUR-VALID frames only, and the force-accept
+    interval counts in that decimated list — so a fast pan that motion-blurs a whole
+    stretch leaves NO valid frame there, the stretch is invisible to the interval,
+    and two keyframes end up many REAL video-frames apart (e.g. 126 frames ≈ 4s in
+    test7). Across that pan the viewpoint change is large and the overlap low → the
+    reconstruction backbone can drift or lose tracking.
+
+    Fix: walk the keyframes in real video-frame order; whenever a gap exceeds
+    ``max_gap_frames`` we scan EVERY frame in it (including the blur-REJECTED ones,
+    via frame_quality.json) and graft the sharpest one as an anchor — but only if it
+    clears ``rescue_min_sharpness_frac`` of the blur threshold (worst of laplacian /
+    fft). If nothing clears the floor (the whole pan is unusable mush) we LEAVE the
+    gap and report it, rather than inject a frame so blurry it poisons matching.
+
+    Returns (new_selected_files, rescued, unfilled).
+    """
+    fq_path = Path(frames_dir) / "frame_quality.json"
+    max_gap = int(config.get("max_gap_frames", 45) or 0)
+    min_frac = float(config.get("rescue_min_sharpness_frac", 0.6))
+    if max_gap <= 0 or not fq_path.exists():
+        return selected_files, [], []   # disabled, or blur filter off (no quality data)
+
+    try:
+        with open(fq_path) as f:
+            fq = json.load(f)
+    except Exception:
+        return selected_files, [], []
+
+    blur_thr = float(fq.get("threshold") or 0)
+    fft_thr = float(fq.get("threshold_fft") or 0)
+    by_index, file_by_index = {}, {}
+    for fr in fq.get("frames", []):
+        idx = int(fr["index"])
+        by_index[idx] = fr
+        file_by_index[idx] = fr["file"]
+    if not by_index:
+        return selected_files, [], []
+
+    def _stem(name):
+        return int(str(name).rsplit("/", 1)[-1].split(".")[0])
+
+    def _frac(fr):
+        # fraction of the threshold the frame reaches in its WORST metric
+        b = (fr.get("blur_score", 0) / blur_thr) if blur_thr > 0 else 1.0
+        f = (fr.get("fft_score", 0) / fft_thr) if fft_thr > 0 else 1.0
+        return min(b, f)
+
+    try:
+        sel_idx = sorted(_stem(s) for s in selected_files)
+    except Exception:
+        return selected_files, [], []
+    keep = set(sel_idx)
+    rescued, unfilled = [], []
+
+    # Subdivide each over-long gap into the FEWEST equal sub-spans of ≤ max_gap,
+    # then in a local window around each cut take the sharpest frame (incl. blur-
+    # rejected ones). Equal spacing avoids clustering anchors right after a keyframe
+    # (where sharpness is highest but coverage barely improves); the local window
+    # still lets each anchor snap to the least-blurry frame nearby.
+    for a, b in zip(sel_idx, sel_idx[1:]):
+        gap = b - a
+        if gap <= max_gap:
+            continue
+        n_anchors = (gap + max_gap - 1) // max_gap - 1   # ceil(gap/max_gap) − 1
+        if n_anchors <= 0:
+            continue
+        step = gap / (n_anchors + 1)
+        half = max(2, int(step / 2))
+        for k in range(1, n_anchors + 1):
+            target = a + int(round(k * step))
+            lo, hi = max(a + 1, target - half), min(b - 1, target + half)
+            cands = [by_index[j] for j in range(lo, hi + 1)
+                     if j in by_index and j not in keep]
+            best = max(cands, key=_frac) if cands else None
+            if best is not None and _frac(best) >= min_frac:
+                keep.add(int(best["index"]))
+                rescued.append({"file": best["file"], "index": int(best["index"]),
+                                "sharpness_frac": round(_frac(best), 3)})
+            else:
+                unfilled.append({"near_frame": target, "after_frame": a,
+                                 "before_frame": b,
+                                 "best_frac": round(_frac(best), 3) if best else None})
+
+    if not rescued and not unfilled:
+        return selected_files, [], []
+    new_files = [file_by_index[j] for j in sorted(keep) if j in file_by_index]
+    return new_files, rescued, unfilled
+
+
 def dino_select_keyframes(frames_dir: str, config: dict = None,
                           file_list: list = None, segment_id: int = None) -> Dict:
     """
@@ -348,6 +440,22 @@ def dino_select_keyframes(frames_dir: str, config: dict = None,
                 "similarity": round(sim, 4),
             })
 
+    # ── Anchor rescue: fill long REAL-frame gaps left by motion-blur pans ──
+    # (operates on real video-frame indices, so it catches stretches the blur
+    # filter dropped entirely — invisible to force_accept_interval above).
+    selected, rescued_anchors, unfilled_gaps = _rescue_sharp_anchors_in_gaps(
+        selected, frames_dir, config)
+    if rescued_anchors:
+        stats["RESCUED_ANCHOR"] = len(rescued_anchors)
+        print(f"  🔧 Rescued {len(rescued_anchors)} sharp anchor(s) into long gaps "
+              f"(max_gap={int(config.get('max_gap_frames', 45))}f, "
+              f"floor={config.get('rescue_min_sharpness_frac', 0.6)}×thr)")
+    for g in unfilled_gaps:
+        print(f"  ⚠️  Unfilled gap near frame {g['near_frame']} "
+              f"(between keyframes {g['after_frame']}→{g['before_frame']}) — no frame "
+              f"above sharpness floor (best={g['best_frac']}×thr); left as-is "
+              f"(possible tracking drift here)")
+
     elapsed = time.time() - t0
     reduction = 1.0 - len(selected) / len(frame_files) if frame_files else 0
 
@@ -389,6 +497,8 @@ def dino_select_keyframes(frames_dir: str, config: dict = None,
             "max": round(max(similarities), 4) if similarities else 0,
             "mean": round(float(np.mean(similarities)), 4) if similarities else 0,
         },
+        "rescued_anchors": rescued_anchors,
+        "unfilled_gaps": unfilled_gaps,
         "selected_files": selected,
         "processing_time": round(elapsed, 1),
     }
