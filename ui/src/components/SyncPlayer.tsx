@@ -5,9 +5,11 @@ import type { ViewportHandle } from './Viewport'
 
 interface Flythrough {
     n_frames: number
-    frames: number[]
-    poses: number[][]          // per-frame c2w (16 floats, row-major), scaled to cloud frame
+    frames: number[]           // REAL video frame index of each keyframe pose (ascending, non-uniform)
+    poses: number[][]          // per-keyframe c2w (16 floats, row-major), scaled to cloud frame
     intrinsics: number[] | null // [fx, fy, cx, cy] at reconstruction resolution
+    fps: number | null          // source video fps (for time→frame mapping)
+    video_n_frames: number | null // total frames in the source video
     video_url: string
 }
 
@@ -118,8 +120,17 @@ export function SyncPlayer({ sessionId, viewportRef, onClose }: {
         return () => { alive = false; ac.abort(); if (objUrl) URL.revokeObjectURL(objUrl) }
     }, [data])
 
-    // Map normalized time tn∈[0,1] → interpolated camera pose, push it. Updates the
-    // slider imperatively (no setState in the hot path).
+    // Map normalized VIDEO time tn∈[0,1] → interpolated camera pose, push it.
+    //
+    // Poses exist only at KEYFRAMES (d.frames[k] = the real video-frame index of
+    // pose k), spaced non-uniformly. So we can't treat tn as a keyframe index —
+    // that drifts out of sync wherever keyframes are sparse. Instead:
+    //   1. tn → the real frame currently on screen:  targetFrame = tn·(total-1)
+    //   2. find the two keyframes bracketing it:      frames[k] ≤ targetFrame ≤ frames[k+1]
+    //   3. interpolate (lerp + slerp) by the position WITHIN that frame gap.
+    // This keeps the camera glued to whatever frame the video shows, smoothly,
+    // without needing a pose for every frame. Updates the slider imperatively
+    // (no setState in the hot path).
     const applyPose = useCallback((tn: number) => {
         const d = dataRef.current
         if (!d || !d.poses.length) return
@@ -127,16 +138,34 @@ export function SyncPlayer({ sessionId, viewportRef, onClose }: {
         const s = sliderRef.current
         if (s && document.activeElement !== s) s.value = String(tn)
 
-        const n = d.poses.length
-        if (n === 1) { viewportRef.current?.setCameraToPose(d.poses[0]); return }
-        const f = tn * (n - 1)
-        const i0 = Math.min(n - 1, Math.floor(f))
-        const i1 = Math.min(n - 1, i0 + 1)
-        const frac = f - i0
-        if (i0 === i1 || frac < 1e-4) { viewportRef.current?.setCameraToPose(d.poses[i0]); return }
+        const poses = d.poses
+        const frames = d.frames
+        const n = poses.length
+        if (n === 1) { viewportRef.current?.setCameraToPose(poses[0]); return }
 
-        mA.current.fromArray(d.poses[i0]).transpose().decompose(pA.current, qA.current, scratch.current)
-        mB.current.fromArray(d.poses[i1]).transpose().decompose(pB.current, qB.current, scratch.current)
+        // Total frames in the video → maps playback time to a real frame index.
+        // Fall back to (last keyframe + 1) if the backend couldn't read it.
+        const lastFrame = frames[n - 1]
+        const totalFrames = (d.video_n_frames && d.video_n_frames > lastFrame)
+            ? d.video_n_frames : lastFrame + 1
+        const targetFrame = tn * (totalFrames - 1)
+
+        // Before the first / after the last keyframe: clamp to the end pose.
+        if (targetFrame <= frames[0]) { viewportRef.current?.setCameraToPose(poses[0]); return }
+        if (targetFrame >= lastFrame) { viewportRef.current?.setCameraToPose(poses[n - 1]); return }
+
+        // Binary search for k with frames[k] ≤ targetFrame < frames[k+1].
+        let lo = 0, hi = n - 1
+        while (hi - lo > 1) {
+            const mid = (lo + hi) >> 1
+            if (frames[mid] <= targetFrame) lo = mid; else hi = mid
+        }
+        const f0 = frames[lo], f1 = frames[lo + 1]
+        const frac = f1 > f0 ? (targetFrame - f0) / (f1 - f0) : 0
+        if (frac < 1e-4) { viewportRef.current?.setCameraToPose(poses[lo]); return }
+
+        mA.current.fromArray(poses[lo]).transpose().decompose(pA.current, qA.current, scratch.current)
+        mB.current.fromArray(poses[lo + 1]).transpose().decompose(pB.current, qB.current, scratch.current)
         pA.current.lerp(pB.current, frac)
         qA.current.slerp(qB.current, frac)
         outM.current.compose(pA.current, qA.current, ONE.current).transpose().toArray(outArr.current)

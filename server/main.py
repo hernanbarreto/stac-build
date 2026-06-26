@@ -1037,8 +1037,32 @@ async def get_flythrough(session_id: str):
             except Exception:
                 pass
             break
+
+    # Video fps + total frame count — the flythrough has poses only at KEYFRAMES
+    # (frames[]), spaced non-uniformly. The client maps the video's real playback
+    # time → real frame number (via these) → the surrounding keyframes, then
+    # interpolates. Without the total count it can't place a pose at the right
+    # time and the camera drifts out of sync with the footage. Best-effort: cv2
+    # reads container metadata (no decode), so this is cheap.
+    fps, video_n_frames = None, None
+    try:
+        import cv2
+        for ext in (".mp4", ".mov", ".avi", ".mkv", ".m4v"):
+            vp = ctx.source_dir / f"source_video{ext}"
+            if vp.exists():
+                cap = cv2.VideoCapture(str(vp))
+                f = cap.get(cv2.CAP_PROP_FPS)
+                nf = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                cap.release()
+                fps = float(f) if f and f > 0 else None
+                video_n_frames = int(nf) if nf and nf > 0 else None
+                break
+    except Exception:
+        pass
+
     return {"n_frames": len(frames), "frames": frames, "poses": mats,
-            "scale": 1.0, "intrinsics": K,
+            "scale": 1.0, "intrinsics": K, "fps": fps,
+            "video_n_frames": video_n_frames,
             "video_url": f"/api/sessions/{session_id}/video"}
 
 # Mount auth routes

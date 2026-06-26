@@ -1,0 +1,20 @@
+{
+  "name": "stac-glb-compress",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Compress TSDF/recon scene .glb files (meshopt geometry + WebP textures) before they are served to the viewer.",
+  "bin": {
+    "compress-glb": "./compress_glb.mjs"
+  },
+  "scripts": {
+    "compress": "node compress_glb.mjs"
+  },
+  "dependencies": {
+    "@gltf-transform/core": "^4.0.0",
+    "@gltf-transform/extensions": "^4.0.0",
+    "@gltf-transform/functions": "^4.0.0",
+    "meshoptimizer": "^0.22.0",
+    "sharp": "^0.33.0"
+  }
+}

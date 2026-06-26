@@ -144,6 +144,11 @@ vendor/CloudComPy_Conda310_Linux64_*.tgz
 # nvdiffrast clone (compiled CUDA ext)
 vendor/nvdiffrast/
 
+# node deps (any subfolder, e.g. tools/glb)
+node_modules/
+# transient GLB compressor temp output
+*.tmp.glb
+
 # secret: GitHub token — never commit
 server/git.txt
 vendor/vggt-omega/

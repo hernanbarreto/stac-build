@@ -8,8 +8,19 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { PotreeOctreeLoader } from './PotreeLoader'
+
+// Factory for the shared GLTFLoader. The TSDF/recon .glb files are compressed
+// with EXT_meshopt_compression (geometry) + WebP textures (see tools/glb/), so
+// the loader MUST have a Meshopt decoder wired or those meshes silently fail to
+// parse. Uncompressed GLBs ignore the decoder, so this stays backwards-compatible.
+function makeGltfLoader(): GLTFLoader {
+    const l = new GLTFLoader()
+    l.setMeshoptDecoder(MeshoptDecoder)
+    return l
+}
 
 type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align'
 
@@ -1293,7 +1304,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         parentGroup.add(group)
         shapesGroupRef.current = group
 
-        if (!gltfLoaderRef.current) gltfLoaderRef.current = new GLTFLoader()
+        if (!gltfLoaderRef.current) gltfLoaderRef.current = makeGltfLoader()
         const loader = gltfLoaderRef.current
 
         let loaded = 0
@@ -1359,7 +1370,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         parentGroup.add(group)
         tsdfGroupRef.current = group
 
-        if (!gltfLoaderRef.current) gltfLoaderRef.current = new GLTFLoader()
+        if (!gltfLoaderRef.current) gltfLoaderRef.current = makeGltfLoader()
         const loader = gltfLoaderRef.current
 
         let loaded = 0
@@ -1446,7 +1457,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         parentGroup.add(group)
         reconSceneGroupRef.current = group
 
-        if (!gltfLoaderRef.current) gltfLoaderRef.current = new GLTFLoader()
+        if (!gltfLoaderRef.current) gltfLoaderRef.current = makeGltfLoader()
         const loader = gltfLoaderRef.current
 
         // confidence colours (mesh elements carry a per-vertex `observed` attribute)
@@ -2294,9 +2305,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
     // Track activeSession in a ref for the WS onopen handler
     const activeSessionRef = useRef(activeSession)
+    // Guards the two AUTOMATIC load_session triggers (WS onopen + the
+    // activeSession effect) against firing twice for the same session on one
+    // connection — that double-fire made the backend reload the cloud AND
+    // re-download the (large) TSDF .glb twice. Holds the session we've already
+    // auto-loaded on the current socket; reset to null on disconnect (so a
+    // reconnect re-requests) and whenever the active session changes. Explicit
+    // reloads (sábana toggle, pipeline-done) bypass this via sendCommand*.
+    const sentLoadForSessionRef = useRef<string | null>(null)
     useEffect(() => {
         activeSessionRef.current = activeSession
         sessionFramedRef.current = null  // reset so new session gets framed
+        sentLoadForSessionRef.current = null  // new session → allow one auto-load
     }, [activeSession])
 
     // Connect WebSocket with auto-reconnect
@@ -2318,7 +2338,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 // console.log('[Viewport] WebSocket connected')
                 // If session was selected before WS was ready, load it now
                 // BUT: skip reload if pipeline is running (no PLY data yet, causes grid flicker)
-                if (activeSessionRef.current && !pipelineRunningRef.current) {
+                if (activeSessionRef.current && !pipelineRunningRef.current
+                    && sentLoadForSessionRef.current !== activeSessionRef.current) {
+                    sentLoadForSessionRef.current = activeSessionRef.current
                     clearScene()
                     ws.send(JSON.stringify({
                         type: 'load_session',
@@ -2358,6 +2380,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 if (wsRef.current === ws) {
                     wsRef.current = null
                 }
+                // Socket is gone — let onopen re-request the active session after
+                // reconnect (the backend lost our load on the dead socket).
+                sentLoadForSessionRef.current = null
                 // Auto-reconnect after 3 seconds
                 if (!unmounted) {
                     reconnectTimer = setTimeout(connect, 3000)
@@ -2539,6 +2564,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         if (pipelineRunningRef.current) return  // Pipeline in progress, cloud doesn't exist yet
         const ws = wsRef.current
         if (!ws || ws.readyState !== WebSocket.OPEN) return
+        // Already auto-loaded this session on this socket (e.g. onopen got there
+        // first) → don't fire a second load that reloads the cloud + re-fetches
+        // the TSDF .glb.
+        if (sentLoadForSessionRef.current === activeSession) return
+        sentLoadForSessionRef.current = activeSession
 
         // Clear existing scene before loading
         clearScene()

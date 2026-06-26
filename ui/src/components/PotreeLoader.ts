@@ -90,6 +90,16 @@ export class PotreeOctreeLoader {
     // session pile up in the browser's connection pool (cap ~6/host) and starve
     // the next load → progressively slower, then nothing (only F5 cleared it).
     private _abort = new AbortController()
+    // Cap on simultaneous octree.bin Range fetches. A large cloud (e.g. 64M pts)
+    // queues hundreds of in-budget nodes in a SINGLE updateVisibility() pass; firing
+    // a fetch() for each at once floods the browser → net::ERR_INSUFFICIENT_RESOURCES,
+    // and the storm starves OTHER downloads (the 284 MB TSDF .glb, frame images) of
+    // connection slots so they appear to "never render". We cap in-flight fetches
+    // low enough to leave headroom for those other requests; nodes that don't get a
+    // slot stay un-`loading` and are retried on the next updateVisibility() tick
+    // (~10 Hz), so the backlog drains naturally without losing any node.
+    private readonly _maxConcurrentFetches = 6
+    private _inFlightFetches = 0
     // In-memory node cache: nodes leaving the frustum keep their parsed geometry
     // (just removed from the scene) so re-entering is instant — no HTTP re-fetch.
     // Bounded by an LRU cap to keep client RAM in check.
@@ -539,17 +549,23 @@ export class PotreeOctreeLoader {
             return
         }
 
-        node.loading = true
-
         const meta = this.metadata
         const byteOffset = Number(node.byteOffset)
         const byteSize = Number(node.byteSize)
 
         if (byteSize <= 0) { node.loading = false; return }
 
+        // Concurrency gate: if we're already at the in-flight cap, leave this node
+        // un-`loading` so the next updateVisibility() tick retries it once a slot
+        // frees up. This is what prevents the fetch storm / ERR_INSUFFICIENT_RESOURCES.
+        if (this._inFlightFetches >= this._maxConcurrentFetches) return
+
+        node.loading = true
+
         // ── Fetch ONLY this node's byte range from octree.bin ──
         // Starlette's FileResponse honours Range → returns 206 with just the
         // slice. We never hold the whole multi-GB file in memory.
+        this._inFlightFetches++
         let buffer: ArrayBuffer
         try {
             const resp = await fetch(this.baseUrl + 'octree.bin', {
@@ -564,7 +580,11 @@ export class PotreeOctreeLoader {
             })
             if (resp.status !== 206 && resp.status !== 200) throw new Error(`HTTP ${resp.status}`)
             buffer = await resp.arrayBuffer()
+            // Release the connection slot as soon as the bytes are in — the parsing
+            // below is CPU-only and shouldn't hold a slot other nodes could use.
+            this._inFlightFetches--
         } catch (e) {
+            this._inFlightFetches--
             // Aborted on dispose (session unload) — not an error, just stop.
             if ((e as Error)?.name === 'AbortError') { node.loading = false; return }
             console.error(`[PotreeLoader] Node ${node.name}: range fetch failed`, e)

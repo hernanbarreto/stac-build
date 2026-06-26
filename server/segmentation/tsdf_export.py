@@ -1336,6 +1336,50 @@ def _icp_mesh_to_cloud(mesh, output_dir: Path):
         return None, metrics
 
 
+def _compress_scene_glb(glb_path: Path) -> None:
+    """Best-effort shrink of a textured scene .glb in place (meshopt + WebP).
+
+    A textured TSDF scene is ~270 MB (243 PNG atlases + ~4 M tris); served raw it
+    floods the browser connection pool and renders only after a long stall. This
+    runs tools/glb/compress_glb.mjs (≈6× smaller) — the viewer's GLTFLoader is
+    wired with a Meshopt decoder, so the compressed output loads transparently.
+
+    Never fatal: if node / the script / its node_modules are missing, or it errors,
+    we log and keep the original uncompressed .glb (the script writes atomically,
+    so a failure leaves the original intact).
+    """
+    import shutil
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    script = repo_root / "tools" / "glb" / "compress_glb.mjs"
+    node = shutil.which("node") or "/workspace/miniforge3/envs/nodejs/bin/node"
+    if not script.exists():
+        logger.warning(f"[TSDF-scene] GLB compressor not found at {script} — serving raw .glb")
+        return
+    if not (script.parent / "node_modules").exists():
+        logger.warning("[TSDF-scene] tools/glb/node_modules missing (run `npm install` there) — serving raw .glb")
+        return
+    if not Path(node).exists():
+        logger.warning("[TSDF-scene] node not found — serving raw .glb")
+        return
+    try:
+        before = glb_path.stat().st_size / (1024 * 1024)
+        r = subprocess.run(
+            [node, str(script), str(glb_path), str(glb_path), "2048", "85"],
+            capture_output=True, text=True, timeout=600,
+        )
+        if r.returncode != 0:
+            logger.warning(f"[TSDF-scene] GLB compression failed (rc={r.returncode}): "
+                           f"{(r.stderr or r.stdout)[-500:]} — serving raw .glb")
+            return
+        after = glb_path.stat().st_size / (1024 * 1024)
+        logger.info(f"[TSDF-scene] 🗜️  GLB compressed {before:.1f} MB → {after:.1f} MB "
+                    f"(meshopt + WebP)")
+    except Exception as e:
+        logger.warning(f"[TSDF-scene] GLB compression error ({e}) — serving raw .glb")
+
+
 def export_tsdf_scene(
     output_dir: Path,
     frames_dir: Path,
@@ -2703,6 +2747,11 @@ def export_tsdf_scene(
                            "keeping the vertex-colour preview")
         finally:
             tex_in.unlink(missing_ok=True)
+
+    # Shrink the final .glb (meshopt geometry + WebP textures) so the viewer can
+    # stream it without saturating the browser. Done after texturing so the meta
+    # below records the compressed on-disk size.
+    _compress_scene_glb(glb_path)
 
     elapsed = time.time() - t0
     meta = {
