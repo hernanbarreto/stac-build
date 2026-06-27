@@ -2561,7 +2561,7 @@ async def get_segmentation_instances(session_id: str):
                 with open(result_path) as f:
                     result_data = json.load(f)
                 for inst in result_data.get("instances", []):
-                    iid = inst.get("id", inst.get("instance_id"))
+                    iid = inst.get("instance_id", inst.get("id"))
                     if iid is not None:
                         enriched_by_id[int(iid)] = inst
             except Exception:
@@ -2569,7 +2569,12 @@ async def get_segmentation_instances(session_id: str):
 
         merged: List[Dict[str, Any]] = []
         for inst in raw_instances:
-            iid = inst.get("id", inst.get("instance_id"))
+            # Cross-reference by instance_id, NOT id: segmentation.json uses
+            # 0-based ``id`` while segmentation_result.json uses 1-based ``id``;
+            # only ``instance_id`` is consistent across both. Matching on ``id``
+            # mis-aligns the enrichment by one (door inherits the ladder's label
+            # + points, ladder shows 0). See enriched_by_id above (also by iid).
+            iid = inst.get("instance_id", inst.get("id"))
             if iid is not None and int(iid) in enriched_by_id:
                 # Enriched fields (OBB, globalIndices, total_points) override
                 # bare fields from segmentation.json; raw entries that don't
