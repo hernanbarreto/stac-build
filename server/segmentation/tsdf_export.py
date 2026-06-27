@@ -3059,3 +3059,188 @@ def build_poisson_scene_kwargs(config: dict, overrides: Optional[dict] = None) -
     if overrides:
         kw.update({k: overrides[k] for k in keys if k in overrides})
     return kw
+
+
+# ── Per-instance crop of the scene TSDF mesh ────────────────────────────────
+#
+# The per-instance TSDF re-integration (``export_tsdf``) needs a recognised
+# per-frame depth source. When the reconstruction backend stored its depth under
+# a non-standard run dir (e.g. VGGTOMEGA → ``omega_run/`` / ``da3_run_probe/``),
+# that resolver returns nothing and the per-object TSDF writes zero meshes.
+#
+# But the SCENE TSDF already ran successfully and produced a fully reconstructed,
+# cloud-consistent mesh (``tsdf/scene/scene.glb``). For architectural geometry —
+# arches, doorways, stairs — that scene mesh holds the REAL surface (concave,
+# with true depth), which both ShapeR (a closed-object generative prior) and a
+# from-scratch per-object TSDF struggle to reproduce.
+#
+# This function carves each instance straight out of that scene mesh: keep the
+# scene vertices within ``proximity_m`` of the instance's segment sub-cloud
+# (``globalIndices`` into ``cleaned_cloud.ply``), keep the faces whose three
+# vertices all survive, drop tiny noise islands. No depth re-integration, no ICP,
+# no generative prior — the output is a faithful slice of the scene surface.
+
+def crop_scene_mesh_to_instances(
+    output_dir: Path,
+    segments_result: dict,
+    obj_ids: Optional[List[int]] = None,
+    proximity_m: float = 0.05,
+    min_island_faces: int = 30,
+    progress_cb: Optional[Callable[[int, str, Optional[float], Optional[str]], None]] = None,
+) -> List[Path]:
+    """Carve one mesh per segmented instance out of the scene TSDF mesh.
+
+    Args:
+        output_dir: session output dir (contains ``tsdf/scene/scene.glb`` and
+            ``cleaned_cloud.ply``).
+        segments_result: parsed ``segmentation_result.json``.
+        obj_ids: optional filter — only crop these instance IDs.
+        proximity_m: a scene vertex is kept if within this distance of the
+            instance sub-cloud (5 cm matches the cloud↔mesh median of ~1 cm with
+            margin; raise it to bridge sparse traceability, lower it to tighten).
+        min_island_faces: connected components smaller than this (in faces) are
+            dropped as noise. Components are otherwise ALL kept — never collapse
+            to the single largest one, or open/stepped objects (stairs, frames)
+            lose most of their geometry.
+        progress_cb: ``(instance_id, phase, elapsed, mesh_path)`` callback.
+
+    Returns:
+        List of ``.glb`` paths written, under ``tsdf/<safe_label>_<id>/``.
+    """
+    import trimesh
+    from scipy.spatial import cKDTree
+    from segmentation.pipeline import _load_ply_origins
+
+    output_dir = Path(output_dir)
+    t0 = time.time()
+
+    # ── Locate the scene mesh. Prefer the un-simplified textured ``.orig`` (the
+    # web ``scene.glb`` is meshopt/draco-packed and trips trimesh's GLB reader).
+    scene_dir = output_dir / "tsdf" / "scene"
+    scene_path: Optional[Path] = None
+    for cand in ("scene.glb.orig", "scene.glb"):
+        if (scene_dir / cand).exists():
+            scene_path = scene_dir / cand
+            break
+    if scene_path is None:
+        logger.error("[TSDF-crop] no scene mesh found (tsdf/scene/scene.glb[.orig]) "
+                     "— run the scene TSDF first")
+        return []
+    try:
+        with open(scene_path, "rb") as f:
+            scene = trimesh.load(f, file_type="glb", force="mesh")
+        V = np.asarray(scene.vertices, dtype=np.float64)
+        F = np.asarray(scene.faces, dtype=np.int64)
+    except Exception as e:
+        logger.error(f"[TSDF-crop] failed to load scene mesh {scene_path.name}: {e}")
+        return []
+    if len(V) == 0 or len(F) == 0:
+        logger.error(f"[TSDF-crop] scene mesh {scene_path.name} is empty/unreadable")
+        return []
+    logger.info(f"[TSDF-crop] scene mesh {scene_path.name}: "
+                f"{len(V):,} verts / {len(F):,} faces")
+
+    # ── Cloud xyz — same indexing space as ``globalIndices``. Use the shared
+    # PLY origin loader so this matches export_tsdf / shaper_export exactly.
+    ply_path = output_dir / "cleaned_cloud.ply"
+    if not ply_path.exists():
+        for alt in ("cleaned_cloud_symlink.ply", "merged.ply"):
+            if (output_dir / alt).exists():
+                ply_path = output_dir / alt
+                break
+    origins = _load_ply_origins(ply_path)
+    if origins is None:
+        logger.error(f"[TSDF-crop] cannot load PLY origins from {ply_path}")
+        return []
+    xyz = origins[0]
+    logger.info(f"[TSDF-crop] cloud: {len(xyz):,} points  (proximity={proximity_m*100:.0f}cm)")
+
+    instances = segments_result.get("instances", [])
+    if not instances:
+        logger.warning("[TSDF-crop] no instances in segmentation_result.json")
+        return []
+
+    tsdf_root = output_dir / "tsdf"
+    tsdf_root.mkdir(exist_ok=True)
+    exported: List[Path] = []
+
+    for inst in instances:
+        inst_id = inst.get("id", inst.get("instance_id", inst.get("globalId")))
+        label = inst.get("label", f"object_{inst_id}")
+        if obj_ids and inst_id not in obj_ids:
+            continue
+
+        gi = np.asarray(inst.get("globalIndices", []), dtype=np.int64)
+        gi = gi[(gi >= 0) & (gi < len(xyz))]
+        if len(gi) < 10:
+            logger.warning(f"[TSDF-crop] {label}_{inst_id}: too few points ({len(gi)}) — skipping")
+            continue
+        sub = xyz[gi].astype(np.float64)
+
+        if progress_cb:
+            progress_cb(int(inst_id), "starting", None, None)
+
+        t_inst = time.time()
+        # Build a tree over the (smaller, per-instance) sub-cloud and ask each
+        # scene vertex for its nearest object point.
+        subtree = cKDTree(sub)
+        dist, _ = subtree.query(V, k=1, workers=-1)
+        keep_v = dist < proximity_m
+        keep_f = keep_v[F].all(axis=1)
+        fsel = F[keep_f]
+        if len(fsel) == 0:
+            logger.warning(f"[TSDF-crop] {label}_{inst_id}: 0 faces within "
+                           f"{proximity_m*100:.0f}cm — skipping")
+            if progress_cb:
+                progress_cb(int(inst_id), "error", None, None)
+            continue
+
+        used = np.unique(fsel)
+        remap = -np.ones(len(V), dtype=np.int64)
+        remap[used] = np.arange(len(used))
+        mesh = trimesh.Trimesh(vertices=V[used], faces=remap[fsel], process=False)
+
+        # Drop tiny noise islands; keep every component >= min_island_faces.
+        try:
+            comps = mesh.split(only_watertight=False)
+            if len(comps) > 1:
+                big = [c for c in comps if len(c.faces) >= min_island_faces]
+                if big:
+                    mesh = trimesh.util.concatenate(big)
+        except Exception as e:
+            logger.warning(f"[TSDF-crop] {label}_{inst_id}: island split failed ({e}) — keeping all")
+
+        safe = _safe_label(label, inst_id)   # already "<label>_<id>"
+        obj_dir = tsdf_root / safe
+        obj_dir.mkdir(parents=True, exist_ok=True)
+        out_path = obj_dir / f"{safe}.glb"
+        mesh.export(str(out_path), include_normals=True)
+
+        ext = (mesh.bounds[1] - mesh.bounds[0]).tolist()
+        elapsed = time.time() - t_inst
+        meta = {
+            "method": "tsdf_scene_crop",
+            "source_mesh": scene_path.name,
+            "instance_id": int(inst_id),
+            "label": label,
+            "glb_file": out_path.name,
+            "proximity_m": float(proximity_m),
+            "min_island_faces": int(min_island_faces),
+            "n_sub_points": int(len(gi)),
+            "n_vertices": int(len(mesh.vertices)),
+            "n_faces": int(len(mesh.faces)),
+            "bbox_extent": [round(float(v), 4) for v in ext],
+            "elapsed_s": round(float(elapsed), 2),
+        }
+        with open(obj_dir / f"{safe}.meta.json", "w") as f:
+            json.dump(meta, f, indent=2)
+
+        logger.info(f"[TSDF-crop] {label}_{inst_id}: sub={len(gi):,}pts → "
+                    f"{len(mesh.vertices):,} verts / {len(mesh.faces):,} faces "
+                    f"ext={[round(v,2) for v in ext]} → {out_path.name}")
+        if progress_cb:
+            progress_cb(int(inst_id), "done", elapsed, str(out_path))
+        exported.append(out_path)
+
+    logger.info(f"[TSDF-crop] wrote {len(exported)} mesh(es) in {time.time()-t0:.1f}s")
+    return exported

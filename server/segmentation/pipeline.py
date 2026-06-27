@@ -1698,7 +1698,43 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         orig_h = float(pixel_row.max() + 1)
         orig_w = float(pixel_col.max() + 1)
         print(f"[SegPipeline]   ⚠️ Original resolution estimated from pixel coords (fallback)")
-    
+
+    # ── Consistency guard ────────────────────────────────────────────────
+    # pixel_row/pixel_col are the GROUND TRUTH of the projection space: the cloud
+    # is projected at the reconstruction backend's resolution (e.g. DA3 ~688x384,
+    # multiples of 16), but the RGB frames / SAM3 masks may have been saved at a
+    # DIFFERENT resolution (e.g. 360x640). If we scale mask lookups using the
+    # on-disk frame resolution while the points live in the projection resolution,
+    # the per-axis factor is wrong and points map off-target — worse the farther
+    # from the image center (objects near the border drift). If the detected orig
+    # is smaller than the actual pixel-coord extent, it cannot be the projection
+    # resolution, so anchor to the pixel coords instead.
+    px_h = float(pixel_row.max() + 1)
+    px_w = float(pixel_col.max() + 1)
+    # The frame/metadata resolution can disagree with the projection in EITHER
+    # direction: frames saved SMALLER than the projection (px > orig) OR LARGER
+    # (px < orig, e.g. 1920x1080 originals while VGGT/DA3 ran at 688x384). In the
+    # second case the old "px > orig" check never fired, so the mask scale stayed
+    # ~1.0 (should be ~2.8) and every point mapped into a corner → 0% coverage.
+    # For a full-scene cloud the projected points span the whole image, so
+    # (px_h, px_w) IS the projection resolution. Anchor to it whenever it
+    # disagrees with orig but shares the mask's aspect ratio (the aspect check
+    # rules out transposed / partial-frame false positives).
+    proj_ar = px_w / max(px_h, 1.0)
+    mask_ar = float(scaled_res[1]) / max(float(scaled_res[0]), 1.0)
+    disagrees = (abs(px_h - orig_h) > 2.0) or (abs(px_w - orig_w) > 2.0)
+    if disagrees and abs(proj_ar - mask_ar) < 0.10:
+        print(f"[SegPipeline]   ⚠️ Detected orig {orig_w:.0f}x{orig_h:.0f} ≠ projection "
+              f"{px_w:.0f}x{px_h:.0f} (cloud traced at the backend resolution; frames/masks "
+              f"saved at another) — using projection resolution for mask scaling")
+        orig_h, orig_w = px_h, px_w
+    elif px_h > orig_h or px_w > orig_w:
+        print(f"[SegPipeline]   ⚠️ Detected orig {orig_w:.0f}x{orig_h:.0f} is smaller than the "
+              f"pixel-coord extent {px_w:.0f}x{px_h:.0f} (frames saved at a different resolution "
+              f"than the projection); using projection resolution from pixel coords")
+        orig_h = max(orig_h, px_h)
+        orig_w = max(orig_w, px_w)
+
     mask_h_ref, mask_w_ref = scaled_res[0], scaled_res[1]
     print(f"[SegPipeline]   Original resolution: {orig_w:.0f}x{orig_h:.0f}, mask: {mask_h_ref}x{mask_w_ref}")
     print(f"[SegPipeline]   Scale factors: row={mask_h_ref/orig_h:.4f}, col={mask_w_ref/orig_w:.4f}")

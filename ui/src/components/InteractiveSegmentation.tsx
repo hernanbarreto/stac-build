@@ -44,6 +44,16 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const maskCacheRef = useRef<Map<number, string>>(new Map())
     const [selectedFrames, setSelectedFrames] = useState<Set<number>>(new Set())
 
+    // ── Multi-object queue ───────────────────────────────────────
+    // Objects already "added" this batch (prompts live in the SAM3 session under
+    // their obj_id). The object currently being clicked uses currentObjIdRef. On
+    // "Propagate all" every queued obj_id + the in-edit one is tracked at once and
+    // saved with its own label. obj_ids start ABOVE the max existing instance id so
+    // _save_masks' upsert never overwrites a previously-saved object.
+    const [pendingObjects, setPendingObjects] = useState<{ objId: number, name: string, color: string }[]>([])
+    const currentObjIdRef = useRef(1)
+    const instancesRef = useRef<InstanceInfo[]>([])
+
     // Zoom/Pan state
     const [zoom, setZoom] = useState(1)
     const [pan, setPan] = useState({ x: 0, y: 0 })
@@ -64,6 +74,16 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
 
     // Keep ref in sync with state for cleanup
     useEffect(() => { stateIdRef.current = stateId }, [stateId])
+
+    // Keep instancesRef current and, while no object is mid-edit/queued, park the
+    // next obj_id above the highest saved id so a new batch never collides with
+    // (and overwrites) an existing instance.
+    useEffect(() => {
+        instancesRef.current = instances
+        if (pendingObjects.length === 0 && promptPoints.length === 0) {
+            currentObjIdRef.current = instances.reduce((m, i) => Math.max(m, i.id), 0) + 1
+        }
+    }, [instances, pendingObjects.length, promptPoints.length])
 
     // Cleanup SAM3 session on unmount (free VRAM)
     useEffect(() => {
@@ -368,7 +388,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         state_id: stateId, session_id: sessionId,
-                        frame_idx: currentFrameIdx, obj_id: 1,
+                        frame_idx: currentFrameIdx, obj_id: currentObjIdRef.current,
                         // SAM3 expects relative coords (0-1), normalize by natural image size
                         points: updated.map(p => [p.x / natW, p.y / natH]),
                         labels: updated.map(p => p.label)
@@ -407,7 +427,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     state_id: stateId, session_id: sessionId,
-                    frame_idx: currentFrameIdx, obj_id: 1,
+                    frame_idx: currentFrameIdx, obj_id: currentObjIdRef.current,
                     points: newPoints.map(p => [p.x / natW, p.y / natH]),
                     labels: newPoints.map(p => p.label)
                 }),
@@ -459,7 +479,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     state_id: stateId, frame_idx: currentFrameIdx,
-                    text: textPrompt.trim(), obj_id: 1
+                    text: textPrompt.trim(), obj_id: currentObjIdRef.current
                 })
             })
             if (!res.ok) throw new Error('Text prompt failed')
@@ -490,7 +510,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                     state_id: stateId,
                     session_id: sessionId,
                     frame_idx: currentFrameIdx,
-                    obj_id: 1
+                    obj_id: currentObjIdRef.current
                 })
             })
             if (!res.ok) throw new Error('Evaluation failed')
@@ -507,10 +527,40 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         }
     }, [stateId, sessionId, currentFrameIdx, hasPrompts, loading])
 
+    // Queue the object currently being clicked and start a fresh one. Its prompts
+    // stay in the SAM3 session under its obj_id; the canvas clears for the next
+    // object. All queued objects propagate together on "Propagate all".
+    const handleAddObject = useCallback(() => {
+        if (!hasPrompts) return
+        const objId = currentObjIdRef.current
+        const name = labelName.trim() || `object_${objId}`
+        const color = INSTANCE_COLORS[(instancesRef.current.length + pendingObjects.length) % INSTANCE_COLORS.length]
+        setPendingObjects(prev => [...prev, { objId, name, color }])
+        currentObjIdRef.current = objId + 1
+        // Clear the canvas for the next object (SAM3 keeps this object's prompts).
+        setPromptPoints([])
+        setMaskOverlay(null)
+        setHasPrompts(false)
+        setLabelName('')
+        promptPointsMapRef.current.clear()
+        maskCacheRef.current.clear()
+        setStatus(`Queued "${name}". Click the next object, or Propagate all.`)
+    }, [hasPrompts, labelName, pendingObjects.length])
+
     const handlePropagate = useCallback(async () => {
         if (!stateId || propagatingRef.current) return
+        // Gather every object to track at once: the queued ones + the in-edit one
+        // (if it has prompts). Each keeps its own obj_id → its own saved label.
+        const objs = [...pendingObjects]
+        if (hasPrompts) {
+            const editId = currentObjIdRef.current
+            objs.push({ objId: editId, name: labelName.trim() || `object_${editId}`, color: '' })
+        }
+        if (objs.length === 0) return
         propagatingRef.current = true
-        const name = labelName.trim() || 'manual_object'
+        const objLabels: Record<number, string> = {}
+        objs.forEach(o => { objLabels[o.objId] = o.name })
+        const name = objs.length === 1 ? objs[0].name : `${objs.length} objects`
         let receivedDone = false
         try {
             setLoading(true)
@@ -523,7 +573,8 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 body: JSON.stringify({
                     state_id: stateId,
                     session_id: sessionId,
-                    label_name: name,
+                    label_name: objs[0].name,   // fallback for any untracked obj_id
+                    obj_labels: objLabels,       // {obj_id: name} — per-object labels
                     selected_frames: Array.from(selectedFrames).sort((a, b) => a - b)
                 })
             })
@@ -573,6 +624,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                 setMaskOverlay(null)
                                 setLabelName('')
                                 setPromptPoints([])
+                                setPendingObjects([])
                                 promptPointsMapRef.current.clear()
                                 maskCacheRef.current.clear()
                                 setSelectedFrames(new Set(keyframes.map((_, i) => i)))
@@ -636,6 +688,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 setMaskOverlay(null)
                 setLabelName('')
                 setPromptPoints([])
+                setPendingObjects([])
                 promptPointsMapRef.current.clear()
                 maskCacheRef.current.clear()
                 setSelectedFrames(new Set(keyframes.map((_, i) => i)))
@@ -1000,6 +1053,20 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                             )}
                         </div>
 
+                        {/* Multi-object queue: objects added but not yet propagated */}
+                        {mode === 'manual' && pendingObjects.length > 0 && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '6px 10px', background: '#1d1d1d', borderTop: '1px solid #333' }}>
+                                <span style={{ fontSize: 11, color: '#888' }}>Queued ({pendingObjects.length}):</span>
+                                {pendingObjects.map(o => (
+                                    <span key={o.objId} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: '#2a2a2a', border: `1px solid ${o.color}`, borderRadius: 12, padding: '2px 9px', fontSize: 12, color: '#eee' }}>
+                                        <span style={{ width: 9, height: 9, borderRadius: '50%', background: o.color }} />
+                                        {o.name}
+                                    </span>
+                                ))}
+                                <span style={{ fontSize: 11, color: '#666' }}>· keep clicking the next object, then “Propagate”. “Clear” discards the queue.</span>
+                            </div>
+                        )}
+
                         {/* Footer */}
                         <div className="seg-footer">
                             <span className="seg-hint">
@@ -1019,8 +1086,9 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                 <button
                                     style={{ background: '#555', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13 }}
                                     onClick={async () => {
-                                        // Clear UI state
+                                        // Clear UI state + the whole multi-object queue
                                         setPromptPoints([])
+                                        setPendingObjects([])
                                         setMaskOverlay(null)
                                         setHasPrompts(false)
                                         setLabelName('')
@@ -1048,12 +1116,16 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                             setStatus('Prompts cleared.')
                                         }
                                     }}
-                                    disabled={loading || (promptPoints.length === 0 && promptPointsMapRef.current.size === 0)}
+                                    disabled={loading || (promptPoints.length === 0 && promptPointsMapRef.current.size === 0 && pendingObjects.length === 0)}
                                 >✕ Clear</button>
                                 <button className="admin-save-btn" style={{ background: '#9b59b6', color: '#fff' }} onClick={handleEvaluate}
                                     disabled={loading || !stateId || !hasPrompts || propagatingRef.current}>🧠 Evaluate</button>
+                                <button className="admin-save-btn" style={{ background: '#2980b9', color: '#fff' }} onClick={handleAddObject}
+                                    disabled={loading || !stateId || !hasPrompts} title="Queue this object and start the next one">➕ Add object</button>
                                 <button className="admin-save-btn" onClick={handlePropagate}
-                                    disabled={loading || !stateId || !hasPrompts}>▶ Propagate ({selectedFrames.size})</button>
+                                    disabled={loading || !stateId || (!hasPrompts && pendingObjects.length === 0)}>
+                                    ▶ Propagate {pendingObjects.length > 0 ? `${pendingObjects.length + (hasPrompts ? 1 : 0)} objs` : ''} ({selectedFrames.size})
+                                </button>
                             </div>
                         </div>
 

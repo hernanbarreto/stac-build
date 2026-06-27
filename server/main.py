@@ -2310,6 +2310,10 @@ async def propagate_interactive_segmentation(request: Request):
     state_id = body.get("state_id")
     session_id = body.get("session_id")
     label_name = body.get("label_name", "manual_object")
+    # Multi-object: {obj_id: name} so each tracked object keeps its own label.
+    # Falls back to label_name for any obj_id not listed (and for the legacy
+    # single-object UI that sends only label_name).
+    obj_labels_req = body.get("obj_labels", None)
     selected_frames = body.get("selected_frames", None)
     
     if not state_id or not session_id:
@@ -2374,15 +2378,24 @@ async def propagate_interactive_segmentation(request: Request):
                 sample_out = list(translated_masks.keys())[:3]
                 print(f"[SegPipeline] Frame translation: SAM3 {sample_in} → real {sample_out}")
             
-            from time import time as _time
-            temp_global_id = int(_time() % 10000)
-            remapped_masks = {}
-            for f_idx, frame_masks in translated_masks.items():
-                remapped_masks[f_idx] = {}
-                for l_id, mask in frame_masks.items():
-                    remapped_masks[f_idx][temp_global_id] = mask
-            obj_labels = {temp_global_id: label_name}
-            saved_seg = _save_masks(output_dir, remapped_masks, [label_name], obj_labels, cfg)
+            # Preserve SAM3's per-object ids (out_obj_ids) so each tracked object
+            # keeps its OWN label, instead of collapsing them all into one. The UI
+            # sends obj_labels={obj_id: name}; any id without an explicit name falls
+            # back to label_name (covers the legacy single-object flow).
+            obj_label_map = {}
+            for k, v in (obj_labels_req or {}).items():
+                try:
+                    obj_label_map[int(k)] = str(v)
+                except (TypeError, ValueError):
+                    pass
+            all_obj_ids = set()
+            for frame_masks in translated_masks.values():
+                all_obj_ids.update(frame_masks.keys())
+            obj_labels = {oid: obj_label_map.get(oid, label_name) for oid in all_obj_ids}
+            categories = sorted(set(obj_labels.values())) or [label_name]
+            saved_seg = _save_masks(output_dir, translated_masks, categories, obj_labels, cfg)
+            print(f"[Segmentation] Saved {len(all_obj_ids)} object(s): "
+                  f"{', '.join(f'{oid}={obj_labels[oid]}' for oid in sorted(all_obj_ids))}")
             
             # NOTE: We intentionally do NOT run _match_and_save_result here.
             # Cloud matching + Potree rebuild is expensive (~minutes) and should
@@ -2828,8 +2841,15 @@ async def delete_segmentation_instance(request: Request):
             for inst in seg_data.get("instances", []):
                 iid = inst.get("instance_id")
                 oid = inst.get("id")
-                if iid == instance_id or oid == instance_id:
-                    obj_ids_to_remove.add(oid)
+                # The UI lists and sends each entry's "id" (obj_id, with instance_id
+                # as fallback — see GET /segmentation). Match ONLY that identifier.
+                # Matching the OTHER field too cross-deletes once the obj_id and
+                # instance_id spaces overlap (e.g. door obj0/inst1 + ladder obj1/inst2:
+                # deleting "1" hit ladder's obj_id AND door's instance_id → both gone).
+                list_id = oid if oid is not None else iid
+                if list_id == instance_id:
+                    if oid is not None:
+                        obj_ids_to_remove.add(oid)
                     if iid is not None:
                         instance_ids_to_remove.add(iid)
                 else:
@@ -2948,6 +2968,10 @@ _shape_in_flight: Dict[str, Any] = {
 # two of these in parallel.
 _shaper_subprocess: Optional["asyncio.subprocess.Process"] = None
 _shaper_subprocess_lock = asyncio.Lock()
+# Strong references to fire-and-forget background tasks. The event loop only keeps
+# weak refs, so a bare asyncio.create_task() can be garbage-collected before it
+# runs. Keep them alive here until they finish.
+_bg_tasks: set = set()
 
 
 def _shape_set(session_id: str, inst_id: int, **kw):
@@ -3019,7 +3043,7 @@ async def _run_shaper_subprocess(session_id: str, output_dir: Path,
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},  # force CPU per user request
+            env={**os.environ},  # inherit GPU visibility (A100 80GB); run_shaper_batch.py auto-detects CUDA
             preexec_fn=_die_with_parent_sigkill,
         ))
         print(f"[Shape]   subprocess pid={proc.pid}")
@@ -3291,8 +3315,9 @@ async def export_shape_pkls(request: Request):
         print(f"[Shape] PKL stage complete: {len(renamed_pkl_paths)} file(s)")
 
         if auto_reconstruct and renamed_pkl_paths:
-            print(f"[Shape] auto_reconstruct=True — scheduling background ShapeR task")
+            print(f"[Shape] auto_reconstruct=True — scheduling background ShapeR task", flush=True)
             async def _bg():
+                print(f"[Shape] _bg ENTER — about to call _run_shaper_subprocess", flush=True)
                 try:
                     await _run_shaper_subprocess(
                         session_id, output_dir, renamed_pkl_paths,
@@ -3300,11 +3325,20 @@ async def export_shape_pkls(request: Request):
                     )
                 except Exception as e:
                     import traceback
-                    print(f"[Shape] ❌ reconstruction crashed: {e}")
+                    print(f"[Shape] ❌ reconstruction crashed: {e}", flush=True)
                     traceback.print_exc()
                     async with _shape_progress_lock:
                         _shape_set_overall(session_id, phase="error", error=str(e))
-            asyncio.create_task(_bg())
+            # Keep a STRONG reference: the loop only holds a weak ref to the task,
+            # so a bare create_task() can be GC'd before it runs. Also surface any
+            # exception that kills the task before it can log it itself.
+            t = asyncio.create_task(_bg())
+            _bg_tasks.add(t)
+            def _on_bg_done(_t):
+                _bg_tasks.discard(_t)
+                if not _t.cancelled() and _t.exception() is not None:
+                    print(f"[Shape] ❌ _bg task died before logging: {_t.exception()!r}", flush=True)
+            t.add_done_callback(_on_bg_done)
             response["reconstructing"] = True
         elif not auto_reconstruct:
             print(f"[Shape] auto_reconstruct=False — stopping after PKL")
@@ -3707,7 +3741,27 @@ async def export_tsdf_endpoint(request: Request):
             pass  # progress is best-effort
 
     def _run_tsdf():
-        from segmentation.tsdf_export import export_tsdf_meshes
+        from segmentation.tsdf_export import (
+            export_tsdf_meshes,
+            crop_scene_mesh_to_instances,
+        )
+        # Prefer carving each instance out of the already-reconstructed scene mesh
+        # (tsdf/scene/scene.glb). It is cloud-consistent and works for EVERY
+        # backend — including those whose per-frame depth lives under a run dir the
+        # per-object re-integration doesn't recognise (e.g. VGGTOMEGA → omega_run/),
+        # which is exactly what made the per-object TSDF report "no depth source".
+        scene_dir = output_dir / "tsdf" / "scene"
+        has_scene = ((scene_dir / "scene.glb.orig").exists()
+                     or (scene_dir / "scene.glb").exists())
+        if has_scene:
+            print("[TSDF] scene mesh present → carving instances from it (crop)")
+            return crop_scene_mesh_to_instances(
+                output_dir=output_dir,
+                segments_result=segments_result,
+                obj_ids=list(target_ids) or None,
+                progress_cb=_progress_cb,
+            )
+        print("[TSDF] no scene mesh → per-object depth re-integration (legacy)")
         return export_tsdf_meshes(
             output_dir=output_dir,
             frames_dir=frames_dir,

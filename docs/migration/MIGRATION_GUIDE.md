@@ -63,7 +63,17 @@ conda env create -f environment_sam3.yml
 
 # Opcional (Si usas el fallback de MapAnything)
 conda env create -f environment_mapanything.yml
+
+# Recrear ShapeR (reconstrucción 3D generativa)
+conda env create -f environment_shaper.yml
 ```
+
+> [!WARNING]
+> El env **`shaper`** NO queda completo solo con el YAML: `torchsparse` debe
+> **compilarse a mano** para la GPU (la A100 necesita `sm_80`), y hay que
+> descargar el modelo **InternVL3-8B** para el autocaption. Seguí los pasos de
+> **[`SHAPER_A100_SETUP.md`](./SHAPER_A100_SETUP.md)** — sin eso, ShapeR falla con
+> "no kernel image is available" y el autocaption cae al fallback.
 
 Probablemente en `da3` y `sam3` Conda descargue temporalmente los runtimes de CUDA y un montón de *GBs* la primera vez, pero es todo automático. No tienes que configurar el path ni lidiar con librerías `nvccs` a mano.
 
@@ -77,3 +87,29 @@ make -j$(nproc)
 ```
 
 ¡Eso es todo! Reinstala los módulos de frontend (`cd ui && npm install`) y levanta el servidor normalmente. Tu nueva máquina volará.
+
+## Paso 7: Arranque rápido (pod / remoto)
+
+Para levantar todo de una en un pod nuevo (backend + UI + sesión claude, en tmux):
+
+```bash
+source /workspace/miniforge3/etc/profile.d/conda.sh
+bash /workspace/stac-build/init_pod.sh
+```
+
+`init_pod.sh` crea tres sesiones tmux: `backend` (corre `scripts/start.sh` en el
+env `da3`), `vite` (la UI) y `claude`. El backend escucha en el puerto 8765 (TLS
+autofirmado).
+
+> [!IMPORTANT]
+> **Tokens y datos NO versionados.** Estos archivos están en `.gitignore` y hay
+> que recrearlos/restaurarlos a mano en el pod nuevo:
+> - `server/git.txt` — tokens de GitHub (`ghp_…`) y HuggingFace (`hf_…`). Recrealo con tus tokens.
+> - `server/projects/**` — datos de escaneos/proyectos (GLB, PLY, npz). Restaurá desde tu backup.
+
+## ShapeR / TSDF y compilación de torchsparse para A100
+
+Ver **[`SHAPER_A100_SETUP.md`](./SHAPER_A100_SETUP.md)** para el detalle de:
+- compilar `torchsparse` para `sm_80` (incluye el parche del `setup.py`),
+- descargar los modelos (InternVL3-8B, ShapeR checkpoints, SAM3),
+- cómo arranca cada subsistema (backend en `da3`, ShapeR en `shaper`).

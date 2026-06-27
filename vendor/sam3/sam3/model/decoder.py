@@ -354,6 +354,16 @@ class TransformerDecoder(nn.Module):
             assert coords_h.shape == (H,)
             assert coords_w.shape == (W,)
 
+        # Device-safety: the coord cache is built ONCE with the device of the first
+        # call (lines above only fill it when None) and never refreshed. A later call
+        # on a different device — e.g. an interactive prompt after a CPU/other-GPU
+        # warmup in the multi-GPU grounding path — leaves coords_h/w on the stale
+        # device while boxes_xyxy is on cuda:0 → "tensors on different devices". Align
+        # to boxes_xyxy before the subtract (no-op when already matching).
+        if coords_h.device != boxes_xyxy.device:
+            coords_h = coords_h.to(boxes_xyxy.device)
+            coords_w = coords_w.to(boxes_xyxy.device)
+
         deltas_y = coords_h.view(1, -1, 1) - boxes_xyxy.reshape(-1, 1, 4)[:, :, 1:4:2]
         deltas_y = deltas_y.view(bs, num_queries, -1, 2)
         deltas_x = coords_w.view(1, -1, 1) - boxes_xyxy.reshape(-1, 1, 4)[:, :, 0:3:2]

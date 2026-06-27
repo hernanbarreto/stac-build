@@ -225,10 +225,12 @@ class Attention(nn.Module):
         return x.reshape(b, n_tokens, n_heads * c_per_head)  # B x N_tokens x C
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-        # Input projections
-        q = self.q_proj(q)
-        k = self.k_proj(k)
-        v = self.v_proj(v)
+        # Input projections. Align each input to its weight dtype so a memory
+        # tensor in a different dtype (e.g. bfloat16 vs float32) can't trigger
+        # "mat1 and mat2 must have the same dtype" in F.linear. See RoPEAttention.
+        q = self.q_proj(q.to(self.q_proj.weight.dtype))
+        k = self.k_proj(k.to(self.k_proj.weight.dtype))
+        v = self.v_proj(v.to(self.v_proj.weight.dtype))
 
         # Separate into heads
         q = self._separate_heads(q, self.num_heads)
@@ -294,10 +296,15 @@ class RoPEAttention(Attention):
     def forward(
         self, q: Tensor, k: Tensor, v: Tensor, num_k_exclude_rope: int = 0
     ) -> Tensor:
-        # Input projections
-        q = self.q_proj(q)
-        k = self.k_proj(k)
-        v = self.v_proj(v)
+        # Input projections.
+        # Align each input to its projection-weight dtype. In cross-attention to
+        # memory, q/k come from the current frame (float32) while v comes from the
+        # memory bank, which can be bfloat16 when prompts live on different frames
+        # (multi-object: e.g. obj 1 on frame 0, obj 2 on frame 175). Without this
+        # cast F.linear raises "mat1 and mat2 must have the same dtype".
+        q = self.q_proj(q.to(self.q_proj.weight.dtype))
+        k = self.k_proj(k.to(self.k_proj.weight.dtype))
+        v = self.v_proj(v.to(self.v_proj.weight.dtype))
 
         # Separate into heads
         q = self._separate_heads(q, self.num_heads)

@@ -43,6 +43,12 @@ echo "📝 logs → $LOG_FILE (latest: $LOG_DIR/latest.log)"
 # así uvicorn hereda esos fds y todo queda registrado.
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+# Unbuffered stdout/stderr so plain print() (e.g. [Shape] logs) flush immediately
+# through the tee above, instead of getting stuck in the block buffer while only
+# uvicorn's logging output (which flushes) appears. Without this we were debugging
+# half-blind: ShapeR could start/crash and its prints stayed invisible.
+export PYTHONUNBUFFERED=1
+
 exec python -m uvicorn main:app --host 0.0.0.0 --port $PORT \
     --ssl-keyfile "$KEY_FILE" \
     --ssl-certfile "$CERT_FILE" \
