@@ -1239,30 +1239,53 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
         try:
             from sklearn.cluster import DBSCAN
             from sklearn.neighbors import NearestNeighbors
-            
+
             k = min(dbscan_min_samples, len(points) - 1)
             if k < 2:
                 return indices, [], [], [], np.array([], dtype=np.int32)
-            
-            nbrs = NearestNeighbors(n_neighbors=k).fit(points)
-            distances, _ = nbrs.kneighbors(points)
-            knn_dists = distances[:, -1]
-            eps = np.percentile(knn_dists, 90)
-            
-            clustering = DBSCAN(eps=eps, min_samples=dbscan_min_samples).fit(points)
-            labels = clustering.labels_
-            
-            unique_labels, counts = np.unique(labels[labels >= 0], return_counts=True)
-            if len(unique_labels) == 0:
-                return indices, [], [], [], np.array([], dtype=np.int32)
-            
-            # Keep ALL clusters, only remove noise (label=-1)
-            cluster_mask = labels >= 0
-            
-            dbscan_removed = int(np.sum(~cluster_mask))
-            indices = indices[cluster_mask]
-            points = points[cluster_mask]
-            print(f"[SegPipeline]     step1 DBSCAN: {len(indices):,} pts (-{dbscan_removed}) {_zr(points)}")
+
+            # For very large sub-clouds, DBSCAN over every point is O(n^2) in time
+            # and memory: a 13M-point object (e.g. a whole train) pins a core for
+            # tens of minutes at >15GB RAM and often OOMs. Downsample to one
+            # representative per voxel, cluster the representatives, then propagate
+            # each voxel's verdict (cluster vs noise) back to all its points. Same
+            # satellite-removal behaviour, but scales to any object size.
+            DBSCAN_MAX_PTS = 1_500_000
+            ds = len(points) > DBSCAN_MAX_PTS
+            if ds:
+                ds_vox = max(voxel_size, 0.05)
+                vkeys = np.floor(points / ds_vox).astype(np.int64)
+                _, inv = np.unique(vkeys, axis=0, return_inverse=True)
+                n_vox = int(inv.max()) + 1
+                cloud = np.zeros((n_vox, 3), dtype=np.float64)
+                np.add.at(cloud, inv, points)
+                cloud /= np.bincount(inv, minlength=n_vox)[:, None]
+            else:
+                cloud = points
+
+            kk = min(dbscan_min_samples, len(cloud) - 1)
+            if kk < 2:
+                print(f"[SegPipeline]     step1 DBSCAN: skipped (only {len(cloud):,} clusterable)")
+            else:
+                nbrs = NearestNeighbors(n_neighbors=kk).fit(cloud)
+                distances, _ = nbrs.kneighbors(cloud)
+                eps = np.percentile(distances[:, -1], 90)
+
+                labels = DBSCAN(eps=eps, min_samples=dbscan_min_samples).fit(cloud).labels_
+                if not np.any(labels >= 0):
+                    return indices, [], [], [], np.array([], dtype=np.int32)
+
+                # Keep ALL clusters, only remove noise (label == -1). When
+                # downsampled, map the per-voxel labels back to every point.
+                point_labels = labels[inv] if ds else labels
+                cluster_mask = point_labels >= 0
+
+                dbscan_removed = int(np.sum(~cluster_mask))
+                indices = indices[cluster_mask]
+                points = points[cluster_mask]
+                tag = f"voxel-ds {len(cloud):,} reps @ {ds_vox:.2f}m → " if ds else ""
+                print(f"[SegPipeline]     step1 DBSCAN: {tag}{len(indices):,} pts "
+                      f"(-{dbscan_removed}) {_zr(points)}")
         except ImportError:
             pass
     
