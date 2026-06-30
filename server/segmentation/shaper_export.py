@@ -33,6 +33,7 @@ import io
 import json
 import logging
 import pickle
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -241,37 +242,120 @@ def _load_da3_intrinsics(output_dir: Path) -> Tuple[Optional[np.ndarray],
     return None, None
 
 
+def _load_frame_index_map(output_dir: Path) -> Optional[List[int]]:
+    """Map each ``camera_poses.txt`` line (a keyframe, in line order) to the REAL
+    global frame number.
+
+    The reconstruction writes ``camera_poses.txt`` (one c2w per keyframe, line
+    order) plus a ``camera_frames.txt`` sidecar whose line *i* holds the real
+    frame number of that keyframe. The cloud's per-point ``frame_global`` and the
+    frame JPG filenames are keyed by that REAL frame number — NOT by the line
+    ordinal. Consumers must cross-reference the two (the TSDF exporter already
+    does, in ``tsdf_export._load_da3_refined_poses``). Returns the per-line frame
+    numbers, or None when no sidecar exists (then line-ordinal keying is correct,
+    e.g. backends whose ``frame_global`` is itself the keyframe ordinal).
+    """
+    for cand in (output_dir / "camera_frames.txt",
+                 output_dir / "da3_run" / "camera_frames.txt"):
+        if cand.exists():
+            try:
+                nums = [int(x) for x in cand.read_text().split()]
+                if nums:
+                    return nums
+            except Exception:
+                pass
+    # Fallback: frame_list.json — the ordered list of processed frame filenames.
+    for cand in (output_dir / "frame_list.json",
+                 output_dir / "da3_run" / "frame_list.json"):
+        if cand.exists():
+            try:
+                names = json.loads(cand.read_text())
+                nums = []
+                for n in names:
+                    m = re.search(r"(\d+)", str(n))
+                    nums.append(int(m.group(1)) if m else -1)
+                if nums and all(v >= 0 for v in nums):
+                    return nums
+            except Exception:
+                pass
+    return None
+
+
+def _key_poses_by_real_frame(pose_lines: Dict[int, np.ndarray],
+                             frame_map: Optional[List[int]]) -> Dict[int, np.ndarray]:
+    """Re-key a line-ordinal pose dict (keys ``0..N-1``) to real global frame
+    numbers via ``frame_map`` (line -> real frame).
+
+    No-op unless the keys are exactly the contiguous range ``0..N-1`` and the
+    counts match — so poses already keyed by real frame (JSON dict-form keyed by
+    filename stem) pass through untouched, and a count mismatch degrades safely to
+    the old line-ordinal behaviour rather than silently corrupting the mapping.
+    """
+    if not pose_lines or not frame_map:
+        return pose_lines
+    keys = sorted(pose_lines)
+    if keys != list(range(len(keys))):
+        return pose_lines  # already keyed by something other than line ordinal
+    if len(frame_map) != len(keys):
+        logger.warning(f"[CameraSource] camera_frames.txt has {len(frame_map)} "
+                       f"entries but {len(keys)} poses — keeping line-ordinal keys")
+        return pose_lines
+    return {int(frame_map[i]): pose_lines[i] for i in keys}
+
+
 def _load_neural_source(output_dir: Path) -> Optional[CameraSource]:
-    """DA3 / MapAnything / hybrid pose loader."""
+    """DA3 / MapAnything / hybrid pose loader.
+
+    Poses are returned keyed by REAL global frame number, matching the cloud's
+    per-point ``frame_global`` and the frame JPG filenames. ``camera_poses.txt``
+    lists one c2w per keyframe in line order; ``camera_frames.txt`` gives each
+    line's real frame number, and the two are cross-referenced here. Keying by
+    line ordinal (the old behaviour) handed every frame a wrong camera — hundreds
+    of frames off — so the projected geometry no longer matched the cloud and
+    ShapeR received inconsistent multi-view extrinsics.
+    """
+    frame_map = _load_frame_index_map(output_dir)
     pose_map: Dict[int, np.ndarray] = {}
 
-    # JSON form (post-processed copy + native MapAnything dump)
-    for path in [output_dir / "camera_poses_mapanything.json",
-                 output_dir / "mapanything_poses.json"]:
+    # 1) Canonical path: the scale-aligned, metric ``camera_poses.txt``.
+    #    IMPORTANT: ``camera_poses_mapanything.json`` is a STALE copy taken
+    #    *before* ``reconstruction.scale_align`` rewrites ``camera_poses.txt`` to
+    #    metric — its translations are up-to-scale and no longer match the metric
+    #    ``cleaned_cloud.ply`` (camera centres come out ~10x too small). It must
+    #    NOT be preferred over the scale-aligned text file.
+    for path in [output_dir / "camera_poses.txt",
+                 output_dir / "da3_run" / "camera_poses.txt",
+                 output_dir / "output" / "camera_poses.txt"]:
         if path.exists():
             try:
-                pose_map = _parse_da3_poses_json(path)
-                if pose_map:
-                    logger.info(f"[CameraSource] Loaded {len(pose_map)} poses from {path.name}")
+                lines = _parse_da3_poses_text(path)
+                if lines:
+                    pose_map = _key_poses_by_real_frame(lines, frame_map)
+                    logger.info(
+                        f"[CameraSource] Loaded {len(pose_map)} poses from "
+                        f"{path.name} "
+                        + ("(keyed by real frame via camera_frames.txt)"
+                           if frame_map else "(keyed by line ordinal)"))
                     break
             except Exception as e:
                 logger.warning(f"Failed to parse {path}: {e}")
 
-    # Text form (DA3 native)
+    # 2) Fallback for older runs lacking a scale-aligned text file. Still re-key
+    #    by camera_frames.txt when the parse produced line-ordinal keys.
     if not pose_map:
-        for path in [output_dir / "da3_run" / "camera_poses.txt",
-                     output_dir / "camera_poses.txt",
-                     output_dir / "output" / "camera_poses.txt"]:
+        for path in [output_dir / "camera_poses_mapanything.json",
+                     output_dir / "mapanything_poses.json"]:
             if path.exists():
                 try:
-                    pose_map = _parse_da3_poses_text(path)
-                    if pose_map:
+                    parsed = _parse_da3_poses_json(path)
+                    if parsed:
+                        pose_map = _key_poses_by_real_frame(parsed, frame_map)
                         logger.info(f"[CameraSource] Loaded {len(pose_map)} poses from {path.name}")
                         break
                 except Exception as e:
                     logger.warning(f"Failed to parse {path}: {e}")
 
-    # extrinsics.npy [N,4,4] (extract_da3_full layout)
+    # 3) extrinsics.npy [N,4,4] (extract_da3_full layout)
     if not pose_map:
         for path in [output_dir / "extrinsics.npy",
                      output_dir / "da3_run" / "extrinsics.npy"]:
@@ -279,8 +363,9 @@ def _load_neural_source(output_dir: Path) -> Optional[CameraSource]:
                 arr = np.load(str(path))
                 if arr.ndim == 3 and arr.shape[1:] == (4, 4):
                     # extract_da3_full saves w2c (OpenCV); invert to c2w
-                    for i, w2c in enumerate(arr):
-                        pose_map[i] = np.linalg.inv(w2c).astype(np.float64)
+                    lines = {i: np.linalg.inv(w2c).astype(np.float64)
+                             for i, w2c in enumerate(arr)}
+                    pose_map = _key_poses_by_real_frame(lines, frame_map)
                     logger.info(f"[CameraSource] Loaded {len(pose_map)} poses from {path.name} (inverted w2c)")
                     break
 
