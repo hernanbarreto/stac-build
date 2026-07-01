@@ -376,6 +376,10 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 setMaskOverlay(null)
                 setHasPrompts(false)
                 setStatus('All prompts removed.')
+                // Must release the click lock here too: this early return removed
+                // the last dot, and without resetting it promptingRef stays true
+                // forever → every later click (this image or any other) is ignored.
+                promptingRef.current = false
                 return
             }
 

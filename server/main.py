@@ -3026,14 +3026,15 @@ async def _run_shaper_subprocess(session_id: str, output_dir: Path,
     script = server_dir / "run_shaper.sh"
 
     shape_root = output_dir / "shape"
-    # "quality" = 16 views, 4× tokens, 50 denoise steps — the best the released
-    # ckpt gives. On CPU run_shaper_batch.py honours it (slower than "cpu"/"balance"
-    # = 25 steps, ~2× the diffusion time per object); on a GPU it's the obvious pick.
+    # "max" = 32 views, 4× tokens, 100 denoise steps, CFG 4.0 — the strongest the
+    # released ckpt can do on the A100 80GB (CFG forces the mesh to follow the
+    # cloud/images; the stock presets leave it off). run_shaper_batch.py auto-detects
+    # CUDA; on CPU this would be very slow, but this path is the GPU pipeline.
     cmd = [
         "bash", str(script),
         "--pkls", *[str(p) for p in pkl_paths],
         "--output_dir", str(shape_root),
-        "--config", "quality",
+        "--config", "max",
     ]
 
     print(f"[Shape] ▶ starting ShapeR reconstruction of {len(pkl_paths)} object(s)")

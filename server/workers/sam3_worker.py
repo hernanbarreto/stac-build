@@ -82,6 +82,50 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
     except Exception as e:
         pipe.send_log(f"Apply to cloud failed (non-fatal): {e}", level="warning")
 
+    # ── Per-object textured TSDF mesh ──
+    # Just as the cloud is split per instance above, carve each instance's
+    # textured surface mesh out of the scene TSDF (output/tsdf/scene/scene.glb).
+    # This is the faithful, scanned-surface deliverable per object (textured) —
+    # part of segmentation, not an optional manual step. Best-effort: never fail
+    # segmentation if the crop has an issue. Requires the scene TSDF to have run
+    # (forced on in the pipeline whenever reconstruction runs).
+    if not pipe.check_cancel():
+        pipe.send_progress(85, "Carving per-object TSDF meshes...", stage="sam3")
+        try:
+            from segmentation.tsdf_export import crop_scene_mesh_to_instances
+            result_path = output_dir / "segmentation_result.json"
+            scene_dir = output_dir / "tsdf" / "scene"
+            has_scene = (scene_dir / "scene.glb.orig").exists() or \
+                        (scene_dir / "scene.glb").exists()
+            if not has_scene:
+                pipe.send_log("No scene TSDF mesh — skipping per-object TSDF crop "
+                              "(run reconstruction/TSDF first)", level="warning")
+            elif not result_path.exists():
+                pipe.send_log("No segmentation_result.json — skipping per-object TSDF crop",
+                              level="warning")
+            else:
+                with open(result_path) as f:
+                    segments_result = json.load(f)
+                n_tot = len(segments_result.get("instances", []))
+
+                def _crop_progress(inst_id, phase, elapsed, mesh_path):
+                    if phase == "done":
+                        _crop_progress.done += 1
+                        pct = 85 + (_crop_progress.done / max(n_tot, 1)) * 13
+                        pipe.send_progress(min(pct, 98),
+                                           f"TSDF mesh {_crop_progress.done}/{n_tot}",
+                                           stage="sam3")
+                _crop_progress.done = 0
+
+                written = crop_scene_mesh_to_instances(
+                    output_dir=output_dir,
+                    segments_result=segments_result,
+                    progress_cb=_crop_progress,
+                )
+                pipe.send_log(f"Per-object TSDF: wrote {len(written)} textured mesh(es)")
+        except Exception as e:
+            pipe.send_log(f"Per-object TSDF crop failed (non-fatal): {e}", level="warning")
+
     pipe.send_progress(100, f"Segmentation complete: {n_instances} objects", stage="sam3")
 
 

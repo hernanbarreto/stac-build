@@ -53,11 +53,29 @@ from postprocessing.helper import remove_floating_geometry
 # `cpu` previously matched `speed` (4 views, 10 steps) but produced low-quality
 # output even on canonical PKLs. Now matches `balance` so CPU runs deliver the
 # vendor's "recommended" quality at the cost of much longer wall time.
+# (num_views, token_multiplier, num_steps, cfg_value)
+#   num_views        — images fed to the model. At inference EVERY view's DINO
+#                      tokens are kept (the 1024//V subsample is training-only,
+#                      shaper_denoiser.forward_impl), so more views = more evidence
+#                      AND more image-condition tokens. Useful up to the number of
+#                      frames the object was actually seen in (the vendor pads with
+#                      repeats beyond that — no new information).
+#   token_multiplier — latent tokens = token_scales[6] (2048) × this → mesh detail.
+#   num_steps        — flow-matching ODE steps (midpoint = 2 model evals/step).
+#   cfg_value        — classifier-free guidance. -1 disables it (the vendor presets'
+#                      default). >1 runs cond+uncond each step (2× evals) and pushes
+#                      the mesh to ADHERE to the point cloud / images / text — the
+#                      strongest quality lever the stock presets leave switched off.
 PRESETS = {
-    "quality": (16, 4, 50),
-    "speed":   (4,  2, 10),
-    "balance": (16, 4, 25),
-    "cpu":     (16, 4, 25),  # full views + tokens, fewer denoise steps than quality
+    "quality": (16, 4, 50, -1.0),
+    "speed":   (4,  2, 10, -1.0),
+    "balance": (16, 4, 25, -1.0),
+    "cpu":     (16, 4, 25, -1.0),  # full views + tokens, fewer denoise steps than quality
+    # A100 "give me the best": more views, more ODE steps, CFG ON. token_multiplier
+    # stays at 4 — raising it explodes the transformer sequence (latent tokens run
+    # through every attention layer alongside num_views×400 image tokens).
+    "max":     (32, 4, 100, 4.0),  # all views, most steps, strong CFG. token×4 kept
+    #                                (raising it OOMs alongside 32×400 image tokens).
 }
 
 
@@ -395,7 +413,18 @@ def main():
     ap.add_argument("--output_dir", required=True,
                     help="Optional output dir override. If omitted, .glb is written next to the .pkl.")
     ap.add_argument("--config", default="balance",
-                    help="quality | balance | speed | cpu")
+                    help="quality | balance | speed | cpu | max")
+    ap.add_argument("--num_views", type=int, default=None,
+                    help="Override the preset's view count (images fed to the model). "
+                         "Useful up to the number of frames the object was seen in.")
+    ap.add_argument("--num_steps", type=int, default=None,
+                    help="Override the preset's flow-matching ODE steps.")
+    ap.add_argument("--token_multiplier", type=int, default=None,
+                    help="Override the preset's latent-token multiplier (mesh detail). "
+                         "Raising it is the most memory-hungry knob.")
+    ap.add_argument("--cfg_value", type=float, default=None,
+                    help="Override classifier-free guidance. -1 disables it; values "
+                         "~2-5 push the mesh to follow the point cloud / images / text.")
     ap.add_argument("--no_remove_floating", action="store_true")
     ap.add_argument("--no_simplify", action="store_true")
     ap.add_argument("--use_text", action="store_true", default=True)
@@ -443,8 +472,19 @@ def main():
     cfg_name = args.config
     if device.type == "cpu" and cfg_name == "balance":
         cfg_name = "cpu"
-    num_views, token_multiplier, num_steps = PRESETS[cfg_name]
-    emit(f"preset={cfg_name} views={num_views} tokens_x={token_multiplier} steps={num_steps}")
+    num_views, token_multiplier, num_steps, cfg_value = PRESETS[cfg_name]
+    # Per-run overrides (so views/steps/CFG/detail can be pushed without editing
+    # the preset table). None = keep the preset value.
+    if args.num_views is not None:
+        num_views = int(args.num_views)
+    if args.num_steps is not None:
+        num_steps = int(args.num_steps)
+    if args.token_multiplier is not None:
+        token_multiplier = int(args.token_multiplier)
+    if args.cfg_value is not None:
+        cfg_value = float(args.cfg_value)
+    emit(f"preset={cfg_name} views={num_views} tokens_x={token_multiplier} "
+         f"steps={num_steps} cfg={cfg_value}")
 
     # ── Resolve checkpoints ──
     if args.ckpt_root:
@@ -525,6 +565,7 @@ def main():
                     token_shape=token_shape,
                     text_feature_extractor=text_extractor,
                     num_steps=num_steps,
+                    cfg_value=cfg_value,
                     use_shifted_sampling=use_shifted_sampling,
                 )
                 mesh = vae.infer_mesh_from_latents(latents)[0]

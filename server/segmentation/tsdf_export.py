@@ -2748,6 +2748,18 @@ def export_tsdf_scene(
         finally:
             tex_in.unlink(missing_ok=True)
 
+    # Keep an UNCOMPRESSED copy as ``scene.glb.orig`` before shrinking. The
+    # compressed scene.glb (meshopt + WebP) is for the browser; trimesh can't read
+    # those extensions, and crop_scene_mesh_to_instances (per-object textured
+    # carve, run by the segmentation stage) needs a plain-GLB it can load. Without
+    # this, fresh runs would have only the compressed mesh → the crop fails.
+    try:
+        import shutil as _shutil
+        _shutil.copyfile(glb_path, str(glb_path) + ".orig")
+    except Exception as e:
+        logger.warning(f"[TSDF-scene] could not save scene.glb.orig ({e}) — "
+                       f"per-object TSDF crop will fall back to the compressed mesh")
+
     # Shrink the final .glb (meshopt geometry + WebP textures) so the viewer can
     # stream it without saturating the browser. Done after texturing so the meta
     # below records the compressed on-disk size.
@@ -3126,19 +3138,33 @@ def crop_scene_mesh_to_instances(
         logger.error("[TSDF-crop] no scene mesh found (tsdf/scene/scene.glb[.orig]) "
                      "— run the scene TSDF first")
         return []
+
+    # Load as a SCENE (not force="mesh"): the textured scene mesh is a set of
+    # per-chart sub-meshes, each with its own UV + baseColor image. Merging them
+    # into one Trimesh (the old force="mesh") drops all textures — which is why
+    # cropped objects came out untextured. ``dump`` bakes the node transforms so
+    # every part's vertices are already in world frame.
     try:
         with open(scene_path, "rb") as f:
-            scene = trimesh.load(f, file_type="glb", force="mesh")
-        V = np.asarray(scene.vertices, dtype=np.float64)
-        F = np.asarray(scene.faces, dtype=np.int64)
+            scene = trimesh.load(f, file_type="glb", force="scene")
+        if isinstance(scene, trimesh.Trimesh):
+            parts = [scene]
+        else:
+            parts = scene.dump(concatenate=False)
+        parts = [p for p in parts
+                 if isinstance(p, trimesh.Trimesh) and len(p.faces) > 0]
     except Exception as e:
         logger.error(f"[TSDF-crop] failed to load scene mesh {scene_path.name}: {e}")
         return []
-    if len(V) == 0 or len(F) == 0:
+    if not parts:
         logger.error(f"[TSDF-crop] scene mesh {scene_path.name} is empty/unreadable")
         return []
-    logger.info(f"[TSDF-crop] scene mesh {scene_path.name}: "
-                f"{len(V):,} verts / {len(F):,} faces")
+    part_bounds = [np.asarray(p.bounds, dtype=np.float64) for p in parts]
+    n_tex = sum(1 for p in parts
+                if getattr(getattr(p, "visual", None), "uv", None) is not None)
+    tot_f = sum(len(p.faces) for p in parts)
+    logger.info(f"[TSDF-crop] scene mesh {scene_path.name}: {len(parts)} parts / "
+                f"{tot_f:,} faces ({n_tex} textured)")
 
     # ── Cloud xyz — same indexing space as ``globalIndices``. Use the shared
     # PLY origin loader so this matches export_tsdf / shaper_export exactly.
@@ -3181,42 +3207,116 @@ def crop_scene_mesh_to_instances(
             progress_cb(int(inst_id), "starting", None, None)
 
         t_inst = time.time()
-        # Build a tree over the (smaller, per-instance) sub-cloud and ask each
-        # scene vertex for its nearest object point.
         subtree = cKDTree(sub)
-        dist, _ = subtree.query(V, k=1, workers=-1)
-        keep_v = dist < proximity_m
-        keep_f = keep_v[F].all(axis=1)
-        fsel = F[keep_f]
-        if len(fsel) == 0:
+        # AABB pre-filter: only query parts whose bbox overlaps the instance's
+        # (expanded by proximity). Skips the far charts → big speed-up on large
+        # scenes without changing the result.
+        inst_lo = sub.min(axis=0) - proximity_m
+        inst_hi = sub.max(axis=0) + proximity_m
+
+        # Per-part surviving-face masks + the centroids of those faces (for a
+        # single global island filter across charts, since charts don't share
+        # vertices and per-chart connectivity would wrongly split one object).
+        part_face_masks: List[Optional[np.ndarray]] = [None] * len(parts)
+        cent_list: List[np.ndarray] = []
+        owner_list: List[np.ndarray] = []
+        for pi, p in enumerate(parts):
+            lo, hi = part_bounds[pi][0], part_bounds[pi][1]
+            if np.any(hi < inst_lo) or np.any(lo > inst_hi):
+                continue  # no overlap
+            Vp = np.asarray(p.vertices, dtype=np.float64)
+            dist, _ = subtree.query(Vp, k=1, workers=-1)
+            keep_v = dist < proximity_m
+            kf = keep_v[p.faces].all(axis=1)
+            if not kf.any():
+                continue
+            part_face_masks[pi] = kf
+            fc = p.vertices[p.faces[kf]].mean(axis=1)
+            cent_list.append(fc)
+            fids = np.where(kf)[0]
+            owner_list.append(np.stack([np.full(len(fids), pi), fids], axis=1))
+
+        if not cent_list:
             logger.warning(f"[TSDF-crop] {label}_{inst_id}: 0 faces within "
                            f"{proximity_m*100:.0f}cm — skipping")
             if progress_cb:
                 progress_cb(int(inst_id), "error", None, None)
             continue
 
-        used = np.unique(fsel)
-        remap = -np.ones(len(V), dtype=np.int64)
-        remap[used] = np.arange(len(used))
-        mesh = trimesh.Trimesh(vertices=V[used], faces=remap[fsel], process=False)
+        # ── Global island filter. Cluster surviving face centroids by spatial
+        # proximity (radius graph → connected components) and drop clusters with
+        # < min_island_faces faces. Operates across chart boundaries so a single
+        # object split into many texture charts is never broken up. min<=0 skips.
+        cent = np.concatenate(cent_list)
+        owner = np.concatenate(owner_list)
+        keep_face = np.ones(len(cent), dtype=bool)
+        if min_island_faces > 0 and len(cent) > 1:
+            try:
+                from scipy.sparse import csr_matrix
+                from scipy.sparse.csgraph import connected_components
+                ct = cKDTree(cent)
+                pairs = ct.query_pairs(r=max(2.5 * proximity_m, 0.03),
+                                       output_type="ndarray")
+                n = len(cent)
+                if len(pairs):
+                    rows = np.concatenate([pairs[:, 0], pairs[:, 1]])
+                    cols = np.concatenate([pairs[:, 1], pairs[:, 0]])
+                    graph = csr_matrix((np.ones(len(rows)), (rows, cols)),
+                                       shape=(n, n))
+                    _, lab = connected_components(graph, directed=False)
+                else:
+                    lab = np.arange(n)
+                sizes = np.bincount(lab)
+                keep_face = sizes[lab] >= min_island_faces
+                if not keep_face.any():        # all clusters tiny → keep largest
+                    keep_face = lab == int(np.argmax(sizes))
+            except Exception as e:
+                logger.warning(f"[TSDF-crop] {label}_{inst_id}: island filter failed "
+                               f"({e}) — keeping all")
 
-        # Drop tiny noise islands; keep every component >= min_island_faces.
-        try:
-            comps = mesh.split(only_watertight=False)
-            if len(comps) > 1:
-                big = [c for c in comps if len(c.faces) >= min_island_faces]
-                if big:
-                    mesh = trimesh.util.concatenate(big)
-        except Exception as e:
-            logger.warning(f"[TSDF-crop] {label}_{inst_id}: island split failed ({e}) — keeping all")
+        # Restrict each part's face mask to islands we kept.
+        owner_keep = owner[keep_face]
+        kept_by_part: Dict[int, np.ndarray] = {}
+        for pi in np.unique(owner_keep[:, 0]):
+            kept_by_part[int(pi)] = owner_keep[owner_keep[:, 0] == pi, 1]
 
+        # Build the cropped, still-textured sub-meshes.
+        cropped: List[trimesh.Trimesh] = []
+        for pi, fids in kept_by_part.items():
+            g = parts[pi].copy()
+            fm = np.zeros(len(g.faces), dtype=bool)
+            fm[fids] = True
+            g.update_faces(fm)               # preserves UV + material
+            g.remove_unreferenced_vertices()  # also remaps the UV array
+            if len(g.faces) > 0:
+                # Force-recompute vertex normals: update_faces/remove_unreferenced
+                # invalidate the cache, and the GLB exporter only emits NORMAL when
+                # they're present — without this the crop ships flat-shaded.
+                try:
+                    _ = g.vertex_normals
+                except Exception:
+                    pass
+                cropped.append(g)
+        if not cropped:
+            logger.warning(f"[TSDF-crop] {label}_{inst_id}: nothing left after island filter")
+            if progress_cb:
+                progress_cb(int(inst_id), "error", None, None)
+            continue
+
+        out_scene = trimesh.Scene(cropped)
         safe = _safe_label(label, inst_id)   # already "<label>_<id>"
         obj_dir = tsdf_root / safe
         obj_dir.mkdir(parents=True, exist_ok=True)
         out_path = obj_dir / f"{safe}.glb"
-        mesh.export(str(out_path), include_normals=True)
+        out_scene.export(str(out_path))      # multi-material GLB keeps textures
+        # Stream-compress (meshopt + WebP) like the scene mesh; best-effort.
+        _compress_scene_glb(out_path)
 
-        ext = (mesh.bounds[1] - mesh.bounds[0]).tolist()
+        n_faces_out = int(sum(len(g.faces) for g in cropped))
+        n_verts_out = int(sum(len(g.vertices) for g in cropped))
+        n_tex_out = sum(1 for g in cropped
+                        if getattr(getattr(g, "visual", None), "uv", None) is not None)
+        ext = (out_scene.bounds[1] - out_scene.bounds[0]).tolist()
         elapsed = time.time() - t_inst
         meta = {
             "method": "tsdf_scene_crop",
@@ -3224,11 +3324,13 @@ def crop_scene_mesh_to_instances(
             "instance_id": int(inst_id),
             "label": label,
             "glb_file": out_path.name,
+            "textured": bool(n_tex_out > 0),
+            "n_texture_charts": int(n_tex_out),
             "proximity_m": float(proximity_m),
             "min_island_faces": int(min_island_faces),
             "n_sub_points": int(len(gi)),
-            "n_vertices": int(len(mesh.vertices)),
-            "n_faces": int(len(mesh.faces)),
+            "n_vertices": n_verts_out,
+            "n_faces": n_faces_out,
             "bbox_extent": [round(float(v), 4) for v in ext],
             "elapsed_s": round(float(elapsed), 2),
         }
@@ -3236,8 +3338,9 @@ def crop_scene_mesh_to_instances(
             json.dump(meta, f, indent=2)
 
         logger.info(f"[TSDF-crop] {label}_{inst_id}: sub={len(gi):,}pts → "
-                    f"{len(mesh.vertices):,} verts / {len(mesh.faces):,} faces "
-                    f"ext={[round(v,2) for v in ext]} → {out_path.name}")
+                    f"{n_verts_out:,} verts / {n_faces_out:,} faces "
+                    f"({n_tex_out} textured charts) ext={[round(v,2) for v in ext]} "
+                    f"→ {out_path.name}")
         if progress_cb:
             progress_cb(int(inst_id), "done", elapsed, str(out_path))
         exported.append(out_path)

@@ -613,8 +613,21 @@ def build_pipeline_stages(
             if StageId.CLOUDCOMPY not in stage_order:
                 ri = stage_order.index(StageId.RECONSTRUCTION)
                 stage_order.insert(ri + 1, StageId.CLOUDCOMPY)
-            logger.info("[Pipeline] Reconstruction enabled → CloudCompy forced on to "
-                        "finish the cloud (avoids fragile on-load regeneration)")
+            # The scene TSDF is a mandatory reconstruction product, not an optional
+            # add-on: it is the textured surface mesh of the scan (the CloudCompare-
+            # equivalent deliverable) AND the source the segmentation stage carves
+            # per-object textured meshes out of (crop_scene_mesh_to_instances). With
+            # it off, segmentation has no mesh to crop. So whenever reconstruction
+            # runs, force TSDF on right after CloudCompy — same rationale as forcing
+            # CloudCompy itself. It only consumes cleaned_cloud + depth/poses; it does
+            # NOT re-run reconstruction.
+            enabled_dict[StageId.TSDF.value] = True
+            if StageId.TSDF not in stage_order:
+                ci = stage_order.index(StageId.CLOUDCOMPY)
+                stage_order.insert(ci + 1, StageId.TSDF)
+            logger.info("[Pipeline] Reconstruction enabled → CloudCompy + scene TSDF "
+                        "forced on (cloud finish + textured scene mesh for per-object "
+                        "segmentation crops)")
     stages = []
     
     for stage_id in stage_order:

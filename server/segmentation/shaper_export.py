@@ -512,7 +512,7 @@ def export_shaper_pkls(
     captions: Optional[Dict[int, str]] = None,
     image_format: str = "png",       # "png" or "jpg"
     grayscale: bool = True,           # ShapeR released ckpt expects grayscale
-    max_views: int = 0,               # 0 = auto (24); else cap views per object
+    max_views: int = 0,               # 0 = auto (32 pool); else cap views per object
     min_view_points: int = 50,        # drop views with < N projected points
 ) -> List[Path]:
     """Export one ShapeR-compatible .pkl per segmented instance.
@@ -640,12 +640,13 @@ def export_shaper_pkls(
         logger.info(f"[ShaperExport] {label}_{inst_id}: {len(gi):,} pts, "
                     f"{len(unique_frames)} candidate frames")
 
-        # How many views to keep in the PKL. ``max_views`` ≤ 0 → 24 (the released
-        # ckpt's `cpu`/`balance` preset uses 16, so 24 leaves the batch script a
-        # good pool to pick the best 16 from). Pre-trim the *candidates* by raw
-        # point count if there are way more than we'd ever keep, so we don't load
-        # 200 frames just to discard most.
-        n_keep = int(max_views) if (max_views and int(max_views) > 0) else 24
+        # How many views to keep in the PKL. ``max_views`` ≤ 0 → 32 — the batch
+        # script's presets select num_views (16 for quality, 24 for `max`) from
+        # this pool, so 32 leaves headroom to pick the best/most-diverse subset for
+        # any preset (and to push --num_views up to 32 without re-exporting). Views
+        # are cheap in the PKL relative to re-running the whole export. Pre-trim the
+        # *candidates* by raw point count if there are far more than we'd ever keep.
+        n_keep = int(max_views) if (max_views and int(max_views) > 0) else 32
         if len(unique_frames) > 4 * n_keep:
             counts = np.array([(sub_fg == f).sum() for f in unique_frames])
             unique_frames = unique_frames[np.argsort(-counts)[:4 * n_keep]]
@@ -679,12 +680,36 @@ def export_shaper_pkls(
             if mask.sum() < min_view_points:
                 continue
 
-            # Rescale pixel coords from PLY traceability resolution to image res.
-            # Use the GLOBAL PLY span (computed once above), not the per-object max.
+            # Bring the traceability pixels AND the intrinsics into the JPG's
+            # resolution. The backend records BOTH at its processing resolution
+            # (e.g. DA3 depth 384×688), which is frequently NOT the resolution of
+            # the saved JPGs (e.g. 360×640). The two must be rescaled to the image
+            # — in EITHER direction.
+            #
+            # Source resolution: prefer the backend's declared source_resolution
+            # (Stray sets it from the RGB frames); otherwise use the intrinsics'
+            # centered principal point (2·cx, 2·cy) — exact for the pinhole DA3/
+            # MapAnything models and, unlike the old max-traceability-pixel guess,
+            # independent of how much of the frame the object's cloud covers.
+            #
+            # The previous `ply_src * 1.2 < H_img` guard only ever UP-scaled (image
+            # ≫ traceability) and silently ignored DA3's down-scale case → every
+            # projection landed shifted toward the bottom-right and points past the
+            # JPG bound got clipped. That is the mask-misalignment ShapeR saw.
             pr_obj = sub_pr[mask].astype(np.float32)
             pc_obj = sub_pc[mask].astype(np.float32)
-            sy = H_img / ply_src_h if ply_src_h * 1.2 < H_img else 1.0
-            sx = W_img / ply_src_w if ply_src_w * 1.2 < W_img else 1.0
+            if cam.source_resolution is not None:
+                src_h, src_w = (float(cam.source_resolution[0]),
+                                float(cam.source_resolution[1]))
+            else:
+                src_w = 2.0 * float(K_src[0, 2])
+                src_h = 2.0 * float(K_src[1, 2])
+            sx = (W_img / src_w) if src_w > 1.0 else 1.0
+            sy = (H_img / src_h) if src_h > 1.0 else 1.0
+            if abs(sx - 1.0) < 0.01:
+                sx = 1.0
+            if abs(sy - 1.0) < 0.01:
+                sy = 1.0
             if sx != 1.0 or sy != 1.0:
                 pr_obj = pr_obj * sy
                 pc_obj = pc_obj * sx
