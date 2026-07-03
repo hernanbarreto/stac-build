@@ -385,7 +385,7 @@ git submodule update --init --recursive
 Heavy/third-party vendors are **git-ignored** and are **not** fetched by clone or by Docker
 (`Dockerfile` does `COPY vendor/ ./vendor/`, i.e. it copies whatever is already on disk).
 They must be placed under `vendor/` manually before building:
-`ShapeR`, `mvs-texturing`, `nvdiffrast`, `oneTBB` / `oneTBB-src`, `CloudComPy310`,
+`meshflow`, `mvs-texturing`, `nvdiffrast`, `oneTBB` / `oneTBB-src`, `CloudComPy310`,
 `dn-splatter`, `gaus-slam`, `scenescript`, `vipe`, plus the `*/checkpoints/` weight dirs.
 
 ### 3. Download model weights

@@ -2799,7 +2799,7 @@ async def rename_segmentation_instance(request: Request):
 
         # Sync shape folder if label changed
         if new_label is not None and old_label and old_label != new_label:
-            from segmentation.shaper_export import rename_shape_folder
+            from segmentation.session_io import rename_shape_folder
             rename_shape_folder(output_dir, old_label, new_label, instance_id)
 
         return {"ok": True}
@@ -2918,7 +2918,7 @@ async def delete_segmentation_instance(request: Request):
 
             # 4) Delete shape folder if it exists
             try:
-                from segmentation.shaper_export import delete_shape_folder
+                from segmentation.session_io import delete_shape_folder
                 for iid in instance_ids_to_remove:
                     # Try to find label from the removed instances
                     for inst in seg_data_original_instances:
@@ -2964,15 +2964,13 @@ _shape_in_flight: Dict[str, Any] = {
     "key": None, "event": None, "result": None, "completed_at": None,
 }
 
-# Global single-flight slot for the ShapeR subprocess. Spawning a second
-# `run_shaper.sh` while one is already running is what caused the OOM kill
-# on 2026-05-09: each subprocess imports torch + ShapeR modules (~2 GB) and
-# the first was already 8-10 GB into inference (T5/CLIP/DINOv2 + tensors).
-# WSL2 OOM-killed the bigger one. We refuse to spawn a second one regardless
-# of session — the user's hardware (CPU-only after the GPU broke) cannot run
-# two of these in parallel.
-_shaper_subprocess: Optional["asyncio.subprocess.Process"] = None
-_shaper_subprocess_lock = asyncio.Lock()
+# Global single-flight slot for the MeshFlow subprocess (inherited from the
+# retired ShapeR path, where spawning a second batch OOM-killed the first on
+# 2026-05-09). One generative batch at a time, regardless of session: the
+# pipeline holds ~5 GB of weights + inference tensors on the GPU and a
+# parallel spawn buys no throughput, only risk.
+_meshflow_subprocess: Optional["asyncio.subprocess.Process"] = None
+_meshflow_subprocess_lock = asyncio.Lock()
 # Strong references to fire-and-forget background tasks. The event loop only keeps
 # weak refs, so a bare asyncio.create_task() can be garbage-collected before it
 # runs. Keep them alive here until they finish.
@@ -2992,63 +2990,63 @@ def _shape_set_overall(session_id: str, **kw):
     overall.update(kw)
 
 
-async def _run_shaper_subprocess(session_id: str, output_dir: Path,
-                                 pkl_paths: List[Path],
-                                 inst_id_by_pkl: Dict[str, int]):
-    """Spawn run_shaper.sh and parse [BATCH] events for live UI progress.
+async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
+                                   ply_paths: List[Path],
+                                   inst_id_by_pkl: Dict[str, int]):
+    """Spawn run_meshflow.sh and parse [BATCH] events for live UI progress.
 
-    Single-flight globally: if another ShapeR subprocess is already running
-    we refuse to spawn — two parallel processes OOM the host and kill the
-    one that's already deep into inference (which is exactly what happened
-    on 2026-05-09 and lost ~2.5 h of work).
+    Single-flight globally (see _meshflow_subprocess above). Output GLBs are
+    GENERATIVE visual assets: ``<stem>_visual.glb`` + ``metric: false`` in
+    meta.json — never metric deliverables.
     """
-    global _shaper_subprocess
+    global _meshflow_subprocess
 
-    if not pkl_paths:
-        print("[Shape] no PKLs to reconstruct — skipping subprocess")
-        _shape_set_overall(session_id, phase="done", reason="no_pkls")
+    if not ply_paths:
+        print("[Shape] no segment PLYs to generate — skipping subprocess")
+        _shape_set_overall(session_id, phase="done", reason="no_plys")
         return
 
     # Single-flight guard. We hold the lock only across the check + assignment
     # so the read loop below doesn't block other code paths.
-    async with _shaper_subprocess_lock:
-        if (_shaper_subprocess is not None
-                and _shaper_subprocess.returncode is None):
-            existing_pid = _shaper_subprocess.pid
-            msg = (f"Another ShapeR subprocess is already running "
+    async with _meshflow_subprocess_lock:
+        if (_meshflow_subprocess is not None
+                and _meshflow_subprocess.returncode is None):
+            existing_pid = _meshflow_subprocess.pid
+            msg = (f"Another MeshFlow subprocess is already running "
                    f"(pid={existing_pid}). Refusing to spawn a second one — "
-                   f"parallel ShapeR runs OOM the host on CPU-only hardware.")
+                   f"one generative batch at a time.")
             print(f"[Shape] ⚠ {msg}")
             _shape_set_overall(session_id, phase="error", error=msg)
             return
 
     server_dir = Path(__file__).resolve().parent
-    script = server_dir / "run_shaper.sh"
+    script = server_dir / "run_meshflow.sh"
 
-    shape_root = output_dir / "shape"
-    # "quality" = the vendor's stock recommended preset: 16 views, 4× tokens, 50
-    # denoise steps, CFG OFF. This is what the released ckpt was tuned for — higher
-    # views (out-of-distribution) or CFG on tend to add artifacts, so keep factory.
+    mcfg = (cfg or {}).get("meshflow", {}) or {}
     cmd = [
         "bash", str(script),
-        "--pkls", *[str(p) for p in pkl_paths],
-        "--output_dir", str(shape_root),
-        "--config", "quality",
+        "--plys", *[str(p) for p in ply_paths],
+        "--steps", str(mcfg.get("steps", 28)),
+        "--guidance_scale", str(mcfg.get("guidance_scale", 2.5)),
+        "--seed", str(mcfg.get("seed", 42)),
+        "--dtype", str(mcfg.get("dtype", "fp16")),
     ]
+    if mcfg.get("num_verts"):
+        cmd += ["--num_verts", str(mcfg["num_verts"])]
 
-    print(f"[Shape] ▶ starting ShapeR reconstruction of {len(pkl_paths)} object(s)")
-    print(f"[Shape]   PKLs: {[p.name for p in pkl_paths]}")
-    print(f"[Shape]   PKL→instance map: {inst_id_by_pkl}")
+    print(f"[Shape] ▶ starting MeshFlow generation of {len(ply_paths)} object(s)")
+    print(f"[Shape]   PLYs: {[p.name for p in ply_paths]}")
+    print(f"[Shape]   PLY→instance map: {inst_id_by_pkl}")
     print(f"[Shape]   cmd: {' '.join(cmd[:6])} ... (+{len(cmd)-6} args)")
     _shape_set_overall(session_id, phase="reconstructing",
-                       total=len(pkl_paths), done=0, started_at=time.time())
+                       total=len(ply_paths), done=0, started_at=time.time())
 
     try:
         proc = _track_worker(await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            env={**os.environ},  # inherit GPU visibility (A100 80GB); run_shaper_batch.py auto-detects CUDA
+            env={**os.environ},  # inherit GPU visibility (A100 80GB); run_meshflow_batch.py auto-detects CUDA
             preexec_fn=_die_with_parent_sigkill,
         ))
         print(f"[Shape]   subprocess pid={proc.pid}")
@@ -3058,8 +3056,8 @@ async def _run_shaper_subprocess(session_id: str, output_dir: Path,
         _shape_set_overall(session_id, phase="error", error=str(e))
         return
 
-    async with _shaper_subprocess_lock:
-        _shaper_subprocess = proc
+    async with _meshflow_subprocess_lock:
+        _meshflow_subprocess = proc
 
     done_count = 0
     while True:
@@ -3120,27 +3118,33 @@ async def _run_shaper_subprocess(session_id: str, output_dir: Path,
 
     rc = await proc.wait()
     # Release the single-flight slot so the next /shape/export can spawn.
-    async with _shaper_subprocess_lock:
-        if _shaper_subprocess is proc:
-            _shaper_subprocess = None
+    async with _meshflow_subprocess_lock:
+        if _meshflow_subprocess is proc:
+            _meshflow_subprocess = None
     overall_phase = "done" if rc == 0 else "error"
     _shape_set_overall(session_id, phase=overall_phase, finished_at=time.time(),
                        returncode=rc)
     icon = "✅" if rc == 0 else "❌"
-    print(f"[Shape] {icon} reconstruction finished rc={rc} "
-          f"({done_count}/{len(pkl_paths)} succeeded)")
+    print(f"[Shape] {icon} generation finished rc={rc} "
+          f"({done_count}/{len(ply_paths)} succeeded)")
 
 
 @app.post("/api/segmentation/shape/export")
-async def export_shape_pkls(request: Request):
-    """Generate ShapeR PKL files (and optionally trigger ShapeR reconstruction).
+async def export_shape_inputs(request: Request):
+    """Export per-instance segment PLYs and (optionally) chain MeshFlow
+    generation. Replaces the retired ShapeR PKL exporter — MeshFlow consumes
+    the segment geometry directly, so no captions/multi-view renders.
 
     Body:
         session_id: str
-        captions: Optional[dict[int, str]] — manual captions per instance_id
         instance_ids: Optional[list[int]] — filter to these IDs only
-        auto_caption: bool — run InternVL3 for caption generation
-        auto_reconstruct: bool (default True) — chain ShapeR mesh inference
+        auto_reconstruct: bool (default True) — chain MeshFlow inference
+        (captions / auto_caption are accepted but ignored — deprecated with
+        ShapeR; MeshFlow has no text conditioning)
+
+    Routing: architectural classes and oversized segments are SKIPPED here
+    (they belong to the metric surface_fit / TSDF paths) — see the response's
+    "skipped" list. Outputs are GENERATIVE visual assets (metric: false).
 
     A browser retry after timeout will hit the in-flight guard below and wait
     for the original request's result instead of spawning a parallel run.
@@ -3148,9 +3152,7 @@ async def export_shape_pkls(request: Request):
     import threading as _threading
     body = await request.json()
     session_id = body.get("session_id")
-    captions = body.get("captions", {})
     instance_ids = body.get("instance_ids")
-    auto_caption = body.get("auto_caption", False)
     auto_reconstruct = body.get("auto_reconstruct", True)
 
     if not session_id:
@@ -3210,12 +3212,9 @@ async def export_shape_pkls(request: Request):
         with open(result_path) as f:
             segments_result = json.load(f)
 
-        captions_int = {int(k): v for k, v in captions.items()} if captions else {}
-
         print(f"[Shape] ━━━ /shape/export request ━━━")
         print(f"[Shape]   session={session_id}  instance_ids={instance_ids}")
-        print(f"[Shape]   auto_caption={auto_caption}  auto_reconstruct={auto_reconstruct}")
-        print(f"[Shape]   manual captions: {list(captions_int.keys())}")
+        print(f"[Shape]   auto_reconstruct={auto_reconstruct}")
 
         # Reset state for the instances we're about to touch
         target_ids = set(instance_ids or [
@@ -3225,44 +3224,28 @@ async def export_shape_pkls(request: Request):
         async with _shape_progress_lock:
             sess_state = _shape_progress.setdefault(session_id, {})
             for tid in target_ids:
-                initial_phase = "captioning" if (auto_caption and tid not in captions_int) else "exporting_pkl"
-                sess_state[int(tid)] = {"id": int(tid), "phase": initial_phase}
+                sess_state[int(tid)] = {"id": int(tid), "phase": "exporting_ply"}
             sess_state["__overall__"] = {
-                "phase": "exporting_pkl",
+                "phase": "exporting_ply",
                 "total": len(target_ids),
                 "done": 0,
                 "started_at": time.time(),
             }
 
-        caption_fn = None
-        if auto_caption:
-            try:
-                from segmentation.object_captioner import caption_object
-                caption_fn = caption_object
-                print(f"[Shape]   object_captioner loaded — InternVL3 will run for "
-                      f"{len(target_ids - set(captions_int))} object(s)")
-            except ImportError as e:
-                print(f"[Shape]   ⚠ object_captioner unavailable ({e}) — falling back to labels")
-
         loop = asyncio.get_event_loop()
+        mcfg = (cfg or {}).get("meshflow", {}) or {}
 
         def _export():
-            from segmentation.shaper_export import export_shaper_pkls
-            # Wrap caption_fn so we can update progress per-instance even though
-            # export_shaper_pkls doesn't expose instance_id to the callback. We do
-            # the bookkeeping by closure-capturing the current label-id mapping.
-            return export_shaper_pkls(
+            from segmentation.mesh_export import export_segment_plys
+            return export_segment_plys(
                 output_dir=output_dir,
-                frames_dir=frames_dir,
                 segments_result=segments_result,
-                session_dir=frames_dir.parent,
                 obj_ids=instance_ids,
-                caption_fn=caption_fn,
-                captions=captions_int,
+                max_extent_m=float(mcfg.get("max_extent_m", 6.0)),
             )
 
         try:
-            exported = await loop.run_in_executor(None, _export)
+            exported, skipped = await loop.run_in_executor(None, _export)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -3270,7 +3253,9 @@ async def export_shape_pkls(request: Request):
                 _shape_set_overall(session_id, phase="error", error=str(e))
             raise HTTPException(status_code=500, detail=str(e))
 
-        # Map pkl folder name → instance_id (folder name = "<safe_label>_<id>")
+        # Map folder name → instance_id (folder name = "<safe_label>_<id>";
+        # the PLY stem equals the folder name, so the [BATCH] stdout matcher
+        # resolves instances by stem directly).
         inst_by_folder = {}
         for inst in segments_result.get("instances", []):
             iid = inst.get("id", inst.get("instance_id"))
@@ -3278,55 +3263,40 @@ async def export_shape_pkls(request: Request):
             safe = label.replace(" ", "_").replace("/", "_")[:30]
             inst_by_folder[f"{safe}_{iid}"] = int(iid)
 
-        # batch wrapper uses the .pkl stem as "name"; our folder contains data.pkl,
-        # so the stem is "data" — useless. Rename map by folder lookup instead.
-        inst_id_by_pkl_name = {}
+        inst_id_by_stem = {}
         for p in exported:
-            # p is .../shape/<folder>/data.pkl
             folder = p.parent.name
             if folder in inst_by_folder:
                 iid = inst_by_folder[folder]
-                inst_id_by_pkl_name[p.stem] = iid  # stem == "data"
+                inst_id_by_stem[p.stem] = iid
                 async with _shape_progress_lock:
-                    _shape_set(session_id, iid, phase="pkl_ready",
-                               pkl=str(p.relative_to(output_dir)))
-
-        # If multiple PKLs map to the same stem ("data"), the stdout matcher will
-        # collide. Rename per-pkl to "<folder>.pkl" so each one has a unique stem.
-        renamed_pkl_paths = []
-        inst_id_by_renamed = {}
-        for p in exported:
-            folder = p.parent.name
-            new_name = f"{folder}.pkl"
-            new_path = p.parent / new_name
-            if new_path != p:
-                try:
-                    p.rename(new_path)
-                    print(f"[Shape]   renamed {p.name} → {new_name}")
-                except Exception as e:
-                    print(f"[Shape]   ⚠ rename failed for {p}: {e} (keeping original)")
-                    new_path = p
-            renamed_pkl_paths.append(new_path)
-            if folder in inst_by_folder:
-                inst_id_by_renamed[new_path.stem] = inst_by_folder[folder]
+                    _shape_set(session_id, iid, phase="ply_ready",
+                               ply=str(p.relative_to(output_dir)))
+        # Skipped instances are terminal for this run — surface the reason
+        async with _shape_progress_lock:
+            for s in skipped:
+                _shape_set(session_id, int(s["instance_id"]), phase="skipped",
+                           reason=s["reason"])
 
         response = {
             "ok": True,
-            "exported": [str(p.relative_to(output_dir)) for p in renamed_pkl_paths],
-            "count": len(renamed_pkl_paths),
+            "exported": [str(p.relative_to(output_dir)) for p in exported],
+            "skipped": skipped,
+            "count": len(exported),
             "reconstructing": False,
         }
 
-        print(f"[Shape] PKL stage complete: {len(renamed_pkl_paths)} file(s)")
+        print(f"[Shape] PLY stage complete: {len(exported)} file(s), "
+              f"{len(skipped)} skipped (routing/size)")
 
-        if auto_reconstruct and renamed_pkl_paths:
-            print(f"[Shape] auto_reconstruct=True — scheduling background ShapeR task", flush=True)
+        if auto_reconstruct and exported:
+            print(f"[Shape] auto_reconstruct=True — scheduling background MeshFlow task", flush=True)
             async def _bg():
-                print(f"[Shape] _bg ENTER — about to call _run_shaper_subprocess", flush=True)
+                print(f"[Shape] _bg ENTER — about to call _run_meshflow_subprocess", flush=True)
                 try:
-                    await _run_shaper_subprocess(
-                        session_id, output_dir, renamed_pkl_paths,
-                        inst_id_by_renamed,
+                    await _run_meshflow_subprocess(
+                        session_id, output_dir, exported,
+                        inst_id_by_stem,
                     )
                 except Exception as e:
                     import traceback
@@ -3346,13 +3316,13 @@ async def export_shape_pkls(request: Request):
             t.add_done_callback(_on_bg_done)
             response["reconstructing"] = True
         elif not auto_reconstruct:
-            print(f"[Shape] auto_reconstruct=False — stopping after PKL")
+            print(f"[Shape] auto_reconstruct=False — stopping after PLY export")
             async with _shape_progress_lock:
                 _shape_set_overall(session_id, phase="done")
-                for p in renamed_pkl_paths:
+                for p in exported:
                     folder = p.parent.name
                     if folder in inst_by_folder:
-                        _shape_set(session_id, inst_by_folder[folder], phase="pkl_ready")
+                        _shape_set(session_id, inst_by_folder[folder], phase="ply_ready")
 
         # Stash result + timestamp BEFORE the finally so the cached result is
         # visible the moment the event fires. Keep key/event/result populated
@@ -3404,13 +3374,16 @@ async def shape_status(session_id: str):
         safe_label = label.replace(" ", "_").replace("/", "_")[:30]
         obj_folder = shape_dir / f"{safe_label}_{iid}"
 
-        has_pkl = any(obj_folder.glob("*.pkl")) if obj_folder.exists() else False
+        # "has_pkl" key kept for UI compat; it now means "has exported input"
+        # (segment .ply for MeshFlow; legacy .pkl folders also count)
+        has_input = (any(obj_folder.glob("*.ply")) or any(obj_folder.glob("*.pkl"))) \
+            if obj_folder.exists() else False
         has_mesh = any(obj_folder.glob("*.glb")) if obj_folder.exists() else False
 
         statuses.append({
             "id": iid,
             "label": label,
-            "has_pkl": has_pkl,
+            "has_pkl": has_input,
             "has_mesh": has_mesh,
             "folder": str(obj_folder.relative_to(output_dir)) if obj_folder.exists() else None,
         })
@@ -3483,6 +3456,195 @@ async def shape_file(session_id: str, folder: str, filename: str):
         media_type=media_type,
         headers={"Cache-Control": "no-cache"},  # may be regenerated
     )
+
+
+# ── surface_fit (measurement-backed smooth surfaces; ShapeR replacement for
+#    architectural classes) ────────────────────────────────────────────────
+# Fits the lowest-DOF smooth model per SAM3 segment (plane → quadric → swept
+# profile → B-spline), regularizes planes scene-wide, and keeps the residuals
+# as deliverable (deviation PLY + heatmap PNG + stats JSON). Runs in a
+# SEPARATE PROCESS (run_surface_fit.py, same da3 env as the server) with the
+# same single-flight discipline as ShapeR: one run at a time, any session.
+
+_surface_fit_progress: Dict[str, Dict[str, Any]] = {}
+_surface_fit_progress_lock = asyncio.Lock()
+_surface_fit_subprocess: Optional["asyncio.subprocess.Process"] = None
+_surface_fit_lock = asyncio.Lock()
+
+
+@app.post("/api/segmentation/surface_fit/run")
+async def surface_fit_run(request: Request):
+    """Launch surface_fit for a session. Body: {session_id, instance_ids?: [int],
+    params?: {fit_segment kwargs}}. Without instance_ids fits every
+    architectural instance + scene regularization (hybrid mode)."""
+    global _surface_fit_subprocess
+    body = await request.json()
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id")
+    instance_ids = body.get("instance_ids") or None
+    params = body.get("params") or {}
+
+    ctx = _ctx(session_id)
+    session_dir = ctx.frames_dir.parent
+    if not (ctx.output_dir / "segmentation_result.json").exists():
+        raise HTTPException(status_code=409,
+                            detail="No segmentation_result.json — run SAM3 first")
+    if not (ctx.output_dir / "cleaned_cloud.ply").exists():
+        raise HTTPException(status_code=409,
+                            detail="No cleaned_cloud.ply — run CloudComPy first")
+
+    async with _surface_fit_lock:
+        if (_surface_fit_subprocess is not None
+                and _surface_fit_subprocess.returncode is None):
+            raise HTTPException(status_code=429,
+                                detail="A surface_fit run is already in progress")
+
+    worker = Path(SERVER_DIR) / "run_surface_fit.py"
+    cmd = [sys.executable, str(worker), "--session-dir", str(session_dir),
+           "--params", json.dumps(params)]
+    if instance_ids:
+        for iid in instance_ids:
+            cmd += ["--instance-id", str(int(iid))]
+    else:
+        cmd.append("--all")
+
+    async with _surface_fit_progress_lock:
+        _surface_fit_progress[session_id] = {
+            "overall": {"phase": "starting", "started_at": time.time()},
+            "instances": {},
+        }
+    print(f"[SurfaceFit] ▶ run session={session_id} "
+          f"instances={'ALL' if not instance_ids else instance_ids}")
+
+    async def _bg():
+        global _surface_fit_subprocess
+        result = None
+        try:
+            proc = _track_worker(await asyncio.create_subprocess_exec(
+                *cmd, cwd=str(SERVER_DIR),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                preexec_fn=_die_with_parent_sigkill,
+            ))
+            async with _surface_fit_lock:
+                _surface_fit_subprocess = proc
+            assert proc.stdout is not None
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", "ignore").rstrip()
+                if not line:
+                    continue
+                if line.startswith("[SFIT-PROGRESS]"):
+                    try:
+                        upd = json.loads(line[len("[SFIT-PROGRESS]"):])
+                        async with _surface_fit_progress_lock:
+                            st = _surface_fit_progress.setdefault(session_id, {
+                                "overall": {}, "instances": {}})
+                            iid = upd.get("instance_id")
+                            if iid is not None:
+                                st["instances"][str(iid)] = upd
+                            st["overall"]["phase"] = upd.get("phase", "running")
+                            st["overall"]["elapsed"] = upd.get("elapsed")
+                    except Exception:
+                        pass
+                elif line.startswith("[SFIT-RESULT]"):
+                    try:
+                        result = json.loads(line[len("[SFIT-RESULT]"):])
+                    except Exception:
+                        result = None
+                else:
+                    try:
+                        print(f"[SurfaceFit] {line}", flush=True)
+                    except (BrokenPipeError, OSError):
+                        pass
+            await proc.wait()
+            ok = bool(result and result.get("ok"))
+            async with _surface_fit_progress_lock:
+                _surface_fit_progress.setdefault(session_id, {})["overall"] = {
+                    "phase": "done" if ok else "error",
+                    "result": result,
+                    "finished_at": time.time(),
+                }
+            print(f"[SurfaceFit] {'✅ done' if ok else '❌ failed'}: "
+                  f"{len((result or {}).get('ok', []))} fitted")
+        except Exception as e:
+            import traceback as _tb
+            _tb.print_exc()
+            async with _surface_fit_progress_lock:
+                _surface_fit_progress.setdefault(session_id, {})["overall"] = {
+                    "phase": "error", "error": str(e), "finished_at": time.time(),
+                }
+        finally:
+            async with _surface_fit_lock:
+                _surface_fit_subprocess = None
+
+    task = asyncio.create_task(_bg())
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return {"ok": True, "started": True,
+            "mode": "scene" if not instance_ids else "instances"}
+
+
+@app.get("/api/segmentation/surface_fit/progress/{session_id}")
+async def surface_fit_progress(session_id: str):
+    async with _surface_fit_progress_lock:
+        st = _surface_fit_progress.get(session_id,
+                                       {"overall": {"phase": "idle"}, "instances": {}})
+        return {"ok": True, "overall": dict(st.get("overall", {})),
+                "instances": list(st.get("instances", {}).values())}
+
+
+@app.get("/api/segmentation/surface_fit/list/{session_id}")
+async def surface_fit_list(session_id: str):
+    """Fitted surfaces of a session (viewer auto-load, parity with shape/list)."""
+    ctx = _ctx(session_id)
+    base = ctx.output_dir / "surface_fit"
+    out = []
+    if base.exists():
+        for d in sorted(p for p in base.iterdir() if p.is_dir()):
+            meta_p = d / "meta.json"
+            if not meta_p.exists():
+                continue
+            try:
+                meta = json.loads(meta_p.read_text())
+            except Exception:
+                continue
+            entry = {"folder": d.name, "meta": meta}
+            for fname, key in (("surface.glb", "glb_url"),
+                               ("surface.ply", "ply_url"),
+                               ("deviation.ply", "deviation_url"),
+                               ("heatmap.png", "heatmap_url"),
+                               ("residuals.json", "residuals_url")):
+                if (d / fname).exists():
+                    entry[key] = (f"/api/segmentation/surface_fit/file/"
+                                  f"{session_id}/{d.name}/{fname}")
+            out.append(entry)
+    scene_rep = base / "scene_report.json"
+    report = None
+    if scene_rep.exists():
+        try:
+            report = json.loads(scene_rep.read_text())
+        except Exception:
+            report = None
+    return {"ok": True, "surfaces": out, "scene_report": report}
+
+
+@app.get("/api/segmentation/surface_fit/file/{session_id}/{folder}/{filename}")
+async def surface_fit_file(session_id: str, folder: str, filename: str):
+    """Serve a surface_fit artifact (GLB/PLY/PNG/JSON)."""
+    from fastapi.responses import FileResponse
+    if "/" in folder or ".." in folder or "/" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid path component")
+    ctx = _ctx(session_id)
+    full_path = ctx.output_dir / "surface_fit" / folder / filename
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+    media = {"glb": "model/gltf-binary", "json": "application/json",
+             "png": "image/png", "ply": "application/octet-stream"}.get(
+        filename.rsplit(".", 1)[-1], "application/octet-stream")
+    return FileResponse(str(full_path), media_type=media,
+                        headers={"Cache-Control": "no-cache"})
 
 
 # ── Reconstruction v2 (semantic-geometric, neighbor-aware) ─────────────
@@ -5196,13 +5358,12 @@ async def viewer_websocket(websocket: WebSocket):
                 session_id = cmd.get("session_id")
                 print(f"[Pipeline] 🔧 Starting pipeline for session {session_id}")
 
-                # Build stages from client config or defaults
-                stages_config = cmd.get("stages", None)  # e.g. {"reconstruction": true, "vlm": false}
-                ordered_stages = cmd.get("ordered_stages", None) # e.g. ["vlm", "sam3", "reconstruction", "cloudcompy"]
-                
+                # The pipeline ALWAYS runs end-to-end (reconstruction → cloudcompy
+                # → tsdf) — any stage selection the client might still send is
+                # deliberately ignored (see build_pipeline_stages).
                 from pipeline_manager import build_pipeline_stages
                 _recon_backend = cfg.get("reconstruction", {}).get("backend", "da3")
-                stages = build_pipeline_stages(ordered_stages=ordered_stages, enabled=stages_config, backend=_recon_backend)
+                stages = build_pipeline_stages(backend=_recon_backend)
 
                 # Progress callback: relay to this websocket + broadcast
                 from task_manager import task_manager as _tm

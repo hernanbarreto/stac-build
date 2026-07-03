@@ -154,3 +154,10 @@ server/git.txt
 vendor/vggt-omega/
 vendor/vggt-omega-weights/
 .claude/
+
+# MeshFlow vendor (repo + 4.5GB gated checkpoint) — cloned/downloaded by setup
+vendor/meshflow/
+# SAM 3.1 vendor checkout (latest main; sam3 env keeps the pinned 3.0 copy)
+vendor/sam31/
+# Retired-module safety net (env ymls + weights pending final deletion)
+archive/

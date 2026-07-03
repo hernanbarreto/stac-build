@@ -545,6 +545,17 @@ reconstruction:
   # relative drift) → refined camera_poses.txt. The TSDF then integrates depth at the refined
   # poses. Applies to ALL chunked backbones — da3, mapanything AND vggtomega (for omega
   # the order is Omega → scale_align → BA, so the BA refines already-metric poses).
+  fine_register:                        # surface_fit stage 0 — INDEPENDENT of the BA (which stays
+    enabled: true                       # off): plane-constrained point-to-plane alignment between
+                                        # chunk PLYs, run before CloudComPy merges them. Collapses
+                                        # the residual mm→cm inter-chunk bias that becomes TSDF
+                                        # double layers; the affected frame poses get the same rigid
+                                        # correction (backup camera_poses.txt.prefinereg). Best-effort.
+    # accept_sep_m: 0.024               # acceptance: residual plane separation; default 2×tsdf.voxel_length
+    # max_correction_m: 0.12            # corrections beyond this are refused (that's a pose problem,
+                                        # not residual bias — fix upstream, don't fake alignment).
+                                        # 0.12 (was 0.08): test3 measured 65 mm of REAL VGGT drift
+                                        # between chunks — the old cap left no headroom.
   bundle_adjust:
     enabled: false                      # OFF — the global BA DEGRADED the result on the metric
                                         # vggtomega recon (A/B vs baseline_noBA was worse). Omega
@@ -729,3 +740,76 @@ coverage_engine:
   sample_density: 4.0                  # BIM samples per m²
   completion_threshold: 80.0           # % coverage → COMPLETED
   quality_threshold: 80.0              # % within tolerance → COMPLETED
+
+# ── Surface Fit (measurement-backed smooth surfaces; replaces ShapeR for architectural classes) ──
+# Fits the lowest-DOF smooth model that explains each SAM3 segment (plane →
+# quadric → swept profile → B-spline) and keeps the point→surface residuals as
+# the fidelity deliverable (stats + heatmap + findings). The geometry is never
+# smoothed: the model is fitted and the deviations are preserved as measurement.
+# Keys mirror reconstruction.surface_fit.runner.fit_segment kwargs (introspected —
+# see build_surface_fit_kwargs; unknown keys are ignored).
+surface_fit:
+  models: [plane, cylinder, sphere, swept_profile, bspline]  # escalation ladder, lowest DOF first;
+                              # remove entries to forbid a model (e.g. [plane] forces plane-only)
+  consolidate_method: auto    # stage-1 layer collapse before fitting: auto (WLOP, MLS if CGAL env
+                              # missing) | wlop | mls | none. Residual reports ALWAYS use the
+                              # original cloud — consolidation only feeds the fitter.
+  consolidate_radius_m: 0.06  # WLOP/MLS neighborhood radius; must exceed the layer separation
+                              # (double layers thicker than this won't collapse — fix registration)
+  wlop_select_percentage: 25.0 # WLOP also downsamples: output = this % of input points
+  wlop_iterations: 30
+  plane_dist_thresh: 0.012    # RANSAC inlier distance (m) — matches the repo-wide 1.2 cm default
+  ransac_iters: 500
+  min_inlier_frac: 0.30       # below this the segment has no dominant surface → no fit
+  max_fit_points: 400000      # fits subsample down to this (deterministic); residuals ALWAYS use
+                              # every original point — fidelity is never subsampled
+  grid_cell_m: 0.05           # UV cell for residual gridding (heatmap px, Moran's I, findings).
+                              # Cell means average sensor noise → the grid exposes registration/
+                              # shape structure. 5 cm ≈ good balance for rooms and tunnel sections.
+  morans_z_max: 4.0           # escalate when ALL: z-score > this (statistically structured)…
+  morans_i_min: 0.05          # …AND Moran's I > this (not just a huge-N artifact)…
+  structure_min_mm: 1.5       # …AND the structure's amplitude exceeds this. Sub-mm systematic
+                              # wiggles are real but irrelevant vs construction tolerances —
+                              # don't trade a 5-DOF cylinder for a 400-DOF spline over them.
+  flatness_tol_mm: 5.0        # construction spec: max deviation under the straightedge window…
+  flatness_span_m: 2.0        # …of this size (default "5 mm under 2 m")
+  finding_dev_mm: 5.0         # |cell mean| above this → candidate finding zone (panza/depresión)
+  finding_min_area_m2: 0.05   # ignore smaller zones (sensor speckle, isolated clutter)
+  tilt_mm_per_m: 3.0          # residual gradient above this on a wall → 'tilt' finding (desplome)
+  support_radius_m: 0.08      # NO-EXTRAPOLATION radius: mesh exists only where measured points
+                              # lie within this distance (holes in data stay holes in the model)
+  mesh_resolution_m: 0.05     # output mesh quad size (m); small enough for mvs-texturing UVs
+  heatmap_vmax_mm: null       # symmetric color range of heatmap/deviation PLY; null = auto (p98,
+                              # floor 2 mm so near-perfect surfaces don't dramatize noise)
+  ctrl_point_spacing_m: 0.5   # B-spline control-point spacing — the geometric low-pass: follows
+                              # real curvature, physically cannot follow high-frequency noise
+  section_spacing_m: 0.20     # swept-profile cross-section spacing along the axis (vaults/tunnels)
+  # ── scene-level (stages 3 + 5) ──
+  fitted_roles: [wall, floor, ceiling, slab, vault, tunnel, column, beam, deck, platform, ramp]
+                              # SAM3 labels (substring match) that get fitted surfaces; every other
+                              # class keeps the existing TSDF crop path unchanged (hybrid scene)
+  regularize: true            # stage 3: GlobFit-style plane snapping + clean edges
+  regularize_angle_tol_deg: 1.0 # snap parallel/orthogonal/vertical within this angle ONLY — a
+                              # larger real deviation is a construction finding, never forced
+  coplanar_tol_mm: 10.0       # same-direction planes within this offset merge to one plane
+  snap_edge_dist_m: 0.10      # boundary vertices within this of an adjacent plane slide onto the
+                              # exact intersection line (clean wall/floor edges, no extrapolation)
+
+# ── MeshFlow (generative per-object meshes; replaces ShapeR) ──────────
+# ⚠ NON-METRIC: MeshFlow outputs are GENERATIVE visual assets (furniture,
+# equipment, signage) — never metric deliverables. The metric surfaces come
+# from surface_fit; scene geometry stays TSDF. Outputs are named
+# <folder>_visual.glb and carry "metric": false in meta.json.
+# Routing: architectural classes (surface_fit.fitted_roles) never reach
+# MeshFlow; oversized segments stay on the TSDF path.
+meshflow:
+  steps: 28                   # flow-matching denoise steps (vendor default)
+  guidance_scale: 2.5         # CFG — only effective when a reference image is provided
+  seed: 42
+  dtype: fp16
+  num_verts: null             # vertex-budget control (needs use_proj_cond_on_temb in the
+                              # model config; null = model default ~4096)
+  max_extent_m: 6.0           # segments larger than this skip MeshFlow (object budget,
+                              # not scenes) and stay on the TSDF/surface_fit path
+  ref_image: null             # optional reference image path (DINOv3 conditioning);
+                              # requires the DINOv3 checkpoint (see weights/dinov3)

@@ -36,7 +36,7 @@ import numpy as np
 from PIL import Image
 
 # Reuse loaders from shaper_export to keep camera/PLY handling consistent.
-from segmentation.shaper_export import (
+from segmentation.session_io import (
     CameraSource,
     _load_camera_source,
     _safe_label,
@@ -961,7 +961,7 @@ def export_tsdf_meshes(
 
     # Depth source — first try Stray (sibling dir), then DA3 (output dir).
     stray_depth = None
-    from segmentation.shaper_export import _find_stray_dir
+    from segmentation.session_io import _find_stray_dir
     stray_dir = _find_stray_dir(session_dir)
     if stray_dir is not None:
         stray_depth = _resolve_stray_depth(stray_dir)
@@ -1572,7 +1572,7 @@ def export_tsdf_scene(
     #   da3 / mapanything → DA3 / VGGT-Long neural depth
     #   da3_lidar / lidar → raw Stray LiDAR (256×192) + confidence
     backend = _read_recon_backend(output_dir)
-    from segmentation.shaper_export import _find_stray_dir
+    from segmentation.session_io import _find_stray_dir
     stray_dir = _find_stray_dir(session_dir)
     stray_depth = (_resolve_stray_depth(stray_dir, conf_min=conf_min)
                    if stray_dir is not None else None)

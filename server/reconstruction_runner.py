@@ -103,7 +103,7 @@ def _selected_frame_indices(frames_dir: Path):
 def _load_cameras(session_dir: Path, output_dir: Path):
     """The camera source (pose_map / K_for / source_resolution) or None."""
     try:
-        from segmentation.shaper_export import _load_camera_source
+        from segmentation.session_io import _load_camera_source
     except Exception:
         return None
     try:
@@ -258,7 +258,7 @@ def _load_tsdf_mesh(output_dir: Path, label: str, iid: int):
 
 def _detect_world_up(cam_positions: np.ndarray, points: np.ndarray) -> np.ndarray:
     try:
-        from segmentation.shaper_export import _detect_world_up as _du
+        from segmentation.session_io import _detect_world_up as _du
         return _world_up_vec(_du(np.asarray(cam_positions, dtype=np.float64),
                                  np.asarray(points, dtype=np.float64)))
     except Exception:
@@ -441,8 +441,12 @@ def run_reconstruction(session_id: str, output_dir, frames_dir,
                 el = reconstruct_element(cls, instance_id=iid, label=label, xyz=xyz_inst,
                                          xyz_hc=xyz_hc, world_up=world_up, caption=caption,
                                          caption_fields=cap_fields, source_indices=gi, obb=obb)
-            if el is None:   # volumetric_mesh, or a parametric fit fell through → ShapeR / placeholder
-                glb = shape_dir / folder / f"{folder}.glb"
+            if el is None:   # volumetric_mesh, or a parametric fit fell through → generated mesh / placeholder
+                # MeshFlow names its output <folder>_visual.glb (non-metric marker);
+                # legacy ShapeR runs left <folder>.glb — accept both.
+                glb = shape_dir / folder / f"{folder}_visual.glb"
+                if not glb.exists():
+                    glb = shape_dir / folder / f"{folder}.glb"
                 if use_shaper_glbs and glb.exists():
                     # double-bound regime: visual-hull carve against this instance's
                     # SAM3 masks (upper bound) + shrink-wrap onto its TSDF surface
@@ -450,7 +454,7 @@ def run_reconstruction(session_id: str, output_dir, frames_dir,
                     inst_views = _instance_camera_views(cam, mask_store, iid, frames_dir)
                     tsdf_mesh = inst_tsdf_mesh   # already loaded above for the classifier
                     if inst_views or tsdf_mesh is not None:
-                        print(f"[ReconV2]   #{iid} {label}: ShapeR mesh + "
+                        print(f"[ReconV2]   #{iid} {label}: generated mesh + "
                               f"{len(inst_views)} masked views + "
                               f"{'TSDF' if tsdf_mesh is not None else 'no TSDF'}")
                     el = reconstruct_mesh_from_glb(glb, instance_id=iid, label=label,

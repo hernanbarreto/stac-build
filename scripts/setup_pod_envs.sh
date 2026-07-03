@@ -44,12 +44,12 @@ for env in "${ENVS[@]}"; do
     echo "  - $env  ($(wc -l <"$dst") líneas)"
 done
 
-# Shaper: si no está en migration, lo exportamos desde local sin builds
-if [[ ! -f "$STAGE_DIR/shaper.yml" ]]; then
-    if [[ -d "$HOME/miniforge3/envs/shaper" ]]; then
-        echo "  - shaper (exportando desde local sin builds)"
+# MeshFlow: si no está en migration, lo exportamos desde local sin builds
+if [[ ! -f "$STAGE_DIR/meshflow.yml" ]]; then
+    if [[ -d "$HOME/miniforge3/envs/meshflow" ]]; then
+        echo "  - meshflow (exportando desde local sin builds)"
         source "$HOME/miniforge3/etc/profile.d/conda.sh"
-        conda env export -n shaper --no-builds > "$STAGE_DIR/shaper.yml"
+        conda env export -n meshflow --no-builds > "$STAGE_DIR/meshflow.yml"
     fi
 fi
 

@@ -3,7 +3,6 @@
  * Hernán Barreto — Ingerop IN3
  */
 import { useState, useCallback, useEffect, useRef } from 'react'
-import type { ReactNode } from 'react'
 import './App.css'
 import Viewport, { ViewportHandle, SegmentInstance } from './components/Viewport'
 import { SyncPlayer } from './components/SyncPlayer'
@@ -18,13 +17,12 @@ import AdminPage from './pages/AdminPage'
 import SegmentationManager from './components/InteractiveSegmentation'
 import { useConfirmDialog } from './components/ConfirmDialog'
 import {
-  Search, Tag, Hammer, Brush, Sparkles, Plug, Upload, Settings, Crosshair,
+  Search, Tag, Hammer, Plug, Upload, Settings, Crosshair,
   Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
   Move, Palette, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D,
   Building2, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
   Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
   Scale, Thermometer, Loader2, BarChart3, Home, Pencil, Camera, Plus, SlidersHorizontal,
-  Box,
 } from 'lucide-react'
 
 interface SessionInfo {
@@ -123,19 +121,9 @@ function App() {
   const [pipelineDialogOpen, setPipelineDialogOpen] = useState(false)
   const [pipelineDialogSession, setPipelineDialogSession] = useState<string | null>(null)
 
-  const STAGE_DEF: Record<string, { label: string, icon: ReactNode }> = {
-    vlm: { label: 'Scene Analysis', icon: <Search size={14} /> },
-    sam3: { label: 'Segmentation', icon: <Tag size={14} /> },
-    reconstruction: { label: '3D Reconstruction', icon: <Hammer size={14} /> },
-    cloudcompy: { label: 'Global Cloud Cleaning', icon: <Brush size={14} /> },
-    tsdf: { label: 'TSDF Mesh', icon: <Box size={14} /> },
-    instance_cleaner: { label: 'Instance Isolation & Erosion', icon: <Sparkles size={14} /> },
-  }
-  const [pipelineOrder] = useState<string[]>(['reconstruction', 'cloudcompy', 'tsdf', 'vlm', 'sam3', 'instance_cleaner'])
-  const [pipelineEnabled, setPipelineEnabled] = useState<Record<string, boolean>>({
-    reconstruction: true, cloudcompy: true, tsdf: true, vlm: true, sam3: true, instance_cleaner: true
-  })
-
+  // The pipeline always runs end-to-end (reconstruction → cloud cleaning →
+  // TSDF); the backend ignores any stage selection, so the dialog only asks
+  // which scans to rebuild and whether to replace existing outputs.
   const [pipelineReplace, setPipelineReplace] = useState(true)
   const [pipelineRunning, setPipelineRunning] = useState<PipelineState | null>(() => {
     try {
@@ -289,8 +277,6 @@ function App() {
 
   // Shape export state
   const [showShapeModal, setShowShapeModal] = useState(false)
-  const [shapeCaptions, setShapeCaptions] = useState<Record<number, string>>({})
-  const [shapeAutoCaption, setShapeAutoCaption] = useState(false)
   const [shapeAutoReconstruct, setShapeAutoReconstruct] = useState(true)
   const [shapeRunning, setShapeRunning] = useState(false)
   // Ref-based busy guard. The `disabled` prop on the Start button only gates
@@ -301,7 +287,7 @@ function App() {
   // synchronously, so any second entry within the same JS turn is rejected.
   const shapeBusyRef = useRef(false)
   // Reconstruction-v2 ("scene") trigger — assembles parametric surfaces / swept
-  // solids / boxes / linear-repeats + free-form ShapeR meshes into output/scene/.
+  // solids / boxes / linear-repeats + free-form generated (MeshFlow) meshes into output/scene/.
   const [reconRunning, setReconRunning] = useState(false)
   const reconBusyRef = useRef(false)
   const [shapeResult, setShapeResult] = useState<{ count: number; exported: string[] } | null>(null)
@@ -334,7 +320,7 @@ function App() {
     } catch { /* ignore */ }
   }, [activeSession])
 
-  // Refresh ShapeR mesh list for the sidebar (mirrors what Viewport fetches —
+  // Refresh generated-mesh list for the sidebar (mirrors what Viewport fetches —
   // shared endpoint). Preserves visibility for instances that already exist
   // so a refresh after generation doesn't reset user-toggled hides.
   const refreshShapeMeshList = useCallback(async (sessionId: string) => {
@@ -972,15 +958,13 @@ function App() {
       viewportRef.current?.sendCommand({
         type: 'run_pipeline',
         session_id: pipelineDialogSession,
-        ordered_stages: pipelineOrder,
-        stages: pipelineEnabled,
         replace: pipelineReplace,
         scans: selectedScans,
       })
       const label = selectedScans.length === 1 ? selectedScans[0] : `${selectedScans.length} scans`
       setStatusMessage(`Pipeline started for ${pipelineDialogSession} (${label})...`)
     }, 500)
-  }, [pipelineDialogSession, pipelineOrder, pipelineEnabled, pipelineReplace, selectedScans])
+  }, [pipelineDialogSession, pipelineReplace, selectedScans])
 
   const handlePipelineCancel = useCallback(() => {
     const targetSession = pipelineRunning?.session_id || activeSession
@@ -1891,7 +1875,7 @@ function App() {
                           <span className="segment-label" style={{ flex: 1, fontStyle: 'italic', opacity: 0.7 }}>Unsegmented</span>
                         </div>
                       </div>
-                  {/* SHAPE section — generated ShapeR meshes (visibility toggles) */}
+                  {/* SHAPE section — generated MeshFlow meshes (visual, non-metric) (visibility toggles) */}
                   {shapeMeshes.length > 0 && (
                     <>
                       <div style={{
@@ -1913,7 +1897,7 @@ function App() {
                             <input
                               type="checkbox"
                               checked={m.visible}
-                              title="Toggle ShapeR mesh visibility"
+                              title="Toggle generated mesh visibility"
                               className="segment-checkbox"
                               onChange={() => {
                                 const newVis = !m.visible
@@ -2408,7 +2392,7 @@ function App() {
         pipelineDialogOpen && (
           <div className="pipeline-dialog-backdrop" onClick={() => setPipelineDialogOpen(false)}>
             <div className="pipeline-dialog" onClick={e => e.stopPropagation()}>
-              <h3>Configure Pipeline</h3>
+              <h3>Run Pipeline</h3>
               <p className="pipeline-dialog-session">Session: {pipelineDialogSession}</p>
 
               {/* Scan Selection */}
@@ -2445,39 +2429,9 @@ function App() {
                 </div>
               )}
               <div className="pipeline-dialog-stages">
-                <p style={{ fontSize: '11px', color: '#888', marginBottom: '10px' }}>Pipeline stages (fixed order):</p>
-                {pipelineOrder.map((stageId) => {
-                  const def = STAGE_DEF[stageId]
-                  // CloudCompy is always coupled with Reconstruction — can't be toggled independently
-                  const isCoupled = stageId === 'cloudcompy'
-                  const isDisabled = isCoupled
-                  return (
-                    <div key={stageId}
-                      style={{ display: 'flex', alignItems: 'center', padding: '8px', background: 'rgba(255,255,255,0.05)', marginBottom: '4px', borderRadius: '6px' }}
-                    >
-                      <span style={{ marginRight: '10px', color: '#555', fontSize: '12px', width: '16px', textAlign: 'center' }}>•</span>
-                      <label className="pipeline-stage-toggle" style={{ margin: 0, padding: 0, flex: 1, background: 'transparent', opacity: isDisabled ? 0.5 : 1 }}>
-                        <input
-                          type="checkbox"
-                          checked={pipelineEnabled[stageId] ?? true}
-                          disabled={isDisabled}
-                          onChange={e => {
-                            const checked = e.target.checked
-                            setPipelineEnabled(prev => {
-                              const next = { ...prev, [stageId]: checked }
-                              // Couple: Reconstruction on → CloudCompy on
-                              if (stageId === 'reconstruction') next.cloudcompy = checked
-                              return next
-                            })
-                          }}
-                        />
-                        <span className="pipeline-stage-check-icon">{def?.icon}</span>
-                        <span>{def?.label || stageId}</span>
-                        {isCoupled && <span style={{ fontSize: '10px', color: '#666', marginLeft: '8px' }}>(auto with Reconstruction)</span>}
-                      </label>
-                    </div>
-                  )
-                })}
+                <p style={{ fontSize: '11px', color: '#888', marginBottom: '10px' }}>
+                  Runs the full reconstruction end-to-end: 3D Reconstruction → Cloud Cleaning → TSDF Mesh
+                </p>
                 {(() => {
                   const partial = scansList.filter(s => selectedScans.includes(s.key) && s.recon_state === 'partial')
                   if (partial.length === 0) return null
@@ -2786,17 +2740,6 @@ function App() {
                               ⚠️ This object already has a mesh. Running will overwrite it.
                             </div>
                           )}
-                          <input
-                            type="text"
-                            placeholder="Caption (optional — leave blank to auto-caption or use the SAM3 label)"
-                            value={shapeCaptions[seg.id] || ''}
-                            onChange={e => setShapeCaptions(prev => ({ ...prev, [seg.id]: e.target.value }))}
-                            style={{
-                              width: '100%', padding: '5px 8px', fontSize: 12,
-                              background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
-                              borderRadius: 4, color: 'var(--text-primary)',
-                            }}
-                          />
                         </>
                       )}
                     </div>
@@ -2804,16 +2747,15 @@ function App() {
                 })
               })()}
 
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, color: 'var(--text-secondary)', fontSize: 13 }}>
-                <input type="checkbox" checked={shapeAutoCaption} disabled={shapeRunning}
-                  onChange={e => setShapeAutoCaption(e.target.checked)} />
-                Auto-caption with InternVL3 (slow, ~30s per object)
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0 12px', color: 'var(--text-secondary)', fontSize: 13 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '12px 0 4px', color: 'var(--text-secondary)', fontSize: 13 }}>
                 <input type="checkbox" checked={shapeAutoReconstruct} disabled={shapeRunning}
                   onChange={e => setShapeAutoReconstruct(e.target.checked)} />
-                Reconstruct mesh after PKL (runs ShapeR — minutes per object on CPU)
+                Generate mesh after export (runs MeshFlow — ~12 s per object on GPU)
               </label>
+              <div style={{ fontSize: 11, color: '#888', margin: '0 0 12px 24px' }}>
+                ⚠ Visual asset (generative, non-metric). Architectural classes are routed to the
+                metric surface-fit pipeline instead.
+              </div>
 
               {shapeOverall.phase !== 'idle' && (shapeRunning || shapeOverall.phase === 'done' || shapeOverall.phase === 'error') && (
                 <div style={{
@@ -2872,25 +2814,19 @@ function App() {
                   setShapeProgress({})
                   setShapeOverall({ phase: 'exporting_pkl', total: shapeSelected.size, done: 0 })
                   try {
-                    const captions: Record<string, string> = {}
-                    for (const [k, v] of Object.entries(shapeCaptions)) {
-                      if (v.trim()) captions[k] = v.trim()
-                    }
                     const res = await fetch('/api/segmentation/shape/export', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({
                         session_id: activeSession,
-                        captions,
                         instance_ids: [...shapeSelected],
-                        auto_caption: shapeAutoCaption,
                         auto_reconstruct: shapeAutoReconstruct,
                       }),
                     })
                     const data = await res.json()
                     if (data.ok) {
                       setShapeResult({ count: data.count, exported: data.exported })
-                      setStatusMessage(`Shape: exported ${data.count} PKL(s)` +
+                      setStatusMessage(`Shape: exported ${data.count} segment(s)` +
                         (data.reconstructing ? ' — reconstructing mesh in background' : ''))
                       if (!data.reconstructing) {
                         await refreshShapeStatus()

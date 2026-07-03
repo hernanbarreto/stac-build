@@ -64,16 +64,20 @@ conda env create -f environment_sam3.yml
 # Opcional (Si usas el fallback de MapAnything)
 conda env create -f environment_mapanything.yml
 
-# Recrear ShapeR (reconstrucción 3D generativa)
-conda env create -f environment_shaper.yml
+# Recrear MeshFlow (mallas generativas por objeto — reemplazo de ShapeR)
+conda env create -f environment_meshflow.yml
 ```
 
-> [!WARNING]
-> El env **`shaper`** NO queda completo solo con el YAML: `torchsparse` debe
-> **compilarse a mano** para la GPU (la A100 necesita `sm_80`), y hay que
-> descargar el modelo **InternVL3-8B** para el autocaption. Seguí los pasos de
-> **[`SHAPER_A100_SETUP.md`](./SHAPER_A100_SETUP.md)** — sin eso, ShapeR falla con
-> "no kernel image is available" y el autocaption cae al fallback.
+> [!NOTE]
+> **MeshFlow** (Meta, CVPR 2026) reemplazó a ShapeR: consume la nube del
+> segmento directamente (sin PKLs multi-vista, sin torchsparse, sin captions) y
+> genera un GLB en ~12 s en la A100. Sus salidas son **assets visuales
+> no-métricos** (`*_visual.glb`, `"metric": false` en meta.json). El env es solo
+> el YAML + el checkpoint gated `facebook/meshflow` (HF_TOKEN) descargado a
+> `vendor/meshflow/ckpt/meshflow/` (`config.yaml` + `model.pth`, 4.5 GB). Para
+> condicionamiento por imagen de referencia hace falta además el checkpoint
+> DINOv3 `dinov3_vitl16` en `/workspace/weights/dinov3/` (link firmado de Meta,
+> expira a las ~48 h — la vía nube→malla no lo necesita).
 
 Probablemente en `da3` y `sam3` Conda descargue temporalmente los runtimes de CUDA y un montón de *GBs* la primera vez, pero es todo automático. No tienes que configurar el path ni lidiar con librerías `nvccs` a mano.
 
@@ -107,9 +111,9 @@ autofirmado).
 > - `server/git.txt` — tokens de GitHub (`ghp_…`) y HuggingFace (`hf_…`). Recrealo con tus tokens.
 > - `server/projects/**` — datos de escaneos/proyectos (GLB, PLY, npz). Restaurá desde tu backup.
 
-## ShapeR / TSDF y compilación de torchsparse para A100
+## MeshFlow / TSDF
 
-Ver **[`SHAPER_A100_SETUP.md`](./SHAPER_A100_SETUP.md)** para el detalle de:
-- compilar `torchsparse` para `sm_80` (incluye el parche del `setup.py`),
-- descargar los modelos (InternVL3-8B, ShapeR checkpoints, SAM3),
-- cómo arranca cada subsistema (backend en `da3`, ShapeR en `shaper`).
+MeshFlow corre en el env `meshflow` (torch 2.8 cu126) lanzado on-demand por el
+backend vía `server/run_meshflow.sh`; no requiere compilar extensiones CUDA.
+El histórico de ShapeR (torchsparse/A100, checkpoints) quedó archivado en
+`archive/` (env yml + pesos) y en la historia de git.

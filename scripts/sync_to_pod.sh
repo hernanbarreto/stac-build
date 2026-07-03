@@ -43,10 +43,10 @@ rsync "${RSYNC_OPTS[@]}" --delete \
       "$REPO_DIR/server/" \
       "$POD_USER@$POD_HOST:$POD_DEST/server/"
 
-# vendor/{MILo, depth-anything-3, sam3, ShapeR} → /workspace/stac-builder/vendor/<X>/
+# vendor/{MILo, depth-anything-3, sam3, meshflow} → /workspace/stac-builder/vendor/<X>/
 ssh -p "$POD_PORT" -i "$POD_KEY" -o StrictHostKeyChecking=accept-new \
     "$POD_USER@$POD_HOST" "mkdir -p $POD_DEST/vendor"
-for vd in MILo depth-anything-3 sam3 ShapeR; do
+for vd in MILo depth-anything-3 sam3 meshflow; do
     if [[ -d "$REPO_DIR/vendor/$vd" ]]; then
         echo "[sync] vendor/$vd"
         rsync "${RSYNC_OPTS[@]}" --delete \

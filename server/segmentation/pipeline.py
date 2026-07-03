@@ -93,30 +93,8 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
         # ── Step 4: Match masks to cloud and cache final result ──
         result = _match_and_save_result(output_dir)
         
-        # ── Step 5: Export ShapeR pkl files for each instance ──
-        # NOTE: ShapeR export is temporarily disconnected from the segmentation manager.
-        # It will be executed as a separate standalone step later to reduce memory load.
-        # if result.get("instances"):
-        #     try:
-        #         from segmentation.shaper_export import export_shaper_pkls
-        #         from segmentation.object_captioner import caption_object
-        #         
-        #         session_dir = frames_dir.parent
-        #         pkl_paths = export_shaper_pkls(
-        #             output_dir=output_dir,
-        #             frames_dir=frames_dir,
-        #             segments_result=result,
-        #             session_dir=session_dir,
-        #             caption_fn=caption_object,
-        #         )
-        #         if pkl_paths:
-        #             print(f"[SegPipeline] 📦 ShapeR export: {len(pkl_paths)} pkl files")
-        #         else:
-        #             print("[SegPipeline] ⚠️ ShapeR export produced no pkl files")
-        #     except Exception as e:
-        #         print(f"[SegPipeline] ⚠️ ShapeR export failed (non-fatal): {e}")
-        #         import traceback
-        #         traceback.print_exc()
+        # (Step 5 removed: the ShapeR PKL export is gone — MeshFlow mesh
+        # generation runs on demand via /api/segmentation/shape/export.)
         
         if result.get("instances"):
             return result
