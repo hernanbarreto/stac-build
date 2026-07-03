@@ -266,6 +266,40 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if (recon_cfg.get("bundle_adjust", {}) or {}).get("enabled"):
         _run_bundle_adjust_step(pipe, frames_dir, output_dir, recon_cfg)
 
+    # ── Step 6: structure-assisted FINE registration between chunks (surface_fit
+    # stage 0). Independent of the BA (which stays OFF for vggtomega — it degrades
+    # the VGGT poses): the mm→cm inter-chunk bias that becomes TSDF double layers
+    # is corrected directly on the chunk PLYs via plane-constrained point-to-plane
+    # alignment, and the affected frame poses get the same rigid correction so
+    # cloud↔TSDF stay consistent. Runs BEFORE CloudCompPy merges the chunks.
+    # Best-effort: a failure logs and continues (the chunks are still valid,
+    # just layered — the surface_fit stage-1 WLOP will partially compensate). ──
+    if (recon_cfg.get("fine_register", {}) or {}).get("enabled", True):
+        _run_fine_register_step(pipe, output_dir, recon_cfg)
+
+
+def _run_fine_register_step(pipe: WorkerPipe, output_dir: Path, recon_cfg: dict):
+    """surface_fit stage 0 over output/chunk_*.ply (reproject_chunks contract).
+    Skips itself when there are <2 backbone chunks (nothing to register)."""
+    server_dir = Path(__file__).resolve().parent.parent
+    py = sys.executable
+    pipe.send_progress(68, "Fine inter-chunk registration (plane-constrained)...",
+                       stage="reconstruction")
+    cmd = [py, "-m", "reconstruction.surface_fit.fine_register",
+           "--output-dir", str(output_dir)]
+    fcfg = recon_cfg.get("fine_register", {}) or {}
+    if fcfg.get("accept_sep_m") is not None:
+        cmd += ["--accept-sep", str(fcfg["accept_sep_m"])]
+    if fcfg.get("max_correction_m") is not None:
+        cmd += ["--max-correction", str(fcfg["max_correction_m"])]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, bufsize=1, cwd=str(server_dir))
+    for line in p.stdout:
+        pipe.send_log("[finereg] " + line.rstrip())
+    if p.wait() != 0:
+        pipe.send_log("[finereg] ⚠ fine registration failed — continuing with "
+                      "unregistered chunks", level="warning")
+
 
 def _run_dense_fusion(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                       config: dict, recon_cfg: dict):
