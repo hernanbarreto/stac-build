@@ -100,6 +100,15 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     }, [])
 
     const currentFrame = keyframes[kfIndex] || null
+
+    // Keep the active thumbnail visible in the carousel when the viewer
+    // navigates (thumbnail click, ◀/▶ buttons, or propagate progress).
+    const thumbRefs = useRef<(HTMLDivElement | null)[]>([])
+    useEffect(() => {
+        thumbRefs.current[kfIndex]?.scrollIntoView({
+            behavior: 'smooth', block: 'nearest', inline: 'center',
+        })
+    }, [kfIndex])
     // SAM3 now loads only keyframes sequentially (via temp dir).
     // The SAM3 frame_idx is the position in the sorted keyframes list = kfIndex.
     const currentFrameIdx = kfIndex
@@ -1133,17 +1142,26 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                             </div>
                         </div>
 
-                        {/* Frames Gallery */}
+                        {/* Frames Gallery. Clicking a thumbnail NAVIGATES the viewer to
+                            that frame (never toggles selection — that's the checkbox's
+                            job); the active thumbnail is kept scrolled into view. */}
                         <div className="seg-frames-bar" style={{ display: 'flex', overflowX: 'auto', gap: 6, padding: '8px', background: '#222', borderTop: '1px solid #333' }}>
                             {keyframes.map((kf, i) => (
-                                <div key={i} style={{ position: 'relative', flexShrink: 0, cursor: 'pointer', opacity: selectedFrames.has(i) ? 1 : 0.4 }} onClick={() => {
-                                    const next = new Set(selectedFrames)
-                                    if (next.has(i)) next.delete(i)
-                                    else next.add(i)
-                                    setSelectedFrames(next)
-                                }}>
+                                <div key={i} ref={el => { thumbRefs.current[i] = el }}
+                                    style={{ position: 'relative', flexShrink: 0, cursor: 'pointer', opacity: selectedFrames.has(i) ? 1 : 0.4 }}
+                                    onClick={() => setKfIndex(i)}>
                                     <img src={`/api/sessions/${sessionId}/frames/${kf}`} style={{ height: 40, borderRadius: 4, border: kfIndex === i ? '2px solid #3498db' : '1px solid transparent' }} />
-                                    <input type="checkbox" checked={selectedFrames.has(i)} readOnly style={{ position: 'absolute', top: 2, right: 2, margin: 0, cursor: 'pointer', transform: 'scale(0.8)' }} />
+                                    <input type="checkbox" checked={selectedFrames.has(i)}
+                                        onClick={e => e.stopPropagation()}
+                                        onChange={() => {
+                                            setSelectedFrames(prev => {
+                                                const next = new Set(prev)
+                                                if (next.has(i)) next.delete(i)
+                                                else next.add(i)
+                                                return next
+                                            })
+                                        }}
+                                        style={{ position: 'absolute', top: 2, right: 2, margin: 0, cursor: 'pointer', transform: 'scale(0.8)' }} />
                                     <div style={{ position: 'absolute', bottom: 2, left: 2, fontSize: 9, background: 'rgba(0,0,0,0.7)', color: 'white', padding: '0 3px', borderRadius: 2 }}>{i + 1}</div>
                                 </div>
                             ))}
