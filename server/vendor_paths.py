@@ -23,9 +23,27 @@ _SERVER_DIR = Path(__file__).resolve().parent          # stac-builder/server/
 _PROJECT_ROOT = _SERVER_DIR.parent                     # stac-builder/
 VENDOR_ROOT = _PROJECT_ROOT / "vendor"                 # stac-builder/vendor/
 
-# ── SAM3 paths ───────────────────────────────────────────────────────
-SAM3_ROOT = VENDOR_ROOT / "sam3"                       # contains sam3/ package
-SAM3_WEIGHTS_DIR = _PROJECT_ROOT / "weights" / "sam3"  # model weights (gitignored)
+# ── SAM3 paths (version-switched) ────────────────────────────────────
+# `models.segmentation.version` in config.yaml picks the checkout:
+#   "sam3"   → vendor/sam3   (pinned SAM 3.0 — the validated baseline)
+#   "sam3.1" → vendor/sam31  (upstream main with Object Multiplex)
+# Read the YAML directly (NOT via config.py) to avoid an import cycle:
+# this module must run before anything else imports the sam3 package.
+def _segmentation_version() -> str:
+    try:
+        import yaml
+        with open(_SERVER_DIR / "config.yaml") as f:
+            c = yaml.safe_load(f) or {}
+        return str(((c.get("models") or {}).get("segmentation") or {})
+                   .get("version", "sam3"))
+    except Exception:
+        return "sam3"
+
+
+SEGMENTATION_VERSION = _segmentation_version()
+SAM3_ROOT = VENDOR_ROOT / ("sam31" if SEGMENTATION_VERSION == "sam3.1" else "sam3")
+SAM3_WEIGHTS_DIR = _PROJECT_ROOT / "weights" / "sam3"    # 3.0 weights (HF cache fallback)
+SAM31_WEIGHTS_DIR = _PROJECT_ROOT / "weights" / "sam31"  # sam3.1_multiplex.pt
 
 # ── CloudComPy paths ─────────────────────────────────────────────────
 CLOUDCOMPY_ROOT = VENDOR_ROOT / "cloudcompy"

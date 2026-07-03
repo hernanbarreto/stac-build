@@ -74,3 +74,16 @@ de keyframes vive en server/stray_da3_streaming.py::StrayDA3Streaming.run()
 (override que reproduce el run() base + filtra por selected_frames.json) y el
 modo da3 puro entra por server/run_da3_main.py (StrayDA3Streaming con
 stray_data=None). run_da3.sh apunta a ese entry point. NO hay que tocar vendor.
+## sam31_base_predictor_PATCHED.py
+Copy over `vendor/sam31/sam3/model/sam3_base_predictor.py`. Upstream main
+(SAM 3.1, 2026-07) forwards `offload_state_to_cpu` from `start_session` to
+`model.init_state()`, but the multiplex model's `init_state` doesn't accept
+it → `TypeError` on every start_session. The patch filters the kwargs by the
+target signature. Re-apply after updating vendor/sam31.
+
+## sam31_base_predictor_PATCHED.py
+Copy over `vendor/sam31/sam3/model/sam3_base_predictor.py`. Upstream main
+(SAM 3.1, 2026-07) forwards `offload_state_to_cpu` from `start_session` to
+`model.init_state()`, but the multiplex model's `init_state` doesn't accept
+it → `TypeError` on every start_session. The patch filters the kwargs by the
+target signature. Re-apply after updating vendor/sam31.

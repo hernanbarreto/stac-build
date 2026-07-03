@@ -58,7 +58,13 @@ conda env create -f environment_da3.yml
 # Recrear CloudComPy para post-procesado C++
 conda env create -f environment_CloudComPy310.yml
 
-# Recrear SAM3 (Segmentación AI)
+# Recrear SAM3 (Segmentación AI) — NOTA: desde 2026-07 la segmentación corre
+# EN EL ENV da3 (in-process del backend) con SAM 3.1 Object Multiplex:
+#   código: vendor/sam31 (checkout de facebookresearch/sam3 main, con el patch
+#           de server/patches/sam31_base_predictor_PATCHED.py aplicado)
+#   pesos:  weights/sam31/sam3.1_multiplex.pt (HF facebook/sam3.1, gated)
+#   switch: models.segmentation.version en server/config.yaml ("sam3" | "sam3.1")
+# Este yml solo recrea el env legacy si volvés a necesitarlo:
 conda env create -f environment_sam3.yml
 
 # Opcional (Si usas el fallback de MapAnything)

@@ -161,7 +161,10 @@ frame_selection:
 # ── Models: Segmentation (SAM 3 / SAM 3.1) ─────────────────────────
 models:
   segmentation:
-    version: "sam3"                    # "sam3" | "sam3.1" (Object Multiplex)
+    version: "sam3.1"                  # "sam3" | "sam3.1" (Object Multiplex). 3.1 measured on
+                                       # test3 (A100): 0.144 s/frame vs 0.884 (6.1x faster),
+                                       # equivalent masks; VRAM 23.5 GB (multiplex buckets) vs 6.4.
+                                       # Rollback = set "sam3" (vendor/sam3 checkout kept) + restart.
     device: "cuda"
 
     # SAM 3.1 Multiplex
