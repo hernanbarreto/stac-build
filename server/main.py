@@ -2870,9 +2870,19 @@ async def delete_segmentation_instance(request: Request):
                 # instance_id spaces overlap (e.g. door obj0/inst1 + ladder obj1/inst2:
                 # deleting "1" hit ladder's obj_id AND door's instance_id → both gone).
                 list_id = oid if oid is not None else iid
-                label_ok = (target_label is None
-                            or inst.get("label", "") == target_label)
-                if list_id == instance_id and label_ok:
+                if target_label is not None:
+                    # label pins the exact row, so the id may match EITHER
+                    # field: the UI's seg.id is the RESULT-space instance_id,
+                    # while this file's list_id prefers the SAM3 obj id —
+                    # requiring list_id equality alone missed the entry
+                    # entirely (wall2 id=3/instance_id=4: nothing deleted,
+                    # and the GET — whose source of truth is THIS file —
+                    # resurrected the row and its OBB in the viewer).
+                    hit = (inst.get("label", "") == target_label
+                           and instance_id in (oid, iid))
+                else:
+                    hit = (list_id == instance_id)
+                if hit:
                     if oid is not None:
                         obj_ids_to_remove.add(oid)
                     if iid is not None:
