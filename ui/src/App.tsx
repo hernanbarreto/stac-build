@@ -247,6 +247,11 @@ function App() {
 
   const [statusMessage, setStatusMessage] = useState('')
   const [segments, setSegments] = useState<SegmentInstance[]>([])
+  // Floor→y=0 leveling: candidates + which floor instance sits at y=0.
+  // Changing the combobox re-levels instantly (no confirm); the manager
+  // close and session load call the auto modes.
+  const [floorLevel, setFloorLevel] = useState<{ candidates: { instance_id: number, label: string, height_m: number | null }[], selected: number | null }>({ candidates: [], selected: null })
+  const floorLevelCheckedRef = useRef<string | null>(null)
   const [editingSegKey, setEditingSegKey] = useState<string | null>(null)
   const [segSearch, setSegSearch] = useState('')
 
@@ -832,6 +837,13 @@ function App() {
                 }
               }
               viewportRef.current?.refreshSegmentOBBs(activeSession)
+              // Floor→y=0: on load, detect an un-leveled floor and fix it
+              // (no-ops server-side when already level). Once per session.
+              if (floorLevelCheckedRef.current !== activeSession) {
+                floorLevelCheckedRef.current = activeSession
+                applyFloorLevel(activeSession, 'auto_if_needed')
+                refreshFloorLevel(activeSession)
+              }
             } catch { /* silent */ }
           }
         }
@@ -913,6 +925,36 @@ function App() {
       setStatusMessage(`Upload error: ${err?.message ?? err}`)
     }
   }, [token, pollVideoExtraction])
+
+  const refreshFloorLevel = useCallback(async (sessionId: string) => {
+    try {
+      const res = await fetch(`/api/segmentation/floor_level/${sessionId}`)
+      if (res.ok) {
+        const d = await res.json()
+        setFloorLevel({ candidates: d.candidates || [], selected: d.selected ?? null })
+      }
+    } catch { /* panel simply hides the combobox */ }
+  }, [])
+
+  const applyFloorLevel = useCallback(async (
+    sessionId: string, mode: 'auto' | 'explicit' | 'auto_if_needed', instanceId?: number
+  ) => {
+    try {
+      const res = await fetch('/api/segmentation/level_floor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, mode, instance_id: instanceId }),
+      })
+      if (!res.ok) return
+      const d = await res.json()
+      if (d.candidates) setFloorLevel({ candidates: d.candidates, selected: d.selected ?? null })
+      if (d.leveled && d.changed && d.matrix) {
+        viewportRef.current?.setFloorTransform(d.matrix)
+        viewportRef.current?.refreshSegmentOBBs(sessionId)
+        setStatusMessage(`Floor leveled to y=0 (was ${d.residual_before_mm ?? '?'} mm off)`)
+      }
+    } catch { /* non-fatal */ }
+  }, [])
 
   const handleReconstruct = useCallback(async (sessionId: string) => {
     setPipelineDialogSession(sessionId)
@@ -1755,6 +1797,29 @@ function App() {
                     <span className="bim-search-clear" onClick={() => setSegSearch('')}>✕</span>
                   )}
                 </div>
+                {floorLevel.candidates.length > 0 && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', borderBottom: '1px solid rgba(255,255,255,0.08)', fontSize: 12 }}>
+                    <span title="Selected floor is leveled to y=0 on the XZ plane" style={{ color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>Floor @ y=0</span>
+                    <select
+                      value={floorLevel.selected ?? ''}
+                      onChange={e => {
+                        const iid = parseInt(e.target.value)
+                        if (!Number.isNaN(iid) && activeSession) {
+                          // applies immediately — no confirmation by design
+                          applyFloorLevel(activeSession, 'explicit', iid)
+                        }
+                      }}
+                      style={{ flex: 1, background: 'var(--bg-input, #222)', color: 'var(--text-primary)', border: '1px solid var(--border, #444)', borderRadius: 4, padding: '2px 6px', fontSize: 12 }}
+                    >
+                      {floorLevel.selected == null && <option value="">(auto: lowest)</option>}
+                      {floorLevel.candidates.map(c => (
+                        <option key={c.instance_id} value={c.instance_id}>
+                          {c.label} #{c.instance_id}{c.height_m != null ? ` (y=${c.height_m.toFixed(2)}m)` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 <div className="segments-list" style={{ flex: 1, overflowY: 'auto' }}>
                   {segments.length === 0 && (
                     <div style={{ padding: '14px 16px 6px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '12px', opacity: 0.6 }}>
@@ -2580,6 +2645,11 @@ function App() {
                     })))
                   }
                   viewportRef.current?.refreshSegmentOBBs(sid)
+                  // Floor→y=0 after finalize: level the selected floor (or the
+                  // lowest when several) — the manager may have created/edited
+                  // floor segments (applies instantly, no confirmation).
+                  await applyFloorLevel(sid, 'auto')
+                  refreshFloorLevel(sid)
                   // Reload Potree so new classification data (classId per point) takes effect
                   viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid })
                 }

@@ -2134,8 +2134,10 @@ async def save_alignment(session_id: str, request: Request):
     if np.linalg.det(R) < 0:
         R = -R
 
-    # Save to floor_transform.npz
+    # Save to floor_transform.npz (capture the OLD transform first — the OBB
+    # re-projection below needs the old→new delta)
     transform_path = output_dir / "floor_transform.npz"
+    _prev_srt = _load_floor_transform_srt(output_dir)
     np.savez(transform_path, s=np.array(s), R=R, t=t)
     print(f"[Alignment] ✅ Saved floor_transform.npz for {session_id}")
     print(f"[Alignment]   s={s:.6f}")
@@ -2149,16 +2151,279 @@ async def save_alignment(session_id: str, request: Request):
     print(f"[Alignment]   Reconstructed M:\n{M_check}")
     print(f"[Alignment]   Max diff: {np.max(np.abs(M - M_check)):.8f}")
 
-    # Delete segmentation_result.json cache so OBBs get recomputed
-    # with the new floor_transform on next session load.
-    # (OBBs are computed from floor-transformed coordinates, so a new
-    # alignment MUST trigger recomputation)
+    # Re-project segmentation_result OBBs (stored in the display frame) with
+    # the old→new transform delta instead of deleting the file: deleting it
+    # forced a full DBSCAN + cloud-matching rerun (~minutes) on the next
+    # refresh just because the user nudged the gizmo. DBSCAN should only run
+    # on Segmentation Manager exit when masks actually changed.
     seg_result_path = output_dir / "segmentation_result.json"
     if seg_result_path.exists():
-        seg_result_path.unlink()
-        print(f"[Alignment] ✅ Deleted segmentation_result.json (OBBs will recompute on reload)")
+        try:
+            with open(seg_result_path) as f:
+                result_data = json.load(f)
+            s0, R0, t0 = _prev_srt
+            A = (s / s0) * (R @ R0.T)          # display_old → display_new
+            b = t - A @ t0
+            n_obb = 0
+            for it in result_data.get("instances", []):
+                obb = it.get("obb")
+                if not obb:
+                    continue
+                if obb.get("center"):
+                    c = np.asarray(obb["center"], float)
+                    obb["center"] = (A @ c + b).tolist()
+                if obb.get("rotation"):
+                    try:
+                        rot = np.asarray(obb["rotation"], float).reshape(3, 3)
+                        obb["rotation"] = ((R @ R0.T) @ rot).tolist()
+                    except Exception:
+                        pass
+                if obb.get("half_extents") and abs(s / s0 - 1.0) > 1e-9:
+                    obb["half_extents"] = (np.asarray(obb["half_extents"], float)
+                                           * (s / s0)).tolist()
+                n_obb += 1
+            with open(seg_result_path, "w") as f:
+                json.dump(result_data, f)
+            print(f"[Alignment] ✅ Re-projected {n_obb} OBBs to the new frame "
+                  "(no DBSCAN rerun needed)")
+        except Exception as e:
+            # fallback: stale OBBs are worse than a recompute — invalidate
+            print(f"[Alignment] OBB re-projection failed ({e}) — deleting "
+                  "segmentation_result.json for recompute")
+            seg_result_path.unlink()
 
     return {"ok": True, "scale": s}
+
+
+# ── Floor leveling (segmented floor → y=0 on the XZ display plane) ──
+# The display frame is Y-up (xyz_display = s·R·xyz + t, see
+# segmentation/pipeline.py). The selected FLOOR instance's fitted plane is
+# rotated to +Y and translated to y=0 with a MINIMAL delta over the current
+# transform. segmentation_result OBBs (stored in display frame) are
+# re-projected with the same delta so nothing needs a DBSCAN rerun and the
+# viewer updates instantly.
+
+def _load_floor_transform_srt(output_dir):
+    s, R, t = 1.0, np.eye(3), np.zeros(3)
+    p = output_dir / "floor_transform.npz"
+    if p.exists():
+        try:
+            d = np.load(p)
+            s, R, t = float(d["s"]), d["R"], d["t"]
+        except Exception:
+            pass
+    return s, R, t
+
+
+def _floor_candidates_from_result(result_data):
+    """Floor instances with their current display height (obb centre Y)."""
+    out = []
+    for inst in result_data.get("instances", []):
+        if "floor" not in str(inst.get("label", "")).lower():
+            continue
+        obb = inst.get("obb") or {}
+        c = obb.get("center")
+        out.append({
+            "instance_id": inst.get("instance_id", inst.get("id")),
+            "label": inst.get("label", ""),
+            "height_m": (float(c[1]) if c else None),
+            "n_points": inst.get("total_points", 0),
+        })
+    return out
+
+
+def _srt_to_threejs_col_major(s, R, t):
+    M = np.eye(4)
+    M[:3, :3] = s * R
+    M[:3, 3] = t
+    return M.flatten(order="F").tolist()
+
+
+@app.get("/api/segmentation/floor_level/{session_id}")
+async def get_floor_level(session_id: str):
+    """Floor candidates + current selection for the SEGMENTS combobox."""
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
+    result_path = output_dir / "segmentation_result.json"
+    if not result_path.exists():
+        return {"ok": True, "candidates": [], "selected": None}
+    with open(result_path) as f:
+        result_data = json.load(f)
+    candidates = _floor_candidates_from_result(result_data)
+    selected = None
+    fl = output_dir / "floor_level.json"
+    if fl.exists():
+        try:
+            selected = json.loads(fl.read_text()).get("selected_instance_id")
+        except Exception:
+            pass
+    if selected not in {c["instance_id"] for c in candidates}:
+        selected = None
+    return {"ok": True, "candidates": candidates, "selected": selected}
+
+
+@app.post("/api/segmentation/level_floor")
+async def level_floor(request: Request):
+    """Level the selected (or lowest) segmented floor to y=0.
+
+    Body: { session_id, instance_id?: int,
+            mode?: "auto" | "explicit" | "auto_if_needed" }
+      - auto: previously selected floor if it still exists, else the LOWEST
+      - explicit: the given instance_id (combobox change)
+      - auto_if_needed: no-op when the floor already sits at y=0 (within 1 cm
+        and 0.5° of horizontal) — used on session load
+    """
+    body = await request.json()
+    session_id = body.get("session_id")
+    req_iid = body.get("instance_id")
+    mode = body.get("mode", "explicit" if req_iid is not None else "auto")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id")
+
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
+    result_path = output_dir / "segmentation_result.json"
+    cloud_path = output_dir / "cleaned_cloud.ply"
+    if not result_path.exists() or not cloud_path.exists():
+        return {"ok": True, "leveled": False,
+                "reason": "no segmentation/cloud yet"}
+
+    loop = asyncio.get_event_loop()
+
+    def _level():
+        import open3d as o3d
+        from reconstruction.geometry.primitives import fit_plane_ransac
+
+        with open(result_path) as f:
+            result_data = json.load(f)
+        candidates = _floor_candidates_from_result(result_data)
+        if not candidates:
+            return {"ok": True, "leveled": False, "reason": "no floor instances",
+                    "candidates": []}
+
+        # selection: explicit > remembered > lowest
+        fl_path = output_dir / "floor_level.json"
+        remembered = None
+        if fl_path.exists():
+            try:
+                remembered = json.loads(fl_path.read_text()).get("selected_instance_id")
+            except Exception:
+                pass
+        cand_ids = {c["instance_id"] for c in candidates}
+        if mode == "explicit" and req_iid is not None:
+            selected = int(req_iid)
+            if selected not in cand_ids:
+                return {"ok": False, "leveled": False,
+                        "reason": f"instance {selected} is not a floor",
+                        "candidates": candidates}
+        elif remembered in cand_ids:
+            selected = remembered
+        else:
+            with_h = [c for c in candidates if c["height_m"] is not None]
+            selected = (min(with_h, key=lambda c: c["height_m"])
+                        if with_h else candidates[0])["instance_id"]
+
+        inst = next(i for i in result_data["instances"]
+                    if i.get("instance_id", i.get("id")) == selected)
+        gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+        if len(gi) < 100:
+            return {"ok": False, "leveled": False,
+                    "reason": "selected floor has too few points",
+                    "candidates": candidates}
+
+        pts = np.asarray(o3d.io.read_point_cloud(str(cloud_path)).points)
+        gi = gi[(gi >= 0) & (gi < len(pts))]
+        seg = pts[gi]
+        if len(seg) > 200_000:
+            seg = seg[np.random.default_rng(0).choice(len(seg), 200_000,
+                                                      replace=False)]
+
+        s, R, t = _load_floor_transform_srt(output_dir)
+        pf = fit_plane_ransac(seg, dist_thresh=0.02, iters=400,
+                              min_inlier_frac=0.2, measure_curvature=False)
+        if pf is None:
+            return {"ok": False, "leveled": False,
+                    "reason": "floor plane fit failed", "candidates": candidates}
+        n_raw = pf.normal
+        n_disp = R @ n_raw
+        if n_disp[1] < 0:
+            n_raw, n_disp = -n_raw, -n_disp
+        c_raw = seg[pf.inliers].mean(0)
+        c_disp = s * (R @ c_raw) + t
+
+        tilt_deg = float(np.degrees(np.arccos(np.clip(n_disp[1], -1, 1))))
+        height = float(c_disp[1])
+        already = tilt_deg < 0.5 and abs(height) < 0.01
+        if mode == "auto_if_needed" and already:
+            return {"ok": True, "leveled": True, "changed": False,
+                    "selected": selected, "candidates": candidates,
+                    "residual_mm": round(height * 1000, 1),
+                    "matrix": _srt_to_threejs_col_major(s, R, t)}
+
+        # minimal delta rotation in DISPLAY space: n_disp → +Y
+        up = np.array([0.0, 1.0, 0.0])
+        v = n_disp / max(np.linalg.norm(n_disp), 1e-12)
+        axis = np.cross(v, up)
+        ln = np.linalg.norm(axis)
+        if ln < 1e-9:
+            R_delta = np.eye(3)
+        else:
+            axis /= ln
+            ang = float(np.arccos(np.clip(v @ up, -1, 1)))
+            K = np.array([[0, -axis[2], axis[1]],
+                          [axis[2], 0, -axis[0]],
+                          [-axis[1], axis[0], 0]])
+            R_delta = np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * (K @ K)
+
+        R_new = R_delta @ R
+        t_new = t.copy()
+        # keep lateral placement; put the fitted plane exactly at y=0
+        c_disp_new = R_delta @ (c_disp - t) + t
+        t_new[1] = t[1] - c_disp_new[1]
+        # display_old → display_new mapping for stored artifacts:
+        #   p_new = R_delta·(p_old − t) + t_new'  where t_new' keeps x,z of t
+        def to_new(p_old):
+            return R_delta @ (np.asarray(p_old, float) - t) + np.array(
+                [t[0], t_new[1], t[2]])
+
+        np.savez(output_dir / "floor_transform.npz",
+                 s=np.array(s), R=R_new, t=np.array([t[0], t_new[1], t[2]]))
+
+        # re-project segmentation_result OBBs (display frame) with the same
+        # delta — keeps them exact without a DBSCAN rerun, and refreshes the
+        # file mtime so the cache stays valid vs the new npz
+        for it in result_data.get("instances", []):
+            obb = it.get("obb")
+            if not obb:
+                continue
+            if obb.get("center"):
+                obb["center"] = to_new(obb["center"]).tolist()
+            if obb.get("rotation"):
+                try:
+                    rot = np.asarray(obb["rotation"], float).reshape(3, 3)
+                    obb["rotation"] = (R_delta @ rot).tolist()
+                except Exception:
+                    pass
+        with open(result_path, "w") as f:
+            json.dump(result_data, f)
+
+        fl_path.write_text(json.dumps({
+            "selected_instance_id": selected,
+            "candidates": candidates,
+            "leveled_height_before_mm": round(height * 1000, 1),
+            "tilt_before_deg": round(tilt_deg, 3),
+        }, indent=2))
+
+        print(f"[FloorLevel] {session_id}: floor inst {selected} → y=0 "
+              f"(was {height*1000:+.1f} mm, tilt {tilt_deg:.2f}°)")
+        return {"ok": True, "leveled": True, "changed": True,
+                "selected": selected, "candidates": candidates,
+                "residual_before_mm": round(height * 1000, 1),
+                "matrix": _srt_to_threejs_col_major(
+                    s, R_new, np.array([t[0], t_new[1], t[2]]))}
+
+    result = await loop.run_in_executor(None, _level)
+    return result
 
 
 # ── BIM / IFC file management ──────────────────────────────────

@@ -73,6 +73,7 @@ export interface ViewportHandle {
     resetCamera: () => void
     clearScene: () => void
     refreshSegmentOBBs: (sessionId: string) => void
+    setFloorTransform: (arr: number[]) => void
     setOBBsVisible: (visible: boolean) => void
     setSegmentVisibility: (segId: number, visible: boolean) => void
     setCloudObjectVisible: (visible: boolean) => void
@@ -1527,6 +1528,22 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         toggleOBB: (key: string, visible: boolean) => {
             const mesh = obbMapRef.current.get(key)
             if (mesh) mesh.visible = visible
+        },
+        setFloorTransform: (arr: number[]) => {
+            // Apply a new floor transform (16 floats, column-major) to the
+            // octree group at runtime — same path the alignment-gizmo save
+            // uses, so cloud + TSDF/shape children update instantly with no
+            // session reload. Used by the floor→y=0 leveling flow.
+            const loader = potreeLoaderRef.current
+            if (!loader || !arr || arr.length !== 16) return
+            const M = new THREE.Matrix4().fromArray(arr)
+            floorTransformRef.current = M.clone()
+            const octreeGroup = loader.getOctreeGroup()
+            if (octreeGroup) {
+                octreeGroup.matrixAutoUpdate = true
+                loader.setTransform(arr)
+                octreeGroup.matrixWorldNeedsUpdate = true
+            }
         },
         setOBBsVisible: (visible: boolean) => {
             const group = obbGroupRef.current
