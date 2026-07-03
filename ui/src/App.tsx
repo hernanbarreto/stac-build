@@ -837,13 +837,6 @@ function App() {
                 }
               }
               viewportRef.current?.refreshSegmentOBBs(activeSession)
-              // Floor→y=0: on load, detect an un-leveled floor and fix it
-              // (no-ops server-side when already level). Once per session.
-              if (floorLevelCheckedRef.current !== activeSession) {
-                floorLevelCheckedRef.current = activeSession
-                applyFloorLevel(activeSession, 'auto_if_needed')
-                refreshFloorLevel(activeSession)
-              }
             } catch { /* silent */ }
           }
         }
@@ -955,6 +948,17 @@ function App() {
       }
     } catch { /* non-fatal */ }
   }, [])
+
+  // Floor→y=0 on session load: once the cloud is actually in the viewer
+  // (pointCount > 0), detect an un-leveled segmented floor and fix it —
+  // the server no-ops when it is already level. Once per session.
+  useEffect(() => {
+    if (!activeSession || pointCount <= 0) return
+    if (floorLevelCheckedRef.current === activeSession) return
+    floorLevelCheckedRef.current = activeSession
+    applyFloorLevel(activeSession, 'auto_if_needed')
+    refreshFloorLevel(activeSession)
+  }, [activeSession, pointCount, applyFloorLevel, refreshFloorLevel])
 
   const handleReconstruct = useCallback(async (sessionId: string) => {
     setPipelineDialogSession(sessionId)
