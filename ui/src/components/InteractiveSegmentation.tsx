@@ -952,7 +952,10 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             const res = await fetch(`/api/segmentation/delete`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ session_id: sessionId, instance_id: instId })
+                // label pins the exact entry: without it the backend falls
+                // back to strict obj-id matching and entries whose obj_id ≠
+                // instance_id (e.g. a half-deleted legacy row) never match
+                body: JSON.stringify({ session_id: sessionId, instance_id: instId, label })
             })
             if (!res.ok) throw new Error('Delete failed')
             isDirty.current = true

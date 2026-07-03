@@ -3151,6 +3151,26 @@ async def delete_segmentation_instance(request: Request):
                 else:
                     remaining_instances.append(inst)
 
+            # Fallback: a caller-provided label that matches NOTHING (e.g. a
+            # UI placeholder like "Object 3" for an unlabeled entry) must not
+            # turn the delete into a silent no-op — retry with id-only
+            # matching, which is unambiguous when the label failed to pin.
+            if target_label is not None and not obj_ids_to_remove \
+                    and not instance_ids_to_remove:
+                print(f"[SegDelete]   label '{target_label}' matched nothing — "
+                      "retrying by id only")
+                remaining_instances = []
+                for inst in seg_data.get("instances", []):
+                    iid = inst.get("instance_id")
+                    oid = inst.get("id")
+                    if instance_id in (oid, iid):
+                        if oid is not None:
+                            obj_ids_to_remove.add(oid)
+                        if iid is not None:
+                            instance_ids_to_remove.add(iid)
+                    else:
+                        remaining_instances.append(inst)
+
             print(f"[SegDelete]   segmentation.json: removing {len(seg_data.get('instances', [])) - len(remaining_instances)} entries, "
                   f"obj_ids={obj_ids_to_remove}, instance_ids={instance_ids_to_remove}")
             seg_data["instances"] = remaining_instances
