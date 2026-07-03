@@ -2607,13 +2607,24 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             totalPointsRef.current = 0
             onPointCount(0)
         }
-        // Clear OBBs
+        // Clear OBBs (deep: containers hold LineSegments + label Sprites with
+        // CanvasTextures — shallow geometry-only disposal leaked them all)
         const group = obbGroupRef.current
         if (group) {
             while (group.children.length > 0) {
                 const child = group.children[0]
                 group.remove(child)
-                if ((child as THREE.Mesh).geometry) (child as THREE.Mesh).geometry.dispose()
+                child.traverse(obj => {
+                    const mesh = obj as THREE.Mesh
+                    if (mesh.geometry) mesh.geometry.dispose()
+                    const mat = mesh.material as THREE.Material | THREE.Material[] | undefined
+                    if (mat) {
+                        for (const m of Array.isArray(mat) ? mat : [mat]) {
+                            (m as unknown as { map?: { dispose?: () => void } }).map?.dispose?.()
+                            m.dispose()
+                        }
+                    }
+                })
             }
             obbMapRef.current.clear()
             // Reset group transform (gizmo may have left a rotation on it)
@@ -3032,20 +3043,40 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     }, [showCameraPoses])
 
     // Render OBB wireframe boxes for segmentation instances
+    // Deep-dispose a three.js subtree: geometry + material(s) + their texture
+    // maps. The OBB containers are Groups whose children (edge LineSegments,
+    // label Sprites with CanvasTextures) were being removed WITHOUT disposal —
+    // every segments refresh leaked GPU buffers/textures, which is why the
+    // viewer slowed down over time and got WORSE after deleting elements
+    // (each delete triggers a full OBB rebuild → another leaked generation).
+    const disposeDeep = useCallback((root: THREE.Object3D) => {
+        root.traverse(obj => {
+            const mesh = obj as THREE.Mesh
+            if (mesh.geometry) mesh.geometry.dispose()
+            const mat = mesh.material as THREE.Material | THREE.Material[] | undefined
+            if (mat) {
+                const mats = Array.isArray(mat) ? mat : [mat]
+                for (const m of mats) {
+                    const anyM = m as unknown as Record<string, { dispose?: () => void } | undefined>
+                    for (const texKey of ['map', 'alphaMap', 'aoMap', 'emissiveMap', 'normalMap', 'roughnessMap', 'metalnessMap']) {
+                        anyM[texKey]?.dispose?.()
+                    }
+                    m.dispose()
+                }
+            }
+        })
+    }, [])
+
     const renderOBBs = useCallback((instances: Array<Record<string, unknown>>) => {
         const group = obbGroupRef.current
         if (!group) return
 
-        // Clear old OBBs
+        // Clear old OBBs (deep: containers hold LineSegments + label Sprites
+        // with CanvasTextures — see disposeDeep)
         while (group.children.length > 0) {
             const child = group.children[0]
             group.remove(child)
-            if ((child as THREE.Mesh).geometry) (child as THREE.Mesh).geometry.dispose()
-            if ((child as THREE.Mesh).material) {
-                const mat = (child as THREE.Mesh).material
-                if (Array.isArray(mat)) mat.forEach(m => m.dispose())
-                else (mat as THREE.Material).dispose()
-            }
+            disposeDeep(child)
         }
         obbMapRef.current.clear()
 

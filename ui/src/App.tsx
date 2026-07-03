@@ -1795,7 +1795,7 @@ function App() {
                                       await fetch('/api/segmentation/rename', {
                                         method: 'POST',
                                         headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel }),
+                                        body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel, old_label: seg.label.replace(/ #\d+$/, '') }),
                                       })
                                       setSegments(prev => prev.map(s =>
                                         s.key === seg.key ? { ...s, label: newLabel } : s
@@ -1813,7 +1813,7 @@ function App() {
                                     await fetch('/api/segmentation/rename', {
                                       method: 'POST',
                                       headers: { 'Content-Type': 'application/json' },
-                                      body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel }),
+                                      body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel, old_label: seg.label.replace(/ #\d+$/, '') }),
                                     })
                                     setSegments(prev => prev.map(s =>
                                       s.key === seg.key ? { ...s, label: newLabel } : s
@@ -1843,11 +1843,21 @@ function App() {
                                 const res = await fetch('/api/segmentation/delete', {
                                   method: 'POST',
                                   headers: { 'Content-Type': 'application/json' },
-                                  body: JSON.stringify({ session_id: activeSession, instance_id: seg.id }),
+                                  // label pins the EXACT row: instance_id alone
+                                  // collides across writers and deleted the
+                                  // wrong instance (strip the ' #N' suffix
+                                  // some list writers append to the label)
+                                  body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: seg.label.replace(/ #\d+$/, '') }),
                                 })
                                 if (res.ok) {
                                   setSegments(prev => prev.filter(s => s.key !== seg.key))
+                                  // hide this segment's POINTS immediately — the
+                                  // shader keeps painting them until a full cloud
+                                  // reload otherwise (delete looked like a no-op)
+                                  viewportRef.current?.setSegmentVisibility(seg.id, false)
                                   viewportRef.current?.refreshSegmentOBBs(activeSession)
+                                } else {
+                                  setStatusMessage(`Delete failed (${res.status}) — segment kept`)
                                 }
                               }}>
                               <Trash2 size={12} />

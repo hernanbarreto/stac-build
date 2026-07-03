@@ -2752,9 +2752,17 @@ async def rename_segmentation_instance(request: Request):
     instance_id = body.get("instance_id")
     new_label = body.get("label")
     excluded = body.get("excluded")
+    # instance_id alone can collide across writers; the UI sends the row's
+    # current label so the match is exact (None keeps old behavior)
+    old_label_hint = body.get("old_label")
 
     if not session_id or instance_id is None:
         raise HTTPException(status_code=400, detail="Missing session_id or instance_id")
+
+    def _match(inst, id_field):
+        if inst.get(id_field) != instance_id:
+            return False
+        return old_label_hint is None or inst.get("label", "") == old_label_hint
 
     ctx = _ctx(session_id)
     output_dir = ctx.output_dir
@@ -2772,13 +2780,13 @@ async def rename_segmentation_instance(request: Request):
         # Save old label BEFORE updating (for shape folder rename)
         old_label = None
         for inst in data.get("instances", []):
-            if inst.get("instance_id") == instance_id:
+            if _match(inst, "instance_id"):
                 old_label = inst.get("label")
                 break
 
         updated = False
         for inst in data.get("instances", []):
-            if inst.get("instance_id") == instance_id:
+            if _match(inst, "instance_id"):
                 if new_label is not None:
                     inst["label"] = new_label
                 if excluded is not None:
@@ -2795,7 +2803,7 @@ async def rename_segmentation_instance(request: Request):
             with open(result_path) as f:
                 result_data = json.load(f)
             for inst in result_data.get("instances", []):
-                if inst.get("id") == instance_id:
+                if _match(inst, "id") or _match(inst, "instance_id"):
                     if new_label is not None:
                         inst["label"] = new_label
                     if excluded is not None:
@@ -2821,6 +2829,10 @@ async def delete_segmentation_instance(request: Request):
     body = await request.json()
     session_id = body.get("session_id")
     instance_id = body.get("instance_id")
+    # instance_id is NOT globally unique (obj_id vs instance_id spaces, and
+    # shape/tsdf writers can collide) — the UI also sends the row's label so
+    # the match is exact: (label, instance_id). label=None keeps old behavior.
+    target_label = body.get("label")
 
     if not session_id or instance_id is None:
         raise HTTPException(status_code=400, detail="Missing session_id or instance_id")
@@ -2858,7 +2870,9 @@ async def delete_segmentation_instance(request: Request):
                 # instance_id spaces overlap (e.g. door obj0/inst1 + ladder obj1/inst2:
                 # deleting "1" hit ladder's obj_id AND door's instance_id → both gone).
                 list_id = oid if oid is not None else iid
-                if list_id == instance_id:
+                label_ok = (target_label is None
+                            or inst.get("label", "") == target_label)
+                if list_id == instance_id and label_ok:
                     if oid is not None:
                         obj_ids_to_remove.add(oid)
                     if iid is not None:
@@ -2872,20 +2886,58 @@ async def delete_segmentation_instance(request: Request):
             with open(seg_path, "w") as f:
                 json.dump(seg_data, f, indent=2)
 
-            # 2) Remove from segmentation_result.json (just delete the entry)
+            # 2) Remove from segmentation_result.json. Entries are joined to
+            # segmentation.json by the INSTANCE id space only (canonical key:
+            # instance_id, id as fallback) — matching the `id` field against
+            # instance_ids cross-deletes unrelated entries once the obj_id and
+            # instance_id spaces overlap (the "deleted A, B vanished" bug).
+            def _result_key(inst):
+                v = inst.get("instance_id")
+                return v if v is not None else inst.get("id")
+
+            def _is_target(inst):
+                return (_result_key(inst) in remove_keys
+                        and (target_label is None
+                             or inst.get("label", "") == target_label))
+
+            remove_keys = instance_ids_to_remove or {instance_id}
             fresh_instances = []
             if result_path.exists():
                 with open(result_path) as f:
                     result_data = json.load(f)
                 fresh_instances = [
                     inst for inst in result_data.get("instances", [])
-                    if inst.get("id") not in instance_ids_to_remove
-                       and inst.get("instance_id") not in instance_ids_to_remove
+                    if not _is_target(inst)
                 ]
                 result_data["instances"] = fresh_instances
                 with open(result_path, "w") as f:
                     json.dump(result_data, f)
                 print(f"[SegDelete]   segmentation_result.json: {len(fresh_instances)} instances remaining")
+
+            # 2b) seg_broadcast.json is a snapshot of segmentation.json written
+            # by the SAM3 worker; anything that replays it (viewer reload,
+            # instance cleaner) RESURRECTS deleted instances unless it is
+            # updated in lockstep.
+            bc_path = output_dir / "seg_broadcast.json"
+            if bc_path.exists():
+                try:
+                    with open(bc_path) as f:
+                        bc = json.load(f)
+                    n_before = len(bc.get("instances", []))
+                    bc["instances"] = [
+                        inst for inst in bc.get("instances", [])
+                        if not (((inst.get("id") if inst.get("id") is not None
+                                  else inst.get("instance_id")) == instance_id
+                                 or _result_key(inst) in remove_keys)
+                                and (target_label is None
+                                     or inst.get("label", "") == target_label))
+                    ]
+                    with open(bc_path, "w") as f:
+                        json.dump(bc, f)
+                    print(f"[SegDelete]   seg_broadcast.json: "
+                          f"{n_before - len(bc['instances'])} entries removed")
+                except Exception as e:
+                    print(f"[SegDelete]   seg_broadcast cleanup failed: {e}")
 
             # 3) Remove masks from NPZ
             if masks_path.exists() and obj_ids_to_remove:
@@ -2933,6 +2985,19 @@ async def delete_segmentation_instance(request: Request):
                             break
             except Exception as e:
                 print(f"[SegDelete]   Shape folder cleanup failed: {e}")
+
+            # 5) Delete the per-instance TSDF crop folder — its GLB is what
+            # the viewer auto-loads as the instance mesh/BBOX, so leaving it
+            # keeps the "ghost" visible in the 3D scene after deletion.
+            try:
+                from segmentation.tsdf_export import delete_tsdf_folder
+                for iid in instance_ids_to_remove:
+                    for inst in seg_data_original_instances:
+                        if inst.get("instance_id") == iid or inst.get("id") == iid:
+                            delete_tsdf_folder(output_dir, inst.get("label", ""), iid)
+                            break
+            except Exception as e:
+                print(f"[SegDelete]   TSDF folder cleanup failed: {e}")
 
             print(f"[SegDelete]   ✅ Done: {len(fresh_instances)} instances remaining")
 
