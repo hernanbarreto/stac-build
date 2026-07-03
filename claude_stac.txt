@@ -1,0 +1,3 @@
+al hacer click para segmentar un objeto no muestra mascara, solo al segundo click. ademas si uso el mismo frame para segmentar mas de un objeto, por ejemplo en un frame agegp un objeto, y
+  luego hago click en otro lado para agregar un nuevo objeto, me muestra la mascara del objeto anterior y del nuevo. ademas al propagar los multiples objetos me arrojo el error
+  Sam3MultiplexVideoPredictor has no attribute '_ALL_INFERENCE_STATES'
