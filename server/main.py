@@ -2137,7 +2137,6 @@ async def save_alignment(session_id: str, request: Request):
     # Save to floor_transform.npz (capture the OLD transform first — the OBB
     # re-projection below needs the old→new delta)
     transform_path = output_dir / "floor_transform.npz"
-    _prev_srt = _load_floor_transform_srt(output_dir)
     np.savez(transform_path, s=np.array(s), R=R, t=t)
     print(f"[Alignment] ✅ Saved floor_transform.npz for {session_id}")
     print(f"[Alignment]   s={s:.6f}")
@@ -2161,30 +2160,10 @@ async def save_alignment(session_id: str, request: Request):
         try:
             with open(seg_result_path) as f:
                 result_data = json.load(f)
-            s0, R0, t0 = _prev_srt
-            A = (s / s0) * (R @ R0.T)          # display_old → display_new
-            b = t - A @ t0
-            n_obb = 0
-            for it in result_data.get("instances", []):
-                obb = it.get("obb")
-                if not obb:
-                    continue
-                if obb.get("center"):
-                    c = np.asarray(obb["center"], float)
-                    obb["center"] = (A @ c + b).tolist()
-                if obb.get("rotation"):
-                    try:
-                        rot = np.asarray(obb["rotation"], float).reshape(3, 3)
-                        obb["rotation"] = ((R @ R0.T) @ rot).tolist()
-                    except Exception:
-                        pass
-                if obb.get("half_extents") and abs(s / s0 - 1.0) > 1e-9:
-                    obb["half_extents"] = (np.asarray(obb["half_extents"], float)
-                                           * (s / s0)).tolist()
-                n_obb += 1
+            n_obb = _recompute_result_obbs(output_dir, result_data, s, R, t)
             with open(seg_result_path, "w") as f:
                 json.dump(result_data, f)
-            print(f"[Alignment] ✅ Re-projected {n_obb} OBBs to the new frame "
+            print(f"[Alignment] ✅ Recomputed {n_obb} OBBs under the new frame "
                   "(no DBSCAN rerun needed)")
         except Exception as e:
             # fallback: stale OBBs are worse than a recompute — invalidate
@@ -2237,6 +2216,37 @@ def _srt_to_threejs_col_major(s, R, t):
     M[:3, :3] = s * R
     M[:3, 3] = t
     return M.flatten(order="F").tolist()
+
+
+def _recompute_result_obbs(output_dir, result_data, s, R, t):
+    """Recompute EVERY instance's OBB from the cloud under the CURRENT
+    transform. Delta re-projection is not enough: historical rebuilds left
+    result OBBs out of sync with the npz (test3's floor OBB sat 105 mm off
+    the actual plane), and a delta faithfully preserves that stale offset.
+    globalIndices → no DBSCAN, no matching; just per-instance OBB fits."""
+    import open3d as o3d
+    from segmentation.pipeline import _compute_obb
+    cloud_path = output_dir / "cleaned_cloud.ply"
+    if not cloud_path.exists():
+        return 0
+    pts = np.asarray(o3d.io.read_point_cloud(str(cloud_path)).points)
+    n = 0
+    for inst in result_data.get("instances", []):
+        gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+        gi = gi[(gi >= 0) & (gi < len(pts))]
+        if len(gi) < 4:
+            continue
+        seg = pts[gi]
+        if len(seg) > 150_000:
+            seg = seg[np.random.default_rng(0).choice(len(seg), 150_000,
+                                                      replace=False)]
+        xyz_display = s * (seg @ R.T) + t
+        try:
+            inst["obb"] = _compute_obb(xyz_display)
+            n += 1
+        except Exception:
+            pass
+    return n
 
 
 @app.get("/api/segmentation/floor_level/{session_id}")
@@ -2380,30 +2390,16 @@ async def level_floor(request: Request):
         # keep lateral placement; put the fitted plane exactly at y=0
         c_disp_new = R_delta @ (c_disp - t) + t
         t_new[1] = t[1] - c_disp_new[1]
-        # display_old → display_new mapping for stored artifacts:
-        #   p_new = R_delta·(p_old − t) + t_new'  where t_new' keeps x,z of t
-        def to_new(p_old):
-            return R_delta @ (np.asarray(p_old, float) - t) + np.array(
-                [t[0], t_new[1], t[2]])
-
         np.savez(output_dir / "floor_transform.npz",
                  s=np.array(s), R=R_new, t=np.array([t[0], t_new[1], t[2]]))
 
-        # re-project segmentation_result OBBs (display frame) with the same
-        # delta — keeps them exact without a DBSCAN rerun, and refreshes the
-        # file mtime so the cache stays valid vs the new npz
-        for it in result_data.get("instances", []):
-            obb = it.get("obb")
-            if not obb:
-                continue
-            if obb.get("center"):
-                obb["center"] = to_new(obb["center"]).tolist()
-            if obb.get("rotation"):
-                try:
-                    rot = np.asarray(obb["rotation"], float).reshape(3, 3)
-                    obb["rotation"] = (R_delta @ rot).tolist()
-                except Exception:
-                    pass
+        # Recompute EVERY OBB from the cloud under the new transform (delta
+        # re-projection preserves any historical drift between result OBBs
+        # and the npz — see _recompute_result_obbs). No DBSCAN rerun; the
+        # rewrite also keeps the result-cache mtime valid vs the new npz.
+        t_final = np.array([t[0], t_new[1], t[2]])
+        n_obb = _recompute_result_obbs(output_dir, result_data, s, R_new, t_final)
+        print(f"[FloorLevel]   recomputed {n_obb} OBBs under the new frame")
         with open(result_path, "w") as f:
             json.dump(result_data, f)
 
