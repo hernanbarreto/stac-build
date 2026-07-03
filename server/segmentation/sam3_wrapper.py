@@ -36,6 +36,17 @@ class SAM3Wrapper:
         self._interactive_sessions: Dict[str, dict] = {}  # state_id → session info dict
         logger.info("SAM3 Wrapper initialized (Lazy Loading Enabled: Model will load on first prompt).")
         
+    def _session_store(self) -> dict:
+        """Predictor's session dict — SAM 3.0 exposes `_ALL_INFERENCE_STATES`,
+        SAM 3.1's base predictor renamed it `_all_inference_states`. Both map
+        session_id → {"state": inference_state, ...}."""
+        if self.predictor is None:
+            return {}
+        store = getattr(self.predictor, "_ALL_INFERENCE_STATES", None)
+        if store is None:
+            store = getattr(self.predictor, "_all_inference_states", {})
+        return store
+
     def load_model(self):
         """Lazy load the SAM3 model."""
         if self.is_loaded:
@@ -598,7 +609,7 @@ class SAM3Wrapper:
         # interaction, we must pre-seed empty caches.
         num_frames = 0
         try:
-            session = self.predictor._ALL_INFERENCE_STATES.get(session_id, {})
+            session = self._session_store().get(session_id, {})
             inference_state = session.get("state", {})
             num_frames = inference_state.get("num_frames", 0)
             if "cached_frame_outputs" not in inference_state:
@@ -630,7 +641,7 @@ class SAM3Wrapper:
         if not self.is_loaded or self.predictor is None:
             return None
         with self.lock:
-            session = self.predictor._ALL_INFERENCE_STATES.get(state_id)
+            session = self._session_store().get(state_id)
             if not session: 
                 return None
             inference_state = session.get("state")
@@ -753,7 +764,7 @@ class SAM3Wrapper:
             # (sam3_video_inference.py line 399), but the tracker pathway (point prompts)
             # does NOT. We use the exact same dummy string SAM3 uses internally.
             try:
-                session = self.predictor._ALL_INFERENCE_STATES.get(state_id, {})
+                session = self._session_store().get(state_id, {})
                 inference_state = session.get("state", {})
                 pso = inference_state.get("previous_stages_out")
                 if pso is not None and frame_idx < len(pso):
@@ -762,7 +773,37 @@ class SAM3Wrapper:
             except Exception as e:
                 logger.warning(f"[SAM3-Interactive] Could not mark frame: {e}")
 
-            # Extract mask from response for preview
+            # SAM 3.1 multiplex quirk: the request that REGISTERS the very
+            # first object of a session initializes the tracker metadata and
+            # returns EMPTY outputs (out_obj_ids=[]). Re-issuing the same
+            # prompt once (idempotent — clear_old_points=True) returns the
+            # real mask, so the first click previews like every other click.
+            def _ids_of(resp):
+                o = (resp or {}).get("outputs") or {}
+                ids = o.get("out_obj_ids")
+                if hasattr(ids, "cpu"):
+                    ids = ids.cpu().numpy()
+                return [] if ids is None else [int(i) for i in np.asarray(ids).ravel()]
+
+            if obj_id not in _ids_of(response):
+                logger.info(f"[SAM3-Interactive] obj {obj_id} missing from outputs "
+                            "(first-object registration) — re-issuing prompt once")
+                with self.lock:
+                    response = self.predictor.handle_request(
+                        request=dict(
+                            type="add_prompt",
+                            session_id=state_id,
+                            frame_index=frame_idx,
+                            obj_id=obj_id,
+                            points=pts,
+                            point_labels=pt_labels,
+                        )
+                    )
+
+            # Extract THIS object's mask for the preview. The multiplex
+            # response contains every tracked object's mask — unioning them
+            # (the old np.max) painted previous objects into the new one's
+            # preview. Select by out_obj_ids; never union.
             result = {"success": True}
             if response and "outputs" in response:
                 outputs = response["outputs"]
@@ -770,11 +811,16 @@ class SAM3Wrapper:
                     mask = outputs["out_binary_masks"]
                     if hasattr(mask, 'cpu'):
                         mask = mask.cpu().numpy()
-                    if mask.ndim == 3:
-                        if mask.shape[0] == 0:
-                            mask = None
+                    if mask.ndim == 3 and mask.shape[0] > 0:
+                        ids = _ids_of(response)
+                        if obj_id in ids:
+                            mask = mask[ids.index(obj_id)]
+                        elif len(ids) == 0 and mask.shape[0] == 1:
+                            mask = mask[0]   # 3.0 path: single unlabeled mask
                         else:
-                            mask = np.max(mask, axis=0)
+                            mask = None
+                    elif mask.ndim == 3:
+                        mask = None
                     if mask is not None:
                         result["mask"] = mask  # [H, W] binary
 
@@ -860,7 +906,7 @@ class SAM3Wrapper:
             raise RuntimeError("SAM3 model not loaded")
 
         # Get num_frames for progress calculation
-        session = self.predictor._ALL_INFERENCE_STATES.get(state_id, {})
+        session = self._session_store().get(state_id, {})
         inference_state = session.get("state", {})
         num_frames = inference_state.get("num_frames", 0)
         # Fallback from session metadata
