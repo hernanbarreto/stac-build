@@ -39,13 +39,21 @@ def session_output(tmp_path):
 
 def test_routing(session_output):
     out, seg = session_output
-    exported, skipped = export_segment_plys(out, seg, max_extent_m=6.0)
-    # only the chair is a MeshFlow-eligible object
-    assert len(exported) == 1
-    assert exported[0].parent.name == "chair_2"
+    # default: NO category routing (user decision) — wall generates too;
+    # only the oversized train is skipped (model vertex budget)
+    exported, skipped = export_segment_plys(out, seg, max_extent_m=6.0,
+                                            require_ref_image=False)
+    assert {p.parent.name for p in exported} == {"chair_2", "wall_1"}
     reasons = {s["label"]: s["reason"] for s in skipped}
-    assert "surface_fit" in reasons["wall"]          # architectural → metric path
     assert "TSDF" in reasons["train"]                # 20 m > 6 m budget
+
+    # opt-in category routing still works
+    exported2, skipped2 = export_segment_plys(out, seg, max_extent_m=6.0,
+                                              require_ref_image=False,
+                                              exclude_architectural=True)
+    assert {p.parent.name for p in exported2} == {"chair_2"}
+    reasons2 = {s["label"]: s["reason"] for s in skipped2}
+    assert "surface_fit" in reasons2["wall"]
 
     meta = json.loads((exported[0].parent / "meta.json").read_text())
     assert meta["metric"] is False                   # ⚠ non-metric labeling
@@ -53,10 +61,43 @@ def test_routing(session_output):
     assert meta["method"] == "meshflow"
 
 
-def test_explicit_selection_still_routed(session_output):
-    """Even if the UI explicitly selects an architectural instance, the
-    exporter refuses it — routing is a policy, not a default."""
+def test_explicit_selection_respects_optin_routing(session_output):
+    """With exclude_architectural=True, an explicitly selected architectural
+    instance is still refused (routing is a policy when enabled)."""
     out, seg = session_output
-    exported, skipped = export_segment_plys(out, seg, obj_ids=[1])
+    exported, skipped = export_segment_plys(out, seg, obj_ids=[1],
+                                            require_ref_image=False,
+                                            exclude_architectural=True)
     assert not exported
     assert skipped and skipped[0]["instance_id"] == 1
+
+
+def test_mandatory_ref_image(session_output, tmp_path):
+    """Con require_ref_image=True: sin máscaras/frames se SALTEA; con una
+    máscara y un frame válidos se genera el recorte de la mejor vista."""
+    import cv2
+    out, seg = session_output
+    # sin seg_masks.npz → skip con razón explícita
+    exported, skipped = export_segment_plys(out, seg, obj_ids=[2],
+                                            frames_dir=None,
+                                            require_ref_image=True)
+    assert not exported
+    assert "mandatory" in skipped[0]["reason"]
+
+    # con máscara + frame: se exporta y el ref.jpg existe
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    img = np.zeros((360, 640, 3), np.uint8)
+    img[:, :, 1] = 128
+    cv2.imwrite(str(frames / "000042.jpg"), img)
+    mask = np.zeros((180, 320), np.uint8)
+    mask[60:120, 100:220] = 1
+    np.savez(out / "seg_masks.npz", **{"f42_o2": mask})
+    exported, skipped = export_segment_plys(out, seg, obj_ids=[2],
+                                            frames_dir=frames,
+                                            require_ref_image=True)
+    assert len(exported) == 1
+    ref = exported[0].parent / f"{exported[0].parent.name}_ref.jpg"
+    assert ref.exists()
+    crop = cv2.imread(str(ref))
+    assert crop is not None and crop.shape[0] > 50 and crop.shape[1] > 100

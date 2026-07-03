@@ -3142,8 +3142,14 @@ async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
         # Print to console (StreamCapture also forwards to WS)
         print(f"[Shape] {text}")
 
+        # tqdm progress uses carriage returns; a [BATCH] line can arrive glued
+        # after \r-fragments on the same buffered line — find it anywhere.
         if not text.startswith("[BATCH]"):
-            continue
+            seg = next((sg for sg in text.split("\r")
+                        if sg.strip().startswith("[BATCH]")), None)
+            if seg is None:
+                continue
+            text = seg.strip()
 
         # Parse "[BATCH] key=value key=value"
         body = text[len("[BATCH]"):].strip()
@@ -3312,7 +3318,10 @@ async def export_shape_inputs(request: Request):
                 output_dir=output_dir,
                 segments_result=segments_result,
                 obj_ids=instance_ids,
-                max_extent_m=float(mcfg.get("max_extent_m", 6.0)),
+                max_extent_m=float(mcfg.get("max_extent_m", 15.0)),
+                exclude_architectural=bool(mcfg.get("exclude_architectural", False)),
+                frames_dir=frames_dir,
+                require_ref_image=bool(mcfg.get("require_ref_image", True)),
             )
 
         try:
@@ -3358,7 +3367,9 @@ async def export_shape_inputs(request: Request):
         }
 
         print(f"[Shape] PLY stage complete: {len(exported)} file(s), "
-              f"{len(skipped)} skipped (routing/size)")
+              f"{len(skipped)} skipped:")
+        for s_ in skipped:
+            print(f"[Shape]   skipped {s_['label']}_{s_['instance_id']}: {s_['reason']}")
 
         if auto_reconstruct and exported:
             print(f"[Shape] auto_reconstruct=True — scheduling background MeshFlow task", flush=True)
@@ -3482,16 +3493,20 @@ async def shape_list(session_id: str):
         glb_files = sorted(obj_folder.glob("*.glb"))
         if not glb_files:
             continue
-        glb_file = glb_files[0]  # one mesh per object today
-        meta_file = glb_file.with_suffix(".meta.json")
-
+        # prefer the MeshFlow output (<folder>_visual.glb) over legacy names
+        glb_file = next((g for g in glb_files if g.stem.endswith("_visual")),
+                        glb_files[0])
+        # sidecar: legacy <glb>.meta.json, else the folder-level meta.json
         meta = None
-        if meta_file.exists():
-            try:
-                with open(meta_file) as f:
-                    meta = json.load(f)
-            except Exception as e:
-                print(f"[ShapeList] failed to read {meta_file}: {e}")
+        for meta_file in (glb_file.with_suffix(".meta.json"),
+                          obj_folder / "meta.json"):
+            if meta_file.exists():
+                try:
+                    with open(meta_file) as f:
+                        meta = json.load(f)
+                    break
+                except Exception as e:
+                    print(f"[ShapeList] failed to read {meta_file}: {e}")
 
         shapes.append({
             "folder": obj_folder.name,
@@ -4414,6 +4429,26 @@ async def refresh_segmentation(body: dict):
             result = _match_and_save_result(output_dir)
             instances = result.get("instances", [])
             print(f"[SegRefresh] ✅ Done: {len(instances)} instances")
+
+            # Carve per-object TSDF meshes — same faithful deliverable the
+            # pipeline SAM3 stage produces (sam3_worker.py). The interactive
+            # Segmentation Manager flow ends HERE (finalize/close), so without
+            # this the interactive segments never got their cropped meshes.
+            # Best-effort: never fail the refresh over a crop issue.
+            try:
+                scene_dir = output_dir / "tsdf" / "scene"
+                if (scene_dir / "scene.glb.orig").exists() or (scene_dir / "scene.glb").exists():
+                    from segmentation.tsdf_export import crop_scene_mesh_to_instances
+                    task_manager.update(tid, pct=70,
+                                        detail="Carving per-object TSDF meshes...")
+                    written = crop_scene_mesh_to_instances(
+                        output_dir=output_dir, segments_result=result)
+                    print(f"[SegRefresh] Per-object TSDF: wrote {len(written)} mesh(es)")
+                else:
+                    print("[SegRefresh] No scene TSDF — skipping per-object crop")
+            except Exception as e:
+                print(f"[SegRefresh] Per-object TSDF crop failed (non-fatal): {e}")
+
             task_manager.finish(tid)
             return {"instances": instances}
         except Exception as e:

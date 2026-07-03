@@ -832,7 +832,15 @@ meshflow:
   dtype: fp16
   num_verts: null             # vertex-budget control (needs use_proj_cond_on_temb in the
                               # model config; null = model default ~4096)
-  max_extent_m: 6.0           # segments larger than this skip MeshFlow (object budget,
-                              # not scenes) and stay on the TSDF/surface_fit path
-  ref_image: null             # optional reference image path (DINOv3 conditioning);
-                              # requires the DINOv3 checkpoint (see weights/dinov3)
+  max_extent_m: 15.0          # segments larger than this skip MeshFlow (the model's ~4096-vertex
+                              # budget degrades on scene-scale geometry) — raised per user decision
+  exclude_architectural: false # false (user decision 2026-07-03): generate for ANY class — the
+                              # assets are non-metric regardless and are never compared against
+                              # BIM; surface_fit remains the only metric surface source
+  require_ref_image: true     # MANDATORY image conditioning (project decision — upstream
+                              # says optional, but geometry-only generations came out wrong
+                              # on real scan segments). The exporter picks the best view by
+                              # mask pixel count (seg_masks.npz traceability), crops it to
+                              # the object bbox and saves <folder>_ref.jpg; instances with
+                              # no usable view are SKIPPED, never generated blind.
+                              # Needs the DINOv3 checkpoint (weights/dinov3 — installed).
