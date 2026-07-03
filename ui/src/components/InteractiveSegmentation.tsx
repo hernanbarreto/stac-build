@@ -1119,8 +1119,51 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                 />
                                 <button
                                     style={{ background: '#555', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13 }}
+                                    title="Clear only the prompts of the object being edited — queued objects and saved instances are untouched"
                                     onClick={async () => {
-                                        // Clear UI state + the whole multi-object queue
+                                        // CLEAR = current context only: the in-edit object's
+                                        // prompts (all frames) + its backend tracking. The
+                                        // pending-object queue, saved instances and the frame
+                                        // selection are NEVER touched here (that was bug 3).
+                                        const objId = currentObjIdRef.current
+                                        setPromptPoints([])
+                                        setMaskOverlay(null)
+                                        setHasPrompts(false)
+                                        setLabelName('')
+                                        for (const k of [...promptPointsMapRef.current.keys()]) {
+                                            if (k.endsWith(`:${objId}`)) promptPointsMapRef.current.delete(k)
+                                        }
+                                        for (const k of [...maskCacheRef.current.keys()]) {
+                                            if (k.endsWith(`:${objId}`)) maskCacheRef.current.delete(k)
+                                        }
+                                        if (stateId) {
+                                            try {
+                                                setLoading(true)
+                                                setStatus('Clearing current object...')
+                                                const res = await fetch('/api/segmentation/clear_prompts', {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ state_id: stateId, obj_id: objId })
+                                                })
+                                                setStatus(res.ok ? 'Current object cleared.'
+                                                    : 'Warning: could not clear the object on backend')
+                                            } catch { setStatus('Error clearing prompts') }
+                                            finally { setLoading(false) }
+                                        } else {
+                                            setStatus('Current object cleared.')
+                                        }
+                                    }}
+                                    disabled={loading || !hasPrompts}
+                                >✕ Clear</button>
+                                <button
+                                    style={{ background: '#7a3030', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13 }}
+                                    title="Discard the in-edit object AND the whole queued-object batch (saved instances are kept)"
+                                    onClick={async () => {
+                                        const n = pendingObjects.length + (hasPrompts ? 1 : 0)
+                                        const ok = await confirmDanger(
+                                            `This discards the object being edited and the ${pendingObjects.length} queued object(s) of this batch. Saved instances are NOT deleted.`,
+                                            'Clear all prompts?')
+                                        if (!ok) return
                                         setPromptPoints([])
                                         setPendingObjects([])
                                         setMaskOverlay(null)
@@ -1128,30 +1171,25 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                         setLabelName('')
                                         promptPointsMapRef.current.clear()
                                         maskCacheRef.current.clear()
-                                        setSelectedFrames(new Set(keyframes.map((_, i) => i)))
-                                        // Clear SAM3 tracked objects (lightweight — session stays alive)
                                         if (stateId) {
                                             try {
                                                 setLoading(true)
-                                                setStatus('Clearing prompts...')
+                                                setStatus(`Clearing all prompts (${n} object(s))...`)
                                                 const res = await fetch('/api/segmentation/clear_prompts', {
                                                     method: 'POST',
                                                     headers: { 'Content-Type': 'application/json' },
                                                     body: JSON.stringify({ state_id: stateId })
                                                 })
-                                                if (res.ok) {
-                                                    setStatus('Prompts cleared — ready for new prompts.')
-                                                } else {
-                                                    setStatus('Warning: could not clear prompts on backend')
-                                                }
+                                                setStatus(res.ok ? 'All prompts cleared — ready for new prompts.'
+                                                    : 'Warning: could not clear prompts on backend')
                                             } catch { setStatus('Error clearing prompts') }
                                             finally { setLoading(false) }
                                         } else {
-                                            setStatus('Prompts cleared.')
+                                            setStatus('All prompts cleared.')
                                         }
                                     }}
-                                    disabled={loading || (promptPoints.length === 0 && promptPointsMapRef.current.size === 0 && pendingObjects.length === 0)}
-                                >✕ Clear</button>
+                                    disabled={loading || (!hasPrompts && pendingObjects.length === 0)}
+                                >🗑 Clear all</button>
                                 <button className="admin-save-btn" style={{ background: '#9b59b6', color: '#fff' }} onClick={handleEvaluate}
                                     disabled={loading || !stateId || !hasPrompts || propagatingRef.current}>🧠 Evaluate</button>
                                 <button className="admin-save-btn" style={{ background: '#2980b9', color: '#fff' }} onClick={handleAddObject}

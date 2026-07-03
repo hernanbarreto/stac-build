@@ -45,21 +45,46 @@ class SAM3Wrapper:
             if self.is_loaded:
                 return
 
-            logger.info("Loading SAM3 Model...")
+            scfg = (cfg.get("models", {}) or {}).get("segmentation", {}) or {}
+            version = str(scfg.get("version", "sam3"))
+            logger.info(f"Loading SAM Model (version={version})...")
             try:
-                if torch.cuda.is_available():
-                    # GPU path: use MultiGPU predictor with bfloat16 autocast
+                if version == "sam3.1" and torch.cuda.is_available():
+                    # SAM 3.1 Object Multiplex: joint multi-object tracking.
+                    # Same handle_request / handle_stream_request API as 3.0,
+                    # so everything below load_model() is version-agnostic.
+                    # vendor_paths already put vendor/sam31 on sys.path.
+                    from sam3.model_builder import build_sam3_multiplex_video_predictor
+                    ckpt = scfg.get("checkpoint_path") or str(
+                        vendor_paths.SAM31_WEIGHTS_DIR / "sam3.1_multiplex.pt")
+                    if not Path(ckpt).exists():
+                        raise FileNotFoundError(
+                            f"SAM 3.1 checkpoint not found at {ckpt} — download "
+                            "facebook/sam3.1 sam3.1_multiplex.pt to weights/sam31/")
+                    self.predictor = build_sam3_multiplex_video_predictor(
+                        checkpoint_path=ckpt,
+                        max_num_objects=int(scfg.get("max_num_objects", 32)),
+                        multiplex_count=int(scfg.get("multiplex_count", 16)),
+                        use_fa3=bool(scfg.get("use_fa3", False)),
+                        compile=bool(scfg.get("compile", False)),
+                    )
+                    torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+                    logger.info("SAM 3.1 Multiplex loaded on GPU (bfloat16 autocast active).")
+                elif torch.cuda.is_available():
+                    # SAM 3.0 GPU path: MultiGPU predictor with bfloat16 autocast
                     from sam3.model_builder import build_sam3_video_predictor
                     gpus_to_use = [torch.cuda.current_device()]
                     self.predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
                     torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
                     logger.info("SAM3 Model loaded on GPU (bfloat16 autocast active).")
                 else:
+                    if version == "sam3.1":
+                        logger.warning("SAM 3.1 requires CUDA — falling back to SAM 3.0 CPU path")
                     # CPU path: use single-device Sam3VideoPredictor (no MultiGPU)
                     from sam3.model.sam3_video_predictor import Sam3VideoPredictor
                     self.predictor = Sam3VideoPredictor()
                     logger.info("SAM3 Model loaded on CPU (float32, slower but functional).")
-                
+
                 self.is_loaded = True
                 
             except Exception as e:
@@ -623,11 +648,14 @@ class SAM3Wrapper:
                 mask = np.max(mask, axis=0)
             return mask
 
-    def clear_interactive_prompts(self, state_id: str) -> bool:
+    def clear_interactive_prompts(self, state_id: str,
+                                  obj_id: Optional[int] = None) -> bool:
         """
-        Clear all prompts/tracked objects from an interactive session WITHOUT
-        destroying the session.  The frames stay loaded in memory, and the
-        user can immediately add new prompts.
+        Clear prompts WITHOUT destroying the session (frames stay loaded).
+
+        obj_id given  → remove ONLY that object from tracking (SAM3's
+                        remove_object) — the other queued objects survive.
+        obj_id = None → reset the whole session (all tracked objects gone).
 
         Returns True on success.
         """
@@ -635,10 +663,19 @@ class SAM3Wrapper:
             return False
 
         try:
-            session = self.predictor._ALL_INFERENCE_STATES.get(state_id)
-            # Use SAM3's official reset_session API (from notebook pattern)
-            # instead of manually manipulating internal state
             with self.lock:
+                if obj_id is not None:
+                    self.predictor.handle_request(
+                        request=dict(
+                            type="remove_object",
+                            session_id=state_id,
+                            obj_id=int(obj_id),
+                        )
+                    )
+                    logger.info(f"[SAM3-Interactive] Removed object {obj_id} "
+                                f"from session {state_id}")
+                    return True
+                # Full reset: SAM3's official reset_session API
                 self.predictor.handle_request(
                     request=dict(
                         type="reset_session",

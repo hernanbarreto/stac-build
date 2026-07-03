@@ -1946,19 +1946,25 @@ async def reset_interactive_segmentation(request: Request):
 @app.post("/api/segmentation/clear_prompts")
 async def clear_interactive_prompts(request: Request):
     """
-    Clear all prompts/tracked objects from the current interactive session
-    WITHOUT destroying it.  Frames stay loaded, model stays loaded.
-    The user can immediately add new prompts after this.
+    Clear prompts from the current interactive session WITHOUT destroying it.
+    Frames stay loaded, model stays loaded.
+
+    Body: { state_id, obj_id?: int }
+      - with obj_id: remove ONLY that object's prompts/tracking (the UI's
+        per-context "Clear" — other queued objects survive).
+      - without: reset every tracked object ("Clear all").
     """
     from segmentation.sam3_wrapper import get_sam3_wrapper
     body = await request.json()
     state_id = body.get("state_id")
+    obj_id = body.get("obj_id")
     if not state_id:
         raise HTTPException(status_code=400, detail="Missing state_id")
 
     sam3 = get_sam3_wrapper()
     loop = asyncio.get_event_loop()
-    ok = await loop.run_in_executor(None, sam3.clear_interactive_prompts, state_id)
+    ok = await loop.run_in_executor(
+        None, lambda: sam3.clear_interactive_prompts(state_id, obj_id=obj_id))
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to clear prompts")
     return {"ok": True}
