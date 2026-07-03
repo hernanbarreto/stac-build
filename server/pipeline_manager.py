@@ -39,16 +39,15 @@ STAGE_REGISTRY = {
     StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
 }
 
-# TSDF runs right after CloudCompy (which builds the cleaned cloud + Potree) so a
-# single pipeline run produces cloud → Potree → TSDF mesh; it depends only on the
-# cleaned cloud, not on VLM/SAM3.
+# THE reconstruction pipeline — always runs end-to-end, no client selection.
+# Reconstruction → CloudCompy (cleaned cloud + Potree) → scene TSDF. VLM
+# (InternVL captions), SAM3 segmentation and instance erosion are NOT part of
+# the reconstruct button: they run on demand from their own UI actions and
+# endpoints, against a finished cloud.
 DEFAULT_STAGE_ORDER: List[StageId] = [
     StageId.RECONSTRUCTION,
     StageId.CLOUDCOMPY,
     StageId.TSDF,
-    StageId.VLM,
-    StageId.SAM3,
-    StageId.INSTANCE_CLEANER,
 ]
 
 
@@ -564,74 +563,23 @@ class PipelineManager:
 
 # ── Helpers ──────────────────────────────────────────────────
 
-def build_pipeline_stages(
-    ordered_stages: Optional[List[str]] = None,
-    enabled: Optional[Dict[str, bool]] = None,
-    backend: Optional[str] = None,
-) -> List[PipelineStage]:
-    """Build the pipeline stage list.
-    
+def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
+    """Build THE pipeline stage list — always the full DEFAULT_STAGE_ORDER
+    (reconstruction → cloudcompy → tsdf), end to end. There is deliberately no
+    per-stage client selection: a reconstruction is only usable once the cloud
+    is cleaned (Potree) and the scene TSDF exists, so partial runs just left
+    sessions in in-between states that hung the on-load lazy paths.
+
     Args:
-        ordered_stages: Optional list of stage IDs (e.g., ["vlm", "sam3", "reconstruction", "cloudcompy"]).
-                        If not provided, defaults to DEFAULT_STAGE_ORDER.
-        enabled: Optional dict like {"reconstruction": True, "vlm": False, ...}
-                 to override which stages are actually executed.
         backend: Reconstruction backend name (e.g., "da3", "gaus_slam").
-                 Used to auto-disable stages incompatible with certain backends.
+                 GauS-SLAM backends skip CloudCompPy (Gaussian surfels are
+                 already clean — the stage has nothing to consume).
     """
-    if ordered_stages is None:
-        stage_order = list(DEFAULT_STAGE_ORDER)   # copy — never mutate the module list
-    else:
-        # Convert strings back to Enums, ignoring invalid ones
-        stage_order = []
-        for s in ordered_stages:
-            try:
-                stage_order.append(StageId(s))
-            except ValueError:
-                logger.warning(f"Unknown stage: {s}")
-
-    enabled_dict = dict(enabled) if enabled else {}
-
-    # Auto-disable stages based on reconstruction backend
     _gaus_backends = ("gaus_slam", "gaus_slam_lidar", "gaus_slam_da3", "gaus_slam_hybrid")
-    if backend in _gaus_backends:
-        # GauS-SLAM produces clean Gaussian surfels — CloudCompPy cleaning is unnecessary
-        enabled_dict.setdefault("cloudcompy", False)
-        logger.info(f"[Pipeline] Auto-disabled CloudCompPy (backend={backend})")
-    else:
-        # CloudCompy produces the cleaned_cloud + Potree the viewer needs. If
-        # reconstruction runs WITHOUT it, the session has only raw chunk_*.ply, and
-        # opening it lazily triggers an on-load CloudCompy+Potree (main.py ~4640) —
-        # which can hang and forces a server restart. So finish the cloud in the
-        # same run: whenever reconstruction is enabled, force CloudCompy on right
-        # after it. It only consumes the reconstruction chunks — it does NOT re-run
-        # reconstruction. TSDF/VLM/SAM3 stay exactly as the user chose.
-        recon_on = (StageId.RECONSTRUCTION in stage_order
-                    and enabled_dict.get(StageId.RECONSTRUCTION.value, True))
-        if recon_on:
-            enabled_dict[StageId.CLOUDCOMPY.value] = True
-            if StageId.CLOUDCOMPY not in stage_order:
-                ri = stage_order.index(StageId.RECONSTRUCTION)
-                stage_order.insert(ri + 1, StageId.CLOUDCOMPY)
-            # The scene TSDF is a mandatory reconstruction product, not an optional
-            # add-on: it is the textured surface mesh of the scan (the CloudCompare-
-            # equivalent deliverable) AND the source the segmentation stage carves
-            # per-object textured meshes out of (crop_scene_mesh_to_instances). With
-            # it off, segmentation has no mesh to crop. So whenever reconstruction
-            # runs, force TSDF on right after CloudCompy — same rationale as forcing
-            # CloudCompy itself. It only consumes cleaned_cloud + depth/poses; it does
-            # NOT re-run reconstruction.
-            enabled_dict[StageId.TSDF.value] = True
-            if StageId.TSDF not in stage_order:
-                ci = stage_order.index(StageId.CLOUDCOMPY)
-                stage_order.insert(ci + 1, StageId.TSDF)
-            logger.info("[Pipeline] Reconstruction enabled → CloudCompy + scene TSDF "
-                        "forced on (cloud finish + textured scene mesh for per-object "
-                        "segmentation crops)")
-    stages = []
-    
-    for stage_id in stage_order:
-        is_enabled = enabled_dict.get(stage_id.value, True)  # all enabled by default
-        stages.append(PipelineStage(id=stage_id, enabled=is_enabled))
-        
-    return stages
+    skip_cloudcompy = backend in _gaus_backends
+    if skip_cloudcompy:
+        logger.info(f"[Pipeline] CloudCompPy skipped (backend={backend})")
+
+    return [PipelineStage(id=stage_id,
+                          enabled=not (skip_cloudcompy and stage_id == StageId.CLOUDCOMPY))
+            for stage_id in DEFAULT_STAGE_ORDER]
