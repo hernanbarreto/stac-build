@@ -4721,25 +4721,6 @@ async def refresh_segmentation(body: dict):
             instances = result.get("instances", [])
             print(f"[SegRefresh] ✅ Done: {len(instances)} instances")
 
-            # Carve per-object TSDF meshes — same faithful deliverable the
-            # pipeline SAM3 stage produces (sam3_worker.py). The interactive
-            # Segmentation Manager flow ends HERE (finalize/close), so without
-            # this the interactive segments never got their cropped meshes.
-            # Best-effort: never fail the refresh over a crop issue.
-            try:
-                scene_dir = output_dir / "tsdf" / "scene"
-                if (scene_dir / "scene.glb.orig").exists() or (scene_dir / "scene.glb").exists():
-                    from segmentation.tsdf_export import crop_scene_mesh_to_instances
-                    task_manager.update(tid, pct=70,
-                                        detail="Carving per-object TSDF meshes...")
-                    written = crop_scene_mesh_to_instances(
-                        output_dir=output_dir, segments_result=result)
-                    print(f"[SegRefresh] Per-object TSDF: wrote {len(written)} mesh(es)")
-                else:
-                    print("[SegRefresh] No scene TSDF — skipping per-object crop")
-            except Exception as e:
-                print(f"[SegRefresh] Per-object TSDF crop failed (non-fatal): {e}")
-
             task_manager.finish(tid)
             return {"instances": instances}
         except Exception as e:
@@ -4747,6 +4728,48 @@ async def refresh_segmentation(body: dict):
             raise
 
     result = await loop.run_in_executor(None, _refresh)
+
+    # Carve per-object TSDF meshes IN THE BACKGROUND — same faithful
+    # deliverable the pipeline SAM3 stage produces. Running it inline froze
+    # the refresh response for minutes (5 instances × millions of points vs
+    # a 1.7M-tri scene mesh) and the UI looked hung; a mid-wait restart then
+    # killed the crops. The refresh now returns right after DBSCAN and the
+    # crops materialize progressively (shape/tsdf lists pick them up).
+    def _crop_bg():
+        crop_tid = task_manager.start(session_id, "tsdf_crop",
+                                      "Carving per-object TSDF meshes")
+        try:
+            scene_dir = output_dir / "tsdf" / "scene"
+            if not ((scene_dir / "scene.glb.orig").exists()
+                    or (scene_dir / "scene.glb").exists()):
+                print("[SegRefresh] No scene TSDF — skipping per-object crop")
+                task_manager.finish(crop_tid)
+                return
+            from segmentation.tsdf_export import crop_scene_mesh_to_instances
+            n_tot = len(result.get("instances", []))
+            done = {"n": 0}
+
+            def _cb(inst_id, phase, elapsed, mesh_path):
+                if phase == "done":
+                    done["n"] += 1
+                    task_manager.update(crop_tid,
+                                        pct=int(done["n"] / max(n_tot, 1) * 100),
+                                        detail=f"TSDF mesh {done['n']}/{n_tot}")
+                    print(f"[SegRefresh]   TSDF crop {done['n']}/{n_tot} "
+                          f"(inst {inst_id}, {elapsed:.0f}s)")
+
+            written = crop_scene_mesh_to_instances(
+                output_dir=output_dir, segments_result=result,
+                progress_cb=_cb)
+            print(f"[SegRefresh] Per-object TSDF: wrote {len(written)} mesh(es)")
+            task_manager.finish(crop_tid)
+        except Exception as e:
+            print(f"[SegRefresh] Per-object TSDF crop failed (non-fatal): {e}")
+            task_manager.fail(crop_tid, str(e))
+
+    _crop_task = asyncio.ensure_future(loop.run_in_executor(None, _crop_bg))
+    _bg_tasks.add(_crop_task)
+    _crop_task.add_done_callback(_bg_tasks.discard)
     return {"ok": True, **result}
 
 
