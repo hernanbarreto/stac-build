@@ -559,6 +559,10 @@ reconstruction:
                                         # not residual bias — fix upstream, don't fake alignment).
                                         # 0.12 (was 0.08): test3 measured 65 mm of REAL VGGT drift
                                         # between chunks — the old cap left no headroom.
+    # pieces_per_chunk: 3               # rigid pieces per chunk for the JOINT pose-graph solve.
+                                        # Long hostile captures drift INSIDE a chunk (test2: rigid
+                                        # per-chunk left pairs at 10 cm); pieces + per-frame
+                                        # interpolation absorb it. 1 = old rigid-chunk behavior.
   bundle_adjust:
     enabled: false                      # OFF — the global BA DEGRADED the result on the metric
                                         # vggtomega recon (A/B vs baseline_noBA was worse). Omega

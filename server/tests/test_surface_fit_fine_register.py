@@ -82,3 +82,70 @@ class TestRegistration:
         B = make_room_chunk(n_per_surf=20_000, seed=8)
         corr, _ = register_chunks({0: A, 1: B})
         assert np.allclose(corr[0], np.eye(4))
+
+
+class TestJointSolve:
+    def test_many_chunks_inconsistent_drift(self):
+        """Replica del modo de falla de test2: 6 chunks con offsets crecientes
+        (deriva acumulada) — el solver CONJUNTO debe dejar todas las
+        separaciones bajo δ, cosa que el secuencial no lograba."""
+        chunks = {}
+        for c in range(6):
+            drift = rigid(rz=np.deg2rad(0.08 * c), t=(0.02 * c, -0.015 * c, 0.01 * c))
+            pts = make_room_chunk(n_per_surf=25_000, seed=20 + c)
+            chunks[c] = pts @ drift[:3, :3].T + drift[:3, 3]
+        corr, report = register_chunks(chunks, accept_sep_m=0.024,
+                                       max_correction_m=0.2)
+        assert report.accepted, f"after: {report.sep_after_m}"
+        assert max(report.sep_after_m.values()) < 0.010   # < 1 cm everywhere
+
+
+class TestPiecewiseRun:
+    def test_intra_chunk_drift_corrected(self, tmp_path):
+        """Dos chunks donde el 2º DERIVA INTERNAMENTE (transformación que
+        crece con el frame): una corrección rígida por chunk no puede alinear
+        ambas puntas — la partición en piezas + interpolación por frame sí."""
+        import numpy as np
+        from plyfile import PlyData, PlyElement
+        from reconstruction.surface_fit.fine_register import run as run_finereg
+
+        rng = np.random.default_rng(31)
+        out = tmp_path
+
+        def write_chunk(cid, pts, frames):
+            v = np.zeros(len(pts), dtype=[("x", "f4"), ("y", "f4"), ("z", "f4")])
+            v["x"], v["y"], v["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
+            PlyData([PlyElement.describe(v, "vertex")], text=False).write(
+                str(out / f"chunk_{cid:03d}.ply"))
+            np.savez(out / f"chunk_{cid:03d}_origins.npz",
+                     frame_global=frames.astype(np.int64))
+
+        base = make_room_chunk(n_per_surf=20_000, seed=32)
+        f0 = rng.integers(0, 10, len(base))
+        write_chunk(0, base, f0)
+
+        # chunk 1: same room re-observed, frames 10..29, drifting linearly
+        # from 0 at frame 10 to 5 cm + 0.4° at frame 29
+        pts1 = make_room_chunk(n_per_surf=20_000, seed=33)
+        f1 = rng.integers(10, 30, len(pts1))
+        drifted = pts1.copy()
+        for fi in np.unique(f1):
+            aa = (fi - 10) / 19.0
+            T = rigid(rz=np.deg2rad(0.4 * aa), t=(0.05 * aa, -0.03 * aa, 0.02 * aa))
+            m = f1 == fi
+            drifted[m] = pts1[m] @ T[:3, :3].T + T[:3, 3]
+        write_chunk(1, drifted, f1)
+
+        frames_all = list(range(30))
+        (out / "camera_frames.txt").write_text(" ".join(str(f) for f in frames_all))
+        eye = " ".join(f"{x:.9g}" for x in np.eye(4).reshape(-1))
+        (out / "camera_poses.txt").write_text("\n".join([eye] * 30) + "\n")
+
+        n = run_finereg(out, accept_sep_m=0.024, max_correction_m=0.2,
+                        pieces_per_chunk=3)
+        assert n >= 1
+        import json
+        rep = json.loads((out / "fine_register_report.json").read_text())
+        assert rep["accepted"], f"sep_after: {rep['sep_after_m']}"
+        assert max(rep["sep_after_m"].values()) < 0.015
+        assert (out / "camera_poses.txt.prefinereg").exists()

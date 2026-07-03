@@ -292,6 +292,8 @@ def _run_fine_register_step(pipe: WorkerPipe, output_dir: Path, recon_cfg: dict)
         cmd += ["--accept-sep", str(fcfg["accept_sep_m"])]
     if fcfg.get("max_correction_m") is not None:
         cmd += ["--max-correction", str(fcfg["max_correction_m"])]
+    if fcfg.get("pieces_per_chunk") is not None:
+        cmd += ["--pieces", str(fcfg["pieces_per_chunk"])]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, bufsize=1, cwd=str(server_dir))
     for line in p.stdout:
