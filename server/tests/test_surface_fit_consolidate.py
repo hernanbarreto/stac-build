@@ -104,3 +104,79 @@ class TestEndToEnd:
         fs = fit_segment(cloud, consolidate_method="none", label="floor",
                          models=["plane"])
         assert fs.report.stats.moran.relevant
+
+
+class TestNormalAware:
+    def test_thin_double_sided_wall_not_merged(self):
+        """Dos caras REALES de un panel a 4 cm, cámaras a ambos lados: la
+        consolidación consciente de normales debe mantener cada cara en su
+        plano (no inventar una superficie media inexistente)."""
+        from reconstruction.surface_fit.consolidate import (
+            consolidate_mls, estimate_oriented_normals)
+        rng = np.random.default_rng(40)
+        n = 30_000
+        face_a = np.column_stack([rng.uniform(0, 3, n), rng.uniform(0, 2, n),
+                                  rng.normal(0.0, 0.002, n)])
+        face_b = np.column_stack([rng.uniform(0, 3, n), rng.uniform(0, 2, n),
+                                  0.04 + rng.normal(0.0, 0.002, n)])
+        cloud = np.vstack([face_a, face_b])
+        cams = np.array([[1.5, 1.0, -2.0], [1.5, 1.0, 2.0]])   # one per side
+        normals = estimate_oriented_normals(cloud, cams)
+        out = consolidate_mls(cloud, radius=0.06, iterations=2,
+                              max_points=None, normals=normals)
+        za = out[:n, 2]
+        zb = out[n:, 2]
+        assert abs(za.mean()) < 0.004, f"cara A se movió a {za.mean()*1000:.1f}mm"
+        assert abs(zb.mean() - 0.04) < 0.004, f"cara B se movió a {zb.mean()*1000:.1f}mm"
+
+    def test_same_side_ghost_still_collapses(self):
+        """Capa fantasma con la MISMA orientación (registro): sí colapsa."""
+        from reconstruction.surface_fit.consolidate import (
+            consolidate_mls, estimate_oriented_normals)
+        rng = np.random.default_rng(41)
+        n = 30_000
+        real = np.column_stack([rng.uniform(0, 3, n), rng.uniform(0, 2, n),
+                                rng.normal(0.0, 0.002, n)])
+        ghost = real + np.array([0, 0, 0.008])
+        cloud = np.vstack([real, ghost])
+        cams = np.array([[1.5, 1.0, 2.0]])                     # same side
+        normals = estimate_oriented_normals(cloud, cams)
+        out = consolidate_mls(cloud, radius=0.06, iterations=2,
+                              max_points=None, normals=normals)
+        assert out[:, 2].std() * 1000 < 1.5                    # thin sheet
+
+
+class TestSceneConsolidate:
+    def test_end_to_end(self, tmp_path):
+        import json
+        import open3d as o3d
+        from reconstruction.surface_fit.consolidate import scene_consolidate
+
+        rng = np.random.default_rng(42)
+        n = 40_000
+        pts = np.column_stack([rng.uniform(0, 4, n), rng.uniform(0, 3, n),
+                               rng.normal(0, 0.002, n)])
+        ghost = pts.copy(); ghost[:, 2] += 0.010
+        cloud = np.vstack([pts, ghost])
+        colors = rng.uniform(0, 1, (len(cloud), 3))
+        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(cloud))
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+        o3d.io.write_point_cloud(str(tmp_path / "cleaned_cloud.ply"), pcd)
+        eye = " ".join(f"{x:.9g}" for x in np.array(
+            [[1,0,0,2],[0,1,0,1.5],[0,0,1,2.0],[0,0,0,1]], float).reshape(-1))
+        (tmp_path / "camera_poses.txt").write_text(eye + "\n")
+        (tmp_path / "fine_register_report.json").write_text(json.dumps(
+            {"sep_after_m": {"0-1": 0.015}}))
+
+        stats = scene_consolidate(tmp_path)
+        assert stats is not None
+        assert abs(stats["radius_m"] - 0.03) < 1e-9     # 2×0.015, adaptativo
+        assert (tmp_path / "cleaned_cloud_raw.ply").exists()
+        out = o3d.io.read_point_cloud(str(tmp_path / "cleaned_cloud.ply"))
+        opts = np.asarray(out.points); ocol = np.asarray(out.colors)
+        assert len(opts) == len(cloud)                  # orden/conteo intactos
+        assert np.allclose(ocol, colors, atol=1/255)    # colores preservados
+        assert opts[:, 2].std() * 1000 < 2.0            # capas colapsadas
+        raw = np.asarray(o3d.io.read_point_cloud(
+            str(tmp_path / "cleaned_cloud_raw.ply")).points)
+        assert raw[:, 2].std() * 1000 > 4.0             # el crudo sigue bicapa

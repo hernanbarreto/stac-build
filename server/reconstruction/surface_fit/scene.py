@@ -84,9 +84,9 @@ def fit_scene(session_dir: Path,
     out_base = Path(out_base) if out_base else session_dir / "output" / "surface_fit"
     kwargs = build_surface_fit_kwargs(config, overrides)
 
-    instances, cloud_pts, centroid = load_instances(session_dir)
+    instances, cloud_pts, centroid, raw_pts = load_instances(session_dir)
     fitted: List[FittedSurface] = []
-    seg_points: Dict[int, np.ndarray] = {}
+    seg_points: Dict[int, np.ndarray] = {}   # RAW measurement per instance
     skipped: List[dict] = []
 
     def _cb(**kw):
@@ -105,9 +105,11 @@ def fit_scene(session_dir: Path,
                         label, iid)
             continue
         pts = segment_points(inst, cloud_pts)
+        raw_seg = segment_points(inst, raw_pts) if raw_pts is not None else pts
         _cb(instance_id=iid, phase="fit", elapsed=time.time() - t0)
         try:
             fs = fit_segment(pts, instance_id=iid, label=label,
+                             original_xyz=raw_seg,
                              scene_centroid=centroid,
                              progress_cb=progress_cb, **kwargs)
         except Exception as e:
@@ -118,7 +120,7 @@ def fit_scene(session_dir: Path,
                             "reason": "no model fitted → TSDF path"})
             continue
         fitted.append(fs)
-        seg_points[iid] = pts
+        seg_points[iid] = raw_seg   # stage-4 reference = raw measurement
 
     # ── stage 3: scene-wide plane regularization + honest re-evaluation ──
     reg_report = RegularizeReport()

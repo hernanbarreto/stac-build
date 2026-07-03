@@ -146,7 +146,7 @@ def main():
             session_dir = Path(args.session_dir)
             base = Path(args.output_dir) if args.output_dir else session_dir / "output" / "surface_fit"
             _attach_file_log(base)
-            instances, cloud_pts, centroid = load_instances(session_dir)
+            instances, cloud_pts, centroid, raw_pts = load_instances(session_dir)
             wanted = set(args.instance_id or [])
             if not wanted:
                 ap.error("--session-dir requires --instance-id or --all")
@@ -156,9 +156,11 @@ def main():
                     continue
                 label = inst.get("label", "")
                 pts = segment_points(inst, cloud_pts)
+                raw_seg = segment_points(inst, raw_pts) if raw_pts is not None else None
                 out = base / _safe_name(label, iid)
                 try:
                     fs = fit_segment(pts, instance_id=iid, label=label,
+                                     original_xyz=raw_seg,
                                      scene_centroid=centroid, out_dir=out,
                                      progress_cb=_progress, **kwargs)
                 except Exception as e:

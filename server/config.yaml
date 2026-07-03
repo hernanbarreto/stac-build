@@ -704,6 +704,22 @@ postprocessing:
   enabled: true
   conda_env: "CloudComPy310"
 
+  # ── Scene-level consolidation (surface_fit stage 1 at scene scale) ──
+  # After CloudComPy writes cleaned_cloud.ply, a normal-aware robust MLS
+  # collapses residual onion layers IN PLACE (point count/order preserved →
+  # colors + segmentation globalIndices stay valid). The raw measurement is
+  # kept as cleaned_cloud_raw.ply — surface_fit residuals ALWAYS use it.
+  # Oriented normals (toward nearest camera) keep the two REAL faces of thin
+  # walls/panels apart — only same-orientation ghost layers collapse.
+  scene_consolidate:
+    enabled: true
+    radius_m: null              # null = adaptive: 2× worst fine_register residual
+    min_radius_m: 0.02          # clamp for the adaptive radius…
+    max_radius_m: 0.06          # …(also the fallback when no fine_register report)
+    iterations: 2
+    normal_gate: 0.25           # neighbours with oriented-normal agreement below
+                                # this are excluded (opposite faces never merge)
+
   # Pipeline toggles
   skip_duplicates: true
   skip_sor: false

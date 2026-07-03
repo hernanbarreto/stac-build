@@ -166,6 +166,39 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         except Exception as e:
             pipe.send_log(f"Merged dir symlink failed (non-critical): {e}", level="warning")
 
+        # ── Scene-level consolidation (surface_fit stage 1 at scene scale) ──
+        # Normal-aware robust MLS over cleaned_cloud IN PLACE: collapses the
+        # residual onion layers fine_register left (<δ) into thin surfaces so
+        # TSDF masking, Potree and segmentation all see clean geometry. Point
+        # count/order (→ colors, globalIndices) are preserved; the untouched
+        # measurement is kept as cleaned_cloud_raw.ply (metric reference for
+        # surface_fit residuals). Radius adapts to fine_register_report.json.
+        sc_cfg = postproc.get("scene_consolidate", {}) or {}
+        if sc_cfg.get("enabled", True):
+            pipe.send_progress(93, "Consolidating cloud (normal-aware MLS)...",
+                               stage="cloudcompy")
+            try:
+                import sys
+                server_dir_str = str(Path(__file__).resolve().parent.parent)
+                if server_dir_str not in sys.path:
+                    sys.path.insert(0, server_dir_str)
+                from reconstruction.surface_fit.consolidate import scene_consolidate
+                stats = scene_consolidate(
+                    output_dir,
+                    radius_m=sc_cfg.get("radius_m"),
+                    min_radius_m=float(sc_cfg.get("min_radius_m", 0.02)),
+                    max_radius_m=float(sc_cfg.get("max_radius_m", 0.06)),
+                    iterations=int(sc_cfg.get("iterations", 2)),
+                    normal_gate=float(sc_cfg.get("normal_gate", 0.25)),
+                )
+                if stats:
+                    pipe.send_log(
+                        f"[consolidate] {stats['n_points']:,} pts, r={stats['radius_m']:.3f}m, "
+                        f"mean move {stats['mean_move_mm']:.2f}mm (p95 {stats['p95_move_mm']:.2f}mm)")
+            except Exception as e:
+                pipe.send_log(f"[consolidate] scene consolidation failed "
+                              f"(non-fatal, cloud kept raw): {e}", level="warning")
+
         # Compute and save floor alignment transform
         pipe.send_progress(95, "Computing floor alignment...", stage="cloudcompy")
         try:

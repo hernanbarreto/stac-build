@@ -262,9 +262,13 @@ def build_surface_fit_kwargs(config: Optional[dict],
 def load_instances(session_dir: Path):
     """Yield per-instance segments from a session's cleaned cloud.
 
-    Returns (instances, points, scene_centroid): the parsed instance dicts of
-    segmentation_result.json, the full cleaned_cloud points (N,3), and its
-    centroid (normal-orientation hint for walls).
+    Returns (instances, points, scene_centroid, raw_points): the parsed
+    instance dicts of segmentation_result.json, the full cleaned_cloud points
+    (N,3), its centroid (normal-orientation hint for walls), and — when the
+    scene-level consolidation ran — the UNTOUCHED measurement from
+    cleaned_cloud_raw.ply (same count/order, so globalIndices index both).
+    Stage-4 residuals must use the raw cloud (charter: never measure fidelity
+    against the consolidated one).
     """
     import open3d as o3d
     session_dir = Path(session_dir)
@@ -277,10 +281,19 @@ def load_instances(session_dir: Path):
         raise FileNotFoundError(f"missing {cloud_path} — run CloudComPy postprocess first")
     seg = json.loads(seg_path.read_text())
     instances = seg.get("instances") or []
-    logger.info("session %s: %d instances, cloud %s", session_dir.name,
-                len(instances), cloud_path.name)
     pts = np.asarray(o3d.io.read_point_cloud(str(cloud_path)).points)
-    return instances, pts, pts.mean(0)
+    raw_path = out / "cleaned_cloud_raw.ply"
+    raw = None
+    if raw_path.exists():
+        raw = np.asarray(o3d.io.read_point_cloud(str(raw_path)).points)
+        if len(raw) != len(pts):
+            logger.warning("cleaned_cloud_raw.ply size mismatch (%d vs %d) — "
+                           "ignoring raw reference", len(raw), len(pts))
+            raw = None
+    logger.info("session %s: %d instances, cloud %s%s", session_dir.name,
+                len(instances), cloud_path.name,
+                " (+raw reference)" if raw is not None else "")
+    return instances, pts, pts.mean(0), raw
 
 
 def segment_points(instance: dict, cloud_pts: np.ndarray) -> np.ndarray:
