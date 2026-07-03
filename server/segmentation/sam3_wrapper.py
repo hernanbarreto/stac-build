@@ -36,6 +36,20 @@ class SAM3Wrapper:
         self._interactive_sessions: Dict[str, dict] = {}  # state_id → session info dict
         logger.info("SAM3 Wrapper initialized (Lazy Loading Enabled: Model will load on first prompt).")
         
+    def _stream(self, request: dict):
+        """handle_stream_request under bf16 autocast.
+
+        SAM 3.1's base predictor autocasts add_prompt internally but NOT
+        propagate_in_video, and torch autocast is THREAD-LOCAL — the context
+        entered at load time doesn't cover the executor thread running the
+        propagation. Without this, bf16 memory features (created during
+        add_prompt) hit fp32 conv biases and propagation dies with
+        "Input type (c10::BFloat16) and bias type (float) should be the same".
+        """
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
+                            enabled=torch.cuda.is_available()):
+            yield from self.predictor.handle_stream_request(request=request)
+
     def _session_store(self) -> dict:
         """Predictor's session dict — SAM 3.0 exposes `_ALL_INFERENCE_STATES`,
         SAM 3.1's base predictor renamed it `_all_inference_states`. Both map
@@ -207,7 +221,7 @@ class SAM3Wrapper:
             # 3. Propagate
             logger.info("Propagating segmentation...")
             # We only need to store results for keyframes
-            for response in self.predictor.handle_stream_request(
+            for response in self._stream(
                 request=dict(
                     type="propagate_in_video",
                     session_id=session_id,
@@ -374,7 +388,7 @@ class SAM3Wrapper:
             
             # 3. Propagate
             logger.info("[SAM3-Full] Propagating segmentation...")
-            for response in self.predictor.handle_stream_request(
+            for response in self._stream(
                 request=dict(
                     type="propagate_in_video",
                     session_id=session_id,
@@ -496,7 +510,7 @@ class SAM3Wrapper:
                     logger.warning(f"Could not add prompt to batch frame {f_idx}: {e}")
             
             # 3. Propagate (save ALL frames, keyframe_interval=1)
-            for response in self.predictor.handle_stream_request(
+            for response in self._stream(
                 request=dict(
                     type="propagate_in_video",
                     session_id=session_id,
@@ -923,7 +937,7 @@ class SAM3Wrapper:
             # Holding a lock across yields would block ALL other SAM3 operations
             # for the entire duration (minutes). The server-side 409 guard already
             # prevents concurrent propagations on the same session.
-            for response in self.predictor.handle_stream_request(
+            for response in self._stream(
                 request=dict(
                     type="propagate_in_video",
                     session_id=state_id,
