@@ -115,6 +115,11 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     // SAM3 now loads only keyframes sequentially (via temp dir).
     // The SAM3 frame_idx is the position in the sorted keyframes list = kfIndex.
     const currentFrameIdx = kfIndex
+    // Live mirror of kfIndex for async handlers: a slow add_prompt response
+    // must not paint its mask over a DIFFERENT frame/object the user has
+    // navigated to meanwhile (stale-response race).
+    const kfIndexRef = useRef(kfIndex)
+    useEffect(() => { kfIndexRef.current = kfIndex }, [kfIndex])
 
     // ── Init ──────────────────────────────────────────────────
     useEffect(() => {
@@ -333,6 +338,116 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         }
     }, [sessionId])
 
+    // ── Clear the CURRENT object only (footer button + Esc) ─────
+    // Never touches the queue, saved instances or the frame selection.
+    const clearCurrentObject = useCallback(async () => {
+        const objId = currentObjIdRef.current
+        setPromptPoints([])
+        setMaskOverlay(null)
+        setHasPrompts(false)
+        setLabelName('')
+        for (const k of [...promptPointsMapRef.current.keys()]) {
+            if (k.endsWith(`:${objId}`)) promptPointsMapRef.current.delete(k)
+        }
+        for (const k of [...maskCacheRef.current.keys()]) {
+            if (k.endsWith(`:${objId}`)) maskCacheRef.current.delete(k)
+        }
+        if (stateId) {
+            try {
+                setLoading(true)
+                setStatus('Clearing current object...')
+                const res = await fetch('/api/segmentation/clear_prompts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ state_id: stateId, obj_id: objId })
+                })
+                setStatus(res.ok ? 'Current object cleared.'
+                    : 'Warning: could not clear the object on backend')
+            } catch { setStatus('Error clearing prompts') }
+            finally { setLoading(false) }
+        } else {
+            setStatus('Current object cleared.')
+        }
+    }, [stateId])
+
+    // ── Undo the last prompt point (Ctrl/Cmd+Z) ─────────────────
+    const undoLastPoint = useCallback(async () => {
+        if (selectedInstance !== null || promptPoints.length === 0 || promptingRef.current) return
+        const updated = promptPoints.slice(0, -1)
+        setPromptPoints(updated)
+        promptPointsMapRef.current.set(pKey(kfIndex), updated)
+        if (updated.length === 0) {
+            setMaskOverlay(null)
+            setHasPrompts(false)
+            maskCacheRef.current.delete(pKey(kfIndex))
+            setStatus('Last point undone — no prompts left on this frame.')
+            return
+        }
+        const img = imgRef.current
+        if (!stateId || !img) return
+        promptingRef.current = true
+        try {
+            setLoading(true)
+            setStatus('Undoing last point...')
+            const res = await fetch('/api/segmentation/add_prompt', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    state_id: stateId, session_id: sessionId,
+                    frame_idx: currentFrameIdx, obj_id: currentObjIdRef.current,
+                    points: updated.map(p => [p.x / img.naturalWidth, p.y / img.naturalHeight]),
+                    labels: updated.map(p => p.label)
+                })
+            })
+            if (res.ok) {
+                const data = await res.json()
+                if (data.mask_png) {
+                    const u = `data:image/png;base64,${data.mask_png}`
+                    setMaskOverlay(u)
+                    maskCacheRef.current.set(pKey(kfIndex), u)
+                }
+            }
+            setStatus('Last point undone.')
+        } catch { setStatus('Error undoing point') }
+        finally { setLoading(false); promptingRef.current = false }
+    }, [promptPoints, selectedInstance, stateId, sessionId, kfIndex, currentFrameIdx])
+
+    // ── Keyboard shortcuts: ←/→ navigate frames, Esc cancels the current
+    // object's prompts, Ctrl/Cmd+Z undoes the last point. Ignored while
+    // typing in inputs. ──
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            const t = e.target as HTMLElement | null
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+            if (e.key === 'ArrowLeft') {
+                e.preventDefault()
+                setKfIndex(i => Math.max(0, i - 1))
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault()
+                setKfIndex(i => Math.min(keyframes.length - 1, i + 1))
+            } else if (e.key === 'Escape') {
+                if (hasPrompts) { e.preventDefault(); clearCurrentObject() }
+            } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+                e.preventDefault()
+                undoLastPoint()
+            }
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+    }, [keyframes.length, hasPrompts, clearCurrentObject, undoLastPoint])
+
+    // ── Warn before leaving the page with unsaved segmentation work ──
+    useEffect(() => {
+        const dirty = hasPrompts || pendingObjects.length > 0
+        if (!dirty) return
+        const onBeforeUnload = (e: BeforeUnloadEvent) => {
+            e.preventDefault()
+            e.returnValue = ''
+        }
+        window.addEventListener('beforeunload', onBeforeUnload)
+        return () => window.removeEventListener('beforeunload', onBeforeUnload)
+    }, [hasPrompts, pendingObjects.length])
+
     // ── Manual click handler ──────────────────────────────────
     const lastClickTime = useRef(0)
     const handleImageClick = useCallback(async (e: React.MouseEvent<HTMLCanvasElement>, isPositive: boolean) => {
@@ -443,6 +558,12 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             setLoading(true)
             setStatus(`Adding ${isPositive ? '✅ positive' : '❌ negative'} prompt...`)
 
+            // Snapshot the send context: if the user navigates to another
+            // frame or object while this request is in flight, the response
+            // is STALE and must not repaint the new context (race guard).
+            const sentFrame = kfIndex
+            const sentObj = currentObjIdRef.current
+
             // Track the point locally
             const newPoints = [...promptPoints, { x, y, label: isPositive ? 1 : 0 }]
             setPromptPoints(newPoints)
@@ -468,14 +589,19 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             })
             if (!res.ok) throw new Error('Failed to add prompt')
             const data = await res.json()
+            const stale = kfIndexRef.current !== sentFrame
+                || currentObjIdRef.current !== sentObj
             if (data.mask_png) {
                 const maskUrl = `data:image/png;base64,${data.mask_png}`
-                setMaskOverlay(maskUrl)
-                maskCacheRef.current.set(pKey(kfIndex), maskUrl)
+                // Cache under the ORIGINAL context either way; only paint the
+                // overlay if the user is still looking at that context.
+                maskCacheRef.current.set(`${sentFrame}:${sentObj}`, maskUrl)
+                if (!stale) setMaskOverlay(maskUrl)
             }
-            promptPointsMapRef.current.set(pKey(kfIndex), newPoints)
+            promptPointsMapRef.current.set(`${sentFrame}:${sentObj}`, newPoints)
             setHasPrompts(true)
-            setStatus('Prompt applied. Add more or propagate.')
+            setStatus(stale ? 'Prompt applied (on the previous frame).'
+                : 'Prompt applied. Add more or propagate.')
         } catch (e: any) {
             setStatus(`Error: ${e.message}`)
         } finally {
@@ -1119,40 +1245,8 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                 />
                                 <button
                                     style={{ background: '#555', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13 }}
-                                    title="Clear only the prompts of the object being edited — queued objects and saved instances are untouched"
-                                    onClick={async () => {
-                                        // CLEAR = current context only: the in-edit object's
-                                        // prompts (all frames) + its backend tracking. The
-                                        // pending-object queue, saved instances and the frame
-                                        // selection are NEVER touched here (that was bug 3).
-                                        const objId = currentObjIdRef.current
-                                        setPromptPoints([])
-                                        setMaskOverlay(null)
-                                        setHasPrompts(false)
-                                        setLabelName('')
-                                        for (const k of [...promptPointsMapRef.current.keys()]) {
-                                            if (k.endsWith(`:${objId}`)) promptPointsMapRef.current.delete(k)
-                                        }
-                                        for (const k of [...maskCacheRef.current.keys()]) {
-                                            if (k.endsWith(`:${objId}`)) maskCacheRef.current.delete(k)
-                                        }
-                                        if (stateId) {
-                                            try {
-                                                setLoading(true)
-                                                setStatus('Clearing current object...')
-                                                const res = await fetch('/api/segmentation/clear_prompts', {
-                                                    method: 'POST',
-                                                    headers: { 'Content-Type': 'application/json' },
-                                                    body: JSON.stringify({ state_id: stateId, obj_id: objId })
-                                                })
-                                                setStatus(res.ok ? 'Current object cleared.'
-                                                    : 'Warning: could not clear the object on backend')
-                                            } catch { setStatus('Error clearing prompts') }
-                                            finally { setLoading(false) }
-                                        } else {
-                                            setStatus('Current object cleared.')
-                                        }
-                                    }}
+                                    title="Clear only the prompts of the object being edited (Esc) — queued objects and saved instances are untouched"
+                                    onClick={clearCurrentObject}
                                     disabled={loading || !hasPrompts}
                                 >✕ Clear</button>
                                 <button
@@ -1209,7 +1303,11 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                 <div key={i} ref={el => { thumbRefs.current[i] = el }}
                                     style={{ position: 'relative', flexShrink: 0, cursor: 'pointer', opacity: selectedFrames.has(i) ? 1 : 0.4 }}
                                     onClick={() => setKfIndex(i)}>
-                                    <img src={`/api/sessions/${sessionId}/frames/${kf}`} style={{ height: 40, borderRadius: 4, border: kfIndex === i ? '2px solid #3498db' : '1px solid transparent' }} />
+                                    <img src={`/api/sessions/${sessionId}/frames/${kf}`} loading="lazy"
+                                        style={{ height: 40, borderRadius: 4, border: kfIndex === i ? '2px solid #3498db' : '1px solid transparent' }} />
+                                    {[...promptPointsMapRef.current.keys()].some(k => k.startsWith(`${i}:`)) && (
+                                        <span title="This frame has prompts" style={{ position: 'absolute', top: 2, left: 2, width: 8, height: 8, borderRadius: '50%', background: '#2ecc71', border: '1px solid #111' }} />
+                                    )}
                                     <input type="checkbox" checked={selectedFrames.has(i)}
                                         onClick={e => e.stopPropagation()}
                                         onChange={() => {
