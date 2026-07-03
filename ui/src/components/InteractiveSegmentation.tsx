@@ -40,8 +40,11 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const [labelName, setLabelName] = useState('')
     const [textPrompt, setTextPrompt] = useState('')
     const [promptPoints, setPromptPoints] = useState<{ x: number, y: number, label: number }[]>([])
-    const promptPointsMapRef = useRef<Map<number, { x: number, y: number, label: number }[]>>(new Map())
-    const maskCacheRef = useRef<Map<number, string>>(new Map())
+    // Prompt/mask caches are keyed by "<frame>:<obj_id>" — NOT by frame alone.
+    // Two objects edited on the same frame must never share an entry, or the
+    // previous object's points leak into the next object's payload (bug 4).
+    const promptPointsMapRef = useRef<Map<string, { x: number, y: number, label: number }[]>>(new Map())
+    const maskCacheRef = useRef<Map<string, string>>(new Map())
     const [selectedFrames, setSelectedFrames] = useState<Set<number>>(new Set())
 
     // ── Multi-object queue ───────────────────────────────────────
@@ -190,13 +193,17 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         init()
     }, [sessionId])
 
+    // Cache key: prompts/masks belong to (frame, object-in-edit), never to the
+    // frame alone — see promptPointsMapRef above (bug 4).
+    const pKey = (frame: number) => `${frame}:${currentObjIdRef.current}`
+
     // Save current frame's prompts before navigating, restore target frame's prompts
     const prevKfIndexRef = useRef(kfIndex)
     useEffect(() => {
         const prev = prevKfIndexRef.current
-        // Save current frame's prompt points
+        // Save current frame's prompt points (under this object's key)
         if (promptPoints.length > 0) {
-            promptPointsMapRef.current.set(prev, [...promptPoints])
+            promptPointsMapRef.current.set(pKey(prev), [...promptPoints])
         }
         prevKfIndexRef.current = kfIndex
 
@@ -205,16 +212,30 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             return
         }
 
-        // Restore target frame's prompts & cached mask
-        const savedPoints = promptPointsMapRef.current.get(kfIndex) || []
+        // Restore target frame's prompts & cached mask (this object only)
+        const savedPoints = promptPointsMapRef.current.get(pKey(kfIndex)) || []
         setPromptPoints(savedPoints)
-        const cachedMask = maskCacheRef.current.get(kfIndex)
+        const cachedMask = maskCacheRef.current.get(pKey(kfIndex))
         if (cachedMask) {
             setMaskOverlay(cachedMask)
         } else if (savedPoints.length === 0) {
             setMaskOverlay(null)
         }
     }, [kfIndex, selectedInstance])
+
+    // Changing the ACTIVE object (selecting an existing instance to edit, or
+    // deselecting it) must clear the previous object's on-screen prompts: its
+    // dots would otherwise stay live and be re-sent under the new obj_id
+    // (the bug-4 contamination). The confirmed masks of saved instances stay
+    // visible through fetchInstanceMask; only in-edit prompt state resets.
+    const prevSelectedInstanceRef = useRef(selectedInstance)
+    useEffect(() => {
+        if (prevSelectedInstanceRef.current !== selectedInstance) {
+            prevSelectedInstanceRef.current = selectedInstance
+            setPromptPoints([])
+            setHasPrompts(false)
+        }
+    }, [selectedInstance])
 
     // Clear prompt points only when mode changes (not frame)
     useEffect(() => { setPromptPoints([]); promptPointsMapRef.current.clear(); maskCacheRef.current.clear() }, [mode])
@@ -450,9 +471,9 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             if (data.mask_png) {
                 const maskUrl = `data:image/png;base64,${data.mask_png}`
                 setMaskOverlay(maskUrl)
-                maskCacheRef.current.set(kfIndex, maskUrl)
+                maskCacheRef.current.set(pKey(kfIndex), maskUrl)
             }
-            promptPointsMapRef.current.set(kfIndex, newPoints)
+            promptPointsMapRef.current.set(pKey(kfIndex), newPoints)
             setHasPrompts(true)
             setStatus('Prompt applied. Add more or propagate.')
         } catch (e: any) {
