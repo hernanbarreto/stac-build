@@ -34,6 +34,14 @@ server:
   port: 8765
   static_dir: "../static"   # Relative to server/
 
+# ── Pipeline ───────────────────────────────────────────────────────
+pipeline:
+  # Full semantic chain inside the reconstruct pipeline (spec order):
+  # VLM scene understanding → SAM3 segment-everything → Phase R anchoring →
+  # TSDF with refined poses. false = restore the on-demand flow (segment
+  # manually, Phase R runs after segmentation, re-run TSDF to fuse anchored).
+  auto_segment: true
+
 # ── Paths ──────────────────────────────────────────────────────────
 paths:
   output_dir_name: "output"
@@ -105,14 +113,22 @@ scene_analysis:
 # the result with a fail-safe A/B vs the no-anchor baseline. Consumed by
 # server/phase_r/*.
 phase_r:
+  enabled: true                       # run semantic anchoring after segmentation
   mask_erosion_px: 8                  # R.2 aggressive erosion (DA3 depth, not sensor)
   depth_stride: 4
   knn_k: 6
   min_points: 30
   max_depth_m: null                   # optional depth clip (metres)
   max_refine_iterations: 2            # R.4 refinement loop cap
+  refine_convergence_tol: 0.001       # R.4 stop when max window correction < tol
+  vote_max_views: 20                  # R.2 views sampled for the plurality vote
+  obb_trim_percent: 1.0               # robust OBB extents (percentile trim) on
+                                      # noisy depth-lifted points; seg OBBs from
+                                      # the cleaned cloud stay canonical
   floor_labels: ["floor", "slab", "platform", "ground"]   # R.4 gravity source
   depth_reg_whitelist: ["wall", "slab", "column", "vault", "platform", "floor"]  # R.5
+  writeback_poses: true               # R.4 write refined poses into camera_poses.txt
+  writeback_depth: false              # R.5 write regularized depth npz (opt-in)
   # dynamic classes (R.7) excluded from pose & fusion come from the vocabulary
   # dynamic flags + {train, person, equipment, vehicle, tram}
 
@@ -190,7 +206,19 @@ autoprompt:
   association_iou_threshold: 0.25     # reprojected-box IoU to link across keyframes
   use_depth: true                     # use DA3/VGGT per-frame depth if present
   assumed_depth_m: 5.0                # fallback lift depth when none available
-  max_keyframes: 0                    # 0 = all selected keyframes
+  max_keyframes: 0                    # 0 = all selected keyframes (hard override)
+  # Adaptive VLM sampling: the grounded detector only sees keyframes where the
+  # camera actually MOVED (new viewpoint = new detection opportunity); SAM3
+  # propagates the masklets to every frame afterwards. Scales with the scan
+  # (short room ≈ dozens of VLM calls, long corridor ∝ metres walked) instead
+  # of one call per frame.
+  adaptive_sampling:
+    enabled: true
+    min_spacing_m: 0.4                # keep a frame after ≥ this camera travel
+    min_rotation_deg: 18              # … or ≥ this camera rotation
+    min_frames: 12                    # floor (tiny/static scans)
+    max_frames: 0                     # optional ceiling (0 = none)
+    no_pose_target: 48                # even subsample when no BA poses exist
 
 
 # ── Semantic Service (Phase 0) ─────────────────────────────────────

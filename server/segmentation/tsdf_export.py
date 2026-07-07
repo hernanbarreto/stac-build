@@ -2392,17 +2392,35 @@ def export_tsdf_scene(
                             f"{'XYZ'[tile_axis]}∈[{lo:.2f},{hi:.2f}) +{halo:.2f}m halo "
                             f"(spatial crop)")
         elif cube_mode:
-            sel = np.all((cc_xyz >= lo - halo) & (cc_xyz < hi + halo), axis=1)
-            cc_fp = _group_rows_by_frame(cc_fg[sel], cc_pr[sel], cc_pc[sel], cc_xyz[sel])
-            logger.info(f"[TSDF-scene] cube {ti} ({len(work)} queued) "
-                        f"x∈[{lo[0]:.1f},{hi[0]:.1f}) y∈[{lo[1]:.1f},{hi[1]:.1f}) "
-                        f"z∈[{lo[2]:.1f},{hi[2]:.1f}) — {len(cc_fp)} frames")
+            if cc_fg is None:
+                # UNMASKED fallback (cloud has no traceability): integrate every
+                # posed frame spatially cropped to this cube — same treatment as
+                # dense-DA3 — instead of dereferencing the missing (frame,pixel)
+                # trace (this crashed with 'NoneType' object is not subscriptable).
+                cc_fp = None
+                tile_bounds = ("box3d", lo, hi, halo)
+                logger.info(f"[TSDF-scene] cube {ti} ({len(work)} queued) UNMASKED "
+                            f"x∈[{lo[0]:.1f},{hi[0]:.1f}) y∈[{lo[1]:.1f},{hi[1]:.1f}) "
+                            f"z∈[{lo[2]:.1f},{hi[2]:.1f}) +{halo:.2f}m halo (spatial crop)")
+            else:
+                sel = np.all((cc_xyz >= lo - halo) & (cc_xyz < hi + halo), axis=1)
+                cc_fp = _group_rows_by_frame(cc_fg[sel], cc_pr[sel], cc_pc[sel], cc_xyz[sel])
+                logger.info(f"[TSDF-scene] cube {ti} ({len(work)} queued) "
+                            f"x∈[{lo[0]:.1f},{hi[0]:.1f}) y∈[{lo[1]:.1f},{hi[1]:.1f}) "
+                            f"z∈[{lo[2]:.1f},{hi[2]:.1f}) — {len(cc_fp)} frames")
         elif n_tiles_tot > 1:
-            sel = (ax >= lo - halo) & (ax < hi + halo)
-            cc_fp = _group_rows_by_frame(cc_fg[sel], cc_pr[sel], cc_pc[sel], cc_xyz[sel])
-            logger.info(f"[TSDF-scene] tile {ti}/{n_tiles_tot} "
-                        f"{'XYZ'[tile_axis]}∈[{lo:.2f},{hi:.2f}) +{halo:.2f}m halo — "
-                        f"{len(cc_fp)} frames")
+            if cc_fg is None:
+                cc_fp = None
+                tile_bounds = (tile_axis, lo, hi, halo)
+                logger.info(f"[TSDF-scene] tile {ti}/{n_tiles_tot} UNMASKED "
+                            f"{'XYZ'[tile_axis]}∈[{lo:.2f},{hi:.2f}) +{halo:.2f}m halo "
+                            f"(spatial crop)")
+            else:
+                sel = (ax >= lo - halo) & (ax < hi + halo)
+                cc_fp = _group_rows_by_frame(cc_fg[sel], cc_pr[sel], cc_pc[sel], cc_xyz[sel])
+                logger.info(f"[TSDF-scene] tile {ti}/{n_tiles_tot} "
+                            f"{'XYZ'[tile_axis]}∈[{lo:.2f},{hi:.2f}) +{halo:.2f}m halo — "
+                            f"{len(cc_fp)} frames")
         else:
             cc_fp = cc_frame_pix  # None (unmasked) or the full dict
 

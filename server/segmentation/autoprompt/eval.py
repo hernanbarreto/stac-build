@@ -92,13 +92,27 @@ def evaluate(session_dir: Path, gt_dir: Path, backend: str, iou_thr: float,
     fp = defaultdict(int)
     fn = defaultdict(int)
 
+    # index frames by their numeric stem — sessions are not guaranteed to use
+    # zero-padded 6-digit names, and a silent skip here inflated the metrics
+    # (skipped frames looked like FN=0). Frames that truly can't be resolved
+    # are REPORTED, not swallowed.
+    frame_by_num: dict[int, Path] = {}
+    for p in sorted(frames_dir.glob("*.jpg")):
+        try:
+            frame_by_num[int(p.stem)] = p
+        except ValueError:
+            continue
+
     t0 = time.time()
     n_frames = 0
     n_gt = 0
+    n_unresolved = 0
     for frame_idx, gt_items in sorted(gt.items()):
-        fn_name = f"{frame_idx:06d}.jpg"
-        fpath = frames_dir / fn_name
-        if not fpath.exists():
+        fpath = frame_by_num.get(int(frame_idx))
+        if fpath is None:
+            n_unresolved += 1
+            print(f"[eval] WARNING: GT frame {frame_idx} has no matching file in "
+                  f"{frames_dir} — excluded from metrics")
             continue
         n_frames += 1
         img = Image.open(fpath).convert("RGB")
@@ -155,6 +169,7 @@ def evaluate(session_dir: Path, gt_dir: Path, backend: str, iou_thr: float,
     manual_estimate_s = n_gt * manual_sec_per_click
     return {
         "n_frames": n_frames, "n_gt_instances": n_gt,
+        "n_unresolved_gt_frames": n_unresolved,
         "per_class": rows, "overall": overall,
         "timing": {
             "auto_seconds": round(elapsed, 1),

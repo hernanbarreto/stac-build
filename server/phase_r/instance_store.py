@@ -50,7 +50,15 @@ CREATE TABLE IF NOT EXISTS instances (
 CREATE TABLE IF NOT EXISTS instance_points (
     instance_id INTEGER PRIMARY KEY,
     points_blob BLOB,                       -- float32 (N,3) world
-    num_points  INTEGER DEFAULT 0
+    num_points  INTEGER DEFAULT 0,
+    frame_ids_blob BLOB,                    -- int32 (N,) source frame per point
+    entropy_blob   BLOB,                    -- float32 (N,) R.2 per-point vote entropy
+    vote_share_blob BLOB                    -- float32 (N,) plurality fraction per point
+);
+CREATE TABLE IF NOT EXISTS vote_regions (
+    region_key   TEXT PRIMARY KEY,          -- R.2 per-region entropy ("x_y_z" cell)
+    mean_entropy REAL,
+    n_points     INTEGER
 );
 CREATE TABLE IF NOT EXISTS instance_obb (
     instance_id   INTEGER,
@@ -79,10 +87,11 @@ CREATE TABLE IF NOT EXISTS vote_metrics (
 );
 CREATE TABLE IF NOT EXISTS onion_metrics (
     instance_id  INTEGER,
-    seam         TEXT DEFAULT 'global',      -- window seam k->k+1 or 'global'
+    seam         TEXT DEFAULT 'global',      -- window seam "wa|wb" or 'global'
     bimodal      INTEGER DEFAULT 0,          -- R.3 GMM 2 vs 1 by BIC
     separation_m REAL DEFAULT 0.0,           -- distance between modes IN METRES
     bic_delta    REAL DEFAULT 0.0,
+    heatmap_json TEXT,                       -- R.3 per-instance local heatmap
     PRIMARY KEY (instance_id, seam)
 );
 CREATE TABLE IF NOT EXISTS window_history (
@@ -142,7 +151,22 @@ class InstanceStore:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(_SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a store was created (SQLite has no
+        ADD COLUMN IF NOT EXISTS; existing scene .db files must keep working)."""
+        wanted = {
+            "instance_points": [("frame_ids_blob", "BLOB"), ("entropy_blob", "BLOB"),
+                                ("vote_share_blob", "BLOB")],
+            "onion_metrics": [("heatmap_json", "TEXT")],
+        }
+        for table, cols in wanted.items():
+            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            for name, decl in cols:
+                if name not in have:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     # ── instances ───────────────────────────────────────────────────
     def upsert_instance(self, instance_id: int, label: str, *, known: bool = False,
@@ -173,13 +197,17 @@ class InstanceStore:
         self.conn.commit()
 
     # ── points / obb ────────────────────────────────────────────────
-    def set_points(self, instance_id: int, points: np.ndarray) -> None:
+    def set_points(self, instance_id: int, points: np.ndarray,
+                   frame_ids: np.ndarray | None = None) -> None:
         pts = np.asarray(points, np.float32).reshape(-1, 3)
+        fb = (np.ascontiguousarray(frame_ids, np.int32).tobytes()
+              if frame_ids is not None else None)
         self.conn.execute(
-            "INSERT INTO instance_points (instance_id,points_blob,num_points) VALUES (?,?,?) "
+            "INSERT INTO instance_points (instance_id,points_blob,num_points,frame_ids_blob) "
+            "VALUES (?,?,?,?) "
             "ON CONFLICT(instance_id) DO UPDATE SET points_blob=excluded.points_blob, "
-            "num_points=excluded.num_points",
-            (instance_id, _blob(pts), len(pts)))
+            "num_points=excluded.num_points, frame_ids_blob=excluded.frame_ids_blob",
+            (instance_id, _blob(pts), len(pts), fb))
         self.conn.commit()
 
     def get_points(self, instance_id: int) -> np.ndarray | None:
@@ -189,6 +217,44 @@ class InstanceStore:
         if not row or row[0] is None:
             return None
         return _arr(row[0], (row[1], 3))
+
+    def get_point_frames(self, instance_id: int) -> np.ndarray | None:
+        """int32 (N,) source frame per stored point (R.2/R.3 per-window splits)."""
+        row = self.conn.execute(
+            "SELECT frame_ids_blob,num_points FROM instance_points WHERE instance_id=?",
+            (instance_id,)).fetchone()
+        if not row or row[0] is None:
+            return None
+        return np.frombuffer(row[0], dtype=np.int32).copy()
+
+    def set_point_votes(self, instance_id: int, entropies: np.ndarray,
+                        shares: np.ndarray) -> None:
+        """Persist the R.2 per-point vote distribution summary (entropy +
+        plurality share per point, aligned with the stored points)."""
+        self.conn.execute(
+            "UPDATE instance_points SET entropy_blob=?, vote_share_blob=? WHERE instance_id=?",
+            (_blob(np.asarray(entropies, np.float32).reshape(-1)),
+             _blob(np.asarray(shares, np.float32).reshape(-1)), instance_id))
+        self.conn.commit()
+
+    def get_point_votes(self, instance_id: int):
+        row = self.conn.execute(
+            "SELECT entropy_blob,vote_share_blob,num_points FROM instance_points "
+            "WHERE instance_id=?", (instance_id,)).fetchone()
+        if not row or row[0] is None:
+            return None
+        return (_arr(row[0], (row[2],)), _arr(row[1], (row[2],)))
+
+    def set_vote_region(self, region_key: str, mean_entropy: float, n_points: int) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO vote_regions (region_key,mean_entropy,n_points) "
+            "VALUES (?,?,?)", (region_key, mean_entropy, n_points))
+        self.conn.commit()
+
+    def list_vote_regions(self) -> list[dict]:
+        return [{"region": r[0], "mean_entropy": r[1], "n_points": r[2]}
+                for r in self.conn.execute(
+                    "SELECT region_key,mean_entropy,n_points FROM vote_regions")]
 
     def set_obb(self, instance_id: int, transform: np.ndarray, aabb: np.ndarray,
                position: np.ndarray, *, window_id: str = "global",
@@ -236,11 +302,31 @@ class InstanceStore:
         self.conn.commit()
 
     def set_onion_metric(self, instance_id: int, bimodal: bool, separation_m: float,
-                       bic_delta: float, seam: str = "global") -> None:
+                       bic_delta: float, seam: str = "global",
+                       heatmap_json: str | None = None) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO onion_metrics "
-            "(instance_id,seam,bimodal,separation_m,bic_delta) VALUES (?,?,?,?,?)",
-            (instance_id, seam, int(bimodal), separation_m, bic_delta))
+            "(instance_id,seam,bimodal,separation_m,bic_delta,heatmap_json) "
+            "VALUES (?,?,?,?,?,?)",
+            (instance_id, seam, int(bimodal), separation_m, bic_delta, heatmap_json))
+        self.conn.commit()
+
+    def list_onion_seams(self, instance_id: int | None = None) -> list[dict]:
+        """All onion rows incl. per-seam entries (R.3 seam report)."""
+        q = ("SELECT instance_id,seam,bimodal,separation_m,bic_delta,heatmap_json "
+             "FROM onion_metrics")
+        args: tuple = ()
+        if instance_id is not None:
+            q += " WHERE instance_id=?"; args = (instance_id,)
+        return [{"instance_id": r[0], "seam": r[1], "bimodal": bool(r[2]),
+                 "separation_m": r[3], "bic_delta": r[4],
+                 "heatmap": r[5]} for r in self.conn.execute(q, args)]
+
+    def set_window_history(self, instance_id: int, window_id: str,
+                           residual_applied: bool = True) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO window_history (instance_id,window_id,residual_applied) "
+            "VALUES (?,?,?)", (instance_id, window_id, int(residual_applied)))
         self.conn.commit()
 
     # ── Phase 2 classification ──────────────────────────────────────

@@ -3,12 +3,25 @@
 # Inserts between windowed reconstruction (VGGT-Ω/VGGT-Long + DA3-Streaming) and
 # final fusion (TSDF/surface_fitting). Ties R.1..R.9 together:
 #   R.1/R.8  build the canonical instance store from masklets (+ dynamic R.7)
-#   R.4      estimate gravity from the dominant floor/slab plane
-#   R.2/R.3  vote-entropy + onion metrics per instance
-#   R.4      per-window OBBs -> Sim(3) residuals -> inter-window pose graph
-#            (refinement loop, max 2 iterations)
-#   R.6      metric authority: marker/survey scale wins on conflict
-#   R.9      A/B gate vs the no-anchor baseline; fall back if anything regresses
+#   R.2      multi-view plurality vote + entropy (per point/instance/region)
+#   R.3      onion metric per instance, PER SEAM between windows, + heatmaps
+#   R.4      gravity + per-window OBBs -> Sim(3) residuals -> inter-window pose
+#            graph, with a REAL refinement loop (max 2 iterations): each pass
+#            re-applies the corrections to the OBBs (== re-lifting the points
+#            with corrected poses, since the lift is linear through c2w),
+#            rebuilds the edges and re-solves until converged.
+#   R.6      metric authority: the marker/survey scale ALWAYS wins on conflict
+#            (conflict logged with magnitude); DA3 top-25% S kept as a prior in
+#            the solve; S per window before/after reported.
+#   R.9      A/B gate vs the no-anchor baseline (computed automatically from
+#            the pre-refinement store); fall back if ANY metric regresses.
+#
+# R.1 RULE (inviolable, spec): cross-window re-identification is EXCLUSIVELY by
+# tracking continuity through the overlap frames. Appearance matching between
+# instances not connected by tracking is PROHIBITED — in tunnels/stations the
+# columns repeat every N metres and an appearance match creates false loop
+# closures that destroy the reconstruction (perceptual aliasing). Nothing in
+# this package matches instances by appearance; keep it that way.
 #
 # Single-window sessions run the per-instance metrics; the inter-window pose
 # graph is exercised when a window_map (frame->window) with >1 window is given.
@@ -19,17 +32,22 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from .build_instances import InstanceStoreBuilder
+from .build_instances import (InstanceStoreBuilder, build_vote_views,
+                              run_scene_vote)
 from .depth_regularization import fit_plane
 from .failsafe import compare_and_gate
+from .geometry import fit_gravity_aligned_obb
 from .instance_store import InstanceStore
 from .metric_hierarchy import MetricAuthority, ScaleReport
-from .residuals import Sim3, WindowEdge, optimize_window_graph, sim3_from_obb_pair
+from .onion import detect_onion, onion_heatmap
+from .residuals import Sim3, WindowEdge, optimize_window_graph
+from .vote import View
 
 
 @dataclass
@@ -38,8 +56,13 @@ class PhaseRReport:
     gravity: list = field(default_factory=list)
     n_windows: int = 1
     pose_graph: dict = field(default_factory=dict)
+    iterations: int = 0
+    converged: bool = False
     onion_bimodal: int = 0
     onion_separation_median_m: float = 0.0
+    seams: dict = field(default_factory=dict)
+    scale_report: dict = field(default_factory=dict)
+    scale_conflicts: list = field(default_factory=list)
     failsafe: dict = field(default_factory=dict)
     used_anchoring: bool = True
     writeback: dict = field(default_factory=dict)
@@ -47,24 +70,51 @@ class PhaseRReport:
     def summary(self) -> str:
         return (f"instances={self.n_instances} windows={self.n_windows} "
                 f"gravity={[round(g,3) for g in self.gravity]} "
-                f"onion_bimodal={self.onion_bimodal} "
+                f"iters={self.iterations} onion_bimodal={self.onion_bimodal} "
                 f"anchoring={'KEPT' if self.used_anchoring else 'FALLBACK'}")
+
+
+def _sim3_matrix(M: Sim3) -> np.ndarray:
+    """Sim(3) as a 4x4 similarity [[s·R, t], [0, 1]]."""
+    T = np.eye(4)
+    T[:3, :3] = M.s * M.R
+    T[:3, 3] = M.t
+    return T
+
+
+def _apply_sim3_to_obb(M: Sim3, obb):
+    """Transform an OBB (T, aabb, pos) by a window Sim(3) correction: the frame
+    rotates/translates rigidly, the extents scale by s."""
+    T, aabb, pos = obb
+    T2 = np.asarray(T, float).copy()
+    T2[:3, :3] = M.R @ T2[:3, :3]
+    T2[:3, 3] = M.apply(T2[:3, 3])
+    return T2, np.asarray(aabb, float) * M.s, T2[:3, 3]
 
 
 class PhaseRPipeline:
     def __init__(self, session_dir, output_dir, store_path, config: dict | None = None,
                  window_map: dict[int, str] | None = None,
-                 marker_scale: float | None = None):
+                 marker_scale: float | None = None,
+                 window_scale_priors: dict[str, float] | None = None):
         self.session_dir = Path(session_dir)
         self.output_dir = Path(output_dir)
         self.store_path = str(store_path)
         self.config = config or {}
         self.cfg = self.config.get("phase_r", {})
-        self.window_map = window_map or {}
+        self.window_map = {int(k): v for k, v in (window_map or {}).items()}
+        # R.6 hooks. marker_scale: ChArUco/survey authority — NOT wired yet
+        # (ChArUco is not implemented in this deployment); the mechanism stays
+        # so the authority activates the day a marker scale exists.
         self.marker_scale = marker_scale
+        # DA3-Streaming top-25%-confidence scale S per window (prior, R.6)
+        self.window_scale_priors = window_scale_priors or {}
         self.floor_labels = set(self.cfg.get("floor_labels",
                                              ["floor", "slab", "platform", "ground"]))
-        self.max_iterations = self.cfg.get("max_refine_iterations", 2)
+        self.max_iterations = int(self.cfg.get("max_refine_iterations", 2))
+        self.converge_tol = float(self.cfg.get("refine_convergence_tol", 1e-3))
+        self.min_points = int(self.cfg.get("min_points", 30))
+        self.vote_max_views = int(self.cfg.get("vote_max_views", 20))
 
     # ── R.4 gravity from the dominant floor/slab plane ──────────────
     def _estimate_gravity(self, store: InstanceStore) -> np.ndarray | None:
@@ -82,78 +132,331 @@ class PhaseRPipeline:
         up = n if n[1] >= 0 else -n
         return -up  # gravity = -up
 
-    # ── R.4 inter-window pose graph over shared instances ───────────
-    def _build_pose_graph(self, store: InstanceStore):
-        windows = sorted(set(self.window_map.values())) if self.window_map else ["global"]
+    # ── R.4 per-window OBBs (from per-point source frames) ──────────
+    def _windows(self) -> list[str]:
+        return sorted(set(self.window_map.values())) if self.window_map else ["global"]
+
+    def _residual_eligible(self, inst: dict) -> bool:
+        """Spec (Phase 1 item 5): dubious instances may vote but generate NO
+        pose residuals until validated or above threshold."""
+        return inst["status"] != "dubious"
+
+    def _fit_window_obbs(self, store: InstanceStore, gravity) -> dict:
+        """Group each instance's points by window and fit a gravity-aligned OBB
+        per window (R.4). Returns {(iid, window): [T, aabb, pos, weight]}."""
+        obb_map: dict = {}
+        windows = self._windows()
         if len(windows) < 2:
-            return windows, []
-        widx = {w: i for i, w in enumerate(windows)}
-        edges: list[WindowEdge] = []
+            return obb_map
         for inst in store.list_instances():
+            if inst["status"] == "dynamic_excluded" or not self._residual_eligible(inst):
+                continue
             iid = inst["instance_id"]
-            wins = store.list_obb_windows(iid)
-            wins = [w for w in wins if w in widx]
+            pts = store.get_points(iid)
+            fids = store.get_point_frames(iid)
+            if pts is None or fids is None or len(pts) < self.min_points:
+                continue
+            wins = np.array([self.window_map.get(int(f), windows[0]) for f in fids])
+            weight = float(min(1.0, 0.5 + inst.get("confidence", 0.0)))
+            for w in np.unique(wins):
+                sel = wins == w
+                if int(sel.sum()) < self.min_points:
+                    continue
+                obb = fit_gravity_aligned_obb(
+                    pts[sel], gravity=gravity,
+                    trim_percent=float(self.cfg.get("obb_trim_percent", 1.0)))
+                if obb is None:
+                    continue
+                T, aabb, pos = obb
+                store.set_obb(iid, T, aabb, pos, window_id=str(w), gravity=gravity,
+                              n_points=int(sel.sum()))
+                obb_map[(iid, str(w))] = [T, aabb, pos, weight]
+        return obb_map
+
+    @staticmethod
+    def _edges_from_obbs(obb_map: dict, windows: list[str]) -> list[WindowEdge]:
+        from .residuals import sim3_from_obb_pair
+        widx = {w: i for i, w in enumerate(windows)}
+        by_iid: dict[int, list[str]] = {}
+        for (iid, w) in obb_map:
+            by_iid.setdefault(iid, []).append(w)
+        edges: list[WindowEdge] = []
+        for iid, wins in by_iid.items():
+            wins = sorted(w for w in wins if w in widx)
             for a in range(len(wins)):
                 for b in range(a + 1, len(wins)):
-                    oa = store.get_obb(iid, wins[a])
-                    ob = store.get_obb(iid, wins[b])
-                    if oa is None or ob is None:
-                        continue
-                    M = sim3_from_obb_pair(oa[0], oa[1], ob[0], ob[1])
-                    w = float(min(1.0, 0.5 + inst.get("confidence", 0.0)))
-                    edges.append(WindowEdge(widx[wins[a]], widx[wins[b]], M, w))
-        return windows, edges
+                    Ta, aa, _pa, wt = obb_map[(iid, wins[a])]
+                    Tb, ab, _pb, _ = obb_map[(iid, wins[b])]
+                    M = sim3_from_obb_pair(Ta, aa, Tb, ab)
+                    edges.append(WindowEdge(widx[wins[a]], widx[wins[b]], M, wt))
+        return edges
+
+    # ── R.3 onion per seam (adjacent windows) ────────────────────────
+    def _seam_onion(self, store: InstanceStore, windows: list[str],
+                    corrections: dict[str, np.ndarray] | None = None,
+                    persist: bool = False) -> dict[str, list[float]]:
+        """Per-seam onion metric: for each adjacent window pair, pool each
+        shared instance's points from BOTH windows and run the bimodality test.
+        Returns {seam: [separations_m per shared instance]}."""
+        seams: dict[str, list[float]] = {}
+        if len(windows) < 2:
+            return seams
+        for inst in store.list_instances():
+            if inst["status"] == "dynamic_excluded":
+                continue
+            iid = inst["instance_id"]
+            pts = store.get_points(iid)
+            fids = store.get_point_frames(iid)
+            if pts is None or fids is None or len(pts) < self.min_points:
+                continue
+            if corrections:
+                from .build_instances import _apply_window_corrections
+                pts = _apply_window_corrections(store, iid, pts, corrections)
+            wins = np.array([self.window_map.get(int(f), windows[0]) for f in fids])
+            for a in range(len(windows) - 1):
+                wa, wb = windows[a], windows[a + 1]
+                sel = (wins == wa) | (wins == wb)
+                if (int((wins == wa).sum()) < self.min_points
+                        or int((wins == wb).sum()) < self.min_points):
+                    continue
+                sub = pts[sel]
+                obb = fit_gravity_aligned_obb(sub)
+                if obb is None:
+                    continue
+                on = detect_onion(sub, obb[0], obb[1], min_points=self.min_points)
+                seam = f"{wa}|{wb}"
+                seams.setdefault(seam, []).append(on.separation_m)
+                if persist:
+                    store.set_onion_metric(iid, on.bimodal, on.separation_m,
+                                           on.bic_delta, seam=seam)
+        return seams
+
+    @staticmethod
+    def _seam_median(seams: dict[str, list[float]]) -> float:
+        vals = [v for lst in seams.values() for v in lst]
+        return float(np.median(vals)) if vals else 0.0
+
+    # ── global OBB + onion + heatmap refresh ─────────────────────────
+    def _refresh_global_geometry(self, store: InstanceStore, gravity,
+                                 corrections: dict | None = None,
+                                 persist: bool = True) -> tuple[int, float]:
+        """(Re)fit the global gravity-aligned OBB + onion metric + heatmap for
+        every instance, optionally on window-corrected points. The segmentation
+        OBB (cleaned cloud — exactly what the viewer draws) stays canonical
+        when present; the trimmed fit on lifted points is the fallback. Returns
+        (n_bimodal, median separation over bimodal instances)."""
+        from .build_instances import load_seg_display_obbs
+        seg_obbs = load_seg_display_obbs(self.output_dir)
+        trim = float(self.cfg.get("obb_trim_percent", 1.0))
+        n_bimodal, seps = 0, []
+        for inst in store.list_instances():
+            if inst["status"] == "dynamic_excluded":
+                continue
+            iid = inst["instance_id"]
+            pts = store.get_points(iid)
+            if pts is None or len(pts) < 3:
+                continue
+            if corrections:
+                from .build_instances import _apply_window_corrections
+                pts = _apply_window_corrections(store, iid, pts, corrections)
+            if iid in seg_obbs and not corrections:
+                T, aabb = seg_obbs[iid]
+                obb = (T, aabb, T[:3, 3])
+            else:
+                obb = fit_gravity_aligned_obb(pts, gravity=gravity, trim_percent=trim)
+            if obb is None:
+                continue
+            T, aabb, pos = obb
+            on = detect_onion(pts, T, aabb, min_points=self.min_points)
+            if persist:
+                store.set_obb(iid, T, aabb, pos, window_id="global", gravity=gravity,
+                              n_points=len(pts))
+                hm = (onion_heatmap(pts, T, aabb)
+                      if len(pts) >= self.min_points else None)
+                store.set_onion_metric(iid, on.bimodal, on.separation_m, on.bic_delta,
+                                       heatmap_json=json.dumps(hm) if hm else None)
+            if on.bimodal:
+                n_bimodal += 1
+                seps.append(on.separation_m)
+        return n_bimodal, (float(np.median(seps)) if seps else 0.0)
+
+    def _corrected_views(self, views: list[View],
+                         corrections: dict) -> list[View]:
+        """Re-vote support: apply each window's 4x4 similarity to its views'
+        c2w so views and corrected points stay consistent (a within-window
+        projection is invariant; only cross-window ones move)."""
+        default = self._windows()[0]
+        out = []
+        for v in views:
+            w = self.window_map.get(int(v.fid), default) if v.fid is not None else default
+            M = corrections.get(w)
+            if M is None:
+                out.append(v)
+            else:
+                out.append(View(np.asarray(M, float) @ np.asarray(v.c2w, float),
+                                v.K, v.masks, v.wh, fid=v.fid))
+        return out
+
+    @staticmethod
+    def _edge_scale_std(edges: list[WindowEdge]) -> float:
+        """Consistency of the inter-window scales implied by the shared
+        instances (R.6 diagnostic): std of log s over all edges."""
+        if not edges:
+            return 0.0
+        return float(np.std([np.log(max(e.measured.s, 1e-9)) for e in edges]))
 
     # ── main ────────────────────────────────────────────────────────
     def run(self, baseline_metrics: dict | None = None) -> PhaseRReport:
-        # R.1/R.2-lift/R.3/R.7/R.8
-        gravity0 = None
+        # R.1/R.2/R.3/R.7/R.8 — build the baseline store (points + frame ids,
+        # global OBBs, onion, baseline vote)
         builder = InstanceStoreBuilder(self.session_dir, self.output_dir, self.store_path,
                                        config=self.config)
-        builder.build(gravity=gravity0)
+        builder.build(gravity=None)
         store = InstanceStore(self.store_path)
         report = PhaseRReport()
         insts = store.list_instances()
         report.n_instances = len(insts)
+        windows = self._windows()
+        report.n_windows = len(windows)
 
-        # R.4 gravity, then re-fit OBBs under gravity (refinement loop)
+        # R.4 gravity, then refit baseline global OBBs/onion/heatmaps under it
         gravity = self._estimate_gravity(store)
         report.gravity = gravity.tolist() if gravity is not None else []
-        if gravity is not None:
-            from .geometry import fit_gravity_aligned_obb
-            from .onion import detect_onion
+        n_bi, sep_med = self._refresh_global_geometry(store, gravity, persist=True)
+
+        # R.9 baseline metrics (auto A/B) — computed BEFORE any refinement;
+        # caller-provided values (e.g. reprojection RMSE) override/extend.
+        base_seams = self._seam_onion(store, windows, persist=False)
+        obb_map = self._fit_window_obbs(store, gravity)
+        edges = self._edges_from_obbs(obb_map, windows)
+        auto_baseline = {
+            "vote_entropy_mean": self._mean_vote_entropy(store),
+            "onion_separation_median": sep_med,
+            "seam_error_median": self._seam_median(base_seams),
+            "scale_S_std": self._edge_scale_std(edges),
+        }
+        if baseline_metrics:
+            auto_baseline.update(baseline_metrics)
+
+        # R.4 inter-window pose graph — REAL refinement loop (<= max_iterations):
+        # solve -> clamp scale (R.6 authority) -> apply to OBBs (== re-lift) ->
+        # rebuild edges (re-residuals) -> repeat until converged.
+        widx = {w: i for i, w in enumerate(windows)}
+        # R.6 — S prior per window: DA3 top-25% scale when provided; otherwise
+        # 1.0 (= "the reconstruction is already metrically consistent, do not
+        # rescale windows unless the instance evidence insists").
+        priors = {widx[w]: float(self.window_scale_priors.get(w, 1.0))
+                  for w in windows}
+        auth = MetricAuthority(self.marker_scale) if self.marker_scale else None
+        totals = [Sim3.identity() for _ in windows]
+        converged = False
+        if edges:
+            for it in range(self.max_iterations):
+                corr, stats = optimize_window_graph(len(windows), edges,
+                                                    scale_priors=priors or None)
+                report.pose_graph = stats
+                report.iterations = it + 1
+                # R.6 — marker authority clamps any correction that would move
+                # the metric scale beyond tolerance (marker wins, logged)
+                if auth is not None:
+                    for i, M in enumerate(corr):
+                        anchor_scale = self.marker_scale * M.s
+                        resolved = auth.resolve_scale(anchor_scale, window_id=windows[i])
+                        if resolved != anchor_scale:
+                            corr[i] = Sim3(1.0, M.R, M.t)  # keep pose, drop rescale
+                step = max(M.magnitude() for M in corr)
+                totals = [c.compose(t) for c, t in zip(corr, totals)]
+                # apply == re-lift: transform the per-window OBBs, rebuild edges
+                for (iid, w), entry in obb_map.items():
+                    M = corr[widx[w]]
+                    T2, aabb2, pos2 = _apply_sim3_to_obb(M, (entry[0], entry[1], entry[2]))
+                    obb_map[(iid, w)] = [T2, aabb2, pos2, entry[3]]
+                edges = self._edges_from_obbs(obb_map, windows)
+                if step < self.converge_tol or stats["cost"] < 1e-6:
+                    converged = True
+                    break
+        report.converged = converged
+
+        # corrections as 4x4 (+ embedded frame->window map for point re-lift)
+        corrections = {w: _sim3_matrix(totals[widx[w]]) for w in windows}
+        corrections["__window_map__"] = dict(self.window_map)
+        any_correction = any(t.magnitude() > 1e-9 for t in totals)
+
+        # R.6 — S per window before/after (DA3 prior × correction scale)
+        scale_report = ScaleReport()
+        for w in windows:
+            s_before = float(self.window_scale_priors.get(w, 1.0))
+            scale_report.set(w, s_before, s_before * totals[widx[w]].s)
+        report.scale_report = {"before": scale_report.before,
+                               "after": scale_report.after,
+                               "stability": scale_report.stability()}
+        if auth is not None:
+            report.scale_conflicts = auth.log.conflicts
+        store.set_meta("scale_report", json.dumps(report.scale_report))
+        if report.scale_conflicts:
+            store.set_meta("scale_conflicts", json.dumps(report.scale_conflicts))
+
+        # R.9 refined metrics — re-vote + re-onion on CORRECTED geometry
+        views = []
+        try:
+            views = build_vote_views(self.session_dir, self.output_dir,
+                                     dynamic_labels=builder.dynamic_labels,
+                                     max_views=self.vote_max_views)
+        except Exception:
+            pass
+        if any_correction:
+            trial_views = self._corrected_views(views, corrections) if views else []
+            trial_vote = run_scene_vote(store, trial_views, corrections=corrections,
+                                        persist=False) if views else {"mean_entropy": 0.0}
+            ref_seams = self._seam_onion(store, windows, corrections=corrections,
+                                         persist=False)
+            _nb, ref_sep = self._refresh_global_geometry(store, gravity,
+                                                         corrections=corrections,
+                                                         persist=False)
+            refined_metrics = {
+                "vote_entropy_mean": trial_vote["mean_entropy"] or auto_baseline["vote_entropy_mean"],
+                "onion_separation_median": ref_sep,
+                "seam_error_median": self._seam_median(ref_seams),
+                "scale_S_std": self._edge_scale_std(edges),
+            }
+        else:
+            ref_seams = base_seams
+            refined_metrics = dict(auto_baseline)
+
+        gate = compare_and_gate(auto_baseline, refined_metrics)
+        report.used_anchoring = gate.use_anchoring
+        report.failsafe.update({"report": gate.report, "regressions": gate.regressions,
+                                "baseline": auto_baseline, "refined": refined_metrics})
+        if self.marker_scale is not None:
+            report.failsafe.setdefault("marker_scale", self.marker_scale)
+
+        # persist the chosen geometry
+        if report.used_anchoring and any_correction:
             for inst in insts:
                 iid = inst["instance_id"]
                 pts = store.get_points(iid)
-                if pts is None or len(pts) < 3:
+                fids = store.get_point_frames(iid)
+                if pts is None:
                     continue
-                obb = fit_gravity_aligned_obb(pts, gravity=gravity)
-                if obb is None:
-                    continue
-                T, aabb, pos = obb
-                store.set_obb(iid, T, aabb, pos, window_id="global", gravity=gravity,
-                              n_points=len(pts))
-                on = detect_onion(pts, T, aabb)
-                store.set_onion_metric(iid, on.bimodal, on.separation_m, on.bic_delta)
+                from .build_instances import _apply_window_corrections
+                store.set_points(iid, _apply_window_corrections(store, iid, pts, corrections),
+                                 frame_ids=fids)
+            # refined per-window OBBs + residual history
+            for (iid, w), (T, aabb, pos, _wt) in obb_map.items():
+                store.set_obb(iid, T, aabb, pos, window_id=str(w), gravity=gravity)
+                store.set_window_history(iid, str(w), residual_applied=True)
+            # global OBB/onion/heatmaps + seams + votes on the final geometry
+            self._refresh_global_geometry(store, gravity, persist=True)
+            self._seam_onion(store, windows, persist=True)
+            if views:  # final vote: corrected points (persisted) + corrected views
+                run_scene_vote(store, self._corrected_views(views, corrections),
+                               persist=True)
+        else:
+            # baseline kept — still persist the seam diagnostics of the baseline
+            self._seam_onion(store, windows, persist=True)
 
-        # R.4 inter-window pose graph (loop, <= max_iterations)
-        windows, edges = self._build_pose_graph(store)
-        report.n_windows = len(windows)
-        corr = None
-        if edges:
-            for _it in range(self.max_iterations):
-                corr, stats = optimize_window_graph(len(windows), edges)
-                report.pose_graph = stats
-                if stats["cost"] < 1e-6 or stats["cost"] > 0.5 * stats["cost0"]:
-                    break  # converged or not improving
-
-        # R.6 metric authority (scale)
-        scale_report = ScaleReport()
-        if self.marker_scale is not None:
-            auth = MetricAuthority(self.marker_scale)
-            report.failsafe.setdefault("marker_scale", self.marker_scale)
-
-        # onion aggregate
+        # onion aggregate for the report (post-decision store state)
+        report.onion_bimodal, report.onion_separation_median_m = 0, 0.0
         seps = []
         for inst in insts:
             m = store.get_metrics(inst["instance_id"]).get("onion")
@@ -161,27 +464,36 @@ class PhaseRPipeline:
                 report.onion_bimodal += 1
                 seps.append(m["separation_m"])
         report.onion_separation_median_m = float(np.median(seps)) if seps else 0.0
+        report.seams = {k: {"median_separation_m": float(np.median(v)), "n": len(v)}
+                        for k, v in ref_seams.items()}
 
-        # R.9 fail-safe A/B gate
-        refined_metrics = {
-            "onion_separation_median": report.onion_separation_median_m,
-            "vote_entropy_mean": self._mean_vote_entropy(store),
-        }
-        if baseline_metrics:
-            gate = compare_and_gate(baseline_metrics, refined_metrics)
-            report.used_anchoring = gate.use_anchoring
-            report.failsafe.update({"report": gate.report,
-                                    "regressions": gate.regressions,
-                                    "refined": refined_metrics})
-        else:
-            report.failsafe.update({"report": "no baseline provided — anchoring kept",
-                                    "refined": refined_metrics})
         # R.4/R.5 WRITEBACK — close the loop into the fusion, gated by the A/B
         # fail-safe: only write refined artifacts when anchoring is kept.
-        report.writeback = self._writeback(store, windows, corr, report.used_anchoring)
+        report.writeback = self._writeback(store, windows, totals, report.used_anchoring)
 
         store.set_meta("phase_r_report", report.summary())
         store.close()
+        # persist the report next to the store — every caller (pipeline stage,
+        # endpoint, CLI, demo) leaves the same artifact, and the pipeline's
+        # resume probe uses it to know this session is already anchored
+        try:
+            (self.output_dir / "phase_r_report.json").write_text(json.dumps({
+                "summary": report.summary(),
+                "n_instances": report.n_instances,
+                "n_windows": report.n_windows,
+                "iterations": report.iterations,
+                "converged": report.converged,
+                "onion_bimodal": report.onion_bimodal,
+                "onion_separation_median_m": report.onion_separation_median_m,
+                "seams": report.seams,
+                "scale_report": report.scale_report,
+                "scale_conflicts": report.scale_conflicts,
+                "failsafe": report.failsafe,
+                "used_anchoring": report.used_anchoring,
+                "writeback": report.writeback,
+            }, indent=2, default=str))
+        except Exception:
+            pass
         return report
 
     # ── R.4/R.5 writeback into the fusion inputs (gated) ────────────
@@ -204,6 +516,16 @@ class PhaseRPipeline:
                                     "poses unchanged (identity writeback)")
         except Exception as e:  # never let writeback break the pipeline
             wb["poses_error"] = str(e)
+        # R.4 — correct the CLOUD geometry too (chunks pre-merge in the
+        # anchored order; merged cloud via frame_global on resumed sessions),
+        # so the fusion inputs AND the viewer see the anchored result.
+        if self.cfg.get("writeback_clouds", True) and corr is not None and len(windows) > 1:
+            try:
+                from .writeback import apply_corrections_to_clouds
+                wb["clouds"] = apply_corrections_to_clouds(
+                    self.output_dir, windows, corr, self.window_map)
+            except Exception as e:
+                wb["clouds_error"] = str(e)
         if self.cfg.get("writeback_depth", False):
             try:
                 from .writeback import apply_depth_regularization

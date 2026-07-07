@@ -5,23 +5,23 @@
     flex-direction: column;
     height: 100%;
     overflow-y: auto;
-    color: #e2e8f0;
+    color: var(--text-primary);
     font-size: 12px;
     scrollbar-width: thin;
-    scrollbar-color: #475569 transparent;
+    scrollbar-color: var(--border-strong) transparent;
 }
 
 /* ── Header ── */
 .bap-header {
     padding: 12px 14px 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    border-bottom: 1px solid var(--border);
 }
 
 .bap-title {
-    font-size: 14px;
-    font-weight: 700;
-    color: #f8fafc;
-    letter-spacing: 0.5px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: 0.02em;
     margin-bottom: 10px;
 }
 
@@ -37,48 +37,51 @@
 }
 
 .bap-meta-label {
-    font-size: 10px;
-    color: #94a3b8;
+    font-size: 9.5px;
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: var(--label-tracking);
 }
 
 .bap-meta-value {
-    color: #cbd5e1;
+    color: var(--text-primary);
     font-weight: 500;
+    font-variant-numeric: tabular-nums;
 }
 
 /* ── Global Progress ── */
 .bap-global {
     padding: 12px 14px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    border-bottom: 1px solid var(--border);
 }
 
 .bap-global-label {
-    font-size: 11px;
-    color: #94a3b8;
+    font-size: 10.5px;
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: var(--label-tracking);
     margin-bottom: 6px;
 }
 
 .bap-global-bar-container {
     height: 8px;
     background: rgba(255, 255, 255, 0.06);
-    border-radius: 4px;
+    border-radius: var(--radius-xs);
     overflow: hidden;
     margin-bottom: 4px;
 }
 
 .bap-global-bar {
     height: 100%;
-    border-radius: 4px;
+    border-radius: var(--radius-xs);
     transition: width 0.5s ease;
 }
 
 .bap-global-value {
     font-size: 22px;
-    font-weight: 800;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
     text-align: center;
     margin-top: 4px;
 }
@@ -88,7 +91,7 @@
     display: flex;
     gap: 6px;
     padding: 10px 14px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    border-bottom: 1px solid var(--border);
 }
 
 .bap-chip {
@@ -98,29 +101,31 @@
     align-items: center;
     padding: 6px 4px;
     border: 1px solid;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     background: rgba(255, 255, 255, 0.03);
 }
 
 .bap-chip-count {
     font-size: 16px;
-    font-weight: 700;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
 }
 
 .bap-chip-label {
     font-size: 9px;
-    color: #94a3b8;
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.3px;
+    letter-spacing: 0.03em;
 }
 
 /* ── Elements List ── */
 .bap-elements-header {
     padding: 8px 14px 4px;
-    font-size: 11px;
-    color: #94a3b8;
+    font-size: 10.5px;
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: var(--label-tracking);
     font-weight: 600;
 }
 
@@ -132,10 +137,16 @@
 }
 
 .bap-element {
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
     padding: 8px 10px;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.bap-element:hover {
+    background: var(--bg-hover);
+    border-color: var(--border);
 }
 
 .bap-element-unbuilt {
@@ -161,7 +172,7 @@
 .bap-el-label {
     font-size: 11px;
     font-weight: 600;
-    color: #e2e8f0;
+    color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -169,14 +180,14 @@
 
 .bap-el-type {
     font-size: 10px;
-    color: #64748b;
+    color: var(--text-muted);
 }
 
 .bap-el-quality {
-    font-size: 10px;
-    font-weight: 700;
+    font-size: 9.5px;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.3px;
+    letter-spacing: 0.03em;
     flex-shrink: 0;
 }
 
@@ -203,8 +214,10 @@
 
 .bap-el-advance {
     font-size: 11px;
-    font-weight: 700;
-    color: #cbd5e1;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
     min-width: 32px;
     text-align: right;
 }
@@ -214,17 +227,19 @@
     gap: 10px;
     margin-top: 4px;
     font-size: 10px;
-    color: #64748b;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
 }
 
 .bap-section-divider {
     padding: 8px 0 4px;
     font-size: 10px;
-    color: #64748b;
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: var(--label-tracking);
     font-weight: 600;
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    border-top: 1px solid var(--border-light);
     margin-top: 4px;
 }
 
@@ -239,24 +254,24 @@
 
 .bap-el-state-badge {
     font-size: 9px;
-    font-weight: 700;
+    font-weight: 600;
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-xs);
     border: 1px solid;
     text-transform: uppercase;
-    letter-spacing: 0.3px;
+    letter-spacing: 0.03em;
     white-space: nowrap;
 }
 
 .bap-el-occlusion {
     font-size: 9px;
-    color: #f97316;
+    color: var(--warning);
     white-space: nowrap;
 }
 
 .bap-el-cumul {
     font-size: 9px;
-    color: #60a5fa;
+    color: var(--accent-2);
     white-space: nowrap;
 }
 

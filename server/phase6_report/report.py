@@ -206,7 +206,27 @@ class ReportBuilder:
         if dyn is not None:
             out.append(f"- {S['dynamic_frac']}: {float(dyn):.4f} "
                        + _trace("scene_meta", {"key": "dynamic_pixel_fraction"}, self.ts))
-        for key in ("scale_conflict", "marker_scale_conflict"):
+        # R.6 — S per window before/after refinement (stability diagnostic)
+        sr = self.store.get_meta("scale_report")
+        if sr:
+            try:
+                rep = json.loads(sr)
+                before, after = rep.get("before", {}), rep.get("after", {})
+                if before:
+                    out.append("")
+                    out.append("| Window | S (pre) | S (post) |")
+                    out.append("|---|---|---|")
+                    for w in sorted(before):
+                        out.append(f"| {w} | {before[w]:.5f} | {after.get(w, before[w]):.5f} |")
+                    stab = rep.get("stability", {})
+                    if stab:
+                        out.append(f"- max \\|ΔS\\|: {stab.get('max_abs_delta', 0):.5f}, "
+                                   f"σ: {stab.get('std', 0):.5f} "
+                                   + _trace("scene_meta", {"key": "scale_report"}, self.ts))
+            except Exception:
+                pass
+        # R.6 — anchor-vs-marker conflicts (marker always wins; logged)
+        for key in ("scale_conflicts", "scale_conflict", "marker_scale_conflict"):
             v = self.store.get_meta(key)
             if v is not None:
                 out.append(f"- {S['scale_conflict']}: {v}")

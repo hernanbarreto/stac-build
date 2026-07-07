@@ -119,7 +119,7 @@
 .menu-app-title {
   font-size: 12px;
   font-weight: 600;
-  color: #e99d28;
+  color: var(--accent);
   margin-right: 12px;
   -webkit-app-region: no-drag;
   display: flex;
@@ -130,7 +130,7 @@
 .menu-app-logo {
   height: 18px;
   width: auto;
-  background: #1a1f2e;
+  background: var(--bg-elevated);
   border-radius: 4px;
   padding: 2px;
 }
@@ -226,7 +226,7 @@
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--label-tracking);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border);
   display: flex;
@@ -283,7 +283,7 @@
 .sidebar-subtitle {
   font-size: 10px;
   color: var(--text-secondary);
-  letter-spacing: 0.5px;
+  letter-spacing: var(--label-tracking);
   text-transform: uppercase;
 }
 
@@ -320,7 +320,7 @@
   font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.8px;
+  letter-spacing: var(--label-tracking);
   color: var(--text-muted);
 }
 
@@ -489,23 +489,23 @@
 }
 
 .session-action-btn.load:hover {
-  background: rgba(0, 212, 255, 0.15);
-  border-color: rgba(0, 212, 255, 0.3);
+  background: rgba(var(--accent-2-rgb), 0.15);
+  border-color: rgba(var(--accent-2-rgb), 0.3);
 }
 
 .session-action-btn.reconstruct:hover {
-  background: rgba(255, 165, 0, 0.15);
-  border-color: rgba(255, 165, 0, 0.3);
+  background: rgba(var(--accent-rgb), 0.15);
+  border-color: rgba(var(--accent-rgb), 0.3);
 }
 
 .session-action-btn.segment:hover {
-  background: rgba(46, 204, 113, 0.15);
-  border-color: rgba(46, 204, 113, 0.3);
+  background: rgba(var(--success-rgb), 0.15);
+  border-color: rgba(var(--success-rgb), 0.3);
 }
 
 .session-action-btn.unload:hover {
-  background: rgba(231, 76, 60, 0.15);
-  border-color: rgba(231, 76, 60, 0.3);
+  background: rgba(var(--error-rgb), 0.15);
+  border-color: rgba(var(--error-rgb), 0.3);
 }
 
 .session-action-btn.delete {
@@ -513,8 +513,8 @@
 }
 
 .session-action-btn.delete:hover {
-  background: rgba(231, 76, 60, 0.2);
-  border-color: rgba(231, 76, 60, 0.4);
+  background: rgba(var(--error-rgb), 0.2);
+  border-color: rgba(var(--error-rgb), 0.4);
   color: var(--error);
 }
 
@@ -590,7 +590,7 @@
 }
 
 .session-create-confirm:hover {
-  background: rgba(46, 204, 113, 0.15);
+  background: rgba(var(--success-rgb), 0.15);
 }
 
 .session-create-confirm:disabled {
@@ -604,7 +604,7 @@
 
 .session-create-cancel:hover {
   color: var(--error);
-  background: rgba(231, 76, 60, 0.15);
+  background: rgba(var(--error-rgb), 0.15);
 }
 
 /* Search / filter bar */
@@ -757,7 +757,7 @@
 
 .connection-dot.connected {
   background: var(--success);
-  box-shadow: 0 0 6px rgba(46, 204, 113, 0.4);
+  box-shadow: 0 0 6px rgba(var(--success-rgb), 0.4);
 }
 
 .connection-text {
@@ -805,10 +805,13 @@
   align-items: center;
   gap: 4px;
   padding: 2px 8px;
-  font-size: 11px;
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.06);
-  border-radius: 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
   white-space: nowrap;
 }
 
@@ -899,7 +902,7 @@
 }
 
 .control-group {
-  background: rgba(22, 27, 34, 0.85);
+  background: var(--glass-bg);
   backdrop-filter: blur(8px);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -913,7 +916,7 @@
   font-size: 10px;
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--label-tracking);
   white-space: nowrap;
 }
 
@@ -1183,7 +1186,7 @@
 }
 
 .slo-dot:nth-child(even) {
-  background: rgba(233, 157, 40, 0.4);
+  background: rgba(var(--accent-rgb), 0.4);
   width: 2px;
   height: 2px;
 }
@@ -1208,7 +1211,7 @@
   width: 140px;
   height: 140px;
   border-radius: 50%;
-  border: 2px solid rgba(233, 157, 40, 0.15);
+  border: 2px solid rgba(var(--accent-rgb), 0.15);
   animation: slo-pulse 2s ease-in-out infinite;
 }
 
@@ -1216,14 +1219,14 @@
   width: 180px;
   height: 180px;
   animation-delay: 0.4s;
-  border-color: rgba(233, 157, 40, 0.08);
+  border-color: rgba(var(--accent-rgb), 0.08);
 }
 
 .slo-logo-ring:nth-child(3) {
   width: 220px;
   height: 220px;
   animation-delay: 0.8s;
-  border-color: rgba(233, 157, 40, 0.04);
+  border-color: rgba(var(--accent-rgb), 0.04);
 }
 
 @keyframes slo-pulse {
@@ -1246,7 +1249,7 @@
   background: rgba(255, 255, 255, 0.92);
   border-radius: 14px;
   padding: 10px 14px;
-  filter: drop-shadow(0 4px 24px rgba(233, 157, 40, 0.4));
+  filter: drop-shadow(0 4px 24px rgba(var(--accent-rgb), 0.4));
   z-index: 3;
 }
 
@@ -1276,7 +1279,7 @@
 .slo-spinner {
   width: 12px;
   height: 12px;
-  border: 2px solid rgba(233, 157, 40, 0.2);
+  border: 2px solid rgba(var(--accent-rgb), 0.2);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: slo-spin 0.8s linear infinite;
@@ -1306,7 +1309,7 @@
   background: rgba(255, 255, 255, 0.92);
   border-radius: 12px;
   padding: 12px 18px;
-  filter: drop-shadow(0 4px 20px rgba(233, 157, 40, 0.3));
+  filter: drop-shadow(0 4px 20px rgba(var(--accent-rgb), 0.3));
 }
 
 .welcome-title {
@@ -1327,19 +1330,19 @@
   margin-top: 8px;
   padding: 10px 24px;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   font-family: var(--font-family);
-  color: white;
+  color: #0a0d12;
   background: var(--accent);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: background var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .welcome-btn:hover {
   background: var(--accent-hover);
-  box-shadow: 0 4px 12px rgba(233, 157, 40, 0.3);
+  box-shadow: 0 4px 12px rgba(var(--accent-rgb), 0.3);
 }
 
 .welcome-hint {
@@ -1359,7 +1362,7 @@
   height: 200px;
   display: flex;
   flex-direction: column;
-  background: #0a0e14;
+  background: var(--bg-base);
   border-top: 1px solid var(--border);
   z-index: 20;
 }
@@ -1369,13 +1372,13 @@
   align-items: center;
   justify-content: space-between;
   padding: 4px 10px;
-  background: #0d1117;
+  background: var(--bg-base);
   border-bottom: 1px solid var(--border);
   font-size: 11px;
   font-weight: 600;
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--label-tracking);
   flex-shrink: 0;
 }
 
@@ -1408,44 +1411,65 @@
 }
 
 .console-ts {
-  color: #555;
+  color: var(--text-muted);
   margin-right: 8px;
 }
 
 .console-info .console-msg {
-  color: #3fb950;
+  color: var(--success);
 }
 
 .console-warn .console-msg {
-  color: #d29922;
+  color: var(--warning);
 }
 
 .console-error .console-msg {
-  color: #f85149;
+  color: var(--error);
 }
 
 .console-debug .console-msg {
-  color: #8b949e;
+  color: var(--text-secondary);
 }
 
-/* ── Login Page ────────────────────────────────────────────────── */
+/* ── Login Page — branded gate on an engineering grid ──────────── */
 .login-page {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 100vh;
-  background: linear-gradient(135deg, #0a0e14 0%, #1a1f2e 50%, #0d1117 100%);
+  background:
+    radial-gradient(65% 55% at 50% 34%, rgba(var(--accent-2-rgb), 0.05), transparent 70%),
+    radial-gradient(50% 40% at 50% 110%, rgba(var(--accent-rgb), 0.04), transparent 70%),
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    var(--bg-base);
+  background-size: auto, auto, 44px 44px, 44px 44px, auto;
   font-family: var(--font-sans);
 }
 
 .login-card {
   width: 360px;
   padding: 40px;
-  background: rgba(22, 27, 34, 0.85);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  backdrop-filter: blur(20px);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(var(--glass-blur));
+  box-shadow: var(--shadow-lg);
   text-align: center;
+  animation: login-card-in var(--transition-normal) ease both;
+}
+
+@keyframes login-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .login-logo-img {
@@ -1455,9 +1479,9 @@
   margin: 0 auto 20px;
   display: block;
   background: rgba(255, 255, 255, 0.92);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 16px 24px;
-  filter: drop-shadow(0 4px 16px rgba(233, 157, 40, 0.25));
+  filter: drop-shadow(0 4px 16px rgba(var(--accent-rgb), 0.25));
 }
 
 .login-title {
@@ -1468,8 +1492,10 @@
 }
 
 .login-subtitle {
-  font-size: 12px;
+  font-size: 10.5px;
   color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: var(--label-tracking);
   margin-bottom: 28px;
 }
 
@@ -1485,12 +1511,12 @@
 
 .login-field label {
   display: block;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
-  color: var(--text-secondary);
+  color: var(--text-muted);
   margin-bottom: 6px;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--label-tracking);
 }
 
 .login-field input {
@@ -1498,42 +1524,54 @@
   padding: 10px 14px;
   background: var(--bg-base);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-size: 14px;
   font-family: var(--font-sans);
   box-sizing: border-box;
-  transition: border-color 0.2s;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.login-field input::placeholder {
+  color: var(--text-muted);
 }
 
 .login-field input:focus {
   outline: none;
-  border-color: #e99d28;
+  border-color: var(--accent-2);
+  box-shadow: var(--focus-ring);
 }
 
 .login-error {
-  background: rgba(248, 81, 73, 0.15);
-  color: #f85149;
+  background: rgba(var(--error-rgb), 0.12);
+  border: 1px solid rgba(var(--error-rgb), 0.35);
+  color: var(--error);
   padding: 8px 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
 }
 
 .login-btn {
   padding: 12px;
-  background: linear-gradient(135deg, #e99d28, #d4851e);
-  border: none;
-  border-radius: 8px;
-  color: #fff;
+  background: var(--accent);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: #0a0d12;
   font-size: 14px;
   font-weight: 600;
+  font-family: var(--font-sans);
   cursor: pointer;
-  transition: opacity 0.2s, box-shadow 0.2s;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .login-btn:hover:not(:disabled) {
-  opacity: 0.9;
-  box-shadow: 0 4px 16px rgba(233, 157, 40, 0.3);
+  background: var(--accent-hover);
+  box-shadow: var(--glow-accent);
+}
+
+.login-btn:active:not(:disabled) {
+  background: var(--accent);
+  box-shadow: none;
 }
 
 .login-btn:disabled {
@@ -1544,6 +1582,7 @@
 .login-footer {
   margin-top: 24px;
   font-size: 10px;
+  letter-spacing: 0.02em;
   color: var(--text-muted);
 }
 
@@ -1562,7 +1601,7 @@
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #00d4aa, #0088ff);
+  background: linear-gradient(135deg, #3c5a7d, #2b4258);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1586,7 +1625,7 @@
   font-size: 10px;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--label-tracking);
   margin-top: 2px;
 }
 
@@ -1723,7 +1762,7 @@
   font-weight: 600;
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--label-tracking);
   margin-bottom: 4px;
 }
 
@@ -1748,8 +1787,8 @@
 .admin-team-add-row select option,
 .admin-form-row select option,
 .admin-user-actions select option {
-  background: #1e1e2e;
-  color: #e0e0e0;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
 }
 
 .admin-team-member {
@@ -1781,8 +1820,8 @@
 
 .admin-team-remove-btn:hover {
   opacity: 1;
-  color: #f85149;
-  background: rgba(248, 81, 73, 0.1);
+  color: var(--error);
+  background: rgba(var(--error-rgb), 0.1);
 }
 
 .admin-team-session {
@@ -1827,7 +1866,7 @@
   border: none;
   border-radius: 6px;
   background: var(--accent);
-  color: #000;
+  color: #0a0d12;
   cursor: pointer;
   font-size: 14px;
   transition: filter 0.12s;
@@ -1869,13 +1908,20 @@
 
 .admin-create-btn {
   padding: 6px 14px;
-  background: linear-gradient(135deg, #00d4aa, #0088ff);
+  background: var(--accent);
   border: none;
-  border-radius: 6px;
-  color: #fff;
+  border-radius: var(--radius-sm);
+  color: #0a0d12;
   font-size: 12px;
   font-weight: 600;
+  font-family: var(--font-sans);
   cursor: pointer;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.admin-create-btn:hover {
+  background: var(--accent-hover);
+  box-shadow: var(--glow-accent);
 }
 
 .admin-count {
@@ -1911,14 +1957,21 @@
 
 .admin-save-btn {
   padding: 8px 16px;
-  background: #00d4aa;
+  background: var(--accent);
   border: none;
-  border-radius: 6px;
-  color: #000;
+  border-radius: var(--radius-sm);
+  color: #0a0d12;
   font-size: 12px;
   font-weight: 600;
+  font-family: var(--font-sans);
   cursor: pointer;
   white-space: nowrap;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.admin-save-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+  box-shadow: var(--glow-accent);
 }
 
 .admin-save-btn:disabled {
@@ -1966,7 +2019,7 @@
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #00d4aa, #0088ff);
+  background: linear-gradient(135deg, #3c5a7d, #2b4258);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1986,8 +2039,8 @@
   display: inline-block;
   margin-left: 6px;
   padding: 1px 6px;
-  background: rgba(0, 136, 255, 0.2);
-  color: #0088ff;
+  background: var(--accent-2-muted);
+  color: var(--accent-2);
   border-radius: 4px;
   font-size: 9px;
   font-weight: 600;
@@ -2028,11 +2081,11 @@
 }
 
 .admin-toggle-btn.active {
-  color: #3fb950;
+  color: var(--success);
 }
 
 .admin-toggle-btn.inactive {
-  color: #f85149;
+  color: var(--error);
 }
 
 .admin-toggle-btn:disabled {
@@ -2101,7 +2154,7 @@
 }
 
 .pipeline-dialog {
-  background: #161b22;
+  background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 24px;
@@ -2181,7 +2234,7 @@
   color: var(--success);
   padding: 1px 4px;
   border-radius: 3px;
-  background: rgba(46, 204, 113, 0.1);
+  background: rgba(var(--success-rgb), 0.1);
 }
 
 .pipeline-dialog-stages {
@@ -2196,7 +2249,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  background: #0d1117;
+  background: var(--bg-base);
   border: 1px solid var(--border);
   border-radius: 8px;
   cursor: pointer;
@@ -2246,7 +2299,7 @@
   border: none;
   border-radius: 8px;
   background: var(--accent);
-  color: #000;
+  color: #0a0d12;
   font-weight: 600;
   cursor: pointer;
   font-size: 13px;
@@ -2273,7 +2326,7 @@
 }
 
 .pipeline-progress-card {
-  background: rgba(13, 17, 23, 0.92);
+  background: var(--glass-bg);
   backdrop-filter: blur(12px);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -2295,17 +2348,17 @@
 
 .pipeline-cancel-btn {
   padding: 3px 10px;
-  border: 1px solid #f85149;
+  border: 1px solid var(--error);
   border-radius: 6px;
   background: transparent;
-  color: #f85149;
+  color: var(--error);
   font-size: 11px;
   cursor: pointer;
   transition: all 0.15s;
 }
 
 .pipeline-cancel-btn:hover {
-  background: #f85149;
+  background: var(--error);
   color: #fff;
 }
 
@@ -2323,11 +2376,11 @@
 }
 
 .pipeline-stage-row.done {
-  color: #3fb950;
+  color: var(--success);
 }
 
 .pipeline-stage-row.failed {
-  color: #f85149;
+  color: var(--error);
 }
 
 .pipeline-stage-icon {
@@ -2346,7 +2399,7 @@
 .pipeline-stage-bar {
   width: 60px;
   height: 4px;
-  background: #21262d;
+  background: var(--bg-active);
   border-radius: 2px;
   overflow: hidden;
 }
@@ -2359,11 +2412,11 @@
 }
 
 .pipeline-stage-row.done .pipeline-stage-fill {
-  background: #3fb950;
+  background: var(--success);
 }
 
 .pipeline-stage-row.failed .pipeline-stage-fill {
-  background: #f85149;
+  background: var(--error);
 }
 
 .pipeline-stage-pct {
@@ -2464,7 +2517,7 @@
   justify-content: center;
   font-size: 14px;
   font-weight: 600;
-  color: #000;
+  color: #0a0d12;
   flex-shrink: 0;
   overflow: hidden;
 }
@@ -2486,11 +2539,11 @@
 }
 
 .member-status-dot.online {
-  background: #3fb950;
+  background: var(--success);
 }
 
 .member-status-dot.offline {
-  background: #484f58;
+  background: var(--text-muted);
 }
 
 .member-info {
@@ -2542,7 +2595,7 @@
 }
 
 .member-action-btn.danger:hover {
-  background: rgba(248, 81, 73, 0.2);
+  background: rgba(var(--error-rgb), 0.2);
 }
 
 .team-add-member-btn {
@@ -2592,7 +2645,7 @@
 .chat-bubble.mine {
   align-self: flex-end;
   background: var(--accent);
-  color: #000;
+  color: #0a0d12;
   border-bottom-right-radius: 4px;
 }
 
@@ -2647,7 +2700,7 @@
   border: none;
   border-radius: 50%;
   background: var(--accent);
-  color: #000;
+  color: #0a0d12;
   cursor: pointer;
   font-size: 14px;
   transition: filter 0.12s;
@@ -2839,7 +2892,7 @@
 }
 
 .webrtc-incoming-card {
-  background: rgba(13, 17, 23, 0.95);
+  background: var(--glass-bg);
   backdrop-filter: blur(16px);
   border: 1px solid var(--accent);
   border-radius: 14px;
@@ -2884,12 +2937,12 @@
 }
 
 .webrtc-btn-accept {
-  background: #3fb950;
-  color: #000;
+  background: var(--success);
+  color: #0a0d12;
 }
 
 .webrtc-btn-decline {
-  background: #f85149;
+  background: var(--error);
   color: #fff;
 }
 
@@ -2934,7 +2987,7 @@
   padding: 8px 24px;
   border: none;
   border-radius: 20px;
-  background: #f85149;
+  background: var(--error);
   color: #fff;
   font-size: 13px;
   font-weight: 600;
@@ -2991,7 +3044,7 @@
   transform: translateX(-50%);
   display: flex;
   gap: 16px;
-  background: rgba(13, 17, 23, 0.8);
+  background: var(--glass-bg);
   backdrop-filter: blur(12px);
   padding: 10px 24px;
   border-radius: 28px;
@@ -3014,11 +3067,11 @@
 }
 
 .webrtc-ctrl-btn.active {
-  background: rgba(248, 81, 73, 0.3);
+  background: rgba(var(--error-rgb), 0.3);
 }
 
 .webrtc-ctrl-btn.end {
-  background: #f85149;
+  background: var(--error);
 }
 
 .webrtc-ctrl-btn.end:hover {
@@ -3061,7 +3114,7 @@
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
-  letter-spacing: 0.5px;
+  letter-spacing: var(--label-tracking);
   text-transform: uppercase;
   border-bottom: 1px solid var(--border);
   background: var(--bg-surface);
@@ -3096,7 +3149,7 @@
 }
 
 .seg-instance-item.selected {
-  background: rgba(0, 168, 255, 0.08);
+  background: rgba(var(--accent-2-rgb), 0.08);
   border-left-color: var(--accent);
 }
 
@@ -3163,7 +3216,7 @@
   opacity: 0.5;
   transition: all var(--transition-fast);
   padding: 0;
-  color: #ccc;
+  color: var(--text-secondary);
 }
 
 .seg-inst-btn:hover {
@@ -3172,24 +3225,24 @@
 
 .seg-inst-edit:hover,
 .seg-inst-edit.active {
-  border-color: #00d4aa;
-  background: rgba(0, 212, 170, 0.15);
+  border-color: var(--accent-2);
+  background: rgba(var(--accent-2-rgb), 0.15);
   opacity: 1;
 }
 
 .seg-inst-excl:hover {
-  border-color: #ff9800;
+  border-color: var(--warning);
 }
 
 .seg-inst-excl.on {
-  background: #ff4444;
-  border-color: #ff4444;
+  background: var(--error);
+  border-color: var(--error);
   opacity: 1;
 }
 
 .seg-inst-del:hover {
-  border-color: #ff4444;
-  background: rgba(255, 68, 68, 0.15);
+  border-color: var(--error);
+  background: rgba(var(--error-rgb), 0.15);
 }
 
 /* Viewer — Right Panel */
@@ -3223,7 +3276,7 @@
 
 .seg-progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #00d4aa, #2ecc71);
+  background: linear-gradient(90deg, var(--accent-2), var(--success));
   transition: width 0.2s ease;
 }
 
@@ -3315,8 +3368,8 @@
 
 .seg-mode-btn.active {
   background: var(--accent);
-  color: #fff;
-  box-shadow: 0 2px 8px rgba(0, 168, 255, 0.3);
+  color: #0a0d12;
+  box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.3);
 }
 
 .seg-mode-btn:disabled {
@@ -3423,7 +3476,7 @@
 .seg-canvas {
   position: relative;
   flex: 1;
-  background: #0a0a0a;
+  background: var(--bg-base);
   overflow: hidden;
   cursor: default;
   min-height: 300px;
@@ -3865,7 +3918,7 @@
   font-weight: 600;
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--label-tracking);
 }
 
 .toggle-switch-container {
@@ -3892,7 +3945,7 @@
   height: 20px;
   border-radius: 10px;
   border: none;
-  background: #21262d;
+  background: var(--bg-active);
   cursor: pointer;
   padding: 0;
   transition: background 0.25s ease;
@@ -3900,7 +3953,7 @@
 }
 
 .toggle-switch:hover {
-  background: #30363d;
+  background: var(--border-strong);
 }
 
 .toggle-switch.on {
@@ -3972,7 +4025,7 @@
 }
 .sync-btn:hover { color: var(--accent, #5b9dd9); }
 .sync-btn:disabled, .sync-seek:disabled { opacity: 0.4; cursor: not-allowed; }
-.sync-err { color: #ff8888; font-size: 12px; padding: 12px; text-align: center; }
+.sync-err { color: var(--error); font-size: 12px; padding: 12px; text-align: center; }
 
 /* Loading / buffering indicator — shown in the video zone and mirrored over the
    3D zone (right half) so it's obvious the player isn't ready to play yet. */
@@ -4080,8 +4133,8 @@
   border-bottom-left-radius: 4px;
 }
 .assistant-msg.assistant.error {
-  border-color: rgba(248, 81, 73, 0.5);
-  background: rgba(248, 81, 73, 0.08);
+  border-color: rgba(var(--error-rgb), 0.5);
+  background: rgba(var(--error-rgb), 0.08);
   color: #ffb4ae;
 }
 .assistant-text { white-space: pre-wrap; word-break: break-word; }
@@ -4092,6 +4145,19 @@
   gap: 7px;
   color: var(--accent-2);
   font-size: 12.5px;
+  animation: thinking-scan 1.6s ease-in-out infinite;
+}
+
+@keyframes thinking-scan {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.55;
+  }
 }
 
 .assistant-trace {
@@ -4100,17 +4166,23 @@
   align-items: center;
   gap: 5px;
   margin-top: 8px;
-  padding-top: 8px;
+  padding: 6px 0 2px 10px;
   border-top: 1px dashed var(--border);
+  border-left: 2px solid rgba(var(--accent-2-rgb), 0.55);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
 }
 .trace-pill {
   background: var(--accent-2-muted);
+  border: 1px solid rgba(var(--accent-2-rgb), 0.25);
   color: var(--accent-2);
-  border-radius: var(--radius-pill);
-  padding: 2px 9px;
+  border-radius: var(--radius-xs);
+  padding: 2px 8px;
   font-size: 10.5px;
   font-weight: 500;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   cursor: default;
 }
 
@@ -4260,3 +4332,220 @@
 
 .spin { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ═══════════════════════════════════════════════════════════════
+   Industrial refinements — additive overrides only.
+   No selector above is renamed; this layer tightens typography,
+   surfaces, motion and interactive states app-wide.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Micro-labels: engineering captions (uppercase, tracked) ── */
+.panel-header,
+.nav-section,
+.console-header,
+.seg-sidebar-header,
+.control-label,
+.bim-alignment-label,
+.admin-team-section-title,
+.assistant-volumes-head {
+  font-size: 10.5px;
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+}
+
+/* ── Numeric readouts: mono + tabular figures everywhere ────── */
+.control-value,
+.menu-shortcut,
+.segment-count,
+.seg-inst-pts,
+.seg-zoom-label,
+.seg-status-text,
+.pipeline-stage-pct,
+.pipeline-scan-frames,
+.pipeline-scan-date,
+.vol-dims,
+.admin-team-session-id,
+.viewport-info {
+  font-variant-numeric: tabular-nums;
+}
+
+.session-meta,
+.admin-user-meta {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+}
+
+.team-meta,
+.activity-time,
+.chat-time,
+.admin-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status bar reads as a mission-control readout strip */
+.statusbar {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+}
+
+/* ── Floating overlays over the 3D viewport: frosted glass ──── */
+.control-group,
+.pipeline-progress-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-md);
+}
+
+/* ── Elevated dialogs: hairline + inset top-highlight ───────── */
+.admin-panel,
+.team-modal,
+.pipeline-dialog {
+  box-shadow: var(--shadow-lg);
+}
+
+.menu-dropdown,
+.pipeline-progress-card {
+  animation: overlay-in var(--transition-normal) ease both;
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ── Live-state indicators: subtle pulse, no neon ───────────── */
+.connection-dot.connected,
+.session-dot.online,
+.member-status-dot.online,
+.seg-status-dot.ready {
+  animation: live-dot-pulse 2.4s ease-out infinite;
+}
+
+.session-dot.loaded {
+  box-shadow: 0 0 5px rgba(var(--accent-rgb), 0.55);
+}
+
+.connection-dot.connected {
+  box-shadow: none;
+}
+
+/* ── Interactive states: hover / active / focus everywhere ──── */
+.activity-btn:hover {
+  background: var(--bg-hover);
+}
+
+.activity-btn:active,
+.tool-btn:active,
+.sidebar-collapse-btn:active,
+.session-action-btn:active {
+  background: var(--bg-active);
+}
+
+.menu-dropdown-item:active:not(:disabled) {
+  background: var(--bg-active);
+}
+
+.admin-tabs button:hover:not(.active),
+.team-tabs button:hover:not(.active) {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.pipeline-btn-run:hover:not(:disabled) {
+  filter: none;
+  background: var(--accent-hover);
+  box-shadow: var(--glow-accent);
+}
+
+.welcome-btn:hover {
+  background: var(--accent-hover);
+  box-shadow: var(--glow-accent);
+}
+
+.session-item:active {
+  background: var(--bg-active);
+}
+
+.nav-item:active {
+  background: var(--bg-active);
+}
+
+.bim-tree-row:active {
+  background: var(--bg-active);
+}
+
+.admin-user-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* Native selects — consistent dark field styling */
+.admin-team-section-row select:focus,
+.admin-team-details select:focus,
+.admin-team-add-row select:focus,
+.admin-form-row select:focus,
+.admin-form-row input:focus,
+.admin-user-actions select:focus,
+.team-selector select:focus {
+  outline: none;
+  border-color: var(--accent-2);
+  box-shadow: var(--focus-ring);
+}
+
+/* ── Empty states: muted icon + one-line hint ───────────────── */
+.team-empty,
+.bim-empty,
+.seg-empty,
+.admin-loading {
+  color: var(--text-muted);
+}
+
+.team-empty div:first-child {
+  opacity: 0.5;
+  filter: grayscale(0.35);
+}
+
+.assistant-empty p {
+  color: var(--text-secondary);
+}
+
+/* ── Sliders: cyan measurement thumbs get a crisp hover ─────── */
+.control-slider::-webkit-slider-thumb:hover,
+.bim-opacity-slider::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+}
+
+/* ── Viewport floating cards (align tool, tooltips, ctx menu) ─ */
+.vp-float {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  color: var(--text-primary);
+}
+
+/* ── Chat: team bubbles keep brand amber; timestamps mono ───── */
+.chat-time {
+  font-family: var(--font-mono);
+}
+
+/* ── Console: terminal chrome ───────────────────────────────── */
+.console-body {
+  font-variant-numeric: tabular-nums;
+}
+
+.console-ts {
+  font-variant-numeric: tabular-nums;
+}

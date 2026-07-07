@@ -18,6 +18,20 @@ source /workspace/miniforge3/etc/profile.d/conda.sh
 export CONDA_ROOT=/workspace/miniforge3
 conda activate semantic
 
+# Guard: never start a second vLLM instance (two at gpu_mem_util 0.5 fill the
+# whole A6000 and starve the reconstruction with CUDA OOM).
+SEM_PORT="$(python - <<'EOF'
+import yaml
+cfg = yaml.safe_load(open("/workspace/stac-build/server/config.yaml"))
+print(cfg.get("semantic", {}).get("port", 8799))
+EOF
+)"
+if curl -s -o /dev/null -m 3 "http://127.0.0.1:${SEM_PORT}/health"; then
+    echo "⚠️  Semantic service already running on port ${SEM_PORT} — not starting a second instance."
+    echo "    Kill it first if you really want to restart: pkill -f 'vllm serve'"
+    exit 0
+fi
+
 # HF cache on the network volume (offline once weights are local).
 export HF_HOME=/workspace/hf_cache
 export VLLM_LOGGING_LEVEL=INFO

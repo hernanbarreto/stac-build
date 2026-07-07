@@ -30,17 +30,23 @@ logger = logging.getLogger("SegPipeline")
 
 
 def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
-                     frame_map: dict = None, on_progress=None) -> dict:
+                     frame_map: dict = None, on_progress=None,
+                     boxes_map: dict = None) -> dict:
     """
     Full segmentation pipeline: batched SAM3 → IoU ID matching → mask-to-point mapping.
-    
+
     Supports multiple categories separated by ';' (e.g., "sofa;cushion;table").
     Uses the same blur-filtered frame set as reconstruction to ensure frame_global indices match.
     Valid frames are copied to frames_valid/ with sequential numbering, then cleaned up.
-    
+
     Args:
         frame_map: Optional dict mapping category label → list of frame filenames.
                    If provided, SAM3 only processes frames where each category was detected.
+        boxes_map: Optional per-instance BOX SEEDS from the Phase 1 auto-prompter:
+                   {label: {filename: [{"instance_id", "box_xywh"}, ...]}} with
+                   normalized xywh. Boxes are fed to SAM3's detector pathway
+                   together with the text prompt at the seeded frames, so
+                   multiple same-label instances are seeded individually.
     """
     from config import cfg
     
@@ -81,6 +87,7 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
             output_dir=output_dir, cfg=cfg,
             frame_map=frame_map,
             on_progress=on_progress,
+            boxes_map=boxes_map,
         )
         
         if not all_masks:
@@ -90,12 +97,21 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
         # ── Step 3: Save masks and metadata ──
         seg_meta = _save_masks(output_dir, all_masks, categories, obj_labels, cfg)
         
-        # ── Step 4: Match masks to cloud and cache final result ──
-        result = _match_and_save_result(output_dir)
-        
+        # ── Step 4: Match masks to cloud and cache final result (ONCE) ──
+        # In the anchored pipeline order (recon → vlm → sam3 → phase_r →
+        # cloudcompy → tsdf) the cleaned cloud does not exist yet — the
+        # mapping is DEFERRED to the cloudcompy stage, which calls
+        # map_segmentation_to_cloud() after the (corrected) merge.
+        if (output_dir / "cleaned_cloud.ply").exists():
+            result = _match_and_save_result(output_dir)
+        else:
+            print("[SegPipeline] ⏭ No cleaned_cloud.ply yet — mask→cloud "
+                  "mapping deferred to the cloudcompy stage")
+            result = {"deferred_cloud_mapping": True, "instances": []}
+
         # (Step 5 removed: the ShapeR PKL export is gone — MeshFlow mesh
         # generation runs on demand via /api/segmentation/shape/export.)
-        
+
         if result.get("instances"):
             return result
         return seg_meta
@@ -213,7 +229,8 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                       iou_threshold: float,
                       output_dir: Path = None, cfg: dict = None,
                       frame_map: dict = None,
-                      on_progress=None) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, str]]:
+                      on_progress=None,
+                      boxes_map: dict = None) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, str]]:
     """
     Process frames in overlapping batches, one category at a time.
     Each category gets its own SAM3 pass; obj_ids are remapped to avoid collisions.
@@ -280,16 +297,29 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         cat_frame_indices = list(range(total_frames))  # Maps local index → original index in frame_files
         cat_label = category.split(";")[0].strip().lower() if ";" in category else category.strip().lower()
         
+        # Per-instance box seeds for this category (Phase 1 auto-prompter):
+        # {filename: [{"instance_id","box_xywh"}, ...]}, same label keys as
+        # frame_map. Filled below into cat_boxes {cat-local position: [xywh]}.
+        matched_boxes = None
+        cat_boxes = {}
+        if boxes_map:
+            for map_label, per_file in boxes_map.items():
+                if (map_label.lower() == cat_label or
+                        cat_label in map_label.lower() or
+                        map_label.lower() in cat_label):
+                    matched_boxes = per_file
+                    break
+
         if frame_map:
             # Find matching frame_map entry for this category
             matched_frames = None
             for map_label, map_frames in frame_map.items():
-                if (map_label.lower() == cat_label or 
-                    cat_label in map_label.lower() or 
+                if (map_label.lower() == cat_label or
+                    cat_label in map_label.lower() or
                     map_label.lower() in cat_label):
                     matched_frames = map_frames
                     break
-            
+
             if matched_frames and len(matched_frames) > 0:
                 # Filter frame_files to only include those detected by VLM
                 # matched_frames contains original filenames (e.g., "00012.jpg")
@@ -304,21 +334,21 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                     for vlm_fname in matched_frames:
                         vlm_base = os.path.splitext(vlm_fname)[0]
                         seq_base = os.path.splitext(seq_fname)[0]
-                        # Direct match (same filename)
-                        if vlm_fname == seq_fname or vlm_base == seq_base:
+                        matched = vlm_fname == seq_fname or vlm_base == seq_base
+                        if not matched:
+                            # Index-based match: VLM "00012" ↔ sequential pos 12
+                            try:
+                                matched = int(vlm_base) == int(seq_base)
+                            except ValueError:
+                                matched = False
+                        if matched:
                             cat_frame_files.append(seq_fname)
                             cat_frame_indices.append(seq_idx)
+                            if matched_boxes and vlm_fname in matched_boxes:
+                                cat_boxes[len(cat_frame_files) - 1] = [
+                                    b["box_xywh"] for b in matched_boxes[vlm_fname]
+                                    if b.get("box_xywh")]
                             break
-                        # Index-based match: VLM frame "00012" matches sequential frame at position 12
-                        try:
-                            vlm_idx = int(vlm_base)
-                            seq_idx_val = int(seq_base)
-                            if vlm_idx == seq_idx_val:
-                                cat_frame_files.append(seq_fname)
-                                cat_frame_indices.append(seq_idx)
-                                break
-                        except ValueError:
-                            pass
                 
                 if cat_frame_files:
                     pct_saved = (1 - len(cat_frame_files) / total_frames) * 100
@@ -349,30 +379,42 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             s += batch_step
         
         def _process_category(category, batches, frames_dir, frame_files, sam3,
-                              batch_size, batch_overlap, iou_threshold):
-            """Process all batches for a single category. Raises on OOM."""
+                              batch_size, batch_overlap, iou_threshold,
+                              boxes_by_pos=None):
+            """Process all batches for a single category. Raises on OOM.
+            boxes_by_pos: {category-local frame position: [xywh boxes]} from the
+            Phase 1 auto-prompter — seeded into SAM3 alongside the text prompt."""
             batch_step = batch_size - batch_overlap
             cat_masks = {}
             next_global_id = 1
             prev_batch_masks = None
             prev_overlap_start = None
-            
+
             for batch_idx, (b_start, b_end) in enumerate(batches):
                 batch_frame_files = frame_files[b_start:b_end]
                 batch_len = len(batch_frame_files)
-                
+
                 print(f"\n[SegPipeline] ── Batch {batch_idx}/{len(batches)-1}: "
                       f"frames {b_start}–{b_end-1} ({batch_len} frames) ──")
                 if on_progress:
                     batch_pct = ((cat_idx * len(batches) + batch_idx + 1) / max(len(categories) * len(batches), 1)) * 100
                     on_progress(batch_pct, f"Batch {batch_idx+1}/{len(batches)} for '{category}'")
                 _log_vram(f"  batch {batch_idx} BEFORE")
-                
+
                 batch_dir, index_mapping = _prepare_batch_dir(frames_dir, batch_frame_files, b_start)
-                
+
+                # per-instance box seeds for this batch (local index space)
+                batch_boxes = None
+                if boxes_by_pos:
+                    batch_boxes = {pos - b_start: bx for pos, bx in boxes_by_pos.items()
+                                   if b_start <= pos < b_end and bx}
+                    if batch_boxes:
+                        print(f"[SegPipeline]   box seeds on {len(batch_boxes)} frame(s)")
+
                 try:
                     raw_results = sam3.process_batch(
-                        str(batch_dir), category, index_mapping
+                        str(batch_dir), category, index_mapping,
+                        boxes_by_local=batch_boxes or None,
                     )
                     
                     if not raw_results:
@@ -452,7 +494,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         try:
             cat_masks = _process_category(
                 category, cat_batches, frames_dir, cat_frame_files, sam3,
-                batch_size, batch_overlap, iou_threshold
+                batch_size, batch_overlap, iou_threshold, boxes_by_pos=cat_boxes
             )
         except Exception as e:
             if "out of memory" in str(e).lower():
@@ -461,7 +503,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                 try:
                     cat_masks = _process_category(
                         category, cat_batches, frames_dir, cat_frame_files, sam3,
-                        batch_size, batch_overlap, iou_threshold
+                        batch_size, batch_overlap, iou_threshold, boxes_by_pos=cat_boxes
                     )
                 except Exception as e2:
                     if "out of memory" in str(e2).lower():
@@ -505,21 +547,17 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         if cat_obj_ids:
             global_id_offset = max(cat_id_remap.values())
         
-        # Incremental save: persist results after each category
+        # Incremental save: persist MASKLETS after each category (cheap,
+        # crash-safe). The mask→cloud matching + per-instance cleaning
+        # (DBSCAN/SOR) runs ONCE at the end (Step 4) — running it per category
+        # interleaved N full matching passes with the segmentation for no
+        # benefit, and in the anchored pipeline order the cleaned cloud does
+        # not even exist yet at this point.
         if output_dir and cfg and all_masks:
             try:
                 categories_so_far = categories[:cat_idx + 1]
                 _save_masks(output_dir, all_masks, categories_so_far, obj_labels, cfg)
                 print(f"[SegPipeline] 💾 Incremental save: {cat_idx+1}/{len(categories)} categories saved")
-                # Only match against cloud if this category found new objects
-                if cat_obj_ids:
-                    new_global_ids = set(cat_id_remap.values())
-                    if on_progress:
-                        save_pct = ((cat_idx + 1) / max(len(categories), 1)) * 100
-                        on_progress(save_pct, f"Matching masks to cloud ({cat_idx+1}/{len(categories)} categories)...")
-                    _match_and_save_result(output_dir, new_obj_ids=new_global_ids)
-                else:
-                    print(f"[SegPipeline] ⏭️ No new objects — skipping cloud matching")
             except Exception as e:
                 print(f"[SegPipeline] ⚠️ Incremental save failed: {e}")
         
@@ -644,7 +682,15 @@ def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
                    next_global_id: int) -> Tuple[Dict[int, int], int]:
     """
     Match object IDs between batches using IoU in the overlap region.
-    
+
+    INVIOLABLE RULE (Phase R.1): cross-window re-identification happens
+    EXCLUSIVELY here, by TRACKING CONTINUITY through the shared overlap frames.
+    Matching instances by APPEARANCE between windows not connected by tracking
+    is PROHIBITED: in tunnels/stations identical columns repeat every N metres
+    and an appearance match creates false loop closures that destroy the
+    reconstruction (perceptual aliasing). Objects with no overlap-frame IoU
+    link get a FRESH global id — never a similarity-based merge.
+
     Returns:
         (id_remap, next_global_id) where id_remap = {curr_local_id → global_id}
     """
@@ -2041,6 +2087,39 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     except Exception as e:
         print(f"[SegPipeline] ⚠️ Potree rebuild error: {e}")
     
+    return result
+
+
+def map_segmentation_to_cloud(output_dir) -> dict:
+    """Deferred mask→cloud mapping (anchored pipeline order): run the FULL
+    matching + per-instance cleaning ONCE against the (corrected, merged)
+    cleaned cloud, then refresh the Phase R store's canonical OBBs so the
+    assistant's boxes coincide exactly with the viewer's. Called by the
+    cloudcompy stage when segmentation.json exists."""
+    output_dir = Path(output_dir)
+    if not (output_dir / "segmentation.json").exists():
+        return {"error": "no segmentation.json", "instances": []}
+    if not (output_dir / "cleaned_cloud.ply").exists():
+        return {"error": "no cleaned_cloud.ply", "instances": []}
+    result = _match_and_save_result(output_dir)
+    # refresh the canonical OBBs in the instance store (non-fatal)
+    store_path = output_dir / "scene_r.db"
+    if store_path.exists() and result.get("instances"):
+        try:
+            from phase_r.build_instances import load_seg_display_obbs
+            from phase_r.instance_store import InstanceStore
+            seg_obbs = load_seg_display_obbs(output_dir)
+            st = InstanceStore(store_path)
+            known = {i["instance_id"] for i in st.list_instances()}
+            n = 0
+            for iid, (T, aabb) in seg_obbs.items():
+                if iid in known:
+                    st.set_obb(iid, T, aabb, T[:3, 3])
+                    n += 1
+            st.close()
+            print(f"[SegPipeline] refreshed {n} canonical OBBs in scene_r.db")
+        except Exception as e:
+            print(f"[SegPipeline] store OBB refresh failed (non-fatal): {e}")
     return result
 
 

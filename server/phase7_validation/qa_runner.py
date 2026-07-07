@@ -107,6 +107,7 @@ class QASuiteRunner:
         return False, f"unknown check {t}"
 
     def run(self, backend: str = "qwen_local", on_progress=None) -> dict:
+        t_start = time.time()
         qa = SpatialQA(self.store_path, backend=backend)
         results: list[QAResult] = []
         for i, q in enumerate(self.suite):
@@ -124,7 +125,47 @@ class QASuiteRunner:
                             f"{q['id']} [{q['category']}] {'PASS' if passed else 'FAIL'} "
                             f"({dt:.1f}s)")
         qa.close()
-        return self._aggregate(backend, results)
+        agg = self._aggregate(backend, results)
+        agg["by_consumer"] = self._consumer_metrics(t_start)
+        return agg
+
+    @staticmethod
+    def _consumer_metrics(t_start: float) -> dict:
+        """Per-consumer breakdown (spec: métricas por consumidor) from the
+        centralized semantic call log, restricted to this run's window."""
+        try:
+            from semantic.semantic_config import load_semantic_config, resolve_path
+            log_path = resolve_path(load_semantic_config().get("logging", {}).get(
+                "jsonl_path", "logs/semantic_calls.jsonl"))
+        except Exception:
+            log_path = Path("logs/semantic_calls.jsonl")
+        if not log_path.exists():
+            return {}
+        import json as _json
+        per: dict[str, dict] = {}
+        try:
+            for line in log_path.read_text().splitlines():
+                try:
+                    rec = _json.loads(line)
+                except Exception:
+                    continue
+                if float(rec.get("ts", 0)) < t_start:
+                    continue
+                c = rec.get("consumer", "unknown")
+                d = per.setdefault(c, {"n_calls": 0, "errors": 0, "latency_ms": []})
+                d["n_calls"] += 1
+                d["errors"] += int(bool(rec.get("error")))
+                if rec.get("latency_ms") is not None:
+                    d["latency_ms"].append(float(rec["latency_ms"]))
+        except Exception:
+            return {}
+        out = {}
+        for c, d in per.items():
+            lat = sorted(d["latency_ms"])
+            out[c] = {"n_calls": d["n_calls"], "errors": d["errors"],
+                      "latency_ms_p50": round(lat[len(lat) // 2], 1) if lat else None,
+                      "latency_ms_max": round(lat[-1], 1) if lat else None}
+        return out
 
     def _aggregate(self, backend: str, results: list[QAResult]) -> dict:
         cats: dict[str, list[QAResult]] = {}
@@ -138,7 +179,8 @@ class QASuiteRunner:
         fails = [r for r in results if not r.passed]
         no_tool = [r.id for r in results if r.category in ("measurement", "health")
                    and not r.tools_called]
-        not_stopped = [r.id for r in results if r.stopped not in ("stop", "answer", "final")]
+        # run_tool_loop reports stopped ∈ {"final_answer", "max_iterations"}
+        not_stopped = [r.id for r in results if r.stopped != "final_answer"]
         return {
             "backend": backend,
             "n": len(results),

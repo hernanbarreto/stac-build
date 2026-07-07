@@ -28,6 +28,21 @@ def fit_plane(points: np.ndarray):
     return n, d
 
 
+def plane_world_to_camera(plane, c2w: np.ndarray):
+    """Transform a WORLD-frame plane (n·X_w + d = 0) into the CAMERA frame of a
+    c2w pose. With X_w = R·X_c + t:  n·(R·X_c + t) + d = (Rᵀn)·X_c + (n·t + d).
+    _plane_depth_map expects the camera-frame plane — passing a world-frame plane
+    (fit on store points) without this produces geometrically wrong depth."""
+    n, d = plane
+    n = np.asarray(n, float)
+    R = np.asarray(c2w, float)[:3, :3]
+    t = np.asarray(c2w, float)[:3, 3]
+    n_c = R.T @ n
+    d_c = float(n @ t + d)
+    norm = np.linalg.norm(n_c)
+    return n_c / (norm + 1e-12), d_c / (norm + 1e-12)
+
+
 def _plane_depth_map(plane, K, wh):
     """Predicted depth per pixel where the camera ray meets the plane (camera
     frame plane n·X + d = 0). Returns (H,W) with NaN where the ray is parallel."""
@@ -51,7 +66,9 @@ def regularize_depth_to_plane(depth: np.ndarray, mask: np.ndarray, plane,
     """Blend depth toward the plane-predicted depth inside the mask. No-op if the
     class is not whitelisted. weight in [0,1] (0 = unchanged, 1 = snap to plane)."""
     wl = whitelist or DEFAULT_WHITELIST
-    if label is not None and label not in wl:
+    # substring match, consistent with writeback/build (labels are free-form
+    # VLM proposals like "brick wall"; the whitelist holds canonical stems)
+    if label is not None and not any(w in label for w in wl):
         return depth  # never flatten non-structural classes
     h, w = depth.shape[:2]
     pred = _plane_depth_map(plane, K, (w, h))

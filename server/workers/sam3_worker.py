@@ -26,15 +26,28 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     # Read VLM analysis if available (written by vlm_worker)
     vlm_path = output_dir / "vlm_analysis.json"
+    boxes_map = None
     if vlm_path.exists():
         vlm_data = json.loads(vlm_path.read_text())
         prompt = vlm_data.get("prompt", "")
         frame_map = vlm_data.get("frame_map", {})
-        pipe.send_log(f"Using VLM prompt: '{prompt}'")
+        boxes_map = vlm_data.get("boxes") or None  # Phase 1 per-instance box seeds
+        pipe.send_log(f"Using VLM prompt: '{prompt}'"
+                      + (f" (+box seeds for {len(boxes_map)} labels)" if boxes_map else ""))
     else:
-        prompt = config.get("segmentation_prompt", "floor;wall;ceiling;door;window;furniture;object")
+        # No scene understanding on disk. An explicit config prompt is
+        # honored (operator override); otherwise FAIL — a canned category
+        # list is not scene analysis, and writing it to segmentation.json
+        # would permanently satisfy the resume probes with garbage.
+        prompt = config.get("segmentation_prompt") or ""
         frame_map = {}
-        pipe.send_log(f"No VLM analysis found, using config prompt: '{prompt}'")
+        if prompt:
+            pipe.send_log(f"No VLM analysis found — using explicit config prompt: '{prompt}'")
+        else:
+            raise RuntimeError(
+                "No vlm_analysis.json (scene understanding) for this session — "
+                "the VLM stage must run first. Re-run the pipeline; it resumes "
+                "from the missing stage automatically.")
 
     if pipe.check_cancel():
         return
@@ -55,6 +68,7 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
         output_dir=str(output_dir),
         prompt=prompt,
         frame_map=frame_map,
+        boxes_map=boxes_map,
         on_progress=_seg_progress,
     )
 
@@ -126,6 +140,10 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
         except Exception as e:
             pipe.send_log(f"Per-object TSDF crop failed (non-fatal): {e}", level="warning")
 
+    # Phase R runs as its OWN pipeline stage right after this one
+    # (reconstruction → cloudcompy → vlm → sam3 → PHASE_R → tsdf), so the
+    # masklets produced here are anchored before the fusion — no in-worker
+    # trigger needed (it would run Phase R twice).
     pipe.send_progress(100, f"Segmentation complete: {n_instances} objects", stage="sam3")
 
 

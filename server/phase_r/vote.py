@@ -35,6 +35,7 @@ class View:
     K: np.ndarray                   # (3,3) at mask resolution
     masks: dict[int, np.ndarray]    # instance_id -> bool mask (H,W)
     wh: tuple[int, int]             # (W,H)
+    fid: int | None = None          # source frame (for window corrections)
 
 
 def _project(point: np.ndarray, view: View):
@@ -71,15 +72,63 @@ def vote_point(point: np.ndarray, views: list[View]) -> tuple[int | None, dict[i
 
 
 def vote_points(points: np.ndarray, views: list[View]):
-    """Vectorized-ish per-point vote over all points. Returns
+    """Per-point vote over all points. Returns
     (assignments[N] int (-1 if none), entropies[N])."""
-    assignments = np.full(len(points), -1, int)
-    entropies = np.zeros(len(points))
-    for i, p in enumerate(points):
-        a, _c, e = vote_point(p, views)
-        assignments[i] = a if a is not None else -1
-        entropies[i] = e
+    assignments, entropies, _shares = vote_points_batch(points, views)
     return assignments, entropies
+
+
+def vote_points_batch(points: np.ndarray, views: list[View]):
+    """Vectorized multi-view plurality vote for all points at once.
+
+    Projects the whole point set into every view in one shot and accumulates a
+    dense (N, n_instances) count matrix. Returns:
+      assignments[N] int  — plurality instance id (-1 when no view saw the point)
+      entropies[N] float  — Shannon entropy of each point's vote distribution
+      shares[N] float     — plurality fraction (votes for winner / total votes)
+    """
+    n = len(points)
+    if n == 0 or not views:
+        return (np.full(0 if n == 0 else n, -1, int), np.zeros(n), np.zeros(n))
+    iids = sorted({iid for v in views for iid in v.masks})
+    idx = {iid: k for k, iid in enumerate(iids)}
+    counts = np.zeros((n, len(iids)), np.int32)
+    ph = np.concatenate([points, np.ones((n, 1))], axis=1)  # (N,4)
+
+    for view in views:
+        cam = (np.linalg.inv(view.c2w) @ ph.T).T          # (N,4)
+        z = cam[:, 2]
+        valid = z > 1e-6
+        u = np.where(valid, view.K[0, 0] * cam[:, 0] / np.where(valid, z, 1.0) + view.K[0, 2], -1)
+        v = np.where(valid, view.K[1, 1] * cam[:, 1] / np.where(valid, z, 1.0) + view.K[1, 2], -1)
+        w, h = view.wh
+        inb = valid & (u >= 0) & (u < w) & (v >= 0) & (v < h)
+        if not inb.any():
+            continue
+        ui, vi = u[inb].astype(int), v[inb].astype(int)
+        rows = np.nonzero(inb)[0]
+        for iid, mask in view.masks.items():
+            mh, mw = mask.shape[:2]
+            mu = np.minimum((ui * mw) // w, mw - 1)
+            mv = np.minimum((vi * mh) // h, mh - 1)
+            hit = mask[mv, mu].astype(bool)
+            if hit.any():
+                counts[rows[hit], idx[iid]] += 1
+
+    total = counts.sum(axis=1)
+    assignments = np.full(n, -1, int)
+    entropies = np.zeros(n)
+    shares = np.zeros(n)
+    voted = total > 0
+    if voted.any():
+        win = counts[voted].argmax(axis=1)
+        assignments[voted] = np.asarray(iids)[win]
+        p = counts[voted] / total[voted, None]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            lp = np.where(p > 0, np.log(p), 0.0)
+        entropies[voted] = -(p * lp).sum(axis=1)
+        shares[voted] = counts[voted].max(axis=1) / total[voted]
+    return assignments, entropies, shares
 
 
 def instance_entropy(points: np.ndarray, instance_id: int, views: list[View]):
@@ -91,3 +140,23 @@ def instance_entropy(points: np.ndarray, instance_id: int, views: list[View]):
     return {"mean_entropy": float(ents[mask].mean()),
             "max_entropy": float(ents[mask].max()),
             "n_points": int(mask.sum())}
+
+
+def region_entropy(points: np.ndarray, entropies: np.ndarray,
+                   cell_m: float = 1.0) -> dict[str, dict]:
+    """Aggregate per-point vote entropy over a metric grid (spec R.2: entropy
+    per REGION). Returns {"x_y_z": {"mean_entropy", "n_points"}} keyed by the
+    cell's integer coordinates at `cell_m` resolution."""
+    out: dict[str, dict] = {}
+    if len(points) == 0:
+        return out
+    cells = np.floor(np.asarray(points, float) / max(cell_m, 1e-6)).astype(np.int64)
+    order = np.lexsort((cells[:, 2], cells[:, 1], cells[:, 0]))
+    cells, ents = cells[order], np.asarray(entropies, float)[order]
+    uniq, starts = np.unique(cells, axis=0, return_index=True)
+    bounds = np.append(starts, len(cells))
+    for i, c in enumerate(uniq):
+        seg = ents[bounds[i]:bounds[i + 1]]
+        out[f"{c[0]}_{c[1]}_{c[2]}"] = {"mean_entropy": float(seg.mean()),
+                                        "n_points": int(len(seg))}
+    return out

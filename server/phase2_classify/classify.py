@@ -118,12 +118,18 @@ class SegmentClassifier:
             class_final = str(d.get("class", inst["label"])).strip().lower()
             conflict = bool(class_final and inst["label"] and
                             class_final not in inst["label"] and inst["label"] not in class_final)
-            eligible = class_final in STRUCTURAL_WHITELIST
+            # eligibility uses the SAME matcher as routing (is_structural):
+            # a multi-word structural class like "tiled floor" is eligible too
+            eligible = is_structural(class_final)
             self.store.set_classification(
                 iid, class_final=class_final, material=str(d.get("material", "")).lower(),
                 state=str(d.get("state", "")).lower(), notes=str(d.get("notes", "")),
                 confidence=float(d.get("confidence", 0.5)), conflict=conflict,
                 whitelist_eligible=eligible, best_frame=bm[1])
+            # class->route table (architectural -> surface_fitting; object ->
+            # visual): persisted so the fusion/surface_fit scene runner and
+            # reports can consume the routing decision.
+            self.store.set_meta(f"route_{iid}", route_for(class_final))
             n_done += 1
             n_conflict += int(conflict)
             if on_progress:

@@ -75,11 +75,21 @@ class WorkerPipe:
 
 def run_worker_safe(worker_fn, conn: Connection, *args, **kwargs):
     """Execute a worker function with standard error handling and cleanup.
-    
+
     This is the top-level entry point called as a multiprocessing target.
     It wraps the actual worker logic in try/except, sends done/error
     messages, and ensures the pipe is always closed.
     """
+    # Become our own process-group leader so a pipeline cancel can kill the
+    # WHOLE stage subtree (bash scripts, DA3/CloudCompy children) with one
+    # killpg — a plain terminate() on the worker orphaned its children, which
+    # kept running and holding GPU memory. Deliberately-persistent services
+    # (vLLM) detach with start_new_session and are unaffected.
+    try:
+        import os
+        os.setsid()
+    except Exception:
+        pass
     pipe = WorkerPipe(conn)
     t0 = time.time()
     try:

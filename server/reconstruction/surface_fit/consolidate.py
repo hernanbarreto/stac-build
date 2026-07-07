@@ -30,6 +30,60 @@ logger = logging.getLogger("SurfaceFit")
 _SERVER_DIR = Path(__file__).resolve().parents[2]
 _WLOP_LAUNCHER = _SERVER_DIR / "run_wlop.sh"
 
+# PLY property type -> numpy dtype (binary_little_endian)
+_PLY_TYPES = {
+    "char": "i1", "uchar": "u1", "int8": "i1", "uint8": "u1",
+    "short": "<i2", "ushort": "<u2", "int16": "<i2", "uint16": "<u2",
+    "int": "<i4", "uint": "<u4", "int32": "<i4", "uint32": "<u4",
+    "float": "<f4", "float32": "<f4", "double": "<f8", "float64": "<f8",
+}
+
+
+def _read_ply_structured(path: Path):
+    """Read a binary_little_endian PLY keeping EVERY property (the cleaned
+    cloud carries frame_global/pixel_row/pixel_col/confidence traceability that
+    Open3D silently drops — losing it broke Potree and the TSDF cloud mask).
+    Returns (header_bytes, structured_array) or None if the layout is not a
+    simple vertex-only binary PLY."""
+    with open(path, "rb") as f:
+        header = b""
+        n_pts = 0
+        fields: list[tuple[str, str]] = []
+        in_vertex = False
+        while True:
+            line = f.readline()
+            if not line:
+                return None
+            header += line
+            s = line.decode("ascii", "replace").strip()
+            if s.startswith("format") and "binary_little_endian" not in s:
+                return None
+            if s.startswith("element"):
+                parts = s.split()
+                in_vertex = parts[1] == "vertex"
+                if in_vertex:
+                    n_pts = int(parts[2])
+                elif int(parts[2]) > 0:
+                    return None  # faces/other elements — not our writer's layout
+            elif s.startswith("property") and in_vertex:
+                parts = s.split()
+                if parts[1] == "list" or parts[1] not in _PLY_TYPES:
+                    return None
+                fields.append((parts[2], _PLY_TYPES[parts[1]]))
+            elif s.startswith("end_header"):
+                break
+        dtype = np.dtype(fields)
+        data = np.fromfile(f, dtype=dtype, count=n_pts)
+        if len(data) != n_pts:
+            return None
+        return header, data
+
+
+def _write_ply_structured(path: Path, header: bytes, data: np.ndarray) -> None:
+    with open(path, "wb") as f:
+        f.write(header)
+        data.tofile(f)
+
 
 def consolidate(xyz: np.ndarray, method: str = "auto",
                 neighbor_radius_m: float = 0.06,
@@ -251,7 +305,6 @@ def scene_consolidate(output_dir: Path,
       charter reference (residuals ALWAYS against the original cloud);
     - radius adapts to the fine_register report (adaptive_radius_m).
     """
-    import open3d as o3d
     output_dir = Path(output_dir)
     cloud_path = output_dir / "cleaned_cloud.ply"
     if not cloud_path.exists():
@@ -261,8 +314,24 @@ def scene_consolidate(output_dir: Path,
 
     r = radius_m if radius_m else adaptive_radius_m(output_dir, min_radius_m,
                                                     max_radius_m)
-    pcd = o3d.io.read_point_cloud(str(cloud_path))
-    pts = np.asarray(pcd.points)
+    # Structure-preserving read: the cleaned cloud carries per-point
+    # traceability (frame_global/pixel_row/pixel_col) + confidence that the
+    # TSDF mask and Potree DEPEND on. Open3D I/O silently dropped them (and
+    # rewrote xyz as float64), which broke both — so we only ever touch the
+    # xyz columns and write the file back byte-identical in layout.
+    loaded = _read_ply_structured(cloud_path)
+    if loaded is None:
+        logger.warning("scene_consolidate: unsupported PLY layout — skipping "
+                       "(cloud kept untouched)")
+        return None
+    header, data = loaded
+    names = data.dtype.names or ()
+    if not {"x", "y", "z"} <= set(names):
+        logger.warning("scene_consolidate: no x/y/z properties — skipping")
+        return None
+    pts = np.column_stack([np.asarray(data["x"], np.float64),
+                           np.asarray(data["y"], np.float64),
+                           np.asarray(data["z"], np.float64)])
     n = len(pts)
     if n < 1000:
         logger.warning("scene_consolidate: only %d pts — skipping", n)
@@ -282,9 +351,13 @@ def scene_consolidate(output_dir: Path,
                             max_points=None, normals=normals,
                             normal_gate=normal_gate)
     disp = np.linalg.norm(moved - pts, axis=1)
-    pcd.points = o3d.utility.Vector3dVector(moved)   # colors/order untouched
-    o3d.io.write_point_cloud(str(cloud_path), pcd, write_ascii=False,
-                             compressed=True)
+    # write ONLY the positions back — every other property (colors, origins,
+    # confidence) and the point ORDER stay bit-identical
+    out = data.copy()
+    out["x"] = moved[:, 0].astype(data.dtype["x"])
+    out["y"] = moved[:, 1].astype(data.dtype["y"])
+    out["z"] = moved[:, 2].astype(data.dtype["z"])
+    _write_ply_structured(cloud_path, header, out)
     stats = {"n_points": int(n), "radius_m": float(r),
              "mean_move_mm": float(disp.mean() * 1000.0),
              "p95_move_mm": float(np.percentile(disp, 95) * 1000.0),

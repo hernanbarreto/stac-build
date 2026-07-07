@@ -1,14 +1,66 @@
 # STAC-Builder: VLM Worker (Subprocess)
-# Runs InternVL3 scene analysis in its own process.
-# Reads frames, writes scene_analysis.json / auto prompt.
+# Scene understanding stage of the automatic pipeline: Qwen3-VL comprehends
+# the scene (no domain assumption) and builds the SAM3 prompts. If the
+# semantic service is down it is AUTO-STARTED and awaited — segmentation must
+# be driven by real scene understanding, never by a canned category list.
 #
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
+import subprocess
 import sys
+import time
 from pathlib import Path
 from multiprocessing.connection import Connection
 
 from workers.base import WorkerPipe, run_worker_safe
+
+_STAC_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _semantic_alive(config: dict, timeout_s: float = 3.0) -> bool:
+    import requests
+    svc = config.get("semantic", {}).get("service", {})
+    url = f"http://{svc.get('host', '127.0.0.1')}:{svc.get('port', 8799)}/health"
+    try:
+        return requests.get(url, timeout=timeout_s).status_code == 200
+    except Exception:
+        return False
+
+
+def _ensure_semantic_service(pipe: WorkerPipe, config: dict) -> bool:
+    """Healthcheck the semantic service; if it is down, AUTO-START it
+    (scripts/serve_semantic.sh has a double-start guard) and wait until it
+    serves or the startup timeout passes. The user never starts it by hand."""
+    if _semantic_alive(config):
+        return True
+    launcher = _STAC_ROOT / "scripts" / "serve_semantic.sh"
+    if not launcher.exists():
+        pipe.send_log("Semantic service down and launcher missing", level="warning")
+        return False
+    pipe.send_log("Semantic service down — auto-starting vLLM (Qwen3-VL)...")
+    pipe.send_progress(0, "Starting semantic service (Qwen3-VL)...", stage="vlm")
+    try:
+        subprocess.Popen(["bash", str(launcher)], cwd=str(_STAC_ROOT),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as e:  # noqa: BLE001
+        pipe.send_log(f"Could not launch semantic service: {e}", level="warning")
+        return False
+    timeout = float(config.get("semantic", {}).get("service", {})
+                    .get("startup_timeout_s", 900))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pipe.check_cancel():
+            return False
+        if _semantic_alive(config):
+            pipe.send_log("Semantic service is up")
+            return True
+        pipe.send_progress(0, "Waiting for semantic service (weights loading)...",
+                           stage="vlm")
+        time.sleep(10)
+    pipe.send_log(f"Semantic service did not come up within {timeout:.0f}s",
+                  level="warning")
+    return False
 
 
 def _vlm_work(pipe: WorkerPipe, session_dir: str, config: dict):
@@ -40,6 +92,10 @@ def _vlm_work(pipe: WorkerPipe, session_dir: str, config: dict):
     used_autoprompt = False
     if autoprompt_cfg.get("enabled", True):
         try:
+            # the segmentation MUST be driven by scene understanding — bring
+            # the semantic service up if it is not (auto-start + wait)
+            if not _ensure_semantic_service(pipe, config):
+                raise RuntimeError("semantic service unavailable")
             pipe.send_progress(0, "Auto-prompting with Qwen3-VL...", stage="vlm")
             pipe.send_log("Starting Qwen3-VL auto-prompter (Phase 1)")
             from segmentation.autoprompt.session_builder import AutoPrompter
@@ -77,9 +133,17 @@ def _vlm_work(pipe: WorkerPipe, session_dir: str, config: dict):
         categories = [c.strip() for c in auto_prompt.split(";") if c.strip()]
         pipe.send_log(f"Categories: {len(categories)}, frame mappings: {len(frame_map)}")
     else:
-        auto_prompt = "floor;wall;ceiling;door;window;furniture;object"
-        frame_map = {}
-        pipe.send_log("No categories detected, using fallback", level="warning")
+        # NO canned category fallback: a generic "floor;wall;door;…" list is
+        # NOT scene understanding, and once it lands in segmentation.json the
+        # resume probes would consider this session segmented forever. Fail
+        # the stage loudly — the pipeline resumes at VLM on the next run once
+        # the semantic service / models are available.
+        raise RuntimeError(
+            "Scene understanding produced no categories (semantic service "
+            "unavailable and InternVL3 fallback empty). Segmentation must be "
+            "driven by scene analysis — fix the semantic service "
+            "(bash scripts/serve_semantic.sh) and re-run; the pipeline will "
+            "resume from this stage.")
 
     # Write results to disk so SAM3 worker can read them
     import json

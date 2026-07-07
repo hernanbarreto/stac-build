@@ -444,16 +444,22 @@ class SAM3Wrapper:
     
     def process_batch(self, batch_dir: str, prompt_text: str,
                       index_mapping: Dict[int, int],
-                      prompt_frames: List[int] = None) -> Dict[int, Any]:
+                      prompt_frames: List[int] = None,
+                      boxes_by_local: Dict[int, list] = None) -> Dict[int, Any]:
         """
         Process a batch of frames in a temporary directory.
-        
+
         Args:
             batch_dir: Path to directory with sequential batch frames (000000.jpg, ...)
             prompt_text: Text prompt for segmentation
             index_mapping: {batch_local_idx → original_frame_idx}
             prompt_frames: Local batch indices where to add prompts (None = auto)
-        
+            boxes_by_local: Optional Phase 1 box seeds {local_idx: [[x,y,w,h], …]}
+                (normalized 0..1). Seeded frames get text + bounding_boxes in the
+                SAME add_prompt call (the patched predictor supports both), so
+                multiple same-label instances are seeded individually instead of
+                relying on the text prompt alone.
+
         Returns:
             Dict[original_frame_idx → {"out_binary_masks": ndarray, "out_obj_ids": ndarray}]
         """
@@ -477,27 +483,32 @@ class SAM3Wrapper:
             )
             session_id = response["session_id"]
             
-            # 2. Add prompts at distributed frames
+            # 2. Add prompts at distributed frames — prefer the frames that
+            # carry Phase 1 box seeds (they pin individual instances)
             if prompt_frames is None:
-                # Auto-distribute: start, 1/3, 2/3, end
-                if batch_size <= 10:
+                if boxes_by_local:
+                    prompt_frames = sorted(boxes_by_local)[:6]
+                elif batch_size <= 10:
                     prompt_frames = [0]
                 else:
                     step = batch_size // 4
                     prompt_frames = [0, step, step * 2, step * 3]
-            
+
             for f_idx in prompt_frames:
                 if f_idx >= batch_size:
                     continue
                 try:
-                    prompt_response = self.predictor.handle_request(
-                        request=dict(
-                            type="add_prompt",
-                            session_id=session_id,
-                            frame_index=f_idx,
-                            text=prompt_text,
-                        )
+                    request = dict(
+                        type="add_prompt",
+                        session_id=session_id,
+                        frame_index=f_idx,
+                        text=prompt_text,
                     )
+                    seeds = (boxes_by_local or {}).get(f_idx)
+                    if seeds:
+                        request["bounding_boxes"] = [[float(c) for c in b] for b in seeds]
+                        request["bounding_box_labels"] = [1] * len(seeds)
+                    prompt_response = self.predictor.handle_request(request=request)
                     # Log what SAM3 detected at the prompt frame
                     if prompt_response:
                         n_objs = 0

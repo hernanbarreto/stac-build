@@ -37,13 +37,17 @@ def gpu_mem_used_mib() -> list[int]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--backend", default=None)
-    ap.add_argument("--wait", type=float, default=0.0, help="seconds to poll before giving up")
+    ap.add_argument("--wait", type=float, default=None,
+                    help="seconds to poll before giving up (default: config "
+                         "service.startup_timeout_s; 0 = single probe)")
     ap.add_argument("--interval", type=float, default=5.0)
     args = ap.parse_args()
 
     cfg = load_semantic_config()
     backend = make_backend(args.backend, cfg)
-    deadline = time.time() + args.wait
+    wait = args.wait if args.wait is not None else float(
+        cfg.get("service", {}).get("startup_timeout_s", 0))
+    deadline = time.time() + wait
     while True:
         h = backend.health()
         if h["ok"]:

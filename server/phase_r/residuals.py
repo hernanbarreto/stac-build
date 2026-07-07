@@ -78,14 +78,22 @@ class WindowEdge:
 
 
 def optimize_window_graph(n_windows: int, edges: list[WindowEdge],
-                          huber_delta: float = 0.05, max_nfev: int = 200):
+                          huber_delta: float = 0.05, max_nfev: int = 200,
+                          scale_priors: dict[int, float] | None = None,
+                          scale_prior_weight: float = 4.0):
     """Solve per-window Sim(3) corrections X_w (X_0 = identity fixed) minimizing
     robust residuals r = log( X_k^{-1} · X_l · M_kl ) over all edges.
+
+    scale_priors (R.6): expected correction scale per window index (the DA3
+    top-25%-confidence scale S is kept as a prior, so corrections are pulled
+    toward it — usually 1.0, i.e. "do not rescale"). Soft residual
+    sqrt(w)·(log s_w − log prior_w) per prior.
     Returns (corrections: list[Sim3], stats)."""
     from scipy.optimize import least_squares
 
     free = list(range(1, n_windows))  # window 0 fixed as reference
     idx_of = {w: i for i, w in enumerate(free)}
+    priors = {w: s for w, s in (scale_priors or {}).items() if w in idx_of and s > 0}
 
     def unpack(params) -> dict[int, Sim3]:
         X = {0: Sim3.identity()}
@@ -99,6 +107,9 @@ def optimize_window_graph(n_windows: int, edges: list[WindowEdge],
         for e in edges:
             r = X[e.win_k].inverse().compose(X[e.win_l]).compose(e.measured)
             out.extend(np.sqrt(e.weight) * r.log())
+        for w, prior in priors.items():
+            out.append(np.sqrt(scale_prior_weight)
+                       * (params[7 * idx_of[w]] - np.log(prior)))
         return np.asarray(out) if out else np.zeros(1)
 
     x0 = np.zeros(7 * len(free))

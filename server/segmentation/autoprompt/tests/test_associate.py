@@ -120,3 +120,47 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn(); print("PASS", name)
     print("all association tests passed")
+
+
+# ── adaptive VLM sampling (camera-path coverage) ─────────────────────
+def test_adaptive_sampling_scales_with_camera_path():
+    import tempfile
+    from pathlib import Path
+    from segmentation.autoprompt.session_builder import AutoPrompter
+
+    class _Cam:
+        def __init__(self, pose_map): self.pose_map = pose_map
+        def K_for(self, f): return None
+
+    with tempfile.TemporaryDirectory() as d:
+        ap = AutoPrompter(Path(d), Path(d) / "output",
+                          config={"autoprompt": {"adaptive_sampling": {
+                              "min_spacing_m": 0.5, "min_rotation_deg": 18,
+                              "min_frames": 4}}})
+        files = [f"{i:06d}.jpg" for i in range(100)]
+
+        # camera advancing 0.1 m/frame along x → 10 m path / 0.5 m ≈ ~20 kept
+        poses = {}
+        for i in range(100):
+            T = np.eye(4); T[0, 3] = 0.1 * i
+            poses[i] = T
+        kept = ap._adaptive_sample(files, _Cam(poses))
+        assert 15 <= len(kept) <= 25, len(kept)
+
+        # stationary camera → collapses to the floor
+        static = {i: np.eye(4) for i in range(100)}
+        kept2 = ap._adaptive_sample(files, _Cam(static))
+        assert len(kept2) <= 4 + 1, len(kept2)  # min_frames floor (+ last frame)
+
+        # pure rotation (no translation): 2°/frame → keep ~ every 9th
+        from scipy.spatial.transform import Rotation as _R
+        rot = {}
+        for i in range(100):
+            T = np.eye(4); T[:3, :3] = _R.from_rotvec([0, np.radians(2 * i), 0]).as_matrix()
+            rot[i] = T
+        kept3 = ap._adaptive_sample(files, _Cam(rot))
+        assert 8 <= len(kept3) <= 16, len(kept3)
+
+        # no poses at all → even fallback at no_pose_target
+        kept4 = ap._adaptive_sample(files, None)
+        assert len(kept4) <= 48 and len(kept4) >= 40

@@ -44,6 +44,23 @@ def _resolve_store(body: dict) -> str | None:
     return None
 
 
+def _resolve_images(body: dict, store_path: str) -> list:
+    """Multimodal disambiguation over HTTP: accepts `images` (data-URLs /
+    base64 strings from the UI) and/or `frame_ids` (session keyframes resolved
+    to files next to the store: <session>/frames/<fid>.jpg)."""
+    images: list = list(body.get("images") or [])
+    fids = body.get("frame_ids") or []
+    if fids:
+        session_dir = Path(store_path).parent.parent  # output/scene_r.db -> session
+        for fid in fids:
+            for cand in (session_dir / "frames" / f"{int(fid):06d}.jpg",
+                         session_dir / "frames" / f"{int(fid)}.jpg"):
+                if cand.exists():
+                    images.append(str(cand))
+                    break
+    return images
+
+
 @router.post("/spatial_qa")
 async def spatial_qa(body: dict):
     question = (body or {}).get("question")
@@ -58,7 +75,8 @@ async def spatial_qa(body: dict):
     from phase5_qa.orchestrator import SpatialQA
     qa = SpatialQA(store_path, backend=backend)
     try:
-        res = qa.ask(question, max_iterations=body.get("max_iterations", 8))
+        res = qa.ask(question, images=_resolve_images(body, store_path) or None,
+                     max_iterations=body.get("max_iterations", 8))
     finally:
         qa.close()
     return JSONResponse(res)
@@ -77,15 +95,19 @@ def _store_or_error(body: dict):
 @router.post("/scene/objects")
 async def scene_objects(body: dict):
     """Instances + OBB geometry so the viewer can render, pick and reference
-    objects by id in the chat. Every field is tool_measured geometry."""
+    objects by id in the chat. Every field is tool_measured geometry, served in
+    the DISPLAY frame (floor-aligned; the exact frame the viewer renders) via
+    SpatialTools — the same frame every chat measurement uses."""
     store, err = _store_or_error(body)
     if err:
         return err
     try:
+        from phase5_qa.tools import SpatialTools
+        tools = SpatialTools(store)
         out = []
         for i in store.list_instances():
             iid = i["instance_id"]
-            obb = store.get_obb(iid)
+            obb = tools._obb(iid)
             entry = {"id": iid, "label": i["label"], "status": i["status"],
                      "n_views": i.get("n_views")}
             c = store.get_classification(iid)
@@ -100,7 +122,7 @@ async def scene_objects(body: dict):
                 entry["obb"] = {"transform": [float(x) for x in np.asarray(T).ravel()],
                                 "center": [float(x) for x in pos], "half_extents": half}
             out.append(entry)
-        return JSONResponse({"objects": out, "count": len(out)})
+        return JSONResponse({"objects": out, "count": len(out), "frame": "display"})
     finally:
         store.close()
 

@@ -21,7 +21,7 @@ service serving Qwen3-VL-8B-Instruct, shared by all consumers through
 
 - **Baseline `qwen_local` = `Qwen/Qwen3-VL-8B-Instruct`** — the EXACT variant
   R3D uses (`vendor/r3d/r3d/pipeline/scripts/generate_responses.py:11`,
-  `rgb_overlay_evals.py:14`). No deviation from spec.
+  `vendor/r3d/scripts/run_eval_8b_quick.sh:18`). No deviation from spec.
 - **Candidate `qwen_local_large` = `Qwen/Qwen3-VL-32B-Instruct-FP8`** —
   configured, download deferred to Phase 7. FP8 block-wise runs on Ampere via
   vLLM's FP8-Marlin. Weights ≈32 GiB → cannot coexist with reconstruction;

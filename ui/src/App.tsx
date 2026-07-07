@@ -831,7 +831,7 @@ function App() {
                     key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
                     id: inst.instance_id || inst.id,
                     label: `${inst.label}`,
-                    color: inst.color || '#00d4ff',
+                    color: inst.color || '#4fd1ff',
                     totalPoints: inst.total_points || 0,
                     visible: true,
                     excluded: inst.excluded || false,
@@ -1402,7 +1402,7 @@ function App() {
                   onChange={e => setPointSize(parseFloat(e.target.value))}
                   onClick={e => e.stopPropagation()}
                   style={{ width: 80, accentColor: 'var(--accent)' }} />
-                <span style={{ fontSize: 11, color: '#aaa', minWidth: 24 }}>{pointSize.toFixed(2)}</span>
+                <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 24 }}>{pointSize.toFixed(2)}</span>
               </div>
             </div>
           )}
@@ -1810,7 +1810,7 @@ function App() {
                   )}
                 </div>
                 {floorLevel.candidates.length > 0 && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', borderBottom: '1px solid rgba(255,255,255,0.08)', fontSize: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
                     <span title="Selected floor is leveled to y=0 on the XZ plane" style={{ color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>Floor @ y=0</span>
                     <select
                       value={floorLevel.selected ?? ''}
@@ -1943,7 +1943,7 @@ function App() {
                         </div>
                       ))}
                       {/* Unsegmented points toggle */}
-                      <div className="segment-item" style={{ borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+                      <div className="segment-item" style={{ borderTop: '1px solid var(--border)' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                           <input
                             type="checkbox"
@@ -1957,7 +1957,7 @@ function App() {
                           />
                           <span
                             className="segment-color-dot"
-                            style={{ background: '#666' }}
+                            style={{ background: 'var(--text-muted)' }}
                           />
                           <span className="segment-label" style={{ flex: 1, fontStyle: 'italic', opacity: 0.7 }}>Unsegmented</span>
                         </div>
@@ -1973,7 +1973,7 @@ function App() {
                         letterSpacing: '0.08em',
                         color: 'var(--text-secondary)',
                         textTransform: 'uppercase',
-                        borderTop: '1px solid rgba(255,255,255,0.1)',
+                        borderTop: '1px solid var(--border)',
                         opacity: 0.85,
                       }}>
                         🧊 Shape ({shapeMeshes.length})
@@ -2011,7 +2011,7 @@ function App() {
                         letterSpacing: '0.08em',
                         color: 'var(--text-secondary)',
                         textTransform: 'uppercase',
-                        borderTop: '1px solid rgba(255,255,255,0.1)',
+                        borderTop: '1px solid var(--border)',
                         opacity: 0.85,
                       }}>
                         🧱 TSDF ({tsdfMeshes.length})
@@ -2211,8 +2211,8 @@ function App() {
                       style={{ position: 'fixed', inset: 0, zIndex: 90 }} />
                     <div style={{
                       position: 'absolute', top: '100%', left: 0, marginTop: 6, zIndex: 100,
-                      background: '#1e1e1e', border: '1px solid #3c3c3c', borderRadius: 6,
-                      padding: 12, minWidth: 240, boxShadow: '0 6px 20px rgba(0,0,0,0.5)',
+                      background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 6,
+                      padding: 12, minWidth: 240, boxShadow: 'var(--shadow-lg)',
                       display: 'flex', flexDirection: 'column', gap: 12,
                     }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -2458,7 +2458,7 @@ function App() {
             <div className="pipeline-progress-overlay">
               <div className="pipeline-progress-card">
                 <div className="pipeline-progress-header">
-                  <span>Pipeline {pipelineRunning.status === 'running' ? <Clock size={14} /> : pipelineRunning.status === 'done' ? <CheckCircle2 size={14} color="#4ade80" /> : pipelineRunning.status === 'failed' ? <XCircle size={14} color="#f87171" /> : <Ban size={14} />}</span>
+                  <span>Pipeline {pipelineRunning.status === 'running' ? <Clock size={14} /> : pipelineRunning.status === 'done' ? <CheckCircle2 size={14} color="#3fb950" /> : pipelineRunning.status === 'failed' ? <XCircle size={14} color="#f85149" /> : <Ban size={14} />}</span>
                   {pipelineRunning.status === 'running' && (
                     <button className="pipeline-cancel-btn" onClick={handlePipelineCancel}>Cancel</button>
                   )}
@@ -2493,7 +2493,7 @@ function App() {
               {/* Scan Selection */}
               {scansList.length > 0 && (
                 <div className="pipeline-dialog-scans">
-                  <p style={{ fontSize: '11px', color: '#888', marginBottom: '6px' }}>
+                  <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '6px' }}>
                     {scansList.length === 1 ? 'Scan to reconstruct:' : `Select scans to reconstruct (${selectedScans.length}/${scansList.length}):`}
                   </p>
                   {scansList.map(scan => {
@@ -2524,7 +2524,7 @@ function App() {
                 </div>
               )}
               <div className="pipeline-dialog-stages">
-                <p style={{ fontSize: '11px', color: '#888', marginBottom: '10px' }}>
+                <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px' }}>
                   Runs the full reconstruction end-to-end: 3D Reconstruction → Cloud Cleaning → TSDF Mesh
                 </p>
                 {(() => {
@@ -2532,7 +2532,7 @@ function App() {
                   if (partial.length === 0) return null
                   const totalCached = partial.reduce((n, s) => n + (s.cached_chunks || 0), 0)
                   return (
-                    <div style={{ fontSize: '11px', background: 'rgba(46,160,67,0.12)', border: '1px solid rgba(46,160,67,0.4)', color: '#7ee787', borderRadius: '6px', padding: '8px', margin: '8px 0' }}>
+                    <div style={{ fontSize: '11px', background: 'rgba(46,160,67,0.12)', border: '1px solid rgba(46,160,67,0.4)', color: 'var(--success)', borderRadius: '6px', padding: '8px', margin: '8px 0' }}>
                       ⏸ Reconstrucción incompleta detectada ({totalCached} chunk{totalCached === 1 ? '' : 's'} en cache).
                       Al ejecutar se <b>reanuda</b> y completa lo que falta sin re-procesar lo ya hecho.
                     </div>
@@ -2547,7 +2547,7 @@ function App() {
                   <span>Replace existing outputs</span>
                 </label>
                 {pipelineReplace && scansList.some(s => selectedScans.includes(s.key) && s.recon_state === 'partial') && (
-                  <div style={{ fontSize: '11px', color: '#f0883e', marginTop: '4px' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--warning)', marginTop: '4px' }}>
                     ⚠️ Con esto activado se borra el cache y la reconstrucción arranca de cero. Desactivalo para reanudar.
                   </div>
                 )}
@@ -2566,11 +2566,11 @@ function App() {
       {/* ── Status Bar ── */}
       <div className="statusbar">
         <div className="statusbar-item">
-          <span><Circle size={8} fill={serverAlive ? '#4ade80' : '#f87171'} stroke="none" /></span>
+          <span><Circle size={8} fill={serverAlive ? '#3fb950' : '#f85149'} stroke="none" /></span>
           <span>STAC Server</span>
         </div>
         <div className="statusbar-item">
-          <span><Circle size={8} fill={connected ? '#4ade80' : '#f87171'} stroke="none" /></span>
+          <span><Circle size={8} fill={connected ? '#3fb950' : '#f85149'} stroke="none" /></span>
           <span>{connected ? 'Connected' : 'Disconnected'}</span>
         </div>
         <div className="statusbar-spacer" />
@@ -2625,7 +2625,7 @@ function App() {
                         key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
                         id: inst.instance_id || inst.id,
                         label: `${inst.label}`,
-                        color: inst.color || '#00d4ff',
+                        color: inst.color || '#4fd1ff',
                         totalPoints: inst.total_points || 0,
                         visible: true,
                         excluded: inst.excluded || false,
@@ -2658,7 +2658,7 @@ function App() {
                       key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
                       id: inst.instance_id || inst.id,
                       label: `${inst.label}`,
-                      color: inst.color || '#00d4ff',
+                      color: inst.color || '#4fd1ff',
                       totalPoints: inst.total_points || 0,
                       visible: true,
                       excluded: inst.excluded || false,
@@ -2687,7 +2687,7 @@ function App() {
                       key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
                       id: inst.instance_id || inst.id,
                       label: `${inst.label}`,
-                      color: inst.color || '#00d4ff',
+                      color: inst.color || '#4fd1ff',
                       totalPoints: inst.total_points || 0,
                       visible: true,
                       excluded: inst.excluded || false,
@@ -2829,14 +2829,14 @@ function App() {
                         </div>
                       )}
                       {prog?.error && (
-                        <div style={{ fontSize: 11, color: '#ec7063', paddingLeft: 24 }}>
+                        <div style={{ fontSize: 11, color: 'var(--error)', paddingLeft: 24 }}>
                           {prog.error.slice(0, 140)}
                         </div>
                       )}
                       {checked && !shapeRunning && (
                         <>
                           {st?.has_mesh && (
-                            <div style={{ fontSize: 11, color: '#e67e22', padding: '2px 0' }}>
+                            <div style={{ fontSize: 11, color: 'var(--warning)', padding: '2px 0' }}>
                               ⚠️ This object already has a mesh. Running will overwrite it.
                             </div>
                           )}
@@ -2852,7 +2852,7 @@ function App() {
                   onChange={e => setShapeAutoReconstruct(e.target.checked)} />
                 Generate mesh after export (runs MeshFlow — ~12 s per object on GPU)
               </label>
-              <div style={{ fontSize: 11, color: '#888', margin: '0 0 12px 24px' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', margin: '0 0 12px 24px' }}>
                 ⚠ Visual asset (generative, non-metric). Architectural classes are routed to the
                 metric surface-fit pipeline instead.
               </div>
@@ -3085,12 +3085,12 @@ function App() {
                         </div>
                       )}
                       {prog?.error && (
-                        <div style={{ fontSize: 11, color: '#ec7063', paddingLeft: 24 }}>
+                        <div style={{ fontSize: 11, color: 'var(--error)', paddingLeft: 24 }}>
                           {prog.error.slice(0, 140)}
                         </div>
                       )}
                       {checked && !tsdfRunning && st?.has_mesh && (
-                        <div style={{ fontSize: 11, color: '#e67e22', padding: '2px 0 0 24px' }}>
+                        <div style={{ fontSize: 11, color: 'var(--warning)', padding: '2px 0 0 24px' }}>
                           ⚠️ This object already has a TSDF mesh. Running will overwrite it.
                         </div>
                       )}
@@ -3265,7 +3265,7 @@ function App() {
                     : '🌐 Reconstruct whole scene'}
                 </button>
                 {(tsdfScene.phase === 'done' || tsdfScene.phase === 'error' || tsdfSceneRunning) && (
-                  <div style={{ fontSize: 12, color: '#888', marginTop: 6 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
                     {tsdfScene.phase === 'done' && (
                       <>✅ Scene mesh written: <code>{tsdfScene.mesh}</code></>
                     )}
@@ -3318,7 +3318,7 @@ function App() {
                     : '🟣 Poisson whole scene'}
                 </button>
                 {(poissonScene.phase === 'done' || poissonScene.phase === 'error' || poissonSceneRunning) && (
-                  <div style={{ fontSize: 12, color: '#888', marginTop: 6 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
                     {poissonScene.phase === 'done' && (
                       <>✅ Poisson mesh written: <code>{poissonScene.mesh}</code></>
                     )}

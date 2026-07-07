@@ -1136,13 +1136,13 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
 
                                 <div style={{ width: 12 }}></div>
 
-                                <button className="seg-nav-btn" style={{ color: '#2ecc71', fontWeight: 'bold' }} title="Include frame & Next" onClick={() => {
+                                <button className="seg-nav-btn" style={{ color: 'var(--success)', fontWeight: 'bold' }} title="Include frame & Next" onClick={() => {
                                     const next = new Set(selectedFrames)
                                     next.add(kfIndex)
                                     setSelectedFrames(next)
                                     if (kfIndex < keyframes.length - 1) setKfIndex(i => i + 1)
                                 }}>✓</button>
-                                <button className="seg-nav-btn" style={{ color: '#e74c3c', fontWeight: 'bold' }} title="Exclude frame & Next" onClick={() => {
+                                <button className="seg-nav-btn" style={{ color: 'var(--error)', fontWeight: 'bold' }} title="Exclude frame & Next" onClick={() => {
                                     const next = new Set(selectedFrames)
                                     next.delete(kfIndex)
                                     setSelectedFrames(next)
@@ -1218,15 +1218,15 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
 
                         {/* Multi-object queue: objects added but not yet propagated */}
                         {mode === 'manual' && pendingObjects.length > 0 && (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '6px 10px', background: '#1d1d1d', borderTop: '1px solid #333' }}>
-                                <span style={{ fontSize: 11, color: '#888' }}>Queued ({pendingObjects.length}):</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '6px 10px', background: 'var(--bg-surface)', borderTop: '1px solid var(--border)' }}>
+                                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Queued ({pendingObjects.length}):</span>
                                 {pendingObjects.map(o => (
-                                    <span key={o.objId} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: '#2a2a2a', border: `1px solid ${o.color}`, borderRadius: 12, padding: '2px 9px', fontSize: 12, color: '#eee' }}>
+                                    <span key={o.objId} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: 'var(--bg-elevated)', border: `1px solid ${o.color}`, borderRadius: 12, padding: '2px 9px', fontSize: 12, color: 'var(--text-primary)' }}>
                                         <span style={{ width: 9, height: 9, borderRadius: '50%', background: o.color }} />
                                         {o.name}
                                     </span>
                                 ))}
-                                <span style={{ fontSize: 11, color: '#666' }}>· keep clicking the next object, then “Propagate”. “Clear” discards the queue.</span>
+                                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· keep clicking the next object, then “Propagate”. “Clear” discards the queue.</span>
                             </div>
                         )}
 
@@ -1247,13 +1247,13 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                     disabled={loading}
                                 />
                                 <button
-                                    style={{ background: '#555', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13 }}
+                                    style={{ background: 'var(--bg-active)', color: 'var(--text-primary)', border: 'none', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13 }}
                                     title="Clear only the prompts of the object being edited (Esc) — queued objects and saved instances are untouched"
                                     onClick={clearCurrentObject}
                                     disabled={loading || !hasPrompts}
                                 >✕ Clear</button>
                                 <button
-                                    style={{ background: '#7a3030', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13 }}
+                                    style={{ background: 'rgba(248, 81, 73, 0.28)', color: '#ffb4ae', border: 'none', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13 }}
                                     title="Discard the in-edit object AND the whole queued-object batch (saved instances are kept)"
                                     onClick={async () => {
                                         const n = pendingObjects.length + (hasPrompts ? 1 : 0)
@@ -1287,9 +1287,9 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                     }}
                                     disabled={loading || (!hasPrompts && pendingObjects.length === 0)}
                                 >🗑 Clear all</button>
-                                <button className="admin-save-btn" style={{ background: '#9b59b6', color: '#fff' }} onClick={handleEvaluate}
+                                <button className="admin-save-btn" style={{ background: 'var(--accent-gradient)', color: '#06121a' }} onClick={handleEvaluate}
                                     disabled={loading || !stateId || !hasPrompts || propagatingRef.current}>🧠 Evaluate</button>
-                                <button className="admin-save-btn" style={{ background: '#2980b9', color: '#fff' }} onClick={handleAddObject}
+                                <button className="admin-save-btn" style={{ background: 'var(--accent-2)', color: '#06121a' }} onClick={handleAddObject}
                                     disabled={loading || !stateId || !hasPrompts} title="Queue this object and start the next one">➕ Add object</button>
                                 <button className="admin-save-btn" onClick={handlePropagate}
                                     disabled={loading || !stateId || (!hasPrompts && pendingObjects.length === 0)}>
@@ -1301,15 +1301,15 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                         {/* Frames Gallery. Clicking a thumbnail NAVIGATES the viewer to
                             that frame (never toggles selection — that's the checkbox's
                             job); the active thumbnail is kept scrolled into view. */}
-                        <div className="seg-frames-bar" style={{ display: 'flex', overflowX: 'auto', gap: 6, padding: '8px', background: '#222', borderTop: '1px solid #333' }}>
+                        <div className="seg-frames-bar" style={{ display: 'flex', overflowX: 'auto', gap: 6, padding: '8px', background: 'var(--bg-surface)', borderTop: '1px solid var(--border)' }}>
                             {keyframes.map((kf, i) => (
                                 <div key={i} ref={el => { thumbRefs.current[i] = el }}
                                     style={{ position: 'relative', flexShrink: 0, cursor: 'pointer', opacity: selectedFrames.has(i) ? 1 : 0.4 }}
                                     onClick={() => setKfIndex(i)}>
                                     <img src={`/api/sessions/${sessionId}/frames/${kf}`} loading="lazy"
-                                        style={{ height: 40, borderRadius: 4, border: kfIndex === i ? '2px solid #3498db' : '1px solid transparent' }} />
+                                        style={{ height: 40, borderRadius: 4, border: kfIndex === i ? '2px solid var(--accent-2)' : '1px solid transparent' }} />
                                     {[...promptPointsMapRef.current.keys()].some(k => k.startsWith(`${i}:`)) && (
-                                        <span title="This frame has prompts" style={{ position: 'absolute', top: 2, left: 2, width: 8, height: 8, borderRadius: '50%', background: '#2ecc71', border: '1px solid #111' }} />
+                                        <span title="This frame has prompts" style={{ position: 'absolute', top: 2, left: 2, width: 8, height: 8, borderRadius: '50%', background: 'var(--success)', border: '1px solid var(--bg-base)' }} />
                                     )}
                                     <input type="checkbox" checked={selectedFrames.has(i)}
                                         onClick={e => e.stopPropagation()}

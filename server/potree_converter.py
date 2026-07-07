@@ -29,43 +29,50 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
     """
     import laspy
 
-    # ── Parse PLY header to detect fields ──
+    # ── Parse PLY header: build the dtype from the ACTUAL property list ──
+    # (never guess the layout — clouds arrive as float32 or float64 xyz, with
+    # or without confidence/origins, and in whatever property order the writer
+    # used; a hardcoded layout crashed with 'buffer size must be a multiple of
+    # element size' the day a float64 cloud showed up)
+    _ply_types = {
+        b"char": "i1", b"uchar": "u1", b"int8": "i1", b"uint8": "u1",
+        b"short": "<i2", b"ushort": "<u2", b"int16": "<i2", b"uint16": "<u2",
+        b"int": "<i4", b"uint": "<u4", b"int32": "<i4", b"uint32": "<u4",
+        b"float": "<f4", b"float32": "<f4", b"double": "<f8", b"float64": "<f8",
+    }
+    _aliases = {"red": "r", "green": "g", "blue": "b"}
     with open(ply_path, "rb") as f:
         n_pts = 0
-        has_origins = False
-        has_confidence = False
-        pixel_type = '<i2'  # default: short (cloudcompy_postprocess output)
+        fields = []
+        in_vertex = False
         while True:
             line = f.readline()
-            if line.startswith(b"element vertex"):
-                n_pts = int(line.split()[-1])
-            if b"frame_global" in line:
-                has_origins = True
-            if b"confidence" in line:
-                has_confidence = True
-            # Detect pixel_row type from PLY header
-            if b"pixel_row" in line:
-                if b"property int" in line:
-                    pixel_type = '<i4'  # int32 (stray_direct_ply.py output)
-                # else stays '<i2' for "property short"
-            if line.startswith(b"end_header"):
+            if not line:
+                raise ValueError(f"Unexpected EOF in PLY header: {ply_path}")
+            s = line.strip()
+            if s.startswith(b"format") and b"binary_little_endian" not in s:
+                raise ValueError(f"Unsupported PLY format (not binary LE): {s!r}")
+            if s.startswith(b"element"):
+                parts = s.split()
+                in_vertex = parts[1] == b"vertex"
+                if in_vertex:
+                    n_pts = int(parts[2])
+            elif s.startswith(b"property") and in_vertex:
+                parts = s.split()
+                if parts[1] == b"list" or parts[1] not in _ply_types:
+                    raise ValueError(f"Unsupported PLY property: {s!r}")
+                name = parts[2].decode()
+                fields.append((_aliases.get(name, name), _ply_types[parts[1]]))
+            if s.startswith(b"end_header"):
                 break
 
-        # Build numpy dtype matching PLY binary layout
-        fields = [
-            ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-            ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
-        ]
-        if has_confidence:
-            fields.append(('confidence', '<f4'))
-        if has_origins:
-            fields.extend([
-                ('frame_global', '<i4'),
-                ('pixel_row', pixel_type), ('pixel_col', pixel_type)
-            ])
-
         ply_dtype = np.dtype(fields)
-        data = np.frombuffer(f.read(), dtype=ply_dtype)
+        data = np.frombuffer(f.read(), dtype=ply_dtype, count=n_pts)
+
+    has_origins = "frame_global" in ply_dtype.names
+    has_confidence = "confidence" in ply_dtype.names
+    if not {"x", "y", "z", "r", "g", "b"} <= set(ply_dtype.names):
+        raise ValueError(f"PLY missing xyz/rgb properties: {ply_dtype.names}")
 
     if len(data) == 0:
         raise ValueError(f"Empty point cloud: {ply_path}")

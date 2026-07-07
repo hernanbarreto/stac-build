@@ -103,6 +103,69 @@ class AutoPrompter:
             out = [out[i] for i in idx]
         return out
 
+    # ── adaptive VLM sampling (camera-path coverage) ─────────────────
+    def _adaptive_sample(self, files: list[str], cam) -> list[str]:
+        """Pick the keyframes the VLM detector actually sees, ADAPTIVE to the
+        scan instead of a fixed count: a frame is kept when the camera moved
+        ≥ min_spacing_m or rotated ≥ min_rotation_deg since the last kept one
+        (a new viewpoint = a new detection opportunity; 600 frames of the same
+        wall add nothing but VLM latency). SAM3 propagates the masklets to
+        every frame afterwards, so identity/coverage do not depend on the VLM
+        seeing each image. Falls back to an even subsample when no poses.
+        Scene understanding keeps its own (smaller) sample."""
+        acfg = self.cfg.get("adaptive_sampling", {})
+        if not acfg.get("enabled", True):
+            return files
+        min_frames = int(acfg.get("min_frames", 12))
+        max_frames = int(acfg.get("max_frames", 0))          # 0 = no ceiling
+        spacing_m = float(acfg.get("min_spacing_m", 0.4))
+        rot_deg = float(acfg.get("min_rotation_deg", 18.0))
+        no_pose_target = int(acfg.get("no_pose_target", 48))
+        if len(files) <= min_frames:
+            return files
+
+        def _even(seq: list[str], n: int) -> list[str]:
+            if len(seq) <= n:
+                return seq
+            idx = np.linspace(0, len(seq) - 1, n).astype(int)
+            return [seq[i] for i in sorted(set(idx))]
+
+        pose_map = cam.pose_map if cam is not None else {}
+        posed = [(fn, pose_map.get(_frame_num(fn))) for fn in files]
+        n_posed = sum(1 for _f, p in posed if p is not None)
+        if n_posed < min_frames:
+            out = _even(files, no_pose_target)
+            print(f"[autoprompt] adaptive sampling: no usable poses — even "
+                  f"subsample {len(files)} → {len(out)} keyframes")
+            return out
+
+        cos_thr = np.cos(np.radians(rot_deg))
+        kept: list[str] = []
+        last_t = last_R = None
+        for fn, pose in posed:
+            if pose is None:
+                continue
+            T = np.asarray(pose, float)
+            t, R = T[:3, 3], T[:3, :3]
+            if last_t is None:
+                kept.append(fn); last_t, last_R = t, R
+                continue
+            moved = np.linalg.norm(t - last_t) >= spacing_m
+            cos_a = (np.trace(last_R.T @ R) - 1.0) / 2.0
+            turned = cos_a < cos_thr
+            if moved or turned:
+                kept.append(fn); last_t, last_R = t, R
+        if files and files[-1] not in kept:
+            kept.append(files[-1])           # always close the trajectory
+
+        if len(kept) < min_frames:
+            kept = _even(files, min_frames)
+        if max_frames and len(kept) > max_frames:
+            kept = _even(kept, max_frames)
+        print(f"[autoprompt] adaptive sampling: {len(files)} keyframes → "
+              f"{len(kept)} VLM frames (spacing {spacing_m} m / {rot_deg}°)")
+        return kept
+
     # ── camera geometry (optional) ──────────────────────────────────
     def _load_camera(self):
         try:
@@ -152,7 +215,10 @@ class AutoPrompter:
                 on_progress(pct, msg)
 
         kf = self._keyframe_files(keyframe_files)
-        prog(2, f"auto-prompt: {len(kf)} keyframes")
+        # BA poses drive both the adaptive VLM sampling and the association
+        cam = self._load_camera()
+        kf_vlm = self._adaptive_sample(kf, cam)
+        prog(2, f"auto-prompt: {len(kf)} keyframes ({len(kf_vlm)} to the VLM)")
 
         client = get_semantic_client(backend=self.backend_name, consumer="phase1.autoprompt")
         detector = GroundedDetector(client, self.vocab)
@@ -181,11 +247,13 @@ class AutoPrompter:
             prog(22, f"scene: {understanding.scene_type} — {len(targets)} object types understood")
 
         # ── Step 2: understanding-driven detection (segment everything) ──
+        # only the adaptively-sampled keyframes go through the VLM; SAM3
+        # propagates the resulting masklets to every frame afterwards
         detections_by_frame: dict[int, list[Detection]] = {}
         img_wh: dict[int, tuple[int, int]] = {}
         fid_to_file: dict[int, str] = {}
         n_det = 0
-        for i, fn in enumerate(kf):
+        for i, fn in enumerate(kf_vlm):
             img = Image.open(self.frames_dir / fn).convert("RGB")
             fid = _frame_num(fn)
             fid_to_file[fid] = fn
@@ -193,10 +261,10 @@ class AutoPrompter:
             dets = detector.detect(img, frame_id=fid, targets=targets)
             detections_by_frame[fid] = dets
             n_det += len(dets)
-            prog(24 + int(40 * (i + 1) / max(1, len(kf))), f"detected {len(dets)} in {fn}")
+            prog(24 + int(40 * (i + 1) / max(1, len(kf_vlm))),
+                 f"detected {len(dets)} in {fn} ({i + 1}/{len(kf_vlm)})")
 
-        # geometric temporal association
-        cam = self._load_camera()
+        # geometric temporal association (reuses the poses loaded above)
         pose_map = cam.pose_map if cam else None
         K_for = (lambda f: cam.K_for(f)) if cam else None
         instances = associate_detections(
@@ -209,7 +277,13 @@ class AutoPrompter:
         prog(70, f"associated -> {len(instances)} instances")
 
         accepted, review = self._gate(instances)
-        prompt, frame_map = self._build_contract(accepted, fid_to_file)
+        # Spec (item 5): dubious instances are NOT dropped — they are segmented
+        # too (their masklets participate in the Phase R vote) but flagged so
+        # they never generate pose residuals until validated. Labels whose
+        # instances are ALL dubious are marked for the store.
+        prompt, frame_map = self._build_contract(accepted + review, fid_to_file)
+        accepted_labels = {i.label for i in accepted}
+        dubious_labels = sorted({i.label for i in review} - accepted_labels)
 
         # persist the integration contract + audit artifacts
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -221,9 +295,12 @@ class AutoPrompter:
             "frame_map": frame_map,
             # extras beyond the InternVL3 contract (ignored by the SAM3 worker,
             # consumed by review UI / Phase R / audit):
-            "boxes": self._boxes_by_label_frame(accepted, fid_to_file),
+            "boxes": self._boxes_by_label_frame(accepted + review, fid_to_file),
             "instances": [i.to_dict() for i in accepted],
             "review_queue": [i.to_dict() for i in review],
+            # labels with ONLY dubious instances → Phase R marks them status=
+            # 'dubious' (vote yes, pose residuals no, until validated)
+            "dubious_labels": dubious_labels,
             "thresholds": {
                 "confidence": self.confidence_threshold,
                 "association_iou": self.iou_threshold,
@@ -253,7 +330,8 @@ class AutoPrompter:
         sam3_ran = False
         if run_sam3 and prompt:
             prog(75, "running SAM3 to pre-populate masks...")
-            self._run_sam3(prompt, frame_map, on_progress)
+            self._run_sam3(prompt, frame_map, on_progress,
+                           boxes_map=vlm_analysis["boxes"])
             sam3_ran = True
 
         prog(100, "auto-prompt complete")
@@ -316,11 +394,12 @@ class AutoPrompter:
                 )
         return out
 
-    def _run_sam3(self, prompt, frame_map, on_progress):
+    def _run_sam3(self, prompt, frame_map, on_progress, boxes_map=None):
         from segmentation.pipeline import run_segmentation
         run_segmentation(
             str(self.frames_dir), str(self.output_dir),
             prompt=prompt, frame_map=frame_map,
+            boxes_map=boxes_map,   # per-instance box seeding (SAM3 detector path)
             on_progress=(lambda pct, msg: on_progress(75 + int(pct * 0.24), msg))
             if on_progress else None,
         )

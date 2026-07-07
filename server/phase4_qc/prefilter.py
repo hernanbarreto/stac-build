@@ -124,13 +124,22 @@ class CaptureQC:
         return ids[:: max(1, self.sample_stride)]
 
     def run(self, on_progress=None) -> QCManifest:
+        frames = self._list_frames()
+        man = QCManifest(n_frames=len(frames))
+        if not self.enabled:
+            # spec: the pre-filter is deactivatable — a disabled QC keeps EVERY
+            # frame and says so in the manifest (nothing dropped silently).
+            for fid in frames:
+                man.frames.append(FrameVerdict(
+                    frame_id=fid, keep=True, decided_by="disabled",
+                    reasons=["phase4.enabled=false"], metrics={}))
+            man.n_kept = len(frames)
+            return man
+
         client = None
         if self.escalate_to_vlm:
             from semantic.client import get_semantic_client
             client = get_semantic_client(backend=self.backend, consumer="phase4.qc")
-
-        frames = self._list_frames()
-        man = QCManifest(n_frames=len(frames))
         for i, fid in enumerate(frames):
             img = Image.open(self.frames_dir / f"{fid:06d}.jpg").convert("RGB")
             m = frame_metrics(img).as_dict()

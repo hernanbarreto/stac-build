@@ -3330,26 +3330,26 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             <div ref={containerRef} className="viewport-canvas" style={{ width: '100%', height: '100%' }} />
             {activeTool === 'align' && (
                 <div style={{
-                    position: 'absolute', top: 12, right: 12, background: 'rgba(20,20,30,0.92)',
+                    position: 'absolute', top: 12, right: 12, background: 'var(--glass-bg)',
                     borderRadius: 10, padding: '14px 18px', color: '#fff', fontSize: 13,
                     display: 'flex', flexDirection: 'column', gap: 10, minWidth: 180,
-                    border: '1px solid rgba(255,255,255,0.12)', backdropFilter: 'blur(8px)',
+                    border: '1px solid var(--glass-border)', backdropFilter: 'blur(8px)',
                     zIndex: 100
                 }}>
                     <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 2 }}>⛶ Align Cloud</div>
                     <div style={{ display: 'flex', gap: 6 }}>
                         <button
-                            style={{ flex: 1, padding: '6px 0', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: alignMode === 'rotate' ? '#f39c12' : '#444', color: '#fff' }}
+                            style={{ flex: 1, padding: '6px 0', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: alignMode === 'rotate' ? 'var(--accent)' : 'var(--bg-active)', color: '#fff' }}
                             onClick={() => setAlignMode('rotate')}
                         >🔄 Rotate</button>
                         <button
-                            style={{ flex: 1, padding: '6px 0', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: alignMode === 'translate' ? '#3498db' : '#444', color: '#fff' }}
+                            style={{ flex: 1, padding: '6px 0', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: alignMode === 'translate' ? 'var(--accent-2)' : 'var(--bg-active)', color: '#fff' }}
                             onClick={() => setAlignMode('translate')}
                         >↔️ Move</button>
                     </div>
-                    <hr style={{ border: 'none', borderTop: '1px solid rgba(255,255,255,0.1)', margin: '2px 0' }} />
+                    <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '2px 0' }} />
                     <button
-                        style={{ padding: '8px 0', border: 'none', borderRadius: 6, cursor: alignDirty ? 'pointer' : 'not-allowed', fontSize: 13, fontWeight: 700, background: alignDirty ? '#2ecc71' : '#333', color: '#fff', opacity: alignDirty ? 1 : 0.5 }}
+                        style={{ padding: '8px 0', border: 'none', borderRadius: 6, cursor: alignDirty ? 'pointer' : 'not-allowed', fontSize: 13, fontWeight: 700, background: alignDirty ? 'var(--success)' : 'var(--bg-active)', color: '#fff', opacity: alignDirty ? 1 : 0.5 }}
                         onClick={saveAlignment}
                         disabled={!alignDirty}
                     >💾 Save Alignment</button>
@@ -3361,7 +3361,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     position: 'absolute',
                     left: camTooltip.x + 16,
                     top: camTooltip.y - 80,
-                    background: 'rgba(10,10,20,0.95)',
+                    background: 'var(--glass-bg)',
                     borderRadius: 8,
                     padding: 8,
                     color: '#fff',
@@ -3369,7 +3369,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     fontWeight: 600,
                     zIndex: 200,
                     pointerEvents: 'none',
-                    border: '1px solid rgba(255,255,255,0.2)',
+                    border: '1px solid var(--glass-border)',
                     backdropFilter: 'blur(6px)',
                     minWidth: 120,
                     maxWidth: 220,
@@ -3389,19 +3389,19 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     position: 'absolute',
                     left: bimTooltip.x + 14,
                     top: bimTooltip.y + 14,
-                    background: 'rgba(10,10,20,0.92)',
+                    background: 'var(--glass-bg)',
                     borderRadius: 6,
                     padding: '5px 10px',
                     color: '#fff',
                     fontSize: 11,
                     zIndex: 200,
                     pointerEvents: 'none',
-                    border: '1px solid rgba(100,180,255,0.3)',
+                    border: '1px solid rgba(79, 209, 255, 0.3)',
                     backdropFilter: 'blur(6px)',
                     maxWidth: 360,
                     wordBreak: 'break-all' as const,
                 }}>
-                    <span style={{ color: '#7cb8ff', fontWeight: 600 }}>{bimTooltip.type.replace('Ifc', '')}</span>
+                    <span style={{ color: 'var(--accent-2)', fontWeight: 600 }}>{bimTooltip.type.replace('Ifc', '')}</span>
                     {bimTooltip.name && !bimTooltip.name.startsWith('Element_') && (
                         <span style={{ marginLeft: 6, opacity: 0.8 }}>{bimTooltip.name}</span>
                     )}
@@ -3413,7 +3413,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     position: 'absolute',
                     left: bimCtxMenu.x,
                     top: bimCtxMenu.y,
-                    background: 'rgba(20,20,30,0.97)',
+                    background: 'var(--glass-bg)',
                     borderRadius: 8,
                     padding: 0,
                     color: '#fff',
@@ -3433,13 +3433,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         opacity: 0.7,
                         wordBreak: 'break-all' as const,
                     }}>
-                        <span style={{ color: '#7cb8ff', fontWeight: 600 }}>{bimCtxMenu.type.replace('Ifc', '')}</span>
+                        <span style={{ color: 'var(--accent-2)', fontWeight: 600 }}>{bimCtxMenu.type.replace('Ifc', '')}</span>
                         {bimCtxMenu.name && !bimCtxMenu.name.startsWith('Element_') && (
                             <span style={{ marginLeft: 6 }}>{bimCtxMenu.name}</span>
                         )}
                     </div>
                     {/* Transparency slider */}
-                    <div style={{ padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                    <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-light)' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                             <span style={{ fontSize: 11, opacity: 0.7, minWidth: 70 }}>Transparency</span>
                             <input
@@ -3466,7 +3466,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                                     })
                                     setBimCtxMenu(prev => prev ? { ...prev, opacity: newOpacity } : null)
                                 }}
-                                style={{ flex: 1, accentColor: '#7cb8ff' }}
+                                style={{ flex: 1, accentColor: 'var(--accent-2)' }}
                             />
                             <span style={{ fontSize: 10, opacity: 0.5, minWidth: 28, textAlign: 'right' }}>
                                 {Math.round((1 - bimCtxMenu.opacity) * 100)}%
@@ -3475,7 +3475,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     </div>
                     {/* Hide */}
                     <div
-                        style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid rgba(255,255,255,0.06)' }}
+                        style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border-light)' }}
                         onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
                         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                         onClick={() => {
@@ -3491,7 +3491,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     >👁‍🗨 Hide</div>
                     {/* Isolate */}
                     <div
-                        style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid rgba(255,255,255,0.06)' }}
+                        style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border-light)' }}
                         onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
                         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                         onClick={() => {

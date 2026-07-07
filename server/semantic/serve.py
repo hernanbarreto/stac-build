@@ -55,6 +55,10 @@ def build_argv(backend: str, overrides: dict) -> list[str]:
     # Native Qwen3 tool-calling.
     parser = b.get("tool_call_parser", "hermes")
     argv += ["--enable-auto-tool-choice", "--tool-call-parser", parser]
+    # Thinking-variant support: -Instruct models set reasoning:false (no flag);
+    # a thinking Qwen3 backend flips it on and vLLM parses <think> blocks.
+    if b.get("reasoning"):
+        argv += ["--reasoning-parser", "qwen3"]
     extra = b.get("extra_serve_args") or []
     argv += [str(x) for x in extra]
     return argv

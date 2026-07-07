@@ -30,84 +30,95 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         raise FileNotFoundError(f"run_cloudcompy.sh not found at {script_path}")
 
     chunks = sorted(output_dir.glob("chunk_*.ply"))
+    # LIGHT RESUME: chunks were already merged (and cleaned up) on a previous
+    # run — e.g. this stage re-runs after Phase R corrected the merged cloud
+    # in place. Skip merge/consolidate; only refresh Potree (if stale) and run
+    # the deferred mask→cloud mapping below.
+    light_resume = False
     if not chunks:
-        raise RuntimeError(f"No chunk_*.ply in {output_dir} — reconstruction produced no cloud")
-
-    # For legacy sessions, check old name as well (new sessions use chunk_999_lidar.ply)
-    for ext_cloud in ["lidar_complement.ply", "chunk_999_lidar.ply"]:
-        ext_path = output_dir / ext_cloud
-        if ext_path.exists() and ext_path not in chunks:
-            chunks.append(ext_path)
-            pipe.send_log(f"Including {ext_cloud} in merge ({ext_path.stat().st_size / 1048576:.0f} MB)")
-
-    pipe.send_progress(0, f"Cleaning {len(chunks)} clouds (voxel={voxel_size*1000:.1f}mm)",
-                       stage="cloudcompy")
-
-    cmd = [
-        "bash", str(script_path),
-        "--input-dir", str(output_dir),
-        "--output", str(output_ply),
-        "--voxel-size", str(voxel_size),
-        "--sor-knn", str(postproc.get("sor_knn", 6)),
-        "--sor-sigma", str(postproc.get("sor_sigma", 1.0)),
-        "--noise-radius", str(postproc.get("noise_radius", 0.01)),
-        "--noise-sigma", str(postproc.get("noise_sigma", 1.0)),
-        "--conf-min-norm", str(postproc.get("conf_min_norm", 0.0)),
-    ]
-    max_points = postproc.get("max_points", 0)
-    if max_points > 0:
-        cmd.extend(["--max-points", str(max_points)])
-    for flag in ("skip_duplicates", "skip_sor", "skip_noise", "skip_normals"):
-        if postproc.get(flag, False):
-            cmd.append(f"--{flag.replace('_', '-')}")
-
-    pipe.send_progress(5, "Running CloudCompPy...", stage="cloudcompy")
-
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
-    # Parse progress from CloudCompy stdout
-    # Look for lines like "[Step 2/5]" or percentage patterns
-    step_pattern = re.compile(r"\[Step\s+(\d+)/(\d+)\]")
-    pct_pattern = re.compile(r"(\d+(?:\.\d+)?)%")
-    line_count = 0
-
-    for line in iter(proc.stdout.readline, ""):
-        line = line.strip()
-        if not line:
-            continue
-
-        line_count += 1
-        pipe.send_log(line)
-
-        # Try to extract progress
-        m = step_pattern.search(line)
-        if m:
-            step, total = int(m.group(1)), int(m.group(2))
-            pct = 5 + (step / total) * 90
-            pipe.send_progress(pct, line, stage="cloudcompy")
+        if output_ply.exists():
+            light_resume = True
+            pipe.send_log("No chunks but cleaned_cloud.ply exists — light resume "
+                          "(merge skipped; refreshing derived artifacts)")
         else:
-            m2 = pct_pattern.search(line)
-            if m2:
-                pipe.send_progress(float(m2.group(1)), line, stage="cloudcompy")
-            elif line_count % 5 == 0:
-                # Report progress every 5 lines even without patterns
-                estimated_pct = min(5 + line_count * 2, 90)
-                pipe.send_progress(estimated_pct, line, stage="cloudcompy")
+            raise RuntimeError(f"No chunk_*.ply in {output_dir} — reconstruction produced no cloud")
 
-        if pipe.check_cancel():
-            proc.terminate()
-            proc.wait()
-            pipe.send_log("Cancelled by user", level="warning")
-            return
+    if not light_resume:
+        # For legacy sessions, check old name as well (new sessions use chunk_999_lidar.ply)
+        for ext_cloud in ["lidar_complement.ply", "chunk_999_lidar.ply"]:
+            ext_path = output_dir / ext_cloud
+            if ext_path.exists() and ext_path not in chunks:
+                chunks.append(ext_path)
+                pipe.send_log(f"Including {ext_cloud} in merge ({ext_path.stat().st_size / 1048576:.0f} MB)")
 
-    rc = proc.wait()
-    if rc != 0:
-        raise RuntimeError(f"CloudCompy script exited with code {rc}")
+        pipe.send_progress(0, f"Cleaning {len(chunks)} clouds (voxel={voxel_size*1000:.1f}mm)",
+                           stage="cloudcompy")
+
+        cmd = [
+            "bash", str(script_path),
+            "--input-dir", str(output_dir),
+            "--output", str(output_ply),
+            "--voxel-size", str(voxel_size),
+            "--sor-knn", str(postproc.get("sor_knn", 6)),
+            "--sor-sigma", str(postproc.get("sor_sigma", 1.0)),
+            "--noise-radius", str(postproc.get("noise_radius", 0.01)),
+            "--noise-sigma", str(postproc.get("noise_sigma", 1.0)),
+            "--conf-min-norm", str(postproc.get("conf_min_norm", 0.0)),
+        ]
+        max_points = postproc.get("max_points", 0)
+        if max_points > 0:
+            cmd.extend(["--max-points", str(max_points)])
+        for flag in ("skip_duplicates", "skip_sor", "skip_noise", "skip_normals"):
+            if postproc.get(flag, False):
+                cmd.append(f"--{flag.replace('_', '-')}")
+
+        pipe.send_progress(5, "Running CloudCompPy...", stage="cloudcompy")
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+        # Parse progress from CloudCompy stdout
+        # Look for lines like "[Step 2/5]" or percentage patterns
+        step_pattern = re.compile(r"\[Step\s+(\d+)/(\d+)\]")
+        pct_pattern = re.compile(r"(\d+(?:\.\d+)?)%")
+        line_count = 0
+
+        for line in iter(proc.stdout.readline, ""):
+            line = line.strip()
+            if not line:
+                continue
+
+            line_count += 1
+            pipe.send_log(line)
+
+            # Try to extract progress
+            m = step_pattern.search(line)
+            if m:
+                step, total = int(m.group(1)), int(m.group(2))
+                pct = 5 + (step / total) * 90
+                pipe.send_progress(pct, line, stage="cloudcompy")
+            else:
+                m2 = pct_pattern.search(line)
+                if m2:
+                    pipe.send_progress(float(m2.group(1)), line, stage="cloudcompy")
+                elif line_count % 5 == 0:
+                    # Report progress every 5 lines even without patterns
+                    estimated_pct = min(5 + line_count * 2, 90)
+                    pipe.send_progress(estimated_pct, line, stage="cloudcompy")
+
+            if pipe.check_cancel():
+                proc.terminate()
+                proc.wait()
+                pipe.send_log("Cancelled by user", level="warning")
+                return
+
+        rc = proc.wait()
+        if rc != 0:
+            raise RuntimeError(f"CloudCompy script exited with code {rc}")
 
     if output_ply.exists():
         size_mb = output_ply.stat().st_size / (1024 * 1024)
@@ -174,7 +185,7 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         # measurement is kept as cleaned_cloud_raw.ply (metric reference for
         # surface_fit residuals). Radius adapts to fine_register_report.json.
         sc_cfg = postproc.get("scene_consolidate", {}) or {}
-        if sc_cfg.get("enabled", True):
+        if sc_cfg.get("enabled", True) and not light_resume:
             pipe.send_progress(93, "Consolidating cloud (normal-aware MLS)...",
                                stage="cloudcompy")
             try:
@@ -199,43 +210,54 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
                 pipe.send_log(f"[consolidate] scene consolidation failed "
                               f"(non-fatal, cloud kept raw): {e}", level="warning")
 
-        # Compute and save floor alignment transform
+        # Compute and save floor alignment transform (kept as-is on light
+        # resume — it may carry the user's gizmo edits)
         pipe.send_progress(95, "Computing floor alignment...", stage="cloudcompy")
-        try:
-            import sys
-            server_dir_str = str(Path(__file__).resolve().parent.parent)
-            if server_dir_str not in sys.path:
-                sys.path.insert(0, server_dir_str)
+        if light_resume and (output_dir / "floor_transform.npz").exists():
+            pipe.send_log("Floor transform already present — kept (light resume)")
+        else:
+            try:
+                import sys
+                server_dir_str = str(Path(__file__).resolve().parent.parent)
+                if server_dir_str not in sys.path:
+                    sys.path.insert(0, server_dir_str)
 
-            import numpy as np
-            from plyfile import PlyData
+                import numpy as np
+                from plyfile import PlyData
 
-            plydata = PlyData.read(str(output_ply))
-            vx = plydata['vertex']
-            xyz = np.column_stack([
-                np.array(vx['x'], dtype=np.float64),
-                np.array(vx['y'], dtype=np.float64),
-                np.array(vx['z'], dtype=np.float64),
-            ])
+                plydata = PlyData.read(str(output_ply))
+                vx = plydata['vertex']
+                xyz = np.column_stack([
+                    np.array(vx['x'], dtype=np.float64),
+                    np.array(vx['y'], dtype=np.float64),
+                    np.array(vx['z'], dtype=np.float64),
+                ])
 
-            from alignment_manager import get_alignment_manager
-            am = get_alignment_manager()
-            s, R, t = am.compute_leveling_from_points(xyz)
+                from alignment_manager import get_alignment_manager
+                am = get_alignment_manager()
+                s, R, t = am.compute_leveling_from_points(xyz)
 
-            if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
-                transform_path = output_dir / "floor_transform.npz"
-                np.savez(transform_path, s=np.array(s), R=R, t=t)
-                pipe.send_log(f"Floor transform saved to {transform_path.name}")
-            else:
-                pipe.send_log("No floor plane detected, skipping alignment", level="warning")
-        except Exception as e:
-            pipe.send_log(f"Floor alignment computation failed: {e}", level="warning")
+                if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+                    transform_path = output_dir / "floor_transform.npz"
+                    np.savez(transform_path, s=np.array(s), R=R, t=t)
+                    pipe.send_log(f"Floor transform saved to {transform_path.name}")
+                else:
+                    pipe.send_log("No floor plane detected, skipping alignment", level="warning")
+            except Exception as e:
+                pipe.send_log(f"Floor alignment computation failed: {e}", level="warning")
 
         # ── Build Potree LOD octree (so the first viewer load is instant) ──
         # Runs as the final reconstruction step. Carries the per-point
         # confidence + origin (frame_global/pixel_row/pixel_col) into the octree
         # (see potree_converter._ply_to_las LAS extra dims). Non-fatal.
-        if postproc.get("build_potree", True):
+        _potree_stale = True
+        if light_resume:
+            _oct = output_dir / "potree" / "metadata.json"
+            _potree_stale = (not _oct.exists()
+                             or _oct.stat().st_mtime < output_ply.stat().st_mtime)
+            if not _potree_stale:
+                pipe.send_log("Potree octree up to date — skipped (light resume)")
+        if postproc.get("build_potree", True) and _potree_stale:
             pipe.send_progress(96, "Building Potree LOD octree...", stage="cloudcompy")
             try:
                 import sys, os
@@ -279,6 +301,30 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
                 pipe.send_log(f"Potree build failed (non-critical): {e}", level="warning")
     else:
         pipe.send_log("Warning: cleaned_cloud.ply not created", level="warning")
+
+    # ── Deferred mask→cloud mapping (anchored pipeline order) ──
+    # SAM3 ran BEFORE this stage and only wrote masklets; now that the
+    # (corrected) merged cloud exists, run the ONE-SHOT matching + per-instance
+    # cleaning and refresh the store's canonical OBBs. Also refreshes when the
+    # segmentation is newer than the last mapping. Non-fatal.
+    try:
+        seg = output_dir / "segmentation.json"
+        res = output_dir / "segmentation_result.json"
+        if output_ply.exists() and seg.exists() and (
+                not res.exists() or res.stat().st_mtime < seg.stat().st_mtime):
+            pipe.send_progress(99, "Mapping segmentation to cloud (one-shot)...",
+                               stage="cloudcompy")
+            import sys
+            server_dir_str = str(Path(__file__).resolve().parent.parent)
+            if server_dir_str not in sys.path:
+                sys.path.insert(0, server_dir_str)
+            from segmentation.pipeline import map_segmentation_to_cloud
+            r = map_segmentation_to_cloud(output_dir)
+            n = len(r.get("instances", []))
+            pipe.send_log(f"Deferred mask→cloud mapping: {n} instances matched")
+    except Exception as e:  # noqa: BLE001
+        pipe.send_log(f"Deferred mask→cloud mapping failed (non-fatal): {e}",
+                      level="warning")
 
     pipe.send_progress(100, "Cloud cleaning + Potree complete", stage="cloudcompy")
 

@@ -850,15 +850,32 @@ pipeline_manager = PipelineManager()  # Pipeline orchestrator (subprocess worker
 
 def _resolve_segmentation_prompt(prompt: str, frames_dir: str) -> tuple:
     """
-    Resolve segmentation prompt: if 'auto' or empty, use InternVL3 scene analyzer.
-    
+    Resolve segmentation prompt: if 'auto' or empty, run the Phase 1 Qwen3-VL
+    auto-prompter (default path, same as the pipeline); InternVL3 analyze_scene
+    stays as fallback.
+
     Returns:
         (prompt, frame_map) where frame_map maps category label → list of frame filenames
     """
     if prompt and prompt.lower() != "auto":
         return prompt, {}
-    
-    print("[SceneAnalyzer] Auto-detecting categories with InternVL3...")
+
+    frames_path = Path(frames_dir)
+    if cfg.get("autoprompt", {}).get("enabled", True):
+        try:
+            print("[AutoPrompt] Auto-detecting categories with Qwen3-VL (Phase 1)...")
+            from segmentation.autoprompt.session_builder import AutoPrompter
+            ap = AutoPrompter(frames_path.parent, frames_path.parent / "output",
+                              backend=cfg.get("autoprompt", {}).get("backend", "qwen_local"),
+                              config=cfg)
+            r = ap.run(run_sam3=False)
+            if r.prompt:
+                print(f"[AutoPrompt] ✅ Auto-detected prompt: '{r.prompt}'")
+                return r.prompt, r.frame_map
+        except Exception as e:  # noqa: BLE001
+            print(f"[AutoPrompt] ⚠️ Auto-prompter failed ({e}); falling back to InternVL3")
+
+    print("[SceneAnalyzer] Auto-detecting categories with InternVL3 (fallback)...")
     try:
         from scene_analyzer import analyze_scene
         scene_cfg = cfg.get("scene_analysis", {})
@@ -5173,19 +5190,51 @@ async def run_auto_segmentation(session_id: str):
     try:
         def _auto():
             try:
-                task_manager.update(tid, pct=10, detail="Analyzing scene with VLM...")
-                from scene_analyzer import analyze_scene
-                vlm_result = analyze_scene(str(frames_dir), str(output_dir))
-                categories = vlm_result.get("categories", [])
-                frame_map = vlm_result.get("frame_map", {})
-                if not categories:
-                    task_manager.finish(tid)
-                    return {"error": "VLM found no categories", "instances": []}
-                labels = [c["label"] if isinstance(c, dict) else c for c in categories]
-                prompt = ";".join(labels)
-                task_manager.update(tid, pct=40, detail=f"Segmenting {len(labels)} categories...")
+                # Phase 1 DEFAULT: Qwen3-VL grounded auto-prompter — the same
+                # path as the pipeline's vlm_worker, so this endpoint and the
+                # pipeline behave identically. InternVL3 stays as fallback.
+                prompt, frame_map, boxes_map = "", {}, None
+                autoprompt_cfg = cfg.get("autoprompt", {})
+                if autoprompt_cfg.get("enabled", True):
+                    try:
+                        task_manager.update(tid, pct=10, detail="Auto-prompting with Qwen3-VL...")
+                        from segmentation.autoprompt.session_builder import AutoPrompter
+                        ap = AutoPrompter(frames_dir.parent, output_dir,
+                                          backend=autoprompt_cfg.get("backend", "qwen_local"),
+                                          config=cfg)
+                        r = ap.run(run_sam3=False)
+                        prompt, frame_map = r.prompt, r.frame_map
+                        boxes_map = json.loads(Path(r.vlm_analysis_path).read_text()).get("boxes") or None
+                    except Exception as ap_err:  # noqa: BLE001
+                        print(f"[AutoSeg] Auto-prompter failed ({ap_err}); falling back to InternVL3")
+                if not prompt:
+                    task_manager.update(tid, pct=10, detail="Analyzing scene with VLM (fallback)...")
+                    from scene_analyzer import analyze_scene
+                    vlm_result = analyze_scene(str(frames_dir), str(output_dir))
+                    categories = vlm_result.get("categories", [])
+                    frame_map = vlm_result.get("frame_map", {})
+                    if not categories:
+                        task_manager.finish(tid)
+                        return {"error": "VLM found no categories", "instances": []}
+                    labels = [c["label"] if isinstance(c, dict) else c for c in categories]
+                    prompt = ";".join(labels)
+                task_manager.update(tid, pct=40, detail=f"Segmenting: {prompt[:80]}")
                 from segmentation_pipeline import run_segmentation
-                result = run_segmentation(str(frames_dir), str(output_dir), prompt, frame_map=frame_map)
+                result = run_segmentation(str(frames_dir), str(output_dir), prompt,
+                                          frame_map=frame_map, boxes_map=boxes_map)
+                # Phase R — build/refresh the instance store now that masklets
+                # exist (same producer chain as the sam3_worker). Never fatal.
+                if cfg.get("phase_r", {}).get("enabled", True) and "error" not in result:
+                    try:
+                        task_manager.update(tid, pct=90, detail="Semantic anchoring (Phase R)...")
+                        from workers.phase_r_worker import _window_map
+                        from phase_r.pipeline import PhaseRPipeline
+                        wmap = _window_map(frames_dir.parent, output_dir, cfg)
+                        PhaseRPipeline(frames_dir.parent, output_dir,
+                                       output_dir / "scene_r.db", config=cfg,
+                                       window_map=wmap).run()
+                    except Exception as pr_err:  # noqa: BLE001
+                        print(f"[AutoSeg] Phase R non-fatal failure: {pr_err}")
                 task_manager.finish(tid)
                 return result
             except Exception as e:

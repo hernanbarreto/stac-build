@@ -8,14 +8,28 @@
     bottom: 80px;
     right: 16px;
     width: 340px;
-    background: rgba(18, 20, 28, 0.95);
-    backdrop-filter: blur(16px);
-    border: 1px solid rgba(0, 212, 255, 0.25);
-    border-radius: 12px;
-    color: #e0e6f0;
-    font-family: 'Inter', 'Segoe UI', sans-serif;
+    background: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur));
+    border: 1px solid rgba(var(--accent-2-rgb), 0.25);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+    color: var(--text-primary);
+    font-family: var(--font-family);
     z-index: 200;
     overflow: hidden;
+    animation: deviation-in var(--transition-normal) ease both;
+}
+
+@keyframes deviation-in {
+    from {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+
+    to {
+        opacity: 1;
+        transform: none;
+    }
 }
 
 .deviation-panel-header {
@@ -23,33 +37,34 @@
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
-    background: linear-gradient(135deg, rgba(0, 212, 255, 0.12), rgba(139, 92, 246, 0.08));
-    border-bottom: 1px solid rgba(0, 212, 255, 0.15);
+    /* AI/measurement brand moment — the one allowed gradient */
+    background: linear-gradient(135deg, rgba(var(--accent-2-rgb), 0.12), rgba(157, 123, 255, 0.08));
+    border-bottom: 1px solid rgba(var(--accent-2-rgb), 0.15);
 }
 
 .deviation-panel-header h3 {
     margin: 0;
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 600;
-    color: #00d4ff;
+    color: var(--accent-2);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: var(--label-tracking);
 }
 
 .deviation-close-btn {
     background: none;
     border: none;
-    color: #8892a4;
+    color: var(--text-secondary);
     cursor: pointer;
     font-size: 18px;
     padding: 2px 6px;
-    border-radius: 4px;
-    transition: all 0.2s;
+    border-radius: var(--radius-xs);
+    transition: color var(--transition-fast), background var(--transition-fast);
 }
 
 .deviation-close-btn:hover {
-    color: #ff4466;
-    background: rgba(255, 68, 102, 0.1);
+    color: var(--error);
+    background: rgba(var(--error-rgb), 0.1);
 }
 
 /* ── Stats Grid ── */
@@ -58,47 +73,49 @@
     grid-template-columns: 1fr 1fr 1fr;
     gap: 6px;
     padding: 12px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid var(--border);
 }
 
 .deviation-stat {
     text-align: center;
     padding: 6px 4px;
     background: rgba(255, 255, 255, 0.03);
-    border-radius: 6px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
 }
 
 .deviation-stat-value {
     font-size: 16px;
-    font-weight: 700;
+    font-weight: 600;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
 }
 
 .deviation-stat-label {
     font-size: 9px;
-    color: #8892a4;
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: var(--label-tracking);
     margin-top: 2px;
 }
 
 /* ── Pass Rate ── */
 .deviation-pass-rate {
     padding: 10px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid var(--border);
 }
 
 .deviation-pass-bar {
     height: 8px;
     background: rgba(255, 255, 255, 0.06);
-    border-radius: 4px;
+    border-radius: var(--radius-xs);
     overflow: hidden;
     margin-bottom: 6px;
 }
 
 .deviation-pass-fill {
     height: 100%;
-    border-radius: 4px;
+    border-radius: var(--radius-xs);
     transition: width 0.6s ease;
 }
 
@@ -106,24 +123,26 @@
     display: flex;
     justify-content: space-between;
     font-size: 11px;
-    color: #8892a4;
+    color: var(--text-secondary);
 }
 
 .deviation-pass-pct {
     font-weight: 600;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
 }
 
 /* ── Histogram ── */
 .deviation-histogram {
     padding: 10px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid var(--border);
 }
 
 .deviation-histogram-title {
     font-size: 10px;
-    color: #8892a4;
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: var(--label-tracking);
     margin-bottom: 6px;
 }
 
@@ -131,10 +150,11 @@
     width: 100%;
     height: 60px;
     background: rgba(255, 255, 255, 0.02);
-    border-radius: 4px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-xs);
 }
 
-/* ── Color Legend ── */
+/* ── Color Legend (data-driven heatmap ramp) ── */
 .deviation-legend {
     padding: 10px 16px;
     display: flex;
@@ -153,13 +173,15 @@
     display: flex;
     justify-content: space-between;
     font-size: 9px;
-    color: #8892a4;
+    color: var(--text-muted);
     margin-top: 2px;
 }
 
 .deviation-legend-label {
     font-size: 9px;
-    color: #8892a4;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
     white-space: nowrap;
 }
 
@@ -177,15 +199,16 @@
 
 .deviation-tolerance-label {
     font-size: 10px;
-    color: #8892a4;
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: var(--label-tracking);
 }
 
 .deviation-tolerance-value {
     font-size: 12px;
     font-weight: 600;
-    color: #00d4ff;
+    color: var(--accent-2);
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
 }
 
@@ -203,10 +226,10 @@
     width: 14px;
     height: 14px;
     border-radius: 50%;
-    background: #00d4ff;
-    border: 2px solid #12141c;
+    background: var(--accent-2);
+    border: 2px solid var(--bg-base);
     cursor: pointer;
-    box-shadow: 0 0 6px rgba(0, 212, 255, 0.5);
+    box-shadow: 0 0 6px rgba(var(--accent-2-rgb), 0.5);
 }
 
 /* ── Element Results List ── */
@@ -221,14 +244,18 @@
     align-items: center;
     gap: 8px;
     padding: 6px 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-xs);
     font-size: 11px;
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background var(--transition-fast);
 }
 
 .deviation-element:hover {
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--bg-hover);
+}
+
+.deviation-element:active {
+    background: var(--bg-active);
 }
 
 .deviation-element-indicator {
@@ -247,11 +274,12 @@
 
 .deviation-element-value {
     font-weight: 600;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
     font-size: 10px;
 }
 
-/* ── Run Button ── */
+/* ── Run Button — AI/measurement primary action ── */
 .deviation-run-btn {
     display: flex;
     align-items: center;
@@ -260,21 +288,21 @@
     width: calc(100% - 24px);
     margin: 8px 12px 12px;
     padding: 10px;
-    background: linear-gradient(135deg, #00d4ff, #8b5cf6);
+    background: var(--accent-gradient);
     border: none;
-    border-radius: 8px;
-    color: white;
-    font-size: 12px;
+    border-radius: var(--radius-sm);
+    color: #06121a;
+    font-size: 11px;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: box-shadow var(--transition-fast), transform var(--transition-fast);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: var(--label-tracking);
 }
 
 .deviation-run-btn:hover {
     transform: translateY(-1px);
-    box-shadow: 0 4px 16px rgba(0, 212, 255, 0.3);
+    box-shadow: var(--glow-cyan);
 }
 
 .deviation-run-btn:disabled {
@@ -290,6 +318,6 @@
 }
 
 .deviation-elements::-webkit-scrollbar-thumb {
-    background: rgba(0, 212, 255, 0.3);
+    background: rgba(var(--accent-2-rgb), 0.3);
     border-radius: 2px;
 }

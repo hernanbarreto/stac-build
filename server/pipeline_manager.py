@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 class StageId(str, Enum):
     RECONSTRUCTION = "reconstruction"
     CLOUDCOMPY = "cloudcompy"
+    PHASE_R = "phase_r"
     TSDF = "tsdf"
     VLM = "vlm"
     SAM3 = "sam3"
@@ -33,6 +34,7 @@ class StageId(str, Enum):
 STAGE_REGISTRY = {
     StageId.RECONSTRUCTION:   {"label": "3D Reconstruction", "icon": "🔨", "module": "workers.map_worker"},
     StageId.CLOUDCOMPY:       {"label": "Cloud Cleaning",    "icon": "🧹", "module": "workers.cloudcompy_worker"},
+    StageId.PHASE_R:          {"label": "Semantic Anchoring", "icon": "⚓", "module": "workers.phase_r_worker"},
     StageId.TSDF:             {"label": "TSDF Mesh",         "icon": "🧊", "module": "workers.tsdf_worker"},
     StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker"},
     StageId.SAM3:             {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
@@ -40,12 +42,25 @@ STAGE_REGISTRY = {
 }
 
 # THE reconstruction pipeline — always runs end-to-end, no client selection.
-# Reconstruction → CloudCompy (cleaned cloud + Potree) → scene TSDF. VLM
-# (InternVL captions), SAM3 segmentation and instance erosion are NOT part of
-# the reconstruct button: they run on demand from their own UI actions and
-# endpoints, against a finished cloud.
+# The full semantic chain runs automatically, ANCHORED BEFORE ANY FUSION:
+#   Reconstruction (VGGT-Ω/DA3: per-chunk poses + metric depth)
+#   → VLM   (Qwen3-VL understands the scene + builds the SAM3 prompts)
+#   → SAM3  (segments EVERYTHING — masklets with instance identity)
+#   → Phase R (instance identity anchors pose + depth corrections AND
+#              transforms the chunk clouds, gated by the R.9 fail-safe A/B)
+#   → CloudCompy (merges the ALREADY-CORRECTED chunks → cleaned cloud +
+#                 Potree + deferred mask→cloud mapping)
+#   → scene TSDF (fusion with the refined poses/depth).
+# Phase R sits BEFORE the merge because the chunk fusion bakes the window
+# poses into the cloud — correcting afterwards would fix the mesh but leave
+# the drift in the cloud the user sees. VLM/SAM3 need the BA poses + DA3
+# depth, hence after reconstruction. Every semantic stage degrades gracefully
+# and the chain can be disabled with `pipeline.auto_segment: false`.
 DEFAULT_STAGE_ORDER: List[StageId] = [
     StageId.RECONSTRUCTION,
+    StageId.VLM,
+    StageId.SAM3,
+    StageId.PHASE_R,
     StageId.CLOUDCOMPY,
     StageId.TSDF,
 ]
@@ -214,12 +229,11 @@ class PipelineManager:
             except Exception:
                 pass
 
-        # Terminate process if still running
+        # Terminate the WHOLE stage process group (workers call os.setsid(),
+        # so bash/DA3/CloudCompy children die with them — a bare terminate()
+        # left GPU-holding orphans behind), then the worker itself as fallback.
         if job._process and job._process.is_alive():
-            job._process.terminate()
-            job._process.join(timeout=5)
-            if job._process.is_alive():
-                job._process.kill()
+            self._kill_stage_tree(job._process)
 
         # Cancel the asyncio task
         if job._task and not job._task.done():
@@ -228,6 +242,47 @@ class PipelineManager:
         job.status = JobStatus.CANCELLED
         if 0 <= job.current_stage_idx < len(job.stages):
             job.stages[job.current_stage_idx].status = JobStatus.CANCELLED
+
+    @staticmethod
+    def _kill_stage_tree(process, timeout: float = 5.0) -> None:
+        """Kill a stage worker AND every child it spawned. Workers call
+        os.setsid() at startup (workers/base.py), so the whole stage subtree
+        (bash launchers, DA3/CloudCompy/SAM3 children) shares one process
+        group: SIGTERM the group, wait, SIGKILL survivors. Without this, a
+        cancel orphaned the children, which kept running and holding GPU
+        memory (the 24 GB zombie). Falls back to plain terminate/kill when
+        the group is gone already."""
+        import os
+        import signal
+
+        pid = process.pid
+        try:
+            pgid = os.getpgid(pid)
+        except (ProcessLookupError, PermissionError):
+            pgid = None
+        try:
+            if pgid is not None and pgid != os.getpgid(0):
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                process.terminate()
+        except (ProcessLookupError, PermissionError):
+            process.terminate()
+        process.join(timeout=timeout)
+        if process.is_alive():
+            try:
+                if pgid is not None and pgid != os.getpgid(0):
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except (ProcessLookupError, PermissionError):
+                process.kill()
+            process.join(timeout=2)
+        # sweep any survivors of the group (children that outlived the worker)
+        if pgid is not None and pgid != os.getpgid(0):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
 
     def get_status(self, session_id: str) -> Optional[dict]:
         """Get current status of a pipeline job."""
@@ -383,6 +438,14 @@ class PipelineManager:
         success = True
         output_dir = Path(session_dir) / "output"
 
+        # RESUME MODE: the pipeline detects on its own which stages this
+        # session already completed (artifact + freshness probes) and only
+        # runs what is missing/stale — the user never selects stages. A stage
+        # that RE-runs still gets its old outputs cleaned (replace). Once any
+        # stage actually runs, everything downstream is considered stale
+        # (its inputs just changed) and runs too.
+        upstream_ran = False
+
         for idx, stage_state in enumerate(job.stages):
             if not stage_state.stage.enabled:
                 stage_state.status = JobStatus.DONE
@@ -391,6 +454,18 @@ class PipelineManager:
 
             if job.status == JobStatus.CANCELLED:
                 break
+
+            if not upstream_ran:
+                done, why = self._stage_is_complete(
+                    output_dir, Path(session_dir), stage_state.stage.id)
+                if done:
+                    stage_state.status = JobStatus.DONE
+                    stage_state.pct = 100
+                    stage_state.message = f"Already complete ({why}) — resumed past"
+                    logger.info(f"[Pipeline] {stage_state.stage.id.value}: "
+                                f"already complete ({why}) — skipping")
+                    continue
+            upstream_ran = True
 
             # Clean up previous outputs if in replace mode (cascade invalidation)
             if replace and output_dir.exists():
@@ -542,11 +617,24 @@ class PipelineManager:
                     success = False
                 done = True
 
-        # Cleanup
+        # Cleanup — reap the worker AND any children it left behind (a crashed
+        # or killed worker must never orphan GPU-holding subprocesses)
         proc.join(timeout=10)
         if proc.is_alive():
-            proc.kill()
-            proc.join(timeout=5)
+            self._kill_stage_tree(proc, timeout=5)
+        else:
+            # worker exited: sweep stragglers of its process group. The worker
+            # setsid()'d at startup, so its pgid == its pid — valid for killpg
+            # even after the leader died, as long as children survive. No such
+            # group (the normal case) raises ProcessLookupError and we move on.
+            import os as _os
+            import signal as _signal
+            try:
+                _os.killpg(proc.pid, _signal.SIGKILL)
+                logger.warning(f"[Pipeline] {stage_id.value}: swept leftover "
+                               f"children of exited worker (pgid={proc.pid})")
+            except (ProcessLookupError, PermissionError):
+                pass  # nothing left — the normal case
 
         try:
             server_conn.close()
@@ -559,6 +647,100 @@ class PipelineManager:
         stage_state.elapsed = time.time() - t0
 
         return success
+
+
+    # ── resume-mode probes ────────────────────────────────────
+    @staticmethod
+    def _stage_is_complete(output_dir: Path, session_dir: Path,
+                           stage_id: StageId) -> tuple:
+        """(complete, reason) — does this session already have the stage's
+        outputs, fresh w.r.t. its inputs? Drives automatic resume: the user
+        never picks stages, the pipeline continues from wherever the session
+        actually is. Probes are ARTIFACT-based (survive restarts/crashes)."""
+        def mt(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        if stage_id == StageId.RECONSTRUCTION:
+            poses = [output_dir / d / "camera_poses.txt"
+                     for d in ("omega_run", "da3_run", "maplong_run", ".")]
+            has_poses = any(p.exists() for p in poses)
+            has_depth = any((output_dir / d).is_dir()
+                            for d in ("omega_run/results_output",
+                                      "da3_run/results_output", "results_output",
+                                      "_tmp_results_aligned"))
+            if has_poses and (has_depth or (output_dir / "cleaned_cloud.ply").exists()):
+                return True, "poses + depth on disk"
+            return False, "no reconstruction artifacts"
+
+        if stage_id == StageId.CLOUDCOMPY:
+            cloud = output_dir / "cleaned_cloud.ply"
+            if not cloud.exists():
+                return False, "no cleaned cloud"
+            # this stage also owns the deferred mask→cloud mapping
+            seg = output_dir / "segmentation.json"
+            res = output_dir / "segmentation_result.json"
+            if seg.exists() and (not res.exists() or mt(res) < mt(seg)):
+                return False, "mask→cloud mapping pending"
+            return True, "cleaned_cloud.ply on disk"
+
+        if stage_id == StageId.VLM:
+            if (output_dir / "vlm_analysis.json").exists():
+                return True, "vlm_analysis.json on disk"
+            # a session segmented MANUALLY (Segmentation Manager) already
+            # fulfilled this stage's purpose — never overwrite human work
+            # with an auto-prompted re-segmentation
+            if (output_dir / "segmentation.json").exists():
+                return True, "segmentation exists (manual) — auto-prompt not needed"
+            return False, "no VLM analysis"
+
+        if stage_id == StageId.SAM3:
+            seg = output_dir / "segmentation.json"
+            masks = output_dir / "seg_masks.npz"
+            if not (seg.exists() and masks.exists()):
+                return False, "no segmentation"
+            vlm = output_dir / "vlm_analysis.json"
+            if vlm.exists() and mt(seg) < mt(vlm):
+                return False, "segmentation older than VLM analysis"
+            # partial-run guard: an interrupted SAM3 leaves an incremental
+            # segmentation.json with only SOME of the VLM's categories — that
+            # is not "complete", re-run the stage
+            if vlm.exists():
+                try:
+                    import json as _json
+                    want = {c.strip() for c in _json.load(open(vlm))
+                            .get("prompt", "").split(";") if c.strip()}
+                    have = set(_json.load(open(seg)).get("prompts", []))
+                    if want and not want <= have:
+                        return False, (f"segmentation partial "
+                                       f"({len(have & want)}/{len(want)} categories)")
+                except Exception:
+                    pass
+            return True, "segmentation.json + masks on disk"
+
+        if stage_id == StageId.PHASE_R:
+            rep = output_dir / "phase_r_report.json"
+            if not (rep.exists() and (output_dir / "scene_r.db").exists()):
+                return False, "no Phase R store/report"
+            seg = output_dir / "segmentation.json"
+            if seg.exists() and mt(rep) < mt(seg):
+                return False, "anchoring older than segmentation"
+            return True, "scene_r.db + report on disk"
+
+        if stage_id == StageId.TSDF:
+            scene_dir = output_dir / "tsdf" / "scene"
+            meshes = list(scene_dir.glob("scene.*")) if scene_dir.is_dir() else []
+            if not meshes:
+                return False, "no scene TSDF mesh"
+            newest_mesh = max(mt(m) for m in meshes)
+            rep = output_dir / "phase_r_report.json"
+            if rep.exists() and newest_mesh < mt(rep):
+                return False, "fusion older than Phase R anchoring"
+            return True, "scene mesh on disk"
+
+        return False, "no probe for stage"
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -580,6 +762,24 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
     if skip_cloudcompy:
         logger.info(f"[Pipeline] CloudCompPy skipped (backend={backend})")
 
-    return [PipelineStage(id=stage_id,
-                          enabled=not (skip_cloudcompy and stage_id == StageId.CLOUDCOMPY))
+    # `pipeline.auto_segment: false` disables the automatic semantic chain
+    # (VLM auto-prompt → SAM3 → Phase R) and restores the on-demand flow.
+    auto_segment = True
+    try:
+        from config import cfg
+        auto_segment = bool(cfg.get("pipeline", {}).get("auto_segment", True))
+    except Exception:
+        pass
+    _semantic_stages = {StageId.VLM, StageId.SAM3, StageId.PHASE_R}
+    if not auto_segment:
+        logger.info("[Pipeline] auto_segment off — VLM/SAM3/PhaseR stages disabled")
+
+    def _enabled(stage_id: StageId) -> bool:
+        if skip_cloudcompy and stage_id == StageId.CLOUDCOMPY:
+            return False
+        if not auto_segment and stage_id in _semantic_stages:
+            return False
+        return True
+
+    return [PipelineStage(id=stage_id, enabled=_enabled(stage_id))
             for stage_id in DEFAULT_STAGE_ORDER]

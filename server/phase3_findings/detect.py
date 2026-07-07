@@ -214,15 +214,48 @@ class FindingDetector:
             merged.append(best)
         return merged
 
+    def _surface_fit_residual(self, instance_id: int, pt: np.ndarray) -> float | None:
+        """REAL surface_fitting cross-check at the finding's location, when the
+        artifacts exist (spec: cruce con surface_fitting cuando exista): local
+        RMS out-of-surface residual over the k nearest points of the instance's
+        deviation.ply. None when no artifact / point off the surface."""
+        base = Path(self.store.path).parent / "surface_fit"
+        if not base.is_dir():
+            return None
+        for d in sorted(base.glob(f"*_{instance_id}")):
+            ply = d / "deviation.ply"
+            if not ply.exists():
+                continue
+            try:
+                import open3d as o3d
+                xyz = np.asarray(o3d.io.read_point_cloud(str(ply)).points)
+                if len(xyz) < self.residual_k:
+                    return None
+                dist = np.linalg.norm(xyz - pt[None, :], axis=1)
+                order = np.argsort(dist)[: self.residual_k]
+                if dist[order[0]] > self.cluster_radius_m:
+                    return None
+                nb = xyz[order]
+                from phase_r.depth_regularization import fit_plane
+                n, dd = fit_plane(nb)
+                return float(np.sqrt(np.mean((nb @ n + dd) ** 2)))
+            except Exception:
+                return None
+        return None
+
     def _local_residual(self, instance_id: int | None, pt: np.ndarray) -> float | None:
-        """LOCALIZED geometric-anomaly proxy for a surface_fitting residual map
-        (which does not exist until surface_fitting runs). Fit a plane to the k
-        instance-cloud points nearest the finding's 3D location and return the
-        RMS out-of-plane residual (m). None if the point is off the cloud or too
-        few neighbors. Unlike an instance-wide onion flag, this fires only where
-        the surface is actually rough/non-planar AT the defect."""
+        """Local geometric residual at the finding. Prefers the REAL
+        surface_fitting deviation artifact when it exists; falls back to a
+        plane-fit proxy over the k instance-cloud points nearest the finding's
+        3D location — RMS out-of-plane residual (m). None if the point is off
+        the cloud or too few neighbors. Unlike an instance-wide onion flag,
+        this fires only where the surface is actually rough/non-planar AT the
+        defect."""
         if instance_id is None:
             return None
+        sf = self._surface_fit_residual(instance_id, pt)
+        if sf is not None:
+            return sf
         pts = self.store.get_points(instance_id)
         if pts is None or len(pts) < self.residual_k:
             return None

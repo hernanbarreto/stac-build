@@ -41,7 +41,7 @@ call log (`logs/semantic_calls.jsonl`) is the audit trail behind that rule.
 ## Backends (config: `semantic.backends`)
 
 - `qwen_local` (default) — `Qwen/Qwen3-VL-8B-Instruct`, the **exact** variant
-  R3D uses (`vendor/r3d/.../generate_responses.py`, `rgb_overlay_evals.py`).
+  R3D uses (`vendor/r3d/.../generate_responses.py`, `scripts/run_eval_8b_*.sh`).
 - `qwen_local_large` — `Qwen/Qwen3-VL-32B-Instruct-FP8`, the larger candidate
   for the Phase 7 comparison. A single vLLM process serves one model at a time.
 

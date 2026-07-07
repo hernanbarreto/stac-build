@@ -65,6 +65,44 @@ def detect_onion(points: np.ndarray, obb_transform: np.ndarray, obb_aabb: np.nda
                        (float(weights[0]), float(weights[1])), n)
 
 
+def onion_heatmap(points: np.ndarray, obb_transform: np.ndarray, obb_aabb: np.ndarray,
+                  grid: int = 6, min_cell_points: int = 40) -> dict:
+    """Per-instance onion HEATMAP (spec R.3): tile the OBB's two largest faces
+    into a grid×grid lattice and run the bimodality test per cell along the OBB
+    normal. Cell value = mode separation in metres (0 = clean / insufficient).
+    Returns {"grid", "axis_u", "axis_v", "normal_axis", "cells", "counts"}."""
+    from .geometry import obb_local_coords
+
+    normal = _obb_normal_axis(obb_aabb)
+    axes = [a for a in (0, 1, 2) if a != normal]
+    local = obb_local_coords(points, obb_transform)
+    lo = np.array([obb_aabb[0], obb_aabb[2], obb_aabb[4]])
+    hi = np.array([obb_aabb[1], obb_aabb[3], obb_aabb[5]])
+    span = np.maximum(hi - lo, 1e-9)
+    u = np.clip(((local[:, axes[0]] - lo[axes[0]]) / span[axes[0]] * grid).astype(int), 0, grid - 1)
+    v = np.clip(((local[:, axes[1]] - lo[axes[1]]) / span[axes[1]] * grid).astype(int), 0, grid - 1)
+    x = local[:, normal]
+
+    cells = [[0.0] * grid for _ in range(grid)]
+    counts = [[0] * grid for _ in range(grid)]
+    for i in range(grid):
+        rows = u == i
+        for j in range(grid):
+            sel = rows & (v == j)
+            nij = int(sel.sum())
+            counts[i][j] = nij
+            if nij < min_cell_points:
+                continue
+            fit = _gmm2_em(x[sel])
+            if fit is None:
+                continue
+            bic1, bic2, means, weights = fit
+            if bic2 < bic1 and min(weights) > 0.1:
+                cells[i][j] = round(float(abs(means[0] - means[1])), 4)
+    return {"grid": grid, "axis_u": axes[0], "axis_v": axes[1],
+            "normal_axis": normal, "cells": cells, "counts": counts}
+
+
 def _gauss_logpdf(x: np.ndarray, mu: float, var: float) -> np.ndarray:
     var = max(var, 1e-9)
     return -0.5 * (np.log(2 * np.pi * var) + (x - mu) ** 2 / var)

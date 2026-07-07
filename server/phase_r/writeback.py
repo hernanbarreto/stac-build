@@ -91,13 +91,129 @@ def write_refined_camera_poses(output_dir, refined_c2w: dict[int, np.ndarray],
     return written
 
 
+# ── R.4 cloud writeback (chunks pre-merge / merged cloud via trace) ──
+def apply_corrections_to_clouds(output_dir, windows: list, totals: list,
+                                window_map: dict[int, str],
+                                backup_suffix: str = ".prephaser") -> dict:
+    """Apply the per-window Sim(3) corrections to the CLOUD geometry so the
+    merge/viewer see the anchored result, not just the TSDF:
+
+      * chunk_*.ply present (anchored order: Phase R runs BEFORE cloudcompy):
+        each chunk is one window — transform its points by that window's
+        correction, then the merge fuses already-corrected chunks.
+      * chunks already merged+deleted (resumed/legacy sessions): transform
+        cleaned_cloud.ply PER POINT via its frame_global traceability
+        (point → source frame → window → correction). No re-reconstruction.
+
+    Identity corrections are a no-op. Backups once (.prephaser). The Potree
+    octree is invalidated when the merged cloud changes."""
+    from reconstruction.surface_fit.consolidate import (_read_ply_structured,
+                                                        _write_ply_structured)
+
+    output_dir = Path(output_dir)
+    widx = {w: i for i, w in enumerate(windows)}
+    mats = {w: _sim3_matrix4(totals[widx[w]]) for w in windows}
+    nontrivial = {w for w, M in mats.items()
+                  if not np.allclose(M, np.eye(4), atol=1e-9)}
+    if not nontrivial:
+        return {"clouds": 0, "note": "identity corrections — clouds untouched"}
+
+    def _transform(pts: np.ndarray, M: np.ndarray) -> np.ndarray:
+        return pts @ M[:3, :3].T + M[:3, 3]
+
+    stats: dict = {"clouds": 0, "mode": None}
+    chunks = sorted(output_dir.glob("chunk_*.ply"))
+    if chunks:
+        import re as _re
+        stats["mode"] = "chunks"
+        for ply in chunks:
+            m = _re.match(r"chunk_(\d+)\.ply$", ply.name)
+            if not m:
+                continue          # chunk_999_lidar.ply etc. — not a window chunk
+            k = int(m.group(1))
+            if k >= 900:
+                continue          # external complements use high indices
+            w = f"w{k:03d}"
+            if w not in nontrivial:
+                continue
+            loaded = _read_ply_structured(ply)
+            if loaded is None:
+                continue
+            header, data = loaded
+            if not {"x", "y", "z"} <= set(data.dtype.names or ()):
+                continue
+            bak = ply.with_suffix(ply.suffix + backup_suffix)
+            if not bak.exists():
+                shutil.copy(ply, bak)
+            pts = np.column_stack([data["x"], data["y"], data["z"]]).astype(np.float64)
+            moved = _transform(pts, mats[w])
+            out = data.copy()
+            out["x"] = moved[:, 0].astype(data.dtype["x"])
+            out["y"] = moved[:, 1].astype(data.dtype["y"])
+            out["z"] = moved[:, 2].astype(data.dtype["z"])
+            _write_ply_structured(ply, header, out)
+            stats["clouds"] += 1
+        return stats
+
+    cloud = output_dir / "cleaned_cloud.ply"
+    if not cloud.exists():
+        return {"clouds": 0, "note": "no chunk PLYs and no cleaned cloud"}
+    loaded = _read_ply_structured(cloud)
+    if loaded is None:
+        return {"clouds": 0, "note": "unsupported cleaned-cloud layout"}
+    header, data = loaded
+    names = set(data.dtype.names or ())
+    if "frame_global" not in names or not {"x", "y", "z"} <= names:
+        return {"clouds": 0, "note": "no frame_global traceability — cloud untouched"}
+    stats["mode"] = "merged_cloud_trace"
+    fg = np.asarray(data["frame_global"], np.int64)
+    default_w = windows[0] if windows else "global"
+    uniq = np.unique(fg)
+    frame_to_w = {int(f): window_map.get(int(f), default_w) for f in uniq}
+    pts = np.column_stack([data["x"], data["y"], data["z"]]).astype(np.float64)
+    touched = False
+    for w in nontrivial:
+        sel_frames = np.array([f for f, ww in frame_to_w.items() if ww == w])
+        if not len(sel_frames):
+            continue
+        sel = np.isin(fg, sel_frames)
+        if sel.any():
+            pts[sel] = _transform(pts[sel], mats[w])
+            touched = True
+    if touched:
+        bak = cloud.with_suffix(cloud.suffix + backup_suffix)
+        if not bak.exists():
+            shutil.copy(cloud, bak)
+        out = data.copy()
+        out["x"] = pts[:, 0].astype(data.dtype["x"])
+        out["y"] = pts[:, 1].astype(data.dtype["y"])
+        out["z"] = pts[:, 2].astype(data.dtype["z"])
+        _write_ply_structured(cloud, header, out)
+        stats["clouds"] = 1
+        # the octree no longer matches the corrected cloud — drop it so the
+        # cloudcompy light-resume / lazy viewer conversion rebuilds it
+        potree = output_dir / "potree"
+        if potree.is_dir():
+            shutil.rmtree(potree, ignore_errors=True)
+            stats["potree_invalidated"] = True
+    return stats
+
+
+def _sim3_matrix4(M: Sim3) -> np.ndarray:
+    T = np.eye(4)
+    T[:3, :3] = M.s * M.R
+    T[:3, 3] = M.t
+    return T
+
+
 # ── R.5 depth regularization writeback ──────────────────────────────
 def apply_depth_regularization(output_dir, store, session_dir, config: dict | None = None,
                                backup_suffix: str = ".prephaser") -> dict:
     """Regularize whitelist-class depth toward the per-instance fitted plane and
     write the depth npz back (with a backup). No-op for instances that are not
     whitelisted or lack enough points. Returns a small stats dict."""
-    from .depth_regularization import fit_plane, regularize_depth_to_plane
+    from .depth_regularization import (fit_plane, plane_world_to_camera,
+                                       regularize_depth_to_plane)
     from .build_instances import _scaled_K, _frame_size
     from segmentation.session_io import _load_camera_source
 
@@ -110,12 +226,27 @@ def apply_depth_regularization(output_dir, store, session_dir, config: dict | No
 
     # locate depth dir + provider
     depth_base = None
+    depth_rel = None
     for c in ["omega_run/results_output", "da3_run/results_output", "results_output"]:
         if (output_dir / c).is_dir():
             depth_base = output_dir / c
+            depth_rel = c
             break
     if depth_base is None:
         return {"applied": 0, "reason": "no depth dir"}
+
+    # omega npz depth is up-to-scale while store points (→ fitted planes) are
+    # metric; convert the metric plane prediction back to the npz's native
+    # units so the blend never mixes scales (see InstanceStoreBuilder.
+    # _metric_depth_scale for the full story).
+    depth_scale = 1.0
+    if not depth_rel.startswith("da3_run"):
+        marker = output_dir / ".metric_scale_applied"
+        if marker.exists():
+            try:
+                depth_scale = float(marker.read_text().strip().split("=")[-1])
+            except Exception:
+                depth_scale = 1.0
 
     import json
     seg = json.load(open(output_dir / "segmentation.json"))
@@ -128,7 +259,15 @@ def apply_depth_regularization(output_dir, store, session_dir, config: dict | No
     for inst in store.list_instances():
         iid = inst["instance_id"]
         label = inst["label"]
-        if not any(w in label for w in whitelist):
+        # R.5 eligibility — Phase 2's refined class updates it for the next
+        # loop iteration (spec): a classification row is authoritative over
+        # the raw prompting label; label substring match is the fallback.
+        cls = store.get_classification(iid)
+        if cls is not None:
+            if not cls.get("whitelist_eligible", False):
+                continue
+            label = cls.get("class_final") or label
+        elif not any(w in label for w in whitelist):
             continue
         pts = store.get_points(iid)
         if pts is None or len(pts) < 30:
@@ -155,7 +294,12 @@ def apply_depth_regularization(output_dir, store, session_dir, config: dict | No
             fw, fh = _frame_size(frames_dir, fid, mask.shape)
             dh, dw = depth.shape[:2]
             Kd = _scaled_K(np.asarray(K, float), (fw, fh), (dw, dh))
-            reg = regularize_depth_to_plane(depth, mask, plane, Kd, weight=weight,
+            # the plane is fit on WORLD points — move it into THIS camera's
+            # frame (and native depth units) before predicting per-pixel depth
+            cam_plane = plane_world_to_camera(plane, np.asarray(cam.pose_map[fid], float))
+            if depth_scale != 1.0:
+                cam_plane = (cam_plane[0], cam_plane[1] / depth_scale)
+            reg = regularize_depth_to_plane(depth, mask, cam_plane, Kd, weight=weight,
                                             label=label, whitelist=whitelist)
             if np.shares_memory(reg, depth) and np.array_equal(reg, depth):
                 continue

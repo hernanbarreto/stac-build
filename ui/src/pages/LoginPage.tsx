@@ -52,11 +52,11 @@ export default function LoginPage() {
                 }}>
                     <span style={{
                         width: 8, height: 8, borderRadius: '50%',
-                        background: serverUp === null ? '#888' : serverUp ? '#2ecc71' : '#e74c3c',
-                        boxShadow: serverUp ? '0 0 6px #2ecc71' : serverUp === false ? '0 0 6px #e74c3c' : 'none',
+                        background: serverUp === null ? 'var(--text-muted)' : serverUp ? 'var(--success)' : 'var(--error)',
+                        boxShadow: serverUp ? '0 0 6px rgba(63, 185, 80, 0.6)' : serverUp === false ? '0 0 6px rgba(248, 81, 73, 0.6)' : 'none',
                         display: 'inline-block',
                     }} />
-                    <span style={{ color: serverUp === null ? '#888' : serverUp ? '#2ecc71' : '#e74c3c' }}>
+                    <span style={{ color: serverUp === null ? 'var(--text-muted)' : serverUp ? 'var(--success)' : 'var(--error)' }}>
                         {serverUp === null ? 'Checking server…' : serverUp ? 'Server online' : 'Server offline'}
                     </span>
                 </div>

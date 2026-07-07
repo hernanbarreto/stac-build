@@ -123,16 +123,28 @@ def _gravity_rotation(gravity: np.ndarray | None) -> np.ndarray:
     return R  # maps up -> +Y
 
 
-def fit_gravity_aligned_obb(points: np.ndarray, gravity: np.ndarray | None = None):
+def fit_gravity_aligned_obb(points: np.ndarray, gravity: np.ndarray | None = None,
+                            trim_percent: float = 0.0):
     """Fit a gravity-aligned OBB. Returns (transform 4x4, aabb 6, position 3),
     aabb centered (±extent/2), placement in transform. Vertical axis is up.
-    Ported/adapted from R3D build_scene.py:191-257 (+ gravity rotation)."""
+    Ported/adapted from R3D build_scene.py:191-257 (+ gravity rotation).
+
+    trim_percent: robust extents via the [p, 100-p] percentiles instead of
+    min/max — depth-lifted points are noisy and raw min/max inflates the box
+    (a floor's thickness read 0.47 m instead of ~0.07 m) and shifts its
+    centre. 0 keeps the exact hull behaviour."""
     if len(points) < 3:
         return None
     R = _gravity_rotation(gravity)
     P = points @ R.T  # into gravity frame (Y up)
 
-    y_min, y_max = P[:, 1].min(), P[:, 1].max()
+    def _rng(v: np.ndarray) -> tuple[float, float]:
+        if trim_percent > 0:
+            return (float(np.percentile(v, trim_percent)),
+                    float(np.percentile(v, 100 - trim_percent)))
+        return float(v.min()), float(v.max())
+
+    y_min, y_max = _rng(P[:, 1])
     xz = P[:, [0, 2]]
     mean_xz = xz.mean(axis=0)
     cov = np.cov((xz - mean_xz).T)
@@ -141,7 +153,9 @@ def fit_gravity_aligned_obb(points: np.ndarray, gravity: np.ndarray | None = Non
     eigvals, eigvecs = np.linalg.eigh(cov)
     axes_2d = eigvecs[:, np.argsort(-eigvals)]  # principal axes in XZ
     proj = (xz - mean_xz) @ axes_2d
-    p_min, p_max = proj.min(axis=0), proj.max(axis=0)
+    lo0, hi0 = _rng(proj[:, 0])
+    lo1, hi1 = _rng(proj[:, 1])
+    p_min, p_max = np.array([lo0, lo1]), np.array([hi0, hi1])
     ex = p_max[0] - p_min[0]
     ey = y_max - y_min
     ez = p_max[1] - p_min[1]
