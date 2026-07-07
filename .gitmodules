@@ -1,9 +1,3 @@
-[submodule "vendor/DepthLM_Official"]
-	path = vendor/DepthLM_Official
-	url = https://github.com/facebookresearch/DepthLM_Official.git
-[submodule "vendor/perception_models"]
-	path = vendor/perception_models
-	url = https://github.com/facebookresearch/perception_models.git
 [submodule "vendor/VGGT-Long"]
 	path = vendor/VGGT-Long
 	url = https://github.com/hernanbarreto/VGGT-Long.git

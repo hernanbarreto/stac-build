@@ -419,7 +419,6 @@ that carry local patches the pipeline depends on**:
 |-----------|--------|-------|
 | `vendor/VGGT-Long` | `hernanbarreto/VGGT-Long` (STAC fork) | loop-closure + sky-removal + DA3-prior patches |
 | `vendor/depth-anything-3` | `hernanbarreto/Depth-Anything-3` (STAC fork, **private**) | cam-encoder pose conditioning + sky drop |
-| `vendor/DepthLM_Official`, `vendor/perception_models` | upstream | unpatched |
 
 ```bash
 # Clone the repo AND all submodules in one step (recommended)
@@ -438,9 +437,20 @@ git submodule update --init --recursive
 
 Heavy/third-party vendors are **git-ignored** and are **not** fetched by clone or by Docker
 (`Dockerfile` does `COPY vendor/ ./vendor/`, i.e. it copies whatever is already on disk).
-They must be placed under `vendor/` manually before building:
-`meshflow`, `mvs-texturing`, `nvdiffrast`, `oneTBB` / `oneTBB-src`, `CloudComPy310`,
-`dn-splatter`, `gaus-slam`, `scenescript`, `vipe`, plus the `*/checkpoints/` weight dirs.
+The git-based ones are pinned and restored automatically:
+
+```bash
+bash scripts/setup_vendors.sh          # clone every pinned git vendor + init submodules
+bash scripts/setup_vendors.sh --list   # show the full manifest without touching anything
+```
+
+This restores the pinned clones — `r3d`, `sam31`, `nvdiffrast`, `meshflow`,
+`mvs-texturing`, `oneTBB-src`, `vggt-omega`, `ShapeR` — at their locked commits.
+The **non-git** vendors (weights / build trees / prebuilt binaries) still need manual
+provisioning: `sam3` (default segmentation baseline), `cloudcompy` / `CloudComPy310`,
+`MapAnything2`, `PotreeConverter`, `oneTBB` (built from `oneTBB-src`), and
+`vggt-omega-weights`. The authoritative inventory — every vendor, its source, pin, and
+provisioning method — is [`vendor/VENDORS.lock.md`](vendor/VENDORS.lock.md).
 
 ### 3. Download model weights
 
