@@ -282,15 +282,17 @@ class InstanceStore:
 
     def list_findings(self, instance_id: int | None = None) -> list[dict]:
         q = ("SELECT finding_id,instance_id,type,severity,description,confidence,"
-             "frame_id,point3d,status,origin,correlated_residual FROM findings")
+             "frame_id,box_xywh,point3d,status,origin,correlated_residual FROM findings")
         args: tuple = ()
         if instance_id is not None:
             q += " WHERE instance_id=?"; args = (instance_id,)
         keys = ["finding_id", "instance_id", "type", "severity", "description",
-                "confidence", "frame_id", "point3d", "status", "origin", "correlated_residual"]
+                "confidence", "frame_id", "box_xywh", "point3d", "status", "origin",
+                "correlated_residual"]
         out = []
         for r in self.conn.execute(q, args):
             d = dict(zip(keys, r))
+            d["box_xywh"] = (_arr(d["box_xywh"], (4,)).tolist() if d["box_xywh"] else None)
             d["point3d"] = (_arr(d["point3d"], (3,)).tolist() if d["point3d"] else None)
             d["correlated_residual"] = bool(d["correlated_residual"])
             out.append(d)

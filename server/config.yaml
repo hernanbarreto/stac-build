@@ -163,6 +163,16 @@ phase4:
   describe: true                      # VLM phrases the recapture instruction per zone
 
 
+# ── Report generation (Phase 6) — bilingual supervision draft ──────
+# Assembles inventory (Ph2) + findings (Ph3) + measurements (Ph5 tools) +
+# coverage (Ph4) + reconstruction-quality (Phase R) into a traceable Markdown
+# report with figures. Every number carries its tool+args+timestamp trace; every
+# VLM observation is marked "proposal pending validation" unless human-validated.
+# The generator measures nothing itself. Consumed by phase6_report/*.
+phase6:
+  lang: "es"                          # default language: es | fr (CLI can emit both)
+
+
 # ── Auto-prompter (Phase 1) — Qwen3-VL grounded detection -> SAM3 ───
 # Replaces manual SAM3 prompting as the DEFAULT: detect boxes+labels with
 # Qwen3-VL, associate the same object across keyframes by BA-pose geometry, and
