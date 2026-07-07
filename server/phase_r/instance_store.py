@@ -121,6 +121,14 @@ CREATE TABLE IF NOT EXISTS scene_meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS user_volumes (
+    volume_id  INTEGER PRIMARY KEY AUTOINCREMENT,   -- user-placed evaluation boxes
+    name       TEXT,
+    center     BLOB,     -- (3,) world centre, metres
+    size       BLOB,     -- (3,) full extents, metres
+    yaw_deg    REAL DEFAULT 0.0,   -- rotation about the world up (Y) axis
+    created_ns INTEGER
+);
 """
 
 
@@ -297,6 +305,38 @@ class InstanceStore:
             d["correlated_residual"] = bool(d["correlated_residual"])
             out.append(d)
         return out
+
+    # ── user-defined evaluation volumes (UI + Q&A) ──────────────────
+    def add_user_volume(self, name: str, center, size, yaw_deg: float = 0.0) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO user_volumes (name,center,size,yaw_deg,created_ns) VALUES (?,?,?,?,?)",
+            (name, _blob(np.asarray(center, np.float32)), _blob(np.asarray(size, np.float32)),
+             float(yaw_deg), int(time.time() * 1e9)))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def get_user_volume(self, volume_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT volume_id,name,center,size,yaw_deg FROM user_volumes WHERE volume_id=?",
+            (volume_id,)).fetchone()
+        if not row:
+            return None
+        return {"volume_id": row[0], "name": row[1],
+                "center": _arr(row[2], (3,)).tolist(), "size": _arr(row[3], (3,)).tolist(),
+                "yaw_deg": row[4]}
+
+    def list_user_volumes(self) -> list[dict]:
+        out = []
+        for row in self.conn.execute(
+                "SELECT volume_id,name,center,size,yaw_deg FROM user_volumes ORDER BY volume_id"):
+            out.append({"volume_id": row[0], "name": row[1],
+                        "center": _arr(row[2], (3,)).tolist(),
+                        "size": _arr(row[3], (3,)).tolist(), "yaw_deg": row[4]})
+        return out
+
+    def delete_user_volume(self, volume_id: int) -> None:
+        self.conn.execute("DELETE FROM user_volumes WHERE volume_id=?", (volume_id,))
+        self.conn.commit()
 
     def set_meta(self, key: str, value: str) -> None:
         self.conn.execute("INSERT OR REPLACE INTO scene_meta (key,value) VALUES (?,?)",

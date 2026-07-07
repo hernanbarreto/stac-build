@@ -228,8 +228,203 @@ class SpatialTools:
 
     def get_findings(self, id: int | None = None, region: str | None = None) -> dict:
         """Visual findings (cracks/moisture/…) for an object/region (Phase 3).
-        Returns insufficient_data until Phase 3 has populated findings."""
-        return _insufficient("no findings store yet (Phase 3 not populated)")
+        Returns insufficient_data when no findings have been recorded."""
+        finds = self.store.list_findings(instance_id=id)
+        if not finds:
+            scope = f"object {id}" if id is not None else "the scene"
+            return _insufficient(f"no findings recorded for {scope}")
+        out = [{"finding_id": f["finding_id"], "type": f["type"], "severity": f["severity"],
+                "description": f["description"], "confidence": round(f["confidence"], 2),
+                "instance_id": f["instance_id"], "point3d": f["point3d"],
+                "status": f["status"], "correlated_residual": f["correlated_residual"],
+                "provenance": ("human_validated" if f["status"] == "human_validated"
+                               else "vlm_proposed")}
+               for f in finds]
+        return {"findings": out, "count": len(out), "source": "vlm_proposed",
+                "note": "findings are proposed and require human validation"}
+
+    # ── user-defined evaluation volumes (space evaluation) ──────────
+    def _all_points(self) -> tuple[np.ndarray, np.ndarray]:
+        """Pool every instance's world points once, with a parallel array of the
+        owning instance id (for occupancy / space-evaluation queries)."""
+        if getattr(self, "_pooled", None) is None:
+            clouds, owners = [], []
+            for i in self.store.list_instances():
+                pts = self._points(i["instance_id"])
+                if pts is not None and len(pts):
+                    clouds.append(pts)
+                    owners.append(np.full(len(pts), i["instance_id"], np.int64))
+            self._pooled = (np.vstack(clouds), np.concatenate(owners)) if clouds \
+                else (np.empty((0, 3)), np.empty((0,), np.int64))
+        return self._pooled
+
+    def _resolve_volume(self, center, size, yaw_deg, volume_id):
+        """Return (center, size, yaw_deg) from explicit args or a saved volume."""
+        if volume_id is not None:
+            v = self.store.get_user_volume(int(volume_id))
+            if v is None:
+                return None
+            return np.asarray(v["center"], float), np.asarray(v["size"], float), float(v["yaw_deg"])
+        if center is None or size is None:
+            return None
+        return np.asarray(center, float), np.asarray(size, float), float(yaw_deg or 0.0)
+
+    @staticmethod
+    def _volume_frame(center: np.ndarray, size: np.ndarray, yaw_deg: float):
+        half = np.abs(size) / 2.0
+        yaw = np.radians(yaw_deg)
+        c, s = np.cos(yaw), np.sin(yaw)
+        R = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])  # about world up (+Y)
+        T = np.eye(4); T[:3, :3] = R; T[:3, 3] = center
+        return T, half
+
+    def _inside_mask(self, pts: np.ndarray, T: np.ndarray, half: np.ndarray) -> np.ndarray:
+        if not len(pts):
+            return np.zeros(0, bool)
+        local = obb_local_coords(pts, T)
+        return np.all(np.abs(local) <= half[None, :] + 1e-9, axis=1)
+
+    def define_volume(self, name: str, center: list, size: list, yaw_deg: float = 0.0) -> dict:
+        """Persist a user-defined evaluation box (world centre + full extents in
+        metres, yaw about vertical). Returns its volume_id for later queries."""
+        if center is None or size is None or len(center) != 3 or len(size) != 3:
+            return _insufficient("center and size must each be [x,y,z] in metres")
+        vid = self.store.add_user_volume(name or f"volume", center, size, yaw_deg or 0.0)
+        return {"volume_id": vid, "name": name, "center": list(map(float, center)),
+                "size": list(map(float, size)), "yaw_deg": float(yaw_deg or 0.0),
+                "source": "user_defined"}
+
+    def evaluate_volume(self, volume_id: int | None = None, center: list | None = None,
+                        size: list | None = None, yaw_deg: float = 0.0,
+                        voxel_m: float = 0.1) -> dict:
+        """Evaluate a user-defined space: which objects fall inside, how much of
+        the box is occupied vs free (voxel occupancy), and the free volume in m³.
+        Pass a saved volume_id OR an explicit center+size (+yaw)."""
+        r = self._resolve_volume(center, size, yaw_deg, volume_id)
+        if r is None:
+            return _insufficient("provide volume_id or center+size")
+        c, s, yaw = r
+        T, half = self._volume_frame(c, s, yaw)
+        box_vol = float(np.prod(np.abs(s)))
+        pts, owners = self._all_points()
+        if not len(pts):
+            return _insufficient("no reconstructed points to evaluate the volume")
+        inside = self._inside_mask(pts, T, half)
+        n_in = int(inside.sum())
+        # per-object occupancy
+        objs = []
+        for iid in np.unique(owners[inside]) if n_in else []:
+            cnt = int((owners[inside] == iid).sum())
+            inst = self._instance(int(iid))
+            objs.append({"id": int(iid), "label": inst["label"] if inst else str(iid),
+                         "points_inside": cnt})
+        objs.sort(key=lambda o: -o["points_inside"])
+        # voxel occupancy of the box interior
+        voxel_m = max(0.02, float(voxel_m))
+        n_vox = np.maximum(1, np.floor(np.abs(s) / voxel_m)).astype(int)
+        total_vox = int(np.prod(n_vox))
+        occ_frac = 0.0
+        if n_in:
+            local = obb_local_coords(pts[inside], T) + half  # 0..size
+            keys = np.floor(local / voxel_m).astype(np.int64)
+            keys = np.clip(keys, 0, n_vox - 1)
+            occ_vox = len(np.unique(keys, axis=0))
+            occ_frac = min(1.0, occ_vox / total_vox)
+        free_frac = float(max(0.0, 1.0 - occ_frac))
+        return {"volume_id": volume_id, "box_volume_m3": round(box_vol, 4),
+                "occupied_fraction": round(occ_frac, 4),
+                "free_fraction": round(free_frac, 4),
+                "free_volume_m3": round(free_frac * box_vol, 4),
+                "points_inside": n_in, "objects_inside": objs,
+                "voxel_m": voxel_m, "unit": "m", "source": "tool_measured",
+                "confidence": 0.7 if n_in else 0.3}
+
+    def objects_in_volume(self, volume_id: int | None = None, center: list | None = None,
+                          size: list | None = None, yaw_deg: float = 0.0) -> dict:
+        """List the objects that intersect a user-defined volume, with the
+        fraction of each object's points that lie inside."""
+        r = self._resolve_volume(center, size, yaw_deg, volume_id)
+        if r is None:
+            return _insufficient("provide volume_id or center+size")
+        c, s, yaw = r
+        T, half = self._volume_frame(c, s, yaw)
+        out = []
+        for i in self.store.list_instances():
+            pts = self._points(i["instance_id"])
+            if pts is None or not len(pts):
+                continue
+            inside = self._inside_mask(pts, T, half)
+            frac = float(inside.mean())
+            if inside.any():
+                out.append({"id": i["instance_id"], "label": i["label"],
+                            "fraction_inside": round(frac, 3),
+                            "points_inside": int(inside.sum())})
+        out.sort(key=lambda o: -o["fraction_inside"])
+        return {"objects": out, "count": len(out), "source": "tool_measured"}
+
+    def fits_in_volume(self, item_size: list, volume_id: int | None = None,
+                       center: list | None = None, size: list | None = None,
+                       yaw_deg: float = 0.0, voxel_m: float = 0.1) -> dict:
+        """Can an axis-aligned item of given size (w,h,d metres) fit in the FREE
+        space of a user-defined volume? Voxelizes the box, marks voxels occupied
+        by any scene point, and slides the item box over free voxels. Returns
+        whether it fits and a candidate placement (box-local, metres)."""
+        r = self._resolve_volume(center, size, yaw_deg, volume_id)
+        if r is None or item_size is None or len(item_size) != 3:
+            return _insufficient("provide item_size [w,h,d] and volume_id or center+size")
+        c, s, yaw = r
+        T, half = self._volume_frame(c, s, yaw)
+        item = np.abs(np.asarray(item_size, float))
+        if np.any(item > np.abs(s) + 1e-9):
+            return {"fits": False, "reason": "item larger than the volume",
+                    "source": "tool_measured"}
+        voxel_m = max(0.02, float(voxel_m))
+        n_vox = np.maximum(1, np.floor(np.abs(s) / voxel_m)).astype(int)
+        occ = np.zeros(tuple(n_vox), bool)
+        pts, _o = self._all_points()
+        inside = self._inside_mask(pts, T, half) if len(pts) else np.zeros(0, bool)
+        if inside.any():
+            local = obb_local_coords(pts[inside], T) + half
+            keys = np.clip(np.floor(local / voxel_m).astype(int), 0, n_vox - 1)
+            occ[keys[:, 0], keys[:, 1], keys[:, 2]] = True
+        # integral image for O(1) empty-box tests
+        free = (~occ).astype(np.int64)
+        ii = free.cumsum(0).cumsum(1).cumsum(2)
+        need = np.maximum(1, np.ceil(item / voxel_m).astype(int))
+        if np.any(need > n_vox):
+            return {"fits": False, "reason": "item larger than the volume",
+                    "source": "tool_measured"}
+        placement = self._find_empty_box(ii, n_vox, need)
+        if placement is None:
+            return {"fits": False, "reason": "no free region large enough",
+                    "free_volume_m3": round(float(free.sum()) * voxel_m ** 3, 4),
+                    "source": "tool_measured"}
+        pos_local = (np.asarray(placement) * voxel_m).tolist()
+        return {"fits": True, "placement_box_local_m": [round(v, 3) for v in pos_local],
+                "item_size_m": item.tolist(), "voxel_m": voxel_m,
+                "source": "tool_measured", "confidence": 0.6}
+
+    @staticmethod
+    def _find_empty_box(ii: np.ndarray, n_vox: np.ndarray, need: np.ndarray):
+        """First origin where a `need`-sized box has zero occupied voxels, via a
+        3D summed-area table. Returns (i,j,k) origin or None."""
+        nx, ny, nz = n_vox
+        dx, dy, dz = need
+
+        def s(i, j, k):  # inclusive-exclusive box sum on the padded integral image
+            return int(ii[i, j, k])
+        # pad ii by one at the front for clean differencing
+        P = np.zeros((nx + 1, ny + 1, nz + 1), np.int64)
+        P[1:, 1:, 1:] = ii
+        for i in range(0, nx - dx + 1):
+            for j in range(0, ny - dy + 1):
+                for k in range(0, nz - dz + 1):
+                    a, b, c2 = i + dx, j + dy, k + dz
+                    tot = (P[a, b, c2] - P[i, b, c2] - P[a, j, c2] - P[a, b, k]
+                           + P[i, j, c2] + P[i, b, k] + P[a, j, k] - P[i, j, k])
+                    if tot == dx * dy * dz:  # all-free box
+                        return (i, j, k)
+        return None
 
     # ── tool-calling schemas for the orchestrator ───────────────────
     def impls(self) -> dict:
@@ -243,6 +438,10 @@ class SpatialTools:
             "get_onion_report": self.get_onion_report,
             "get_instance_history": self.get_instance_history,
             "get_findings": self.get_findings,
+            "define_volume": self.define_volume,
+            "evaluate_volume": self.evaluate_volume,
+            "objects_in_volume": self.objects_in_volume,
+            "fits_in_volume": self.fits_in_volume,
         }
 
     def openai_schemas(self) -> list[dict]:
@@ -274,4 +473,38 @@ class SpatialTools:
             fn("get_instance_history", "Windows seen + residuals for an object.", {"id": idp}, ["id"]),
             fn("get_findings", "Visual findings for an object/region (Phase 3).",
                {"id": idp, "region": {"type": "string"}}),
+            fn("define_volume",
+               "Persist a user-defined evaluation box (world centre + full extents "
+               "in metres, yaw about vertical). Use to mark a space to evaluate.",
+               {"name": {"type": "string"},
+                "center": {"type": "array", "items": {"type": "number"},
+                           "description": "[x,y,z] world centre, metres"},
+                "size": {"type": "array", "items": {"type": "number"},
+                         "description": "[w,h,d] full extents, metres"},
+                "yaw_deg": {"type": "number", "description": "rotation about vertical"}},
+               ["name", "center", "size"]),
+            fn("evaluate_volume",
+               "Evaluate a space: objects inside, occupied vs free fraction, and "
+               "free volume (m³). Pass volume_id OR center+size(+yaw).",
+               {"volume_id": {"type": "integer"},
+                "center": {"type": "array", "items": {"type": "number"}},
+                "size": {"type": "array", "items": {"type": "number"}},
+                "yaw_deg": {"type": "number"}}),
+            fn("objects_in_volume",
+               "List objects intersecting a user-defined volume with each one's "
+               "fraction inside. Pass volume_id OR center+size(+yaw).",
+               {"volume_id": {"type": "integer"},
+                "center": {"type": "array", "items": {"type": "number"}},
+                "size": {"type": "array", "items": {"type": "number"}},
+                "yaw_deg": {"type": "number"}}),
+            fn("fits_in_volume",
+               "Check whether an item of size [w,h,d] metres fits in the FREE space "
+               "of a user-defined volume; returns a candidate placement.",
+               {"item_size": {"type": "array", "items": {"type": "number"},
+                              "description": "[w,h,d] metres"},
+                "volume_id": {"type": "integer"},
+                "center": {"type": "array", "items": {"type": "number"}},
+                "size": {"type": "array", "items": {"type": "number"}},
+                "yaw_deg": {"type": "number"}},
+               ["item_size"]),
         ]

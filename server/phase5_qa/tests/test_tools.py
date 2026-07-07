@@ -94,6 +94,84 @@ def test_volume_and_span():
         st.close()
 
 
+def test_define_and_persist_volume():
+    with tempfile.TemporaryDirectory() as d:
+        st = _make_store(os.path.join(d, "s.db"))
+        t = SpatialTools(st)
+        r = t.define_volume("bay A", [0.0, 1.5, 0.0], [1.0, 3.0, 1.0], yaw_deg=0.0)
+        vid = r["volume_id"]
+        assert vid >= 1 and st.get_user_volume(vid)["name"] == "bay A"
+        assert len(st.list_user_volumes()) == 1
+        st.delete_user_volume(vid)
+        assert st.get_user_volume(vid) is None
+        st.close()
+
+
+def test_objects_in_volume():
+    with tempfile.TemporaryDirectory() as d:
+        st = _make_store(os.path.join(d, "s.db"))
+        t = SpatialTools(st)
+        # box around the column at x=0 -> contains column (id 1), not wall (id 2)
+        r = t.objects_in_volume(center=[0.0, 1.5, 0.0], size=[1.0, 3.2, 1.0])
+        ids = [o["id"] for o in r["objects"]]
+        assert 1 in ids and 2 not in ids
+        assert r["objects"][0]["fraction_inside"] > 0.9
+        # box far away -> empty
+        far = t.objects_in_volume(center=[50.0, 1.5, 0.0], size=[1.0, 1.0, 1.0])
+        assert far["count"] == 0
+
+
+def test_evaluate_volume_free_fraction():
+    with tempfile.TemporaryDirectory() as d:
+        st = _make_store(os.path.join(d, "s.db"))
+        t = SpatialTools(st)
+        r = t.evaluate_volume(center=[0.0, 1.5, 0.0], size=[1.0, 3.0, 1.0], voxel_m=0.1)
+        assert abs(r["box_volume_m3"] - 3.0) < 1e-6
+        assert 0.0 < r["occupied_fraction"] < 1.0  # column occupies part of the bay
+        assert r["free_volume_m3"] > 0.0
+        assert any(o["id"] == 1 for o in r["objects_inside"])
+
+
+def test_fits_in_volume():
+    with tempfile.TemporaryDirectory() as d:
+        st = _make_store(os.path.join(d, "s.db"))
+        t = SpatialTools(st)
+        # a small item fits in the free border around the column
+        small = t.fits_in_volume(item_size=[0.25, 0.25, 0.25],
+                                 center=[0.0, 1.5, 0.0], size=[1.0, 3.0, 1.0], voxel_m=0.1)
+        assert small["fits"] is True and "placement_box_local_m" in small
+        # an item as wide as the whole bay cannot fit past the column
+        big = t.fits_in_volume(item_size=[0.9, 0.9, 0.9],
+                               center=[0.0, 1.5, 0.0], size=[1.0, 3.0, 1.0], voxel_m=0.1)
+        assert big["fits"] is False
+        # an item larger than the box is rejected outright
+        huge = t.fits_in_volume(item_size=[5.0, 5.0, 5.0],
+                                center=[0.0, 1.5, 0.0], size=[1.0, 3.0, 1.0])
+        assert huge["fits"] is False
+
+
+def test_volume_by_saved_id():
+    with tempfile.TemporaryDirectory() as d:
+        st = _make_store(os.path.join(d, "s.db"))
+        t = SpatialTools(st)
+        vid = t.define_volume("bay", [0.0, 1.5, 0.0], [1.0, 3.0, 1.0])["volume_id"]
+        r = t.evaluate_volume(volume_id=vid, voxel_m=0.1)
+        assert r["points_inside"] > 0 and r["volume_id"] == vid
+        st.close()
+
+
+def test_get_findings_reads_store():
+    with tempfile.TemporaryDirectory() as d:
+        st = _make_store(os.path.join(d, "s.db"))
+        st.add_finding(instance_id=1, type="crack", severity="high",
+                       description="x", confidence=0.9, frame_id=1)
+        t = SpatialTools(st)
+        r = t.get_findings(1)
+        assert r["count"] == 1 and r["findings"][0]["type"] == "crack"
+        assert t.get_findings(2).get("insufficient_data")
+        st.close()
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
