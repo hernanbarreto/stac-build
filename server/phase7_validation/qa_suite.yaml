@@ -1,0 +1,153 @@
+# STAC-Builder — Phase 7 spatial Q&A validation suite.
+#
+# ~28 questions over one of OUR scenes (the R.8 store). Each carries a machine-
+# checkable expectation; geometric MAGNITUDES are cross-checked against the
+# deterministic tool output (the tools are the ground truth the VLM only relays),
+# and are additionally flagged `cloudcompare_pending` where a human CloudCompare
+# cross-check is the external validation step.
+#
+# check.type:
+#   count_all              answer must contain the store's instance count
+#   count_label            answer must contain the count of matching instances
+#   insufficient           answer must express "insufficient / no data / cannot"
+#   tool_called            a tool in check.tools must appear in the trace
+#   measured               a measurement tool called AND answer has a number+unit
+#   findings_present       answer must mention a finding type present in the store
+#   health_bimodal         alignment-health/onion tool called AND answer mentions
+#                          the double-surface / separation result
+#
+# Hernán Barreto - Ingerop IN3 Session IV - STAC
+
+questions:
+  # ── inventory / counting (deterministic) ──────────────────────────
+  - id: q01
+    category: count
+    question: "How many distinct objects are tracked in this scene?"
+    check: {type: count_all}
+  - id: q02
+    category: count
+    question: "How many walls are there?"
+    check: {type: count_label, label: wall}
+  - id: q03
+    category: list
+    question: "List the objects you can see with their ids."
+    check: {type: tool_called, tools: [list_objects]}
+  - id: q04
+    category: count
+    question: "How many doors are in the scene?"
+    check: {type: count_label, label: door}
+
+  # ── measurement (magnitude cross-checked vs tool; CC pending) ──────
+  - id: q05
+    category: measurement
+    question: "What is the bounding-box size of the floor?"
+    check: {type: measured, tools: [get_object_size]}
+    cloudcompare_pending: true
+  - id: q06
+    category: measurement
+    question: "What is the volume of the door?"
+    check: {type: measured, tools: [get_object_volume]}
+    cloudcompare_pending: true
+  - id: q07
+    category: measurement
+    question: "How far apart are the floor and the wall?"
+    check: {type: measured, tools: [get_distance, get_clearance]}
+    cloudcompare_pending: true
+  - id: q08
+    category: measurement
+    question: "What is the minimum clearance between the wall and the door?"
+    check: {type: measured, tools: [get_clearance]}
+    cloudcompare_pending: true
+  - id: q09
+    category: measurement
+    question: "Where is the door located in the scene (its 3D position)?"
+    check: {type: measured, tools: [get_position]}
+    cloudcompare_pending: true
+  - id: q10
+    category: measurement
+    question: "How out-of-level is the floor?"
+    check: {type: measured, tools: [get_level]}
+    cloudcompare_pending: true
+  - id: q11
+    category: measurement
+    question: "Is the wall plumb, and by how much does it deviate?"
+    check: {type: measured, tools: [get_plumb]}
+    cloudcompare_pending: true
+
+  # ── findings (Phase 3) ────────────────────────────────────────────
+  - id: q12
+    category: findings
+    question: "Are there any recorded findings on the floor? What kind?"
+    check: {type: findings_present}
+  - id: q13
+    category: findings
+    question: "What defects have been reported anywhere in the scene?"
+    check: {type: findings_present}
+  - id: q14
+    category: findings
+    question: "Show the findings for the wall."
+    check: {type: tool_called, tools: [get_findings]}
+
+  # ── alignment-health tools (Phase R) — 4 questions ────────────────
+  - id: q15
+    category: health
+    question: "What is the alignment health of the floor?"
+    check: {type: health_bimodal, tools: [get_alignment_health, get_onion_report]}
+  - id: q16
+    category: health
+    question: "Is there any onion / double-surface artifact on the wall?"
+    check: {type: health_bimodal, tools: [get_onion_report, get_alignment_health]}
+  - id: q17
+    category: health
+    question: "How reliable is the reconstruction of the door — any registration issues?"
+    check: {type: tool_called, tools: [get_alignment_health, get_onion_report, get_instance_history]}
+  - id: q18
+    category: health
+    question: "In which windows was the floor observed and what were its residuals?"
+    check: {type: tool_called, tools: [get_instance_history]}
+
+  # ── insufficient-data traps (5) — correct answer is 'insufficient' ─
+  - id: q19
+    category: trap
+    question: "What is the surface temperature of the wall?"
+    check: {type: insufficient}
+  - id: q20
+    category: trap
+    question: "What is the distance between the floor and object number 9999?"
+    check: {type: insufficient}
+  - id: q21
+    category: trap
+    question: "How many people are currently standing in the scene?"
+    check: {type: insufficient}
+  - id: q22
+    category: trap
+    question: "What is the compressive strength of the concrete in the floor?"
+    check: {type: insufficient}
+  - id: q23
+    category: trap
+    question: "What will this room be used for after construction?"
+    check: {type: insufficient}
+
+  # ── mixed / chained ───────────────────────────────────────────────
+  - id: q24
+    category: measurement
+    question: "Which object is the largest by bounding-box volume?"
+    check: {type: tool_called, tools: [get_object_volume, list_objects]}
+    cloudcompare_pending: true
+  - id: q25
+    category: count
+    question: "Are there more walls or more doors?"
+    check: {type: tool_called, tools: [count_objects, list_objects]}
+  - id: q26
+    category: measurement
+    question: "What is the height of the door in metres?"
+    check: {type: measured, tools: [get_object_size]}
+    cloudcompare_pending: true
+  - id: q27
+    category: findings
+    question: "Is there any moisture damage reported in the scene?"
+    check: {type: findings_present}
+  - id: q28
+    category: health
+    question: "Give me the onion separation for the floor in metres."
+    check: {type: health_bimodal, tools: [get_onion_report, get_alignment_health]}
