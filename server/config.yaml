@@ -12,6 +12,7 @@
 #   workers/cloudcompy_worker.py  → postprocessing
 #   workers/instance_cleaner_*.py → instance_cleaning
 #   workers/vlm_worker.py         → scene_analysis
+#   semantic/* (client+launcher)  → semantic  (Phase 0 shared VLM service)
 #   alignment_manager.py          → alignment.auto_leveling
 #   frame_selector.py             → frame_selection
 #   frames/storage.py             → storage, reconstruction.<backend>.{chunk_size,
@@ -94,6 +95,68 @@ scene_analysis:
     - { label: "floor" }
     - { label: "wall" }
     - { label: "ceiling" }
+
+
+# ── Semantic Service (Phase 0) ─────────────────────────────────────
+# The single persistent VLM endpoint (vLLM serving Qwen3-VL) shared by every
+# downstream consumer (Phases 1-6). Runs in its OWN conda env `semantic`;
+# reached only through the semantic_client HTTP client (server/semantic/).
+# Consumed by: server/semantic/* (launcher + client). Launch:
+#   bash scripts/serve_semantic.sh [backend]
+semantic:
+  enabled: true
+
+  service:
+    host: "127.0.0.1"
+    port: 8799                 # OpenAI-compatible endpoint: http://127.0.0.1:8799/v1
+    api_key: "EMPTY"           # vLLM ignores it; the OpenAI wire format needs a value
+    startup_timeout_s: 900     # weights load can be slow off the network volume
+    request_timeout_s: 600
+
+  default_backend: "qwen_local"
+
+  # One vLLM process serves ONE model at a time. The comparison suite (Phase 7)
+  # serves each backend in turn. gpu_memory_utilization is the TOTAL fraction of
+  # the 48 GB A6000 vLLM may use (weights + KV cache), chosen to coexist with
+  # the reconstruction pipeline — start ~0.35 and adjust by MEASURING (spec).
+  backends:
+    qwen_local:                          # baseline — exact variant R3D uses
+      model_id: "Qwen/Qwen3-VL-8B-Instruct"
+      served_model_name: "qwen_local"
+      weights_path: "weights/qwen3vl/8b-instruct"
+      # MEASURED (A6000 48 GB): 8B bf16 weights ≈16 GiB. At util 0.45 only
+      # 2.33 GiB KV remained (max len ≈16.9k) — the spec's 0.35 start is
+      # infeasible for the 8B. 0.50 (≈24 GiB) is the working floor for a 24k
+      # context and leaves ~24 GiB for the reconstruction pipeline.
+      gpu_memory_utilization: 0.50
+      max_model_len: 24576
+      max_images_per_prompt: 8
+      dtype: "bfloat16"                  # A6000 sm_86 native bf16
+      tool_call_parser: "hermes"         # Qwen3 native tool-calling (vLLM rec.)
+      reasoning: false                   # -Instruct is non-thinking
+      extra_serve_args: []
+
+    qwen_local_large:                    # candidate — larger quantized (Phase 7)
+      model_id: "Qwen/Qwen3-VL-32B-Instruct-FP8"
+      served_model_name: "qwen_local_large"
+      weights_path: "weights/qwen3vl/32b-instruct-fp8"
+      gpu_memory_utilization: 0.80
+      max_model_len: 24576
+      max_images_per_prompt: 6
+      tool_call_parser: "hermes"
+      reasoning: false
+      extra_serve_args: []
+
+  generation:
+    temperature: 0.0            # deterministic — measurements must be repeatable
+    max_tokens: 2048
+
+  tool_calling:
+    max_iterations: 8           # bound the Q&A tool loop (Phase 5)
+
+  logging:
+    enabled: true
+    jsonl_path: "logs/semantic_calls.jsonl"   # every call: consumer/prompt/imgs/response/latency
 
 
 # ── Frame Selection params (mode is reconstruction.frames_selector) ─

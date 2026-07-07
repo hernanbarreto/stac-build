@@ -161,3 +161,6 @@ vendor/meshflow/
 vendor/sam31/
 # Retired-module safety net (env ymls + weights pending final deletion)
 archive/
+
+# R3D (cloned by setup; env `r3d`) — spatial reasoning reuse (Phases R & 5)
+vendor/r3d/
