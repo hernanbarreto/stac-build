@@ -98,6 +98,25 @@ scene_analysis:
     - { label: "ceiling" }
 
 
+# ── Phase R — semantic anchoring (instance-aware pose/depth refinement) ─
+# Inserts between windowed reconstruction and final fusion. Builds the canonical
+# instance store from masklets + poses + depth, computes vote/onion health
+# metrics, estimates gravity, runs the inter-window Sim(3) pose graph, and gates
+# the result with a fail-safe A/B vs the no-anchor baseline. Consumed by
+# server/phase_r/*.
+phase_r:
+  mask_erosion_px: 8                  # R.2 aggressive erosion (DA3 depth, not sensor)
+  depth_stride: 4
+  knn_k: 6
+  min_points: 30
+  max_depth_m: null                   # optional depth clip (metres)
+  max_refine_iterations: 2            # R.4 refinement loop cap
+  floor_labels: ["floor", "slab", "platform", "ground"]   # R.4 gravity source
+  depth_reg_whitelist: ["wall", "slab", "column", "vault", "platform", "floor"]  # R.5
+  # dynamic classes (R.7) excluded from pose & fusion come from the vocabulary
+  # dynamic flags + {train, person, equipment, vehicle, tram}
+
+
 # ── Auto-prompter (Phase 1) — Qwen3-VL grounded detection -> SAM3 ───
 # Replaces manual SAM3 prompting as the DEFAULT: detect boxes+labels with
 # Qwen3-VL, associate the same object across keyframes by BA-pose geometry, and
