@@ -1,0 +1,39 @@
+# STAC-Builder — Auto-prompter construction vocabulary (Phase 1)
+#
+# Open-vocabulary class list for Qwen3-VL grounded detection. Canonical labels
+# are ENGLISH (project rule); the Spanish domain term is kept as an alias and
+# the `phrase` is the richer grounding cue handed to the VLM. Domain = railway /
+# tunnel / station construction supervision.
+#
+# Per-class fields:
+#   label      : canonical id (English, lowercase) — becomes the SAM3 label
+#   es         : Spanish domain term (documentation / bilingual reports)
+#   phrase     : grounding phrase given to the VLM detector (open-vocab cue)
+#   structural : true → eligible for surface_fitting primitives + R.5 depth
+#                regularization whitelist (wall/slab/column/vault/platform/floor)
+#   dynamic    : true → excluded from pose estimation & fusion (R.7 dynamic mask)
+#   small      : true → hard for the 8B (thin/small); flagged in the Phase 1 eval
+#   min_confidence : optional per-class override of the global threshold
+#
+# Consumed by server/segmentation/autoprompt/detector.py. Editable without code
+# changes — add/remove classes freely.
+
+version: 1
+
+classes:
+  - { label: column,      es: columna,           phrase: "structural column or pillar",                    structural: true }
+  - { label: wall,        es: muro,              phrase: "wall surface",                                   structural: true }
+  - { label: vault,       es: bóveda,            phrase: "vaulted ceiling or arch",                        structural: true }
+  - { label: floor,       es: piso,              phrase: "floor or ground surface",                        structural: true }
+  - { label: platform,    es: andén,             phrase: "station platform edge",                          structural: true }
+  - { label: track,       es: vía,               phrase: "railway track rails",                            small: true }
+  - { label: sleeper,     es: durmiente,         phrase: "railway sleeper or tie",                         small: true }
+  - { label: catenary,    es: catenaria,         phrase: "overhead catenary contact wire",                 small: true, min_confidence: 0.25 }
+  - { label: sign,        es: señal,             phrase: "railway or safety sign",                         small: true, min_confidence: 0.25 }
+  - { label: luminaire,   es: luminaria,         phrase: "light fixture or luminaire" }
+  - { label: pipe,        es: tubería,           phrase: "pipe or conduit" }
+  - { label: cable_tray,  es: bandeja de cables, phrase: "cable tray or cable ladder" }
+  - { label: door,        es: puerta,            phrase: "door or gate" }
+  - { label: equipment,   es: equipo,            phrase: "machinery or equipment",                         dynamic: true }
+  - { label: scaffold,    es: andamio,           phrase: "scaffolding structure" }
+  - { label: person,      es: persona,           phrase: "person or worker",                               dynamic: true }

@@ -13,6 +13,7 @@
 #   workers/instance_cleaner_*.py → instance_cleaning
 #   workers/vlm_worker.py         → scene_analysis
 #   semantic/* (client+launcher)  → semantic  (Phase 0 shared VLM service)
+#   segmentation/autoprompt/*     → autoprompt (Phase 1 SAM3 auto-prompter)
 #   alignment_manager.py          → alignment.auto_leveling
 #   frame_selector.py             → frame_selection
 #   frames/storage.py             → storage, reconstruction.<backend>.{chunk_size,
@@ -95,6 +96,23 @@ scene_analysis:
     - { label: "floor" }
     - { label: "wall" }
     - { label: "ceiling" }
+
+
+# ── Auto-prompter (Phase 1) — Qwen3-VL grounded detection -> SAM3 ───
+# Replaces manual SAM3 prompting as the DEFAULT: detect boxes+labels with
+# Qwen3-VL, associate the same object across keyframes by BA-pose geometry, and
+# pre-populate a segmentation session for human review. Its batch CLI is the
+# masklet producer for Phase R. Consumed by segmentation/autoprompt/* and
+# (as the default inventory path) workers/vlm_worker.py.
+autoprompt:
+  enabled: true                       # default path; false -> InternVL3 fallback
+  backend: "qwen_local"               # semantic-service backend
+  vocabulary_path: null               # null -> segmentation/autoprompt/vocabulary.yaml
+  confidence_threshold: 0.5           # below (per-class overridable) -> review queue
+  association_iou_threshold: 0.25     # reprojected-box IoU to link across keyframes
+  use_depth: true                     # use DA3/VGGT per-frame depth if present
+  assumed_depth_m: 5.0                # fallback lift depth when none available
+  max_keyframes: 0                    # 0 = all selected keyframes
 
 
 # ── Semantic Service (Phase 0) ─────────────────────────────────────

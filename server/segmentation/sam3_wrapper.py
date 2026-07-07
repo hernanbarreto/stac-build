@@ -901,6 +901,75 @@ class SAM3Wrapper:
             traceback.print_exc()
             return {"success": False, "error": str(e)}
 
+    def add_box_prompt(
+        self,
+        state_id: str,
+        frame_idx: int,
+        boxes_xywh: "list",
+        obj_id: int = 1,
+    ) -> dict:
+        """
+        Add BOX prompt(s) to a frame in an interactive session (Phase 1
+        auto-prompter). Boxes drive SAM3's detector pathway.
+
+        SAM3 box convention (vendor/sam31 .../sam3_video_inference.py:881-891):
+            boxes are [xmin, ymin, width, height] in NORMALIZED 0..1 coords.
+            A box that is a semantic prompt RESETS prior session state, so pass
+            ALL boxes for this frame in one call; box and point prompts are
+            mutually exclusive per call.
+
+        Args:
+            state_id: Session ID from init_interactive_session
+            frame_idx: Frame index to add the prompt to
+            boxes_xywh: list of [x, y, w, h], each normalized to 0..1
+            obj_id: Object ID (single-object convenience; multi-box seeding uses
+                    the batch/detector pathway to assign ids)
+
+        Returns:
+            Dict with 'success' and optionally 'mask' ([H, W] numpy).
+        """
+        if not self.is_loaded or self.predictor is None:
+            raise RuntimeError("SAM3 model not loaded")
+
+        boxes = [[float(c) for c in b] for b in boxes_xywh]
+        labels = [1] * len(boxes)  # 1 = foreground (0 short-circuits as no prompt)
+        try:
+            logger.info(
+                f"[SAM3-Interactive] Box prompt on frame {frame_idx}: "
+                f"{len(boxes)} box(es), obj_id={obj_id}"
+            )
+            with self.lock:
+                response = self.predictor.handle_request(
+                    request=dict(
+                        type="add_prompt",
+                        session_id=state_id,
+                        frame_index=frame_idx,
+                        obj_id=obj_id,
+                        bounding_boxes=boxes,
+                        bounding_box_labels=labels,
+                    )
+                )
+
+            result = {"success": True}
+            if response and "outputs" in response:
+                outputs = response["outputs"]
+                if "out_binary_masks" in outputs:
+                    mask = outputs["out_binary_masks"]
+                    if hasattr(mask, "cpu"):
+                        mask = mask.cpu().numpy()
+                    if mask.ndim == 3:
+                        mask = np.max(mask, axis=0)
+                    result["mask"] = mask
+                if "out_obj_ids" in outputs:
+                    oids = outputs["out_obj_ids"]
+                    result["obj_ids"] = oids.cpu().numpy().tolist() if hasattr(oids, "cpu") else list(oids)
+            return result
+        except Exception as e:
+            logger.error(f"[SAM3-Interactive] Box prompt failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": str(e)}
+
     def propagate_interactive_session(self, state_id: str) -> Dict[int, Any]:
         """
         Propagate the interactive prompts across the whole video.
