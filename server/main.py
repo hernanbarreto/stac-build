@@ -1073,6 +1073,10 @@ app.include_router(auth_router)
 from auth.routes_team import router as team_router
 app.include_router(team_router)
 
+# Mount Phase 5 spatial Q&A route (POST /api/spatial_qa)
+from phase5_qa.api import router as spatial_qa_router
+app.include_router(spatial_qa_router)
+
 @app.get("/")
 async def root():
     return HTMLResponse('<html><head><meta http-equiv="refresh" content="0;url=/static/viewer.html"></head></html>')
