@@ -5,6 +5,33 @@
 
 ---
 
+## ✅ Semantic Intelligence Layer — Qwen3-VL (Delivered)
+
+A persistent Qwen3-VL layer over the reconstruction pipeline, under one rule:
+**the VLM proposes/describes/classifies/orchestrates; it never measures** — every
+metric is a deterministic tool over geometry, tagged `vlm_proposed` /
+`tool_measured` / `human_validated`. Implemented, tested, and integrated
+end-to-end (see `docs/phase0_report.md` … `docs/phase7_report.md`).
+
+- [x] **Phase 0** — persistent vLLM/Qwen3-VL semantic service (`semantic` env, `127.0.0.1:8799`)
+- [x] **Phase 1** — understanding-driven, open-vocabulary auto-prompter → SAM3
+- [x] **Phase R** — instance store, gravity, vote/onion metrics, inter-window Sim(3) pose graph, depth regularization, A/B fail-safe, **writeback into the TSDF fusion**
+- [x] **Phase 5** — spatial Q&A tools + user-defined evaluation volumes + orchestrator (`/api/spatial_qa`, `/api/scene/*`)
+- [x] **Phase 2** — per-instance class / material / state, conflict flags, structural routing
+- [x] **Phase 3** — 3D-anchored visual findings (cracks/moisture/…), multi-view dedup, honest precision eval
+- [x] **Phase 4** — capture QC pre-filter + coverage recapture checklist (never deletes frames)
+- [x] **Phase 6** — bilingual ES/FR supervision report, fully traceable
+- [x] **Phase 7** — 28-question validation suite, GPU coexistence, Pitch-2 demo
+- [x] **Immersive AI Assistant UI** — chat that replays each answer as animated 3D measurements; evaluation-volume placement
+
+**Open (external data / human only — code + tests complete):**
+- [ ] `qwen_local_large` run (needs the larger quantized weights + a service restart)
+- [ ] Phase 1 per-class recall/precision (needs hand-segmented ground truth)
+- [ ] Phase R full 160 m corridor A/B + real multi-window pose writeback (needs a multi-window scan)
+- [ ] Phase 3 full ~50-crop precision + Phase 4 false-discard rate (need human labels)
+
+---
+
 ## ✅ Tier 0: Core Platform (Done)
 
 Everything here is implemented and working.

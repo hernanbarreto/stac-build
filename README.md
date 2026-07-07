@@ -194,6 +194,60 @@ filler poses (`filler_poses.npz`, used over SLERP) → **cloud and mesh are dens
 
 ---
 
+## Semantic Intelligence Layer (Phases 0–7)
+
+A persistent **Qwen3-VL** vision-language layer sits on top of the reconstruction
+pipeline, turning the point cloud into a **queryable, supervised, reportable**
+scene. It is governed by one inviolable rule:
+
+> **The VLM proposes, describes, detects, classifies and orchestrates.
+> It NEVER measures.** Every metric comes from deterministic tools over geometry
+> / `surface_fitting`. Every output is tagged `vlm_proposed`, `tool_measured`, or
+> `human_validated`.
+
+| Phase | Path | Purpose | Status |
+|-------|------|---------|--------|
+| **0 · Semantic Service** | `server/semantic/` | Persistent vLLM 0.19 serving Qwen3-VL-8B on `127.0.0.1:8799`, own `semantic` env; all consumers reach it through `semantic_client` | ✅ |
+| **1 · Auto-prompter** | `server/segmentation/autoprompt/` | Understanding-driven, **open-vocabulary** detection → SAM3 box prompts. Segments *everything*; the construction vocabulary is a canonicalization overlay, never a filter | ✅ |
+| **R · Pose/Depth refinement** | `server/phase_r/` | Canonical R.8 instance store, gravity-aligned OBBs, vote-entropy + onion (double-surface) metrics, inter-window Sim(3) pose graph, depth regularization, A/B fail-safe, and **writeback** of refined poses/depth into the TSDF fusion | ✅ |
+| **5 · Spatial Q&A** | `server/phase5_qa/` | Deterministic `SpatialTools` (distance, clearance, plumb, level, volume, findings, alignment health…) + user-defined **evaluation volumes**, driven by a tool-calling orchestrator | ✅ |
+| **2 · Classification** | `server/phase2_classify/` | Per-instance class / material / state, label-conflict flags, structural→`surface_fitting` routing | ✅ |
+| **3 · Findings** | `server/phase3_findings/` | Cracks / moisture / spalling / corrosion detection, **3D-anchored** via the R-refined pose, multi-view deduped, residual-correlated; honest precision eval | ✅ |
+| **4 · Capture QC** | `server/phase4_qc/` | Ingestion pre-filter (cheap Laplacian blur + exposure; VLM only on the ambiguous band) + post-reconstruction coverage → recapture checklist. Never deletes frames | ✅ |
+| **6 · Report** | `server/phase6_report/` | Bilingual **ES/FR** supervision-report draft; every number carries a `tool(args)+timestamp` trace; VLM text flagged *pending validation* | ✅ |
+| **7 · Validation** | `server/phase7_validation/` | 28-question spatial-Q&A suite (incl. insufficient-data traps), GPU coexistence probe, reproducible Pitch-2 demo | ✅ |
+
+Each phase ships a CLI, unit tests, and a `docs/phaseN_report.md`. The only open
+items are **external data / human** dependencies (hand-segmented GT, a
+multi-window corridor scan, larger annotated sets).
+
+**Run the semantic service** (own env, isolated from the reconstruction envs):
+
+```bash
+bash scripts/build_semantic_env.sh     # one-time, on a fresh box
+bash setup_weights.sh semantic         # download Qwen3-VL-8B
+bash scripts/serve_semantic.sh         # → 127.0.0.1:8799
+```
+
+### Immersive AI Assistant (in the viewer)
+
+The 3D viewer includes an **AI Assistant** panel (cyan ✨ in the activity bar):
+ask a question in natural language and the answer is measured by the Phase-5
+tools and **replayed as animated three.js geometry** — you literally see *how*
+each distance, volume, plumb angle or clearance was measured. Drop **evaluation
+volumes** into the scene to assess spaces (occupancy, free m³, "does this fit?").
+The chat is backed by `POST /api/spatial_qa`; geometry by `POST /api/scene/*`.
+
+### Reproducible end-to-end demo
+
+```bash
+scripts/demo_pitch2.sh <session_dir> scene.db out_dir
+# segment → Phase R store → classify → findings → coverage
+# → 8 spatial questions answered WITH traces → bilingual report draft
+```
+
+---
+
 ## Architecture
 
 ```

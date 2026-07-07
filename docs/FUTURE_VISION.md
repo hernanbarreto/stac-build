@@ -24,6 +24,24 @@ The core principle: **every claim, certificate, and payment is backed by verifia
 
 ---
 
+## The Semantic Intelligence Layer — from geometry to understanding
+
+> **Status:** Delivered (Phases 0–7). This is no longer aspirational — it ships today and is the foundation every module above now builds on. See `README.md` → *Semantic Intelligence Layer* and `docs/ROADMAP.md`.
+
+The reconstruction gives us *where* things are. The semantic layer gives us *what* they are, *whether they are right*, and lets a human simply **ask**. A local Qwen3-VL vision-language model comprehends each scene with **no domain assumption** and segments **everything**; a construction vocabulary is layered on top only to canonicalize and route — never to filter what the model is allowed to see. This is what turns a point cloud into an auditable asset record.
+
+Three shifts define the product from here forward:
+
+- **Agentic supervision, not manual inspection.** The VLM proposes, describes, detects, and classifies findings across the scene; deterministic geometry tools then *measure* them. The two roles never blur — this is the inviolable **provenance rule**: the model never produces a number. Every value in a deliverable is tagged `vlm_proposed`, `tool_measured`, or `human_validated`, so a certificate can be traced, line by line, back to the pixel and the plane it came from. That traceability is exactly what a blockchain-sealed public-works audit trail (Layer 3) needs underneath it.
+
+- **Natural-language site queries.** Instead of navigating a viewport and reading gizmos, a supervisor asks *"how wide is this opening?"*, *"is the floor level?"*, *"does a 1.2 m pallet fit against that wall?"* — and the assistant answers by **calling real measurement tools** (angle, distance, clearance, plane residual, volume occupancy), then **animates the three.js scene to show exactly how it measured**. The answer is never a guess; it is a replayable, tool-backed trace the user can watch and trust.
+
+- **User-defined evaluation volumes.** Beyond measuring what exists, the user can insert arbitrary volumes into the reconstruction to evaluate space that *doesn't* exist yet — free clearance, occupancy, "will this equipment fit," empty-box search — turning the scan into a planning surface for logistics, installation sequencing, and safety envelopes.
+
+Together these make the platform's upper layers *answerable*: a contract clause, a QSE non-conformance, or a payment milestone can each be posed as a question, measured deterministically, and sealed with its full provenance. The semantic layer is the bridge from **"we scanned it"** to **"we can prove it, and you can ask it anything."**
+
+---
+
 ## Platform Architecture: 3 Layers
 
 The platform is organized into three interdependent layers, where each upper layer draws its authority from the layer below:
