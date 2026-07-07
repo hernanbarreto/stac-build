@@ -190,3 +190,32 @@ def signed_distances_along_axis(points: np.ndarray, T: np.ndarray, axis: int = 2
     short/depth axis, index 2) — the 1-D distribution the onion detector uses."""
     local = obb_local_coords(points, T)
     return local[:, axis]
+
+
+def unproject_pixel_to_world(
+    u: float, v: float, depth: np.ndarray, K: np.ndarray, c2w: np.ndarray,
+    win: int = 3, max_depth: float | None = None,
+) -> np.ndarray | None:
+    """Back-project a single pixel (u,v, in the depth image's resolution) to a
+    world point using a small median depth window for robustness. Returns None
+    if no valid depth is available under the window. Used by Phase 3 to anchor a
+    2D finding to a 3D coordinate via the R-refined pose (same math as the mask
+    lift, one pixel)."""
+    h, w = depth.shape[:2]
+    ui, vi = int(round(u)), int(round(v))
+    if not (0 <= ui < w and 0 <= vi < h):
+        return None
+    u0, u1 = max(0, ui - win), min(w, ui + win + 1)
+    v0, v1 = max(0, vi - win), min(h, vi + win + 1)
+    patch = depth[v0:v1, u0:u1].astype(np.float64)
+    valid = (patch > 0) & np.isfinite(patch)
+    if max_depth is not None:
+        valid &= patch < max_depth
+    if not np.any(valid):
+        return None
+    d = float(np.median(patch[valid]))
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    x = (ui - cx) / fx * d
+    y = (vi - cy) / fy * d
+    p_cam = np.array([x, y, d, 1.0])
+    return (c2w @ p_cam)[:3]

@@ -117,6 +117,26 @@ phase_r:
   # dynamic flags + {train, person, equipment, vehicle, tram}
 
 
+# ── Findings (Phase 3) — 3D-anchored visual inspection ─────────────
+# Over sampled keyframes Qwen3-VL reports ONLY clearly visible defects (strict
+# JSON). Each 2D detection is anchored to 3D through the R-refined pose, the
+# owning R.8 instance is resolved by mask coverage, multi-view duplicates are
+# merged by type + 3D proximity, and a LOCALIZED point-to-cloud residual (proxy
+# for a surface_fitting residual map) raises severity where the surface is
+# actually rough. VLM proposes/describes, never measures; every finding is born
+# "proposed" and needs human validation. Consumed by phase3_findings/*.
+phase3:
+  enabled: true
+  backend: "qwen_local"
+  sample_stride: 1                    # keyframe subsampling (over frames with instances)
+  max_frames: 60                      # cap on inspected keyframes (cost)
+  min_confidence: 0.35                # drop low-confidence detections
+  cluster_radius_m: 0.30              # multi-view dedup + on-cloud gate (metres)
+  residual_k: 12                      # neighbours for the local plane-residual proxy
+  residual_thresh_m: 0.02             # residual above this -> correlate + bump severity
+  max_depth_m: null                   # optional depth clip for anchoring
+
+
 # ── Auto-prompter (Phase 1) — Qwen3-VL grounded detection -> SAM3 ───
 # Replaces manual SAM3 prompting as the DEFAULT: detect boxes+labels with
 # Qwen3-VL, associate the same object across keyframes by BA-pose geometry, and
