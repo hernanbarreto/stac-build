@@ -137,6 +137,32 @@ phase3:
   max_depth_m: null                   # optional depth clip for anchoring
 
 
+# ── Capture QC (Phase 4) — ingestion pre-filter + coverage report ──
+# 4A runs BEFORE DA3/VGGT: cheap classical metrics on every sampled frame
+# (Laplacian-variance blur + exposure); the VLM is invoked ONLY on the ambiguous
+# band (borderline blur / suspicious exposure) to judge blur, occlusion by
+# people/equipment, exposure and usefulness. Frames are NEVER deleted — a
+# manifest + drop-log record which and why. 4B runs AFTER reconstruction: finds
+# under-sampled zones in the pooled cloud, recovers the frames that view each,
+# and emits a natural-language recapture checklist. Consumed by phase4_qc/*.
+phase4:
+  enabled: true                       # disableable; when off, no frame is filtered
+  sample_stride: 1                    # frame subsampling for the pre-filter
+  escalate_to_vlm: true               # false -> classical only, ambiguous kept+flagged
+  blur_keep_above: 120.0              # Laplacian variance: clearly sharp -> keep (no VLM)
+  blur_drop_below: 25.0               # clearly blurred -> drop (no VLM, logged)
+  brightness_lo: 40.0                 # mean-luma acceptable band (0..255)
+  brightness_hi: 220.0
+  clip_frac_max: 0.25                 # max fraction of clipped pixels before escalation
+  # 4B coverage
+  voxel_size_m: 0.10                  # density voxel grid
+  low_density_pct: 20.0               # bottom-percentile component size = under-sampled
+  min_zone_points: 20                 # floor: discard single-stray-point noise
+  max_zone_fraction: 0.5              # a component above this share is the main body
+  max_zones: 12
+  describe: true                      # VLM phrases the recapture instruction per zone
+
+
 # ── Auto-prompter (Phase 1) — Qwen3-VL grounded detection -> SAM3 ───
 # Replaces manual SAM3 prompting as the DEFAULT: detect boxes+labels with
 # Qwen3-VL, associate the same object across keyframes by BA-pose geometry, and
