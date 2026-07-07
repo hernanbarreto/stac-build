@@ -49,24 +49,67 @@ def detect_onion(points: np.ndarray, obb_transform: np.ndarray, obb_aabb: np.nda
         return OnionResult(False, 0.0, 0.0, (0.0, 0.0), n)
 
     axis = _obb_normal_axis(obb_aabb)
-    x = signed_distances_along_axis(points, obb_transform, axis=axis).reshape(-1, 1)
+    x = signed_distances_along_axis(points, obb_transform, axis=axis).astype(np.float64)
 
-    from sklearn.mixture import GaussianMixture
-
-    try:
-        g1 = GaussianMixture(n_components=1, covariance_type="full",
-                             random_state=0).fit(x)
-        g2 = GaussianMixture(n_components=2, covariance_type="full",
-                             random_state=0, n_init=2).fit(x)
-    except Exception:
+    # 1- vs 2-component GMM by BIC, numpy-only (no sklearn dependency — the
+    # onion metric must run in any deployment env; this is a 1-D EM).
+    fit = _gmm2_em(x)
+    if fit is None:
         return OnionResult(False, 0.0, 0.0, (0.0, 0.0), n)
-
-    bic1, bic2 = g1.bic(x), g2.bic(x)
-    means = g2.means_.ravel()
+    bic1, bic2, means, weights = fit
     sep = float(abs(means[0] - means[1]))
-    weights = tuple(float(w) for w in g2.weights_.ravel())
     # require both modes to carry meaningful mass, not a tiny outlier cluster
     balanced = min(weights) > 0.1
     bimodal = bool(bic2 < bic1 and sep > min_separation_m and balanced)
     return OnionResult(bimodal, sep if bimodal else 0.0, float(bic1 - bic2),
-                       weights, n)
+                       (float(weights[0]), float(weights[1])), n)
+
+
+def _gauss_logpdf(x: np.ndarray, mu: float, var: float) -> np.ndarray:
+    var = max(var, 1e-9)
+    return -0.5 * (np.log(2 * np.pi * var) + (x - mu) ** 2 / var)
+
+
+def _bic(loglik: float, k_params: int, n: int) -> float:
+    return -2.0 * loglik + k_params * np.log(max(n, 1))
+
+
+def _gmm2_em(x: np.ndarray, iters: int = 100, tol: float = 1e-6):
+    """Fit 1- and 2-component 1-D Gaussian mixtures by EM; return
+    (bic1, bic2, means2, weights2) or None. Pure numpy."""
+    n = len(x)
+    mu0, var0 = float(x.mean()), float(x.var())
+    if var0 < 1e-12:
+        return None
+    ll1 = float(_gauss_logpdf(x, mu0, var0).sum())
+    bic1 = _bic(ll1, 2, n)  # mean + var
+
+    # init 2 components at the ±1σ quantiles
+    lo, hi = np.percentile(x, [25, 75])
+    mu = np.array([lo, hi], float)
+    if mu[0] == mu[1]:
+        mu = np.array([mu0 - np.sqrt(var0), mu0 + np.sqrt(var0)])
+    var = np.array([var0, var0], float)
+    w = np.array([0.5, 0.5], float)
+
+    prev_ll = -np.inf
+    for _ in range(iters):
+        # E-step: responsibilities (log-space for stability)
+        logr = np.stack([np.log(w[k] + 1e-12) + _gauss_logpdf(x, mu[k], var[k])
+                         for k in range(2)], axis=1)
+        m = logr.max(axis=1, keepdims=True)
+        logsum = m[:, 0] + np.log(np.exp(logr - m).sum(axis=1))
+        ll = float(logsum.sum())
+        r = np.exp(logr - logsum[:, None])
+        # M-step
+        nk = r.sum(axis=0) + 1e-12
+        w = nk / n
+        mu = (r * x[:, None]).sum(axis=0) / nk
+        var = (r * (x[:, None] - mu[None, :]) ** 2).sum(axis=0) / nk
+        var = np.maximum(var, 1e-9)
+        if abs(ll - prev_ll) < tol:
+            break
+        prev_ll = ll
+
+    bic2 = _bic(ll, 5, n)  # 2 means + 2 vars + 1 weight
+    return bic1, bic2, mu, w

@@ -42,6 +42,7 @@ class PhaseRReport:
     onion_separation_median_m: float = 0.0
     failsafe: dict = field(default_factory=dict)
     used_anchoring: bool = True
+    writeback: dict = field(default_factory=dict)
 
     def summary(self) -> str:
         return (f"instances={self.n_instances} windows={self.n_windows} "
@@ -138,6 +139,7 @@ class PhaseRPipeline:
         # R.4 inter-window pose graph (loop, <= max_iterations)
         windows, edges = self._build_pose_graph(store)
         report.n_windows = len(windows)
+        corr = None
         if edges:
             for _it in range(self.max_iterations):
                 corr, stats = optimize_window_graph(len(windows), edges)
@@ -174,9 +176,42 @@ class PhaseRPipeline:
         else:
             report.failsafe.update({"report": "no baseline provided — anchoring kept",
                                     "refined": refined_metrics})
+        # R.4/R.5 WRITEBACK — close the loop into the fusion, gated by the A/B
+        # fail-safe: only write refined artifacts when anchoring is kept.
+        report.writeback = self._writeback(store, windows, corr, report.used_anchoring)
+
         store.set_meta("phase_r_report", report.summary())
         store.close()
         return report
+
+    # ── R.4/R.5 writeback into the fusion inputs (gated) ────────────
+    def _writeback(self, store, windows, corr, used_anchoring: bool) -> dict:
+        wb: dict = {"poses": [], "depth": None, "gated_out": False}
+        if not used_anchoring:
+            wb["gated_out"] = True   # A/B regressed → keep baseline fusion inputs
+            return wb
+        if not self.cfg.get("writeback_poses", True):
+            return wb
+        try:
+            from .writeback import compose_refined_poses, write_refined_camera_poses
+            from segmentation.session_io import _load_camera_source
+            cam = _load_camera_source(self.session_dir, self.output_dir)
+            if cam is not None and corr is not None and len(windows) > 1:
+                refined = compose_refined_poses(cam.pose_map, self.window_map, windows, corr)
+                wb["poses"] = write_refined_camera_poses(self.output_dir, refined)
+            else:
+                wb["poses_note"] = ("single window / no inter-window correction — "
+                                    "poses unchanged (identity writeback)")
+        except Exception as e:  # never let writeback break the pipeline
+            wb["poses_error"] = str(e)
+        if self.cfg.get("writeback_depth", False):
+            try:
+                from .writeback import apply_depth_regularization
+                wb["depth"] = apply_depth_regularization(
+                    self.output_dir, store, self.session_dir, self.config)
+            except Exception as e:
+                wb["depth_error"] = str(e)
+        return wb
 
     def _mean_vote_entropy(self, store: InstanceStore) -> float:
         vals = []
