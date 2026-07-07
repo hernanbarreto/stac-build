@@ -168,7 +168,8 @@ class InstanceStoreBuilder:
                 first_frame=member_frames[0], last_frame=member_frames[-1],
                 scene_type=scene_type)
             for fid in member_frames:
-                store.add_masklet_ref(iid, fid, frames[fid])
+                store.add_masklet_ref(iid, fid, frames[fid],
+                                      box_xywh=_mask_bbox_xywh(npz[frames[fid]]))
 
             if is_dynamic or not pooled:
                 continue
@@ -194,6 +195,15 @@ class InstanceStoreBuilder:
         store.set_meta("dynamic_pixel_fraction", str(stats.dynamic_pixel_fraction))
         store.close()
         return stats
+
+
+def _mask_bbox_xywh(mask) -> np.ndarray | None:
+    ys, xs = np.where(mask > 0)
+    if xs.size == 0:
+        return None
+    h, w = mask.shape[:2]
+    x1, y1, x2, y2 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+    return np.array([x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h], np.float32)
 
 
 def _frame_size(frames_dir: Path, fid: int, mask_shape) -> tuple[int, int]:

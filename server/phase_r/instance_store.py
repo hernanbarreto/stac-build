@@ -91,6 +91,32 @@ CREATE TABLE IF NOT EXISTS window_history (
     residual_applied INTEGER DEFAULT 0,
     PRIMARY KEY (instance_id, window_id)
 );
+CREATE TABLE IF NOT EXISTS instance_classification (
+    instance_id   INTEGER PRIMARY KEY,   -- Phase 2 enrichment (no new objects)
+    class_final    TEXT,
+    material       TEXT,
+    state          TEXT,
+    notes          TEXT,
+    confidence     REAL,
+    conflict       INTEGER DEFAULT 0,     -- VLM class contradicts prompt label
+    whitelist_eligible INTEGER DEFAULT 0, -- feeds R.5 whitelist for next iteration
+    origin         TEXT DEFAULT 'vlm_proposed',
+    best_frame     INTEGER
+);
+CREATE TABLE IF NOT EXISTS findings (
+    finding_id    INTEGER PRIMARY KEY AUTOINCREMENT,   -- Phase 3
+    instance_id   INTEGER,
+    type          TEXT,
+    severity      TEXT,
+    description   TEXT,
+    confidence    REAL,
+    frame_id      INTEGER,
+    box_xywh      BLOB,
+    point3d       BLOB,
+    status        TEXT DEFAULT 'proposed',
+    origin        TEXT DEFAULT 'vlm_proposed',
+    correlated_residual INTEGER DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS scene_meta (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -208,6 +234,67 @@ class InstanceStore:
             "(instance_id,seam,bimodal,separation_m,bic_delta) VALUES (?,?,?,?,?)",
             (instance_id, seam, int(bimodal), separation_m, bic_delta))
         self.conn.commit()
+
+    # ── Phase 2 classification ──────────────────────────────────────
+    def set_classification(self, instance_id: int, *, class_final: str,
+                          material: str = "", state: str = "", notes: str = "",
+                          confidence: float = 0.0, conflict: bool = False,
+                          whitelist_eligible: bool = False, best_frame: int | None = None,
+                          origin: str = "vlm_proposed") -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO instance_classification
+               (instance_id,class_final,material,state,notes,confidence,conflict,
+                whitelist_eligible,origin,best_frame)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (instance_id, class_final, material, state, notes, confidence,
+             int(conflict), int(whitelist_eligible), origin, best_frame))
+        self.conn.commit()
+
+    def get_classification(self, instance_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT class_final,material,state,notes,confidence,conflict,"
+            "whitelist_eligible,origin,best_frame FROM instance_classification WHERE instance_id=?",
+            (instance_id,)).fetchone()
+        if not row:
+            return None
+        keys = ["class_final", "material", "state", "notes", "confidence", "conflict",
+                "whitelist_eligible", "origin", "best_frame"]
+        d = dict(zip(keys, row))
+        d["conflict"] = bool(d["conflict"]); d["whitelist_eligible"] = bool(d["whitelist_eligible"])
+        return d
+
+    # ── Phase 3 findings ────────────────────────────────────────────
+    def add_finding(self, *, instance_id: int | None, type: str, severity: str,
+                   description: str, confidence: float, frame_id: int | None = None,
+                   box_xywh=None, point3d=None, correlated_residual: bool = False,
+                   status: str = "proposed", origin: str = "vlm_proposed") -> int:
+        b = _blob(np.asarray(box_xywh)) if box_xywh is not None else None
+        p = _blob(np.asarray(point3d)) if point3d is not None else None
+        cur = self.conn.execute(
+            """INSERT INTO findings
+               (instance_id,type,severity,description,confidence,frame_id,box_xywh,
+                point3d,status,origin,correlated_residual)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (instance_id, type, severity, description, confidence, frame_id, b, p,
+             status, origin, int(correlated_residual)))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_findings(self, instance_id: int | None = None) -> list[dict]:
+        q = ("SELECT finding_id,instance_id,type,severity,description,confidence,"
+             "frame_id,point3d,status,origin,correlated_residual FROM findings")
+        args: tuple = ()
+        if instance_id is not None:
+            q += " WHERE instance_id=?"; args = (instance_id,)
+        keys = ["finding_id", "instance_id", "type", "severity", "description",
+                "confidence", "frame_id", "point3d", "status", "origin", "correlated_residual"]
+        out = []
+        for r in self.conn.execute(q, args):
+            d = dict(zip(keys, r))
+            d["point3d"] = (_arr(d["point3d"], (3,)).tolist() if d["point3d"] else None)
+            d["correlated_residual"] = bool(d["correlated_residual"])
+            out.append(d)
+        return out
 
     def set_meta(self, key: str, value: str) -> None:
         self.conn.execute("INSERT OR REPLACE INTO scene_meta (key,value) VALUES (?,?)",
