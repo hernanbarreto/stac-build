@@ -21,7 +21,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MIGRATION_DIR="$REPO_DIR/docs/migration"
 
 # Envs que vamos a crear (los YAMLs ya están en docs/migration/)
-ENVS=(stac-build da3 sam3 mapanything)
+ENVS=(stac-build da3 sam3 mapanything semantic)
 
 SSH="ssh -p $POD_PORT -i $POD_KEY -o StrictHostKeyChecking=accept-new"
 SCP="scp -P $POD_PORT -i $POD_KEY -o StrictHostKeyChecking=accept-new"

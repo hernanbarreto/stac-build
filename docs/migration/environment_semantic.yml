@@ -1,0 +1,24 @@
+# STAC-Builder — Phase 0 semantic service conda env (vLLM / Qwen3-VL).
+#
+# Isolated from the reconstruction envs on purpose: vLLM 0.19 pins recent
+# torch/transformers that clash with da3 (transformers<4.48). Created by
+# scripts/setup_pod_envs.sh (env name "semantic") or standalone via
+# scripts/build_semantic_env.sh. GPU: any CUDA 12.x; RTX A6000 48 GB validated.
+#
+# Hernán Barreto - Ingerop IN3 Session IV - STAC
+name: semantic
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      # vLLM brings a compatible torch + transformers for Qwen3-VL serving.
+      - vllm==0.19.0
+      # semantic_client + launcher deps
+      - openai
+      - pydantic
+      - pillow
+      - requests
+      - pyyaml
+      - numpy
