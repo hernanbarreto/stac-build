@@ -107,7 +107,10 @@ scene_analysis:
 autoprompt:
   enabled: true                       # default path; false -> InternVL3 fallback
   backend: "qwen_local"               # semantic-service backend
+  understand: true                    # comprehend the scene first; drives detection
+  understand_sample: 8                # keyframes sampled for scene understanding
   vocabulary_path: null               # null -> segmentation/autoprompt/vocabulary.yaml
+                                      # (canonicalization/routing overlay, NOT a filter)
   confidence_threshold: 0.5           # below (per-class overridable) -> review queue
   association_iou_threshold: 0.25     # reprojected-box IoU to link across keyframes
   use_depth: true                     # use DA3/VGGT per-frame depth if present

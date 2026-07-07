@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -61,7 +62,7 @@ class Vocabulary:
         return default
 
     def resolve_label(self, raw: str) -> str | None:
-        """Map a VLM-returned string to a canonical label (exact, alias, or
+        """Map a VLM-returned string to a canonical KNOWN label (exact, alias, or
         substring), else None. Keeps detection robust to label drift."""
         if not raw:
             return None
@@ -76,6 +77,36 @@ class Vocabulary:
             if c.label in s or (c.es and c.es.lower().replace(" ", "_") in s):
                 return c.label
         return None
+
+    @staticmethod
+    def sanitize_label(raw: str) -> str:
+        """Normalize a free-form (unknown) label to a compact id-like string."""
+        s = raw.strip().lower()
+        s = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
+        return s[:40] or "object"
+
+    def canonicalize(self, raw: str) -> tuple[str | None, bool]:
+        """Return (label, known). Known obra classes are canonicalized and
+        inherit metadata (structural/dynamic/small/thresholds); unknown labels
+        are sanitized and KEPT (we segment everything — the vocabulary is a
+        priority/canonicalization overlay, NOT a filter). Returns (None, False)
+        only for empty/garbage strings."""
+        known = self.resolve_label(raw)
+        if known is not None:
+            return known, True
+        s = self.sanitize_label(raw)
+        if not s or s == "object" and not raw.strip():
+            return None, False
+        return s, False
+
+    def metadata_for(self, label: str) -> VocabClass:
+        """VocabClass for a label; a safe default for unknown labels (non-
+        structural, non-dynamic, unknown-size) so downstream rules stay
+        conservative on things we didn't pre-register."""
+        c = self._by_label.get(label)
+        if c is not None:
+            return c
+        return VocabClass(label=label)
 
 
 def load_vocabulary(path: str | Path | None = None) -> Vocabulary:

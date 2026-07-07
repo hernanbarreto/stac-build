@@ -1,9 +1,27 @@
 # Phase 1 — SAM3 Auto-prompter: Report
 
-**Status: core built and validated on real BA geometry.** Qwen3-VL grounded
-detection + geometric temporal association pre-populate a segmentation session
-for human review, and a headless batch CLI produces the masklet contract for
-Phase R. InternVL3 remains as fallback.
+**Status: core built and validated on real BA geometry.** The system first
+UNDERSTANDS the scene (what is this place / what is in it, no domain assumption),
+then does understanding-driven open-vocabulary detection + geometric temporal
+association to pre-populate a segmentation session for human review. A headless
+batch CLI produces the masklet contract for Phase R. InternVL3 remains fallback.
+
+## Design principle (revised per review)
+
+**Segment EVERYTHING, understand what you see — do not restrict to a class
+list.** The detector localizes every distinct object/surface it comprehends,
+with free-form labels. The construction vocabulary (`vocabulary.yaml`) is only a
+**canonicalization / routing overlay** (known structural/dynamic classes get a
+canonical id for surface_fitting, R.5 flatten-whitelist, R.7 dynamic masking) —
+it is **never a detection filter**. Unknown objects are kept with their VLM
+label and safe defaults. Pipeline: `scene_understanding` → understanding-driven
+`detector` (per-frame NMS dedup) → `associate` → session + review queue.
+
+> Note: scene identity is discovered, never assumed. Example (test2, told
+> nothing): understood as "train maintenance depot" — a CDMX metro train under
+> maintenance — and detected 43 open-vocab object types (train, tool cart, fire
+> extinguisher, scaffolding, electrical box, bucket, cables, plastic sheeting…),
+> none of which are in the 16-class obra vocabulary.
 
 ## What was built (`server/segmentation/autoprompt/`)
 
@@ -31,7 +49,7 @@ Phase R. InternVL3 remains as fallback.
   review overlays. `add_box_prompt` sends `bounding_boxes`+`bounding_box_labels`.
 - Every proposed label/box tagged `origin: vlm_proposed` (inviolable rule).
 
-## Validation on real data (test3 — the vault/tunnel session, 307 frames / 230 keyframes with BA poses)
+## Validation on real data (test3 — unknown-domain session; do NOT assume; 307 frames / 230 keyframes with BA poses)
 
 **Detector** (live 8B): on real keyframes it correctly detects the construction
 domain — vault, wall, floor, platform, column, pipe, luminaire, sign, door — at

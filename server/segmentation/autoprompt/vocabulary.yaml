@@ -1,8 +1,13 @@
 # STAC-Builder — Auto-prompter construction vocabulary (Phase 1)
 #
-# Open-vocabulary class list for Qwen3-VL grounded detection. Canonical labels
-# are ENGLISH (project rule); the Spanish domain term is kept as an alias and
-# the `phrase` is the richer grounding cue handed to the VLM. Domain = railway /
+# PRIORITY / CANONICALIZATION overlay — NOT a filter. The detector segments
+# EVERYTHING it sees (open set); this list only (a) gives known construction/
+# railway objects a canonical id that routes downstream tools (surface_fitting,
+# R.5 flatten-whitelist, R.7 dynamic mask), and (b) carries their metadata.
+# Anything NOT in this list is still detected and kept with its free-form label
+# (non-structural / non-dynamic / unknown-size defaults). The user filters which
+# segments matter later. Canonical labels are ENGLISH (project rule); the Spanish
+# domain term is an alias; `phrase` is the grounding cue. Domain = railway /
 # tunnel / station construction supervision.
 #
 # Per-class fields:

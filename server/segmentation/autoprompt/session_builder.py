@@ -45,12 +45,14 @@ class AutoPromptResult:
     instances_path: str
     sam3_ran: bool = False
     per_class_counts: dict[str, int] = field(default_factory=dict)
+    scene_type: str = ""
 
     def summary(self) -> str:
         return (
-            f"keyframes={self.n_keyframes} detections={self.n_detections} "
-            f"instances={self.n_instances} (accepted={self.n_accepted}, "
-            f"review={self.n_review}) classes={self.per_class_counts}"
+            f"scene='{self.scene_type}' keyframes={self.n_keyframes} "
+            f"detections={self.n_detections} instances={self.n_instances} "
+            f"(accepted={self.n_accepted}, review={self.n_review}) "
+            f"classes={self.per_class_counts}"
         )
 
 
@@ -73,6 +75,8 @@ class AutoPrompter:
         cfg = (config or {}).get("autoprompt", {}) if config else {}
         self.cfg = cfg
         self.backend_name = cfg.get("backend", backend)
+        self.understand_enabled = cfg.get("understand", True)
+        self.understand_sample = cfg.get("understand_sample", 8)
         self.confidence_threshold = cfg.get("confidence_threshold", 0.5)
         self.iou_threshold = cfg.get("association_iou_threshold", 0.25)
         self.assumed_depth_m = cfg.get("assumed_depth_m", 5.0)
@@ -153,6 +157,30 @@ class AutoPrompter:
         client = get_semantic_client(backend=self.backend_name, consumer="phase1.autoprompt")
         detector = GroundedDetector(client, self.vocab)
 
+        # ── Step 1: understand the scene (what is this? what's in it?) ──
+        understanding = None
+        targets: list[str] | None = None
+        if self.understand_enabled:
+            from .scene_understanding import understand_frame, aggregate
+            sample = kf
+            if self.understand_sample and len(kf) > self.understand_sample:
+                idx = np.linspace(0, len(kf) - 1, self.understand_sample).astype(int)
+                sample = [kf[i] for i in idx]
+            fus = []
+            for j, fn in enumerate(sample):
+                img = Image.open(self.frames_dir / fn).convert("RGB")
+                fu = understand_frame(client, img, _frame_num(fn))
+                if fu:
+                    fus.append(fu)
+                prog(2 + int(20 * (j + 1) / max(1, len(sample))), f"understanding {fn}")
+            understanding = aggregate(fus)
+            targets = understanding.objects
+            (self.output_dir).mkdir(parents=True, exist_ok=True)
+            (self.output_dir / "scene_understanding.json").write_text(
+                json.dumps(understanding.to_dict(), indent=2, ensure_ascii=False))
+            prog(22, f"scene: {understanding.scene_type} — {len(targets)} object types understood")
+
+        # ── Step 2: understanding-driven detection (segment everything) ──
         detections_by_frame: dict[int, list[Detection]] = {}
         img_wh: dict[int, tuple[int, int]] = {}
         fid_to_file: dict[int, str] = {}
@@ -162,10 +190,10 @@ class AutoPrompter:
             fid = _frame_num(fn)
             fid_to_file[fid] = fn
             img_wh[fid] = img.size
-            dets = detector.detect(img, frame_id=fid)
+            dets = detector.detect(img, frame_id=fid, targets=targets)
             detections_by_frame[fid] = dets
             n_det += len(dets)
-            prog(2 + int(60 * (i + 1) / max(1, len(kf))), f"detected {len(dets)} in {fn}")
+            prog(24 + int(40 * (i + 1) / max(1, len(kf))), f"detected {len(dets)} in {fn}")
 
         # geometric temporal association
         cam = self._load_camera()
@@ -188,6 +216,7 @@ class AutoPrompter:
         vlm_analysis = {
             "source": "qwen3vl_autoprompt",
             "backend": self.backend_name,
+            "scene_understanding": understanding.to_dict() if understanding else None,
             "prompt": prompt,
             "frame_map": frame_map,
             # extras beyond the InternVL3 contract (ignored by the SAM3 worker,
@@ -235,6 +264,7 @@ class AutoPrompter:
             vlm_analysis_path=str(vlm_path), review_queue_path=str(review_path),
             instances_path=str(inst_path), sam3_ran=sam3_ran,
             per_class_counts=per_class,
+            scene_type=understanding.scene_type if understanding else "",
         )
 
     # ── helpers ─────────────────────────────────────────────────────
