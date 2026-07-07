@@ -23,7 +23,9 @@ import {
   Building2, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
   Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
   Scale, Thermometer, Loader2, BarChart3, Home, Pencil, Camera, Plus, SlidersHorizontal,
+  Sparkles,
 } from 'lucide-react'
+import AssistantPanel from './components/AssistantPanel'
 
 interface SessionInfo {
   id: string
@@ -68,7 +70,7 @@ function App() {
   const [activeTool, setActiveTool] = useState<Tool>('navigate')
   const [connected, setConnected] = useState(false)
   const [serverAlive, setServerAlive] = useState(false)
-  const [activePanel, setActivePanel] = useState<'sessions' | 'segments' | 'bim' | 'team' | 'analysis' | null>('sessions')
+  const [activePanel, setActivePanel] = useState<'sessions' | 'segments' | 'bim' | 'team' | 'analysis' | 'assistant' | null>('sessions')
 
   const [bimModels, setBimModels] = useState<IFCLoadResult[]>([])
   const [sidebarWidth, setSidebarWidth] = useState(280)
@@ -1498,6 +1500,12 @@ function App() {
             <BarChart3 size={18} />
           </button>
         )}
+        {hasSession && (
+          <button className={`activity-btn assistant-btn ${activePanel === 'assistant' ? 'active' : ''}`}
+            onClick={() => togglePanel('assistant')} title="AI Assistant — ask & measure">
+            <Sparkles size={18} />
+          </button>
+        )}
         <div className="activity-spacer" />
         <button className={`activity-btn ${activePanel === 'team' ? 'active' : ''}`}
           onClick={() => togglePanel('team')} title="Team">
@@ -2122,6 +2130,14 @@ function App() {
             {/* Analysis Panel (Sábana) */}
             {activePanel === 'analysis' && sabanaFullMeta && activeSession && (
               <BIMAnalysisPanel meta={sabanaFullMeta} sessionId={activeSession} />
+            )}
+
+            {/* Immersive AI Assistant Panel */}
+            {activePanel === 'assistant' && (
+              <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+                <div className="panel-header"><Sparkles size={14} /> AI Assistant</div>
+                <AssistantPanel sessionId={activeSession} viewport={viewportRef} />
+              </div>
             )}
 
           </div>

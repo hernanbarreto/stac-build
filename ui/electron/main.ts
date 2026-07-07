@@ -44,8 +44,9 @@ function createWindow() {
 
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL)
-    // Open DevTools in dev mode
-    win.webContents.openDevTools({ mode: 'right' })
+    // DevTools only when explicitly requested (STAC_DEVTOOLS=1) — keep the
+    // default launch clean/professional.
+    if (process.env.STAC_DEVTOOLS) win.webContents.openDevTools({ mode: 'right' })
   } else {
     win.loadFile(path.join(RENDERER_DIST, 'index.html'))
   }

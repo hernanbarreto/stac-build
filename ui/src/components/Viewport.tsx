@@ -11,6 +11,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { PotreeOctreeLoader } from './PotreeLoader'
+import { AssistantViz, type SceneObject, type UserVolume, type TraceEntry } from './assistantViz'
 
 // Factory for the shared GLTFLoader. The TSDF/recon .glb files are compressed
 // with EXT_meshopt_compression (geometry) + WebP textures (see tools/glb/), so
@@ -92,6 +93,14 @@ export interface ViewportHandle {
     // Match the 3D camera's vertical FOV to the real camera (from intrinsics) so
     // the flythrough frames the scene exactly like the video. Restored on close.
     setCameraFov: (fovYDeg: number) => void
+    // Immersive assistant: feed scene objects (for OBB lookup), animate the
+    // geometry behind a spatial answer, and manage user-defined volumes.
+    setAssistantObjects: (objects: SceneObject[]) => void
+    visualizeMeasurement: (trace: TraceEntry[]) => void
+    clearAssistantViz: () => void
+    addUserVolume: (volume: UserVolume) => void
+    removeUserVolume: (volumeId: number) => void
+    frameBox: (min: number[], max: number[]) => void
 }
 
 // Vertex shader — matches FusionRenderer.js point size formula
@@ -374,6 +383,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         x: number; y: number; expressID: number; type: string; name: string; opacity: number
     } | null>(null)
     const camRaycasterRef = useRef(new THREE.Raycaster())
+
+    // Immersive assistant visualization (animated measurements + user volumes)
+    const assistantVizRef = useRef<AssistantViz | null>(null)
 
     // Measurement state
     const measureGroupRef = useRef<THREE.Group | null>(null)
@@ -1529,6 +1541,38 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const mesh = obbMapRef.current.get(key)
             if (mesh) mesh.visible = visible
         },
+        setAssistantObjects: (objects: SceneObject[]) => {
+            assistantVizRef.current?.setObjects(objects)
+        },
+        visualizeMeasurement: (trace: TraceEntry[]) => {
+            const box = assistantVizRef.current?.visualizeTrace(trace)
+            if (box && !box.isEmpty()) {
+                // gently frame what was drawn without yanking the user around
+                const camera = cameraRef.current, controls = controlsRef.current
+                if (camera && controls) {
+                    const center = box.getCenter(new THREE.Vector3())
+                    const radius = Math.max(0.4, box.getSize(new THREE.Vector3()).length() / 2)
+                    const dir = camera.position.clone().sub(controls.target).normalize()
+                    const dist = radius / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.4
+                    controls.target.lerp(center, 0.6)
+                    camera.position.lerp(center.clone().addScaledVector(dir, dist), 0.6)
+                }
+            }
+        },
+        clearAssistantViz: () => assistantVizRef.current?.clearMeasurements(),
+        addUserVolume: (volume: UserVolume) => assistantVizRef.current?.addVolume(volume),
+        removeUserVolume: (volumeId: number) => assistantVizRef.current?.removeVolume(volumeId),
+        frameBox: (min: number[], max: number[]) => {
+            const camera = cameraRef.current, controls = controlsRef.current
+            if (!camera || !controls) return
+            const box = new THREE.Box3(new THREE.Vector3().fromArray(min), new THREE.Vector3().fromArray(max))
+            const center = box.getCenter(new THREE.Vector3())
+            const radius = Math.max(0.4, box.getSize(new THREE.Vector3()).length() / 2)
+            const dir = camera.position.clone().sub(controls.target).normalize()
+            const dist = radius / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.4
+            controls.target.copy(center)
+            camera.position.copy(center.clone().addScaledVector(dir, dist))
+        },
         setFloorTransform: (arr: number[]) => {
             // Apply a new floor transform (16 floats, column-major) to the
             // octree group at runtime — same path the alignment-gizmo save
@@ -2076,6 +2120,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         scene.add(measureGroup)
         measureGroupRef.current = measureGroup
 
+        // Immersive assistant overlay (animated measurements + evaluation volumes)
+        const assistantViz = new AssistantViz()
+        scene.add(assistantViz.group)
+        assistantVizRef.current = assistantViz
+
         // Grid helper (will be replaced when cloud loads)
         const gridHelper = new THREE.GridHelper(20, 40, 0x252d3a, 0x1c2333)
         gridHelper.visible = showGrid
@@ -2195,6 +2244,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
             // Update time uniform
             material.uniforms.time.value = now * 0.001
+
+            // Advance immersive assistant animations (measurement reveals)
+            assistantVizRef.current?.update(now)
 
             // Potree LOD: update visible nodes based on camera (~10 Hz, not every frame)
             if (potreeLoaderRef.current?.isLoaded && now - lastLodUpdateRef.current > 100) {

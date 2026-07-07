@@ -5,34 +5,55 @@
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
-/* ── Design Tokens ─────────────────────────────────────────── */
+/* ── Design Tokens ─────────────────────────────────────────────
+   2026 refresh: deeper cool-tinted surfaces, dual accent (amber brand +
+   cyan for the AI / measurement layer), glass + glow, refined type & radii.
+   Additive — legacy variable names are preserved so existing components
+   keep working. */
 :root {
   /* Background layers (darkest → lightest) */
-  --bg-base: #0d1117;
-  --bg-surface: #161b22;
-  --bg-elevated: #1c2333;
-  --bg-hover: #252d3a;
-  --bg-active: #2d3748;
+  --bg-base: #0a0d12;
+  --bg-surface: #11151c;
+  --bg-elevated: #171c26;
+  --bg-hover: #1f2632;
+  --bg-active: #2a3340;
 
-  /* Accent colors */
-  --accent: #e99d28;
-  --accent-hover: #f0b04a;
-  --accent-muted: rgba(233, 157, 40, 0.15);
+  /* Glass surfaces (frosted overlays) */
+  --glass-bg: rgba(20, 25, 34, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-blur: 14px;
+
+  /* Accent colors — amber brand */
+  --accent: #f0a839;
+  --accent-hover: #ffbe57;
+  --accent-muted: rgba(240, 168, 57, 0.15);
+  --accent-rgb: 240, 168, 57;
+
+  /* Secondary accent — cyan (AI assistant + measurement) */
+  --accent-2: #4fd1ff;
+  --accent-2-hover: #7fe0ff;
+  --accent-2-muted: rgba(79, 209, 255, 0.14);
+  --accent-2-rgb: 79, 209, 255;
+  --accent-gradient: linear-gradient(135deg, #4fd1ff 0%, #9d7bff 100%);
 
   /* Status colors */
-  --success: #2ecc71;
-  --warning: #f39c12;
-  --error: #e74c3c;
-  --info: #3498db;
+  --success: #3fb950;
+  --warning: #f0a839;
+  --error: #f85149;
+  --info: #4fd1ff;
 
   /* Text */
-  --text-primary: #e6edf3;
-  --text-secondary: #8b949e;
-  --text-muted: #8b929a;
+  --text-primary: #e9eef5;
+  --text-secondary: #9aa4b2;
+  --text-muted: #6b7686;
 
   /* Borders */
-  --border: #30363d;
-  --border-light: #21262d;
+  --border: #262d3a;
+  --border-light: #1b212b;
+  --border-strong: #333d4d;
+
+  /* Focus ring */
+  --focus-ring: 0 0 0 2px rgba(var(--accent-2-rgb), 0.55);
 
   /* Spacing */
   --activity-bar-width: 48px;
@@ -40,18 +61,27 @@
   --toolbar-height: 40px;
   --statusbar-height: 28px;
 
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
   /* Typography */
   --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
 
   /* Transitions */
-  --transition-fast: 120ms ease;
-  --transition-normal: 200ms ease;
+  --transition-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 220ms cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 
-  /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  /* Shadows + glow */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 16px 44px rgba(0, 0, 0, 0.55);
+  --glow-accent: 0 0 0 1px rgba(var(--accent-rgb), 0.4), 0 4px 20px rgba(var(--accent-rgb), 0.25);
+  --glow-cyan: 0 0 0 1px rgba(var(--accent-2-rgb), 0.4), 0 4px 24px rgba(var(--accent-2-rgb), 0.28);
 }
 
 /* ── Reset ─────────────────────────────────────────────────── */
@@ -81,8 +111,8 @@ body,
 
 /* ── Scrollbar ─────────────────────────────────────────────── */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -90,12 +120,27 @@ body,
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--text-muted);
-  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.22);
+  background-clip: padding-box;
+}
+
+/* ── Selection + focus ─────────────────────────────────────── */
+::selection {
+  background: rgba(var(--accent-2-rgb), 0.3);
+  color: #fff;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
 }
 
 /* ── Utility Classes ───────────────────────────────────────── */
