@@ -6,61 +6,27 @@
 #
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
-import subprocess
 import sys
-import time
 from pathlib import Path
 from multiprocessing.connection import Connection
 
 from workers.base import WorkerPipe, run_worker_safe
 
-_STAC_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _semantic_alive(config: dict, timeout_s: float = 3.0) -> bool:
-    import requests
-    svc = config.get("semantic", {}).get("service", {})
-    url = f"http://{svc.get('host', '127.0.0.1')}:{svc.get('port', 8799)}/health"
-    try:
-        return requests.get(url, timeout=timeout_s).status_code == 200
-    except Exception:
-        return False
-
 
 def _ensure_semantic_service(pipe: WorkerPipe, config: dict) -> bool:
-    """Healthcheck the semantic service; if it is down, AUTO-START it
-    (scripts/serve_semantic.sh has a double-start guard) and wait until it
-    serves or the startup timeout passes. The user never starts it by hand."""
-    if _semantic_alive(config):
-        return True
-    launcher = _STAC_ROOT / "scripts" / "serve_semantic.sh"
-    if not launcher.exists():
-        pipe.send_log("Semantic service down and launcher missing", level="warning")
-        return False
-    pipe.send_log("Semantic service down — auto-starting vLLM (Qwen3-VL)...")
+    """Healthcheck the semantic service; if it is down, AUTO-START it and wait
+    until it serves. The lifecycle itself lives in semantic.service so that the
+    FastAPI routes (spatial Q&A) restart it exactly the same way — the
+    reconstruction / SAM3 stages stop vLLM to free the GPU."""
+    server_dir = str(Path(__file__).resolve().parent.parent)
+    if server_dir not in sys.path:
+        sys.path.insert(0, server_dir)
+    from semantic.service import ensure_service
+
     pipe.send_progress(0, "Starting semantic service (Qwen3-VL)...", stage="vlm")
-    try:
-        subprocess.Popen(["bash", str(launcher)], cwd=str(_STAC_ROOT),
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-    except Exception as e:  # noqa: BLE001
-        pipe.send_log(f"Could not launch semantic service: {e}", level="warning")
-        return False
-    timeout = float(config.get("semantic", {}).get("service", {})
-                    .get("startup_timeout_s", 900))
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if pipe.check_cancel():
-            return False
-        if _semantic_alive(config):
-            pipe.send_log("Semantic service is up")
-            return True
-        pipe.send_progress(0, "Waiting for semantic service (weights loading)...",
-                           stage="vlm")
-        time.sleep(10)
-    pipe.send_log(f"Semantic service did not come up within {timeout:.0f}s",
-                  level="warning")
-    return False
+    return ensure_service(config,
+                          log=lambda m: pipe.send_log(m),
+                          cancelled=pipe.check_cancel)
 
 
 def _vlm_work(pipe: WorkerPipe, session_dir: str, config: dict):

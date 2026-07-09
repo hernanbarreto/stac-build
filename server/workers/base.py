@@ -129,8 +129,9 @@ def gpu_free_gb() -> Optional[float]:
 def stop_semantic_service(pipe: "WorkerPipe", stage: str = "") -> None:
     """EXCLUSIVE GPU for a heavy stage: stop the vLLM semantic service (its ~40 GB
     resident VRAM starves Omega single passes and long SAM3 sessions). Any later
-    consumer auto-restarts it (_ensure_semantic_service), so this is a stage-scoped
-    handover, not a shutdown. No-op when vLLM isn't running."""
+    consumer restarts it (semantic.service.ensure_service — the VLM worker AND the
+    spatial-Q&A route), so this is a stage-scoped handover, not a shutdown. No-op
+    when vLLM isn't running."""
     import subprocess
     try:
         if subprocess.run(["pgrep", "-f", "vllm serve"],
