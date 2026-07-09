@@ -153,7 +153,7 @@ class PipelineManager:
         config: dict,
         on_progress: Optional[ProgressCallback] = None,
         on_complete: Optional[Callable[[str, bool], Awaitable[None]]] = None,
-        replace: bool = True,
+        replace: bool = False,
         scan_key: Optional[str] = None,
     ) -> PipelineJob:
         """Start a pipeline for the given session.
@@ -164,7 +164,9 @@ class PipelineManager:
             config: Server config dict (from config.yaml)
             on_progress: Async callback(session_id, job_dict) for progress updates
             on_complete: Async callback(session_id, success) when pipeline finishes
-            replace: If True, delete existing outputs before running each stage
+            replace: If True, WIPE output/ (and its derived caches) and re-run every
+                     stage from scratch. Defaults to False: resume is the safe default,
+                     an omitted flag must never destroy a reconstruction.
             scan_key: Optional "date/source" key (e.g. "2026-03-07/legacy") to target
                       a specific scan. If None, resolves to latest scan/first source.
         """
@@ -354,6 +356,66 @@ class PipelineManager:
     }
 
     @staticmethod
+    def _wipe_outputs_for_replace(session_dir: Path, output_dir: Path):
+        """Replace mode: delete the WHOLE output/ dir before anything runs.
+
+        Per-stage cleanup is not enough. It only ran for stages that were about to
+        run, and the resume probes ran first — so a session whose every stage
+        probed "complete" (e.g. artifacts from an older architecture) skipped the
+        cleanup entirely and Replace silently did nothing.
+
+        Also removes the derived caches OUTSIDE output/ that are pure functions of
+        it, or the stale ones get served: merged_cloud.ply, its Potree octree
+        (convert_ply_to_potree skips when metadata.json exists), the floor
+        transform, the frame-selection files reconstruction regenerates, and the
+        BIM/sábana artifacts tied to the old cloud.
+        """
+        import shutil as _shutil
+
+        deleted = []
+        if output_dir.exists():
+            _shutil.rmtree(output_dir, ignore_errors=True)
+            deleted.append("output/")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # frame selection + quality: reconstruction rebuilds these
+        frames_dir = session_dir / "frames"
+        if frames_dir.exists():
+            for pattern in PipelineManager.FRAMES_DIR_FILES:
+                for f in frames_dir.glob(pattern):
+                    f.unlink(missing_ok=True)
+                    deleted.append(f"frames/{f.name}")
+
+        # project-level derivatives of output/ (merged cloud, its octree, floor)
+        try:
+            merged_dir = session_dir.parent.parent.parent / "merged"
+            for name in ("merged_cloud.ply", "potree", "floor_transform.npz"):
+                target = merged_dir / name
+                if target.is_dir():
+                    _shutil.rmtree(target, ignore_errors=True)
+                    deleted.append(f"merged/{name}")
+                elif target.exists():
+                    target.unlink(missing_ok=True)
+                    deleted.append(f"merged/{name}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Pipeline] Replace: could not clean merged/ ({e})")
+
+        # BIM comparison / sábana: derived from the cloud that just went away
+        for base in (session_dir, session_dir.parent.parent.parent / "bim_comparison"):
+            if not base.exists():
+                continue
+            for pattern in PipelineManager.BIM_COMPARISON_FILES:
+                for f in base.glob(pattern):
+                    if f.is_dir():
+                        _shutil.rmtree(f, ignore_errors=True)
+                    else:
+                        f.unlink(missing_ok=True)
+                    deleted.append(f.name)
+
+        logger.info(f"[Pipeline] 🗑️ Replace: wiped {', '.join(deleted) or 'nothing'} "
+                    f"— every stage re-runs from scratch")
+
+    @staticmethod
     def _cleanup_stage_outputs(output_dir: Path, stage_id: StageId,
                                session_dir: Path = None):
         """Delete existing output files for a stage AND all downstream dependents.
@@ -437,20 +499,26 @@ class PipelineManager:
         config: dict,
         on_progress: Optional[ProgressCallback],
         on_complete: Optional[Callable[[str, bool], Awaitable[None]]],
-        replace: bool = True,
+        replace: bool = False,
     ):
         """Run stages sequentially, each as a subprocess."""
         job.status = JobStatus.RUNNING
         success = True
         output_dir = Path(session_dir) / "output"
 
-        # RESUME MODE: the pipeline detects on its own which stages this
-        # session already completed (artifact + freshness probes) and only
-        # runs what is missing/stale — the user never selects stages. A stage
-        # that RE-runs still gets its old outputs cleaned (replace). Once any
-        # stage actually runs, everything downstream is considered stale
-        # (its inputs just changed) and runs too.
-        upstream_ran = False
+        # REPLACE MODE: "start from scratch" — wipe output/ and its derived caches
+        # up front, THEN run every stage. The resume probes are skipped entirely:
+        # consulting them first is what made Replace a no-op on sessions whose
+        # artifacts all probed complete.
+        if replace:
+            self._wipe_outputs_for_replace(Path(session_dir), output_dir)
+
+        # RESUME MODE (replace off): the pipeline detects on its own which stages
+        # this session already completed (artifact + freshness probes) and only
+        # runs what is missing/stale — the user never selects stages. Once any
+        # stage actually runs, everything downstream is considered stale (its
+        # inputs just changed) and runs too.
+        upstream_ran = replace
 
         for idx, stage_state in enumerate(job.stages):
             if not stage_state.stage.enabled:
@@ -528,7 +596,7 @@ class PipelineManager:
         session_dir: str,
         config: dict,
         on_progress: Optional[ProgressCallback],
-        replace: bool = True,
+        replace: bool = False,
     ) -> bool:
         """Run a single stage as a subprocess with Pipe IPC."""
 

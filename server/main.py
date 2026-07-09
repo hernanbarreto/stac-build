@@ -5966,7 +5966,8 @@ async def viewer_websocket(websocket: WebSocket):
                         pass
 
                 # Start pipeline — support sequential multi-scan
-                replace = cmd.get("replace", True)
+                # resume by default — an omitted flag must not wipe output/
+                replace = bool(cmd.get("replace", False))
                 scan_keys = cmd.get("scans", [])  # e.g. ["2026-03-07/legacy", "2026-03-08/default"]
 
                 if len(scan_keys) <= 1:
