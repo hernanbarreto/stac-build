@@ -1969,8 +1969,13 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                     out_ply = output_dir / f"chunk_{i:03d}.ply"
                     ply_n = _read_ply_point_count(out_ply) if out_ply.exists() else None
                     if ply_n is not None and ply_n != n:
-                        pipe.send_log(f"Chunk {i:03d} (src {K}): inline origins {n} vs PLY "
-                                      f"{ply_n} — mismatch (will be dropped at merge)", level="warning")
+                        # Fail HERE, not an hour later inside CloudCompPy: a desync means
+                        # the cleaned cloud cannot carry per-point traceability, and the
+                        # merge step aborts anyway (cloudcompy_postprocess: no fallback).
+                        raise RuntimeError(
+                            f"Chunk {i:03d} (src {K}): inline origins {n} vs PLY {ply_n} — "
+                            f"points and origins are out of sync; the confidence mask used "
+                            f"for the PLY and for the origins must be identical.")
                     np.savez_compressed(output_dir / f"chunk_{i:03d}_origins.npz",
                                         **{k: z[k] for k in z.files})
                     with open(output_dir / f"chunk_{i:03d}_meta.json", "w") as f:

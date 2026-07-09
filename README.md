@@ -23,53 +23,51 @@ pose/depth refinement), and compares the result against the BIM/IFC model to mea
 deviations and coverage. A persistent **Qwen3-VL semantic layer** then makes the scene
 queryable (spatial Q&A with deterministic measurement tools) and reportable.
 
-### Core Workflow (the anchored 6-stage pipeline)
+### Core Workflow (the SIMPLE one-pass pipeline)
 
 Orchestrated by `pipeline_manager.py` (`DEFAULT_STAGE_ORDER`); each stage runs as an
 isolated subprocess. The pipeline is **automatic and resume-aware** (per-stage artifact
-+ freshness probes: finished stages are skipped, manual segmentation is never
-overwritten) and **fail-fast** (a stage that cannot do its job raises — no silent
-fallbacks). Segmentation runs **before** the final fusion, so Phase R's pose/depth
-corrections land in both the cloud and the mesh.
+probes: finished stages are skipped) and **fail-fast** (a stage that cannot do its job
+raises — no silent fallbacks). One concept: **sparse frames → ONE reconstruction pass →
+no window seams → no "onion"** (validated 2026-07-09 against the VGGT-Omega web demo).
+Heavy stages get the GPU to themselves (the vLLM semantic service is stopped during
+reconstruction and SAM3, and auto-restarts on the next VLM use).
 
 ```
 📱 Capture: smartphone video (MP4)  +  optional 📷 Stray Scanner (LiDAR + ARKit)
     │
     ▼
 🔨 1. 3D Reconstruction   (backend: vggtomega ← default │ mapanything │ da3 │ hybrid │ hybrid_cond │ lidar)
-    ├─ Laplacian blur filter → keyframe selection (`frames_selector: dino` — DINO-cosine
-    │     0.99, literature-backed redundancy cut; `parallax` geometric selection available,
-    │     aborts on pure rotation)
-    ├─ DA3 per-frame METRIC depth + intrinsics on the selected frames (metric anchor / prior)
-    ├─ VGGT-Ω backbone (CVPR 2026) per chunk inside the VGGT-Long framework
-    │     → up-to-scale poses + cloud, SALAD/DINOv2 loop closure + Sim3 alignment
-    ├─ scale_align: global similarity s = median(DA3 depth / Ω depth) → METRIC poses + cloud
+    ├─ Laplacian blur filter → temporal sampling at ~4 fps (reconstruction.simple.target_fps)
+    ├─ VGGT-Ω (CVPR 2026) in ONE single pass when the set fits (≤600 frames AND free
+    │     VRAM, ~86 MB/frame): no chunking, no Sim3 gluing, no loop closure needed.
+    │     Longer videos fall back to windowed mode (500/250, 50% overlap) with a
+    │     real free-VRAM check that shrinks the chunk instead of OOM-ing.
+    ├─ aggressive point-confidence filter (conf >= mean×0.6 ≈ the web demo at 20%)
+    ├─ metric scale: 12 evenly-spread DA3 anchor frames, ISOLATED per-frame inference
+    │     (no streaming) → s = median(DA3/Ω depth) applied as a global similarity
     │     (fails hard if the scale cannot be recovered)
-    └─ fine_register: plane-constrained inter-chunk registration (per-chunk pieces +
-          per-frame interpolation absorb intra-chunk drift)
+    └─ upright orientation BAKED into cloud + poses (reconstruction/orient.py):
+          gravity = mean camera-down axis, floor at y=0 — deterministic, no floor RANSAC
     │
     ▼
-🔍 2. Scene Understanding  → Qwen3-VL (semantic service): open-vocabulary detection over
-    │                        keyframes → SAM3 box prompts (auto-prompter, Phase 1).
-    │                        Adaptive keyframe sampling; no canned-category fallback.
+🔍 2. Scene Understanding  → Qwen3-VL (semantic service): understands the scene from
+    │                        ~8 keyframes and emits ONE RICH noun phrase per object
+    │                        type ("concrete support column"), consolidated across
+    │                        frames. No per-keyframe detection, no boxes.
     ▼
-🏷️ 3. Segmentation         → SAM3: tracked 2D instance masks per frame (cloud-agnostic;
-    │                        the mask→cloud mapping is deferred to the cleaning stage)
+🏷️ 3. Segmentation         → SAM3: each phrase runs as its OWN concept session over ALL
+    │                        sampled frames — SAM3 finds, labels and tracks; its
+    │                        tracking IS the instance identity. Post-pass: same-SPACE
+    │                        dedupe (5 cm voxel occupancy) merges duplicates of one
+    │                        physical object, tiny slivers are dropped, and the
+    │                        canonical instance store (scene_r.db) is rebuilt from the
+    │                        clean instances (display frame) for phases 2-6.
     ▼
-⚓ 4. Phase R — Semantic Anchoring
-    ├─ SAM3 instance identity → depth-lift + multi-view plurality vote (R3D machinery)
-    ├─ vote-entropy + onion (double-surface) misalignment metrics
-    ├─ inter-window Sim(3) pose graph on per-instance OBB/primitive residuals
-    ├─ class-conditioned depth regularization (structural whitelist only)
-    ├─ A/B fail-safe: if refinement worsens any reference metric → fall back, report
-    └─ WRITEBACK: refined poses/depth correct the point cloud and feed the TSDF
-    │
+🧹 4. Cloud Cleaning       → CloudCompPy SOR + voxel merge → cleaned_cloud.ply
+    │                        + mask→cloud instance mapping
     ▼
-🧹 5. Cloud Cleaning       → CloudCompPy SOR + voxel merge → cleaned_cloud.ply
-    │                        + deferred mask→cloud instance mapping (+ optional
-    │                        per-instance DBSCAN cleaning stage)
-    ▼
-🧊 6. TSDF Mesh            → textured surface mesh (Open3D VoxelBlockGrid, GPU, 3D cube
+🧊 5. TSDF Mesh            → textured surface mesh (Open3D VoxelBlockGrid, GPU, 3D cube
     │                        tiling welded into one mesh; depth_source: mapanything —
     │                        the SAME Ω keyframe depth as the cloud; texrecon UV-atlas
     │                        photo texture)
