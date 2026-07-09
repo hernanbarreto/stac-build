@@ -280,7 +280,11 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             print(f"[VRAM] {label}: error reading - {e}")
     
     sam3 = get_sam3_wrapper()
-    
+    # Start clean: a previous run that crashed mid-way leaves its reused session
+    # and symlink dirs behind (both are released on the normal path below).
+    sam3.release_batch_session()
+    _clear_batch_dirs()
+
     # Master state across all categories
     all_masks = {}  # orig_frame_idx -> {global_obj_id: mask}
     obj_labels = {}  # global_obj_id -> category_label
@@ -468,7 +472,9 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                     _log_vram(f"  batch {batch_idx} AFTER")
                     
                 finally:
-                    shutil.rmtree(batch_dir, ignore_errors=True)
+                    # batch_dir is memoized and reused by the next concept — see
+                    # _prepare_batch_dir. Freed by _clear_batch_dirs() at the end.
+                    pass
             
             return cat_masks
         
@@ -581,18 +587,37 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         total_objects.update(fm.keys())
     print(f"\n[SegPipeline] SAM3 complete: {len(all_masks)} frames, "
           f"{len(total_objects)} unique objects across {len(categories)} categories")
+
+    # The batch session and the symlink dirs were kept alive across concepts.
+    try:
+        sam3.release_batch_session()
+    except Exception as e:  # noqa: BLE001
+        print(f"[SegPipeline]   ⚠️ Could not release SAM3 session: {e}")
+    _clear_batch_dirs()
     
     return all_masks, obj_labels
+
+
+# Symlink dirs are keyed by their exact frame list and reused: every concept sees
+# the SAME frames, and rebuilding the dir per concept also forced SAM3 to open a
+# new session (new resource_path) and re-decode all of them. Cleared by
+# _clear_batch_dirs() at the end of a segmentation run.
+_BATCH_DIRS: Dict[tuple, Tuple[Path, Dict[int, int]]] = {}
 
 
 def _prepare_batch_dir(frames_dir: Path, batch_files: List[str], 
                        start_idx: int) -> Tuple[Path, Dict[int, int]]:
     """
-    Create a temp directory with sequentially numbered symlinks for a batch.
+    Create (or reuse) a temp directory with sequentially numbered symlinks for a batch.
     
     Returns:
         (batch_dir, index_mapping) where index_mapping = {local_idx: original_frame_idx}
     """
+    key = (str(frames_dir), tuple(batch_files))
+    cached = _BATCH_DIRS.get(key)
+    if cached is not None and cached[0].exists():
+        return cached
+
     batch_dir = Path(tempfile.mkdtemp(prefix="sam3_batch_"))
     index_mapping = {}
     
@@ -606,7 +631,15 @@ def _prepare_batch_dir(frames_dir: Path, batch_files: List[str],
         orig_idx = int(os.path.splitext(filename)[0])
         index_mapping[local_idx] = orig_idx
     
+    _BATCH_DIRS[key] = (batch_dir, index_mapping)
     return batch_dir, index_mapping
+
+
+def _clear_batch_dirs():
+    """Drop every memoized symlink dir (end of a segmentation run)."""
+    for batch_dir, _ in _BATCH_DIRS.values():
+        shutil.rmtree(batch_dir, ignore_errors=True)
+    _BATCH_DIRS.clear()
 
 
 def _parse_raw_masks(raw_results: Dict[int, dict]) -> Dict[int, Dict[int, np.ndarray]]:

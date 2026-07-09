@@ -4,7 +4,7 @@ import gc
 import torch
 import numpy as np
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from threading import Lock
 import logging
 
@@ -34,7 +34,49 @@ class SAM3Wrapper:
         self.is_loaded = False
         self.lock = Lock()
         self._interactive_sessions: Dict[str, dict] = {}  # state_id → session info dict
+        # ONE batch session kept open and reused across concepts (see _session_for).
+        self._batch_session: Optional[Tuple[str, str]] = None  # (batch_dir, session_id)
         logger.info("SAM3 Wrapper initialized (Lazy Loading Enabled: Model will load on first prompt).")
+
+    # ── Batch session reuse ──────────────────────────────────────────
+    # SAM3's text pathway is one concept per pass: `add_prompt` starts with
+    # `reset_state` ("since it's a semantic prompt, we start over"). But the
+    # SESSION — the decoded frames — does not have to be rebuilt for each concept.
+    # We used to open one session per concept, re-reading and re-decoding all N
+    # frames from disk every time (~12 s × 46 concepts). The vendor's own
+    # benchmark `forward()` does the opposite: init_state ONCE, then loop
+    # add_prompt → propagate over the prompts. Same masks, a fraction of the I/O.
+
+    def _session_for(self, batch_dir: str) -> str:
+        """Session for this frame set, opened once and reused across concepts."""
+        if self._batch_session and self._batch_session[0] == batch_dir:
+            return self._batch_session[1]
+        self.release_batch_session()          # only ever one open at a time
+        response = self.predictor.handle_request(
+            request=dict(type="start_session", resource_path=batch_dir)
+        )
+        self._batch_session = (batch_dir, response["session_id"])
+        logger.info(f"[SAM3-Batch] Opened session for {batch_dir} (reused across concepts)")
+        return response["session_id"]
+
+    def release_batch_session(self):
+        """Close the reused batch session and free its frames. Call when the frame
+        set changes, on error, and once segmentation is done."""
+        if not self._batch_session:
+            return
+        _, session_id = self._batch_session
+        self._batch_session = None
+        try:
+            self.predictor.handle_request(
+                request=dict(type="close_session", session_id=session_id))
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Error closing batch session: {e}")
+        gc.collect()
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
         
     def _stream(self, request: dict):
         """handle_stream_request under bf16 autocast.
@@ -120,6 +162,7 @@ class SAM3Wrapper:
 
     def unload_model(self):
         """Unload model to free VRAM."""
+        self.release_batch_session()   # its decoded frames belong to the predictor
         with self.lock:
             if self.predictor is not None:
                 try:
@@ -468,7 +511,6 @@ class SAM3Wrapper:
         
         batch_path = Path(batch_dir)
         batch_size = len(index_mapping)
-        session_id = None
         results = {}
         
         try:
@@ -476,49 +518,51 @@ class SAM3Wrapper:
             _vram_before = 0
             if torch.cuda.is_available():
                 _vram_before = torch.cuda.memory_allocated() / (1024**3)
-            
-            # 1. Start session
-            response = self.predictor.handle_request(
-                request=dict(type="start_session", resource_path=batch_dir)
-            )
-            session_id = response["session_id"]
-            
-            # 2. Add prompts at distributed frames — prefer the frames that
-            # carry Phase 1 box seeds (they pin individual instances)
-            if prompt_frames is None:
-                if boxes_by_local:
-                    prompt_frames = sorted(boxes_by_local)[:6]
-                elif batch_size <= 10:
-                    prompt_frames = [0]
-                else:
-                    step = batch_size // 4
-                    prompt_frames = [0, step, step * 2, step * 3]
 
-            for f_idx in prompt_frames:
-                if f_idx >= batch_size:
-                    continue
-                try:
-                    request = dict(
-                        type="add_prompt",
-                        session_id=session_id,
-                        frame_index=f_idx,
-                        text=prompt_text,
-                    )
-                    seeds = (boxes_by_local or {}).get(f_idx)
-                    if seeds:
-                        request["bounding_boxes"] = [[float(c) for c in b] for b in seeds]
-                        request["bounding_box_labels"] = [1] * len(seeds)
-                    prompt_response = self.predictor.handle_request(request=request)
-                    # Log what SAM3 detected at the prompt frame
-                    if prompt_response:
-                        n_objs = 0
-                        if "out_obj_ids" in prompt_response:
-                            ids = prompt_response["out_obj_ids"]
-                            n_objs = len(ids) if hasattr(ids, '__len__') else 0
-                        has_mask = "out_binary_masks" in prompt_response
-                        logger.info(f"[SAM3-Batch] Prompt '{prompt_text}' @ frame {f_idx}: {n_objs} objects, has_mask={has_mask}")
-                except Exception as e:
-                    logger.warning(f"Could not add prompt to batch frame {f_idx}: {e}")
+            # 1. Session for this frame set — opened once, reused for every concept
+            session_id = self._session_for(batch_dir)
+
+            # 2. ONE add_prompt. A text prompt is not tied to a frame ("text prompts
+            # are NOT associated with a particular frame ... they apply to all frames",
+            # sam3_video_inference.py:851) and every add_prompt calls reset_state, so
+            # prompting at 4 spread frames only ever kept the LAST one — 3 wasted
+            # forwards and 3 wasted resets per concept. Seed on the frame that carries
+            # box seeds, if any; frame 0 otherwise.
+            if prompt_frames:
+                f_idx = next((f for f in prompt_frames if f < batch_size), 0)
+            elif boxes_by_local:
+                # the seeded frame with the most boxes — only one survives the reset
+                f_idx = max((f for f in boxes_by_local if f < batch_size),
+                            key=lambda f: len(boxes_by_local[f]), default=0)
+                if len(boxes_by_local) > 1:
+                    logger.info(f"[SAM3-Batch] {len(boxes_by_local)} seeded frames, "
+                                f"using frame {f_idx}: add_prompt resets the session, "
+                                f"so only one seed frame can survive")
+            else:
+                f_idx = 0
+
+            try:
+                request = dict(
+                    type="add_prompt",
+                    session_id=session_id,
+                    frame_index=f_idx,
+                    text=prompt_text,
+                )
+                seeds = (boxes_by_local or {}).get(f_idx)
+                if seeds:
+                    request["bounding_boxes"] = [[float(c) for c in b] for b in seeds]
+                    request["bounding_box_labels"] = [1] * len(seeds)
+                prompt_response = self.predictor.handle_request(request=request)
+                # Log what SAM3 detected at the prompt frame
+                if prompt_response:
+                    n_objs = 0
+                    if "out_obj_ids" in prompt_response:
+                        ids = prompt_response["out_obj_ids"]
+                        n_objs = len(ids) if hasattr(ids, '__len__') else 0
+                    has_mask = "out_binary_masks" in prompt_response
+                    logger.info(f"[SAM3-Batch] Prompt '{prompt_text}' @ frame {f_idx}: {n_objs} objects, has_mask={has_mask}")
+            except Exception as e:
+                logger.warning(f"Could not add prompt to batch frame {f_idx}: {e}")
             
             # 3. Propagate (save ALL frames, keyframe_interval=1)
             for response in self._stream(
@@ -555,16 +599,14 @@ class SAM3Wrapper:
             logger.error(f"Error during batch processing: {e}")
             import traceback
             traceback.print_exc()
+            # the reused session may be in a bad state (and on OOM its frames are
+            # the memory we need back) — drop it, the next concept reopens one
+            self.release_batch_session()
             if is_oom:
                 raise  # Let caller handle OOM recovery
         finally:
-            if session_id is not None:
-                try:
-                    self.predictor.handle_request(
-                        request=dict(type="close_session", session_id=session_id)
-                    )
-                except Exception as e:
-                    logger.error(f"Error closing session: {e}")
+            # NOTE: the session stays OPEN for the next concept — release_batch_session()
+            # closes it when the frame set changes or segmentation ends.
             # Free GPU tensors from propagation after each batch
             gc.collect()
             try:
