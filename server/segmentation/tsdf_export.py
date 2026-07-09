@@ -1840,7 +1840,12 @@ def export_tsdf_scene(
         if raster_active:
             _dt_new = max(float(depth_trunc), diag * 1.1)
         else:
-            _dt_new = min(float(depth_trunc), max(float(reliable_depth_m), 2.0))
+            # reliable_depth_m is a FLOOR, not a fixed cap: depth error is relative to
+            # range, so a big scene needs a proportionally longer integration range. A
+            # fixed 15 m cap on an 80 m hall never integrated the far half ("TSDF poco
+            # profundo / incompleto"); half the cloud diagonal tracks the scene instead.
+            _dt_new = min(float(depth_trunc),
+                          max(float(reliable_depth_m), 2.0, 0.5 * diag))
         # decimate_target: scale ∝ scene diagonal vs a ~10 m reference, floor at the
         # configured value, ceil at max_decimate → big scenes keep detail, small don't bloat.
         _REF_DIAG = 10.0

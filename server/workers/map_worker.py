@@ -170,43 +170,18 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         #   · near scenes cut denser than far scenes automatically (measured: 734
         #     units/m close-range vs 160 units/m in a big hall — same walking speed)
         # DINO-cosine is superseded: dissimilarity is enforced geometrically here.
-        _fq_path = frames_dir / "frame_quality.json"
-        if not _fq_path.exists():
-            raise RuntimeError(
-                "frame selection 'motion' needs frame_quality.json (inter_frame_diff) — "
-                "run with the quality analysis enabled, or set "
-                "reconstruction.simple.frame_selection: fps")
-        _entries = json.loads(_fq_path.read_text()).get("frames", [])
-        _entries.sort(key=lambda e: int(os.path.splitext(e["file"])[0]))
-        if not _entries:
-            raise RuntimeError("frame_quality.json has no per-frame entries")
         quantum = float(_simple_cfg.get("keyframe_motion_quantum", 250.0))
-        window, chosen, soft_windows, acc = [], [], 0, 0.0
-        def _flush(win):
-            nonlocal soft_windows
-            valid_w = [e for e in win if e.get("valid", True)]
-            pool = valid_w or win
-            if not valid_w:
-                soft_windows += 1
-            chosen.append(max(pool, key=lambda e: float(e.get("fft_score", 0.0)))["file"])
-        for e in _entries:
-            window.append(e)
-            acc += float(e.get("inter_frame_diff", 0.0))
-            if acc >= quantum:
-                _flush(window)
-                window, acc = [], 0.0
-        if window:                      # tail: whatever motion was left still gets a view
-            _flush(window)
+        chosen, _n_total, soft_windows = _motion_keyframes(frames_dir, quantum)
         if len(chosen) < 2:
             raise RuntimeError(f"motion sampling produced {len(chosen)} keyframe(s) "
                                f"(quantum={quantum:g}) — not enough to reconstruct; "
                                f"lower keyframe_motion_quantum")
         with open(sf_path, "w") as _f:
             json.dump({"version": "2.0", "method": f"motion_{quantum:g}",
-                       "total_frames": len(_entries), "selected_count": len(chosen),
+                       "total_frames": _n_total, "selected_count": len(chosen),
                        "selected_files": chosen}, _f)
         _soft = f", {soft_windows} window(s) all-blurry → kept least-blurry" if soft_windows else ""
-        pipe.send_log(f"Frame set: {len(chosen)}/{len(_entries)} keyframes "
+        pipe.send_log(f"Frame set: {len(chosen)}/{_n_total} keyframes "
                       f"(parallax-uniform, quantum {quantum:g} motion units, sharpest "
                       f"per window{_soft}) → selected_frames.json")
     elif mode == "dino":
@@ -1359,6 +1334,41 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap
 from workers.base import gpu_free_gb as _gpu_free_gb, stop_semantic_service
 
 
+def _motion_keyframes(frames_dir: Path, quantum: float):
+    """Parallax-uniform keyframes: one per `quantum` of accumulated inter-frame pixel
+    motion (frame_quality.json), sharpest frame per window (all-blurry windows keep
+    their least-blurry frame — a soft frame beats a hole). Returns (files, n_total,
+    soft_windows). Shared by the frame-selection stage and the chunked-metric phase 2,
+    which re-selects DENSER so a 12 m chunk still holds enough keyframes to align."""
+    fq_path = frames_dir / "frame_quality.json"
+    if not fq_path.exists():
+        raise RuntimeError("frame selection 'motion' needs frame_quality.json "
+                           "(inter_frame_diff) — run with the quality analysis enabled")
+    entries = json.loads(fq_path.read_text()).get("frames", [])
+    entries.sort(key=lambda e: int(os.path.splitext(e["file"])[0]))
+    if not entries:
+        raise RuntimeError("frame_quality.json has no per-frame entries")
+    window, chosen, soft = [], [], [0]
+
+    def _flush(win):
+        valid_w = [e for e in win if e.get("valid", True)]
+        pool = valid_w or win
+        if not valid_w:
+            soft[0] += 1
+        chosen.append(max(pool, key=lambda e: float(e.get("fft_score", 0.0)))["file"])
+
+    acc = 0.0
+    for e in entries:
+        window.append(e)
+        acc += float(e.get("inter_frame_diff", 0.0))
+        if acc >= quantum:
+            _flush(window)
+            window, acc = [], 0.0
+    if window:                      # tail: whatever motion was left still gets a view
+        _flush(window)
+    return chosen, len(entries), soft[0]
+
+
 def _run_da3_anchor(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                     anchor_files: list, recon_cfg: dict) -> None:
     """ISOLATED per-frame DA3 metric depth on the K scale-anchor frames — NO streaming.
@@ -1410,6 +1420,9 @@ def _run_da3_anchor(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         arrays = {"depth": np.load(dp).astype(np.float32)}
         if cp.exists():
             arrays["conf"] = np.load(cp).astype(np.float32)
+        kp = raw / f"{stem}_intrinsics.npy"
+        if kp.exists():
+            arrays["intrinsics"] = np.load(kp).astype(np.float64)
         np.savez_compressed(ro / f"frame_{num}.npz", **arrays)
         n += 1
     shutil.rmtree(tmp, ignore_errors=True)
@@ -1488,44 +1501,33 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         pipe.send_log("scale_align OFF → skipping DA3 (its only role here is the metric "
                       "anchor for scale_align) — running Omega ONLY")
 
-    # ── VGGT-Long with the Omega backbone ──
+    # ── VGGT-Long with the Omega backbone — TWO-PHASE ──
+    # Phase 1: ONE pass over the motion keyframes. For short walks this IS the result
+    # (no windows → no seams → no onion; validated vs the web demo on test2). It is
+    # ALSO the probe: the metric trajectory it yields measures the real walk length.
+    # Phase 2 (walk > max_walk_single_pass_m): Omega drifts ~1.3 cm/m on long walks
+    # (feed-forward, gauge-anchored at frame 0, no global correction — measured on
+    # test4). Re-run CHUNKED-METRIC: chunks sized by walked meters, each metric-locked
+    # to DA3 anchors BEFORE alignment, glued SE(3) (scale is not negotiable — the Sim3
+    # scale freedom is what produced the onion), SALAD loop closure + pose graph on.
+    from reconstruction.chunk_plan import (walk_length_m, plan_chunks,
+                                           plan_anchor_indices)
     vggt_config = _build_vggtomega_config(config)
-    if _simple_on and _n_selected:
-        # SINGLE PASS: when the sampled frame set fits in one chunk there are no
-        # windows, no Sim3 gluing, no seams — the onion cannot exist by construction
-        # (validated against the VGGT-Omega web demo on test2). Long videos exceed
-        # max_frames_single_pass and fall back to the windowed mode (500/250).
-        # VRAM model from the paper: ~43 GB at 500 frames ≈ 4 GB base + 86 MB/frame;
-        # checked against the ACTUAL free VRAM so an over-long pass degrades to
-        # windowed mode with a fitting chunk instead of OOM-ing mid-run.
-        _max_sp = int(_simple_cfg.get("max_frames_single_pass", 600) or 600)
-        _free = _gpu_free_gb()
-        _fits = max(2, int((_free - 4.0) / 0.086)) if _free is not None else _max_sp
-        if _n_selected <= min(_max_sp, _fits):
-            vggt_config["Model"]["chunk_size"] = max(_n_selected, 2)
-            vggt_config["Model"]["overlap"] = 0
-            vggt_config["Model"]["loop_enable"] = False
-            pipe.send_log(f"SIMPLE single-pass: {_n_selected} frames in ONE chunk "
-                          f"(no windows → no seams). Loop closure off (nothing to close).")
-        else:
-            _chunk = min(int(vggt_config["Model"]["chunk_size"]), _fits)
-            _chunk = max(_chunk, 50)
-            vggt_config["Model"]["chunk_size"] = _chunk
-            vggt_config["Model"]["overlap"] = _chunk // 2
-            _why = (f"{_n_selected} frames > max_frames_single_pass={_max_sp}"
-                    if _n_selected > _max_sp else
-                    f"free VRAM {_free:.0f} GB fits ~{_fits} frames < {_n_selected}")
-            pipe.send_log(f"SIMPLE: {_why} → windowed mode "
-                          f"({_chunk}/{_chunk // 2}, 50% overlap)", level="warning")
+    _va_cfg = recon_cfg.get("vggtomega", {}) or {}
+    _max_walk = float(_simple_cfg.get("max_walk_single_pass_m", 25.0))
+    _chunk_walk = float(_simple_cfg.get("chunk_walk_m", 12.0))
+    _anch_per_chunk = int(_simple_cfg.get("chunk_anchors", 3))
+    _anchor_dir = output_dir / "da3_run" / "results_output"
+
+    def _apply_conf_filter(cfg_v):
         # Point-confidence filter, same knob the web demo exposes: drop the bottom P%
-        # of the valid points by confidence. A mean-relative coef is scene-dependent
-        # (it kept 53% of one scan and 89% of another) — the percentile keeps exactly
-        # 100-P% every time. The origins generator replicates this exact mask, so
-        # traceability stays 1:1.
+        # of the valid points by confidence (scene-independent; a mean-relative coef
+        # kept 53% of one scan and 89% of another). The origins generator replicates
+        # this exact mask, so traceability stays 1:1.
         _pct = _simple_cfg.get("conf_percentile")
         _coef = _simple_cfg.get("conf_threshold_coef")
         if _pct is not None or _coef:
-            _ps = vggt_config["Model"].setdefault("Pointcloud_Save", {})
+            _ps = cfg_v["Model"].setdefault("Pointcloud_Save", {})
             _ps["use_conf_filter"] = True
             if _pct is not None:
                 _ps["conf_percentile"] = float(_pct)
@@ -1534,95 +1536,261 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             else:
                 _ps["conf_threshold_coef"] = float(_coef)
                 pipe.send_log(f"SIMPLE: point confidence filter conf >= mean*{float(_coef):g}")
-    vggt_config_path = output_dir / "vggt_omega_config.yaml"
-    with open(vggt_config_path, "w") as f:
-        yaml.dump(vggt_config, f, default_flow_style=False)
-    pipe.send_log(f"VGGT-Long[Omega] config: {vggt_config_path}")
 
-    project_root = Path(__file__).resolve().parent.parent.parent
-    vggt_script = project_root / "vendor" / "VGGT-Long" / "vggt_long.py"
-    vggt_save_dir = output_dir / "maplong_run"
-    script_path = Path(__file__).resolve().parent.parent / "run_mapanything.sh"
-    if not script_path.exists():
-        raise FileNotFoundError(f"run_mapanything.sh not found: {script_path}")
-    cmd = ["bash", str(script_path), "--image_dir", str(frames_dir),
-           "--config", str(vggt_config_path), "--save_dir", str(vggt_save_dir)]
-    if selected_frames_path:
-        cmd.extend(["--selected_frames", selected_frames_path])
-    env = os.environ.copy()
-    if device == "cpu":
-        env["CUDA_VISIBLE_DEVICES"] = ""
+    def _apply_chunked_metric(cfg_v, _chunk, _ov):
+        cfg_v["Model"]["chunk_size"] = int(_chunk)
+        cfg_v["Model"]["overlap"] = int(_ov)
+        cfg_v["Model"]["loop_enable"] = True
+        cfg_v["Model"]["using_sim3"] = False       # SE(3): scale locked by the anchors
+        cfg_v["Model"]["metric_lock"] = {
+            "enable": True,
+            "anchor_dir": str(_anchor_dir),
+            "near_frac": float(_va_cfg.get("scale_near_frac", 0.25)),
+        }
+        pipe.send_log(f"CHUNKED-METRIC: chunks {int(_chunk)}/{int(_ov)} (50% overlap), "
+                      f"per-chunk DA3 metric lock, SE(3) gluing (scale locked), "
+                      f"SALAD loop closure ON")
 
-    pipe.send_progress(10, "Starting VGGT-Long[Omega] reconstruction...", stage="reconstruction")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1, env=env, cwd=str(vggt_script.parent))
-    chunk_pattern = _re.compile(r'\[Progress\]:\s*(\d+)/(\d+)')
-    for line in proc.stdout:
-        line = line.strip()
-        if not line:
-            continue
-        if pipe.check_cancel():
-            proc.terminate(); pipe.send_log("Cancelled by user", level="warning"); return
-        m = chunk_pattern.search(line)
-        if m:
-            done, total = int(m.group(1)), int(m.group(2))
-            pipe.send_progress(10 + (done / max(total, 1)) * 65, f"Chunk {done}/{total}",
-                               stage="reconstruction")
-        pipe.send_log(line)
-    proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError(f"VGGT-Long[Omega] exited with code {proc.returncode}")
+    def _ensure_anchors(_files):
+        """Isolated DA3 depth for every anchor file not already extracted."""
+        _missing = [f for f in _files
+                    if not (_anchor_dir / f"frame_{int(os.path.splitext(f)[0])}.npz").exists()]
+        if _missing:
+            _run_da3_anchor(pipe, frames_dir, output_dir, sorted(set(_missing)), recon_cfg)
 
-    pipe.send_progress(78, "VGGT-Long[Omega] complete, post-processing...", stage="reconstruction")
-    _postprocess_reconstruction(pipe, vggt_save_dir, output_dir, vggt_config, backend="mapanything")
+    def _omega_pass(cfg_v, tag):
+        vggt_config_path = output_dir / "vggt_omega_config.yaml"
+        with open(vggt_config_path, "w") as f:
+            yaml.dump(cfg_v, f, default_flow_style=False)
+        pipe.send_log(f"VGGT-Long[Omega] config ({tag}): {vggt_config_path}")
 
-    # ── metric scale: emit omega per-frame depth, then align to DA3 ──
+        project_root = Path(__file__).resolve().parent.parent.parent
+        vggt_script = project_root / "vendor" / "VGGT-Long" / "vggt_long.py"
+        vggt_save_dir = output_dir / "maplong_run"
+        script_path = Path(__file__).resolve().parent.parent / "run_mapanything.sh"
+        if not script_path.exists():
+            raise FileNotFoundError(f"run_mapanything.sh not found: {script_path}")
+        cmd = ["bash", str(script_path), "--image_dir", str(frames_dir),
+               "--config", str(vggt_config_path), "--save_dir", str(vggt_save_dir)]
+        if selected_frames_path:
+            cmd.extend(["--selected_frames", selected_frames_path])
+        env = os.environ.copy()
+        if device == "cpu":
+            env["CUDA_VISIBLE_DEVICES"] = ""
+
+        pipe.send_progress(10, f"Starting VGGT-Long[Omega] ({tag})...", stage="reconstruction")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1, env=env, cwd=str(vggt_script.parent))
+        chunk_pattern = _re.compile(r'\[Progress\]:\s*(\d+)/(\d+)')
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            if pipe.check_cancel():
+                proc.terminate(); pipe.send_log("Cancelled by user", level="warning")
+                return False
+            m = chunk_pattern.search(line)
+            if m:
+                done, total = int(m.group(1)), int(m.group(2))
+                pipe.send_progress(10 + (done / max(total, 1)) * 65, f"Chunk {done}/{total}",
+                                   stage="reconstruction")
+            pipe.send_log(line)
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"VGGT-Long[Omega] exited with code {proc.returncode}")
+
+        pipe.send_progress(78, f"VGGT-Long[Omega] {tag} complete, post-processing...",
+                           stage="reconstruction")
+        _postprocess_reconstruction(pipe, vggt_save_dir, output_dir, cfg_v, backend="mapanything")
+        return True
+
+    _chunked_already = False
+    if _simple_on and _n_selected:
+        _max_sp = int(_simple_cfg.get("max_frames_single_pass", 600) or 600)
+        _free = _gpu_free_gb()
+        _fits = max(2, int((_free - 4.0) / 0.086)) if _free is not None else _max_sp
+        if _n_selected <= min(_max_sp, _fits):
+            vggt_config["Model"]["chunk_size"] = max(_n_selected, 2)
+            vggt_config["Model"]["overlap"] = 0
+            vggt_config["Model"]["loop_enable"] = False
+            pipe.send_log(f"SIMPLE single-pass: {_n_selected} frames in ONE chunk "
+                          f"(no windows → no seams). Walk length measured after — "
+                          f"a walk over {_max_walk:g} m re-runs chunked-metric.")
+        elif _scale_align_on:
+            # too many frames for one pass even as a probe → chunked-metric DIRECTLY
+            # (no meters yet: size by keyframe count; keyframes are parallax-uniform)
+            _chunk = max(24, min(60, _fits))
+            _ov = _chunk // 2
+            _chunked_already = True
+            _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov, _anch_per_chunk)
+            _ensure_anchors([_sel_files[i] for i in _anchor_idx])
+            _apply_chunked_metric(vggt_config, _chunk, _ov)
+        else:
+            _chunk = min(int(vggt_config["Model"]["chunk_size"]), _fits)
+            _chunk = max(_chunk, 50)
+            vggt_config["Model"]["chunk_size"] = _chunk
+            vggt_config["Model"]["overlap"] = _chunk // 2
+            pipe.send_log(f"SIMPLE: {_n_selected} frames exceed one pass and scale_align "
+                          f"is OFF → legacy windowed mode ({_chunk}/{_chunk // 2})",
+                          level="warning")
+        _apply_conf_filter(vggt_config)
+    if not _omega_pass(vggt_config, "chunked-metric" if _chunked_already else "single-pass"):
+        return
+
+    # ── metric scale + orientation (runs after EVERY pass) ──
     # Opt-out (scale_align: false) leaves poses UP-TO-SCALE — used to isolate whether a
     # bad result comes from the scale alignment vs the raw Omega backbone.
-    if not (recon_cfg.get("vggtomega", {}) or {}).get("scale_align", True):
+    vggt_save_dir = output_dir / "maplong_run"
+    if not _scale_align_on:
         pipe.send_log("[scale-align] DISABLED (vggtomega.scale_align: false) — poses stay up-to-scale",
                       level="warning")
         return
-    pipe.send_progress(86, "VGGT-Omega: aligning metric scale to DA3...", stage="reconstruction")
-    _emit_omega_depth(vggt_save_dir, output_dir,
-                      int(vggt_config["Model"]["chunk_size"]),
-                      int(vggt_config["Model"]["overlap"]),
-                      selected_frames_path, pipe)
-    from reconstruction.scale_align import run as _scale_run
-    # Forward scale_align's detailed reasoning to the pipe → it lands in BOTH the server
-    # log file AND the UI, so WHAT HAPPENED (skip / inputs / s+spread / fail reason) is
-    # always visible — not hidden in scale_align's own logger.
-    _va = recon_cfg.get("vggtomega", {}) or {}
-    s = _scale_run(output_dir, dry_run=False,
-                   log=lambda m: pipe.send_log(f"[scale-align] {m}"),
-                   near_frac=float(_va.get("scale_near_frac", 0.25)),
-                   conf_top_frac=float(_va.get("scale_conf_top_frac", 0.10)))
-    # METRIC IS MANDATORY: a non-metric cloud is useless (BIM comparison needs real units).
-    # If scale_align could not estimate the scale (s is None), FAIL the reconstruction here
-    # — do NOT silently ship up-to-scale poses. (s is non-None when already-applied.)
-    if s is None:
-        raise RuntimeError(
-            "metric scale alignment FAILED — scale_align could not estimate s. Refusing to "
-            "produce a NON-METRIC reconstruction (it can't be compared against BIM). See the "
-            "[scale-align] lines above for the exact reason (frame match / ratios / inputs).")
 
-    # ── SIMPLE: bake the upright orientation (gravity from the camera poses) ──
-    # Deterministic replacement for the floor-RANSAC as the critical orientation path:
-    # mean camera-down = world down (people film level; measured ~3° error), rotated to
-    # -Y and the floor put at y=0, IN the cloud + poses — the viewer needs no flip and
-    # the downstream floor leveler only ever fine-tunes a few degrees.
-    if _simple_on and bool(_simple_cfg.get("orient_from_poses", True)):
-        pipe.send_progress(92, "Baking upright orientation from camera poses...",
+    def _metricize_and_orient(cfg_v, tag):
+        """Emit omega depth → scale_align (global; in chunked-metric mode the chunks are
+        already locked, so this is the residual/VERIFICATION pass — its spread is the
+        health metric) → bake upright orientation. Returns the walk length in meters."""
+        pipe.send_progress(86, f"VGGT-Omega ({tag}): aligning metric scale to DA3...",
                            stage="reconstruction")
-        from reconstruction.orient import run as _orient_run
-        _T = _orient_run(output_dir, log=lambda m: pipe.send_log(f"[orient] {m}"))
-        if _T is None:
-            pipe.send_log("[orient] orientation NOT applied (no poses or weak camera-down "
-                          "consensus) — the floor leveler downstream is the fallback",
+        _emit_omega_depth(vggt_save_dir, output_dir,
+                          int(cfg_v["Model"]["chunk_size"]),
+                          int(cfg_v["Model"]["overlap"]),
+                          selected_frames_path, pipe)
+        from reconstruction.scale_align import run as _scale_run
+        _s = _scale_run(output_dir, dry_run=False,
+                        log=lambda m: pipe.send_log(f"[scale-align] {m}"),
+                        near_frac=float(_va_cfg.get("scale_near_frac", 0.25)),
+                        conf_top_frac=float(_va_cfg.get("scale_conf_top_frac", 0.10)))
+        # METRIC IS MANDATORY: a non-metric cloud is useless (BIM comparison needs real
+        # units). If scale_align could not estimate s, FAIL — never ship up-to-scale.
+        if _s is None:
+            raise RuntimeError(
+                "metric scale alignment FAILED — scale_align could not estimate s. Refusing to "
+                "produce a NON-METRIC reconstruction (it can't be compared against BIM). See the "
+                "[scale-align] lines above for the exact reason (frame match / ratios / inputs).")
+
+        # ── SIMPLE: bake the upright orientation (gravity from the camera poses) ──
+        if _simple_on and bool(_simple_cfg.get("orient_from_poses", True)):
+            pipe.send_progress(92, "Baking upright orientation from camera poses...",
+                               stage="reconstruction")
+            from reconstruction.orient import run as _orient_run
+            _T = _orient_run(output_dir, log=lambda m: pipe.send_log(f"[orient] {m}"))
+            if _T is None:
+                pipe.send_log("[orient] orientation NOT applied (no poses or weak camera-down "
+                              "consensus) — the floor leveler downstream is the fallback",
+                              level="warning")
+        try:
+            _walk = walk_length_m(output_dir / "camera_poses.txt")
+        except Exception as _e:  # noqa: BLE001
+            pipe.send_log(f"[chunk-plan] could not measure walk length ({_e})", level="warning")
+            _walk = 0.0
+        pipe.send_log(f"[chunk-plan] measured walk: {_walk:.1f} m ({tag})")
+        return _walk
+
+    _walk_m = _metricize_and_orient(vggt_config, "chunked-metric" if _chunked_already
+                                    else "single-pass")
+
+    # ── PHASE 2: the probe says the walk exceeds Omega's comfort range → re-run
+    # chunked-metric. The comfort limit is a config parameter (25 m default): Omega is
+    # excellent on short walks and drifts ~1.3 cm/m past them (measured, test4).
+    if (_simple_on and not _chunked_already and _walk_m > _max_walk
+            and _n_selected >= 24):
+        # Re-select keyframes DENSER for the chunked pass: with sparse keyframes
+        # (big m/kf) a minimum-size chunk covers far more walk than chunk_walk_m —
+        # e.g. 66 kf over 81 m gives 1.2 m/kf, so a 24-kf chunk spans 29 m. Target
+        # ~30 kf per chunk: quantum scales linearly with the desired kf spacing.
+        # Within a 12 m chunk this added density is HARMLESS (the drift-amplifying
+        # redundancy is a long-sequence effect; 30-frame passes are the demo regime).
+        _kf_per_chunk = 30
+        _m_per_kf = _walk_m / max(_n_selected, 1)
+        _desired_m_per_kf = _chunk_walk / _kf_per_chunk
+        if _desired_m_per_kf < _m_per_kf * 0.95:
+            _q1 = float(_simple_cfg.get("keyframe_motion_quantum", 250.0))
+            _q2 = max(20.0, _q1 * _desired_m_per_kf / _m_per_kf)
+            _chosen2, _n_total2, _ = _motion_keyframes(frames_dir, _q2)
+            if len(_chosen2) > _n_selected:
+                with open(selected_frames_path, "w") as _f:
+                    json.dump({"version": "2.0", "method": f"motion_{_q2:g}_chunked",
+                               "total_frames": _n_total2,
+                               "selected_count": len(_chosen2),
+                               "selected_files": _chosen2}, _f)
+                pipe.send_log(f"[chunk-plan] re-selected {len(_chosen2)} keyframes "
+                              f"(quantum {_q1:g}→{_q2:.0f}) so each {_chunk_walk:g} m "
+                              f"chunk holds ~{_kf_per_chunk} keyframes")
+                _sel_files = _chosen2
+                _n_selected = len(_chosen2)
+        _chunk, _ov = plan_chunks(_n_selected, _walk_m, _chunk_walk)
+        if _chunk < _n_selected:
+            pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > comfort "
+                          f"{_max_walk:g} m → phase 2: chunked-metric re-run "
+                          f"({_chunk} kf/chunk ≈ {_chunk_walk:g} m walked each)")
+            _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov, _anch_per_chunk)
+            _ensure_anchors([_sel_files[i] for i in _anchor_idx])
+            # wipe phase-1 reconstruction artifacts (NOT da3_run — the anchors live there)
+            for _pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
+                for _f in output_dir.glob(_pat):
+                    _f.unlink(missing_ok=True)
+            for _name in ("maplong_run", "omega_run", "frame_list.json", "intrinsic.txt",
+                          "camera_poses.txt", "camera_poses.txt.prescale",
+                          "camera_poses.txt.preorient", "camera_frames.txt",
+                          "camera_poses_mapanything.json",
+                          ".metric_scale_applied", ".orientation_applied"):
+                _t = output_dir / _name
+                if _t.is_dir():
+                    shutil.rmtree(_t, ignore_errors=True)
+                elif _t.exists():
+                    _t.unlink()
+            vggt_config = _build_vggtomega_config(config)
+            _apply_chunked_metric(vggt_config, _chunk, _ov)
+            _apply_conf_filter(vggt_config)
+            _chunked_already = True
+            if not _omega_pass(vggt_config, "chunked-metric"):
+                return
+            _walk_m = _metricize_and_orient(vggt_config, "chunked-metric")
+        else:
+            pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > comfort {_max_walk:g} m "
+                          f"but only {_n_selected} keyframes (one chunk) — keeping the "
+                          f"single pass", level="warning")
+
+    # ── DENSITY: DA3 densification of the non-keyframe frames ──
+    # Poses come from FEW sharp, parallax-uniform keyframes (redundancy amplifies
+    # drift); density comes from DA3 metric depth on the frames in between,
+    # frame-to-keyframe ICP-registered on the fixed skeleton (dense_pose_fusion) —
+    # DA3 governs density, Omega governs poses, neither does the other's job.
+    _dn_cfg = _simple_cfg.get("densify") or {}
+    if _simple_on and bool(_dn_cfg.get("enabled", True)):
+        try:
+            _stride = max(1, int(_dn_cfg.get("stride", 4)))
+            _kf_set = set(_sel_files)
+            _fq_path = frames_dir / "frame_quality.json"
+            _all_files = [e["file"] for e in
+                          json.loads(_fq_path.read_text()).get("frames", [])] \
+                if _fq_path.exists() else []
+            _first = _sel_files[0] if _sel_files else None
+            _last = _sel_files[-1] if _sel_files else None
+            _dense = [f for i, f in enumerate(sorted(_all_files))
+                      if f not in _kf_set and i % _stride == 0
+                      and (_first is None or _first <= f <= _last)]
+            _cap = int(_dn_cfg.get("max_frames", 500))
+            if len(_dense) > _cap:
+                _step = len(_dense) / _cap
+                _dense = [_dense[int(i * _step)] for i in range(_cap)]
+            if _dense:
+                pipe.send_log(f"[densify] DA3 metric depth on {len(_dense)} non-keyframe "
+                              f"frames (stride {_stride}) + the {_n_selected} keyframes "
+                              f"(ICP anchors)")
+                _ensure_anchors(list(_kf_set) + _dense)
+                with open(frames_dir / "da3_frames.json", "w") as _f:
+                    json.dump({"version": "2.0", "method": f"densify_stride_{_stride}",
+                               "selected_files": _dense}, _f)
+                _run_dense_fusion(pipe, frames_dir, output_dir, config, recon_cfg)
+            else:
+                pipe.send_log("[densify] no extra frames to fuse", level="warning")
+        except Exception as _e:  # noqa: BLE001
+            pipe.send_log(f"[densify] failed (non-fatal, cloud stays keyframe-only): {_e}",
                           level="warning")
 
-    # Success (or already-applied) → free da3_run when the TSDF won't use it (depth_source
-    # not DA3-based). With the 12-frame anchor this is small; still, no reason to keep it.
+    # Success → free da3_run when the TSDF won't use it (depth_source not DA3-based).
     _ds = str((config.get("tsdf", {}) or {}).get("depth_source", "auto")).lower()
     if _ds not in ("da3", "da3_frames", "auto"):
         _da3_run = output_dir / "da3_run"

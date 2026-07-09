@@ -68,7 +68,7 @@ def main():
 
     # Run inference: one joint batch (default) or strictly per-frame (--per_frame)
     if args.per_frame:
-        d_list, c_list = [], []
+        d_list, c_list, k_list = [], [], []
         with torch.no_grad():
             for i, img_path in enumerate(images):
                 print(f"[DA3 Extractor] isolated inference {i+1}/{len(images)}: "
@@ -76,20 +76,27 @@ def main():
                 pred = model.inference([img_path])
                 d = pred.depth
                 c = pred.conf
+                k = getattr(pred, "intrinsics", None)
                 d_list.append(d.cpu().numpy() if isinstance(d, torch.Tensor) else np.asarray(d))
                 c_list.append(c.cpu().numpy() if isinstance(c, torch.Tensor) else np.asarray(c))
+                if k is not None:
+                    k_list.append(k.cpu().numpy() if isinstance(k, torch.Tensor) else np.asarray(k))
         depths = np.concatenate(d_list, axis=0)
         confs = np.concatenate(c_list, axis=0)
+        intrinsics = np.concatenate(k_list, axis=0) if len(k_list) == len(images) else None
     else:
         with torch.no_grad():
             prediction = model.inference(images)
         # prediction.depth has shape [N, H, W], prediction.conf has shape [N, H, W]
         depths = prediction.depth
         confs = prediction.conf
+        intrinsics = getattr(prediction, "intrinsics", None)
         if isinstance(depths, torch.Tensor):
             depths = depths.cpu().numpy()
         if isinstance(confs, torch.Tensor):
             confs = confs.cpu().numpy()
+        if isinstance(intrinsics, torch.Tensor):
+            intrinsics = intrinsics.cpu().numpy()
 
     # DA3 conf uses expp1 activation (exp(x)+1), range ~1-60+
     # Subtract 1.0 so minimum is 0 (same as DA3-streaming does)
@@ -111,6 +118,9 @@ def main():
         print(f"[{i+1}/{len(images)}] {basename} → depth + conf")
         np.save(depth_path, depths[i])
         np.save(conf_path, confs[i])
+        if intrinsics is not None:
+            # per-frame predicted K — dense_pose_fusion unprojects DA3 depth with it
+            np.save(os.path.join(args.output_dir, stem + "_intrinsics.npy"), intrinsics[i])
 
     print("[DA3 Extractor] Finished successfully.")
 

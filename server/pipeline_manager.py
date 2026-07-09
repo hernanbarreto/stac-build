@@ -320,6 +320,7 @@ class PipelineManager:
     # Files in frames/ dir that should be regenerated on reconstruction
     FRAMES_DIR_FILES: List[str] = [
         "selected_frames.json", "selected_frames_seg*.json", "frame_quality.json",
+        "da3_frames.json",   # densify fusion set — derived from selected_frames
     ]
 
     # BIM comparison / sábana artifacts (may live in output/, session root, or bim_comparison/)
