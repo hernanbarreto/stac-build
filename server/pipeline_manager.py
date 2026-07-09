@@ -370,11 +370,28 @@ class PipelineManager:
         transform, the frame-selection files reconstruction regenerates, and the
         BIM/sábana artifacts tied to the old cloud.
         """
+        import os as _os
         import shutil as _shutil
 
+        def _rm_tree(target: Path) -> bool:
+            """Rename out of the way, THEN delete. rmtree walks a big Potree octree
+            for seconds, and during that walk half its files are gone while the rest
+            still answer exists() — the viewer's in-flight requests then died with
+            FileNotFoundError between the route's exists() check and open(). The
+            rename is one atomic syscall: the path is either fully there or fully
+            gone, so a racing request gets a clean 404 instead of a 500."""
+            if not target.exists():
+                return False
+            doomed = target.with_name(f".{target.name}.wiping-{_os.getpid()}")
+            try:
+                target.rename(doomed)
+            except OSError:
+                doomed = target          # racing / cross-device: delete in place
+            _shutil.rmtree(doomed, ignore_errors=True)
+            return True
+
         deleted = []
-        if output_dir.exists():
-            _shutil.rmtree(output_dir, ignore_errors=True)
+        if _rm_tree(output_dir):
             deleted.append("output/")
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -392,8 +409,8 @@ class PipelineManager:
             for name in ("merged_cloud.ply", "potree", "floor_transform.npz"):
                 target = merged_dir / name
                 if target.is_dir():
-                    _shutil.rmtree(target, ignore_errors=True)
-                    deleted.append(f"merged/{name}")
+                    if _rm_tree(target):
+                        deleted.append(f"merged/{name}")
                 elif target.exists():
                     target.unlink(missing_ok=True)
                     deleted.append(f"merged/{name}")

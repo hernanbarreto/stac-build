@@ -46,7 +46,7 @@ logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
 from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 security = HTTPBearer(auto_error=False)
@@ -951,11 +951,21 @@ async def serve_potree_files(session_id: str, file_path: str):
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
     # Set proper content type for binary files
     content_type = "application/json" if file_path.endswith(".json") else "application/octet-stream"
-    return FileResponse(
-        str(full_path),
-        media_type=content_type,
-        headers={"Cache-Control": "public, max-age=3600"},  # Cache 1h
-    )
+    headers = {"Cache-Control": "public, max-age=3600"}  # Cache 1h
+
+    # A Replace wipe can delete the octree between the exists() check above and the
+    # open() FileResponse does at send time — the response is already committed with
+    # a 200 by then, so the vanished file surfaced as a 500 traceback. metadata.json
+    # and hierarchy.bin are small and fetched whole: read them here, where a missing
+    # file is still an honest 404. octree.bin keeps FileResponse (Range requests).
+    if full_path.suffix in (".json", ".bin") and full_path.name != "octree.bin":
+        try:
+            return Response(content=full_path.read_bytes(),
+                            media_type=content_type, headers=headers)
+        except OSError:
+            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+
+    return FileResponse(str(full_path), media_type=content_type, headers=headers)
 
 @app.get("/potree_sabana/{session_id}/{file_path:path}")
 async def serve_sabana_potree_files(session_id: str, file_path: str):
