@@ -2056,6 +2056,44 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                   f"(<{_min_pts} pts): {_tiny_desc}{'...' if len(tiny) > 10 else ''}")
             instances = [inst for inst in instances if inst["total_points"] >= _min_pts]
 
+    # ── Canonical instance store (scene_r.db) — THE single source of objects
+    # for spatial Q&A (phase5), classification (phase2), findings (phase3) and
+    # reports (phase6). Rebuilt from scratch on every segmentation, straight
+    # from the CLEAN instances: points/OBBs in the DISPLAY frame (the exact
+    # geometry the viewer renders and the user measures against).
+    try:
+        from phase_r.instance_store import InstanceStore
+        _sp = output_dir / "scene_r.db"
+        for _suffix in ("", "-wal", "-shm"):
+            _f = Path(str(_sp) + _suffix)
+            if _f.exists():
+                _f.unlink()
+        _st = InstanceStore(_sp)
+        for inst in instances:
+            _iid = int(inst["instance_id"])
+            _m = np.asarray(inst["globalIndices"], dtype=np.int64)
+            _st.upsert_instance(_iid, str(inst["label"]), source="sam3_concepts",
+                                status="proposed", n_views=0,
+                                label_origin="vlm_proposed")
+            _st.set_points(_iid, xyz_display[_m])
+            _obb = inst.get("obb") or {}
+            if _obb.get("center") and _obb.get("half_extents"):
+                _c = np.asarray(_obb["center"], float)
+                _h = np.asarray(_obb["half_extents"], float)
+                _Rd = np.asarray(_obb.get("rotation", np.eye(3)), float)
+                _T = np.eye(4)
+                _T[:3, :3] = _Rd
+                _T[:3, 3] = _c
+                _aabb = np.array([-_h[0], _h[0], -_h[1], _h[1], -_h[2], _h[2]])
+                _st.set_obb(_iid, _T, _aabb, _c, n_points=int(inst["total_points"]),
+                            obb_origin="tool_measured")
+        _st.set_meta("built_from", "sam3_concepts_display_frame")
+        _st.close()
+        print(f"[SegPipeline] scene_r.db built: {len(instances)} instances "
+              f"(display frame — Q&A/classify/findings read from here)")
+    except Exception as e:
+        print(f"[SegPipeline] instance store build failed (non-fatal): {e}")
+
     total_segmented = sum(inst["total_points"] for inst in instances)
     coverage = round(total_segmented / max(1, n_pts), 4)
     
@@ -2173,24 +2211,8 @@ def map_segmentation_to_cloud(output_dir) -> dict:
     if not (output_dir / "cleaned_cloud.ply").exists():
         return {"error": "no cleaned_cloud.ply", "instances": []}
     result = _match_and_save_result(output_dir)
-    # refresh the canonical OBBs in the instance store (non-fatal)
-    store_path = output_dir / "scene_r.db"
-    if store_path.exists() and result.get("instances"):
-        try:
-            from phase_r.build_instances import load_seg_display_obbs
-            from phase_r.instance_store import InstanceStore
-            seg_obbs = load_seg_display_obbs(output_dir)
-            st = InstanceStore(store_path)
-            known = {i["instance_id"] for i in st.list_instances()}
-            n = 0
-            for iid, (T, aabb) in seg_obbs.items():
-                if iid in known:
-                    st.set_obb(iid, T, aabb, T[:3, 3])
-                    n += 1
-            st.close()
-            print(f"[SegPipeline] refreshed {n} canonical OBBs in scene_r.db")
-        except Exception as e:
-            print(f"[SegPipeline] store OBB refresh failed (non-fatal): {e}")
+    # scene_r.db is (re)built inside the mask→cloud matching itself — points,
+    # labels and OBBs all in the display frame, single source for phases 2-6.
     return result
 
 

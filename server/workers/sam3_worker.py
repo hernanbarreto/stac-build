@@ -162,10 +162,6 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
         except Exception as e:
             pipe.send_log(f"Per-object TSDF crop failed (non-fatal): {e}", level="warning")
 
-    # Phase R runs as its OWN pipeline stage right after this one
-    # (reconstruction → cloudcompy → vlm → sam3 → PHASE_R → tsdf), so the
-    # masklets produced here are anchored before the fusion — no in-worker
-    # trigger needed (it would run Phase R twice).
     pipe.send_progress(100, f"Segmentation complete: {n_instances} objects", stage="sam3")
 
 

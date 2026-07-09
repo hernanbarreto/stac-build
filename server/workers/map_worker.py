@@ -1540,20 +1540,15 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                           level="warning")
 
     # Success (or already-applied) → free da3_run when the TSDF won't use it (depth_source
-    # not DA3-based). ~25GB. Only delete on success so failures keep the evidence.
+    # not DA3-based). With the 12-frame anchor this is small; still, no reason to keep it.
     _ds = str((config.get("tsdf", {}) or {}).get("depth_source", "auto")).lower()
-    _keep_for_recheck = bool((config.get("phase_r", {}) or {}).get("scale_recheck", False))
     if _ds not in ("da3", "da3_frames", "auto"):
-        if _keep_for_recheck:
-            pipe.send_log("[scale-align] keeping da3_run/ — phase_r.scale_recheck re-verifies "
-                          "S over structural masks after anchoring and needs the DA3 depth")
-        else:
-            _da3_run = output_dir / "da3_run"
-            if _da3_run.exists():
-                _mb = sum(f.stat().st_size for f in _da3_run.rglob("*") if f.is_file()) / (1024 * 1024)
-                shutil.rmtree(_da3_run, ignore_errors=True)
-                pipe.send_log(f"[scale-align] freed da3_run/ ({_mb:.0f} MB) — TSDF uses omega "
-                              f"depth (depth_source={_ds}), DA3 no longer needed")
+        _da3_run = output_dir / "da3_run"
+        if _da3_run.exists():
+            _mb = sum(f.stat().st_size for f in _da3_run.rglob("*") if f.is_file()) / (1024 * 1024)
+            shutil.rmtree(_da3_run, ignore_errors=True)
+            pipe.send_log(f"[scale-align] freed da3_run/ ({_mb:.0f} MB) — TSDF uses omega "
+                          f"depth (depth_source={_ds}), DA3 no longer needed")
 
 
 def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: WorkerPipe):

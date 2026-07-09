@@ -32,8 +32,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from phase_r.build_instances import _frame_size, _scaled_K
-from phase_r.geometry import unproject_pixel_to_world
+from phase_r.geometry import (frame_size as _frame_size, scaled_K as _scaled_K,
+                              unproject_pixel_to_world)
 from phase_r.instance_store import InstanceStore
 
 FINDING_TYPES = [

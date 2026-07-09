@@ -233,3 +233,32 @@ def unproject_pixel_to_world(
     y = (vi - cy) / fy * d
     p_cam = np.array([x, y, d, 1.0])
     return (c2w @ p_cam)[:3]
+
+
+# ── shared camera/frame helpers (moved from build_instances when the anchoring
+#    machinery was removed, 2026-07-09; consumed by phase3_findings) ─────────
+
+def scaled_K(K, from_wh, to_wh):
+    """Scale intrinsics from one resolution to another (width,height)."""
+    import numpy as _np
+    (fw, fh), (tw, th) = from_wh, to_wh
+    sx, sy = tw / fw, th / fh
+    Ks = _np.asarray(K, float).copy()
+    Ks[0, 0] *= sx; Ks[0, 2] *= sx
+    Ks[1, 1] *= sy; Ks[1, 2] *= sy
+    return Ks
+
+
+def frame_size(frames_dir, fid, mask_shape):
+    """(w, h) of the real frame JPG; falls back to the mask's shape."""
+    from pathlib import Path as _P
+    p = _P(frames_dir) / f"{int(fid):06d}.jpg"
+    if p.exists():
+        try:
+            from PIL import Image
+            with Image.open(p) as im:
+                return im.size
+        except Exception:
+            pass
+    h, w = mask_shape[:2]
+    return (w, h)

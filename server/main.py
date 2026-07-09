@@ -5222,19 +5222,8 @@ async def run_auto_segmentation(session_id: str):
                 from segmentation_pipeline import run_segmentation
                 result = run_segmentation(str(frames_dir), str(output_dir), prompt,
                                           frame_map=frame_map, boxes_map=boxes_map)
-                # Phase R — build/refresh the instance store now that masklets
-                # exist (same producer chain as the sam3_worker). Never fatal.
-                if cfg.get("phase_r", {}).get("enabled", True) and "error" not in result:
-                    try:
-                        task_manager.update(tid, pct=90, detail="Semantic anchoring (Phase R)...")
-                        from workers.phase_r_worker import _window_map
-                        from phase_r.pipeline import PhaseRPipeline
-                        wmap = _window_map(frames_dir.parent, output_dir, cfg)
-                        PhaseRPipeline(frames_dir.parent, output_dir,
-                                       output_dir / "scene_r.db", config=cfg,
-                                       window_map=wmap).run()
-                    except Exception as pr_err:  # noqa: BLE001
-                        print(f"[AutoSeg] Phase R non-fatal failure: {pr_err}")
+                # The instance store (scene_r.db) is rebuilt inside the mask→cloud
+                # matching itself — no separate anchoring step (Phase R removed).
                 task_manager.finish(tid)
                 return result
             except Exception as e:

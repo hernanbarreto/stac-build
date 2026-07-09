@@ -1,4 +1,6 @@
-# STAC-Builder — Phase R geometry + store unit tests (synthetic).
+# STAC-Builder — geometry + instance-store unit tests (synthetic).
+# (The Phase-R anchoring machinery was removed 2026-07-09; these cover the
+# shared primitives that live on: OBB fit, KNN filter, the canonical store.)
 #
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
@@ -13,7 +15,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from phase_r.geometry import (  # noqa: E402
     fit_gravity_aligned_obb, filter_outliers_knn, signed_distances_along_axis,
 )
-from phase_r.onion import detect_onion  # noqa: E402
 from phase_r.instance_store import InstanceStore  # noqa: E402
 
 rng = np.random.default_rng(0)
@@ -40,30 +41,6 @@ def test_knn_removes_outliers():
     # most cluster kept, most outliers removed
     assert keep[:500].mean() > 0.9
     assert keep[500:].mean() < 0.5
-
-
-def test_onion_detects_double_surface():
-    # two parallel planes (a doubled wall) separated by 0.20 m along z
-    n = 800
-    xy = rng.uniform(-1, 1, (n, 2))
-    z = np.where(rng.random(n) < 0.5, -0.10, 0.10) + rng.normal(0, 0.01, n)
-    pts = np.column_stack([xy[:, 0], xy[:, 1] * 0.5, z])
-    out = fit_gravity_aligned_obb(pts, gravity=np.array([0, -1, 0]))
-    T, aabb, pos = out
-    res = detect_onion(pts, T, aabb, min_points=40)
-    assert res.bimodal, res
-    assert abs(res.separation_m - 0.20) < 0.05, res.separation_m
-
-
-def test_onion_single_surface_not_bimodal():
-    n = 800
-    xy = rng.uniform(-1, 1, (n, 2))
-    z = rng.normal(0, 0.01, n)
-    pts = np.column_stack([xy[:, 0], xy[:, 1] * 0.5, z])
-    out = fit_gravity_aligned_obb(pts, gravity=np.array([0, -1, 0]))
-    T, aabb, pos = out
-    res = detect_onion(pts, T, aabb, min_points=40)
-    assert not res.bimodal, res
 
 
 def test_store_roundtrip():

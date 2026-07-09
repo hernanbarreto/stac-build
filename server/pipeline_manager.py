@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 class StageId(str, Enum):
     RECONSTRUCTION = "reconstruction"
     CLOUDCOMPY = "cloudcompy"
-    PHASE_R = "phase_r"
     TSDF = "tsdf"
     VLM = "vlm"
     SAM3 = "sam3"
@@ -34,7 +33,6 @@ class StageId(str, Enum):
 STAGE_REGISTRY = {
     StageId.RECONSTRUCTION:   {"label": "3D Reconstruction", "icon": "🔨", "module": "workers.map_worker"},
     StageId.CLOUDCOMPY:       {"label": "Cloud Cleaning",    "icon": "🧹", "module": "workers.cloudcompy_worker"},
-    StageId.PHASE_R:          {"label": "Semantic Anchoring", "icon": "⚓", "module": "workers.phase_r_worker"},
     StageId.TSDF:             {"label": "TSDF Mesh",         "icon": "🧊", "module": "workers.tsdf_worker"},
     StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker"},
     StageId.SAM3:             {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
@@ -42,25 +40,21 @@ STAGE_REGISTRY = {
 }
 
 # THE reconstruction pipeline — always runs end-to-end, no client selection.
-# The full semantic chain runs automatically, ANCHORED BEFORE ANY FUSION:
-#   Reconstruction (VGGT-Ω/DA3: per-chunk poses + metric depth)
-#   → VLM   (Qwen3-VL understands the scene + builds the SAM3 prompts)
-#   → SAM3  (segments EVERYTHING — masklets with instance identity)
-#   → Phase R (instance identity anchors pose + depth corrections AND
-#              transforms the chunk clouds, gated by the R.9 fail-safe A/B)
-#   → CloudCompy (merges the ALREADY-CORRECTED chunks → cleaned cloud +
-#                 Potree + deferred mask→cloud mapping)
-#   → scene TSDF (fusion with the refined poses/depth).
-# Phase R sits BEFORE the merge because the chunk fusion bakes the window
-# poses into the cloud — correcting afterwards would fix the mesh but leave
-# the drift in the cloud the user sees. VLM/SAM3 need the BA poses + DA3
-# depth, hence after reconstruction. Every semantic stage degrades gracefully
-# and the chain can be disabled with `pipeline.auto_segment: false`.
+#   Reconstruction (SIMPLE: sparse frames → ONE Omega pass → metric scale →
+#                   upright orientation baked into cloud + poses)
+#   → VLM   (Qwen3-VL understands the scene → RICH concept phrases, no boxes)
+#   → SAM3  (one concept session per phrase — SAM3's tracking IS the identity;
+#            instance store scene_r.db rebuilt from the clean instances)
+#   → CloudCompy (merge/clean → cleaned cloud + Potree + mask→cloud mapping)
+#   → scene TSDF (fusion + texrecon photo texture).
+# The former Phase R (semantic anchoring) was REMOVED 2026-07-09: the one-pass
+# reconstruction has no window seams to anchor, and the anchoring never beat
+# its own A/B gate. Its shared primitives (instance store, geometry) live on
+# under phase_r/ as the data layer for phases 2-6.
 DEFAULT_STAGE_ORDER: List[StageId] = [
     StageId.RECONSTRUCTION,
     StageId.VLM,
     StageId.SAM3,
-    StageId.PHASE_R,
     StageId.CLOUDCOMPY,
     StageId.TSDF,
 ]
@@ -316,8 +310,7 @@ class PipelineManager:
                       "scene_understanding.json", "autoprompt_instances.json",
                       "autoprompt_review_queue.json"],
         StageId.SAM3: ["segmentation.json", "segmentation_result.json",
-                       "seg_masks.npz", "seg_broadcast.json"],
-        StageId.PHASE_R: ["scene_r.db", "phase_r_report.json"],
+                       "seg_masks.npz", "seg_broadcast.json", "scene_r.db"],
         StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
     }
 
@@ -332,8 +325,8 @@ class PipelineManager:
     ]
 
     # Cascade: when a stage re-runs, these DOWNSTREAM stages' outputs are ALSO
-    # invalidated. MUST mirror the ANCHORED order (DEFAULT_STAGE_ORDER):
-    #   RECONSTRUCTION → VLM → SAM3 → PHASE_R → CLOUDCOMPY → TSDF
+    # invalidated. MUST mirror DEFAULT_STAGE_ORDER:
+    #   RECONSTRUCTION → VLM → SAM3 → CLOUDCOMPY → TSDF
     # A cascade edge pointing UPSTREAM deletes freshly produced artifacts
     # mid-pipeline — that exact bug (CLOUDCOMPY → SAM3, a relic of the old
     # cloudcompy-before-sam3 order) silently erased segmentation.json +
@@ -342,26 +335,16 @@ class PipelineManager:
         StageId.RECONSTRUCTION: [
             StageId.VLM,              # scene analysis ran on old keyframes
             StageId.SAM3,             # segmentation ran on old frames
-            StageId.PHASE_R,          # anchoring used old poses/depth/chunks
             StageId.CLOUDCOMPY,       # cleaned_cloud depends on chunks
             StageId.TSDF,             # TSDF mesh integrated old depth/poses
             StageId.INSTANCE_CLEANER, # instance PLYs from old segmentation
         ],
         StageId.VLM: [
             StageId.SAM3,             # SAM3 uses VLM categories
-            StageId.PHASE_R,          # instances rebuilt from new masks
             StageId.INSTANCE_CLEANER,
         ],
         StageId.SAM3: [
-            StageId.PHASE_R,          # anchoring consumed the old masklets
             StageId.INSTANCE_CLEANER, # instances depend on segmentation
-        ],
-        StageId.PHASE_R: [
-            # NOT CLOUDCOMPY: chunks are deleted after the merge
-            # (delete_chunks_after_merge), so wiping cleaned_cloud here would
-            # leave nothing to re-merge. Phase R corrects the merged cloud
-            # in place via the frame_global trace; cloudcompy light-resumes it.
-            StageId.TSDF,             # fusion integrated pre-anchor poses/depth
         ],
         StageId.CLOUDCOMPY: [
             StageId.TSDF,             # TSDF masks to the old cleaned_cloud
@@ -742,24 +725,11 @@ class PipelineManager:
                     pass
             return True, "segmentation.json + masks on disk"
 
-        if stage_id == StageId.PHASE_R:
-            rep = output_dir / "phase_r_report.json"
-            if not (rep.exists() and (output_dir / "scene_r.db").exists()):
-                return False, "no Phase R store/report"
-            seg = output_dir / "segmentation.json"
-            if seg.exists() and mt(rep) < mt(seg):
-                return False, "anchoring older than segmentation"
-            return True, "scene_r.db + report on disk"
-
         if stage_id == StageId.TSDF:
             scene_dir = output_dir / "tsdf" / "scene"
             meshes = list(scene_dir.glob("scene.*")) if scene_dir.is_dir() else []
             if not meshes:
                 return False, "no scene TSDF mesh"
-            newest_mesh = max(mt(m) for m in meshes)
-            rep = output_dir / "phase_r_report.json"
-            if rep.exists() and newest_mesh < mt(rep):
-                return False, "fusion older than Phase R anchoring"
             return True, "scene mesh on disk"
 
         return False, "no probe for stage"
@@ -785,31 +755,21 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
         logger.info(f"[Pipeline] CloudCompPy skipped (backend={backend})")
 
     # `pipeline.auto_segment: false` disables the automatic semantic chain
-    # (VLM auto-prompt → SAM3 → Phase R) and restores the on-demand flow.
+    # (VLM auto-prompt → SAM3) and restores the on-demand flow.
     auto_segment = True
-    simple_on = False
     try:
         from config import cfg
         auto_segment = bool(cfg.get("pipeline", {}).get("auto_segment", True))
-        simple_on = bool((cfg.get("reconstruction", {}).get("simple") or {}).get("enabled", False))
     except Exception:
         pass
-    _semantic_stages = {StageId.VLM, StageId.SAM3, StageId.PHASE_R}
+    _semantic_stages = {StageId.VLM, StageId.SAM3}
     if not auto_segment:
-        logger.info("[Pipeline] auto_segment off — VLM/SAM3/PhaseR stages disabled")
-    # SIMPLE pipeline: one VGGT-Omega pass → no windows → no seams. Phase R exists to
-    # repair inter-window seams, so with nothing to anchor it stays OUT of the flow
-    # (it returns, redesigned around anchor objects, when long windowed videos need it).
-    if simple_on:
-        logger.info("[Pipeline] SIMPLE pipeline on — Phase R stage disabled "
-                    "(single pass: no windows, no seams to anchor)")
+        logger.info("[Pipeline] auto_segment off — VLM/SAM3 stages disabled")
 
     def _enabled(stage_id: StageId) -> bool:
         if skip_cloudcompy and stage_id == StageId.CLOUDCOMPY:
             return False
         if not auto_segment and stage_id in _semantic_stages:
-            return False
-        if simple_on and stage_id == StageId.PHASE_R:
             return False
         return True
 
