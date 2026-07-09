@@ -728,14 +728,20 @@ reconstruction:
   # Windows return ONLY when the sampled video still exceeds max_frames_single_pass.
   simple:
     enabled: true
-    target_fps: 1.0                     # temporal sampling of blur-valid frames. 1 fps = the
-                                        # web demo's regime and the vendor's own drift fix
-                                        # (VGGT-Long README 239-242: "very dense input where
-                                        # movement between consecutive frames is small → drift
-                                        # increases; extract at a lower frame rate, such as
-                                        # 1fps"). Measured at 4 fps: camera height drifted
-                                        # -4.9 cm/m on a 29 m walk (test6), columns curved.
-                                        # Omega's showcase examples feed 6-30 frames total.
+    frame_selection: motion             # "motion" (default) = parallax-uniform keyframes: one
+                                        # keyframe per keyframe_motion_quantum of accumulated
+                                        # inter-frame pixel motion, sharpest frame per window.
+                                        # Standing still adds ~no keyframes (dense low-baseline
+                                        # input amplifies feed-forward drift — FastVGGT / the
+                                        # VGGT-Long README's own drift note); fast stretches
+                                        # get more (no 9 m jumps). "fps" = plain time sampling.
+    keyframe_motion_quantum: 250.0      # motion units (mean gray-diff @320px) per keyframe.
+                                        # Measured: ≈734 units/m close-range, ≈160 units/m in
+                                        # a big hall → ~0.3-1.5 m baseline depending on scene
+                                        # depth — parallax is what the estimator feels, meters
+                                        # are not. Lower = denser keyframes.
+    target_fps: 1.0                     # "fps" mode only: time sampling rate. 1 fps = the web
+                                        # demo's regime (its slider caps at 2; examples use 1).
     max_frames_single_pass: 600         # above this, windowed mode resumes (long videos).
                                         # ~43 GB VRAM at 500 frames (paper) ≈ 86 MB/frame —
                                         # the worker ALSO checks free VRAM and degrades to

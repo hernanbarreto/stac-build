@@ -84,11 +84,11 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # first pillar of the one-pass design — it overrides whatever selector is configured.
     _simple_cfg = recon_cfg.get("simple") or {}
     _simple_on = bool(_simple_cfg.get("enabled", False))
-    if _simple_on and mode != "fps":
-        pipe.send_log(f"SIMPLE pipeline ON → frame selection 'fps' "
-                      f"(~{_simple_cfg.get('target_fps', 1.0)} fps) overrides "
-                      f"frames_selector '{mode}'")
-        mode = "fps"
+    if _simple_on and mode not in ("fps", "motion"):
+        _sel = str(_simple_cfg.get("frame_selection", "motion")).lower()
+        pipe.send_log(f"SIMPLE pipeline ON → frame selection '{_sel}' "
+                      f"overrides frames_selector '{mode}'")
+        mode = _sel if _sel in ("fps", "motion") else "motion"
     sf_path = frames_dir / "selected_frames.json"
     if not replace and sf_path.exists():
         pipe.send_log("Reusing existing selected_frames.json (replace=off)")
@@ -159,6 +159,56 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         pipe.send_log(f"Frame set: {len(chosen)}/{len(_all)} frames "
                       f"(~{target_fps:g} fps of native {native_fps:.1f}, step {step}, "
                       f"sharpest per bin{_soft}) → selected_frames.json")
+    elif mode == "motion":
+        # PARALLAX-uniform keyframes: cut one keyframe per fixed quantum of ACCUMULATED
+        # inter-frame pixel motion (frame_quality.json inter_frame_diff), picking the
+        # sharpest frame inside each quantum window. Pixel motion ≈ parallax, which is
+        # what the multi-view estimator actually consumes — NOT meters and NOT seconds:
+        #   · fast walking → more keyframes (no 9 m jumps between neighbours)
+        #   · standing still / slow drift-prone stretches → almost none (redundant
+        #     low-baseline frames amplify feed-forward drift — FastVGGT)
+        #   · near scenes cut denser than far scenes automatically (measured: 734
+        #     units/m close-range vs 160 units/m in a big hall — same walking speed)
+        # DINO-cosine is superseded: dissimilarity is enforced geometrically here.
+        _fq_path = frames_dir / "frame_quality.json"
+        if not _fq_path.exists():
+            raise RuntimeError(
+                "frame selection 'motion' needs frame_quality.json (inter_frame_diff) — "
+                "run with the quality analysis enabled, or set "
+                "reconstruction.simple.frame_selection: fps")
+        _entries = json.loads(_fq_path.read_text()).get("frames", [])
+        _entries.sort(key=lambda e: int(os.path.splitext(e["file"])[0]))
+        if not _entries:
+            raise RuntimeError("frame_quality.json has no per-frame entries")
+        quantum = float(_simple_cfg.get("keyframe_motion_quantum", 250.0))
+        window, chosen, soft_windows, acc = [], [], 0, 0.0
+        def _flush(win):
+            nonlocal soft_windows
+            valid_w = [e for e in win if e.get("valid", True)]
+            pool = valid_w or win
+            if not valid_w:
+                soft_windows += 1
+            chosen.append(max(pool, key=lambda e: float(e.get("fft_score", 0.0)))["file"])
+        for e in _entries:
+            window.append(e)
+            acc += float(e.get("inter_frame_diff", 0.0))
+            if acc >= quantum:
+                _flush(window)
+                window, acc = [], 0.0
+        if window:                      # tail: whatever motion was left still gets a view
+            _flush(window)
+        if len(chosen) < 2:
+            raise RuntimeError(f"motion sampling produced {len(chosen)} keyframe(s) "
+                               f"(quantum={quantum:g}) — not enough to reconstruct; "
+                               f"lower keyframe_motion_quantum")
+        with open(sf_path, "w") as _f:
+            json.dump({"version": "2.0", "method": f"motion_{quantum:g}",
+                       "total_frames": len(_entries), "selected_count": len(chosen),
+                       "selected_files": chosen}, _f)
+        _soft = f", {soft_windows} window(s) all-blurry → kept least-blurry" if soft_windows else ""
+        pipe.send_log(f"Frame set: {len(chosen)}/{len(_entries)} keyframes "
+                      f"(parallax-uniform, quantum {quantum:g} motion units, sharpest "
+                      f"per window{_soft}) → selected_frames.json")
     elif mode == "dino":
         from frame_selector import select_keyframes
         # NO FALLBACK: keyframe selection is foundational (writes selected_frames.json).
