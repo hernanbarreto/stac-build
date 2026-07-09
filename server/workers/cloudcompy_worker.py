@@ -213,7 +213,21 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         # Compute and save floor alignment transform (kept as-is on light
         # resume — it may carry the user's gizmo edits)
         pipe.send_progress(95, "Computing floor alignment...", stage="cloudcompy")
-        if light_resume and (output_dir / "floor_transform.npz").exists():
+        if (output_dir / ".orientation_applied").exists():
+            # reconstruction/orient.py already baked upright (+Y up, floor at y=0) into
+            # the cloud AND the poses, from the camera-pose gravity — a measurement over
+            # every frame. Re-deriving a floor here means running a largest-plane RANSAC
+            # over an already-level cloud: in a rail/outdoor scene the biggest plane is
+            # often a wall or the train's flank, not the ground, and the resulting
+            # rotation RE-TILTS the scene. Everything downstream that consumes
+            # floor_transform.npz (xyz_display, and therefore every instance OBB) then
+            # works in a bogus frame. The baked frame IS the display frame: identity.
+            _tp = output_dir / "floor_transform.npz"
+            if _tp.exists():
+                _tp.unlink()
+            pipe.send_log("Orientation already baked from camera poses (.orientation_applied) "
+                          "— floor transform is identity, skipping RANSAC leveling")
+        elif light_resume and (output_dir / "floor_transform.npz").exists():
             pipe.send_log("Floor transform already present — kept (light resume)")
         else:
             try:

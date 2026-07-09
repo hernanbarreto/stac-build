@@ -28,6 +28,7 @@ interface Message {
     text: string
     trace?: TraceEntry[]
     pending?: boolean
+    note?: string          // what the pending bubble is waiting on
     error?: boolean
 }
 
@@ -101,12 +102,27 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
             { role: 'assistant', text: '', pending: true }])
         setInput(''); setBusy(true)
         try {
-            const r = await api(sessionId, '/api/spatial_qa', { question })
-            const d = await r.json()
-            if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`)
-            const trace: TraceEntry[] = d.tool_trace || []
+            // The GPU is handed to the reconstruction, so Qwen3-VL is usually unloaded
+            // when the chat opens. The server starts it and answers status=loading;
+            // keep the pending bubble and wait for the weights instead of surfacing
+            // the handover as an error the user has to act on.
+            let d: Record<string, unknown>
+            const deadline = Date.now() + 10 * 60_000
+            for (;;) {
+                const r = await api(sessionId, '/api/spatial_qa', { question })
+                d = await r.json()
+                if (r.ok) break
+                if (r.status !== 503 || d.status !== 'loading' || Date.now() > deadline)
+                    throw new Error(String(d.error || `HTTP ${r.status}`))
+                setMessages((m) => replaceLast(m, {
+                    role: 'assistant', text: '', pending: true,
+                    note: 'Loading the model (Qwen3-VL)…',
+                }))
+                await new Promise((res) => setTimeout(res, 8000))
+            }
+            const trace: TraceEntry[] = (d.tool_trace as TraceEntry[]) || []
             viewport.current?.visualizeMeasurement(trace)
-            setMessages((m) => replaceLast(m, { role: 'assistant', text: d.answer || '(no answer)', trace }))
+            setMessages((m) => replaceLast(m, { role: 'assistant', text: String(d.answer || '(no answer)'), trace }))
         } catch (e) {
             setMessages((m) => replaceLast(m, {
                 role: 'assistant', error: true,
@@ -157,7 +173,9 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
                 {messages.map((m, i) => (
                     <div key={i} className={`assistant-msg ${m.role} ${m.error ? 'error' : ''}`}>
                         {m.pending ? (
-                            <span className="assistant-thinking"><Loader2 size={14} className="spin" /> measuring…</span>
+                            <span className="assistant-thinking">
+                                <Loader2 size={14} className="spin" /> {m.note || 'measuring…'}
+                            </span>
                         ) : (
                             <>
                                 <div className="assistant-text">{m.text}</div>

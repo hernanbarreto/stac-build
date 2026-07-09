@@ -1444,14 +1444,23 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                     f"free VRAM {_free:.0f} GB fits ~{_fits} frames < {_n_selected}")
             pipe.send_log(f"SIMPLE: {_why} → windowed mode "
                           f"({_chunk}/{_chunk // 2}, 50% overlap)", level="warning")
-        # Aggressive point-confidence filter, same knob the web demo exposes. The
-        # origins generator replicates this exact mask, so traceability stays 1:1.
+        # Point-confidence filter, same knob the web demo exposes: drop the bottom P%
+        # of the valid points by confidence. A mean-relative coef is scene-dependent
+        # (it kept 53% of one scan and 89% of another) — the percentile keeps exactly
+        # 100-P% every time. The origins generator replicates this exact mask, so
+        # traceability stays 1:1.
+        _pct = _simple_cfg.get("conf_percentile")
         _coef = _simple_cfg.get("conf_threshold_coef")
-        if _coef:
+        if _pct is not None or _coef:
             _ps = vggt_config["Model"].setdefault("Pointcloud_Save", {})
-            _ps["conf_threshold_coef"] = float(_coef)
             _ps["use_conf_filter"] = True
-            pipe.send_log(f"SIMPLE: point confidence filter conf >= mean*{float(_coef):g}")
+            if _pct is not None:
+                _ps["conf_percentile"] = float(_pct)
+                pipe.send_log(f"SIMPLE: confidence filter — drop the bottom {float(_pct):g}% "
+                              f"of valid points (keeps {100 - float(_pct):g}%)")
+            else:
+                _ps["conf_threshold_coef"] = float(_coef)
+                pipe.send_log(f"SIMPLE: point confidence filter conf >= mean*{float(_coef):g}")
     vggt_config_path = output_dir / "vggt_omega_config.yaml"
     with open(vggt_config_path, "w") as f:
         yaml.dump(vggt_config, f, default_flow_style=False)

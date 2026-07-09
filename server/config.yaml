@@ -36,11 +36,12 @@ server:
 
 # ── Pipeline ───────────────────────────────────────────────────────
 pipeline:
-  # Full semantic chain inside the reconstruct pipeline (spec order):
-  # VLM scene understanding → SAM3 segment-everything → Phase R anchoring →
-  # TSDF with refined poses. false = restore the on-demand flow (segment
-  # manually, Phase R runs after segmentation, re-run TSDF to fuse anchored).
-  auto_segment: true
+  # Full semantic chain inside the reconstruct pipeline:
+  # VLM scene understanding → SAM3 segment-everything. false = the pipeline runs
+  # RECONSTRUCTION → CLOUDCOMPY → TSDF only, and segmentation stays on-demand.
+  # TEMPORARILY OFF while the SAM3 session handling is being reworked: a
+  # reconstruction re-run must not burn 1h40 in a segmentation we know is wrong.
+  auto_segment: false
 
 # ── Paths ──────────────────────────────────────────────────────────
 paths:
@@ -170,9 +171,15 @@ phase6:
 # (as the default inventory path) workers/vlm_worker.py.
 # ── Instance post-processing (mask→cloud stage) ──────────────────────────
 segmentation:
-  dedupe_voxel_m: 0.05        # same-SPACE dedupe: voxel size for occupancy overlap
-  dedupe_overlap: 0.5         # merge when ≥50% of the smaller instance's voxels sit
-                              # inside a bigger one (same physical object, different name)
+  merge_duplicates: false     # OFF. Both merges (index overlap + same-space voxel dedupe)
+                              # test CONTAINMENT, not identity: they divide the intersection
+                              # by the SMALLER instance's size, so a wall/floor/train body
+                              # absorbs every sign, panel and wheel resting against it, and
+                              # the absorber's envelope keeps growing (largest-first cascade).
+                              # That is what collapsed 147 instances to 3-4. Distinct objects
+                              # stay distinct; SAM3's tracking is the identity.
+  dedupe_voxel_m: 0.05        # voxel size, only used when merge_duplicates is true
+  dedupe_overlap: 0.5         # overlap fraction, only used when merge_duplicates is true
   min_instance_points: 300    # drop mask slivers below this point count (not objects)
 
 autoprompt:
@@ -730,9 +737,14 @@ reconstruction:
                                         # windowed mode with a fitting chunk when short.
     exclusive_gpu: true                 # stop vLLM before reconstruction (Omega gets the
                                         # whole GPU); the VLM stage auto-restarts it after
-    conf_threshold_coef: 0.6            # vendor Pointcloud_Save coef (keep conf >= mean*coef);
-                                        # 0.6 ≈ the web demo at threshold 20% (keeps ~80%,
-                                        # reaches farther); 1.0 ≈ demo at ~50% (stricter)
+    conf_percentile: 20.0               # THE confidence filter, web-demo semantics: drop the
+                                        # bottom 20% of valid (non-sky) points by confidence,
+                                        # keep 80%. Scene-independent by construction. The old
+                                        # mean-relative coef was not: mean*0.6 kept 53% of one
+                                        # scan and 89% of another. Set to null to fall back to
+                                        # conf_threshold_coef below.
+    conf_threshold_coef: 0.6            # legacy fallback (keep conf >= mean*coef); ignored
+                                        # whenever conf_percentile is set
     scale_anchor_frames: 12             # DA3 runs on ONLY this many evenly-spread frames
     orient_from_poses: true             # bake Y-up + floor at y=0 into cloud + poses
 

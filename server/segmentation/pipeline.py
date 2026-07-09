@@ -1648,7 +1648,13 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     xyz_display = xyz  # default: use raw xyz
     s, R, t = 1.0, np.eye(3), np.zeros(3)  # identity transform defaults
     transform_path = output_dir / "floor_transform.npz"
-    if transform_path.exists():
+    if (output_dir / ".orientation_applied").exists():
+        # reconstruction/orient.py baked +Y up and the floor at y=0 into the cloud
+        # itself, measured from the camera-pose gravity over every frame. The raw
+        # cloud IS the display frame — any further leveling would rotate it a second
+        # time and _compute_obb's Y-up assumption would then hold in no frame at all.
+        print("[SegPipeline]   Orientation baked from camera poses — display frame is identity")
+    elif transform_path.exists():
         try:
             data = np.load(transform_path)
             s = float(data["s"])
@@ -1932,10 +1938,20 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         print(f"[SegPipeline]   Object '{label}' #{iid}: "
               f"{len(all_matched):,} points{filter_info}")
     
+    # ── Instance post-processing config ────────────────────────────────
+    try:
+        from config import cfg as _seg_global_cfg
+        _dd = (_seg_global_cfg.get("segmentation", {}) or {})
+    except Exception:
+        _dd = {}
+    _merge_on = bool(_dd.get("merge_duplicates", False))
+
     # ── Phase 3: Cross-category Re-ID — merge instances with high 3D overlap ──
     # If VLM produced synonyms (e.g., "chair" + "wooden chair"), SAM3 may have
     # segmented the same physical object twice. Detect and merge by 3D point overlap.
-    if len(instances) > 1:
+    # OFF by default: the test is `intersection / smaller`, i.e. CONTAINMENT, so a
+    # large instance absorbs anything lying inside it — distinct objects, not synonyms.
+    if _merge_on and len(instances) > 1:
         merge_threshold = 0.5  # If >50% of smaller set overlaps → merge
         merged_away = set()  # indices of instances absorbed by others
         
@@ -1999,16 +2015,14 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # same object occupies the same SPACE. Voxelize each instance (5 cm) and merge
     # when most of the smaller one sits inside the bigger one. Then drop crumbs
     # (tiny instances below min_instance_points — mask slivers, not objects).
-    try:
-        from config import cfg as _seg_global_cfg
-        _dd = (_seg_global_cfg.get("segmentation", {}) or {})
-    except Exception:
-        _dd = {}
     _vox = float(_dd.get("dedupe_voxel_m", 0.05))
     _dup_thr = float(_dd.get("dedupe_overlap", 0.5))
     _min_pts = int(_dd.get("min_instance_points", 300))
+    if not _merge_on:
+        print("[SegPipeline]   Instance merging DISABLED "
+              "(segmentation.merge_duplicates: false) — instances kept distinct")
 
-    if len(instances) > 1 and _vox > 0:
+    if _merge_on and len(instances) > 1 and _vox > 0:
         vox_sets = []
         for inst in instances:
             idxs = np.asarray(inst["globalIndices"], dtype=np.int64)
@@ -2325,9 +2339,22 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
     # Invalidate cache if floor_transform.npz is newer (alignment changed or pipeline re-ran).
     # Note: gizmo alignment save deletes segmentation_result.json to force
     # OBB recomputation with the new transform.
-    if result_path.exists() and transform_path.exists():
-        if transform_path.stat().st_mtime > result_path.stat().st_mtime:
-            print(f"[SegPipeline] ⚠️ floor_transform.npz is newer than cache — invalidating")
+    #
+    # Watch EVERY input, not just the transform. Watching floor_transform.npz alone
+    # meant a result computed from stale masks — or by an older version of the
+    # matching code — was served forever: a session kept reporting "3 instances,
+    # 16.8% coverage" while a fresh match over the same data found a hundred.
+    if result_path.exists():
+        _res_mt = result_path.stat().st_mtime
+        _deps = [transform_path,
+                 output_dir / "seg_masks.npz",
+                 output_dir / "segmentation.json",
+                 output_dir / "cleaned_cloud.ply",
+                 Path(__file__)]                      # the matching code itself
+        _stale = next((p for p in _deps if p.exists() and p.stat().st_mtime > _res_mt), None)
+        if _stale is not None:
+            print(f"[SegPipeline] ⚠️ {_stale.name} is newer than the cached result — "
+                  f"invalidating segmentation_result.json")
             result_path.unlink()
     if result_path.exists():
         try:

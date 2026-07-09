@@ -72,16 +72,17 @@ async def spatial_qa(body: dict):
             {"error": "no instance store found (pass store_path, or build the "
                       "Phase R store for this session first)"}, status_code=404)
     # The reconstruction / SAM3 stages stop vLLM to get the whole GPU, so by the
-    # time the user opens the chat the service is usually down. Bring it back
-    # (idempotent) instead of answering 500 ConnectionRefused. Weights take
-    # minutes to load: don't hold the request open for the full startup timeout —
-    # tell the user to retry, the launcher keeps loading in the background.
-    from semantic.service import ensure_service
-    if not ensure_service(log=print, timeout_s=float(body.get("startup_wait_s", 60))):
+    # time the user opens the chat the service is usually down. Kick the launcher
+    # and return immediately with status=loading: the weights take minutes, and
+    # holding the request open just turns into a timeout the user reads as an
+    # error. The client keeps its pending bubble and retries.
+    from semantic.service import ensure_service, is_alive
+    if not is_alive():
+        ensure_service(log=print, timeout_s=0.0)   # fire and forget
         return JSONResponse(
-            {"error": "the semantic service (Qwen3-VL) is starting up — it was "
-                      "stopped to free the GPU for reconstruction. Loading the "
-                      "weights takes a couple of minutes; ask again shortly."},
+            {"status": "loading",
+             "error": "Loading the model (Qwen3-VL). It was unloaded to free the "
+                      "GPU for reconstruction; this takes a couple of minutes."},
             status_code=503)
 
     backend = body.get("backend", "qwen_local")
