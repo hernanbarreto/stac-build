@@ -297,8 +297,9 @@ class PipelineManager:
                       "vggt_long_config.yaml", "vggt_omega_config.yaml", "da3_streaming_config.yaml",
                       "camera_poses_mapanything.json", "camera_poses.txt", "camera_frames.txt",
                       "intrinsic.txt", "lidar_complement.ply", "omega_run",
-                      ".metric_scale_applied"],  # ← idempotency marker: MUST be cleared on
-                      # Replace, else scale_align skips on every re-run → not metric (the bug).
+                      ".metric_scale_applied", ".orientation_applied"],
+                      # ↑ idempotency markers: MUST be cleared on Replace, else scale_align /
+                      # orient skip on every re-run → cloud not metric, scene upside down.
         StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "cleaned_cloud_raw.ply",
                              "floor_transform.npz", "scene_consolidate_report.json",
                              # the deferred mask→cloud mapping runs IN this stage
