@@ -70,6 +70,7 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
     const [busy, setBusy] = useState(false)
     const [volumes, setVolumes] = useState<UserVolume[]>([])
     const [showVolForm, setShowVolForm] = useState(false)
+    const [vlmStatus, setVlmStatus] = useState<'up' | 'loading' | 'busy' | 'down' | null>(null)
     const [volForm, setVolForm] = useState({ name: 'Bay', cx: '0', cy: '0', cz: '0', w: '2', h: '2', d: '2' })
     const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -91,6 +92,30 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
     useEffect(() => {
         scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
     }, [messages])
+
+    // The reconstruction stages stop Qwen3-VL to free the GPU, so it is usually down
+    // when the chat opens. Ask for its state and start it right away (the server
+    // refuses while a pipeline is running), then poll until it serves — so the user
+    // sees "loading" up front instead of discovering it after asking.
+    useEffect(() => {
+        let cancelled = false
+        let warmed = false
+        const tick = async () => {
+            if (cancelled) return
+            try {
+                const r = await fetch(`/api/semantic/status?warmup=${warmed ? 'false' : 'true'}`)
+                const d = await r.json()
+                warmed = true
+                if (cancelled) return
+                setVlmStatus(d.status)
+                if (d.status !== 'up') setTimeout(tick, 8000)
+            } catch {
+                if (!cancelled) setTimeout(tick, 15000)
+            }
+        }
+        tick()
+        return () => { cancelled = true }
+    }, [])
 
     const ask = useCallback(async (question: string) => {
         if (!question.trim() || busy) return
@@ -157,6 +182,15 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
 
     return (
         <div className="assistant-panel">
+            {vlmStatus && vlmStatus !== 'up' && (
+                <div className="assistant-status">
+                    {vlmStatus === 'busy' ? (
+                        <>The GPU is busy reconstructing — the assistant loads when it finishes.</>
+                    ) : (
+                        <><Loader2 size={12} className="spin" /> Loading the model (Qwen3-VL)…</>
+                    )}
+                </div>
+            )}
             <div className="assistant-scroll" ref={scrollRef}>
                 {messages.length === 0 && (
                     <div className="assistant-empty">

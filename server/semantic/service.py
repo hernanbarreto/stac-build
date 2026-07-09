@@ -37,6 +37,15 @@ def is_alive(config: Optional[dict] = None, timeout_s: float = 3.0) -> bool:
         return False
 
 
+def is_starting() -> bool:
+    """True when a vLLM process exists but is not serving yet (weights loading)."""
+    try:
+        return subprocess.run(["pgrep", "-f", "vllm serve"],
+                              capture_output=True).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def ensure_service(config: Optional[dict] = None,
                    log: Optional[Callable[[str], Any]] = None,
                    cancelled: Optional[Callable[[], bool]] = None,

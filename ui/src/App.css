@@ -4549,3 +4549,12 @@
 .console-ts {
   font-variant-numeric: tabular-nums;
 }
+
+/* Assistant: Qwen3-VL lifecycle banner (the GPU is handed to the reconstruction,
+   so the model is usually unloaded when the chat opens). */
+.assistant-status {
+    display: flex; align-items: center; gap: 6px;
+    padding: 7px 12px; font-size: 11.5px;
+    color: var(--text-dim); background: rgba(var(--accent-2-rgb), 0.08);
+    border-bottom: 1px solid var(--border);
+}

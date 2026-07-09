@@ -61,6 +61,38 @@ def _resolve_images(body: dict, store_path: str) -> list:
     return images
 
 
+@router.get("/semantic/status")
+async def semantic_status(warmup: bool = False):
+    """State of the Qwen3-VL service, so the chat can say "loading…" the moment it
+    opens instead of only after the user has waited on a question.
+
+    `warmup=true` also starts it — but never while a pipeline is running: vLLM rests
+    at ~40 GB of VRAM and the reconstruction stages stop it precisely to get the GPU
+    back. Warming up mid-reconstruction would OOM the very run the user is waiting on.
+    """
+    from semantic.service import is_alive, is_starting, ensure_service
+
+    if is_alive():
+        return JSONResponse({"status": "up"})
+    if is_starting():
+        return JSONResponse({"status": "loading"})
+
+    if warmup:
+        try:
+            from main import pipeline_manager           # late import: avoids a cycle
+            busy = any(j.get("status") in ("running", "queued")
+                       for j in pipeline_manager.get_all_jobs().values())
+        except Exception:  # noqa: BLE001
+            busy = False
+        if busy:
+            return JSONResponse({"status": "busy",
+                                 "detail": "a pipeline is using the GPU"})
+        ensure_service(log=print, timeout_s=0.0)        # fire and forget
+        return JSONResponse({"status": "loading"})
+
+    return JSONResponse({"status": "down"})
+
+
 @router.post("/spatial_qa")
 async def spatial_qa(body: dict):
     question = (body or {}).get("question")
