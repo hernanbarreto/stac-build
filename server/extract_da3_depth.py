@@ -16,6 +16,11 @@ def main():
     parser.add_argument("--image_dir", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--model", type=str, default="depth-anything/DA3NESTED-GIANT-LARGE-1.1")
+    parser.add_argument("--per_frame", action="store_true",
+                        help="Run inference one image at a time (ISOLATED monocular depth "
+                             "— no cross-frame attention). Used for the metric scale "
+                             "anchor, where frames are seconds apart and must not be "
+                             "treated as a multi-view set.")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -49,20 +54,42 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"[DA3 Extractor] Loading {args.model} on {device}")
-    model = DepthAnything3.from_pretrained(args.model, device=device)
+    # PyTorchModelHubMixin.from_pretrained SILENTLY IGNORES a `device=` kwarg —
+    # the model stayed on CPU (23 cores pinned, minutes per frame, GPU at 0%).
+    # Move it explicitly and verify, so this can never regress quietly.
+    model = DepthAnything3.from_pretrained(args.model)
+    model = model.to(device)
     model.eval()
+    p = next(model.parameters())
+    print(f"[DA3 Extractor] model device: {p.device} (dtype {p.dtype})")
+    if device.type == "cuda" and p.device.type != "cuda":
+        raise RuntimeError("model did not reach the GPU — aborting instead of "
+                           "silently burning CPU")
 
-    # Run inference in a batch using the provided list of paths
-    with torch.no_grad():
-        prediction = model.inference(images)
-    
-    # prediction.depth has shape [N, H, W], prediction.conf has shape [N, H, W]
-    depths = prediction.depth
-    confs = prediction.conf
-    if isinstance(depths, torch.Tensor):
-        depths = depths.cpu().numpy()
-    if isinstance(confs, torch.Tensor):
-        confs = confs.cpu().numpy()
+    # Run inference: one joint batch (default) or strictly per-frame (--per_frame)
+    if args.per_frame:
+        d_list, c_list = [], []
+        with torch.no_grad():
+            for i, img_path in enumerate(images):
+                print(f"[DA3 Extractor] isolated inference {i+1}/{len(images)}: "
+                      f"{os.path.basename(img_path)}")
+                pred = model.inference([img_path])
+                d = pred.depth
+                c = pred.conf
+                d_list.append(d.cpu().numpy() if isinstance(d, torch.Tensor) else np.asarray(d))
+                c_list.append(c.cpu().numpy() if isinstance(c, torch.Tensor) else np.asarray(c))
+        depths = np.concatenate(d_list, axis=0)
+        confs = np.concatenate(c_list, axis=0)
+    else:
+        with torch.no_grad():
+            prediction = model.inference(images)
+        # prediction.depth has shape [N, H, W], prediction.conf has shape [N, H, W]
+        depths = prediction.depth
+        confs = prediction.conf
+        if isinstance(depths, torch.Tensor):
+            depths = depths.cpu().numpy()
+        if isinstance(confs, torch.Tensor):
+            confs = confs.cpu().numpy()
 
     # DA3 conf uses expp1 activation (exp(x)+1), range ~1-60+
     # Subtract 1.0 so minimum is 0 (same as DA3-streaming does)

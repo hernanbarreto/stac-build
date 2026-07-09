@@ -32,8 +32,22 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
         prompt = vlm_data.get("prompt", "")
         frame_map = vlm_data.get("frame_map", {})
         boxes_map = vlm_data.get("boxes") or None  # Phase 1 per-instance box seeds
-        pipe.send_log(f"Using VLM prompt: '{prompt}'"
-                      + (f" (+box seeds for {len(boxes_map)} labels)" if boxes_map else ""))
+        # SIMPLE pipeline: the VLM contributes ONLY the concept vocabulary. SAM3 alone
+        # searches, identifies and tracks each concept over the WHOLE sampled frame set
+        # (empty frame_map → all frames; with ~1 fps sampling that is a single SAM3
+        # session per concept → SAM3's own tracking IS the instance identity). Box
+        # seeds are NOT passed: injected boxes pinned duplicate instances of the same
+        # physical object and (vendor behavior) each add_prompt resets the session
+        # anyway, so they cost identity for near-zero benefit.
+        _simple = ((config.get("reconstruction", {}) or {}).get("simple", {}) or {})
+        if bool(_simple.get("enabled", False)):
+            frame_map = {}
+            boxes_map = None
+            pipe.send_log(f"SIMPLE segmentation: text concepts only, all frames per "
+                          f"concept — '{prompt}'")
+        else:
+            pipe.send_log(f"Using VLM prompt: '{prompt}'"
+                          + (f" (+box seeds for {len(boxes_map)} labels)" if boxes_map else ""))
     else:
         # No scene understanding on disk. An explicit config prompt is
         # honored (operator override); otherwise FAIL — a canned category
@@ -51,6 +65,14 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     if pipe.check_cancel():
         return
+
+    # Exclusive GPU: the VLM analysis is already on disk — vLLM is not needed
+    # during SAM3, and long single-session tracking (batch_size ≥ frame count)
+    # wants the VRAM. Any later VLM consumer auto-restarts the service.
+    _simple_gpu = ((config.get("reconstruction", {}) or {}).get("simple", {}) or {})
+    if bool(_simple_gpu.get("enabled", False)) and bool(_simple_gpu.get("exclusive_gpu", True)):
+        from workers.base import stop_semantic_service
+        stop_semantic_service(pipe, stage="SAM3")
 
     pipe.send_progress(0, "Loading SAM3 model...", stage="sam3")
 

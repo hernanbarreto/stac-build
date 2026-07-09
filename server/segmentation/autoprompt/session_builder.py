@@ -74,6 +74,10 @@ class AutoPrompter:
         self.frames_dir = self.session_dir / "frames"
         cfg = (config or {}).get("autoprompt", {}) if config else {}
         self.cfg = cfg
+        # SIMPLE pipeline flag: understanding-only prompts (rich phrases → SAM3),
+        # no per-keyframe grounded detection, no boxes, no association.
+        self.prompts_only = bool((((config or {}).get("reconstruction", {}) or {})
+                                  .get("simple", {}) or {}).get("enabled", False))
         self.backend_name = cfg.get("backend", backend)
         self.understand_enabled = cfg.get("understand", True)
         self.understand_sample = cfg.get("understand_sample", 8)
@@ -246,6 +250,51 @@ class AutoPrompter:
                 json.dumps(understanding.to_dict(), indent=2, ensure_ascii=False))
             prog(22, f"scene: {understanding.scene_type} — {len(targets)} object types understood")
 
+        # ── SIMPLE pipeline: understanding IS the whole VLM job ──────────
+        # The scene pass already produced one RICH noun phrase per object type.
+        # Those phrases go straight to SAM3 as SEPARATE text prompts (the ';'
+        # join below is just the file format — the segmentation pipeline splits
+        # it and runs ONE SAM3 concept session per phrase). No per-keyframe
+        # grounded detection, no boxes, no association: SAM3 searches, labels
+        # and TRACKS each concept itself — its tracking is the identity.
+        if self.prompts_only:
+            phrases = [p for p in (targets or []) if p and p.strip()]
+            if not phrases:
+                raise RuntimeError("scene understanding produced no objects — "
+                                   "cannot build SAM3 prompts")
+            prompt = ";".join(phrases)
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            vlm_analysis = {
+                "source": "qwen3vl_autoprompt_simple",
+                "backend": self.backend_name,
+                "scene_understanding": understanding.to_dict() if understanding else None,
+                "prompt": prompt,
+                "frame_map": {},          # empty → SAM3 runs every phrase on ALL frames
+                "boxes": {},              # NO box seeds, ever, in this mode
+                "instances": [],
+                "review_queue": [],
+                "dubious_labels": [],
+                "thresholds": {},
+            }
+            vlm_path = self.output_dir / "vlm_analysis.json"
+            vlm_path.write_text(json.dumps(vlm_analysis, indent=2, ensure_ascii=False))
+            review_path = self.output_dir / "autoprompt_review_queue.json"
+            review_path.write_text(json.dumps({"instances": []}, indent=2))
+            inst_path = self.output_dir / "autoprompt_instances.json"
+            inst_path.write_text(json.dumps({"accepted": [], "review": []}, indent=2))
+            prog(100, f"prompts ready: {len(phrases)} rich concepts → SAM3")
+            print(f"[autoprompt] SIMPLE: {len(phrases)} rich concept prompts for SAM3: "
+                  f"{phrases}")
+            return AutoPromptResult(
+                n_keyframes=len(kf), n_detections=0, n_instances=0,
+                n_accepted=0, n_review=0, prompt=prompt, frame_map={},
+                vlm_analysis_path=str(vlm_path),
+                review_queue_path=str(review_path),
+                instances_path=str(inst_path),
+                per_class_counts={p: 1 for p in phrases},
+                scene_type=(understanding.scene_type if understanding else ""),
+            )
+
         # ── Step 2: understanding-driven detection (segment everything) ──
         # only the adaptively-sampled keyframes go through the VLM; SAM3
         # propagates the resulting masklets to every frame afterwards
@@ -277,6 +326,15 @@ class AutoPrompter:
         prog(70, f"associated -> {len(instances)} instances")
 
         accepted, review = self._gate(instances)
+        # Consolidate near-synonym labels BEFORE building the SAM3 contract: the VLM
+        # freely emits "wheel"+"train_wheel", "ceiling_truss"+"ceiling_trusses", … and
+        # each label becomes its own SAM3 concept pass — the same physical object then
+        # gets segmented once per name (the "same tag N times" duplicates). Lexical
+        # merge only (plural + shared last token); semantics untouched.
+        merged = self._consolidate_labels(accepted + review)
+        if merged:
+            print(f"[autoprompt] vocabulary consolidated: "
+                  f"{', '.join(f'{a}→{b}' for a, b in sorted(merged.items()))}")
         # Spec (item 5): dubious instances are NOT dropped — they are segmented
         # too (their masklets participate in the Phase R vote) but flagged so
         # they never generate pose residuals until validated. Labels whose
@@ -355,6 +413,55 @@ class AutoPrompter:
             eff_conf = inst.confidence + (0.05 if inst.n_views >= 2 else 0.0)
             (accepted if eff_conf >= thr else review).append(inst)
         return accepted, review
+
+    @staticmethod
+    def _consolidate_labels(instances: list[Instance]) -> dict[str, str]:
+        """Merge NEAR-SYNONYM labels in place so each visual concept reaches SAM3
+        exactly once. Two lexical rules only (semantics are never guessed):
+          1. plural → singular when both exist ("ceiling_trusses" → "ceiling_truss")
+          2. shared last token → the SHORTER (more generic) label wins for the
+             SAM3 concept pass ("train_wheel"+"wheel" → "wheel"); the vocabulary
+             stays a canonicalization overlay downstream, never a detection filter.
+        Returns {old_label: new_label} for the merges applied."""
+        labels = {i.label for i in instances}
+
+        def _singular(s: str) -> str:
+            # pragmatic English plural strip: trusses→truss, boxes→box, wheels→wheel
+            for suf in ("sses", "xes", "ches", "shes"):
+                if s.endswith(suf):
+                    return s[:-2]
+            return s[:-1] if s.endswith("s") and not s.endswith("ss") else s
+
+        remap: dict[str, str] = {}
+        # rule 1: plural collapses onto the existing singular
+        for lb in sorted(labels):
+            sg = _singular(lb)
+            if sg != lb and sg in labels:
+                remap[lb] = sg
+        # rule 2: same last token (after plural strip) → shortest label wins
+        by_token: dict[str, list[str]] = {}
+        for lb in sorted(labels):
+            eff = remap.get(lb, lb)
+            by_token.setdefault(_singular(eff.split("_")[-1]), []).append(eff)
+        for tok, group in by_token.items():
+            group = sorted(set(group), key=len)
+            if len(group) > 1 and tok == group[0] == _singular(group[0]):
+                # only merge when the generic token itself is one of the labels
+                # ("wheel" ⊂ "train_wheel"); unrelated same-suffix labels
+                # ("door" vs "trapdoor" won't hit: token match is exact on "_" split)
+                for other in group[1:]:
+                    remap[other] = group[0]
+        # resolve chains (plural → token merge)
+        for k in list(remap):
+            v = remap[k]
+            while v in remap:
+                v = remap[v]
+            remap[k] = v
+        if remap:
+            for inst in instances:
+                if inst.label in remap:
+                    inst.label = remap[inst.label]
+        return remap
 
     def _build_contract(
         self, accepted: list[Instance], fid_to_file: dict[int, str]

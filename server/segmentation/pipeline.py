@@ -15,6 +15,7 @@ Usage from main.py:
 """
 
 import os
+import re
 import json
 import shutil
 import torch
@@ -953,6 +954,10 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     for raw_id in sorted(new_obj_ids_raw):
         remapped_id = id_remap[raw_id]
         label = obj_labels.get(raw_id, categories[0] if categories else "object")
+        # Rich SAM3 concept phrases ("concrete support column") become compact
+        # id-like labels here — the ONE place labels are persisted — so folder
+        # names / JSON keys downstream never carry spaces.
+        label = re.sub(r"[^a-z0-9]+", "_", str(label).strip().lower()).strip("_")[:48] or "object"
         
         if remapped_id in existing_by_id:
             # Update existing entry (label may have changed)
@@ -1985,7 +1990,73 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                 if len(matched) >= 4:
                     inst["obb"] = _compute_obb(xyz_display[matched])
             print(f"[SegPipeline]   Cross-category merge: {pre_merge} → {len(instances)} instances")
-    
+
+    # ── Same-SPACE dedupe + small-instance filter ──────────────────────
+    # The index-overlap merge above only fires when two instances share the SAME
+    # cloud points — but duplicates of one physical object (two SAM3 concepts, or
+    # a track split) usually land on DISJOINT points (each mask claims different
+    # frames), so they never intersect by index. Occupancy says the truth: the
+    # same object occupies the same SPACE. Voxelize each instance (5 cm) and merge
+    # when most of the smaller one sits inside the bigger one. Then drop crumbs
+    # (tiny instances below min_instance_points — mask slivers, not objects).
+    try:
+        from config import cfg as _seg_global_cfg
+        _dd = (_seg_global_cfg.get("segmentation", {}) or {})
+    except Exception:
+        _dd = {}
+    _vox = float(_dd.get("dedupe_voxel_m", 0.05))
+    _dup_thr = float(_dd.get("dedupe_overlap", 0.5))
+    _min_pts = int(_dd.get("min_instance_points", 300))
+
+    if len(instances) > 1 and _vox > 0:
+        vox_sets = []
+        for inst in instances:
+            idxs = np.asarray(inst["globalIndices"], dtype=np.int64)
+            if len(idxs) == 0:
+                vox_sets.append(set())
+                continue
+            v = np.floor(xyz_display[idxs] / _vox).astype(np.int64)
+            vox_sets.append(set(map(tuple, v)))
+        absorbed = set()
+        order = sorted(range(len(instances)), key=lambda k: -len(vox_sets[k]))
+        for a_pos, i in enumerate(order):
+            if i in absorbed or not vox_sets[i]:
+                continue
+            for j in order[a_pos + 1:]:
+                if j in absorbed or not vox_sets[j]:
+                    continue
+                inter = len(vox_sets[i] & vox_sets[j])
+                if inter and inter / len(vox_sets[j]) >= _dup_thr:
+                    # j (smaller) is the same physical object as i → absorb
+                    merged_idx = sorted(set(instances[i]["globalIndices"])
+                                        | set(instances[j]["globalIndices"]))
+                    instances[i]["globalIndices"] = merged_idx
+                    instances[i]["total_points"] = len(merged_idx)
+                    vox_sets[i] |= vox_sets[j]
+                    absorbed.add(j)
+                    print(f"[SegPipeline]   🔗 Space-dedupe: '{instances[j]['label']}' "
+                          f"#{instances[j]['id']} is the same object as "
+                          f"'{instances[i]['label']}' #{instances[i]['id']} "
+                          f"({inter / len(vox_sets[j]):.0%} of its space) — merged")
+        if absorbed:
+            pre = len(instances)
+            instances = [inst for k, inst in enumerate(instances) if k not in absorbed]
+            for inst in instances:
+                m = np.array(inst["globalIndices"], dtype=np.int64)
+                if len(m) >= 4:
+                    inst["obb"] = _compute_obb(xyz_display[m])
+            print(f"[SegPipeline]   Space-dedupe: {pre} → {len(instances)} instances")
+
+    if _min_pts > 0:
+        tiny = [inst for inst in instances if inst["total_points"] < _min_pts]
+        if tiny:
+            _tiny_desc = ", ".join("{}#{}({})".format(t["label"], t["id"], t["total_points"])
+                                   for t in tiny[:10])
+            print(f"[SegPipeline]   Dropped {len(tiny)} tiny instance(s) "
+                  f"(<{_min_pts} pts): {_tiny_desc}{'...' if len(tiny) > 10 else ''}")
+            instances = [inst for inst in instances if inst["total_points"] >= _min_pts]
+
+    total_segmented = sum(inst["total_points"] for inst in instances)
     coverage = round(total_segmented / max(1, n_pts), 4)
     
     result = {

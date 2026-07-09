@@ -110,3 +110,43 @@ def run_worker_safe(worker_fn, conn: Connection, *args, **kwargs):
             pass  # CUDA not available or not initialized in this process
         import gc
         gc.collect()
+
+
+# ── Exclusive-GPU helpers (shared by reconstruction / SAM3 workers) ──────────
+
+def gpu_free_gb() -> Optional[float]:
+    """Free VRAM (GB) of GPU 0 via nvidia-smi; None when it can't be read."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10)
+        return float(out.stdout.strip().splitlines()[0]) / 1024.0
+    except Exception:
+        return None
+
+
+def stop_semantic_service(pipe: "WorkerPipe", stage: str = "") -> None:
+    """EXCLUSIVE GPU for a heavy stage: stop the vLLM semantic service (its ~40 GB
+    resident VRAM starves Omega single passes and long SAM3 sessions). Any later
+    consumer auto-restarts it (_ensure_semantic_service), so this is a stage-scoped
+    handover, not a shutdown. No-op when vLLM isn't running."""
+    import subprocess
+    try:
+        if subprocess.run(["pgrep", "-f", "vllm serve"],
+                          capture_output=True).returncode != 0:
+            return
+        pipe.send_log(f"[gpu] stopping vLLM semantic service — {stage or 'this stage'} "
+                      f"gets the whole GPU (it auto-restarts on next VLM use)")
+        subprocess.run(["pkill", "-f", "vllm serve"], capture_output=True)
+        for _ in range(30):
+            time.sleep(2)
+            if subprocess.run(["pgrep", "-f", "vllm serve"],
+                              capture_output=True).returncode != 0:
+                break
+        free = gpu_free_gb()
+        if free is not None:
+            pipe.send_log(f"[gpu] vLLM stopped — {free:.0f} GB VRAM free")
+    except Exception as e:  # noqa: BLE001
+        pipe.send_log(f"[gpu] could not stop vLLM ({e}) — continuing with shared GPU",
+                      level="warning")

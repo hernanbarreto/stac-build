@@ -32,11 +32,15 @@ _PROMPT = (
     'Study this image and return JSON:\n'
     '{"scene_type": "<short phrase: what kind of place/space is this>",\n'
     ' "summary": "<1-2 sentences: the setting and what is happening>",\n'
-    ' "objects": ["<every distinct object or surface visible, generic or '
-    'specific>", ...]}\n'
-    "List objects at instance granularity where it matters (e.g. 'support "
-    "column' if several columns are present). Base everything ONLY on what is "
-    "visible. Output ONLY the JSON."
+    ' "objects": ["<RICH noun phrase for every distinct object or surface '
+    'visible>", ...]}\n'
+    "Each object must be a RICH, descriptive noun phrase (2-5 words) that a "
+    "text-promptable segmenter can match visually: include material, color or "
+    "context when it helps discriminate — e.g. 'concrete support column', "
+    "'overhead fluorescent light fixture', 'yellow metro train car' — never a "
+    "bare word like 'column' when a richer phrase describes it better. One "
+    "phrase PER OBJECT TYPE (all wheels are one entry). Base everything ONLY "
+    "on what is visible. Output ONLY the JSON."
 )
 
 
@@ -101,8 +105,26 @@ def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int 
     )
 
 
+def _head_noun(phrase: str) -> str:
+    """Concept key of a noun phrase = its (plural-stripped) head noun, e.g.
+    'concrete support columns' -> 'column'. Used ONLY to merge near-duplicate
+    phrasings of the same concept across keyframes."""
+    words = phrase.split()
+    if not words:
+        return phrase
+    w = words[-1]
+    for suf in ("sses", "xes", "ches", "shes"):
+        if w.endswith(suf):
+            return w[:-2]
+    return w[:-1] if w.endswith("s") and not w.endswith("ss") else w
+
+
 def aggregate(frames: list[FrameUnderstanding], min_object_freq: int = 1) -> SceneUnderstanding:
-    """Consensus scene_type + deduped union of objects across keyframes."""
+    """Consensus scene_type + one RICH phrase per concept across keyframes.
+    Different frames phrase the same concept differently ('metro train car' /
+    'subway train car'); grouping by head noun keeps exactly one — the most
+    frequently used phrasing (ties → the richest) — so SAM3 gets one text
+    prompt per distinct object type, never N variants of the same thing."""
     frames = [f for f in frames if f is not None]
     if not frames:
         return SceneUnderstanding("unknown", "", [], [])
@@ -112,7 +134,14 @@ def aggregate(frames: list[FrameUnderstanding], min_object_freq: int = 1) -> Sce
     cand = [f for f in frames if f.scene_type == scene_type] or frames
     summary = max((f.summary for f in cand), key=len, default="")
     obj_counts = Counter(o for f in frames for o in set(f.objects))
-    objects = sorted([o for o, c in obj_counts.items() if c >= min_object_freq],
-                     key=lambda o: -obj_counts[o])
+    by_head: dict[str, list[str]] = {}
+    for o, c in obj_counts.items():
+        if c >= min_object_freq:
+            by_head.setdefault(_head_noun(o), []).append(o)
+    objects = []
+    for head, variants in by_head.items():
+        best = max(variants, key=lambda v: (obj_counts[v], len(v)))
+        objects.append(best)
+    objects.sort(key=lambda o: -obj_counts[o])
     return SceneUnderstanding(scene_type=scene_type, summary=summary,
                               objects=objects, per_frame=frames)

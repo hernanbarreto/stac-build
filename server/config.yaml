@@ -232,6 +232,13 @@ phase6:
 # pre-populate a segmentation session for human review. Its batch CLI is the
 # masklet producer for Phase R. Consumed by segmentation/autoprompt/* and
 # (as the default inventory path) workers/vlm_worker.py.
+# ── Instance post-processing (mask→cloud stage) ──────────────────────────
+segmentation:
+  dedupe_voxel_m: 0.05        # same-SPACE dedupe: voxel size for occupancy overlap
+  dedupe_overlap: 0.5         # merge when ≥50% of the smaller instance's voxels sit
+                              # inside a bigger one (same physical object, different name)
+  min_instance_points: 300    # drop mask slivers below this point count (not objects)
+
 autoprompt:
   enabled: true                       # default path; false -> InternVL3 fallback
   backend: "qwen_local"               # semantic-service backend
@@ -411,7 +418,9 @@ models:
     prompt_search_frames: [0, 15]      # frames to apply prompt (relative to chunk start)
 
     # Batched processing (memory management for long videos)
-    batch_size: 50
+    batch_size: 250                    # ≥ sampled frame count → ONE SAM3 session per
+                                       # concept = SAM3's own tracking is the identity
+                                       # (cross-batch ID stitching is unreliable; avoid it)
     batch_overlap: 10
     iou_match_threshold: 0.3
 
@@ -649,15 +658,12 @@ tsdf:
                              # TSDF surfaces have edges ≈ voxel size; this only removes the
                              # spurious near↔far 'bridge'/spike lines. Run post-weld + post-decimate.
   texture: true
-  texture_mode: "vertex_gpu" # FAST-ITERATION mode for the Phase-R A/B test runs (nvdiffrast,
-                             # GPU, seconds): per-VERTEX colour, resolution ≈ vertex spacing
-                             # (~1.2cm) = NOT photographic. Switch back to "texrecon" for final
-                             # deliverables — UV-atlas photo texture (MVS-Texturing, CPU; measured
-                             # 30-60 min on test2's 4M-tri / 676-view mesh, NOT ~10 min).
-                             # texrecon needs accurate metric poses (now provided by omega+scale_align).
-                             # OLD comment: vertex_gpu colour resolution ≈ the mesh vertex spacing
-                             # (~voxel, 1.2cm) — fast + good for iterating; "texrecon" gives a sharper
-                             # UV atlas for a FINAL render. Switch back to texrecon only for delivery.
+  texture_mode: "texrecon"   # UV-atlas PHOTO texture (MVS-Texturing). With the SIMPLE
+                             # pipeline (~46 views / ~1.6M tris on test2) this runs in
+                             # minutes, so it is the default again. "vertex_gpu" remains
+                             # the fast-iteration alternative (per-vertex colour ≈ 1.2cm,
+                             # NOT photographic — it was left on by the old Phase-R A/B
+                             # loop and produced the washed-out colours of 2026-07-09).
   texture_max_views: 400     # texrecon view cap (evenly subsampled). 400 spread over a 62m corridor
                              # thins to ~1 view/2.4 frames → patchy/untextured swaths. With auto_tune
                              # ON this scales UP ∝ scene diagonal (10m ref), capped at the ceiling below,
@@ -754,8 +760,9 @@ reconstruction:
   # ⚠ Weights are gated: request access at huggingface.co/facebook/VGGT-Omega, download
   #   vggt_omega_1b_512.pt → vendor/vggt-omega-weights/ (path in stac_vggtomega.yaml).
   vggtomega:
-    chunk_size: 120                     # Omega uses ~30% of VGGT memory → large chunks OK
-    chunk_overlap: 60
+    chunk_size: 500                     # windowed FALLBACK only (video > max_frames_single_pass):
+    chunk_overlap: 250                  # 500/250 = few seams, wide-baseline chunks, 50% overlap
+                                        # (~43 GB VRAM at 500 frames — needs the GPU to itself)
     loop_closure: true
     resolution: 512                     # load_and_preprocess_images(image_resolution=…)
     mode: "balanced"                    # "balanced" (≈res² tokens) | "max_size" (less VRAM)
@@ -769,6 +776,29 @@ reconstruction:
                                         # pixels vote (npz 'conf'); 0 disables the gate.
                                         # Fallback ladder if a filter starves: near∩conf →
                                         # conf → near → all valid.
+
+  # ── SIMPLE pipeline (one concept — validated 2026-07-09 vs the VGGT-Omega web demo) ──
+  # Sparse frames (~1 fps) → ONE VGGT-Omega pass (no windows → no seams → no onion) →
+  # aggressive confidence filter → metric scale from a handful of DA3 anchor frames
+  # (or Stray depth when the session provides it) → upright orientation baked from the
+  # camera poses (mean camera-down = gravity; no floor RANSAC in the critical path).
+  # Windows return ONLY when the sampled video still exceeds max_frames_single_pass.
+  simple:
+    enabled: true
+    target_fps: 4.0                     # temporal sampling of blur-valid frames (~4 fps:
+                                        # denser views → better texture/coverage; test2
+                                        # ≈ 180 frames, still one pass)
+    max_frames_single_pass: 600         # above this, windowed mode resumes (long videos).
+                                        # ~43 GB VRAM at 500 frames (paper) ≈ 86 MB/frame —
+                                        # the worker ALSO checks free VRAM and degrades to
+                                        # windowed mode with a fitting chunk when short.
+    exclusive_gpu: true                 # stop vLLM before reconstruction (Omega gets the
+                                        # whole GPU); the VLM stage auto-restarts it after
+    conf_threshold_coef: 0.6            # vendor Pointcloud_Save coef (keep conf >= mean*coef);
+                                        # 0.6 ≈ the web demo at threshold 20% (keeps ~80%,
+                                        # reaches farther); 1.0 ≈ demo at ~50% (stricter)
+    scale_anchor_frames: 12             # DA3 runs on ONLY this many evenly-spread frames
+    orient_from_poses: true             # bake Y-up + floor at y=0 into cloud + poses
 
   # ── Dense frame fusion (frame-to-keyframe ICP) — cloud-stage completeness ──
   # VGGT-Long poses+cloud use KEYFRAMES only → inter-keyframe holes the TSDF inherits.

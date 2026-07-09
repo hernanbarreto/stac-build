@@ -787,19 +787,29 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
     # `pipeline.auto_segment: false` disables the automatic semantic chain
     # (VLM auto-prompt → SAM3 → Phase R) and restores the on-demand flow.
     auto_segment = True
+    simple_on = False
     try:
         from config import cfg
         auto_segment = bool(cfg.get("pipeline", {}).get("auto_segment", True))
+        simple_on = bool((cfg.get("reconstruction", {}).get("simple") or {}).get("enabled", False))
     except Exception:
         pass
     _semantic_stages = {StageId.VLM, StageId.SAM3, StageId.PHASE_R}
     if not auto_segment:
         logger.info("[Pipeline] auto_segment off — VLM/SAM3/PhaseR stages disabled")
+    # SIMPLE pipeline: one VGGT-Omega pass → no windows → no seams. Phase R exists to
+    # repair inter-window seams, so with nothing to anchor it stays OUT of the flow
+    # (it returns, redesigned around anchor objects, when long windowed videos need it).
+    if simple_on:
+        logger.info("[Pipeline] SIMPLE pipeline on — Phase R stage disabled "
+                    "(single pass: no windows, no seams to anchor)")
 
     def _enabled(stage_id: StageId) -> bool:
         if skip_cloudcompy and stage_id == StageId.CLOUDCOMPY:
             return False
         if not auto_segment and stage_id in _semantic_stages:
+            return False
+        if simple_on and stage_id == StageId.PHASE_R:
             return False
         return True
 

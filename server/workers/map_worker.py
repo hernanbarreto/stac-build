@@ -12,6 +12,7 @@ import re
 import shutil
 import glob
 import tempfile
+import time
 from pathlib import Path
 from multiprocessing.connection import Connection
 
@@ -79,9 +80,62 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # frame set is always pinned and every backend consumes the same --selected_frames.
     selected_frames_path = None
     mode = str(recon_cfg.get("frames_selector", "none")).lower()
+    # SIMPLE pipeline (reconstruction.simple.enabled): sparse temporal sampling is the
+    # first pillar of the one-pass design — it overrides whatever selector is configured.
+    _simple_cfg = recon_cfg.get("simple") or {}
+    _simple_on = bool(_simple_cfg.get("enabled", False))
+    if _simple_on and mode != "fps":
+        pipe.send_log(f"SIMPLE pipeline ON → frame selection 'fps' "
+                      f"(~{_simple_cfg.get('target_fps', 1.0)} fps) overrides "
+                      f"frames_selector '{mode}'")
+        mode = "fps"
     sf_path = frames_dir / "selected_frames.json"
     if not replace and sf_path.exists():
         pipe.send_log("Reusing existing selected_frames.json (replace=off)")
+    elif mode == "fps":
+        # Temporal sampling: keep ~target_fps frames of the blur-valid set, spaced by
+        # ORIGINAL frame number (frames are extracted 1:1 from the video, so the numeric
+        # stem is the video frame index). Native fps read from the source video; 30 as
+        # the safe fallback.
+        target_fps = float(_simple_cfg.get("target_fps", 1.0) or 1.0)
+        native_fps = 30.0
+        _vid = next((p for ext in (".mp4", ".mov", ".avi", ".mkv", ".m4v")
+                     for p in [frames_dir.parent / f"source_video{ext}"] if p.exists()), None)
+        if _vid is not None:
+            try:
+                import cv2 as _cv2
+                _cap = _cv2.VideoCapture(str(_vid))
+                _f = _cap.get(_cv2.CAP_PROP_FPS)
+                _cap.release()
+                if _f and _f > 0:
+                    native_fps = float(_f)
+            except Exception as _e:
+                pipe.send_log(f"could not read native fps ({_e}) — assuming 30", level="warning")
+        if blur_on:
+            from frame_selector import _load_valid_frame_list
+            _files = _load_valid_frame_list(frames_dir)
+        else:
+            _files = [os.path.basename(f) for f in
+                      (glob.glob(str(frames_dir / "*.jpg")) + glob.glob(str(frames_dir / "*.png")))]
+        valid = sorted(_files, key=lambda f: int(os.path.splitext(os.path.basename(f))[0]))
+        step = max(1, int(round(native_fps / max(target_fps, 0.01))))
+        chosen, next_at = [], 0
+        for f in valid:
+            n = int(os.path.splitext(f)[0])
+            if n >= next_at:
+                chosen.append(f)
+                next_at = n + step
+        if len(chosen) < 2:
+            raise RuntimeError(f"fps sampling produced {len(chosen)} frame(s) "
+                               f"(target_fps={target_fps}, native={native_fps:.1f}) — "
+                               f"not enough to reconstruct")
+        with open(sf_path, "w") as _f:
+            json.dump({"version": "2.0", "method": f"fps_{target_fps:g}",
+                       "total_frames": len(valid), "selected_count": len(chosen),
+                       "selected_files": chosen}, _f)
+        pipe.send_log(f"Frame set: {len(chosen)}/{len(valid)} frames "
+                      f"(~{target_fps:g} fps of native {native_fps:.1f}, step {step}, "
+                      f"{'blur-valid' if blur_on else 'no blur'}) → selected_frames.json")
     elif mode == "dino":
         from frame_selector import select_keyframes
         # NO FALLBACK: keyframe selection is foundational (writes selected_frames.json).
@@ -1229,6 +1283,68 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap
     pipe.send_log(f"[omega-depth] wrote {n_written} per-frame omega depths for scale align")
 
 
+from workers.base import gpu_free_gb as _gpu_free_gb, stop_semantic_service
+
+
+def _run_da3_anchor(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
+                    anchor_files: list, recon_cfg: dict) -> None:
+    """ISOLATED per-frame DA3 metric depth on the K scale-anchor frames — NO streaming.
+    The streaming pipeline chains poses across consecutive frames; anchor frames are
+    seconds apart, the chain breaks (pose=None → crash) and none of its machinery is
+    needed: the scale is a per-pixel depth RATIO, poses don't participate. Runs
+    extract_da3_depth.py (--per_frame) and converts its output to the exact layout
+    scale_align consumes: da3_run/results_output/frame_<num>.npz (depth + conf)."""
+    import numpy as np
+    server_dir = Path(__file__).resolve().parent.parent
+    tmp = output_dir / "_da3_anchor_frames"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    for f in anchor_files:
+        src = frames_dir / f
+        if src.exists():
+            os.symlink(str(src), str(tmp / f))
+    raw = output_dir / "da3_run" / "anchor_raw"
+    model_id = str((recon_cfg.get("da3", {}) or {}).get(
+        "model_id", "depth-anything/DA3NESTED-GIANT-LARGE-1.1"))
+    cmd = [sys.executable, str(server_dir / "extract_da3_depth.py"),
+           "--image_dir", str(tmp), "--output_dir", str(raw),
+           "--model", model_id, "--per_frame"]
+    pipe.send_log(f"DA3 anchor: isolated per-frame depth on {len(anchor_files)} frames "
+                  f"({model_id}) — no streaming")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1)
+    for line in proc.stdout:
+        line = line.strip()
+        if line:
+            pipe.send_log(line)
+        if pipe.check_cancel():
+            proc.terminate()
+            return
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"DA3 anchor extraction exited with code {proc.returncode}")
+
+    ro = output_dir / "da3_run" / "results_output"
+    ro.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for f in anchor_files:
+        stem = os.path.splitext(f)[0]
+        dp, cp = raw / f"{stem}_depth.npy", raw / f"{stem}_conf.npy"
+        if not dp.exists():
+            continue
+        num = int(stem)
+        arrays = {"depth": np.load(dp).astype(np.float32)}
+        if cp.exists():
+            arrays["conf"] = np.load(cp).astype(np.float32)
+        np.savez_compressed(ro / f"frame_{num}.npz", **arrays)
+        n += 1
+    shutil.rmtree(tmp, ignore_errors=True)
+    if n == 0:
+        raise RuntimeError("DA3 anchor produced no depth maps — scale cannot be estimated")
+    pipe.send_log(f"DA3 anchor: {n} metric depth maps → {ro}")
+
+
 def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                    selected_frames_path: str, recon_cfg: dict, config: dict):
     """VGGT-Omega backbone: DA3 per-frame metric depth (anchor) + VGGT-Long[Omega] poses
@@ -1236,11 +1352,48 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     import yaml, re as _re
     device = recon_cfg.get("device", "cpu")
 
+    # ── SIMPLE pipeline knobs (reconstruction.simple) ──
+    _simple_cfg = recon_cfg.get("simple") or {}
+    _simple_on = bool(_simple_cfg.get("enabled", False))
+    _n_selected = 0
+    try:
+        _sel = json.load(open(selected_frames_path))
+        _sel_files = _sel.get("selected_files", _sel if isinstance(_sel, list) else [])
+        _n_selected = len(_sel_files)
+    except Exception:
+        _sel_files = []
+
+    # Exclusive GPU: reconstruction and the semantic service never share the card.
+    # vLLM's resident ~40 GB would cap the Omega pass; stop it here — the VLM stage
+    # brings it back up on its own once reconstruction is done.
+    if _simple_on and bool(_simple_cfg.get("exclusive_gpu", True)):
+        stop_semantic_service(pipe, stage="Omega reconstruction")
+
     # ── DA3 per-frame metric depth (NO streaming) on the dense/keyframe set ──
     # DA3 here is ONLY the metric anchor consumed by scale_align (and the TSDF depth
     # source). The Omega backbone itself does NOT use it. So when scale_align is OFF
     # (testing raw Omega), skip DA3 entirely — otherwise it re-runs for hours for nothing.
     _scale_align_on = bool((recon_cfg.get("vggtomega", {}) or {}).get("scale_align", True))
+    # SIMPLE: the metric scale is ONE scalar — a handful of evenly-spread anchor frames
+    # is statistically equivalent to the whole set (measured: an 11-frame re-check moved
+    # s by only -0.91%). Stray sessions already skip DA3 inference entirely (their depth
+    # is converted to the DA3 layout by convert_stray_to_da3.py and detected as done).
+    _da3_frames_path = selected_frames_path
+    _anchor_files = None
+    if _simple_on and _scale_align_on and _sel_files:
+        _k = int(_simple_cfg.get("scale_anchor_frames", 12) or 12)
+        if 1 < _k < _n_selected:
+            _idx = sorted({round(i * (_n_selected - 1) / (_k - 1)) for i in range(_k)})
+            _anchor_files = [_sel_files[int(i)] for i in _idx]
+            _anchor_path = output_dir / "scale_anchor_frames.json"
+            with open(_anchor_path, "w") as _f:
+                json.dump({"version": "2.0", "method": f"scale_anchor_{_k}",
+                           "total_frames": _n_selected,
+                           "selected_count": len(_anchor_files),
+                           "selected_files": _anchor_files}, _f)
+            _da3_frames_path = str(_anchor_path)
+            pipe.send_log(f"SIMPLE: DA3 metric anchor on {len(_anchor_files)}/{_n_selected} "
+                          f"evenly-spread frames (scale is one scalar — the rest is waste)")
     if _scale_align_on:
         pipe.send_progress(6, "VGGT-Omega: extracting DA3 metric depth (per-frame)...",
                            stage="reconstruction")
@@ -1248,15 +1401,57 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # vggtomega DA3 is just the metric anchor for scale_align (per-keyframe omega↔DA3),
         # and the TSDF uses omega depth (depth_source: mapanything), not DA3. Running it on
         # the dense set produced ~25GB of unused da3_run that overflowed the disk.
-        da3_dir = _run_da3(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config,
-                           depth_only=True)
-        pipe.send_log(f"DA3 metric depth → {Path(da3_dir) / 'results_output'} (anchor + cloud depth)")
+        if _anchor_files:
+            # SIMPLE: isolated per-frame DA3 — the streaming machinery chains poses
+            # across consecutive frames and CRASHES on sparse anchors (pose=None on
+            # frames seconds apart). The anchor needs depth VALUES only.
+            _run_da3_anchor(pipe, frames_dir, output_dir, _anchor_files, recon_cfg)
+        else:
+            da3_dir = _run_da3(pipe, frames_dir, output_dir, _da3_frames_path, recon_cfg,
+                               config, depth_only=True)
+            pipe.send_log(f"DA3 metric depth → {Path(da3_dir) / 'results_output'} "
+                          f"(anchor + cloud depth)")
     else:
         pipe.send_log("scale_align OFF → skipping DA3 (its only role here is the metric "
                       "anchor for scale_align) — running Omega ONLY")
 
     # ── VGGT-Long with the Omega backbone ──
     vggt_config = _build_vggtomega_config(config)
+    if _simple_on and _n_selected:
+        # SINGLE PASS: when the sampled frame set fits in one chunk there are no
+        # windows, no Sim3 gluing, no seams — the onion cannot exist by construction
+        # (validated against the VGGT-Omega web demo on test2). Long videos exceed
+        # max_frames_single_pass and fall back to the windowed mode (500/250).
+        # VRAM model from the paper: ~43 GB at 500 frames ≈ 4 GB base + 86 MB/frame;
+        # checked against the ACTUAL free VRAM so an over-long pass degrades to
+        # windowed mode with a fitting chunk instead of OOM-ing mid-run.
+        _max_sp = int(_simple_cfg.get("max_frames_single_pass", 600) or 600)
+        _free = _gpu_free_gb()
+        _fits = max(2, int((_free - 4.0) / 0.086)) if _free is not None else _max_sp
+        if _n_selected <= min(_max_sp, _fits):
+            vggt_config["Model"]["chunk_size"] = max(_n_selected, 2)
+            vggt_config["Model"]["overlap"] = 0
+            vggt_config["Model"]["loop_enable"] = False
+            pipe.send_log(f"SIMPLE single-pass: {_n_selected} frames in ONE chunk "
+                          f"(no windows → no seams). Loop closure off (nothing to close).")
+        else:
+            _chunk = min(int(vggt_config["Model"]["chunk_size"]), _fits)
+            _chunk = max(_chunk, 50)
+            vggt_config["Model"]["chunk_size"] = _chunk
+            vggt_config["Model"]["overlap"] = _chunk // 2
+            _why = (f"{_n_selected} frames > max_frames_single_pass={_max_sp}"
+                    if _n_selected > _max_sp else
+                    f"free VRAM {_free:.0f} GB fits ~{_fits} frames < {_n_selected}")
+            pipe.send_log(f"SIMPLE: {_why} → windowed mode "
+                          f"({_chunk}/{_chunk // 2}, 50% overlap)", level="warning")
+        # Aggressive point-confidence filter, same knob the web demo exposes. The
+        # origins generator replicates this exact mask, so traceability stays 1:1.
+        _coef = _simple_cfg.get("conf_threshold_coef")
+        if _coef:
+            _ps = vggt_config["Model"].setdefault("Pointcloud_Save", {})
+            _ps["conf_threshold_coef"] = float(_coef)
+            _ps["use_conf_filter"] = True
+            pipe.send_log(f"SIMPLE: point confidence filter conf >= mean*{float(_coef):g}")
     vggt_config_path = output_dir / "vggt_omega_config.yaml"
     with open(vggt_config_path, "w") as f:
         yaml.dump(vggt_config, f, default_flow_style=False)
@@ -1328,6 +1523,22 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             "metric scale alignment FAILED — scale_align could not estimate s. Refusing to "
             "produce a NON-METRIC reconstruction (it can't be compared against BIM). See the "
             "[scale-align] lines above for the exact reason (frame match / ratios / inputs).")
+
+    # ── SIMPLE: bake the upright orientation (gravity from the camera poses) ──
+    # Deterministic replacement for the floor-RANSAC as the critical orientation path:
+    # mean camera-down = world down (people film level; measured ~3° error), rotated to
+    # -Y and the floor put at y=0, IN the cloud + poses — the viewer needs no flip and
+    # the downstream floor leveler only ever fine-tunes a few degrees.
+    if _simple_on and bool(_simple_cfg.get("orient_from_poses", True)):
+        pipe.send_progress(92, "Baking upright orientation from camera poses...",
+                           stage="reconstruction")
+        from reconstruction.orient import run as _orient_run
+        _T = _orient_run(output_dir, log=lambda m: pipe.send_log(f"[orient] {m}"))
+        if _T is None:
+            pipe.send_log("[orient] orientation NOT applied (no poses or weak camera-down "
+                          "consensus) — the floor leveler downstream is the fallback",
+                          level="warning")
+
     # Success (or already-applied) → free da3_run when the TSDF won't use it (depth_source
     # not DA3-based). ~25GB. Only delete on success so failures keep the evidence.
     _ds = str((config.get("tsdf", {}) or {}).get("depth_source", "auto")).lower()

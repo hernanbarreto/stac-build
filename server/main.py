@@ -5542,6 +5542,22 @@ async def viewer_websocket(websocket: WebSocket):
                     if not cleaned_ply.exists():
                         chunk_plys = sorted(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
                         if chunk_plys:
+                            # PIPELINE ORDER GUARD: reconstruction → VLM → SAM3 → cloudcompy.
+                            # This on-load cleanup is a legacy on-demand convenience; when the
+                            # semantic pipeline drives the session it must NOT jump ahead of
+                            # VLM/SAM3 (the mask→cloud mapping belongs to the staged flow).
+                            _auto_seg = bool(cfg.get("pipeline", {}).get("auto_segment", True))
+                            _sem_done = ((output_dir / "vlm_analysis.json").exists()
+                                         and (output_dir / "segmentation.json").exists())
+                            if _auto_seg and not _sem_done:
+                                print(f"[Viewer] Reconstruction ready but VLM/SAM3 pending — "
+                                      f"NOT running on-load CloudCompPy (pipeline order)")
+                                await websocket.send_text(json.dumps({
+                                    "type": "status",
+                                    "message": "Reconstruction ready — resume the pipeline "
+                                               "(VLM → SAM3 → cleanup) to build the viewable cloud"
+                                }))
+                                raise Exception("Pipeline incomplete (semantic stages pending)")
                             print(f"[Viewer] No cleaned_cloud.ply found. Running CloudCompPy on {len(chunk_plys)} chunks...")
                             await websocket.send_text(json.dumps({
                                 "type": "status",
