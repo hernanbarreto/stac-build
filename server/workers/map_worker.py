@@ -111,31 +111,54 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
                     native_fps = float(_f)
             except Exception as _e:
                 pipe.send_log(f"could not read native fps ({_e}) — assuming 30", level="warning")
-        if blur_on:
-            from frame_selector import _load_valid_frame_list
-            _files = _load_valid_frame_list(frames_dir)
-        else:
-            _files = [os.path.basename(f) for f in
-                      (glob.glob(str(frames_dir / "*.jpg")) + glob.glob(str(frames_dir / "*.png")))]
-        valid = sorted(_files, key=lambda f: int(os.path.splitext(os.path.basename(f))[0]))
+        # Sharpest-per-bin sampling — the cadence is GUARANTEED. The old walk sampled
+        # the blur-VALID list, so a blurry stretch became a hole in the sequence
+        # (measured: 6 s missing on one scan → a 9 m jump between adjacent keyframes
+        # on another). Zero overlap between neighbours is far worse for Omega's joint
+        # attention than a soft frame: uniform baselines are what the web demo feeds
+        # it. So: one frame per 1/target_fps bin, preferring the sharpest VALID frame
+        # (frame_quality.json FFT score), falling back to the least-blurry one when
+        # the whole bin failed the filter. Blur stays a preference, never a gate.
         step = max(1, int(round(native_fps / max(target_fps, 0.01))))
-        chosen, next_at = [], 0
-        for f in valid:
-            n = int(os.path.splitext(f)[0])
-            if n >= next_at:
-                chosen.append(f)
-                next_at = n + step
+        _all = sorted((os.path.basename(f) for f in
+                       (glob.glob(str(frames_dir / "*.jpg")) + glob.glob(str(frames_dir / "*.png")))),
+                      key=lambda f: int(os.path.splitext(f)[0]))
+        _quality = {}   # file -> (fft_score, valid)
+        _fq_path = frames_dir / "frame_quality.json"
+        if blur_on and _fq_path.exists():
+            try:
+                for _e in json.loads(_fq_path.read_text()).get("frames", []):
+                    _quality[_e["file"]] = (float(_e.get("fft_score", 0.0)),
+                                            bool(_e.get("valid", True)))
+            except Exception as _e:
+                pipe.send_log(f"frame_quality.json unreadable ({_e}) — uniform sampling",
+                              level="warning")
+        bins = {}
+        for f in _all:
+            bins.setdefault(int(os.path.splitext(f)[0]) // step, []).append(f)
+        chosen, soft_bins = [], 0
+        for b in sorted(bins):
+            frames_in_bin = bins[b]
+            if _quality:
+                valid_in_bin = [f for f in frames_in_bin if _quality.get(f, (0, True))[1]]
+                pool = valid_in_bin or frames_in_bin
+                if not valid_in_bin:
+                    soft_bins += 1
+                chosen.append(max(pool, key=lambda f: _quality.get(f, (0.0, True))[0]))
+            else:
+                chosen.append(frames_in_bin[0])
         if len(chosen) < 2:
             raise RuntimeError(f"fps sampling produced {len(chosen)} frame(s) "
                                f"(target_fps={target_fps}, native={native_fps:.1f}) — "
                                f"not enough to reconstruct")
         with open(sf_path, "w") as _f:
             json.dump({"version": "2.0", "method": f"fps_{target_fps:g}",
-                       "total_frames": len(valid), "selected_count": len(chosen),
+                       "total_frames": len(_all), "selected_count": len(chosen),
                        "selected_files": chosen}, _f)
-        pipe.send_log(f"Frame set: {len(chosen)}/{len(valid)} frames "
+        _soft = f", {soft_bins} bin(s) all-blurry → kept least-blurry" if soft_bins else ""
+        pipe.send_log(f"Frame set: {len(chosen)}/{len(_all)} frames "
                       f"(~{target_fps:g} fps of native {native_fps:.1f}, step {step}, "
-                      f"{'blur-valid' if blur_on else 'no blur'}) → selected_frames.json")
+                      f"sharpest per bin{_soft}) → selected_frames.json")
     elif mode == "dino":
         from frame_selector import select_keyframes
         # NO FALLBACK: keyframe selection is foundational (writes selected_frames.json).

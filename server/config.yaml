@@ -728,9 +728,14 @@ reconstruction:
   # Windows return ONLY when the sampled video still exceeds max_frames_single_pass.
   simple:
     enabled: true
-    target_fps: 4.0                     # temporal sampling of blur-valid frames (~4 fps:
-                                        # denser views → better texture/coverage; test2
-                                        # ≈ 180 frames, still one pass)
+    target_fps: 1.0                     # temporal sampling of blur-valid frames. 1 fps = the
+                                        # web demo's regime and the vendor's own drift fix
+                                        # (VGGT-Long README 239-242: "very dense input where
+                                        # movement between consecutive frames is small → drift
+                                        # increases; extract at a lower frame rate, such as
+                                        # 1fps"). Measured at 4 fps: camera height drifted
+                                        # -4.9 cm/m on a 29 m walk (test6), columns curved.
+                                        # Omega's showcase examples feed 6-30 frames total.
     max_frames_single_pass: 600         # above this, windowed mode resumes (long videos).
                                         # ~43 GB VRAM at 500 frames (paper) ≈ 86 MB/frame —
                                         # the worker ALSO checks free VRAM and degrades to
