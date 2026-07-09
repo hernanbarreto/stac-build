@@ -374,7 +374,14 @@ function App() {
                 : s.meta?.method === 'poisson_scene' ? '🟣 Poisson — whole scene'
                 : s.folder === 'scene' ? '🌐 Whole scene' : s.folder),
           folder: s.folder,
-          visible: prevVis.get(s.folder) ?? true,
+          // Scene meshes start visible (auto-loaded). Per-instance meshes are
+          // lazy: every refresh follows a viewer reset (reloadTsdf / session
+          // load) that dropped them back to not-loaded, so their checkbox
+          // always resets to unchecked — checking it triggers the on-demand
+          // download in the Viewport (setTsdfVisibility).
+          visible: typeof s.meta?.instance_id === 'number'
+            ? false
+            : (prevVis.get(s.folder) ?? true),
         }))
       })
     } catch { /* ignore */ }

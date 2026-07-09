@@ -127,8 +127,45 @@ phase_r:
                                       # the cleaned cloud stay canonical
   floor_labels: ["floor", "slab", "platform", "ground"]   # R.4 gravity source
   depth_reg_whitelist: ["wall", "slab", "column", "vault", "platform", "floor"]  # R.5
+  min_window_edges: 2                 # R.4 underdetermination guard: a window with fewer
+                                      # incident edges (OBB + primitive) stays LOCKED at
+                                      # identity — one edge = 7 residuals for 7 DoF, so a
+                                      # single bad edge fully "corrects" a window onto its
+                                      # noise (test2: s=0.055 / |t|=3.15m on 5 edges/11 win).
+  primitive_residuals: true           # R.4 fine primitives: plane/cylinder residuals for
+                                      # STRUCTURAL classes in the Sim(3) graph (unbiased by
+                                      # partial views, unlike OBB centre/extents)
+  primitive_weight: 1.0               # weight of primitive residuals vs OBB edges
+  plane_classes: ["wall", "slab", "vault", "platform", "floor"]
+  cylinder_classes: ["column"]
+  single_window_split_frames: 60      # single-window sessions: split the one window into
+                                      # ~N-frame segments (s000, s001…) and run the SAME
+                                      # Sim(3) anchoring between them (intra-chunk drift is
+                                      # real — test2 left pairs at 10 cm inside one chunk).
+                                      # 0 disables (single-window then gets no pose graph).
+  marker_scale: null                  # R.6 metric authority (ChArUco/survey/known gauge).
+                                      # Set to a measured scale to make it clamp the graph;
+                                      # null = no marker on this deployment (DA3 prior only).
   writeback_poses: true               # R.4 write refined poses into camera_poses.txt
-  writeback_depth: false              # R.5 write regularized depth npz (opt-in)
+  writeback_depth: true               # R.5 write regularized depth back — BOTH the per-frame
+                                      # npz AND the aligned chunk depth the TSDF integrates
+                                      # (maplong_run/_tmp_results_aligned). Gated by the same
+                                      # R.9 fail-safe as the pose writeback; backups .prephaser.
+  depth_reg_erosion_px: 8             # R.5 erosion before regularizing (interiors only)
+  scale_recheck: true                 # R.6: after anchoring, re-estimate S over eroded
+                                      # STRUCTURAL masks with RAW depths (independent of the
+                                      # R.5 regularization — planes come from S-scaled points,
+                                      # so regularized depth would be circular). Keeps
+                                      # da3_run/ on disk (map_worker skips the cleanup).
+  scale_recheck_apply: true           # apply the refined S as a global similarity (chunks +
+                                      # aligned depth + poses + marker + store) when the
+                                      # gates below pass; otherwise report-only with reason
+  scale_recheck_min_frames: 4         # need ≥ this many structural frames to trust the delta.
+                                      # Lowered 10→4 on evidence: two independent test2 runs
+                                      # agreed (−2.69% @5f, −4.26% @4f) — the structural-mask
+                                      # S is consistently a few % below the global near-band S.
+  scale_recheck_min_delta_pct: 0.2    # |Δ| below this = noise — don't churn files
+  scale_recheck_max_delta_pct: 10.0   # |Δ| above this = bad inputs — refuse, report loudly
   # dynamic classes (R.7) excluded from pose & fusion come from the vocabulary
   # dynamic flags + {train, person, equipment, vehicle, tram}
 
@@ -214,9 +251,13 @@ autoprompt:
   # of one call per frame.
   adaptive_sampling:
     enabled: true
-    min_spacing_m: 0.4                # keep a frame after ≥ this camera travel
-    min_rotation_deg: 18              # … or ≥ this camera rotation
-    min_frames: 12                    # floor (tiny/static scans)
+    min_spacing_m: 0.15               # keep a frame after ≥ this camera travel
+    min_rotation_deg: 10              # … or ≥ this camera rotation
+    min_frames: 48                    # floor. Phase R needs masklet coverage in EVERY
+                                      # window: test2 with the old 0.4m/18°/floor-12 gave
+                                      # 15 VLM frames over 11 windows → 5 OBB edges,
+                                      # 0 primitive edges → no anchoring evidence at all.
+                                      # ~4-5 mask frames per 120-frame window is the target.
     max_frames: 0                     # optional ceiling (0 = none)
     no_pose_target: 48                # even subsample when no BA poses exist
 
@@ -608,10 +649,11 @@ tsdf:
                              # TSDF surfaces have edges ≈ voxel size; this only removes the
                              # spurious near↔far 'bridge'/spike lines. Run post-weld + post-decimate.
   texture: true
-  texture_mode: "texrecon"   # UV-atlas photo texture (MVS-Texturing, CPU ~10 min) → PHOTOGRAPHIC
-                             # quality from the full-res keyframes. "vertex_gpu" (nvdiffrast, GPU,
-                             # seconds) is per-VERTEX colour → resolution ≈ vertex spacing (~1.2cm)
-                             # = NOT photographic (blurry); use it only for fast iteration.
+  texture_mode: "vertex_gpu" # FAST-ITERATION mode for the Phase-R A/B test runs (nvdiffrast,
+                             # GPU, seconds): per-VERTEX colour, resolution ≈ vertex spacing
+                             # (~1.2cm) = NOT photographic. Switch back to "texrecon" for final
+                             # deliverables — UV-atlas photo texture (MVS-Texturing, CPU; measured
+                             # 30-60 min on test2's 4M-tri / 676-view mesh, NOT ~10 min).
                              # texrecon needs accurate metric poses (now provided by omega+scale_align).
                              # OLD comment: vertex_gpu colour resolution ≈ the mesh vertex spacing
                              # (~voxel, 1.2cm) — fast + good for iterating; "texrecon" gives a sharper
@@ -720,6 +762,13 @@ reconstruction:
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
                                         # scales cloud + poses by s = median DA3/Omega depth).
                                         # false → up-to-scale (raw Omega isolation test).
+    scale_near_frac: 0.25               # scale_align: ratio over the closest frac of pixels
+                                        # (near band — DA3 compresses the far range; 0.25
+                                        # validated on test3, +8.25% vs all-pixels)
+    scale_conf_top_frac: 0.10           # scale_align: AND only the top-10% DA3-confidence
+                                        # pixels vote (npz 'conf'); 0 disables the gate.
+                                        # Fallback ladder if a filter starves: near∩conf →
+                                        # conf → near → all valid.
 
   # ── Dense frame fusion (frame-to-keyframe ICP) — cloud-stage completeness ──
   # VGGT-Long poses+cloud use KEYFRAMES only → inter-keyframe holes the TSDF inherits.
@@ -742,8 +791,11 @@ reconstruction:
                                         # double layers; the affected frame poses get the same rigid
                                         # correction (backup camera_poses.txt.prefinereg). Best-effort.
     # accept_sep_m: 0.024               # acceptance: residual plane separation; default 2×tsdf.voxel_length
-    # max_correction_m: 0.12            # corrections beyond this are refused (that's a pose problem,
-                                        # not residual bias — fix upstream, don't fake alignment).
+    max_correction_m: 0.25              # corrections beyond this are refused (a shift that big is a
+                                        # pose problem — fix upstream, don't fake alignment). Raised
+                                        # 0.12→0.25 on evidence: test2 2026-07-09 refused 9 REAL
+                                        # intra-chunk drift corrections of 125–230mm (chunks 5–9),
+                                        # leaving that drift in the cloud/mesh.
                                         # 0.12 (was 0.08): test3 measured 65 mm of REAL VGGT drift
                                         # between chunks — the old cap left no headroom.
     # pieces_per_chunk: 3               # rigid pieces per chunk for the JOINT pose-graph solve.

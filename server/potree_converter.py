@@ -81,8 +81,12 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
     if has_confidence:
         logger.info(f"[Potree] Confidence field detected — mapping to LAS intensity")
 
-    # ── Write LAS 1.4 (point format 2 = XYZ + RGB) ──
-    header = laspy.LasHeader(point_format=2, version="1.4")
+    # ── Write LAS 1.4 (point format 7 = XYZ + RGB + 8-bit classification) ──
+    # NOT format 2: its legacy classification field is 5 bits (max 31) — with
+    # >31 segmented instances laspy raises OverflowError and the octree build
+    # dies (test2 hit it with 46 instances). Format 7 classification is uint8
+    # (0..255) and PotreeConverter supports it (formatToExtraIndex has {7,11}).
+    header = laspy.LasHeader(point_format=7, version="1.4")
     header.offsets = [
         float(data['x'].min()),
         float(data['y'].min()),
@@ -104,8 +108,16 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
     if class_npy.exists():
         class_arr = np.load(class_npy)
         if len(class_arr) == len(data):
+            n_over = int(np.count_nonzero(class_arr > 255))
+            if n_over:
+                # uint8 cast would WRAP (300 → 44, wrong instance) — clamp to
+                # 0 (unsegmented) instead and say so loudly
+                logger.warning(f"[Potree] {n_over:,} pts with instance id >255 "
+                               f"(LAS classification is uint8) → set to 0/unsegmented")
+                class_arr = np.where(class_arr > 255, 0, class_arr)
             las.classification = class_arr.astype(np.uint8)
-            logger.info(f"[Potree] Classification loaded: {np.count_nonzero(class_arr):,} classified pts")
+            logger.info(f"[Potree] Classification loaded: {np.count_nonzero(class_arr):,} classified pts "
+                        f"(max instance id {int(class_arr.max())})")
         else:
             logger.warning(f"[Potree] Classification size mismatch: {len(class_arr)} vs {len(data)} pts")
 

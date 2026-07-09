@@ -157,9 +157,12 @@ def test_scale_prior_regularizes_scale():
     # one weak edge suggesting a 20% rescale of window 1
     M = Sim3(1.2, np.eye(3), np.zeros(3))
     edges = [WindowEdge(0, 1, M, weight=0.1)]
-    corr_free, _ = optimize_window_graph(2, edges)
+    # min_window_edges=1: this test exercises the PRIOR math on a single edge;
+    # the production underdetermination guard (default 2) would lock the window
+    corr_free, _ = optimize_window_graph(2, edges, min_window_edges=1)
     corr_prior, _ = optimize_window_graph(2, edges, scale_priors={1: 1.0},
-                                          scale_prior_weight=50.0)
+                                          scale_prior_weight=50.0,
+                                          min_window_edges=1)
     # without the prior the solver rescales; with it the scale stays ~1
     assert abs(np.log(corr_prior[1].s)) < abs(np.log(corr_free[1].s))
     assert abs(corr_prior[1].s - 1.0) < 0.03

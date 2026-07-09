@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -46,8 +47,14 @@ from .geometry import fit_gravity_aligned_obb
 from .instance_store import InstanceStore
 from .metric_hierarchy import MetricAuthority, ScaleReport
 from .onion import detect_onion, onion_heatmap
-from .residuals import Sim3, WindowEdge, optimize_window_graph
+from .residuals import (PrimitiveEdge, Sim3, WindowEdge, fit_cylinder_primitive,
+                        fit_plane_primitive, optimize_window_graph,
+                        transform_cylinder, transform_plane)
 from .vote import View
+
+# Every step logs here; the phase_r worker forwards this logger to the pipe →
+# server.log + UI, so a full run is debuggable from the log alone.
+logger = logging.getLogger("PhaseR")
 
 
 @dataclass
@@ -103,12 +110,22 @@ class PhaseRPipeline:
         self.config = config or {}
         self.cfg = self.config.get("phase_r", {})
         self.window_map = {int(k): v for k, v in (window_map or {}).items()}
-        # R.6 hooks. marker_scale: ChArUco/survey authority — NOT wired yet
-        # (ChArUco is not implemented in this deployment); the mechanism stays
-        # so the authority activates the day a marker scale exists.
+        # R.6 marker/survey authority: explicit argument wins; else the config
+        # (phase_r.marker_scale — e.g. a surveyed distance or the 1435 mm track
+        # gauge measured on this scene). None → no marker, DA3 prior only.
+        if marker_scale is None:
+            mk = self.cfg.get("marker_scale")
+            marker_scale = float(mk) if mk else None
         self.marker_scale = marker_scale
-        # DA3-Streaming top-25%-confidence scale S per window (prior, R.6)
+        # DA3 top-confidence scale S per window (prior, R.6) — wired by the
+        # phase_r worker from the raw DA3/omega depth ratios per window.
         self.window_scale_priors = window_scale_priors or {}
+        # R.4 fine primitives for structural classes (plane/cylinder residuals)
+        self.primitive_residuals = bool(self.cfg.get("primitive_residuals", True))
+        self.primitive_weight = float(self.cfg.get("primitive_weight", 1.0))
+        self.plane_classes = set(self.cfg.get("plane_classes",
+                                              ["wall", "slab", "vault", "platform", "floor"]))
+        self.cylinder_classes = set(self.cfg.get("cylinder_classes", ["column"]))
         self.floor_labels = set(self.cfg.get("floor_labels",
                                              ["floor", "slab", "platform", "ground"]))
         self.max_iterations = int(self.cfg.get("max_refine_iterations", 2))
@@ -172,6 +189,76 @@ class PhaseRPipeline:
                               n_points=int(sel.sum()))
                 obb_map[(iid, str(w))] = [T, aabb, pos, weight]
         return obb_map
+
+    def _fit_window_primitives(self, store: InstanceStore, gravity) -> dict:
+        """R.4 fine primitives: per STRUCTURAL instance and window, fit the
+        surface primitive on that window's points — plane for plane-like
+        classes, cylinder axis for column-like. Returns
+        {(iid, window): (prim, kind, weight)}. Empty when disabled or <2 windows."""
+        prim_map: dict = {}
+        if not self.primitive_residuals:
+            return prim_map
+        windows = self._windows()
+        if len(windows) < 2:
+            return prim_map
+        for inst in store.list_instances():
+            if inst["status"] == "dynamic_excluded" or not self._residual_eligible(inst):
+                continue
+            label = str(inst["label"])
+            kind = ("plane" if any(c in label for c in self.plane_classes) else
+                    "cylinder" if any(c in label for c in self.cylinder_classes) else None)
+            if kind is None:
+                continue
+            iid = inst["instance_id"]
+            pts = store.get_points(iid)
+            fids = store.get_point_frames(iid)
+            if pts is None or fids is None or len(pts) < self.min_points:
+                continue
+            wins = np.array([self.window_map.get(int(f), windows[0]) for f in fids])
+            weight = float(min(1.0, 0.5 + inst.get("confidence", 0.0)))
+            for w in np.unique(wins):
+                sel = wins == w
+                if int(sel.sum()) < self.min_points:
+                    continue
+                prim = (fit_plane_primitive(pts[sel]) if kind == "plane"
+                        else fit_cylinder_primitive(pts[sel]))
+                if prim is not None:
+                    prim_map[(iid, str(w))] = (prim, kind, weight)
+        logger.info(f"[R.4] fine primitives fitted: {len(prim_map)} "
+                    f"(instance, window) pairs "
+                    f"(plane classes {sorted(self.plane_classes)}, "
+                    f"cylinder classes {sorted(self.cylinder_classes)})")
+        return prim_map
+
+    @staticmethod
+    def _edges_from_primitives(prim_map: dict, windows: list[str]) -> list[PrimitiveEdge]:
+        widx = {w: i for i, w in enumerate(windows)}
+        by_iid: dict[int, list[str]] = {}
+        for (iid, w) in prim_map:
+            by_iid.setdefault(iid, []).append(w)
+        edges: list[PrimitiveEdge] = []
+        for iid, wins in by_iid.items():
+            wins = sorted(w for w in wins if w in widx)
+            for a in range(len(wins)):
+                for b in range(a + 1, len(wins)):
+                    pa, kind_a, wt = prim_map[(iid, wins[a])]
+                    pb, kind_b, _ = prim_map[(iid, wins[b])]
+                    if kind_a != kind_b:
+                        continue
+                    edges.append(PrimitiveEdge(widx[wins[a]], widx[wins[b]],
+                                               pa, pb, kind_a, wt))
+        return edges
+
+    @staticmethod
+    def _apply_sim3_to_primitives(prim_map: dict, corr, widx: dict) -> dict:
+        """Re-lift the primitives under the iteration's corrections (same role
+        as _apply_sim3_to_obb for the OBBs)."""
+        out = {}
+        for (iid, w), (prim, kind, wt) in prim_map.items():
+            M = corr[widx[w]]
+            prim2 = transform_plane(prim, M) if kind == "plane" else transform_cylinder(prim, M)
+            out[(iid, w)] = (prim2, kind, wt)
+        return out
 
     @staticmethod
     def _edges_from_obbs(obb_map: dict, windows: list[str]) -> list[WindowEdge]:
@@ -329,6 +416,12 @@ class PhaseRPipeline:
         base_seams = self._seam_onion(store, windows, persist=False)
         obb_map = self._fit_window_obbs(store, gravity)
         edges = self._edges_from_obbs(obb_map, windows)
+        prim_map = self._fit_window_primitives(store, gravity)
+        prim_edges = self._edges_from_primitives(prim_map, windows)
+        logger.info(f"[R.4] pose graph inputs: {len(windows)} windows, "
+                    f"{len(edges)} OBB edges, {len(prim_edges)} primitive edges, "
+                    f"scale priors for {len(self.window_scale_priors)} windows, "
+                    f"marker_scale={self.marker_scale}")
         auto_baseline = {
             "vote_entropy_mean": self._mean_vote_entropy(store),
             "onion_separation_median": sep_med,
@@ -350,10 +443,14 @@ class PhaseRPipeline:
         auth = MetricAuthority(self.marker_scale) if self.marker_scale else None
         totals = [Sim3.identity() for _ in windows]
         converged = False
-        if edges:
+        if edges or prim_edges:
             for it in range(self.max_iterations):
-                corr, stats = optimize_window_graph(len(windows), edges,
-                                                    scale_priors=priors or None)
+                corr, stats = optimize_window_graph(
+                    len(windows), edges,
+                    scale_priors=priors or None,
+                    primitive_edges=prim_edges or None,
+                    primitive_weight=self.primitive_weight,
+                    min_window_edges=int(self.cfg.get("min_window_edges", 2)))
                 report.pose_graph = stats
                 report.iterations = it + 1
                 # R.6 — marker authority clamps any correction that would move
@@ -365,17 +462,33 @@ class PhaseRPipeline:
                         if resolved != anchor_scale:
                             corr[i] = Sim3(1.0, M.R, M.t)  # keep pose, drop rescale
                 step = max(M.magnitude() for M in corr)
+                _locked = stats.get("locked_windows", [])
+                logger.info(f"[R.4] iteration {it + 1}: cost {stats['cost0']:.6f} → "
+                            f"{stats['cost']:.6f} ({stats['n_edges']} OBB + "
+                            f"{stats.get('n_primitive_edges', 0)} primitive edges), "
+                            f"max window step {step:.4f}"
+                            + (f"; {len(_locked)} window(s) LOCKED at identity "
+                               f"(<min_window_edges evidence): "
+                               f"{[windows[i] for i in _locked]}" if _locked else ""))
                 totals = [c.compose(t) for c, t in zip(corr, totals)]
-                # apply == re-lift: transform the per-window OBBs, rebuild edges
+                # apply == re-lift: transform the per-window OBBs + primitives,
+                # rebuild both edge sets
                 for (iid, w), entry in obb_map.items():
                     M = corr[widx[w]]
                     T2, aabb2, pos2 = _apply_sim3_to_obb(M, (entry[0], entry[1], entry[2]))
                     obb_map[(iid, w)] = [T2, aabb2, pos2, entry[3]]
                 edges = self._edges_from_obbs(obb_map, windows)
+                if prim_map:
+                    prim_map = self._apply_sim3_to_primitives(prim_map, corr, widx)
+                    prim_edges = self._edges_from_primitives(prim_map, windows)
                 if step < self.converge_tol or stats["cost"] < 1e-6:
                     converged = True
                     break
         report.converged = converged
+        logger.info(f"[R.4] pose graph {'converged' if converged else 'iteration-capped'} "
+                    f"after {report.iterations} iteration(s); per-window corrections: "
+                    + ", ".join(f"{w}: |t|={np.linalg.norm(totals[widx[w]].t):.4f}m "
+                                f"s={totals[widx[w]].s:.5f}" for w in windows))
 
         # corrections as 4x4 (+ embedded frame->window map for point re-lift)
         corrections = {w: _sim3_matrix(totals[widx[w]]) for w in windows}
@@ -425,6 +538,9 @@ class PhaseRPipeline:
 
         gate = compare_and_gate(auto_baseline, refined_metrics)
         report.used_anchoring = gate.use_anchoring
+        logger.info(f"[R.9] A/B gate: anchoring {'KEPT' if gate.use_anchoring else 'FALLBACK'}"
+                    + (f" — regressions: {gate.regressions}" if gate.regressions else "")
+                    + f"; baseline={auto_baseline} refined={refined_metrics}")
         report.failsafe.update({"report": gate.report, "regressions": gate.regressions,
                                 "baseline": auto_baseline, "refined": refined_metrics})
         if self.marker_scale is not None:
@@ -526,6 +642,15 @@ class PhaseRPipeline:
                     self.output_dir, windows, corr, self.window_map)
             except Exception as e:
                 wb["clouds_error"] = str(e)
+            # a window correction with s ≠ 1 rescales the world → the camera-frame
+            # depth of that window's frames must scale by s too, or the TSDF
+            # integrates depth inconsistent with the corrected poses/cloud
+            try:
+                from .writeback import apply_corrections_to_aligned_depth
+                wb["aligned_depth"] = apply_corrections_to_aligned_depth(
+                    self.output_dir, windows, corr, self.window_map)
+            except Exception as e:
+                wb["aligned_depth_error"] = str(e)
         if self.cfg.get("writeback_depth", False):
             try:
                 from .writeback import apply_depth_regularization
@@ -533,6 +658,7 @@ class PhaseRPipeline:
                     self.output_dir, store, self.session_dir, self.config)
             except Exception as e:
                 wb["depth_error"] = str(e)
+        logger.info(f"[R.4/R.5] writeback: {wb}")
         return wb
 
     def _mean_vote_entropy(self, store: InstanceStore) -> float:

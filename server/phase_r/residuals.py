@@ -68,6 +68,103 @@ def sim3_from_obb_pair(T_a: np.ndarray, aabb_a: np.ndarray,
     return Sim3(s, R, t)
 
 
+# ── R.4 fine primitives (plane / cylinder) for structural classes ───
+# The OBB residual is a coarse constraint and biased under partial observation
+# (a wall half-seen from window k has a shifted centre/extents vs window k+1).
+# For STRUCTURAL classes the spec adds the fine surface_fitting primitive:
+#   plane-like  (wall/slab/vault/platform/floor) → plane (n, d)
+#   column-like (column)                         → cylinder axis (a, c, r)
+# A primitive pair between two windows contributes residuals directly in the
+# graph cost — normal/axis misalignment (rad) + offset/axis-distance (m) —
+# which are unbiased by how much of the surface each window saw.
+@dataclass
+class PlanePrim:
+    n: np.ndarray   # unit normal
+    d: float        # offset: n·x + d = 0
+
+
+@dataclass
+class CylinderPrim:
+    a: np.ndarray   # unit axis
+    c: np.ndarray   # point on the axis (centroid projection)
+    r: float        # radius (m)
+
+
+def fit_plane_primitive(points: np.ndarray) -> PlanePrim | None:
+    """Least-squares plane over the instance's window points (SVD)."""
+    pts = np.asarray(points, float)
+    if len(pts) < 10:
+        return None
+    c = pts.mean(0)
+    _u, sv, vt = np.linalg.svd(pts - c, full_matrices=False)
+    if sv[1] < 1e-9:           # degenerate (a line, not a surface)
+        return None
+    n = vt[2] / (np.linalg.norm(vt[2]) + 1e-12)
+    return PlanePrim(n, -float(n @ c))
+
+
+def fit_cylinder_primitive(points: np.ndarray) -> CylinderPrim | None:
+    """Cylinder axis via PCA (largest-variance direction), radius as the median
+    radial distance. Deterministic, robust enough for column-like instances."""
+    pts = np.asarray(points, float)
+    if len(pts) < 10:
+        return None
+    c = pts.mean(0)
+    _u, sv, vt = np.linalg.svd(pts - c, full_matrices=False)
+    if sv[0] < 1e-9:
+        return None
+    a = vt[0] / (np.linalg.norm(vt[0]) + 1e-12)
+    d = pts - c
+    radial = d - np.outer(d @ a, a)
+    r = float(np.median(np.linalg.norm(radial, axis=1)))
+    if not np.isfinite(r) or r < 1e-4:
+        return None
+    return CylinderPrim(a, c, r)
+
+
+def transform_plane(p: PlanePrim, M: Sim3) -> PlanePrim:
+    """Plane under y = s·R·x + t:  n' = R·n,  d' = s·d − n'·t (n' stays unit)."""
+    n2 = M.R @ p.n
+    return PlanePrim(n2, float(M.s * p.d - n2 @ M.t))
+
+
+def transform_cylinder(cy: CylinderPrim, M: Sim3) -> CylinderPrim:
+    """Cylinder under a Sim(3): axis rotates, centre maps fully, radius scales."""
+    return CylinderPrim(M.R @ cy.a, M.apply(cy.c), float(M.s * cy.r))
+
+
+def primitive_residual(pk, pl, kind: str) -> np.ndarray:
+    """Residual between the SAME instance's primitive seen from two windows,
+    both already mapped into the common frame. Zero when the windows agree.
+    plane    → [n_k × n_l (3, rad), d_k − d_l (m)]
+    cylinder → [a_k × a_l (3, rad), ⊥ axis-line distance (3, m), r_k − r_l (m)]
+    Units match the Sim(3) log residuals (rad + m) → directly comparable cost."""
+    if kind == "plane":
+        n_k, n_l, d_l = pk.n, pl.n, pl.d
+        if float(n_k @ n_l) < 0:            # sign-align the normals
+            n_l, d_l = -n_l, -d_l
+        return np.concatenate([np.cross(n_k, n_l), [pk.d - d_l]])
+    # cylinder
+    a_k, a_l = pk.a, pl.a
+    if float(a_k @ a_l) < 0:
+        a_l = -a_l
+    a_m = a_k + a_l
+    a_m = a_m / (np.linalg.norm(a_m) + 1e-12)
+    dc = pl.c - pk.c
+    e_perp = dc - (dc @ a_m) * a_m          # displacement ⊥ to the axis (m)
+    return np.concatenate([np.cross(a_k, a_l), e_perp, [pl.r - pk.r]])
+
+
+@dataclass
+class PrimitiveEdge:
+    win_k: int
+    win_l: int
+    prim_k: object   # PlanePrim | CylinderPrim in window k's current frame
+    prim_l: object   # same instance's primitive in window l's current frame
+    kind: str        # "plane" | "cylinder"
+    weight: float = 1.0
+
+
 # ── inter-window pose graph ─────────────────────────────────────────
 @dataclass
 class WindowEdge:
@@ -80,23 +177,44 @@ class WindowEdge:
 def optimize_window_graph(n_windows: int, edges: list[WindowEdge],
                           huber_delta: float = 0.05, max_nfev: int = 200,
                           scale_priors: dict[int, float] | None = None,
-                          scale_prior_weight: float = 4.0):
+                          scale_prior_weight: float = 4.0,
+                          primitive_edges: list[PrimitiveEdge] | None = None,
+                          primitive_weight: float = 1.0,
+                          min_window_edges: int = 2):
     """Solve per-window Sim(3) corrections X_w (X_0 = identity fixed) minimizing
-    robust residuals r = log( X_k^{-1} · X_l · M_kl ) over all edges.
+    robust residuals r = log( X_k^{-1} · X_l · M_kl ) over all OBB edges PLUS the
+    fine primitive residuals (plane/cylinder pairs mapped by X_k / X_l — spec
+    R.4 "primitiva fina" for structural classes; unbiased by partial views).
 
     scale_priors (R.6): expected correction scale per window index (the DA3
-    top-25%-confidence scale S is kept as a prior, so corrections are pulled
-    toward it — usually 1.0, i.e. "do not rescale"). Soft residual
+    top-confidence scale S per window is kept as a prior, so corrections are
+    pulled toward it — 1.0 = "do not rescale"). Soft residual
     sqrt(w)·(log s_w − log prior_w) per prior.
     Returns (corrections: list[Sim3], stats)."""
     from scipy.optimize import least_squares
 
-    free = list(range(1, n_windows))  # window 0 fixed as reference
+    prim_edges = primitive_edges or []
+    # UNDERDETERMINATION GUARD: a Sim(3) has 7 DoF; one edge is exactly 7
+    # residuals — a window supported by a single (possibly bad) edge is solved
+    # exactly ONTO that edge's noise. test2 2026-07-09: 5 OBB edges over 11
+    # windows produced s=0.055 / |t|=3.15m "corrections" that the R.9 gate had
+    # to throw away. Windows with < min_window_edges incident constraints stay
+    # LOCKED at identity (no free params); their edges still constrain their
+    # neighbours.
+    incident = {w: 0 for w in range(n_windows)}
+    for e in edges:
+        incident[e.win_k] += 1
+        incident[e.win_l] += 1
+    for pe in prim_edges:
+        incident[pe.win_k] += 1
+        incident[pe.win_l] += 1
+    locked = {w for w in range(1, n_windows) if incident[w] < min_window_edges}
+    free = [w for w in range(1, n_windows) if w not in locked]
     idx_of = {w: i for i, w in enumerate(free)}
     priors = {w: s for w, s in (scale_priors or {}).items() if w in idx_of and s > 0}
 
     def unpack(params) -> dict[int, Sim3]:
-        X = {0: Sim3.identity()}
+        X = {w: Sim3.identity() for w in range(n_windows) if w == 0 or w in locked}
         for w in free:
             X[w] = Sim3.exp(params[7 * idx_of[w]:7 * idx_of[w] + 7])
         return X
@@ -107,18 +225,32 @@ def optimize_window_graph(n_windows: int, edges: list[WindowEdge],
         for e in edges:
             r = X[e.win_k].inverse().compose(X[e.win_l]).compose(e.measured)
             out.extend(np.sqrt(e.weight) * r.log())
+        for pe in prim_edges:
+            if pe.kind == "plane":
+                pk = transform_plane(pe.prim_k, X[pe.win_k])
+                pl = transform_plane(pe.prim_l, X[pe.win_l])
+            else:
+                pk = transform_cylinder(pe.prim_k, X[pe.win_k])
+                pl = transform_cylinder(pe.prim_l, X[pe.win_l])
+            out.extend(np.sqrt(pe.weight * primitive_weight)
+                       * primitive_residual(pk, pl, pe.kind))
         for w, prior in priors.items():
             out.append(np.sqrt(scale_prior_weight)
                        * (params[7 * idx_of[w]] - np.log(prior)))
         return np.asarray(out) if out else np.zeros(1)
 
     x0 = np.zeros(7 * len(free))
-    if not edges or not free:
-        return [Sim3.identity() for _ in range(n_windows)], {"cost0": 0.0, "cost": 0.0, "success": True}
+    if (not edges and not prim_edges) or not free:
+        return [Sim3.identity() for _ in range(n_windows)], {"cost0": 0.0, "cost": 0.0,
+                                                             "success": True,
+                                                             "n_edges": len(edges),
+                                                             "n_primitive_edges": len(prim_edges),
+                                                             "locked_windows": sorted(locked)}
 
     cost0 = 0.5 * float(np.sum(resid(x0) ** 2))
     sol = least_squares(resid, x0, loss="huber", f_scale=huber_delta, max_nfev=max_nfev)
     X = unpack(sol.x)
     corrections = [X[w] for w in range(n_windows)]
     return corrections, {"cost0": cost0, "cost": float(sol.cost), "success": bool(sol.success),
-                         "n_edges": len(edges)}
+                         "n_edges": len(edges), "n_primitive_edges": len(prim_edges),
+                         "locked_windows": sorted(locked)}

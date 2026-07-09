@@ -26,7 +26,10 @@ SCREEN="${SCREEN:-1680x1050x24}"
 VNC_PORT="${VNC_PORT:-5900}"
 NOVNC_PORT="${NOVNC_PORT:-6080}"
 VITE_PORT="${VITE_PORT:-5173}"
-VITE_URL="http://127.0.0.1:${VITE_PORT}"
+# "localhost", NOT 127.0.0.1: the Vite dev server may bind IPv6-only ([::1]),
+# where an IPv4-literal probe/URL never connects (seen on this pod: "Vite not
+# reachable after 90s" while Vite was up on [::1]:5173).
+VITE_URL="http://localhost:${VITE_PORT}"
 LOG_DIR="${LOG_DIR:-/tmp/stac-desktop}"
 UI="$(cd "$(dirname "${BASH_SOURCE[0]}")/../ui" && pwd)"
 NOVNC_WEB="${NOVNC_WEB:-/usr/share/novnc}"

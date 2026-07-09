@@ -85,8 +85,46 @@ def _tsdf_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if not path:
         raise RuntimeError("export_tsdf_scene produced no mesh (no depth source / "
                            "no integrable frames)")
-    pipe.send_progress(100, f"TSDF mesh written: {Path(path).name}", stage="tsdf")
     pipe.send_log(f"TSDF scene mesh: {path}")
+
+    # ── Per-object textured meshes (the segmentation "cut") ──
+    # In the anchored order SAM3 runs BEFORE this stage, so its own crop attempt
+    # finds no scene mesh and skips ("No scene TSDF mesh"). Now the scene mesh
+    # exists → carve each instance's textured mesh out of it, the same faithful
+    # deliverable the manual Segmentation Manager flow produces via
+    # /api/segmentation/refresh. Best-effort: never fail the TSDF stage.
+    try:
+        import json as _json
+        result_path = output_dir / "segmentation_result.json"
+        if result_path.exists():
+            segments_result = _json.loads(result_path.read_text())
+            n_tot = len(segments_result.get("instances", []))
+            if n_tot:
+                pipe.send_progress(97, f"Carving {n_tot} per-object TSDF meshes...",
+                                   stage="tsdf")
+                from segmentation.tsdf_export import crop_scene_mesh_to_instances
+
+                def _crop_progress(inst_id, phase, elapsed, mesh_path):
+                    if phase == "done":
+                        _crop_progress.done += 1
+                        pipe.send_progress(min(97 + (_crop_progress.done / n_tot) * 3, 99),
+                                           f"Object mesh {_crop_progress.done}/{n_tot}",
+                                           stage="tsdf")
+                _crop_progress.done = 0
+
+                written = crop_scene_mesh_to_instances(
+                    output_dir=output_dir,
+                    segments_result=segments_result,
+                    progress_cb=_crop_progress,
+                )
+                pipe.send_log(f"Per-object TSDF: wrote {len(written)} textured mesh(es)")
+        else:
+            pipe.send_log("No segmentation_result.json — per-object TSDF crop skipped "
+                          "(session without segmentation)")
+    except Exception as e:
+        pipe.send_log(f"Per-object TSDF crop failed (non-fatal): {e}", level="warning")
+
+    pipe.send_progress(100, f"TSDF mesh written: {Path(path).name}", stage="tsdf")
 
     # Cascade cleanup (step 3/3): the aligned chunk depth (maplong_run/_tmp_results_aligned)
     # is the MapAnything dense depth+K that MATCHES cleaned_cloud.ply — it is REQUIRED to

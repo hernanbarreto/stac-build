@@ -305,11 +305,19 @@ class PipelineManager:
                       "intrinsic.txt", "lidar_complement.ply", "omega_run",
                       ".metric_scale_applied"],  # ← idempotency marker: MUST be cleared on
                       # Replace, else scale_align skips on every re-run → not metric (the bug).
-        StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "floor_transform.npz"],
+        StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "cleaned_cloud_raw.ply",
+                             "floor_transform.npz", "scene_consolidate_report.json",
+                             # the deferred mask→cloud mapping runs IN this stage
+                             # → its products are THIS stage's outputs, not SAM3's
+                             "segmentation_result.json", "seg_broadcast.json",
+                             "classification.npy", "corrected_cloud.ply"],
         StageId.TSDF: ["tsdf/scene"],
-        StageId.VLM: ["scene_analysis.json", "vlm_analysis.json"],
+        StageId.VLM: ["scene_analysis.json", "vlm_analysis.json",
+                      "scene_understanding.json", "autoprompt_instances.json",
+                      "autoprompt_review_queue.json"],
         StageId.SAM3: ["segmentation.json", "segmentation_result.json",
                        "seg_masks.npz", "seg_broadcast.json"],
+        StageId.PHASE_R: ["scene_r.db", "phase_r_report.json"],
         StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
     }
 
@@ -323,27 +331,41 @@ class PipelineManager:
         "sabana.npz", "sabana_cloud.ply", "sabana_meta.json", "sabana_potree",
     ]
 
-    # Cascade: when a stage re-runs, these downstream stages' outputs are ALSO invalidated
-    # Example: Reconstruction → new chunks → old cleaned_cloud is invalid → old sábana is invalid
+    # Cascade: when a stage re-runs, these DOWNSTREAM stages' outputs are ALSO
+    # invalidated. MUST mirror the ANCHORED order (DEFAULT_STAGE_ORDER):
+    #   RECONSTRUCTION → VLM → SAM3 → PHASE_R → CLOUDCOMPY → TSDF
+    # A cascade edge pointing UPSTREAM deletes freshly produced artifacts
+    # mid-pipeline — that exact bug (CLOUDCOMPY → SAM3, a relic of the old
+    # cloudcompy-before-sam3 order) silently erased segmentation.json +
+    # seg_masks.npz right after SAM3 wrote them (test2, 2026-07-08).
     CASCADE_INVALIDATION: Dict[StageId, List[StageId]] = {
         StageId.RECONSTRUCTION: [
+            StageId.VLM,              # scene analysis ran on old keyframes
+            StageId.SAM3,             # segmentation ran on old frames
+            StageId.PHASE_R,          # anchoring used old poses/depth/chunks
             StageId.CLOUDCOMPY,       # cleaned_cloud depends on chunks
             StageId.TSDF,             # TSDF mesh integrated old depth/poses
-            StageId.VLM,              # scene analysis ran on old keyframes
-            StageId.SAM3,             # segmentation ran on old cloud
             StageId.INSTANCE_CLEANER, # instance PLYs from old segmentation
-        ],
-        StageId.CLOUDCOMPY: [
-            StageId.TSDF,             # TSDF masks to the old cleaned_cloud
-            StageId.SAM3,             # segmentation used old cleaned_cloud
-            StageId.INSTANCE_CLEANER,
         ],
         StageId.VLM: [
             StageId.SAM3,             # SAM3 uses VLM categories
+            StageId.PHASE_R,          # instances rebuilt from new masks
             StageId.INSTANCE_CLEANER,
         ],
         StageId.SAM3: [
+            StageId.PHASE_R,          # anchoring consumed the old masklets
             StageId.INSTANCE_CLEANER, # instances depend on segmentation
+        ],
+        StageId.PHASE_R: [
+            # NOT CLOUDCOMPY: chunks are deleted after the merge
+            # (delete_chunks_after_merge), so wiping cleaned_cloud here would
+            # leave nothing to re-merge. Phase R corrects the merged cloud
+            # in place via the frame_global trace; cloudcompy light-resumes it.
+            StageId.TSDF,             # fusion integrated pre-anchor poses/depth
+        ],
+        StageId.CLOUDCOMPY: [
+            StageId.TSDF,             # TSDF masks to the old cleaned_cloud
+            StageId.INSTANCE_CLEANER,
         ],
     }
 

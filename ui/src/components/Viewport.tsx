@@ -103,7 +103,26 @@ export interface ViewportHandle {
     frameBox: (min: number[], max: number[]) => void
 }
 
+// One item of /api/segmentation/tsdf/list — per-instance entries carry
+// meta.instance_id, the whole-scene meshes (scene / scene_poisson) don't.
+interface TsdfListEntry {
+    folder: string
+    glb_url: string
+    meta: { instance_id?: number; label?: string; method?: string } | null
+}
+
 // Vertex shader — matches FusionRenderer.js point size formula
+// 256×1 single-channel lookup texture backing uSegVisTex (255 = visible).
+// Mutated in place by setSegmentVisibility (write texel + needsUpdate).
+const makeSegVisTexture = () => {
+    const tex = new THREE.DataTexture(new Uint8Array(256).fill(255), 256, 1,
+                                      THREE.RedFormat, THREE.UnsignedByteType)
+    tex.minFilter = THREE.NearestFilter
+    tex.magFilter = THREE.NearestFilter
+    tex.needsUpdate = true
+    return tex
+}
+
 const vertexShader = `
   attribute float classId;
   attribute float confidence;
@@ -113,7 +132,12 @@ const vertexShader = `
   varying vec3 vColor;
   varying vec3 vWorldPos;
   uniform float pointSize;
-  uniform float uSegmentVisible[16];
+  // 256 segment-visibility slots via a 256×1 LOOKUP TEXTURE (one texel per
+  // instance id). The old float[16] uniform chain capped the viewer at 16
+  // instances (test2: 46+). A texel fetch in the vertex shader is the
+  // lowest-common-denominator path every driver handles — no dynamic uniform
+  // indexing, no uniform-vector pressure.
+  uniform sampler2D uSegVisTex;
 
   void main() {
     vClassId = classId;
@@ -125,25 +149,8 @@ const vertexShader = `
     if (classId < 0.0) {
       vSegVisible = 1.0; // always visible (e.g. sábana)
     } else {
-      int segIdx = int(clamp(classId, 0.0, 15.0));
-      float sv = 1.0;
-      if (segIdx == 0) sv = uSegmentVisible[0];
-      else if (segIdx == 1) sv = uSegmentVisible[1];
-      else if (segIdx == 2) sv = uSegmentVisible[2];
-      else if (segIdx == 3) sv = uSegmentVisible[3];
-      else if (segIdx == 4) sv = uSegmentVisible[4];
-      else if (segIdx == 5) sv = uSegmentVisible[5];
-      else if (segIdx == 6) sv = uSegmentVisible[6];
-      else if (segIdx == 7) sv = uSegmentVisible[7];
-      else if (segIdx == 8) sv = uSegmentVisible[8];
-      else if (segIdx == 9) sv = uSegmentVisible[9];
-      else if (segIdx == 10) sv = uSegmentVisible[10];
-      else if (segIdx == 11) sv = uSegmentVisible[11];
-      else if (segIdx == 12) sv = uSegmentVisible[12];
-      else if (segIdx == 13) sv = uSegmentVisible[13];
-      else if (segIdx == 14) sv = uSegmentVisible[14];
-      else sv = uSegmentVisible[15];
-      vSegVisible = sv;
+      float u = (clamp(classId, 0.0, 255.0) + 0.5) / 256.0;
+      vSegVisible = texture2D(uSegVisTex, vec2(u, 0.5)).r;
     }
 
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
@@ -366,6 +373,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // TSDF meshes — same lifecycle as shapes, kept in a parallel group so both
     // backends can be displayed simultaneously for A/B comparison.
     const tsdfGroupRef = useRef<THREE.Group | null>(null)
+    // Lazy TSDF: per-instance meshes are NOT downloaded at session open (only
+    // the whole-scene mesh is). Entries wait here (folder → list item) until
+    // setTsdfVisibility(folder, true) pulls them in on demand.
+    const tsdfPendingRef = useRef<Map<string, TsdfListEntry>>(new Map())
+    const tsdfLoadingRef = useRef<Set<string>>(new Set())
     // Reconstruction-v2 scene — typed elements (parametric surfaces / swept solids
     // / boxes / linear-repeats + free-form ShapeR meshes). Same lifecycle as
     // shapes; lives under the octreeGroup so floor_transform applies.
@@ -416,6 +428,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const alignSavedRef = useRef(false)  // tracks if alignment was saved during this session
     const [alignMode, setAlignMode] = useState<'translate' | 'rotate'>('rotate')
     const [alignDirty, setAlignDirty] = useState(false)
+    // WebGL context loss (GPU out of resources / driver reset). Without this
+    // the canvas silently freezes or goes blank — the overlay tells the user
+    // what happened and how to recover.
+    const [contextLost, setContextLost] = useState(false)
 
     // Keep activeToolRef in sync with prop
     useEffect(() => { activeToolRef.current = activeTool }, [activeTool])
@@ -1362,6 +1378,44 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (parent) parent.remove(group)
         }
         tsdfGroupRef.current = null
+        tsdfPendingRef.current.clear()
+        tsdfLoadingRef.current.clear()
+    }, [])
+
+    /** Download + attach one TSDF GLB under the tsdf-group. Shared by the
+     *  eager scene-mesh load and the on-demand per-instance load. */
+    const loadTsdfMeshEntry = useCallback(async (sh: TsdfListEntry): Promise<THREE.Group | null> => {
+        const group = tsdfGroupRef.current
+        if (!group) return null
+        if (!gltfLoaderRef.current) gltfLoaderRef.current = makeGltfLoader()
+        const loader = gltfLoaderRef.current
+
+        const gltf = await loader.loadAsync(sh.glb_url)
+        // TSDF normals point INTO the room (marching cubes uses the
+        // SDF gradient, which points from the wall toward free space —
+        // and free space is the interior, since scanning happens from
+        // inside). With FrontSide (three.js default) walls disappear
+        // when seen from outside. DoubleSide renders both faces so the
+        // mesh is navigable from any angle. ~2× rasterized triangles,
+        // negligible at this tri count.
+        gltf.scene.traverse((obj) => {
+            if (obj instanceof THREE.Mesh) {
+                const mat = obj.material
+                if (Array.isArray(mat)) {
+                    mat.forEach(m => { if (m) m.side = THREE.DoubleSide })
+                } else if (mat) {
+                    mat.side = THREE.DoubleSide
+                }
+            }
+        })
+        // Session may have switched while the GLB was downloading — drop it
+        if (tsdfGroupRef.current !== group) return null
+        const meshGroup = new THREE.Group()
+        meshGroup.name = `tsdf-${sh.folder}`
+        meshGroup.userData = { meta: sh.meta, folder: sh.folder, method: 'tsdf' }
+        meshGroup.add(gltf.scene)
+        group.add(meshGroup)
+        return meshGroup
     }, [])
 
     const loadTsdfIntoGroup = useCallback(async (sessionId: string, parentGroup: THREE.Object3D) => {
@@ -1375,7 +1429,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         if (!res.ok) return
         const data = await res.json()
-        const meshes = (data?.shapes || []) as Array<{ folder: string; glb_url: string; meta: any }>
+        const meshes = (data?.shapes || []) as TsdfListEntry[]
         if (meshes.length === 0) return
 
         const group = new THREE.Group()
@@ -1383,44 +1437,30 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         parentGroup.add(group)
         tsdfGroupRef.current = group
 
-        if (!gltfLoaderRef.current) gltfLoaderRef.current = makeGltfLoader()
-        const loader = gltfLoaderRef.current
+        // Lazy split: only whole-scene meshes (no instance_id — scene /
+        // scene_poisson) download at session open. Eagerly pulling every
+        // per-instance GLB blew up big sessions (test2: 40 GLBs ≈ 230 MB on
+        // top of the point cloud → renderer OOM). Instance meshes wait in
+        // tsdfPendingRef until setTsdfVisibility(folder, true) requests them.
+        const eager: TsdfListEntry[] = []
+        for (const sh of meshes) {
+            if (typeof sh.meta?.instance_id === 'number') tsdfPendingRef.current.set(sh.folder, sh)
+            else eager.push(sh)
+        }
 
         let loaded = 0
-        for (const sh of meshes) {
+        for (const sh of eager) {
             try {
-                const gltf = await loader.loadAsync(sh.glb_url)
-                // TSDF normals point INTO the room (marching cubes uses the
-                // SDF gradient, which points from the wall toward free space —
-                // and free space is the interior, since scanning happens from
-                // inside). With FrontSide (three.js default) walls disappear
-                // when seen from outside. DoubleSide renders both faces so the
-                // mesh is navigable from any angle. ~2× rasterized triangles,
-                // negligible at this tri count.
-                gltf.scene.traverse((obj) => {
-                    if (obj instanceof THREE.Mesh) {
-                        const mat = obj.material
-                        if (Array.isArray(mat)) {
-                            mat.forEach(m => { if (m) m.side = THREE.DoubleSide })
-                        } else if (mat) {
-                            mat.side = THREE.DoubleSide
-                        }
-                    }
-                })
-                const meshGroup = new THREE.Group()
-                meshGroup.name = `tsdf-${sh.folder}`
-                meshGroup.userData = { meta: sh.meta, folder: sh.folder, method: 'tsdf' }
-                meshGroup.add(gltf.scene)
-                group.add(meshGroup)
-                loaded += 1
+                if (await loadTsdfMeshEntry(sh)) loaded += 1
             } catch (e) {
                 console.warn(`[Viewport] failed to load TSDF mesh ${sh.glb_url}`, e)
             }
         }
         if (onStatusMessage && loaded > 0) {
-            onStatusMessage(`Loaded ${loaded} TSDF mesh${loaded !== 1 ? 'es' : ''}`)
+            const pending = tsdfPendingRef.current.size
+            onStatusMessage(`Loaded ${loaded} TSDF scene mesh${loaded !== 1 ? 'es' : ''}${pending > 0 ? ` — ${pending} instance mesh${pending !== 1 ? 'es' : ''} on demand` : ''}`)
         }
-    }, [clearAllTsdf, onStatusMessage])
+    }, [clearAllTsdf, loadTsdfMeshEntry, onStatusMessage])
 
     // ── Reconstruction-v2 scene loader (mirrors ShapeR / TSDF; own group) ──
     const clearAllReconScene = useCallback(() => {
@@ -1596,12 +1636,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         setSegmentVisibility: (segId: number, visible: boolean) => {
             const mat = materialRef.current
             if (!mat) return
-            const idx = Math.max(0, Math.min(segId, 15))
-            const oldArr = mat.uniforms.uSegmentVisible.value as number[]
-            const newArr = [...oldArr]
-            newArr[idx] = visible ? 1.0 : 0.0
-            mat.uniforms.uSegmentVisible.value = newArr
-            mat.uniformsNeedUpdate = true
+            const idx = Math.max(0, Math.min(segId, 255))
+            const tex = mat.uniforms.uSegVisTex.value as THREE.DataTexture
+            ;(tex.image.data as Uint8Array)[idx] = visible ? 255 : 0
+            tex.needsUpdate = true
         },
         setCloudObjectVisible: (visible: boolean) => {
             // Object-level cloud visibility, driven by App. Hide ONLY the
@@ -1654,7 +1692,29 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         setTsdfVisibility: (folder: string, visible: boolean) => {
             const meshGroup = tsdfGroupRef.current?.children
                 .find(c => c.name === `tsdf-${folder}`)
-            if (meshGroup) meshGroup.visible = visible
+            if (meshGroup) {
+                meshGroup.visible = visible
+                return
+            }
+            // Not in the scene yet — per-instance meshes load on demand the
+            // first time they're toggled visible (see loadTsdfIntoGroup).
+            if (!visible) return
+            const pending = tsdfPendingRef.current.get(folder)
+            if (!pending || tsdfLoadingRef.current.has(folder)) return
+            tsdfLoadingRef.current.add(folder)
+            if (onStatusMessage) onStatusMessage(`Loading TSDF mesh: ${folder}...`)
+            loadTsdfMeshEntry(pending).then((g) => {
+                tsdfLoadingRef.current.delete(folder)
+                if (g) {
+                    tsdfPendingRef.current.delete(folder)
+                    if (onStatusMessage) onStatusMessage(`TSDF mesh loaded: ${folder}`)
+                }
+            }).catch((e) => {
+                // Keep the entry pending so re-toggling retries the download
+                tsdfLoadingRef.current.delete(folder)
+                console.warn(`[Viewport] on-demand TSDF load failed for ${folder}`, e)
+                if (onStatusMessage) onStatusMessage(`TSDF mesh load failed: ${folder}`)
+            })
         },
         clearTsdf: () => clearAllTsdf(),
         reloadReconScene: async (sessionId: string) => {
@@ -2066,6 +2126,21 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         container.appendChild(renderer.domElement)
         rendererRef.current = renderer
 
+        // WebGL context loss safety net. preventDefault() tells the browser we
+        // want a `webglcontextrestored` — three.js then re-uploads its GPU
+        // state from the CPU-side buffers automatically.
+        const handleContextLost = (e: Event) => {
+            e.preventDefault()
+            console.error('[Viewport] WebGL context lost — GPU out of resources or driver reset')
+            setContextLost(true)
+        }
+        const handleContextRestored = () => {
+            console.warn('[Viewport] WebGL context restored')
+            setContextLost(false)
+        }
+        renderer.domElement.addEventListener('webglcontextlost', handleContextLost)
+        renderer.domElement.addEventListener('webglcontextrestored', handleContextRestored)
+
         // Scene
         const scene = new THREE.Scene()
         // Very subtle fog — only noticeable at 200+ meters, never obscures close-up detail
@@ -2196,7 +2271,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 highlightIntensity: { value: 0.5 },
                 uOpacity: { value: 1.0 },
                 uConfidenceThreshold: { value: 0.0 },
-                uSegmentVisible: { value: new Array(16).fill(1.0) },
+                // 256-slot visibility lookup texture (see vertex shader)
+                uSegVisTex: { value: makeSegVisTexture() },
                 time: { value: 0 },
                 sectionBoxEnabled: { value: false },
                 sectionBoxMin: { value: new THREE.Vector3(-100, -100, -100) },
@@ -2322,6 +2398,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             renderer.domElement.removeEventListener('mousemove', onSectionMove)
             renderer.domElement.removeEventListener('mousemove', handleMeasureHover)
             renderer.domElement.removeEventListener('mouseup', onSectionUp)
+            renderer.domElement.removeEventListener('webglcontextlost', handleContextLost)
+            renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored)
             window.removeEventListener('keydown', onKeyDown)
             controls.dispose()
             renderer.dispose()
@@ -3328,6 +3406,30 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     return (
         <div style={{ position: 'relative', width: '100%', height: '100%' }}>
             <div ref={containerRef} className="viewport-canvas" style={{ width: '100%', height: '100%' }} />
+            {contextLost && (
+                <div style={{
+                    position: 'absolute', inset: 0, zIndex: 500,
+                    display: 'flex', flexDirection: 'column', alignItems: 'center',
+                    justifyContent: 'center', gap: 12, textAlign: 'center',
+                    background: 'rgba(13, 17, 23, 0.94)', color: '#e6edf3', padding: 24,
+                }}>
+                    <div style={{ fontSize: 34 }}>🖥️⚠️</div>
+                    <div style={{ fontSize: 16, fontWeight: 700 }}>WebGL context lost</div>
+                    <div style={{ fontSize: 13, color: '#8b949e', maxWidth: 460 }}>
+                        The GPU ran out of resources rendering this scene. If it does
+                        not recover automatically, lower the Detail (point budget)
+                        slider and reload.
+                    </div>
+                    <button
+                        onClick={() => window.location.reload()}
+                        style={{
+                            padding: '8px 20px', border: 'none', borderRadius: 8,
+                            background: 'var(--accent, #2f81f7)', color: '#fff',
+                            fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                        }}
+                    >↻ Reload</button>
+                </div>
+            )}
             {activeTool === 'align' && (
                 <div style={{
                     position: 'absolute', top: 12, right: 12, background: 'var(--glass-bg)',

@@ -39,6 +39,21 @@ function createWindow() {
   // Remove default menu for cleaner look
   // win.setMenu(null)
 
+  // Renderer crash safety net: a dead renderer (e.g. OOM while loading a huge
+  // point cloud) is otherwise just a silent white window. Log the reason and
+  // reload so the user gets a fresh session instead of a frozen blank screen.
+  win.webContents.on('render-process-gone', (_event, details) => {
+    console.error(`[electron] renderer gone: ${details.reason} (exitCode=${details.exitCode})`)
+    if (details.reason !== 'clean-exit') {
+      setTimeout(() => {
+        if (win && !win.isDestroyed()) win.webContents.reloadIgnoringCache()
+      }, 1000)
+    }
+  })
+  win.webContents.on('unresponsive', () => {
+    console.warn('[electron] renderer unresponsive (heavy load or hang)')
+  })
+
   // Maximize on start for full workspace
   win.maximize()
 

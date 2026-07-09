@@ -73,9 +73,13 @@ def _read_poses(output_dir: Path) -> Tuple[List[str], List[int], Path]:
     raise FileNotFoundError("no row-aligned camera_poses.txt/camera_frames.txt")
 
 
-def _ratio(da3: np.ndarray, omega: np.ndarray) -> Optional[float]:
-    """median(DA3/Omega) over the NEAR-BAND pixels (closest 25% by depth) valid in both,
-    at the common (resized) grid.
+def _ratio(da3: np.ndarray, omega: np.ndarray, conf: Optional[np.ndarray] = None,
+           near_frac: float = 0.25, conf_top_frac: float = 0.0,
+           restrict: Optional[np.ndarray] = None) -> Optional[float]:
+    """median(DA3/Omega) over the NEAR-BAND pixels (closest `near_frac` by depth) valid in
+    both, at the common (resized) grid — optionally intersected with the top
+    `conf_top_frac` most-confident DA3 pixels and/or a boolean `restrict` mask
+    (e.g. eroded structural-instance masks; any resolution, resized to the omega grid).
 
     Why the near band and not all pixels: monocular metric depth (DA3) compresses the far
     range → distant pixels systematically bias the DA3/omega ratio LOW, under-scaling the
@@ -85,27 +89,49 @@ def _ratio(da3: np.ndarray, omega: np.ndarray) -> Optional[float]:
     all-pixels, which would carry test2's track gauge from 1328 mm (−7.5%) to ~1438 mm
     (+0.2% vs the 1435 mm standard gauge) — and test2 independently needs +8.06%. Agnostic:
     no known pattern / no manual measurement, just "weight the near field where DA3 is good".
+
+    The confidence gate stacks the same idea on the model's own uncertainty: only the
+    top fraction of DA3-confidence pixels vote. Fallback ladder when a filter starves
+    (<50 px): near∩conf → conf-only → near-only → all valid.
     """
     if da3 is None or omega is None:
         return None
-    if da3.shape != omega.shape:
-        # resize DA3 → omega grid (nearest)
-        H, W = omega.shape
-        yi = (np.arange(H) * da3.shape[0] / H).astype(int).clip(0, da3.shape[0] - 1)
-        xi = (np.arange(W) * da3.shape[1] / W).astype(int).clip(0, da3.shape[1] - 1)
-        da3 = da3[yi][:, xi]
+    H, W = omega.shape
+
+    def _fit(a):
+        # resize any per-pixel companion array → omega grid (nearest)
+        if a is None or a.shape[:2] == (H, W):
+            return a
+        yi = (np.arange(H) * a.shape[0] / H).astype(int).clip(0, a.shape[0] - 1)
+        xi = (np.arange(W) * a.shape[1] / W).astype(int).clip(0, a.shape[1] - 1)
+        return a[yi][:, xi]
+
+    da3 = _fit(da3)
+    conf = _fit(conf)
+    restrict = _fit(restrict)
     m = np.isfinite(da3) & np.isfinite(omega) & (da3 > 1e-3) & (omega > 1e-3)
+    if restrict is not None:
+        m &= restrict.astype(bool)
     if m.sum() < 100:
         return None
     rr = da3[m] / omega[m]
     od = omega[m]                       # depth proxy; per-chunk Sim3 preserves intra-frame order
-    near = od <= np.percentile(od, 25)  # closest 25% of valid pixels
+    near = od <= np.percentile(od, float(near_frac) * 100.0)
+    if conf is not None and conf_top_frac and conf_top_frac > 0:
+        cf = conf[m].astype(np.float32)
+        top = cf >= np.percentile(cf, 100.0 * (1.0 - float(conf_top_frac)))
+        both = near & top
+        if both.sum() >= 50:
+            return float(np.median(rr[both]))
+        if top.sum() >= 50:             # near band too thin → confidence-only
+            return float(np.median(rr[top]))
     if near.sum() >= 50:
         return float(np.median(rr[near]))
     return float(np.median(rr))         # too few near pixels → fall back to all valid
 
 
-def estimate_scale(output_dir: Path, log=None) -> Optional[float]:
+def estimate_scale(output_dir: Path, log=None,
+                   near_frac: float = 0.25, conf_top_frac: float = 0.0) -> Optional[float]:
     # `log` (if given) mirrors every message to the caller's sink (e.g. the worker pipe →
     # server log file AND the UI) so WHAT HAPPENED is always visible, not just in this
     # module's logger (which the worker does not forward).
@@ -130,10 +156,12 @@ def estimate_scale(output_dir: Path, log=None) -> Optional[float]:
             continue
         matched += 1
         try:
-            dd = np.load(p)["depth"].astype(np.float32)
+            npz = np.load(p)
+            dd = npz["depth"].astype(np.float32)
+            cc = npz["conf"].astype(np.float32) if "conf" in npz.files else None
         except Exception:
             continue
-        r = _ratio(dd, od)
+        r = _ratio(dd, od, conf=cc, near_frac=near_frac, conf_top_frac=conf_top_frac)
         if r is not None and np.isfinite(r) and r > 0:
             ratios.append(r)
         else:
@@ -147,7 +175,9 @@ def estimate_scale(output_dir: Path, log=None) -> Optional[float]:
     ratios = np.array(ratios)
     lo, hi = np.percentile(ratios, [10, 90])           # trim outliers
     s = float(np.median(ratios[(ratios >= lo) & (ratios <= hi)]))
-    _log(f"OK: metric scale s={s:.4f} (near-25%-band ratio, median over {len(ratios)} "
+    _filters = f"near-{near_frac:.0%} band" + (
+        f" ∩ conf top-{conf_top_frac:.0%}" if conf_top_frac and conf_top_frac > 0 else "")
+    _log(f"OK: metric scale s={s:.4f} ({_filters} ratio, median over {len(ratios)} "
          f"keyframes, spread {ratios.min():.3f}–{ratios.max():.3f})")
     return s
 
@@ -296,7 +326,8 @@ def apply_scale(output_dir: Path, s: float, dry_run: bool = False) -> None:
         logger.info(f"  scaled {pp} (backup {bak.name})")
 
 
-def run(output_dir: Path, dry_run: bool = False, log=None) -> Optional[float]:
+def run(output_dir: Path, dry_run: bool = False, log=None,
+        near_frac: float = 0.25, conf_top_frac: float = 0.0) -> Optional[float]:
     """Estimate + apply the metric scale. Returns the scale s (float) on success OR when
     it was ALREADY applied (marker present → output is already metric). Returns None ONLY
     when the scale could not be estimated (genuine failure) — the caller MUST treat None
@@ -315,7 +346,7 @@ def run(output_dir: Path, dry_run: bool = False, log=None) -> Optional[float]:
         _log(f"ALREADY METRIC: marker present ({txt}) → output already scaled, not re-scaling "
              f"(Replace clears the marker to re-scale)")
         return s_prev          # non-None → caller knows it IS metric (not a failure)
-    s = estimate_scale(output_dir, log=log)
+    s = estimate_scale(output_dir, log=log, near_frac=near_frac, conf_top_frac=conf_top_frac)
     if s is None:
         return None            # genuine failure → caller makes it FATAL
     apply_scale(output_dir, s, dry_run=dry_run)

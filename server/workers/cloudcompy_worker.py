@@ -246,10 +246,73 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
             except Exception as e:
                 pipe.send_log(f"Floor alignment computation failed: {e}", level="warning")
 
+        # ── Deferred mask→cloud mapping (anchored pipeline order) ──
+        # SAM3 ran BEFORE this stage and only wrote masklets; now that the
+        # (corrected) merged cloud exists, run the ONE-SHOT matching + per-
+        # instance cleaning and refresh the store's canonical OBBs. Also
+        # refreshes when the segmentation is newer than the last mapping.
+        # Runs AFTER floor alignment (a newer floor_transform.npz would
+        # invalidate the freshly written segmentation_result.json) and BEFORE
+        # the Potree build, so the octree is built ONCE, already carrying the
+        # per-point classification — instead of a plain build here + a forced
+        # classification rebuild inside the matching. Non-fatal.
+        _mapping_rebuilt_potree = False
+        try:
+            seg = output_dir / "segmentation.json"
+            res = output_dir / "segmentation_result.json"
+            if seg.exists() and (
+                    not res.exists() or res.stat().st_mtime < seg.stat().st_mtime):
+                pipe.send_progress(94, "Mapping segmentation to cloud (one-shot)...",
+                                   stage="cloudcompy")
+                import sys
+                server_dir_str = str(Path(__file__).resolve().parent.parent)
+                if server_dir_str not in sys.path:
+                    sys.path.insert(0, server_dir_str)
+                from segmentation.pipeline import map_segmentation_to_cloud
+                r = map_segmentation_to_cloud(output_dir)
+                n = len(r.get("instances", []))
+                _mapping_rebuilt_potree = bool(r.get("reload_potree"))
+                pipe.send_log(f"Deferred mask→cloud mapping: {n} instances matched"
+                              + (" (octree rebuilt with classification)"
+                                 if _mapping_rebuilt_potree else ""))
+        except Exception as e:  # noqa: BLE001
+            pipe.send_log(f"Deferred mask→cloud mapping failed (non-fatal): {e}",
+                          level="warning")
+
         # ── Build Potree LOD octree (so the first viewer load is instant) ──
         # Runs as the final reconstruction step. Carries the per-point
         # confidence + origin (frame_global/pixel_row/pixel_col) into the octree
         # (see potree_converter._ply_to_las LAS extra dims). Non-fatal.
+        def _mirror_merged_potree():
+            # Mirror merged/potree symlink for new-style projects (serving
+            # checks merged_potree first, then output/potree).
+            import os
+            potree_dir = output_dir / "potree"
+            try:
+                project_root = session_path
+                for _ in range(5):
+                    project_root = project_root.parent
+                    if (project_root / "project.json").exists():
+                        break
+                else:
+                    project_root = None
+                if project_root and (project_root / "project.json").exists():
+                    merged_dir = project_root / "merged"
+                    merged_dir.mkdir(parents=True, exist_ok=True)
+                    merged_potree = merged_dir / "potree"
+                    if merged_potree.exists() or merged_potree.is_symlink():
+                        if merged_potree.is_symlink() or merged_potree.is_file():
+                            merged_potree.unlink()
+                        else:
+                            import shutil as _sh
+                            _sh.rmtree(merged_potree, ignore_errors=True)
+                    rel_potree = os.path.relpath(str(potree_dir), str(merged_dir))
+                    os.symlink(rel_potree, str(merged_potree))
+                    pipe.send_log(f"Linked merged/potree → {rel_potree}")
+            except Exception as e:
+                pipe.send_log(f"merged/potree symlink failed (non-critical): {e}",
+                              level="warning")
+
         _potree_stale = True
         if light_resume:
             _oct = output_dir / "potree" / "metadata.json"
@@ -257,10 +320,16 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
                              or _oct.stat().st_mtime < output_ply.stat().st_mtime)
             if not _potree_stale:
                 pipe.send_log("Potree octree up to date — skipped (light resume)")
-        if postproc.get("build_potree", True) and _potree_stale:
+        if _mapping_rebuilt_potree:
+            # the matching just rebuilt the octree (with classification) from the
+            # corrected cloud — a second forced build here would only redo it
+            pipe.send_log("Potree octree already rebuilt by the mask→cloud mapping — "
+                          "skipping duplicate build")
+            _mirror_merged_potree()
+        elif postproc.get("build_potree", True) and _potree_stale:
             pipe.send_progress(96, "Building Potree LOD octree...", stage="cloudcompy")
             try:
-                import sys, os
+                import sys
                 server_dir_str = str(Path(__file__).resolve().parent.parent)
                 if server_dir_str not in sys.path:
                     sys.path.insert(0, server_dir_str)
@@ -268,63 +337,14 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
                 ok = convert_ply_to_potree(session_path, force=True)
                 if ok:
-                    potree_dir = output_dir / "potree"
-                    pipe.send_log(f"Potree octree built → {potree_dir}")
-                    # Mirror merged/potree symlink for new-style projects (serving
-                    # checks merged_potree first, then output/potree).
-                    try:
-                        project_root = session_path
-                        for _ in range(5):
-                            project_root = project_root.parent
-                            if (project_root / "project.json").exists():
-                                break
-                        else:
-                            project_root = None
-                        if project_root and (project_root / "project.json").exists():
-                            merged_dir = project_root / "merged"
-                            merged_dir.mkdir(parents=True, exist_ok=True)
-                            merged_potree = merged_dir / "potree"
-                            if merged_potree.exists() or merged_potree.is_symlink():
-                                if merged_potree.is_symlink() or merged_potree.is_file():
-                                    merged_potree.unlink()
-                                else:
-                                    import shutil as _sh
-                                    _sh.rmtree(merged_potree, ignore_errors=True)
-                            rel_potree = os.path.relpath(str(potree_dir), str(merged_dir))
-                            os.symlink(rel_potree, str(merged_potree))
-                            pipe.send_log(f"Linked merged/potree → {rel_potree}")
-                    except Exception as e:
-                        pipe.send_log(f"merged/potree symlink failed (non-critical): {e}", level="warning")
+                    pipe.send_log(f"Potree octree built → {output_dir / 'potree'}")
+                    _mirror_merged_potree()
                 else:
                     pipe.send_log("Potree conversion returned False (non-critical)", level="warning")
             except Exception as e:
                 pipe.send_log(f"Potree build failed (non-critical): {e}", level="warning")
     else:
         pipe.send_log("Warning: cleaned_cloud.ply not created", level="warning")
-
-    # ── Deferred mask→cloud mapping (anchored pipeline order) ──
-    # SAM3 ran BEFORE this stage and only wrote masklets; now that the
-    # (corrected) merged cloud exists, run the ONE-SHOT matching + per-instance
-    # cleaning and refresh the store's canonical OBBs. Also refreshes when the
-    # segmentation is newer than the last mapping. Non-fatal.
-    try:
-        seg = output_dir / "segmentation.json"
-        res = output_dir / "segmentation_result.json"
-        if output_ply.exists() and seg.exists() and (
-                not res.exists() or res.stat().st_mtime < seg.stat().st_mtime):
-            pipe.send_progress(99, "Mapping segmentation to cloud (one-shot)...",
-                               stage="cloudcompy")
-            import sys
-            server_dir_str = str(Path(__file__).resolve().parent.parent)
-            if server_dir_str not in sys.path:
-                sys.path.insert(0, server_dir_str)
-            from segmentation.pipeline import map_segmentation_to_cloud
-            r = map_segmentation_to_cloud(output_dir)
-            n = len(r.get("instances", []))
-            pipe.send_log(f"Deferred mask→cloud mapping: {n} instances matched")
-    except Exception as e:  # noqa: BLE001
-        pipe.send_log(f"Deferred mask→cloud mapping failed (non-fatal): {e}",
-                      level="warning")
 
     pipe.send_progress(100, "Cloud cleaning + Potree complete", stage="cloudcompy")
 
