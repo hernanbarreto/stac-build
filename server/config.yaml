@@ -752,10 +752,13 @@ reconstruction:
                                         # Small chunks = the regime where Omega is excellent.
     chunk_anchors: 3                    # DA3 metric anchors per chunk (metric lock BEFORE the
                                         # SE(3) gluing — scale is never a degree of freedom).
-    densify:                            # DA3 governs density, Omega governs poses:
-      enabled: true                     # after the skeleton is fixed+metric, DA3 depth on the
-      stride: 4                         # non-keyframe frames (every Nth) is ICP-registered to
-      max_frames: 500                   # the nearest keyframe (dense_pose_fusion → chunk_998).
+    densify:                            # DA3 governs density, Omega governs poses.
+      enabled: true                     # The fusion set is a FUNCTION of the session's own
+      stride: 1                         # data: every frame that PASSED the FFT+Laplacian
+                                        # quality filter, minus the keyframes (blurry depth is
+                                        # exactly what the filter keeps out of the cloud).
+                                        # stride 1 = all of them; N>1 subsamples that set to
+                                        # trade completeness for runtime — no absolute cap.
     max_frames_single_pass: 600         # above this, windowed mode resumes (long videos).
                                         # ~43 GB VRAM at 500 frames (paper) ≈ 86 MB/frame —
                                         # the worker ALSO checks free VRAM and degrades to
