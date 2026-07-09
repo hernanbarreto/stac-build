@@ -742,10 +742,12 @@ reconstruction:
                                         # are not. Lower = denser keyframes.
     target_fps: 1.0                     # "fps" mode only: time sampling rate. 1 fps = the web
                                         # demo's regime (its slider caps at 2; examples use 1).
-    max_walk_single_pass_m: 25.0        # Omega's COMFORT RANGE (config parameter, tune freely):
+    max_walk_single_pass_m: 15.0        # Omega's COMFORT RANGE (config parameter, tune freely):
                                         # phase 1 always runs one pass; if the measured walk
                                         # exceeds this, phase 2 re-runs chunked-metric (Omega
                                         # drifts ~1.3 cm/m past its comfort range — measured).
+                                        # 25→15 (2026-07-09): test6 (29 m walk) was still bad
+                                        # single-pass — the comfort proven so far is test2 ~10 m.
     chunk_walk_m: 12.0                  # chunked-metric: walked meters per chunk (50% overlap).
                                         # Small chunks = the regime where Omega is excellent.
     chunk_anchors: 3                    # DA3 metric anchors per chunk (metric lock BEFORE the
