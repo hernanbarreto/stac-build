@@ -211,6 +211,41 @@ def test_scale_graph_chunk_without_anchor():
     assert abs(s[1] - 11.0) < 0.15        # recovered purely from the seams
 
 
+# ── exact seam fit + frame ownership ─────────────────────────────────
+
+def test_robust_rigid_recovers_pose_with_outliers():
+    from loop_utils.metric_lock import robust_rigid
+    rng3 = np.random.default_rng(5)
+    src = rng3.uniform(-5, 5, (20000, 3))
+    ang = np.radians(3.0)
+    R_true = np.array([[np.cos(ang), -np.sin(ang), 0],
+                       [np.sin(ang), np.cos(ang), 0], [0, 0, 1.0]])
+    t_true = np.array([0.35, -0.10, 0.50])
+    dst = src @ R_true.T + t_true + rng3.normal(0, 0.01, src.shape)   # 1 cm noise
+    out = rng3.random(len(src)) < 0.2                                  # 20% junk
+    dst[out] += rng3.uniform(-3, 3, (int(out.sum()), 3))
+    R, t, resid, n = robust_rigid(src, dst, sample=20000)
+    assert np.abs(t - t_true).max() < 0.01, t
+    assert np.degrees(np.arccos(np.clip((np.trace(R @ R_true.T) - 1) / 2, -1, 1))) < 0.1
+    assert resid < 0.05
+
+
+def test_frame_owner_partitions_every_frame_once():
+    from loop_utils.metric_lock import frame_owner
+    from reconstruction.chunk_plan import chunk_ranges
+    for n, cs_, ov_ in [(192, 28, 14), (100, 60, 30), (66, 40, 20)]:
+        ranges = chunk_ranges(n, cs_, ov_)
+        owner = frame_owner(ranges, n)
+        assert (owner >= 0).all()                       # every frame owned
+        for g in range(n):                              # owner really contains g
+            s0, e0 = ranges[owner[g]]
+            assert s0 <= g < e0
+        # each chunk keeps its centre, gives away its far overlap edges
+        for k, (s0, e0) in enumerate(ranges):
+            mid = (s0 + e0) // 2
+            assert owner[mid] == k
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

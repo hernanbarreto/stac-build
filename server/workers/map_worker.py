@@ -1547,9 +1547,14 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             "anchor_dir": str(_anchor_dir),
             "near_frac": float(_va_cfg.get("scale_near_frac", 0.25)),
         }
+        cfg_v["Model"]["exact_seam_align"] = True   # rigid seams from EXACT pixel
+                                                    # correspondences (mm), not the
+                                                    # coarse point-map fit (25-30cm)
+        cfg_v["Model"]["frame_ownership"] = True    # one frame → one writer: overlap
+                                                    # frames stop entering the cloud twice
         pipe.send_log(f"CHUNKED-METRIC: chunks {int(_chunk)}/{int(_ov)} (50% overlap), "
-                      f"per-chunk DA3 metric lock, SE(3) gluing (scale locked), "
-                      f"SALAD loop closure ON")
+                      f"scale graph (seams+DA3), EXACT-correspondence seam gluing, "
+                      f"frame ownership (one writer per frame)")
 
     def _ensure_anchors(_files):
         """Isolated DA3 depth for every anchor file not already extracted."""
