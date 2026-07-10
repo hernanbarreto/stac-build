@@ -1578,19 +1578,6 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                     # ONE 3D position (rigid residual per
                                                     # shared frame, blended across the
                                                     # overlap, poses moved with points)
-        cfg_v["Model"]["frame_graph"] = bool(       # per-frame RIGID pose graph (chunk
-            _va_cfg.get("frame_graph", False))      # interiors). DEFAULT OFF — measured
-                                                    # on test4 2026-07-10 (run 4): pairs
-                                                    # span ≤12 frames, so wavelengths
-                                                    # longer than that are invisible to
-                                                    # the graph AND to its short-span
-                                                    # held-out — it improved locally
-                                                    # (9.3→6.0 cm) while injecting up to
-                                                    # 163 cm of low-frequency bend
-                                                    # (chimney 7→130 cm, duplicated
-                                                    # objects). Hardened (zero-prior +
-                                                    # median-based bound) but stays
-                                                    # opt-in until it can truly earn.
         cfg_v["Model"]["depth_graph"] = True        # per-frame DEPTH graph: different
                                                     # frames agree on the depth of the
                                                     # same surface (kills the in-depth
@@ -1603,8 +1590,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                     # disagreement 1.51% -> 1.01%)
         pipe.send_log(f"CHUNKED-METRIC: chunks {int(_chunk)}/{int(_ov)} (50% overlap), "
                       f"scale graph (seams+DA3) + self-gated per-chunk scale DRIFT, "
-                      f"EXACT-correspondence seam gluing, per-frame RIGID pose graph "
-                      f"(interior warp), "
+                      f"EXACT-correspondence seam gluing, "
                       f"frame ownership (one writer per frame), ELASTIC per-frame "
                       f"seam consensus (shared pixels share one 3D position), "
                       f"DEPTH graph (frames agree on shared-surface depth)")
