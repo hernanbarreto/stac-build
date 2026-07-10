@@ -1464,7 +1464,6 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # is statistically equivalent to the whole set (measured: an 11-frame re-check moved
     # s by only -0.91%). Stray sessions already skip DA3 inference entirely (their depth
     # is converted to the DA3 layout by convert_stray_to_da3.py and detected as done).
-    _da3_frames_path = selected_frames_path
     _anchor_files = None
     if _simple_on and _scale_align_on and _sel_files:
         _k = int(_simple_cfg.get("scale_anchor_frames", 12) or 12)
@@ -1477,26 +1476,34 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                            "total_frames": _n_selected,
                            "selected_count": len(_anchor_files),
                            "selected_files": _anchor_files}, _f)
-            _da3_frames_path = str(_anchor_path)
             pipe.send_log(f"SIMPLE: DA3 metric anchor on {len(_anchor_files)}/{_n_selected} "
                           f"evenly-spread frames (scale is one scalar — the rest is waste)")
     if _scale_align_on:
         pipe.send_progress(6, "VGGT-Omega: extracting DA3 metric depth (per-frame)...",
                            stage="reconstruction")
-        # DA3 on the KEYFRAMES only (selected_frames), NOT the dense da3_frames set: for
-        # vggtomega DA3 is just the metric anchor for scale_align (per-keyframe omega↔DA3),
-        # and the TSDF uses omega depth (depth_source: mapanything), not DA3. Running it on
-        # the dense set produced ~25GB of unused da3_run that overflowed the disk.
-        if _anchor_files:
-            # SIMPLE: isolated per-frame DA3 — the streaming machinery chains poses
-            # across consecutive frames and CRASHES on sparse anchors (pose=None on
-            # frames seconds apart). The anchor needs depth VALUES only.
-            _run_da3_anchor(pipe, frames_dir, output_dir, _anchor_files, recon_cfg)
+        # DA3's ONLY role in the vggtomega path is per-frame metric depth VALUES
+        # (scale_align + metric-lock anchors). ISOLATED per-frame extraction, NEVER
+        # streaming: the streaming machinery chains poses across frames — poses
+        # nothing here consumes — and crashes when the chain starves (test3:
+        # 12 keyframes → single chunk → save_camera_poses pose=None). The old
+        # streaming fallback fired exactly when the selection was SMALLER than
+        # scale_anchor_frames; a small selection simply means every frame anchors.
+        if not _sel_files:
+            raise RuntimeError("scale_align needs selected frames to anchor DA3 depth "
+                               "(selected_frames.json empty or unreadable)")
+        if _anchor_files is None:
+            _anchor_files = list(_sel_files)
+            pipe.send_log(f"DA3 metric anchor on ALL {_n_selected} selected frames "
+                          f"(isolated per-frame — no streaming)")
+        _ro = output_dir / "da3_run" / "results_output"
+        _missing = [f for f in _anchor_files
+                    if not (_ro / f"frame_{int(os.path.splitext(f)[0])}.npz").exists()]
+        if _missing:
+            _run_da3_anchor(pipe, frames_dir, output_dir, sorted(set(_missing)), recon_cfg)
         else:
-            da3_dir = _run_da3(pipe, frames_dir, output_dir, _da3_frames_path, recon_cfg,
-                               config, depth_only=True)
-            pipe.send_log(f"DA3 metric depth → {Path(da3_dir) / 'results_output'} "
-                          f"(anchor + cloud depth)")
+            # Stray sessions (depth pre-converted to the DA3 layout) and resumed
+            # runs land here: everything already extracted.
+            pipe.send_log("DA3 anchor: all per-frame depths already on disk — skipped")
     else:
         pipe.send_log("scale_align OFF → skipping DA3 (its only role here is the metric "
                       "anchor for scale_align) — running Omega ONLY")
