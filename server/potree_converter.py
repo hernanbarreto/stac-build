@@ -124,9 +124,16 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
     # Confidence is already normalized to [0, 1] by VGGT-Long — map directly to uint16 intensity.
     if has_confidence:
         conf = data['confidence'].astype(np.float32)
-        # NaN/inf conf -> inf in PotreeConverter's attribute stats -> INVALID
-        # metadata.json -> the viewer dies parsing it ("Expecting value").
-        conf = np.nan_to_num(conf, nan=0.0, posinf=1.0, neginf=0.0)
+        # NO NaN TOLERATED: a non-finite confidence means an upstream stage shipped
+        # corrupted data. Sanitizing here would HIDE that corruption (and non-finite
+        # values also break PotreeConverter's metadata.json). Fail loudly instead —
+        # the error must die at its source, not travel in disguise.
+        _bad = ~np.isfinite(conf)
+        if _bad.any():
+            raise ValueError(
+                f"cleaned cloud has {int(_bad.sum()):,}/{len(conf):,} non-finite "
+                f"confidence values — an upstream stage corrupted the cloud; refusing "
+                f"to convert corrupted data")
         conf = np.clip(conf, 0.0, 1.0)
         las.intensity = (conf * 65535).astype(np.uint16)
         n = len(conf)
@@ -139,10 +146,7 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
     # in addition to intensity, so the value is exact, not quantized to uint16.)
     if has_confidence:
         las.add_extra_dim(laspy.ExtraBytesParams(name="confidence", type=np.float32))
-        # this float extra dim is the one whose non-finite values become inf in
-        # PotreeConverter's metadata.json attribute stats — sanitize it too
-        las.confidence = np.nan_to_num(data['confidence'].astype(np.float32),
-                                       nan=0.0, posinf=1.0, neginf=0.0)
+        las.confidence = data['confidence'].astype(np.float32)  # verified finite above
     if has_origins:
         # Pick the smallest int type that fits each field's ACTUAL range, so the
         # octree stays compact for typical scans (frame_global ~hundreds-to-low-

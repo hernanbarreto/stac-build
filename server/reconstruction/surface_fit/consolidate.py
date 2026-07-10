@@ -350,6 +350,11 @@ def scene_consolidate(output_dir: Path,
     moved = consolidate_mls(pts, radius=r, k=k, iterations=iterations,
                             max_points=None, normals=normals,
                             normal_gate=normal_gate)
+    _bad = ~np.isfinite(moved).all(axis=1)
+    if _bad.any():
+        raise RuntimeError(
+            f"scene_consolidate produced {int(_bad.sum()):,} non-finite positions — "
+            f"refusing to write corrupted geometry back (cloud left untouched)")
     disp = np.linalg.norm(moved - pts, axis=1)
     # write ONLY the positions back — every other property (colors, origins,
     # confidence) and the point ORDER stay bit-identical

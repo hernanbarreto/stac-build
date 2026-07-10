@@ -345,6 +345,26 @@ def main():
     print(f"[Step 6/6] Normal estimation: DISABLED (not written to PLY / not used)\n")
 
     # ══════════════════════════════════════════════════════════════
+    # NO NaN TOLERATED — final gate before the cloud becomes the pipeline's truth.
+    # Every downstream consumer (Potree, TSDF, segmentation, Q&A) trusts this file;
+    # a single non-finite coordinate or confidence here means some step above
+    # corrupted data, and shipping it would just move the explosion downstream.
+    _xyz_chk = np.column_stack([current.toNpArrayCopy()[:, :3]])
+    if not np.isfinite(_xyz_chk).all():
+        print(f"[CloudCompPy] ❌ {int((~np.isfinite(_xyz_chk)).any(1).sum()):,} points "
+              f"with non-finite XYZ — refusing to save a corrupted cloud")
+        sys.exit(1)
+    _sfd = current.getScalarFieldDic()
+    for _sfname in ("confidence", "frame_global", "pixel_row", "pixel_col"):
+        _si = _sfd.get(_sfname, -1)
+        if _si is not None and _si >= 0:
+            _vals = current.getScalarField(_si).toNpArrayCopy()
+            _nbad = int((~np.isfinite(_vals)).sum())
+            if _nbad:
+                print(f"[CloudCompPy] ❌ scalar field '{_sfname}' has {_nbad:,} "
+                      f"non-finite values — refusing to save a corrupted cloud")
+                sys.exit(1)
+
     # SAVE (Binary PLY — with origin fields preserved if available)
     # ══════════════════════════════════════════════════════════════
     t_save = time.time()
