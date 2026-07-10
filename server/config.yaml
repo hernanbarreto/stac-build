@@ -732,17 +732,20 @@ reconstruction:
                                         # SUSPECT — the chunk keeps writing points but argues
                                         # more quietly (elastic consensus biased toward the
                                         # trusted side; finereg down-weights its planes 0.5).
-    # frame_graph: false                # per-frame RIGID pose graph (elastic for chunk
-                                        # INTERIORS). DEFAULT OFF — negative result, measured
-                                        # (test4 run 4, 2026-07-10): pair constraints span ≤12
-                                        # frames, so wavelengths longer than the span are
-                                        # invisible both to the graph and to its short-span
-                                        # held-out; it improved locally (9.3→6.0 cm) while
-                                        # injecting ≤163 cm of low-frequency bend (chimney
-                                        # offset 7→130 cm, duplicated objects). The stage is
-                                        # hardened now (per-frame zero-prior + median-based
-                                        # correction bound) but stays opt-in until a rerun
-                                        # proves it can EARN the correction.
+    frame_graph: true                   # per-frame RIGID pose graph v2 (elastic for chunk
+                                        # INTERIORS) — EXPERIMENT vs run 3 (the best result so
+                                        # far): set false to reproduce run 3 exactly.
+                                        # v1 negative result (run 4, 2026-07-10): short-span
+                                        # pairs (≤12 kf) can't see wavelengths beyond their
+                                        # span → the lstsq filled them from noise (163 cm bend,
+                                        # chimney 7→130 cm). v2 = wavelength-matched evidence:
+                                        # COARSE layer (nodes every 12 kf) constrained ONLY by
+                                        # geometric revisit pairs (scan-agnostic: an orbit
+                                        # yields many, a one-way corridor none → coarse stays
+                                        # identity by construction); FINE layer = dense short
+                                        # pairs on the residual; STRATIFIED verdict (short AND
+                                        # long held-out bands) + pair hygiene; ladder
+                                        # hierarchical → fine-only → SKIP.
 
   # ── SIMPLE pipeline (one concept — validated 2026-07-09 vs the VGGT-Omega web demo) ──
   # Sparse frames (~1 fps) → ONE VGGT-Omega pass (no windows → no seams → no onion) →

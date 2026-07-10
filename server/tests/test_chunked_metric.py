@@ -894,6 +894,92 @@ def test_frame_graph_verdict():
     assert not v_w["bounded"], v_w
 
 
+def test_revisit_candidates_orbit_vs_corridor():
+    """Scan-agnostic long-baseline discovery: an ORBIT around a structure
+    re-observes it (centroids cluster near the structure → many candidates);
+    a one-way CORRIDOR never does (candidates: none). The data declares the
+    topology — no scene assumption."""
+    from loop_utils.metric_lock import revisit_candidates
+    N = 90
+    th = 2 * np.pi * np.arange(N) / N
+    orbit_c = np.stack([2.0 * np.cos(th), np.zeros(N), 2.0 * np.sin(th)], 1)
+    orbit_r = np.full(N, 4.0)          # frames see the building at the centre
+    pairs = revisit_candidates(orbit_c, orbit_r, min_gap=24)
+    assert len(pairs) > 30
+    assert all(g - f >= 24 for f, g in pairs)
+
+    corridor_c = np.stack([0.5 * np.arange(N), np.zeros(N), np.zeros(N)], 1)
+    corridor_r = np.full(N, 4.0)       # 24 frames apart = 12 m >> 8 m reach
+    assert revisit_candidates(corridor_c, corridor_r, min_gap=24) == []
+
+
+def test_filter_pair_fits_hygiene():
+    from loop_utils.metric_lock import filter_pair_fits
+    R = np.eye(3)
+    fits = ([(f, f + 1, R, np.zeros(3), 0.01, 5000) for f in range(10)]
+            + [(20, 21, R, np.zeros(3), 0.30, 5000),      # occlusion junk
+               (22, 23, R, np.zeros(3), 0.01, 100)])      # starved
+    out = filter_pair_fits(fits)
+    assert len(out) == 10                                 # both dropped
+    assert all(w > 0 for _, _, _, w in out)
+
+
+def test_solve_coarse_layer_supported_vs_unsupported():
+    """The coarse layer's contract: wavelengths WITH long-baseline evidence are
+    corrected; stretches WITHOUT support stay identity BY CONSTRUCTION (the
+    run-4 hallucination is structurally impossible)."""
+    from loop_utils.metric_lock import solve_coarse_layer
+    N = 96
+    ty = np.zeros(N)
+    ty[:48] = 0.10 * np.sin(2 * np.pi * np.arange(48) / 48)   # warp, 1st half
+    ty[:48] -= ty[:48].mean()
+    long_taus = []
+    for f in range(0, 36, 3):                # revisits only in the FIRST half
+        g = f + 30
+        tau = np.zeros(6); tau[4] = ty[f] - ty[g]
+        long_taus.append((f, g, tau, 1.0))
+    xi = solve_coarse_layer(long_taus, N, node_step=12)
+    # supported half: correlates with the true warp
+    assert np.dot(xi[:48, 4], ty[:48]) > 0.4 * np.dot(ty[:48], ty[:48])
+    # beyond the last pair's reach (last g = 63 → nodes ≤ 6 supported):
+    # identity by construction — no noise-filled bend
+    assert np.max(np.abs(xi[84:, 4])) < 0.005
+
+
+def test_frame_graph_hierarchical_recovers_both_bands():
+    """The run-4 regression, solved: true warp = LONG sine + SHORT ripple.
+    Fine-only (short pairs, zero-prior) recovers the ripple but must NOT
+    invent the long sine; the hierarchical solve with revisit pairs recovers
+    BOTH."""
+    from loop_utils.metric_lock import solve_frame_graph, solve_coarse_layer
+    rng17 = np.random.default_rng(50)
+    N = 96
+    long_true = 0.12 * np.sin(2 * np.pi * np.arange(N) / N)
+    short_true = 0.015 * np.sin(2 * np.pi * np.arange(N) / 8)
+    ty = long_true + short_true
+    ty -= ty.mean()
+    xi_true = np.zeros((N, 6)); xi_true[:, 4] = ty
+
+    short_taus = [(f, f + d,
+                   xi_true[f] - xi_true[f + d] + rng17.normal(0, 5e-4, 6), 1.0)
+                  for d in (1, 2, 3, 5) for f in range(N - d)]
+    long_taus = [(f, f + 40,
+                  xi_true[f] - xi_true[f + 40] + rng17.normal(0, 2e-3, 6), 1.0)
+                 for f in range(0, N - 40, 2)]
+
+    fine_only = solve_frame_graph(short_taus, N)
+    err_fine = np.abs(fine_only[:, 4] - ty)
+    # ripple captured but the long sine NOT hallucinated from short pairs:
+    assert np.max(np.abs(fine_only[:, 4])) < 0.8 * np.max(np.abs(long_true))
+
+    xi_c = solve_coarse_layer(long_taus, N, node_step=12)
+    resid = [(f, g, t - (xi_c[f] - xi_c[g]), w) for f, g, t, w in short_taus]
+    xi = xi_c + solve_frame_graph(resid, N)
+    err_h = np.abs(xi[:, 4] - ty)
+    assert np.median(err_h) < 0.01, np.median(err_h)
+    assert np.median(err_h) < 0.5 * np.median(err_fine)
+
+
 def test_chunk_anchor_ratios_positions():
     """The positioned form: each ratio comes with the LOCAL frame index it was
     measured at (the drift model needs to know where)."""
