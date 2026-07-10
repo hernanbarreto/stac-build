@@ -36,6 +36,8 @@ server:
 
 # ── Pipeline ───────────────────────────────────────────────────────
 pipeline:
+  auto_tsdf: false      # false = the pipeline STOPS after the cleaned cloud (see it fast);
+                        # the TSDF/texrecon (slow) is triggered manually from the UI.
   # Full semantic chain inside the reconstruct pipeline:
   # VLM scene understanding → SAM3 segment-everything. false = the pipeline runs
   # RECONSTRUCTION → CLOUDCOMPY → TSDF only, and segmentation stays on-demand.
@@ -752,13 +754,13 @@ reconstruction:
                                         # Small chunks = the regime where Omega is excellent.
     chunk_anchors: 3                    # DA3 metric anchors per chunk (metric lock BEFORE the
                                         # SE(3) gluing — scale is never a degree of freedom).
-    densify:                            # DA3 governs density, Omega governs poses.
-      enabled: true                     # The fusion set is a FUNCTION of the session's own
-      stride: 1                         # data: every frame that PASSED the FFT+Laplacian
-                                        # quality filter, minus the keyframes (blurry depth is
-                                        # exactly what the filter keeps out of the cloud).
-                                        # stride 1 = all of them; N>1 subsamples that set to
-                                        # trade completeness for runtime — no absolute cap.
+    # densify: REMOVED (2026-07-10). DA3 fill glued by frame-to-keyframe ICP was
+    # measured on test4: 863/1235 frames rejected (fitness<0.3) and the surviving
+    # 30.4M points (46.7% of the cloud) sat OFFSET -26.6 cm median (max 83 cm) from
+    # the Omega skeleton — DA3's monocular shape vs Omega's multi-view shape = a
+    # manufactured onion. If density is ever needed, densify WITHIN the Omega
+    # chunks (more keyframes per chunk in its comfort regime), never by gluing
+    # another model's geometry.
     max_frames_single_pass: 600         # above this, windowed mode resumes (long videos).
                                         # ~43 GB VRAM at 500 frames (paper) ≈ 86 MB/frame —
                                         # the worker ALSO checks free VRAM and degrades to

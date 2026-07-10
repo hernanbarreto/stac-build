@@ -320,7 +320,7 @@ class PipelineManager:
     # Files in frames/ dir that should be regenerated on reconstruction
     FRAMES_DIR_FILES: List[str] = [
         "selected_frames.json", "selected_frames_seg*.json", "frame_quality.json",
-        "da3_frames.json",   # densify fusion set — derived from selected_frames
+        "da3_frames.json",   # dense-set list (legacy da3/mapanything backends)
     ]
 
     # BIM comparison / sábana artifacts (may live in output/, session root, or bim_comparison/)
@@ -853,10 +853,24 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
     if not auto_segment:
         logger.info("[Pipeline] auto_segment off — VLM/SAM3 stages disabled")
 
+    # `pipeline.auto_tsdf: false` stops the pipeline at the cleaned cloud — the
+    # TSDF/texrecon takes hours and the user wants the cloud on screen first;
+    # the mesh is then triggered manually.
+    auto_tsdf = True
+    try:
+        from config import cfg as _c2
+        auto_tsdf = bool(_c2.get("pipeline", {}).get("auto_tsdf", True))
+    except Exception:
+        pass
+    if not auto_tsdf:
+        logger.info("[Pipeline] auto_tsdf off — pipeline ends at the cleaned cloud")
+
     def _enabled(stage_id: StageId) -> bool:
         if skip_cloudcompy and stage_id == StageId.CLOUDCOMPY:
             return False
         if not auto_segment and stage_id in _semantic_stages:
+            return False
+        if not auto_tsdf and stage_id == StageId.TSDF:
             return False
         return True
 

@@ -1752,48 +1752,6 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                           f"but only {_n_selected} keyframes (one chunk) — keeping the "
                           f"single pass", level="warning")
 
-    # ── DENSITY: DA3 densification of the non-keyframe frames ──
-    # Poses come from FEW sharp, parallax-uniform keyframes (redundancy amplifies
-    # drift); density comes from DA3 metric depth on the frames in between,
-    # frame-to-keyframe ICP-registered on the fixed skeleton (dense_pose_fusion) —
-    # DA3 governs density, Omega governs poses, neither does the other's job.
-    _dn_cfg = _simple_cfg.get("densify") or {}
-    if _simple_on and bool(_dn_cfg.get("enabled", True)):
-        try:
-            # The fusion set is a FUNCTION of the session's own data — the frames that
-            # passed the FFT+Laplacian quality filter — never an arbitrary absolute:
-            # every blur-VALID frame between the first and last keyframe, minus the
-            # keyframes themselves. `stride` (default 1 = all of them) only exists to
-            # trade completeness for runtime explicitly; it subsamples that set, it
-            # does not cap it. Blurry frames are excluded because their DA3 depth is
-            # exactly the noise the quality filter exists to keep out of the cloud.
-            _stride = max(1, int(_dn_cfg.get("stride", 1)))
-            _kf_set = set(_sel_files)
-            _fq_path = frames_dir / "frame_quality.json"
-            _valid_files = sorted(e["file"] for e in
-                                  json.loads(_fq_path.read_text()).get("frames", [])
-                                  if e.get("valid", True)) if _fq_path.exists() else []
-            _first = _sel_files[0] if _sel_files else None
-            _last = _sel_files[-1] if _sel_files else None
-            _pool = [f for f in _valid_files
-                     if f not in _kf_set
-                     and (_first is None or _first <= f <= _last)]
-            _dense = _pool[::_stride]
-            if _dense:
-                pipe.send_log(f"[densify] DA3 metric depth on {len(_dense)}/{len(_pool)} "
-                              f"blur-valid non-keyframe frames (stride {_stride}) + the "
-                              f"{_n_selected} keyframes (ICP anchors)")
-                _ensure_anchors(list(_kf_set) + _dense)
-                with open(frames_dir / "da3_frames.json", "w") as _f:
-                    json.dump({"version": "2.0", "method": f"densify_stride_{_stride}",
-                               "selected_files": _dense}, _f)
-                _run_dense_fusion(pipe, frames_dir, output_dir, config, recon_cfg)
-            else:
-                pipe.send_log("[densify] no extra frames to fuse", level="warning")
-        except Exception as _e:  # noqa: BLE001
-            pipe.send_log(f"[densify] failed (non-fatal, cloud stays keyframe-only): {_e}",
-                          level="warning")
-
     # Success → free da3_run when the TSDF won't use it (depth_source not DA3-based).
     _ds = str((config.get("tsdf", {}) or {}).get("depth_source", "auto")).lower()
     if _ds not in ("da3", "da3_frames", "auto"):
