@@ -534,6 +534,38 @@ def test_blend_two_copies():
     assert np.array_equal(wp2, wp) and np.array_equal(cf2, cf) and np.array_equal(dd2, dd)
 
 
+def test_classify_far_points_contradiction():
+    """The v2 policy core: a near frame g sees a tilted wall; far points that
+    (a) match it -> AGREE (kept), (b) sit 1 m displaced -> CONTRADICTED (dropped),
+    (c) fall outside g's FOV or beyond g's reach -> untested (kept)."""
+    from loop_utils.metric_lock import classify_far_points
+    H, W = 60, 80
+    fx = fy = 70.0; cx, cy = W / 2, H / 2
+    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]])
+    uu, vv = np.meshgrid(np.arange(W), np.arange(H))
+    rays = np.stack([(uu - cx) / fx, (vv - cy) / fy, np.ones((H, W))], -1)
+    depth_g = (4.0 + 1.5 * (uu - cx) / (W / 2)).astype(np.float32)   # tilted wall
+    conf_g = np.full((H, W), 9.0, np.float32)
+    wp_g = rays * depth_g[..., None]
+    cam_g = np.zeros(3); w2c_g = np.eye(4)
+    # far points: on-surface / displaced 1 m deeper / far behind the camera's FOV
+    pix = [(30, 20), (30, 40), (30, 60)]
+    on = np.array([wp_g[v, u] for v, u in pix])
+    off = on + np.array([0, 0, 1.0])
+    out = np.array([[50.0, 0.0, -5.0]])                 # behind g -> untested
+    pts = np.vstack([on, off, out])
+    ok = np.ones(len(pts), bool)
+    agree, contra = classify_far_points(pts, ok, cam_g, depth_g, conf_g, w2c_g, K,
+                                        cap=8.0, floor_m=0.045, rate=0.0067)
+    assert agree[:3].all() and not contra[:3].any()      # corroborated
+    assert contra[3:6].all() and not agree[3:6].any()    # displaced duplicate
+    assert not agree[6] and not contra[6]                # unseen -> keep
+    # a camera too far from the points tests nothing
+    a2, c2 = classify_far_points(pts, ok, cam_g + 50.0, depth_g, conf_g, w2c_g, K,
+                                 cap=8.0, floor_m=0.045, rate=0.0067)
+    assert not a2.any() and not c2.any()
+
+
 def test_write_depth_cap_math():
     """cap = seam floor / pairwise error rate — with test4's real numbers the cone
     gallery's far observations (15-25 m) must fall OUTSIDE the cap while the

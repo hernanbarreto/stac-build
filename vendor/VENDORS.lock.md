@@ -19,7 +19,7 @@ Declared in `.gitmodules`, tracked as gitlinks.
 
 | Dir | Upstream | Pin | Notes |
 |-----|----------|-----|-------|
-| `vendor/VGGT-Long` | `hernanbarreto/VGGT-Long` (STAC fork) | `07ebb33` | loop-closure + sky-removal + DA3-prior patches |
+| `vendor/VGGT-Long` | `hernanbarreto/VGGT-Long` (STAC fork) | `ce5e961` | loop-closure + sky-removal + DA3-prior patches |
 | `vendor/depth-anything-3` | `hernanbarreto/Depth-Anything-3` (STAC fork, **PRIVATE**) | `52837d34` (`stac-main`) | cam-encoder pose conditioning + sky drop. Needs GitHub access to the private fork. |
 
 `git clone --recursive https://github.com/hernanbarreto/stac-build.git` pulls
