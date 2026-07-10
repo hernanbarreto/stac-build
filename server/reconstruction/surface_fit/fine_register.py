@@ -191,10 +191,57 @@ def _rodrigues(w: np.ndarray) -> np.ndarray:
     return np.eye(3) + np.sin(th) * K + (1 - np.cos(th)) * (K @ K)
 
 
+def fit_shared_ground(ground_pts: Dict, corr: Dict,
+                      tilt_lock_deg: float = 2.0) -> Optional[Tuple[np.ndarray, float]]:
+    """One shared ground plane (n, d) fitted to a LEVEL's (corrected) ground
+    patches together — the vertical datum its units are tied to.
+
+    Gravity is the arbiter (orientation is baked from camera gravity before
+    this stage, +y up). A free-normal fit through spatially-disjoint patches
+    can ABSORB vertical drift as a fake slope (a 0.2° tilted plane passes
+    through a 3 cm step between two patches 9 m apart and corrects nothing) —
+    so when the free fit is within ``tilt_lock_deg`` of horizontal the normal
+    is LOCKED to +y and only the offset (Huber-median height) is kept: the
+    drift gets flattened. A steeper fit is a genuinely sloped site (ramp):
+    the free plane is kept, still tying every unit to one consistent surface."""
+    pooled = []
+    for k, P in ground_pts.items():
+        T = corr[k]
+        pooled.append(P @ T[:3, :3].T + T[:3, 3])
+    if not pooled:
+        return None
+    X = np.vstack(pooled)
+    if len(X) < 100:
+        return None
+    for _ in range(2):                       # plain fit, then one Huber reweight
+        c = X.mean(0) if _ == 0 else (X * w[:, None]).sum(0) / w.sum()
+        M = (X - c) if _ == 0 else (X - c) * np.sqrt(w)[:, None]
+        n = np.linalg.svd(M, full_matrices=False)[2][-1]
+        n = n / max(np.linalg.norm(n), _EPS)
+        r = (X - c) @ n
+        s = max(1.4826 * float(np.median(np.abs(r))), 1e-4)
+        w = np.where(np.abs(r) > 2 * s, 2 * s / np.maximum(np.abs(r), _EPS), 1.0)
+    if n[1] < 0:                             # +y is up after orient
+        n = -n
+    if float(n[1]) >= np.cos(np.deg2rad(tilt_lock_deg)):
+        y = X[:, 1]
+        for _ in range(2):                   # Huber-median height, gravity-locked
+            med = float(np.median(y)) if _ == 0 else float((y * wy).sum() / wy.sum())
+            ry = y - med
+            sy = max(1.4826 * float(np.median(np.abs(ry))), 1e-4)
+            wy = np.where(np.abs(ry) > 2 * sy,
+                          2 * sy / np.maximum(np.abs(ry), _EPS), 1.0)
+        return np.array([0.0, 1.0, 0.0]), -med
+    return n, float(-n @ c)
+
+
 def solve_joint(planes: Dict, anchor, matches_fn=None,
-                iters: int = 5, lam: float = 1e-2,
+                iters: int = 20, lam: float = 1e-2,
                 huber_m: float = 0.02,
-                sample_per_match: int = 800) -> Dict:
+                sample_per_match: int = 800,
+                capture_m: float = 0.12,
+                ground_pts: Optional[Dict] = None,
+                unit_conf: Optional[Dict] = None) -> Dict:
     """JOINT pose-graph solve over all rigid units at once.
 
     The old per-chunk sequential (Gauss-Seidel) update could not reconcile
@@ -205,6 +252,34 @@ def solve_joint(planes: Dict, anchor, matches_fn=None,
     Gauss-Newton with Huber IRLS so a WRONG plane match (repeated parallel
     structure) is down-weighted instead of dragging the whole graph.
 
+    Convergence (measured on test4, 2026-07-10: corrections up to 24 cm moved
+    the worst pair 119.05 → 118.55 mm — the solve SAW the drift but would not
+    act on it): a fixed 2 cm Huber scale down-weights a 10 cm drift residual
+    5x, i.e. the exact signal this stage exists to remove is treated as an
+    outlier. Two graduated schedules fix that without giving up robustness:
+
+      * ANNEALED robust scale — each iteration the Huber scale is the 75th
+        percentile of the current |residuals| (floored at ``huber_m``), so
+        early iterations pull on the real drift at near-full weight and late
+        iterations tighten to the mm regime;
+      * GRADUATED capture radius — plane matching runs at ``capture_m`` for
+        the first half of the iterations (pairs drifted beyond the default
+        12 cm — including NON-ADJACENT chunk overlaps, the geometric loop
+        closures — become visible to the solve), then at the strict default
+        so the endgame is never polluted by far false matches.
+
+    ``ground_pts`` (list of {unit_key: (M,3) ground-patch points}, one dict
+    per ground LEVEL — see ground_patches; a plain dict is treated as one
+    level): each level's patches are tied to that level's OWN shared plane
+    (re-fitted each iteration from the corrected patches) — the vertical
+    datum that stops per-chunk vertical drift from accumulating along the
+    chain, including between chunks that never overlap. Stairs and
+    split-level sites keep their real steps: levels are never merged.
+
+    ``unit_conf`` ({unit_key: weight 0..1}): residuals involving a unit are
+    scaled by its confidence — health-suspect chunks state their opinion
+    more quietly instead of dragging healthy neighbours.
+
     ``planes``: {unit_key: [ChunkPlane,...]}. Returns {unit_key: 4×4}.
     """
     if matches_fn is None:
@@ -213,45 +288,76 @@ def solve_joint(planes: Dict, anchor, matches_fn=None,
     idx = {k: i for i, k in enumerate(keys)}
     U = len(keys)
     corr = {k: np.eye(4) for k in keys}
+    conf = {k: float((unit_conf or {}).get(k, 1.0)) for k in keys}
     rng = np.random.default_rng(0)
 
     for it in range(iters):
         cur = {k: [_apply_to_plane(p, corr[k]) for p in planes[k]] for k in keys}
-        rows_i: List[np.ndarray] = []   # jacobian blocks per residual set
-        H = np.zeros((6 * U, 6 * U))
-        g = np.zeros(6 * U)
-        n_res = 0
+        match_radius = max(capture_m, 0.12) if it < iters // 2 else 0.12
+
+        # ── pass 1: collect residual blocks (so the robust scale is set from
+        # THIS iteration's residual distribution, not a fixed guess) ──
+        blocks = []                # (key_a or None, key_b, normal, d, P, w_conf)
+        all_abs_r = []
         for a_i in range(U):
             for b_i in range(a_i + 1, U):
                 a, b = keys[a_i], keys[b_i]
-                for i_a, i_b, _sep in matches_fn(cur[a], cur[b]):
+                for i_a, i_b, _sep in matches_fn(cur[a], cur[b],
+                                                 max_offset_m=match_radius):
                     A = cur[a][i_a]
                     B = cur[b][i_b]
                     P = B.points
                     if len(P) > sample_per_match:
                         P = P[rng.choice(len(P), sample_per_match, replace=False)]
-                    n = A.normal
-                    r = P @ n + A.d                      # signed dist to plane a
-                    # Huber IRLS weight per residual
-                    w = np.ones_like(r)
-                    big = np.abs(r) > huber_m
-                    w[big] = huber_m / np.abs(r[big])
-                    # J wrt unit b (moves points): [P×n, n]
-                    Jb = np.hstack([np.cross(P, np.broadcast_to(n, P.shape)),
-                                    np.broadcast_to(n, P.shape)])
-                    # J wrt unit a (moves the plane): opposite sign, same lever
-                    Ja = -Jb
-                    ia, ib = idx[a] * 6, idx[b] * 6
-                    JbW = Jb * w[:, None]
-                    JaW = Ja * w[:, None]
-                    H[ib:ib + 6, ib:ib + 6] += Jb.T @ JbW
-                    H[ia:ia + 6, ia:ia + 6] += Ja.T @ JaW
-                    Hab = Ja.T @ JbW
-                    H[ia:ia + 6, ib:ib + 6] += Hab
-                    H[ib:ib + 6, ia:ia + 6] += Hab.T
-                    g[ib:ib + 6] += Jb.T @ (w * r)
-                    g[ia:ia + 6] += Ja.T @ (w * r)
-                    n_res += len(P)
+                    r = P @ A.normal + A.d
+                    blocks.append((a, b, A.normal, A.d, P, conf[a] * conf[b]))
+                    all_abs_r.append(np.abs(r))
+        levels = ([ground_pts] if isinstance(ground_pts, dict)
+                  else list(ground_pts or []))
+        for level in levels:
+            gplane = fit_shared_ground(level, corr)
+            if gplane is None:
+                continue
+            gn, gd = gplane
+            for k, P0 in level.items():
+                T = corr[k]
+                P = P0 @ T[:3, :3].T + T[:3, 3]
+                if len(P) > sample_per_match:
+                    P = P[rng.choice(len(P), sample_per_match, replace=False)]
+                blocks.append((None, k, gn, gd, P, conf[k]))
+                all_abs_r.append(np.abs(P @ gn + gd))
+        if not blocks:
+            break
+        scale_it = max(float(np.percentile(np.concatenate(all_abs_r), 75)), huber_m)
+
+        # ── pass 2: accumulate the normal equations ──
+        H = np.zeros((6 * U, 6 * U))
+        g = np.zeros(6 * U)
+        n_res = 0
+        for a, b, n, d, P, wc in blocks:
+            r = P @ n + d
+            w = np.ones_like(r)
+            big = np.abs(r) > scale_it
+            w[big] = scale_it / np.abs(r[big])
+            w *= wc
+            # J wrt unit b (moves points): [P×n, n]
+            Jb = np.hstack([np.cross(P, np.broadcast_to(n, P.shape)),
+                            np.broadcast_to(n, P.shape)])
+            ib = idx[b] * 6
+            JbW = Jb * w[:, None]
+            H[ib:ib + 6, ib:ib + 6] += Jb.T @ JbW
+            g[ib:ib + 6] += Jb.T @ (w * r)
+            if a is not None:
+                # J wrt unit a (moves the plane): opposite sign, same lever
+                Ja = -Jb
+                ia = idx[a] * 6
+                JaW = Ja * w[:, None]
+                H[ia:ia + 6, ia:ia + 6] += Ja.T @ JaW
+                Hab = Ja.T @ JbW
+                H[ia:ia + 6, ib:ib + 6] += Hab
+                H[ib:ib + 6, ia:ia + 6] += Hab.T
+                g[ia:ia + 6] += Ja.T @ (w * r)
+            n_res += len(P)
         if n_res == 0:
             break
         # Tikhonov keeps unobservable DOF still; anchor pinned hard
@@ -282,8 +388,10 @@ def register_chunks(chunks: Dict[int, np.ndarray],
                     max_correction_m: float = 0.12,
                     dist_thresh: float = 0.015,
                     max_planes: int = 8,
-                    passes: int = 5,
-                    lam: float = 1e-2) -> Tuple[Dict[int, np.ndarray], FineRegisterReport]:
+                    passes: int = 20,
+                    lam: float = 1e-2,
+                    capture_m: float = 0.25,
+                    ground_datum: bool = False) -> Tuple[Dict[int, np.ndarray], FineRegisterReport]:
     """Estimate one rigid correction per chunk via the JOINT pose-graph solve
     (largest chunk anchored). Returns ({chunk_id: 4×4}, report). Corrections
     larger than ``max_correction_m`` are refused (identity) — a shift that big
@@ -307,7 +415,9 @@ def register_chunks(chunks: Dict[int, np.ndarray],
             if m:
                 report.sep_before_m[f"{a}-{b}"] = max(s for _, _, s in m)
 
-    corr = solve_joint(planes, anchor, iters=passes, lam=lam)
+    gpts = ground_patches(planes) if ground_datum else None
+    corr = solve_joint(planes, anchor, iters=passes, lam=lam,
+                       capture_m=capture_m, ground_pts=gpts)
 
     # refusal: a correction beyond the cap means the upstream poses are off by
     # more than "residual bias" — zero it and flag, never fake alignment.
@@ -343,6 +453,53 @@ def register_chunks(chunks: Dict[int, np.ndarray],
                 worst_b * 1000, worst_a * 1000, accept_sep_m * 1000,
                 "OK" if report.accepted else "STILL OVER δ")
     return corr, report
+
+
+# ── ground datum: pick each unit's ground patches, grouped by LEVEL ──
+
+def ground_patches(planes: Dict, max_tilt_deg: float = 15.0,
+                   level_gap_m: float = 0.5,
+                   max_above_local_min_m: float = 2.0) -> List[Dict]:
+    """[{unit_key: (M,3) points}, ...] — one dict per GROUND LEVEL.
+
+    Chunks are upright when this stage runs (orientation is baked from camera
+    gravity before finereg), so ground candidates are planes with a near-+y
+    normal. A scan does NOT have one ground plane: stairs, ramps and
+    split-level sites have several — so candidates are clustered by elevation
+    (a gap over ``level_gap_m`` starts a new level) and each level becomes its
+    OWN shared datum. A real step between levels is preserved, never
+    flattened; a unit that sees two floors (a stairs transition) belongs to
+    both groups. Per unit only surfaces within ``max_above_local_min_m`` of
+    that unit's lowest candidate qualify — a roof never poses as ground.
+    Levels backed by fewer than two units are dropped (nothing to tie)."""
+    up = np.array([0.0, 1.0, 0.0])
+    cos_min = np.cos(np.deg2rad(max_tilt_deg))
+    cand: List[Tuple[float, object, np.ndarray]] = []   # (elev, unit, points)
+    for k, pls in planes.items():
+        flats = [p for p in pls if abs(float(p.normal @ up)) >= cos_min]
+        if not flats:
+            continue
+        local_min = min(float(p.centroid[1]) for p in flats)
+        for p in flats:
+            y = float(p.centroid[1])
+            if y <= local_min + max_above_local_min_m:
+                cand.append((y, k, p.points))
+    if len(cand) < 2:
+        return []
+    cand.sort(key=lambda c: c[0])
+    groups: List[List[Tuple[float, object, np.ndarray]]] = [[cand[0]]]
+    for c in cand[1:]:
+        if c[0] - groups[-1][-1][0] > level_gap_m:
+            groups.append([])
+        groups[-1].append(c)
+    out: List[Dict] = []
+    for grp in groups:
+        by_unit: Dict = {}
+        for _y, k, pts in grp:
+            by_unit[k] = pts if k not in by_unit else np.vstack([by_unit[k], pts])
+        if len(by_unit) >= 2:
+            out.append(by_unit)
+    return out
 
 
 # ── piecewise units: intra-chunk drift ──────────────────────────────
@@ -384,7 +541,9 @@ def _interp_transforms(centers: List[float], mats: List[np.ndarray],
 
 def run(output_dir: Path, accept_sep_m: Optional[float] = None,
         max_correction_m: float = 0.12, dist_thresh: float = 0.015,
-        max_planes: int = 8, pieces_per_chunk: int = 3) -> int:
+        max_planes: int = 8, pieces_per_chunk: int = 5,
+        ground_datum: bool = True, capture_m: float = 0.25,
+        iters: int = 20) -> int:
     """Fine-register all backbone chunk_N.ply in place; rewrite poses of the
     frames each chunk owns. Returns the number of corrected chunks.
 
@@ -393,7 +552,15 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
     transform can align both of its ends (test2: 11 chunks, joint rigid solve
     still left pairs at 10 cm). The joint solve runs over the pieces; the
     correction applied to points and poses is interpolated PER FRAME between
-    piece transforms, so pieces never create seams."""
+    piece transforms, so pieces never create seams.
+
+    ``ground_datum``: tie every unit's ground patch to one shared session
+    ground plane inside the solve (see solve_joint) — the datum that kills
+    accumulated VERTICAL drift (test4: chimney placed 16 cm apart in y by two
+    chunks). ``capture_m``: plane-match capture radius for the first half of
+    the solve, so drifted pairs — including non-adjacent chunk overlaps, the
+    geometric loop closures — contribute constraints. Acceptance is still
+    measured at the strict default radius."""
     from plyfile import PlyData, PlyElement
     output_dir = Path(output_dir)
     if accept_sep_m is None:
@@ -452,6 +619,31 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
     anchor = max(unit_pts, key=lambda u: len(unit_pts[u]))
     report = FineRegisterReport(accept_sep_m=accept_sep_m)
 
+    # ── ground datum: shared ground plane(s), one per LEVEL (vertical drift
+    # killer; stairs/split-level sites keep their real steps) ──
+    gpts = ground_patches(planes) if ground_datum else []
+    if gpts:
+        logger.info("fine_register: ground datum — %d level(s): %s",
+                    len(gpts), "; ".join(f"level {i}: {len(g)}/{len(unit_pts)} units"
+                                         for i, g in enumerate(gpts)))
+    elif ground_datum:
+        logger.info("fine_register: no shared ground patch found — datum OFF")
+
+    # ── unit confidence: health-suspect chunks argue more quietly ──
+    unit_conf: Dict[tuple, float] = {}
+    health_path = output_dir / "maplong_run" / "chunk_health.json"
+    if health_path.exists():
+        try:
+            health = json.loads(health_path.read_text())
+            weak = set(map(int, (health.get("suspect") or {}).keys()))
+            weak |= set(map(int, (health.get("sick") or {}).keys()))
+            unit_conf = {u: 0.5 for u in unit_pts if u[0] in weak}
+            if unit_conf:
+                logger.info("fine_register: down-weighting units of suspect/sick "
+                            "chunks %s (conf 0.5)", sorted(weak))
+        except Exception as e:
+            logger.warning("fine_register: chunk_health.json unreadable (%s)", e)
+
     def _pair_metric(pl: Dict) -> Dict[str, float]:
         out: Dict[str, float] = {}
         us = sorted(pl.keys())
@@ -468,7 +660,8 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
         return out
 
     report.sep_before_m = _pair_metric(planes)
-    corr = solve_joint(planes, anchor)
+    corr = solve_joint(planes, anchor, iters=iters, capture_m=capture_m,
+                       ground_pts=gpts or None, unit_conf=unit_conf or None)
 
     # refusal per unit: beyond the cap = upstream pose problem, don't fake it
     for u in list(corr.keys()):
@@ -485,6 +678,13 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
         if v > accept_sep_m:
             report.accepted = False
 
+    # non-adjacent chunk pairs with matched planes ARE the geometric loop
+    # closures — surfaced in the report so their effect is auditable.
+    loop_pairs = sorted(k for k in set(report.sep_before_m) | set(report.sep_after_m)
+                        if abs(int(k.split("-")[0]) - int(k.split("-")[1])) > 1)
+    if loop_pairs:
+        logger.info("fine_register: %d non-adjacent (loop) pair(s) constrained: %s",
+                    len(loop_pairs), ", ".join(loop_pairs))
     (output_dir / "fine_register_report.json").write_text(json.dumps({
         "corrections": {str(k): v.tolist() for k, v in corr.items()},
         "sep_before_m": report.sep_before_m,
@@ -492,6 +692,9 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
         "accept_sep_m": report.accept_sep_m,
         "accepted": report.accepted,
         "pieces_per_chunk": pieces_per_chunk,
+        "ground_datum_units": [sorted(str(u) for u in g) for g in gpts],
+        "loop_pairs": loop_pairs,
+        "unit_conf": {str(u): c for u, c in unit_conf.items()},
     }, indent=2))
 
     # ── apply: per-frame interpolated correction (points + poses) ──
@@ -569,11 +772,18 @@ def main():
     ap.add_argument("--accept-sep", type=float, default=None,
                     help="acceptance: max residual plane separation (m); default 2×tsdf.voxel_length")
     ap.add_argument("--max-correction", type=float, default=0.12)
-    ap.add_argument("--pieces", type=int, default=3,
+    ap.add_argument("--pieces", type=int, default=5,
                     help="rigid pieces per chunk (intra-chunk drift); 1 = rigid chunks")
+    ap.add_argument("--no-ground-datum", action="store_true",
+                    help="disable the shared session ground-plane datum")
+    ap.add_argument("--capture", type=float, default=0.25,
+                    help="plane-match capture radius (m) for the solve's first half")
+    ap.add_argument("--iters", type=int, default=20,
+                    help="joint Gauss-Newton iterations")
     a = ap.parse_args()
     run(Path(a.output_dir), accept_sep_m=a.accept_sep,
-        max_correction_m=a.max_correction, pieces_per_chunk=a.pieces)
+        max_correction_m=a.max_correction, pieces_per_chunk=a.pieces,
+        ground_datum=not a.no_ground_datum, capture_m=a.capture, iters=a.iters)
 
 
 if __name__ == "__main__":

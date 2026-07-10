@@ -605,6 +605,169 @@ def test_trim_zoom_tail_with_jumpy_poses():
     assert lo == 0 and 49 <= hi <= 51, (lo, hi)
 
 
+# ── per-chunk scale DRIFT (linear log-scale model, self-gated) ───────
+
+def _drift_session(rng_, n_chunks=4, drift_pct=(0.0, 15.0, -10.0, 5.0),
+                   anchor_noise=0.03, seam_noise=0.003, n_anchors=7):
+    """Synthetic session: chunk k's true scale is log-linear along the chunk,
+    s_k(u) = base_k * exp(d_k * (u - 0.5)). Returns (anchors, seam_obs, s0s, s1s)."""
+    bases = [9.0 * (1.06 ** k) for k in range(n_chunks)]
+    d = [np.log1p(p / 100.0) for p in drift_pct]
+
+    def s_true(k, u):
+        return bases[k] * np.exp(d[k] * (u - 0.5))
+
+    anchors = {k: [(u, s_true(k, u) * np.exp(rng_.normal(0, anchor_noise)))
+                   for u in np.linspace(0.05, 0.95, n_anchors)]
+               for k in range(n_chunks)}
+    seam_obs = {}
+    for k in range(n_chunks - 1):
+        obs = []
+        for m in np.linspace(0.0, 1.0, 9):
+            u_k, u_k1 = 0.5 + 0.5 * m, 0.5 * m       # 50% overlap positions
+            r = (s_true(k + 1, u_k1) / s_true(k, u_k)
+                 * np.exp(rng_.normal(0, seam_noise)))
+            obs.append((u_k, u_k1, r))
+        seam_obs[k] = obs
+    s0 = np.array([s_true(k, 0.0) for k in range(n_chunks)])
+    s1 = np.array([s_true(k, 1.0) for k in range(n_chunks)])
+    return anchors, seam_obs, s0, s1
+
+
+def test_solve_scale_drift_recovers_linear_drift():
+    from loop_utils.metric_lock import solve_scale_drift
+    rng8 = np.random.default_rng(31)
+    anchors, seam_obs, s0_true, s1_true = _drift_session(rng8)
+    s0, s1 = solve_scale_drift(anchors, seam_obs, 4)
+    assert np.all(np.abs(np.log(s0 / s0_true)) < 0.03), (s0, s0_true)
+    assert np.all(np.abs(np.log(s1 / s1_true)) < 0.03), (s1, s1_true)
+
+
+def test_scale_drift_gate_accepts_drift_rejects_noise():
+    """The self-gate: real intra-chunk drift must pass; a constant-scale
+    session with noisy anchors must NOT earn a drift correction."""
+    from loop_utils.metric_lock import scale_drift_gate
+    rng9 = np.random.default_rng(32)
+    anchors, seam_obs, _, _ = _drift_session(rng9, drift_pct=(18.0, -14.0, 22.0, -9.0))
+    s_const = {k: float(np.median([r for _, r in a])) for k, a in anchors.items()}
+    ok, info = scale_drift_gate(anchors, s_const, seam_obs, 4)
+    assert ok, info
+
+    anchors0, seam0, _, _ = _drift_session(rng9, drift_pct=(0, 0, 0, 0),
+                                           anchor_noise=0.08)
+    s_const0 = {k: float(np.median([r for _, r in a])) for k, a in anchors0.items()}
+    ok0, info0 = scale_drift_gate(anchors0, s_const0, seam0, 4)
+    assert not ok0, info0
+
+    # starved sessions never earn the correction
+    thin = {0: anchors[0][:2]}
+    okt, infot = scale_drift_gate(thin, s_const, {}, 1)
+    assert not okt and "thin" in infot["reason"]
+
+
+def _drift_chunk_data(rng_, S=5, H=6, W=8):
+    ext = np.tile(np.eye(4), (S, 1, 1))
+    for i in range(S):
+        ext[i, :3, 3] = rng_.uniform(-2, 2, 3) + [0.4 * i, 0, 0]
+    depth = rng_.uniform(2.0, 6.0, (S, H, W)).astype(np.float32)
+    wp = np.empty((S, H, W, 3), np.float32)
+    for i in range(S):                       # points scattered around each camera
+        wp[i] = (ext[i, :3, 3] + rng_.uniform(-3, 3, (H, W, 3))).astype(np.float32)
+    return {"world_points": wp, "depth": depth, "extrinsic": ext,
+            "world_points_conf": np.full((S, H, W), 5.0, np.float32)}
+
+
+def test_apply_scale_drift_constant_equals_apply_scale():
+    from loop_utils.metric_lock import apply_scale, apply_scale_drift
+    rng10 = np.random.default_rng(33)
+    d1 = _drift_chunk_data(rng10)
+    d2 = {k: np.copy(v) for k, v in d1.items()}
+    apply_scale(d1, 7.3)
+    apply_scale_drift(d2, [7.3] * 5)
+    for key in ("world_points", "depth", "extrinsic"):
+        assert np.allclose(np.asarray(d1[key], np.float64),
+                           np.asarray(d2[key], np.float64),
+                           rtol=1e-5, atol=1e-4), key
+
+
+def test_apply_scale_drift_per_frame_geometry():
+    """Per-frame scale: depth scales about each frame's OWN camera and the
+    trajectory re-integrates with the local scale — camera-relative geometry
+    stays consistent (wp' - c' = s_f * (wp - c))."""
+    from loop_utils.metric_lock import apply_scale_drift
+    rng11 = np.random.default_rng(34)
+    data = _drift_chunk_data(rng11, S=3)
+    c_old = np.asarray(data["extrinsic"])[:, :3, 3].copy()
+    wp_old = np.asarray(data["world_points"], np.float64).copy()
+    depth_old = np.asarray(data["depth"], np.float64).copy()
+    s = np.array([2.0, 4.0, 8.0])
+    apply_scale_drift(data, s)
+    c_new = np.asarray(data["extrinsic"])[:, :3, 3]
+    assert np.allclose(np.asarray(data["depth"], np.float64),
+                       depth_old * s[:, None, None], rtol=1e-6)
+    for i in range(3):
+        rel_old = wp_old[i] - c_old[i]
+        rel_new = np.asarray(data["world_points"], np.float64)[i] - c_new[i]
+        assert np.allclose(rel_new, s[i] * rel_old, rtol=1e-4, atol=1e-4), i
+    step_new = np.linalg.norm(c_new[1] - c_new[0])
+    step_old = np.linalg.norm(c_old[1] - c_old[0])
+    assert abs(step_new / step_old - np.sqrt(2.0 * 4.0)) < 1e-9
+
+
+# ── suspect tier (soft health) ───────────────────────────────────────
+
+def test_flag_suspect_chunks():
+    from loop_utils.metric_lock import flag_suspect_chunks
+    aiq = {0: 0.08, 1: 0.35, 2: 0.10, 3: None, 4: 0.31}
+    sus = flag_suspect_chunks(aiq)
+    assert set(sus) == {1, 4}
+    assert "down-weighted" in sus[1]
+    # already-sick chunks are the hard tier's business, never double-flagged
+    assert flag_suspect_chunks(aiq, sick={1}) == {4: sus[4]}
+    assert flag_suspect_chunks({0: 0.05, 1: 0.12}) == {}
+
+
+def test_elastic_corrections_suspect_bias():
+    """A suspect neighbour gets LESS say: the trusted chunk bends less than in
+    the unbiased blend, consensus stays exact and endpoints stay identity —
+    interiors are never torn."""
+    from loop_utils.metric_lock import elastic_corrections, rigid_mat
+    rng12 = np.random.default_rng(35)
+    ci = [(0, 28), (14, 42)]
+    fits = {0: {g: _small_rigid(rng12, 0.3, 0.03) for g in range(14, 28)}}
+    plain0 = elastic_corrections(ci, 0, fits)
+    bias0 = elastic_corrections(ci, 0, fits, suspect={1})
+    bias1 = elastic_corrections(ci, 1, fits, suspect={1})
+    for g in range(14, 28):
+        T = rigid_mat(*fits[0][g])
+        # the anchoring directive survives the bias: copies still COINCIDE
+        assert np.allclose(bias0[g] @ T, bias1[g - 14], atol=1e-10), g
+        # trusted side moves no more than the unbiased blend (less say for 1)
+        assert (np.linalg.norm(bias0[g][:3, 3])
+                <= np.linalg.norm(plain0[g][:3, 3]) + 1e-12), g
+    # endpoints exact: consensus starts at chunk 0's copy, ends at chunk 1's
+    assert np.allclose(bias0[14], np.eye(4), atol=1e-10)
+    assert np.allclose(bias1[27 - 14], np.eye(4), atol=1e-10)
+    # interior strictly biased toward the trusted side
+    mid = 21
+    assert (np.linalg.norm(bias0[mid][:3, 3])
+            < np.linalg.norm(plain0[mid][:3, 3]) - 1e-9)
+
+
+def test_chunk_anchor_ratios_positions():
+    """The positioned form: each ratio comes with the LOCAL frame index it was
+    measured at (the drift model needs to know where)."""
+    from loop_utils.metric_lock import chunk_anchor_ratios
+    with tempfile.TemporaryDirectory() as d:
+        chunk, metric = _synthetic_chunk(S=6, true_scale=0.02)
+        nums = [100, 108, 116, 124, 132, 140]
+        for local in (1, 3, 5):
+            np.savez(Path(d) / f"frame_{nums[local]}.npz", depth=metric[local])
+        locs, ratios = chunk_anchor_ratios(chunk, nums, d)
+        assert locs == [1, 3, 5]
+        assert all(abs(r - 50.0) < 0.5 for r in ratios)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

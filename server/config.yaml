@@ -721,6 +721,17 @@ reconstruction:
                                         # pixels vote (npz 'conf'); 0 disables the gate.
                                         # Fallback ladder if a filter starves: near∩conf →
                                         # conf → near → all valid.
+    # scale_drift: true                 # metric-lock: per-chunk LINEAR scale drift (log-scale,
+                                        # 2 DOF/chunk) from positioned DA3 anchors + per-frame
+                                        # seam ratios, SELF-GATED on held-out seam observations
+                                        # (applies only when it beats the constant model ≥25%
+                                        # on data it never saw). test4 2026-07-10: 48% anchor
+                                        # spread inside chunk 3, adjacent scale jumps 18-29% —
+                                        # the leftover warp was the chimney/cones z-drift.
+    # suspect_spread: 0.30              # soft health tier: anchor IQR/median beyond this ⇒
+                                        # SUSPECT — the chunk keeps writing points but argues
+                                        # more quietly (elastic consensus biased toward the
+                                        # trusted side; finereg down-weights its planes 0.5).
 
   # ── SIMPLE pipeline (one concept — validated 2026-07-09 vs the VGGT-Omega web demo) ──
   # Sparse frames (~1 fps) → ONE VGGT-Omega pass (no windows → no seams → no onion) →
@@ -806,10 +817,23 @@ reconstruction:
                                         # leaving that drift in the cloud/mesh.
                                         # 0.12 (was 0.08): test3 measured 65 mm of REAL VGGT drift
                                         # between chunks — the old cap left no headroom.
-    # pieces_per_chunk: 3               # rigid pieces per chunk for the JOINT pose-graph solve.
+    # pieces_per_chunk: 5               # rigid pieces per chunk for the JOINT pose-graph solve.
                                         # Long hostile captures drift INSIDE a chunk (test2: rigid
                                         # per-chunk left pairs at 10 cm); pieces + per-frame
                                         # interpolation absorb it. 1 = old rigid-chunk behavior.
+                                        # 3→5 (2026-07-10): test4's warp was not 3-piece-rigid.
+    # ground_datum: true                # tie every unit's ground patch to ONE shared session
+                                        # ground plane inside the joint solve — the vertical datum
+                                        # that stops per-chunk vertical drift accumulating along
+                                        # the chain (test4: chimney 16 cm apart in y across chunks).
+    # capture_m: 0.25                   # plane-match capture radius for the solve's first half:
+                                        # wide enough to SEE drifted pairs (incl. non-adjacent
+                                        # overlaps = geometric loop closures); acceptance is always
+                                        # measured at the strict 0.12 radius.
+    # iters: 20                         # joint Gauss-Newton iterations (annealed robust scale:
+                                        # early iterations pull on the real drift, late ones
+                                        # tighten to mm — a fixed 2 cm Huber treated test4's 10 cm
+                                        # drift as an outlier and left it in place).
   bundle_adjust:
     enabled: false                      # OFF — the global BA DEGRADED the result on the metric
                                         # vggtomega recon (A/B vs baseline_noBA was worse). Omega

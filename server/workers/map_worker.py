@@ -396,6 +396,12 @@ def _run_fine_register_step(pipe: WorkerPipe, output_dir: Path, recon_cfg: dict)
         cmd += ["--max-correction", str(fcfg["max_correction_m"])]
     if fcfg.get("pieces_per_chunk") is not None:
         cmd += ["--pieces", str(fcfg["pieces_per_chunk"])]
+    if fcfg.get("ground_datum") is False:
+        cmd += ["--no-ground-datum"]
+    if fcfg.get("capture_m") is not None:
+        cmd += ["--capture", str(fcfg["capture_m"])]
+    if fcfg.get("iters") is not None:
+        cmd += ["--iters", str(fcfg["iters"])]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, bufsize=1, cwd=str(server_dir))
     for line in p.stdout:
@@ -1553,6 +1559,14 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             "enable": True,
             "anchor_dir": str(_anchor_dir),
             "near_frac": float(_va_cfg.get("scale_near_frac", 0.25)),
+            # per-chunk LINEAR scale drift (self-gated on held-out seam obs):
+            # one scalar per chunk cannot represent a chunk whose internal
+            # scale drifts (test4: 48% anchor spread inside chunk 3; the
+            # leftover warp was the z-drift on the chimney/cones)
+            "scale_drift": bool(_va_cfg.get("scale_drift", True)),
+            # soft health tier: anchor spread beyond this ⇒ SUSPECT (chunk
+            # argues more quietly in elastic/finereg, still writes points)
+            "suspect_spread": float(_va_cfg.get("suspect_spread", 0.30)),
         }
         cfg_v["Model"]["exact_seam_align"] = True   # rigid seams from EXACT pixel
                                                     # correspondences (mm), not the
@@ -1575,7 +1589,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                     # (measured: cross-owner depth
                                                     # disagreement 1.51% -> 1.01%)
         pipe.send_log(f"CHUNKED-METRIC: chunks {int(_chunk)}/{int(_ov)} (50% overlap), "
-                      f"scale graph (seams+DA3), EXACT-correspondence seam gluing, "
+                      f"scale graph (seams+DA3) + self-gated per-chunk scale DRIFT, "
+                      f"EXACT-correspondence seam gluing, "
                       f"frame ownership (one writer per frame), ELASTIC per-frame "
                       f"seam consensus (shared pixels share one 3D position), "
                       f"DEPTH graph (frames agree on shared-surface depth)")
