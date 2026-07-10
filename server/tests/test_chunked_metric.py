@@ -168,6 +168,49 @@ def test_motion_keyframes_selector():
         assert sum(1 for f in kf if f in invalid) == 0
 
 
+# ── scale graph (seam-relative + DA3-absolute fusion) ──────────────
+
+def test_seam_relative_scale():
+    from loop_utils.metric_lock import seam_relative_scale
+    yy, xx = np.mgrid[0:60, 0:80].astype(np.float32)
+    base = 3.0 + np.sin(xx / 9.0) + 0.02 * yy
+    # chunk B's raw depth is 0.8x chunk A's for the same pixels → s_B/s_A = 1.25
+    r = seam_relative_scale(base, base * 0.8)
+    assert r is not None and abs(r - 1.25) < 1e-3
+
+
+def test_scale_graph_fixes_noisy_anchors():
+    from loop_utils.metric_lock import solve_scale_graph
+    rng2 = np.random.default_rng(3)
+    true = np.array([10.0 * (1.02 ** k) for k in range(13)])      # smooth true scales
+    # DA3: each chunk's absolute estimate off by an independent ±8%
+    s_da3 = {k: float(true[k] * np.exp(rng2.normal(0, 0.08))) for k in range(13)}
+    n_anch = {k: 7 for k in range(13)}
+    # seams: relative scale measured to 0.3%
+    seam = {k: float(true[k + 1] / true[k] * np.exp(rng2.normal(0, 0.003)))
+            for k in range(12)}
+    s_opt = solve_scale_graph(s_da3, n_anch, seam, 13)
+
+    rel_err_da3 = np.array([abs(s_da3[k] / s_da3[k + 1] * true[k + 1] / true[k] - 1)
+                            for k in range(12)])
+    rel_err_opt = np.abs(s_opt[:-1] / s_opt[1:] * true[1:] / true[:-1] - 1)
+    # neighbour CONSISTENCY (what kills the seams) must collapse to ~seam noise
+    assert rel_err_opt.max() < 0.01, rel_err_opt.max()
+    assert rel_err_opt.max() < rel_err_da3.max() / 5
+    # and the global metre stays anchored (mean of DA3, ±3%)
+    g = float(np.exp(np.mean(np.log(s_opt / true))))
+    assert abs(g - 1) < 0.03, g
+
+
+def test_scale_graph_chunk_without_anchor():
+    from loop_utils.metric_lock import solve_scale_graph
+    true = [10.0, 11.0, 12.1]
+    s_da3 = {0: 10.0, 2: 12.1}            # chunk 1 has NO anchors
+    seam = {0: 1.1, 1: 1.1}
+    s = solve_scale_graph(s_da3, {0: 5, 2: 5}, seam, 3)
+    assert abs(s[1] - 11.0) < 0.15        # recovered purely from the seams
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
