@@ -1552,9 +1552,15 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                     # coarse point-map fit (25-30cm)
         cfg_v["Model"]["frame_ownership"] = True    # one frame → one writer: overlap
                                                     # frames stop entering the cloud twice
+        cfg_v["Model"]["elastic_seam"] = True       # per-frame seam CONSENSUS: the same
+                                                    # pixel seen by two chunks lands at
+                                                    # ONE 3D position (rigid residual per
+                                                    # shared frame, blended across the
+                                                    # overlap, poses moved with points)
         pipe.send_log(f"CHUNKED-METRIC: chunks {int(_chunk)}/{int(_ov)} (50% overlap), "
                       f"scale graph (seams+DA3), EXACT-correspondence seam gluing, "
-                      f"frame ownership (one writer per frame)")
+                      f"frame ownership (one writer per frame), ELASTIC per-frame "
+                      f"seam consensus (shared pixels share one 3D position)")
 
     def _ensure_anchors(_files):
         """Isolated DA3 depth for every anchor file not already extracted."""

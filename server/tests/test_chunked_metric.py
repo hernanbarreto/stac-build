@@ -246,6 +246,104 @@ def test_frame_owner_partitions_every_frame_once():
             assert owner[mid] == k
 
 
+# ── elastic per-frame seam consensus ─────────────────────────────────
+
+def _small_rigid(rng_, ang_deg, t_m):
+    import cv2
+    v = rng_.normal(0, 1, 3)
+    v /= np.linalg.norm(v)
+    R, _ = cv2.Rodrigues(v * np.radians(ang_deg))
+    return R, rng_.normal(0, t_m, 3)
+
+
+def test_rigid_fraction_endpoints_and_midpoint():
+    from loop_utils.metric_lock import rigid_fraction
+    ang = np.radians(2.0)
+    R = np.array([[np.cos(ang), -np.sin(ang), 0],
+                  [np.sin(ang), np.cos(ang), 0], [0, 0, 1.0]])
+    t = np.array([0.03, -0.01, 0.02])
+    assert np.allclose(rigid_fraction(R, t, 0.0), np.eye(4), atol=1e-12)
+    M1 = rigid_fraction(R, t, 1.0)
+    assert np.allclose(M1[:3, :3], R, atol=1e-12) and np.allclose(M1[:3, 3], t)
+    Mh = rigid_fraction(R, t, 0.5)                 # half the angle, half the shift
+    half = np.degrees(np.arccos(np.clip((np.trace(Mh[:3, :3]) - 1) / 2, -1, 1)))
+    assert abs(half - 1.0) < 1e-9 and np.allclose(Mh[:3, 3], t / 2)
+
+
+def test_elastic_corrections_consensus_exact():
+    """The anchoring directive: corrected copies of every shared frame COINCIDE —
+    A_g @ T_g == B_g for the dst (chunk j) and src (chunk j+1) sides."""
+    from loop_utils.metric_lock import elastic_corrections, rigid_mat
+    rng4 = np.random.default_rng(11)
+    ci = [(0, 28), (14, 42), (28, 56)]
+    fits = {j: {g: _small_rigid(rng4, 0.3, 0.03)
+                for g in range(ci[j + 1][0], ci[j][1])} for j in range(2)}
+    corr = [elastic_corrections(ci, k, fits) for k in range(3)]
+    for j in range(2):
+        for g in range(ci[j + 1][0], ci[j][1]):
+            T = rigid_mat(*fits[j][g])
+            A = corr[j][g - ci[j][0]]
+            B = corr[j + 1][g - ci[j + 1][0]]
+            assert np.allclose(A @ T, B, atol=1e-10), (j, g)
+    # exclusive head of chunk 0 untouched; consensus starts AT chunk 0's own copy
+    assert np.allclose(corr[0][:14], np.tile(np.eye(4), (14, 1, 1)), atol=1e-12)
+    assert np.allclose(corr[0][14], np.eye(4), atol=1e-10)
+    # ... and ends at chunk 1's own copy (identity at ITS centre)
+    assert np.allclose(corr[1][27 - 14], np.eye(4), atol=1e-10)
+    # a starved frame inherits its nearest fitted neighbour (both sides agree on it)
+    del fits[0][20]
+    cA = elastic_corrections(ci, 0, fits)
+    cB = elastic_corrections(ci, 1, fits)
+    T19 = rigid_mat(*fits[0][19])
+    assert np.allclose(cA[20] @ T19, cB[20 - 14], atol=1e-10)
+
+
+def test_elastic_corrections_smooth_fields():
+    """One rigid residual per seam (the smooth real-world case): each chunk's
+    correction field must step by ~|t|/L between frames — edges bend, interiors
+    never tear."""
+    from loop_utils.metric_lock import elastic_corrections
+    rng5 = np.random.default_rng(12)
+    ci = [(0, 28), (14, 42), (28, 56)]
+    fits = {}
+    for j in range(2):
+        R, t = _small_rigid(rng5, 0.2, 0.02)
+        fits[j] = {g: (R, t) for g in range(ci[j + 1][0], ci[j][1])}
+    for k in range(3):
+        corr = elastic_corrections(ci, k, fits)
+        steps = np.linalg.norm(np.diff(corr[:, :3, 3], axis=0), axis=1)
+        t_max = max(np.linalg.norm(fits[j][g][1]) for j in fits for g in fits[j])
+        assert steps.max() <= t_max / 13.0 * 1.5 + 1e-12, (k, steps.max())
+
+
+def test_elastic_end_to_end_copies_coincide():
+    """Full loop on synthetic points: two chunks disagree by a small rigid offset
+    per shared frame → robust_rigid fits + elastic corrections put BOTH copies at
+    the same 3D position (exact correspondences, so to numerical precision)."""
+    from loop_utils.metric_lock import robust_rigid, elastic_corrections
+    rng6 = np.random.default_rng(13)
+    ci = [(0, 8), (4, 12)]
+    fits = {0: {}}
+    copies = {}
+    for g in range(4, 8):
+        p0 = rng6.uniform(-4, 4, (5000, 3))                  # chunk 0's copy
+        R, t = _small_rigid(rng6, 0.4, 0.04)
+        p1 = (p0 - t) @ R                                    # chunk 1's copy: p0 = R p1 + t
+        fit = robust_rigid(p1, p0, sample=5000)
+        assert fit is not None
+        fits[0][g] = (fit[0], fit[1])
+        copies[g] = (p0, p1)
+    c0 = elastic_corrections(ci, 0, fits)
+    c1 = elastic_corrections(ci, 1, fits)
+    for g in range(4, 8):
+        p0, p1 = copies[g]
+        A, B = c0[g], c1[g - 4]
+        q0 = p0 @ A[:3, :3].T + A[:3, 3]
+        q1 = p1 @ B[:3, :3].T + B[:3, 3]
+        d = np.linalg.norm(q0 - q1, axis=1)
+        assert np.median(d) < 1e-6, (g, float(np.median(d)))
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
