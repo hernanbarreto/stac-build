@@ -754,6 +754,49 @@ def test_elastic_corrections_suspect_bias():
             < np.linalg.norm(plain0[mid][:3, 3]) - 1e-9)
 
 
+def test_solve_depth_graph_scale_only():
+    """The fallback rung: per-frame scale field recovered exactly, offset
+    NEVER touched (b stays 0) — the offset is where the unbounded warp hides."""
+    from loop_utils.metric_lock import solve_depth_graph
+    rng13 = np.random.default_rng(36)
+    N = 12
+    s_true = np.exp(rng13.normal(0, 0.02, N))
+    s_true /= np.exp(np.mean(np.log(s_true)))          # gauge: mean log = 0
+    meas = []
+    for d in (1, 2, 3):
+        for f in range(N - d):
+            meas.append((f, f + d, float(s_true[f] / s_true[f + d]), 0.0))
+    a, b = solve_depth_graph(meas, N, scale_only=True)
+    assert np.allclose(a, s_true, rtol=1e-6)
+    assert np.all(b == 0.0)
+
+
+def test_depth_graph_verdict_ladder():
+    """The shared verdict: an affine solution with a wild offset fails
+    `bounded`; the scale-only solution on the same pairs is bounded AND
+    improves — the ladder's second rung earns the correction."""
+    from loop_utils.metric_lock import solve_depth_graph, depth_graph_verdict
+    rng14 = np.random.default_rng(37)
+    N = 30
+    s_true = np.exp(0.02 * np.sin(2 * np.pi * np.arange(N) / N))
+    s_true /= np.exp(np.mean(np.log(s_true)))
+    def pair(f, g):
+        al = float(s_true[f] / s_true[g]) * float(np.exp(rng14.normal(0, 5e-4)))
+        return (f, g, al, float(rng14.normal(0, 5e-4)))
+    meas = [pair(f, f + d) for d in (1, 2, 3, 5) for f in range(N - d)]
+    held = [pair(f, f + d) for d in (4,) for f in range(N - d)]
+
+    a_s, b_s = solve_depth_graph(meas, N, scale_only=True)
+    v_s = depth_graph_verdict(a_s, b_s, meas, held)
+    assert v_s["bounded"] and v_s["improves"], v_s
+
+    # poison the affine rung with a wild offset field (what test4's b did)
+    a_w = a_s.copy()
+    b_w = np.linspace(-1.0, 1.0, N)                    # ±1 m warp
+    v_w = depth_graph_verdict(a_w, b_w, meas, held)
+    assert not v_w["bounded"], v_w
+
+
 def test_chunk_anchor_ratios_positions():
     """The positioned form: each ratio comes with the LOCAL frame index it was
     measured at (the drift model needs to know where)."""

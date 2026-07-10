@@ -238,6 +238,43 @@ class TestGeometricLoop:
         assert report.sep_after_m.get("0-2", 1.0) < 0.02
 
 
+class TestOnionMatching:
+    def test_double_sheet_ground_never_cross_matches(self):
+        """test4 failure mode: the intra-chunk depth 'onion' reconstructs the
+        same ground as two parallel sheets ~9 cm apart. One-to-one matching
+        must pair sheet-1↔sheet-1 and sheet-2↔sheet-2 (the 2 cm inter-chunk
+        drift) and never the ~9 cm cross pairs — so the solve sees drift, not
+        contradictions, and the metric reports drift, not the onion."""
+        rng = np.random.default_rng(70)
+        n = 25_000
+
+        def sheeted_chunk(dy):
+            g1 = np.column_stack([rng.uniform(0, 8, n),
+                                  rng.normal(dy, SIGMA, n),
+                                  rng.uniform(0, 8, n)])
+            g2 = np.column_stack([rng.uniform(0, 8, n),
+                                  rng.normal(dy + 0.09, SIGMA, n),   # onion sheet
+                                  rng.uniform(0, 8, n)])
+            wall = np.column_stack([rng.uniform(0, 8, n),
+                                    rng.uniform(dy, dy + 3, n),
+                                    rng.normal(0, SIGMA, n)])
+            return np.vstack([g1, g2, wall])
+
+        A, B = sheeted_chunk(0.0), sheeted_chunk(0.02)     # 2 cm true drift
+        pa = extract_chunk_planes(A, seed=71)
+        pb = extract_chunk_planes(B, seed=72)
+        matches = match_planes(pa, pb)
+        seps = sorted(s for _, _, s in matches)
+        assert all(s < 0.035 for s in seps), seps          # no ~9 cm cross pair
+        # each plane used at most once (one-to-one)
+        assert len({i for i, _, _ in matches}) == len(matches)
+        assert len({j for _, j, _ in matches}) == len(matches)
+
+        corr, report = register_chunks({0: A, 1: B}, accept_sep_m=0.024)
+        assert report.accepted, f"after: {report.sep_after_m}"
+        assert abs(corr[1][1, 3] + 0.02) < 0.005           # drift recovered
+
+
 class TestPiecewiseRun:
     def test_intra_chunk_drift_corrected(self, tmp_path):
         """Dos chunks donde el 2º DERIVA INTERNAMENTE (transformación que

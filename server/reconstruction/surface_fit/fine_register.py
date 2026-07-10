@@ -119,15 +119,22 @@ def match_planes(pa: List[ChunkPlane], pb: List[ChunkPlane],
                  max_offset_m: float = 0.12,
                  min_overlap_m: float = 0.3) -> List[Tuple[int, int, float]]:
     """(idx_a, idx_b, separation) for plane pairs that are the same physical
-    surface seen from two chunks: near-parallel, small offset, bboxes overlap."""
+    surface seen from two chunks: near-parallel, small offset, bboxes overlap.
+
+    Matching is ONE-TO-ONE (greedy by separation): a plane pairs with at most
+    its nearest counterpart. Without this, duplicated parallel sheets — the
+    intra-chunk depth "onion" (test4: the same ground reconstructed as two
+    sheets ~9 cm apart INSIDE one chunk) — cross-match sheet-1↔sheet-2 and
+    dominate both the solve (contradictory constraints, 30-111 cm requested
+    corrections, all refused) and the acceptance metric (~118 mm forever,
+    measuring the onion instead of the inter-chunk drift)."""
     cos_min = np.cos(np.deg2rad(max_angle_deg))
-    out = []
+    cand = []
     for i, A in enumerate(pa):
         for j, B in enumerate(pb):
             c = float(A.normal @ B.normal)
             if abs(c) < cos_min:
                 continue
-            nB, dB = (B.normal, B.d) if c > 0 else (-B.normal, -B.d)
             # separation measured where both surfaces live: B's centroid vs A's plane
             sep = abs(float(A.normal @ B.centroid + A.d))
             if sep > max_offset_m:
@@ -137,7 +144,16 @@ def match_planes(pa: List[ChunkPlane], pb: List[ChunkPlane],
             span = np.sort(hi - lo)
             if span[1] < min_overlap_m:        # need a real 2-D overlap patch
                 continue
-            out.append((i, j, sep))
+            cand.append((i, j, sep))
+    cand.sort(key=lambda m: m[2])
+    used_a, used_b = set(), set()
+    out = []
+    for i, j, sep in cand:
+        if i in used_a or j in used_b:
+            continue
+        used_a.add(i)
+        used_b.add(j)
+        out.append((i, j, sep))
     return out
 
 
