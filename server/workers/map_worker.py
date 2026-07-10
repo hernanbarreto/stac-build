@@ -1569,6 +1569,11 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                     # same surface (kills the in-depth
                                                     # object duplication: 1.5% intra +
                                                     # 2x at chunk crossings, measured)
+        cfg_v["Model"]["blend_copies"] = True       # two-copy consensus: overlap frames
+                                                    # keep the MEAN of their two chunks'
+                                                    # fields instead of discarding one
+                                                    # (measured: cross-owner depth
+                                                    # disagreement 1.51% -> 1.01%)
         pipe.send_log(f"CHUNKED-METRIC: chunks {int(_chunk)}/{int(_ov)} (50% overlap), "
                       f"scale graph (seams+DA3), EXACT-correspondence seam gluing, "
                       f"frame ownership (one writer per frame), ELASTIC per-frame "

@@ -514,6 +514,26 @@ def test_depth_pair_samples_end_to_end():
     assert before > 0.01                                     # the 2% is visible
 
 
+def test_blend_two_copies():
+    from loop_utils.metric_lock import blend_two_copies
+    rng12 = np.random.default_rng(60)
+    H, W = 6, 8
+    w1 = rng12.normal(0, 1, (H, W, 3)).astype(np.float32)
+    w2 = w1 + rng12.normal(0, 0.02, (H, W, 3)).astype(np.float32)
+    c1 = np.full((H, W), 5.0, np.float32); c2 = np.full((H, W), 8.0, np.float32)
+    c1[0, 0] = 0.0                                    # only copy 2 valid there
+    c2[1, 1] = 0.0                                    # only copy 1 valid there
+    d1 = np.full((H, W), 4.0, np.float32); d2 = np.full((H, W), 4.2, np.float32)
+    wp, cf, dd = blend_two_copies(w1, c1, w2, c2, d1, d2)
+    assert np.allclose(wp[2, 2], 0.5 * (w1[2, 2] + w2[2, 2]), atol=1e-6)
+    assert np.allclose(wp[0, 0], w2[0, 0]) and np.allclose(wp[1, 1], w1[1, 1])
+    assert cf[2, 2] == 8.0 and cf[0, 0] == 8.0 and cf[1, 1] == 5.0
+    assert np.allclose([dd[2, 2], dd[0, 0], dd[1, 1]], [4.1, 4.2, 4.0], atol=1e-6)
+    # idempotent once both copies hold the blend
+    wp2, cf2, dd2 = blend_two_copies(wp, cf, wp, cf, dd, dd)
+    assert np.array_equal(wp2, wp) and np.array_equal(cf2, cf) and np.array_equal(dd2, dd)
+
+
 # ── zoom detection ───────────────────────────────────────────────────
 
 def test_flag_sick_chunks_zoom():
