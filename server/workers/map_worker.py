@@ -1578,6 +1578,13 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                     # ONE 3D position (rigid residual per
                                                     # shared frame, blended across the
                                                     # overlap, poses moved with points)
+        cfg_v["Model"]["frame_graph"] = bool(       # per-frame RIGID pose graph: chunk
+            _va_cfg.get("frame_graph", True))       # INTERIORS join the consensus (the
+                                                    # elastic only reaches seam overlaps).
+                                                    # test4: the residual warp was a POSE
+                                                    # error (ground as two sheets ~9 cm
+                                                    # apart inside one chunk); self-gated
+                                                    # on held-out pairs.
         cfg_v["Model"]["depth_graph"] = True        # per-frame DEPTH graph: different
                                                     # frames agree on the depth of the
                                                     # same surface (kills the in-depth
@@ -1590,7 +1597,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                     # disagreement 1.51% -> 1.01%)
         pipe.send_log(f"CHUNKED-METRIC: chunks {int(_chunk)}/{int(_ov)} (50% overlap), "
                       f"scale graph (seams+DA3) + self-gated per-chunk scale DRIFT, "
-                      f"EXACT-correspondence seam gluing, "
+                      f"EXACT-correspondence seam gluing, per-frame RIGID pose graph "
+                      f"(interior warp), "
                       f"frame ownership (one writer per frame), ELASTIC per-frame "
                       f"seam consensus (shared pixels share one 3D position), "
                       f"DEPTH graph (frames agree on shared-surface depth)")

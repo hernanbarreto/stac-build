@@ -797,6 +797,89 @@ def test_depth_graph_verdict_ladder():
     assert not v_w["bounded"], v_w
 
 
+# ── frame graph (per-frame rigid pose consensus, the interior-warp killer) ──
+
+def test_solve_frame_graph_recovers_smooth_warp():
+    """A smooth per-frame warp (the intra-chunk trajectory bend): pairwise
+    rigid residuals at several offsets must reconstruct the field exactly (up
+    to the zero-mean gauge)."""
+    from loop_utils.metric_lock import solve_frame_graph
+    rng15 = np.random.default_rng(40)
+    N = 40
+    xi_true = np.zeros((N, 6))
+    xi_true[:, 4] = 0.05 * np.sin(2 * np.pi * np.arange(N) / N)      # ty warp
+    xi_true[:, 0] = 0.004 * np.cos(2 * np.pi * np.arange(N) / N)     # small roll
+    xi_true -= xi_true.mean(0)                                       # gauge
+    taus = []
+    for d in (1, 2, 3, 5):
+        for f in range(N - d):
+            tau = xi_true[f] - xi_true[f + d] + rng15.normal(0, 5e-4, 6)
+            taus.append((f, f + d, tau, 1.0))
+    xi = solve_frame_graph(taus, N)
+    assert np.max(np.abs(xi - xi_true)) < 0.004, np.max(np.abs(xi - xi_true))
+
+
+def test_solve_frame_graph_sick_frames_identity():
+    from loop_utils.metric_lock import solve_frame_graph
+    taus = [(0, 1, np.full(6, 0.01), 1.0), (1, 2, np.full(6, 0.01), 1.0),
+            (2, 3, np.full(6, 0.01), 1.0), (3, 4, np.full(6, 0.01), 1.0)]
+    xi = solve_frame_graph(taus, 5, sick_frames={2})
+    assert np.all(xi[2] == 0.0)                    # sick: identity, excluded
+
+
+def test_surface_pair_correspondences_rigid_fit():
+    """End-to-end mini: two frames see the same tilted wall, frame g's copy is
+    rigidly offset — correspondences + robust_rigid must recover the offset."""
+    from loop_utils.metric_lock import surface_pair_correspondences, robust_rigid
+    H, W = 60, 80
+    fx = fy = 70.0; cx, cy = W / 2, H / 2
+    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]])
+    uu, vv = np.meshgrid(np.arange(W), np.arange(H))
+    rays = np.stack([(uu - cx) / fx, (vv - cy) / fy, np.ones((H, W))], -1)
+    z = 6.0 + 2.0 * (uu - cx) / (W / 2) + 1.0 * (vv - cy) / (H / 2)
+    wp_f = rays * z[..., None]                      # frame f's copy
+    T = np.eye(4)
+    T[:3, 3] = [0.04, -0.06, 0.02]                  # 7.5 cm rigid offset
+    wp_g = wp_f @ T[:3, :3].T + T[:3, 3]            # frame g's copy, displaced
+    conf = np.full((H, W), 9.0, np.float32)
+    pq = surface_pair_correspondences(wp_f, conf, wp_g, conf, np.eye(4), K)
+    assert pq is not None and len(pq[0]) > 1000
+    fit = robust_rigid(pq[0], pq[1], sample=len(pq[0]))
+    assert fit is not None
+    R_, t_, res_, _ = fit
+    assert np.linalg.norm(t_ - T[:3, 3]) < 0.01, t_
+    assert res_ < 0.01
+
+
+def test_frame_graph_verdict():
+    """The gate: a solution matching the held-out pairs is bounded+improving;
+    a wildly integrated field fails bounded."""
+    from loop_utils.metric_lock import solve_frame_graph, frame_graph_verdict
+    rng16 = np.random.default_rng(41)
+    N = 30
+    xi_true = np.zeros((N, 6))
+    xi_true[:, 4] = 0.06 * np.sin(2 * np.pi * np.arange(N) / N)
+    xi_true -= xi_true.mean(0)
+    taus, held = [], []
+    for d in (1, 2, 3, 5):
+        for f in range(N - d):
+            taus.append((f, f + d,
+                         xi_true[f] - xi_true[f + d] + rng16.normal(0, 5e-4, 6), 1.0))
+    for f in range(N - 4):                          # held-out: actual point pairs
+        p = rng16.uniform(-3, 3, (500, 3))
+        # g's copy sits where the true warp difference puts it
+        q = p + (xi_true[f, 3:] - xi_true[f + 4, 3:])
+        held.append((f, f + 4, p, q))
+    xi = solve_frame_graph(taus, N)
+    v = frame_graph_verdict(xi, taus, held)
+    assert v["bounded"] and v["improves"], v
+    assert v["med_after"] < 0.25 * v["med_before"]
+
+    wild = xi + np.linspace(0, 1.0, N)[:, None] * np.array([0, 0, 0, 1, 0, 0])
+    v_w = frame_graph_verdict(wild, taus, held)
+    assert not v_w["bounded"], v_w
+
+
 def test_chunk_anchor_ratios_positions():
     """The positioned form: each ratio comes with the LOCAL frame index it was
     measured at (the drift model needs to know where)."""

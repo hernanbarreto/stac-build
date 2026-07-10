@@ -732,6 +732,15 @@ reconstruction:
                                         # SUSPECT — the chunk keeps writing points but argues
                                         # more quietly (elastic consensus biased toward the
                                         # trusted side; finereg down-weights its planes 0.5).
+    # frame_graph: true                 # per-frame RIGID pose graph (runs after the elastic,
+                                        # before the depth graph): exact-surface rigid residuals
+                                        # between nearby frames → one small SE(3) correction per
+                                        # frame, points+pose move together (depth/TSDF invariant),
+                                        # SELF-GATED on held-out pairs. test4 2026-07-10: the
+                                        # residual intra-chunk warp (ground as two sheets ~9 cm
+                                        # apart) is a POSE error — the depth-graph ladder proved
+                                        # no depth model explains it (offset field improved
+                                        # held-out but ran to ±1 m; scale-only explained nothing).
 
   # ── SIMPLE pipeline (one concept — validated 2026-07-09 vs the VGGT-Omega web demo) ──
   # Sparse frames (~1 fps) → ONE VGGT-Omega pass (no windows → no seams → no onion) →
