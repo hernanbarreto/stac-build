@@ -534,6 +534,18 @@ def test_blend_two_copies():
     assert np.array_equal(wp2, wp) and np.array_equal(cf2, cf) and np.array_equal(dd2, dd)
 
 
+def test_write_depth_cap_math():
+    """cap = seam floor / pairwise error rate — with test4's real numbers the cone
+    gallery's far observations (15-25 m) must fall OUTSIDE the cap while the
+    galleries themselves (2-8 m) stay inside."""
+    floor_m = 0.045          # median elastic per-frame residual, test4
+    rate = 0.0067            # median pairwise depth disagreement, test4
+    cap = floor_m / rate
+    assert 5.0 < cap < 9.0, cap          # ~6.7 m for this session
+    assert cap < 15.0                     # chunk 4's far view of the cones: dropped
+    assert cap > 4.0                      # the gallery structures themselves: kept
+
+
 # ── zoom detection ───────────────────────────────────────────────────
 
 def test_flag_sick_chunks_zoom():

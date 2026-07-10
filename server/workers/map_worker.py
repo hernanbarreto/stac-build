@@ -1808,7 +1808,13 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # ~30 kf per chunk: quantum scales linearly with the desired kf spacing.
         # Within a 12 m chunk this added density is HARMLESS (the drift-amplifying
         # redundancy is a long-sequence effect; 30-frame passes are the demo regime).
-        _kf_per_chunk = 30
+        # 45 kf per 12 m chunk (user-requested density bump from 30, 2026-07-11):
+        # cloud density scales with keyframes/metre; chunk_size grows with it so
+        # each chunk still spans chunk_walk_m. VRAM is ample (~0.086 GB/frame);
+        # inference cost grows ~quadratically per chunk. Density is only useful
+        # WITH the fusion stages active (blend/consensus) — otherwise extra frames
+        # add fuzz layers, not signal.
+        _kf_per_chunk = 45
         _m_per_kf = _walk_m / max(_n_selected, 1)
         _desired_m_per_kf = _chunk_walk / _kf_per_chunk
         if _desired_m_per_kf < _m_per_kf * 0.95:
