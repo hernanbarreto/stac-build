@@ -188,6 +188,42 @@ def estimate_oriented_normals(xyz: np.ndarray,
     return nrm
 
 
+def _smallest_eigvec3_torch(A, _torch):
+    """Smallest-eigenvalue eigenvector of a batch of symmetric 3x3 matrices,
+    CLOSED FORM (trigonometric eigenvalues + row-cross eigenvector) — cusolver's
+    batched syev rejects large float64 batches on this stack, and this needs no
+    solver at all. (B,3,3) -> (B,3), unit length."""
+    a00, a01, a02 = A[:, 0, 0], A[:, 0, 1], A[:, 0, 2]
+    a11, a12, a22 = A[:, 1, 1], A[:, 1, 2], A[:, 2, 2]
+    p1 = a01 ** 2 + a02 ** 2 + a12 ** 2
+    q = (a00 + a11 + a22) / 3.0
+    p2 = (a00 - q) ** 2 + (a11 - q) ** 2 + (a22 - q) ** 2 + 2.0 * p1
+    p = _torch.sqrt(_torch.clamp(p2 / 6.0, min=1e-30))
+    # B = (A - qI)/p ; r = det(B)/2 in [-1,1]
+    b00, b11, b22 = (a00 - q) / p, (a11 - q) / p, (a22 - q) / p
+    b01, b02, b12 = a01 / p, a02 / p, a12 / p
+    detB = (b00 * (b11 * b22 - b12 * b12) - b01 * (b01 * b22 - b12 * b02)
+            + b02 * (b01 * b12 - b11 * b02))
+    r = _torch.clamp(detB / 2.0, -1.0, 1.0)
+    phi = _torch.acos(r) / 3.0
+    lmin = q + 2.0 * p * _torch.cos(phi + 2.0 * _torch.pi / 3.0)
+    # eigenvector: null space of (A - lmin I) via the largest cross of two rows
+    r0 = _torch.stack([a00 - lmin, a01, a02], dim=1)
+    r1 = _torch.stack([a01, a11 - lmin, a12], dim=1)
+    r2 = _torch.stack([a02, a12, a22 - lmin], dim=1)
+    c01 = _torch.cross(r0, r1, dim=1)
+    c02 = _torch.cross(r0, r2, dim=1)
+    c12 = _torch.cross(r1, r2, dim=1)
+    n01 = (c01 ** 2).sum(1); n02 = (c02 ** 2).sum(1); n12 = (c12 ** 2).sum(1)
+    v = _torch.where((n01 >= n02).unsqueeze(1) & (n01 >= n12).unsqueeze(1), c01,
+                     _torch.where((n02 >= n12).unsqueeze(1), c02, c12))
+    nrm2 = _torch.linalg.norm(v, dim=1, keepdim=True)
+    # degenerate (isotropic) neighbourhoods: any unit vector is valid — use +Y
+    fallback = _torch.zeros_like(v); fallback[:, 1] = 1.0
+    v = _torch.where(nrm2 > 1e-20, v / _torch.clamp(nrm2, min=1e-30), fallback)
+    return v
+
+
 def consolidate_mls(xyz: np.ndarray, radius: float = 0.06, k: int = 24,
                     iterations: int = 2, max_points: Optional[int] = 600_000,
                     normals: Optional[np.ndarray] = None,
@@ -225,6 +261,40 @@ def consolidate_mls(xyz: np.ndarray, radius: float = 0.06, k: int = 24,
 
     out = pts.copy()
     sigma_r = max(radius / 2.0, 1e-4)
+
+    # GPU inner loop: the per-block math (weighted centres, 3x3 covariances,
+    # batched eigh, IRLS reweighting) is what burned ~an hour of CPU on 35M-pt
+    # scenes — on the GPU it is seconds per block. The kNN stays on cKDTree
+    # (parallel, minutes); only the dense math moves. Falls back to numpy
+    # automatically when CUDA is unavailable.
+    _torch = None
+    try:
+        import torch as _torch
+        if not _torch.cuda.is_available():
+            _torch = None
+    except Exception:
+        _torch = None
+
+    def _project_block_gpu(q, nb, gate):
+        tq = _torch.from_numpy(q).cuda()
+        tnb = _torch.from_numpy(nb).cuda()
+        tw = (_torch.from_numpy(gate).cuda() if gate is not None
+              else _torch.ones(tnb.shape[:2], dtype=tq.dtype, device="cuda"))
+        tgate = tw.clone() if gate is not None else None
+        for _irls in range(3):
+            wsum = tw.sum(dim=1, keepdim=True)
+            ctr = (tnb * tw.unsqueeze(-1)).sum(dim=1) / wsum
+            d = tnb - ctr.unsqueeze(1)
+            cov = _torch.einsum("bkj,bkl,bk->bjl", d, d, tw) / wsum.unsqueeze(-1)
+            nrm = _smallest_eigvec3_torch(cov, _torch)
+            resid = _torch.einsum("bkj,bj->bk", tnb - ctr.unsqueeze(1), nrm)
+            w_res = _torch.exp(-0.5 * (resid / sigma_r) ** 2)
+            tw = tgate * w_res if tgate is not None else w_res
+        h = _torch.einsum("bj,bj->b", tq - ctr, nrm)
+        res = (tq - h.unsqueeze(1) * nrm).cpu().numpy()
+        del tq, tnb, tw, ctr, d, cov, nrm, resid, w_res
+        return res
+
     for _ in range(int(iterations)):
         tree = cKDTree(out)
         for b0 in range(0, n, block):
@@ -232,14 +302,17 @@ def consolidate_mls(xyz: np.ndarray, radius: float = 0.06, k: int = 24,
             q = out[b0:b1]
             _, idx = tree.query(q, k=k + 1, workers=-1)   # includes self
             nb = out[idx]                                 # (B, k+1, 3)
-            w = np.ones(idx.shape)
+            gate = None
             if normals is not None:
                 gate = np.einsum("bj,bkj->bk", normals[b0:b1], normals[idx])
                 gate = np.clip(gate, 0.0, None) ** 2
                 gate = np.maximum(gate, 1e-6)             # keep self usable
                 if normal_gate > 0:
                     gate[gate < normal_gate ** 2] = 1e-6
-                w = gate
+            if _torch is not None:
+                out[b0:b1] = _project_block_gpu(q, nb, gate)
+                continue
+            w = gate if gate is not None else np.ones(idx.shape)
             for _irls in range(3):
                 wsum = w.sum(axis=1, keepdims=True)
                 ctr = (nb * w[..., None]).sum(axis=1) / wsum      # (B,3)
@@ -249,7 +322,7 @@ def consolidate_mls(xyz: np.ndarray, radius: float = 0.06, k: int = 24,
                 nrm = vecs[:, :, 0]                               # (B,3)
                 resid = np.einsum("bkj,bj->bk", nb - ctr[:, None, :], nrm)
                 w_res = np.exp(-0.5 * (resid / sigma_r) ** 2)
-                if normals is not None:
+                if gate is not None:
                     w = gate * w_res
                 else:
                     w = w_res
@@ -346,7 +419,22 @@ def scene_consolidate(output_dir: Path,
     logger.info("scene_consolidate: %s pts, radius=%.3fm (adaptive), "
                 "%s camera centres, normal-aware", f"{n:,}", r,
                 len(cams) if cams is not None else 0)
-    normals = estimate_oriented_normals(pts, cams)
+    # traced cloud → normals from the per-frame depth gradient (seconds, camera-
+    # oriented for free) instead of KDTree-PCA over every point (many minutes).
+    normals = None
+    if all(k_ in (data.dtype.names or ()) for k_ in
+           ("frame_global", "pixel_row", "pixel_col")):
+        try:
+            from reconstruction.trace_normals import normals_from_trace
+            normals = normals_from_trace(
+                pts, np.asarray(data["frame_global"], np.int64),
+                np.asarray(data["pixel_row"], np.int64),
+                np.asarray(data["pixel_col"], np.int64),
+                output_dir, log=lambda m: logger.info("scene_consolidate: %s", m))
+        except Exception as _e:  # noqa: BLE001
+            logger.info("scene_consolidate: trace normals unavailable (%s)", _e)
+    if normals is None:
+        normals = estimate_oriented_normals(pts, cams)
     moved = consolidate_mls(pts, radius=r, k=k, iterations=iterations,
                             max_points=None, normals=normals,
                             normal_gate=normal_gate)
