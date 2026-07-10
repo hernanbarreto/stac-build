@@ -5873,20 +5873,27 @@ async def viewer_websocket(websocket: WebSocket):
                         }))
                     except Exception:
                         pass
-
-                # Completion callback: send cloud + segmentation data
-                async def _on_pipeline_complete(sid, success):
-                    if not success:
-                        _tm.fail(_pipeline_tid, "Pipeline failed")
-                        try:
+                    # early cloud delivery: cloudcompy done → the cleaned cloud is final
+                    try:
+                        _cc = next((st for st in job_dict.get("stages", [])
+                                    if st.get("id") == "cloudcompy"), None)
+                        if (_cc and _cc.get("enabled", True) and _cc.get("status") == "done"
+                                and sid not in _cloud_ready_sent):
+                            _cloud_ready_sent.add(sid)
                             await viewer_manager.broadcast_text(json.dumps({
-                                "type": "error",
-                                "message": f"Pipeline failed for {sid}. Check server logs."
+                                "type": "status",
+                                "message": "Cloud ready — sending while the TSDF bakes..."
                             }))
-                        except Exception:
-                            pass
-                        return
+                            await _notify_cloud_ready(sid)
+                    except Exception as _e:
+                        print(f"[Pipeline] early cloud delivery failed (non-fatal): {_e}")
 
+                # The cloud is DONE when cloudcompy finishes — the TSDF/texrecon that
+                # follows takes hours and does not touch it. Send it the moment it exists
+                # so the user inspects the cloud while the mesh still bakes.
+                _cloud_ready_sent = set()
+
+                async def _notify_cloud_ready(sid):
                     # Convert to Potree octree and notify viewer
                     try:
                         session_path = _ctx(sid).session_dir
@@ -5948,6 +5955,25 @@ async def viewer_websocket(websocket: WebSocket):
                             await _send_cleaned_cloud_broadcast(sid)
                     except Exception as e:
                         print(f"[Pipeline] Send cloud error: {e}")
+
+                # Completion callback: send cloud + segmentation data
+                async def _on_pipeline_complete(sid, success):
+                    if not success:
+                        _tm.fail(_pipeline_tid, "Pipeline failed")
+                        try:
+                            await viewer_manager.broadcast_text(json.dumps({
+                                "type": "error",
+                                "message": f"Pipeline failed for {sid}. Check server logs."
+                            }))
+                        except Exception:
+                            pass
+                        return
+
+                    if sid in _cloud_ready_sent:
+                        print(f"[Pipeline] cloud already sent after cloudcompy — skipping rebuild")
+                    else:
+                        _cloud_ready_sent.add(sid)
+                        await _notify_cloud_ready(sid)
 
                     # Send segmentation result (with floor-aligned OBBs) if available
                     # Use apply_segmentation_to_cloud (same as session reload) to ensure
