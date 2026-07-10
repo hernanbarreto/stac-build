@@ -2895,6 +2895,34 @@ def export_poisson_scene(
     if n_loaded == 0:
         logger.error("[Poisson-scene] empty cloud — aborting")
         return None
+    # Normals from per-point traceability, attached BEFORE downsampling so they ride
+    # through it (uniform keeps rows; voxel averages per cell). The cloud carries
+    # (frame_global, pixel_row, pixel_col) and the run keeps per-frame depth + poses:
+    # normal = depth-map gradient at the point's own pixel, orientation = camera-facing
+    # for free. Replaces KDTree estimation + the global-MST orientation (minutes).
+    if not pcd.has_normals():
+        try:
+            from plyfile import PlyData as _PlyData
+            _v = _PlyData.read(str(cc_path))['vertex'].data
+            if all(k in (_v.dtype.names or ()) for k in
+                   ("frame_global", "pixel_row", "pixel_col")):
+                if progress_cb:
+                    progress_cb("normals", time.time() - t0, None)
+                from reconstruction.trace_normals import normals_from_trace
+                _tn = normals_from_trace(
+                    np.asarray(pcd.points),
+                    _v['frame_global'].astype(np.int64),
+                    _v['pixel_row'].astype(np.int64),
+                    _v['pixel_col'].astype(np.int64),
+                    output_dir,
+                    log=lambda m: logger.info(f"[Poisson-scene] {m}"))
+                if _tn is not None:
+                    pcd.normals = o3d.utility.Vector3dVector(_tn.astype(np.float64))
+                    logger.info(f"[Poisson-scene] trace normals attached "
+                                f"({time.time() - t0:.0f}s elapsed)")
+        except Exception as _e:  # noqa: BLE001
+            logger.info(f"[Poisson-scene] trace-normals unavailable ({_e}) — the "
+                        f"KDTree+MST fallback will run after downsampling")
     # Cheap, memory-light pre-downsample FIRST. uniform_down_sample is a plain
     # stride select — no hash, no blow-up — unlike voxel_down_sample, which
     # OOMs a 12 GB box on the raw ~44 M-point cleaned_cloud. Cut to max_points
@@ -2906,13 +2934,15 @@ def export_poisson_scene(
                     f"{len(pcd.points):,} pts")
     if voxel_downsample > 0:
         pcd = pcd.voxel_down_sample(voxel_downsample)
+        if pcd.has_normals():
+            pcd.normalize_normals()   # voxel averaging shrinks them below unit length
         logger.info(f"[Poisson-scene] voxel-down {voxel_downsample}m → "
                     f"{len(pcd.points):,} pts")
     if not pcd.has_normals():
-        # NOTE: orient_normals_consistent_tangent_plane builds a global MST over
-        # every point — the dominant cost (minutes, can look hung on >2-3M pts).
-        # max_points/voxel_downsample keep the working set tractable. Emit a phase
-        # so the UI shows it's WORKING, not stuck at "starting".
+        # FALLBACK ONLY (untraced clouds): orient_normals_consistent_tangent_plane
+        # builds a global MST over every point — single-threaded MINUTES. Traced
+        # clouds got their normals attached right after load (see above): depth-map
+        # gradient at each point's own pixel, camera-oriented for free.
         n_norm = len(pcd.points)
         if progress_cb:
             progress_cb("normals", time.time() - t0, None)
