@@ -732,15 +732,17 @@ reconstruction:
                                         # SUSPECT — the chunk keeps writing points but argues
                                         # more quietly (elastic consensus biased toward the
                                         # trusted side; finereg down-weights its planes 0.5).
-    # frame_graph: true                 # per-frame RIGID pose graph (runs after the elastic,
-                                        # before the depth graph): exact-surface rigid residuals
-                                        # between nearby frames → one small SE(3) correction per
-                                        # frame, points+pose move together (depth/TSDF invariant),
-                                        # SELF-GATED on held-out pairs. test4 2026-07-10: the
-                                        # residual intra-chunk warp (ground as two sheets ~9 cm
-                                        # apart) is a POSE error — the depth-graph ladder proved
-                                        # no depth model explains it (offset field improved
-                                        # held-out but ran to ±1 m; scale-only explained nothing).
+    # frame_graph: false                # per-frame RIGID pose graph (elastic for chunk
+                                        # INTERIORS). DEFAULT OFF — negative result, measured
+                                        # (test4 run 4, 2026-07-10): pair constraints span ≤12
+                                        # frames, so wavelengths longer than the span are
+                                        # invisible both to the graph and to its short-span
+                                        # held-out; it improved locally (9.3→6.0 cm) while
+                                        # injecting ≤163 cm of low-frequency bend (chimney
+                                        # offset 7→130 cm, duplicated objects). The stage is
+                                        # hardened now (per-frame zero-prior + median-based
+                                        # correction bound) but stays opt-in until a rerun
+                                        # proves it can EARN the correction.
 
   # ── SIMPLE pipeline (one concept — validated 2026-07-09 vs the VGGT-Omega web demo) ──
   # Sparse frames (~1 fps) → ONE VGGT-Omega pass (no windows → no seams → no onion) →

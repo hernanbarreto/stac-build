@@ -801,8 +801,10 @@ def test_depth_graph_verdict_ladder():
 
 def test_solve_frame_graph_recovers_smooth_warp():
     """A smooth per-frame warp (the intra-chunk trajectory bend): pairwise
-    rigid residuals at several offsets must reconstruct the field exactly (up
-    to the zero-mean gauge)."""
+    rigid residuals at several offsets reconstruct the field exactly with the
+    prior off. With the DEFAULT zero-prior, wavelengths longer than the pair
+    span are DAMPED (never amplified) — the run-4 lesson: under-evidenced
+    long modes must shrink toward identity, not get filled from noise."""
     from loop_utils.metric_lock import solve_frame_graph
     rng15 = np.random.default_rng(40)
     N = 40
@@ -815,8 +817,20 @@ def test_solve_frame_graph_recovers_smooth_warp():
         for f in range(N - d):
             tau = xi_true[f] - xi_true[f + d] + rng15.normal(0, 5e-4, 6)
             taus.append((f, f + d, tau, 1.0))
-    xi = solve_frame_graph(taus, N)
-    assert np.max(np.abs(xi - xi_true)) < 0.004, np.max(np.abs(xi - xi_true))
+    xi0 = solve_frame_graph(taus, N, prior_w=0.0)                    # exact
+    assert np.max(np.abs(xi0 - xi_true)) < 0.004, np.max(np.abs(xi0 - xi_true))
+
+    xi = solve_frame_graph(taus, N)                                  # default prior
+    ty, ty_true = xi[:, 4], xi_true[:, 4]
+    # damped, same shape: positively correlated with truth, amplitude ≤ truth
+    assert np.dot(ty, ty_true) > 0.5 * np.dot(ty_true, ty_true)
+    assert np.max(np.abs(ty)) <= np.max(np.abs(ty_true)) + 1e-6
+
+    # hallucination guard: PURE-NOISE pairs must not integrate into a bend
+    noise = [(f, f + d, rng15.normal(0, 5e-4, 6), 1.0)
+             for d in (1, 2, 3, 5) for f in range(N - d)]
+    xi_n = solve_frame_graph(noise, N)
+    assert np.max(np.abs(xi_n)) < 0.002, np.max(np.abs(xi_n))
 
 
 def test_solve_frame_graph_sick_frames_identity():
