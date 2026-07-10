@@ -1564,10 +1564,16 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                     # ONE 3D position (rigid residual per
                                                     # shared frame, blended across the
                                                     # overlap, poses moved with points)
+        cfg_v["Model"]["depth_graph"] = True        # per-frame DEPTH graph: different
+                                                    # frames agree on the depth of the
+                                                    # same surface (kills the in-depth
+                                                    # object duplication: 1.5% intra +
+                                                    # 2x at chunk crossings, measured)
         pipe.send_log(f"CHUNKED-METRIC: chunks {int(_chunk)}/{int(_ov)} (50% overlap), "
                       f"scale graph (seams+DA3), EXACT-correspondence seam gluing, "
                       f"frame ownership (one writer per frame), ELASTIC per-frame "
-                      f"seam consensus (shared pixels share one 3D position)")
+                      f"seam consensus (shared pixels share one 3D position), "
+                      f"DEPTH graph (frames agree on shared-surface depth)")
 
     def _ensure_anchors(_files):
         """Isolated DA3 depth for every anchor file not already extracted."""
@@ -1731,8 +1737,23 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 (output_dir / "maplong_run" / "frame_list.json").read_text())
             _rows = [l.split() for l in open(output_dir / "camera_poses.txt") if l.strip()]
             _ctr = _np.array([[float(x) for x in r] for r in _rows]).reshape(-1, 4, 4)[:, :3, 3]
+            # per-keyframe estimated focal: the ZOOM detector's direct signal
+            _fx = None
+            for _ip in (output_dir / "intrinsic.txt",
+                        output_dir / "maplong_run" / "intrinsic.txt"):
+                if _ip.exists():
+                    _fx = _np.array([float(l.split()[0]) for l in
+                                     _ip.read_text().splitlines() if l.strip()])
+                    break
+            if _fx is not None and len(_fx) != len(_ctr):
+                pipe.send_log(f"[coverage-trim] intrinsic.txt has {len(_fx)} rows vs "
+                              f"{len(_ctr)} poses — zoom detection skipped", level="warning")
+                _fx = None
+            if len(_ctr) != len(_probe_frames):
+                pipe.send_log(f"[coverage-trim] probe poses ({len(_ctr)}) != frame list "
+                              f"({len(_probe_frames)}) — trim skipped", level="warning")
             if len(_ctr) == len(_probe_frames) and len(_ctr) >= 3:
-                _plo, _phi = trim_static_ends(_ctr)
+                _plo, _phi = trim_static_ends(_ctr, fx=_fx)
                 if (_plo, _phi) != (0, len(_ctr)):
                     _pnums = [int(os.path.splitext(f)[0]) for f in _probe_frames]
                     _trim_lo_num, _trim_hi_num = _pnums[_plo], _pnums[_phi - 1]
@@ -1746,9 +1767,10 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                    "probe_kf_trimmed_tail": int(len(_ctr) - _phi),
                                    "keyframes_dropped": _n_selected - len(_kept),
                                    "walk_m_total": _walk_m, "walk_m_kept": _walk_kept,
-                                   "reason": "static ends (camera steps an order of "
-                                             "magnitude below the session's walking pace) "
-                                             "hold no parallax -> no 3D information"},
+                                   "reason": "static and/or optical-zoom ends: neither "
+                                             "adds baseline -> no parallax -> no 3D "
+                                             "information (steps a decade below the "
+                                             "walking pace, or focal at robust z>3.5)"},
                                   _f, indent=1)
                     pipe.send_log(f"[coverage-trim] static ends: keeping real frames "
                                   f"[{_trim_lo_num}, {_trim_hi_num}] — dropped "

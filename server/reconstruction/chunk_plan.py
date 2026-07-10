@@ -32,19 +32,26 @@ def walk_length_m(poses_txt: Path) -> float:
     return float(np.linalg.norm(np.diff(centers, axis=0), axis=1).sum())
 
 
-def trim_static_ends(centers: np.ndarray, floor_ratio: float = 10.0) -> Tuple[int, int]:
-    """(lo, hi): the slice of keyframes that actually WALKS, per the probe trajectory.
+def trim_static_ends(centers: np.ndarray, fx: np.ndarray = None,
+                     floor_ratio: float = 10.0, zoom_z_cut: float = 3.5) -> Tuple[int, int]:
+    """(lo, hi): the slice of keyframes that actually WALKS (and does not ZOOM),
+    per the probe trajectory.
 
-    Rotation-only stretches at the walk's ends (turning in place at the finish —
-    test4's rotten tail) hold no parallax: any multi-view geometry there is garbage
-    by construction, at any chunking, so phase 2 must not spend chunks on them.
-    A step is 'static' when it is an order of magnitude below the session's own
-    walking pace (median step / floor_ratio — same physical decade criterion as the
-    chunk health gate; measured gap on test4: body steps 29-47 cm vs tail 1-5.5 cm).
-    Only maximal static runs at the HEAD and TAIL are trimmed: cutting a mid-walk
-    pause would split the sequence into islands with no shared frames to glue, and
-    mid-walk weak chunks are the health gate's job. Scale-invariant (ratio within
-    one trajectory), so the probe's poses may be metric or up-to-scale.
+    Two per-keyframe 'no 3D information' conditions, trimmed only as maximal runs
+    at the HEAD and TAIL (cutting a mid-walk stretch would split the sequence into
+    islands with no shared frames to glue — mid-walk weakness is the chunk health
+    gate's job):
+
+    1. STATIC: step an order of magnitude below the session's own walking pace
+       (median step / floor_ratio — the same physical decade criterion as the
+       health gate; measured on test4: body steps 29-47 cm vs tail 1-5.5 cm).
+       Rotation in place holds no parallax. Scale-invariant.
+    2. ZOOM (when `fx` per keyframe is given, from the probe's intrinsic.txt):
+       robust z (Iglewicz-Hoaglin, cut 3.5) of the estimated focal against the
+       trajectory's median. Optical zoom magnifies without adding baseline — no
+       parallax no matter how the poses come out (on test4 the zoomed tail's
+       garbage poses JUMPED metres instead of standing still, which is exactly
+       why the step criterion alone missed it: fx 550 body vs 704-1334 tail).
 
     Returns keyframe indices with centers[lo:hi] kept; (0, len) when nothing trims.
     """
@@ -56,14 +63,22 @@ def trim_static_ends(centers: np.ndarray, floor_ratio: float = 10.0) -> Tuple[in
     med = float(np.median(steps))
     if med <= 0:
         return 0, n
-    static = steps < med / float(floor_ratio)
+    bad_kf = np.zeros(n, bool)
+    if fx is not None and len(np.asarray(fx)) == n:
+        f = np.asarray(fx, np.float64)
+        fmed = float(np.median(f))
+        fmad = float(np.median(np.abs(f - fmed)))
+        if fmad > 0:
+            bad_kf |= np.abs(f - fmed) / (1.4826 * fmad) > float(zoom_z_cut)
+    # a step is unusable when it is static OR touches a zoomed keyframe
+    bad = (steps < med / float(floor_ratio)) | bad_kf[:-1] | bad_kf[1:]
     lo = 0
-    while lo < len(steps) and static[lo]:
+    while lo < len(bad) and bad[lo]:
         lo += 1
     hi = n
-    while hi - 2 >= lo and static[hi - 2]:
+    while hi - 2 >= lo and bad[hi - 2]:
         hi -= 1
-    if hi - lo < 2:            # degenerate (everything static) — leave untouched:
+    if hi - lo < 2:            # degenerate (everything static/zoomed) — untouched:
         return 0, n            # phase 2 would not even trigger on a ~0 m walk
     return lo, hi
 

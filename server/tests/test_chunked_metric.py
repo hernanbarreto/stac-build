@@ -420,6 +420,127 @@ def test_trim_static_ends():
     assert trim_static_ends(static) == (0, 20)
 
 
+# ── per-frame depth graph ────────────────────────────────────────────
+
+def test_pair_depth_relation_robust():
+    from loop_utils.metric_lock import pair_depth_relation
+    rng9 = np.random.default_rng(40)
+    z = rng9.uniform(2.0, 12.0, 6000)
+    zd = 1.03 * z + 0.05 + rng9.normal(0, 0.02, z.shape)     # 3% scale + 5 cm offset
+    out = rng9.random(len(z)) < 0.15                          # 15% occlusion junk
+    zd[out] += rng9.uniform(0.5, 4.0, int(out.sum()))
+    al, be, before, n = pair_depth_relation(z, zd)
+    assert abs(al - 1.03) < 0.005 and abs(be - 0.05) < 0.03, (al, be)
+    # a broken pair (relation far from identity) is rejected, not fitted
+    assert pair_depth_relation(z, z * 1.6) is None
+
+
+def test_solve_depth_graph_recovers_and_collapses():
+    """Frames with a smooth true depth-error field: the graph must recover the
+    corrections (up to the mean gauge) and collapse pairwise disagreement."""
+    from loop_utils.metric_lock import solve_depth_graph
+    rng10 = np.random.default_rng(41)
+    N = 60
+    a_true = 1.0 + 0.02 * np.sin(np.arange(N) / 7.0)          # ±2% depth scale drift
+    b_true = 0.05 * np.cos(np.arange(N) / 11.0)               # ±5 cm offset drift
+    meas = []
+    for f in range(N):
+        for d in (1, 3, 7):
+            g = f + d
+            if g >= N:
+                continue
+            # measured relation z_g = alpha z_f + beta given the true errors:
+            # a_f z + b_f == a_g (alpha z + beta) + b_g  =>
+            alpha = a_true[f] / a_true[g]
+            beta = (b_true[f] - b_true[g]) / a_true[g]
+            meas.append((f, g, alpha * np.exp(rng10.normal(0, 5e-4)),
+                         beta + rng10.normal(0, 2e-3)))
+    a, b = solve_depth_graph(meas, N)
+    # gauge: compare shape, not absolute level
+    ra = a / np.exp(np.mean(np.log(a))) - a_true / np.exp(np.mean(np.log(a_true)))
+    assert np.abs(ra).max() < 0.004, np.abs(ra).max()
+    # pairwise disagreement at z=5 m collapses by >10x after the corrections
+    d_before = np.median([abs((a_true[f] * 5 + b_true[f]) - (a_true[g] * 5 + b_true[g]))
+                          for f, g, _, _ in meas])
+    resid = [abs((a[f] * 5 + b[f]) - (a[g] * (al * 5 + be) + b[g]))
+             for f, g, al, be in meas]
+    assert np.median(resid) < d_before / 10, (np.median(resid), d_before)
+
+
+def test_apply_depth_correction_moves_along_rays():
+    from loop_utils.metric_lock import apply_depth_correction
+    H, W = 8, 10
+    cam = np.array([1.0, 2.0, 3.0])
+    dirs = np.stack(np.meshgrid(np.linspace(-0.2, 0.2, W),
+                                np.linspace(-0.15, 0.15, H), indexing="xy") + [np.ones((H, W))],
+                    axis=-1)
+    dirs /= np.linalg.norm(dirs, axis=-1, keepdims=True)
+    depth = np.full((H, W), 5.0, np.float32)
+    wp = cam + dirs * (depth[..., None] / dirs[..., 2:])      # z-depth 5 m
+    wp2, d2 = apply_depth_correction(wp.astype(np.float32), depth, cam, 1.02, 0.04)
+    assert np.allclose(d2, 5.0 * 1.02 + 0.04, atol=1e-5)
+    # every point stays on its original ray from the camera
+    r0 = wp - cam; r1 = wp2 - cam
+    cosang = (r0 * r1).sum(-1) / (np.linalg.norm(r0, axis=-1) * np.linalg.norm(r1, axis=-1))
+    assert cosang.min() > 1 - 1e-9
+    # invalid depth pixels untouched
+    depth_bad = depth.copy(); depth_bad[0, 0] = 0.0
+    wp3, d3 = apply_depth_correction(wp.astype(np.float32), depth_bad, cam, 1.02, 0.04)
+    assert np.allclose(wp3[0, 0], wp[0, 0]) and d3[0, 0] == 0.0
+
+
+def test_depth_pair_samples_end_to_end():
+    """Two frames observing the same wall with a 2% depth-scale disagreement:
+    depth_pair_samples + pair_depth_relation must measure alpha ~= 1/1.02."""
+    from loop_utils.metric_lock import depth_pair_samples, pair_depth_relation
+    H, W = 60, 80
+    fx = fy = 70.0; cx, cy = W / 2, H / 2
+    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]])
+    uu, vv = np.meshgrid(np.arange(W), np.arange(H))
+    rays = np.stack([(uu - cx) / fx, (vv - cy) / fy, np.ones((H, W))], -1)
+    # frame g at origin, TILTED wall (depth varies 4-8 m across the image so the
+    # affine fit has slope information); frame f 0.5 m to the right sees the same
+    # wall but with its depth field SCALED 1.02
+    z_g = 6.0 + 2.0 * (uu - cx) / (W / 2) * rays[..., 2]      # planar, tilted in x
+    wp_g = rays * z_g[..., None]
+    cam_f = np.array([0.5, 0.0, 0.0])
+    wp_f = cam_f + (wp_g - cam_f) * 1.02
+    conf = np.full((H, W), 9.0, np.float32)
+    w2c_g = np.eye(4)
+    out = depth_pair_samples(wp_f, conf, wp_g, conf, w2c_g, K)
+    assert out is not None
+    al, be, before, n = pair_depth_relation(out[0], out[1])
+    assert abs(al - 1 / 1.02) < 0.01 or abs(al * 1.02 - 1) < 0.02, al
+    assert before > 0.01                                     # the 2% is visible
+
+
+# ── zoom detection ───────────────────────────────────────────────────
+
+def test_flag_sick_chunks_zoom():
+    from loop_utils.metric_lock import flag_sick_chunks
+    tri = {k: 0.09 for k in range(13)}                        # parallax fine everywhere
+    fx = {k: 550.0 + 3.0 * (k % 5) for k in range(10)}
+    fx.update({10: 904.0, 11: 1317.0, 12: 1199.0})            # test4's zoom tail
+    sick = flag_sick_chunks(tri, {}, fx_median=fx)
+    assert set(sick) == {10, 11, 12}, sick
+    assert all(any("ZOOM" in r for r in sick[k]) for k in sick)
+
+
+def test_trim_zoom_tail_with_jumpy_poses():
+    """test4's actual failure mode: the zoomed tail's garbage poses JUMP metres
+    (not static), so the step criterion alone misses it — fx must catch it."""
+    from reconstruction.chunk_plan import trim_static_ends
+    rng11 = np.random.default_rng(50)
+    walk = np.cumsum(rng11.uniform(0.3, 0.5, (50, 1)) * np.array([[1, 0, 0]]), axis=0)
+    jumpy = walk[-1] + rng11.uniform(-2, 2, (12, 3))          # metre-scale garbage jumps
+    centers = np.vstack([walk, jumpy])
+    fx = np.concatenate([550 + rng11.normal(0, 5, 50), rng11.uniform(700, 1330, 12)])
+    lo, hi = trim_static_ends(centers)                        # steps alone: misses it
+    assert hi == len(centers)
+    lo, hi = trim_static_ends(centers, fx=fx)                 # fx: catches it
+    assert lo == 0 and 49 <= hi <= 51, (lo, hi)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
