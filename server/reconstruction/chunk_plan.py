@@ -32,6 +32,42 @@ def walk_length_m(poses_txt: Path) -> float:
     return float(np.linalg.norm(np.diff(centers, axis=0), axis=1).sum())
 
 
+def trim_static_ends(centers: np.ndarray, floor_ratio: float = 10.0) -> Tuple[int, int]:
+    """(lo, hi): the slice of keyframes that actually WALKS, per the probe trajectory.
+
+    Rotation-only stretches at the walk's ends (turning in place at the finish —
+    test4's rotten tail) hold no parallax: any multi-view geometry there is garbage
+    by construction, at any chunking, so phase 2 must not spend chunks on them.
+    A step is 'static' when it is an order of magnitude below the session's own
+    walking pace (median step / floor_ratio — same physical decade criterion as the
+    chunk health gate; measured gap on test4: body steps 29-47 cm vs tail 1-5.5 cm).
+    Only maximal static runs at the HEAD and TAIL are trimmed: cutting a mid-walk
+    pause would split the sequence into islands with no shared frames to glue, and
+    mid-walk weak chunks are the health gate's job. Scale-invariant (ratio within
+    one trajectory), so the probe's poses may be metric or up-to-scale.
+
+    Returns keyframe indices with centers[lo:hi] kept; (0, len) when nothing trims.
+    """
+    centers = np.asarray(centers, np.float64)
+    n = len(centers)
+    if n < 3:
+        return 0, n
+    steps = np.linalg.norm(np.diff(centers, axis=0), axis=1)   # steps[i]: kf i -> i+1
+    med = float(np.median(steps))
+    if med <= 0:
+        return 0, n
+    static = steps < med / float(floor_ratio)
+    lo = 0
+    while lo < len(steps) and static[lo]:
+        lo += 1
+    hi = n
+    while hi - 2 >= lo and static[hi - 2]:
+        hi -= 1
+    if hi - lo < 2:            # degenerate (everything static) — leave untouched:
+        return 0, n            # phase 2 would not even trigger on a ~0 m walk
+    return lo, hi
+
+
 def plan_chunks(n_keyframes: int, walk_m: float, chunk_walk_m: float,
                 min_size: int = 24, max_size: int = 150) -> Tuple[int, int]:
     """(chunk_size, overlap) in KEYFRAMES so each chunk covers ~chunk_walk_m of walk.

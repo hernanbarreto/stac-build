@@ -1518,7 +1518,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # to DA3 anchors BEFORE alignment, glued SE(3) (scale is not negotiable — the Sim3
     # scale freedom is what produced the onion), SALAD loop closure + pose graph on.
     from reconstruction.chunk_plan import (walk_length_m, plan_chunks,
-                                           plan_anchor_indices)
+                                           plan_anchor_indices, trim_static_ends)
     vggt_config = _build_vggtomega_config(config)
     _va_cfg = recon_cfg.get("vggtomega", {}) or {}
     _max_walk = float(_simple_cfg.get("max_walk_single_pass_m", 25.0))
@@ -1713,6 +1713,68 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # excellent on short walks and drifts ~1.3 cm/m past them (measured, test4).
     if (_simple_on and not _chunked_already and _walk_m > _max_walk
             and _n_selected >= 24):
+        # ── coverage trim (probe-informed): drop rotation-only ENDS before chunking ──
+        # The probe already walked the scene: keyframes whose camera does not move
+        # hold no parallax, so their chunks would be born rotten at ANY chunking
+        # (test4: 3/13 chunks — 23% of the phase-2 GPU — spent on a tail with
+        # 0.24 m of walk in 24 kf, geometry garbage by construction) and their
+        # anchors/seams pollute the scale graph. Static HEAD/TAIL are trimmed in
+        # real-frame space and declared as ranges WITHOUT 3D coverage; mid-walk
+        # weak stretches stay — cutting them would split the sequence into islands
+        # with no shared frames to glue, and the vendor's chunk health gate covers
+        # them. Trim failure falls open (no trim) LOUDLY: the health gate is the
+        # safety net either way.
+        _trim_lo_num = _trim_hi_num = None
+        try:
+            import numpy as _np
+            _probe_frames = json.loads(
+                (output_dir / "maplong_run" / "frame_list.json").read_text())
+            _rows = [l.split() for l in open(output_dir / "camera_poses.txt") if l.strip()]
+            _ctr = _np.array([[float(x) for x in r] for r in _rows]).reshape(-1, 4, 4)[:, :3, 3]
+            if len(_ctr) == len(_probe_frames) and len(_ctr) >= 3:
+                _plo, _phi = trim_static_ends(_ctr)
+                if (_plo, _phi) != (0, len(_ctr)):
+                    _pnums = [int(os.path.splitext(f)[0]) for f in _probe_frames]
+                    _trim_lo_num, _trim_hi_num = _pnums[_plo], _pnums[_phi - 1]
+                    _kept = [f for f in _sel_files
+                             if _trim_lo_num <= int(os.path.splitext(f)[0]) <= _trim_hi_num]
+                    _walk_kept = float(_np.linalg.norm(
+                        _np.diff(_ctr[_plo:_phi], axis=0), axis=1).sum())
+                    with open(output_dir / "coverage_trim.json", "w") as _f:
+                        json.dump({"frame_lo": _trim_lo_num, "frame_hi": _trim_hi_num,
+                                   "probe_kf_trimmed_head": int(_plo),
+                                   "probe_kf_trimmed_tail": int(len(_ctr) - _phi),
+                                   "keyframes_dropped": _n_selected - len(_kept),
+                                   "walk_m_total": _walk_m, "walk_m_kept": _walk_kept,
+                                   "reason": "static ends (camera steps an order of "
+                                             "magnitude below the session's walking pace) "
+                                             "hold no parallax -> no 3D information"},
+                                  _f, indent=1)
+                    pipe.send_log(f"[coverage-trim] static ends: keeping real frames "
+                                  f"[{_trim_lo_num}, {_trim_hi_num}] — dropped "
+                                  f"{_n_selected - len(_kept)} keyframe(s) "
+                                  f"({int(_plo)} head / {int(len(_ctr) - _phi)} tail probe kf); "
+                                  f"those ranges are declared WITHOUT 3D coverage",
+                                  level="warning")
+                    _sel_files = _kept
+                    _n_selected = len(_kept)
+                    _walk_m = _walk_kept
+                    try:
+                        _prev_sel = json.load(open(selected_frames_path))
+                        _tot = int(_prev_sel.get("total_frames", len(_kept)))
+                        _meth = str(_prev_sel.get("method", "motion")) + "+trim"
+                    except Exception:
+                        _tot, _meth = len(_kept), "motion+trim"
+                    with open(selected_frames_path, "w") as _f:
+                        json.dump({"version": "2.0", "method": _meth,
+                                   "total_frames": _tot,
+                                   "selected_count": len(_kept),
+                                   "selected_files": _kept}, _f)
+        except Exception as _e:  # noqa: BLE001
+            pipe.send_log(f"[coverage-trim] SKIPPED ({_e}) — the chunk health gate "
+                          f"remains the safety net for parallax-starved chunks",
+                          level="warning")
+
         # Re-select keyframes DENSER for the chunked pass: with sparse keyframes
         # (big m/kf) a minimum-size chunk covers far more walk than chunk_walk_m —
         # e.g. 66 kf over 81 m gives 1.2 m/kf, so a 24-kf chunk spans 29 m. Target
@@ -1726,6 +1788,11 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             _q1 = float(_simple_cfg.get("keyframe_motion_quantum", 250.0))
             _q2 = max(20.0, _q1 * _desired_m_per_kf / _m_per_kf)
             _chosen2, _n_total2, _ = _motion_keyframes(frames_dir, _q2)
+            if _trim_lo_num is not None:
+                # the dense re-selection sweeps the WHOLE video — keep it inside
+                # the trimmed coverage window
+                _chosen2 = [f for f in _chosen2
+                            if _trim_lo_num <= int(os.path.splitext(f)[0]) <= _trim_hi_num]
             if len(_chosen2) > _n_selected:
                 with open(selected_frames_path, "w") as _f:
                     json.dump({"version": "2.0", "method": f"motion_{_q2:g}_chunked",

@@ -344,6 +344,82 @@ def test_elastic_end_to_end_copies_coincide():
         assert np.median(d) < 1e-6, (g, float(np.median(d)))
 
 
+# ── chunk health gate + coverage trim ────────────────────────────────
+
+def test_flag_sick_chunks_on_test4_numbers():
+    """The gate must reproduce the test4 verdict from the chunks' OWN numbers:
+    10 sick by anchor incoherence, 11-12 sick by missing parallax, body clean."""
+    from loop_utils.metric_lock import flag_sick_chunks
+    tri = {0: 0.098, 1: 0.102, 2: 0.112, 3: 0.085, 4: 0.095, 5: 0.081, 6: 0.109,
+           7: 0.111, 8: 0.083, 9: 0.090, 10: 0.046, 11: 0.0051, 12: 0.00084}
+    aiq = {0: 0.095, 1: 0.058, 2: 0.100, 3: 0.099, 4: 0.168, 5: 0.012, 6: 0.057,
+           7: 0.073, 8: 0.107, 9: 0.120, 10: 0.374, 11: 0.170, 12: 0.168}
+    sick = flag_sick_chunks(tri, aiq)
+    assert set(sick) == {10, 11, 12}, sick
+    assert any("anchors" in r.lower() or "anchor" in r for r in sick[10])
+    assert any("triangulation" in r for r in sick[11])
+    assert any("triangulation" in r for r in sick[12])
+
+
+def test_flag_sick_chunks_healthy_session():
+    from loop_utils.metric_lock import flag_sick_chunks
+    tri = {k: 0.09 + 0.01 * (k % 3) for k in range(8)}
+    aiq = {k: 0.06 + 0.02 * (k % 4) for k in range(8)}
+    assert flag_sick_chunks(tri, aiq) == {}
+    # starved inputs never crash the gate
+    assert flag_sick_chunks({0: None, 1: 0.1}, {0: None, 1: None}) == {}
+
+
+def test_chunk_tri_angle_scale_invariant():
+    from loop_utils.metric_lock import chunk_tri_angle
+    S, H, W = 6, 16, 16
+    ext = np.tile(np.eye(4), (S, 1, 1))
+    ext[:, 2, 3] = np.arange(S) * 0.4                       # 40 cm steps
+    depth = np.full((S, H, W), 4.0, np.float32)             # 4 m scene
+    conf = np.full((S, H, W), 5.0, np.float32)
+    a1 = chunk_tri_angle(depth, conf, ext)
+    ext2 = ext.copy(); ext2[:, :3, 3] *= 9.7                # metric lock scaling
+    a2 = chunk_tri_angle(depth * 9.7, conf, ext2)
+    assert abs(a1 - 0.1) < 1e-9 and abs(a1 - a2) / a1 < 1e-6   # float32 depth rounding
+
+
+def test_elastic_corrections_sick_side_pinned():
+    """A healthy chunk never bends toward a sick neighbour: its side of the seam
+    stays identity, the sick side adopts the healthy copy fully."""
+    from loop_utils.metric_lock import elastic_corrections, rigid_mat
+    rng7 = np.random.default_rng(21)
+    ci = [(0, 28), (14, 42), (28, 56)]
+    fits = {j: {g: _small_rigid(rng7, 0.3, 0.03)
+                for g in range(ci[j + 1][0], ci[j][1])} for j in range(2)}
+    # chunk 2 sick: seam 1 (chunks 1-2) pins to chunk 1's copy
+    c1 = elastic_corrections(ci, 1, fits, sick={2})
+    c2 = elastic_corrections(ci, 2, fits, sick={2})
+    for g in range(28, 42):
+        T = rigid_mat(*fits[1][g])
+        assert np.allclose(c1[g - 14], np.eye(4), atol=1e-12), g   # healthy: untouched
+        assert np.allclose(c2[g - 28], T, atol=1e-10)              # sick: adopts healthy
+    # seam 0 (both healthy) keeps the normal blend + exact consensus
+    c0 = elastic_corrections(ci, 0, fits, sick={2})
+    for g in range(14, 28):
+        T = rigid_mat(*fits[0][g])
+        assert np.allclose(c0[g] @ T, c1[g - 14], atol=1e-10)
+
+
+def test_trim_static_ends():
+    from reconstruction.chunk_plan import trim_static_ends
+    rng8 = np.random.default_rng(30)
+    walk = np.cumsum(rng8.uniform(0.3, 0.5, (40, 1)) * np.array([[1, 0, 0]]), axis=0)
+    still_tail = walk[-1] + rng8.normal(0, 0.003, (10, 3))   # turning in place: ~mm steps
+    still_head = walk[0] + rng8.normal(0, 0.003, (5, 3))
+    centers = np.vstack([still_head, walk, still_tail])
+    lo, hi = trim_static_ends(centers)
+    assert 4 <= lo <= 6 and len(centers) - 11 <= hi <= len(centers) - 9, (lo, hi)
+    # healthy walk untrimmed; degenerate all-static untouched
+    assert trim_static_ends(walk) == (0, len(walk))
+    static = np.zeros((20, 3)) + rng8.normal(0, 0.001, (20, 3))
+    assert trim_static_ends(static) == (0, 20)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
