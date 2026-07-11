@@ -732,7 +732,7 @@ reconstruction:
                                         # SUSPECT — the chunk keeps writing points but argues
                                         # more quietly (elastic consensus biased toward the
                                         # trusted side; finereg down-weights its planes 0.5).
-    intra_chunk: false                  # INTRA-CHUNK per-frame consensus, ITERATIVE (set
+    intra_chunk: true                   # INTRA-CHUNK per-frame consensus, ITERATIVE (set
                                         # false → run 3 exactly). Corrects the warp BETWEEN
                                         # frames of the same chunk. Two measured lessons baked
                                         # in: endpoints clamped to the seam consensus (no
