@@ -743,6 +743,33 @@ reconstruction:
                                         # in serpenteado or duplicates — acquitted as the
                                         # visible-warp culprit despite its unsmoothed
                                         # per-frame fits (|t| up to 159 cm at seam 7->8).
+    hybrid_da3: true                    # Phase E-lite 2026-07-11 (BEST OF BOTH WORLDS): each
+                                        # keyframe adopts DA3's per-pixel depth SHAPE at
+                                        # omega's scale and pose, right after metric-lock —
+                                        # Phase A proved the serpenteado is intrinsic to
+                                        # omega's feed-forward output, and DA3's isolated
+                                        # depth is locally straight. Per-frame median ratio
+                                        # pins DA3 to omega's scale (kills DA3's absolute
+                                        # metric jitter); shape corrections beyond 35% or
+                                        # farther than hybrid_da3_far_m keep omega. Extracts
+                                        # isolated DA3 for ALL keyframes (denser scale
+                                        # anchors too — metric-lock numbers WILL shift).
+    hybrid_da3_far_m: 15.0              # beyond this omega depth the pixel keeps omega
+                                        # (isolated DA3 degrades at range — user-observed;
+                                        # onion risk is at distance, straightness is near).
+    ownership_backfill: true            # Phase D: in overlap zones the non-owner copy writes
+                                        # EXACTLY the pixels the owner drops (frozen write
+                                        # thresholds → owner-writes and backfill are disjoint
+                                        # complements; a pixel never enters the cloud twice).
+                                        # Recovers the hole-filling the pre-ownership 2x
+                                        # redundancy used to provide, without the duplicates.
+    elastic_smooth_win: 5               # Phase B: moving-average window (frames) over the
+                                        # per-frame seam fits — adjacent shared frames stop
+                                        # receiving uncorrelated rigid moves. 1 = raw fits.
+    elastic_max_t_m: 0.30               # Phase B: per-fit translation cap (m). A fit beyond
+                                        # this is scaled down as a whole twist — bounded
+                                        # authority, not faked closure (seam 7->8 fitted up
+                                        # to 1.59 m to close an 8 cm gap). 0/null = no cap.
     intra_chunk: true                   # KEEP ON — A4 2026-07-11 tested false on test4:
                                         # serpenteado unchanged (it is intrinsic to omega's
                                         # feed-forward output, not our stages) and duplicates
@@ -808,12 +835,15 @@ reconstruction:
                                         # windowed mode with a fitting chunk when short.
     exclusive_gpu: true                 # stop vLLM before reconstruction (Omega gets the
                                         # whole GPU); the VLM stage auto-restarts it after
-    conf_percentile: 20.0               # THE confidence filter, web-demo semantics: drop the
-                                        # bottom 20% of valid (non-sky) points by confidence,
-                                        # keep 80%. Scene-independent by construction. The old
-                                        # mean-relative coef was not: mean*0.6 kept 53% of one
-                                        # scan and 89% of another. Set to null to fall back to
-                                        # conf_threshold_coef below.
+    conf_percentile: 10.0               # THE confidence filter, web-demo semantics: drop the
+                                        # bottom 10% of valid (non-sky) points by confidence.
+                                        # Phase D 2026-07-11: 20 → 10 — with one writer per
+                                        # frame the old 2x overlap redundancy no longer
+                                        # backfills what this cut removes, and 20% was a
+                                        # measured hole source. Scene-independent by
+                                        # construction (the old mean-relative coef was not:
+                                        # mean*0.6 kept 53% of one scan and 89% of another).
+                                        # Set to null to fall back to conf_threshold_coef.
     conf_threshold_coef: 0.6            # legacy fallback (keep conf >= mean*coef); ignored
                                         # whenever conf_percentile is set
     scale_anchor_frames: 12             # DA3 runs on ONLY this many evenly-spread frames
@@ -840,11 +870,21 @@ reconstruction:
                                         # double layers; the affected frame poses get the same rigid
                                         # correction (backup camera_poses.txt.prefinereg). Best-effort.
     # accept_sep_m: 0.024               # acceptance: residual plane separation; default 2×tsdf.voxel_length
-    max_correction_m: 0.25              # corrections beyond this are refused (a shift that big is a
-                                        # pose problem — fix upstream, don't fake alignment). Raised
+    max_correction_m: 0.25              # PER-ROUND cap: single-step corrections beyond this are
+                                        # refused (a shift that big in one step is a pose problem —
+                                        # fix upstream, don't fake alignment). Raised
                                         # 0.12→0.25 on evidence: test2 2026-07-09 refused 9 REAL
                                         # intra-chunk drift corrections of 125–230mm (chunks 5–9),
                                         # leaving that drift in the cloud/mesh.
+    anneal_rounds: 3                    # Phase C 2026-07-11: bounded solve→apply→re-measure rounds.
+                                        # test4 measured REAL chunk offsets of 300–1100mm that one
+                                        # capped solve can only refuse (31 units REFUSED, worst plane
+                                        # separation stuck at ~117mm); rounds let real offsets
+                                        # accumulate in honest 250mm steps. 1 = old single-shot.
+    max_total_correction_m: 0.75        # per-unit accumulated budget across rounds; plus FULL
+                                        # ROLLBACK to identity when no round improves the worst
+                                        # plane separation (a correction that doesn't pay for
+                                        # itself is a warp, not a fix).
                                         # 0.12 (was 0.08): test3 measured 65 mm of REAL VGGT drift
                                         # between chunks — the old cap left no headroom.
     # pieces_per_chunk: 5               # rigid pieces per chunk for the JOINT pose-graph solve.

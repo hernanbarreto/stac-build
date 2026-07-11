@@ -324,3 +324,78 @@ class TestPiecewiseRun:
         assert rep["accepted"], f"sep_after: {rep['sep_after_m']}"
         assert max(rep["sep_after_m"].values()) < 0.015
         assert (out / "camera_poses.txt.prefinereg").exists()
+
+
+class TestAnneal:
+    def _write_scene(self, out, offset_m):
+        """Two rigid chunks of the same room; the second offset by offset_m in x."""
+        import numpy as np
+        from plyfile import PlyData, PlyElement
+        rng = np.random.default_rng(41)
+
+        def write_chunk(cid, pts, frames):
+            v = np.zeros(len(pts), dtype=[("x", "f4"), ("y", "f4"), ("z", "f4")])
+            v["x"], v["y"], v["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
+            PlyData([PlyElement.describe(v, "vertex")], text=False).write(
+                str(out / f"chunk_{cid:03d}.ply"))
+            np.savez(out / f"chunk_{cid:03d}_origins.npz",
+                     frame_global=frames.astype(np.int64))
+
+        A = make_room_chunk(n_per_surf=20_000, seed=42)
+        write_chunk(0, A, rng.integers(0, 10, len(A)))
+        B = make_room_chunk(n_per_surf=15_000, seed=43)
+        write_chunk(1, B + np.array([offset_m, 0.0, 0.0]),
+                    rng.integers(10, 20, len(B)))
+        (out / "camera_frames.txt").write_text(" ".join(str(f) for f in range(20)))
+        eye = " ".join(f"{x:.9g}" for x in np.eye(4).reshape(-1))
+        (out / "camera_poses.txt").write_text("\n".join([eye] * 20) + "\n")
+
+    def test_anneal_recovers_offset_beyond_single_round_cap(self, tmp_path):
+        """A 90 mm real offset with a 40 mm per-round cap: single-shot REFUSES it
+        (proven by rounds=1), the anneal accumulates it in bounded steps."""
+        import json
+        from reconstruction.surface_fit.fine_register import run as run_finereg
+        self._write_scene(tmp_path, offset_m=0.09)
+        n1 = run_finereg(tmp_path, accept_sep_m=0.024, max_correction_m=0.04,
+                         pieces_per_chunk=1, anneal_rounds=1)
+        rep1 = json.loads((tmp_path / "fine_register_report.json").read_text())
+        assert n1 == 0 and not rep1["accepted"]          # single-shot can only refuse
+        self._write_scene(tmp_path, offset_m=0.09)       # fresh copy (run mutates PLYs)
+        n = run_finereg(tmp_path, accept_sep_m=0.024, max_correction_m=0.04,
+                        pieces_per_chunk=1, anneal_rounds=5)
+        rep = json.loads((tmp_path / "fine_register_report.json").read_text())
+        assert n >= 1
+        assert rep["anneal"]["rounds_run"] >= 2
+        assert max(rep["sep_after_m"].values()) < 0.03, rep["sep_after_m"]
+
+    def test_anneal_total_budget_held(self, tmp_path):
+        """The accumulated correction must respect max_total_correction_m: a
+        300 mm offset with a 60 mm budget stays essentially uncorrected."""
+        import json
+        import numpy as np
+        from reconstruction.surface_fit.fine_register import run as run_finereg
+        self._write_scene(tmp_path, offset_m=0.30)
+        run_finereg(tmp_path, accept_sep_m=0.024, max_correction_m=0.05,
+                    pieces_per_chunk=1, anneal_rounds=6,
+                    max_total_correction_m=0.06)
+        rep = json.loads((tmp_path / "fine_register_report.json").read_text())
+        for u, M in rep["corrections"].items():
+            t = np.array(M)[:3, 3]
+            assert np.linalg.norm(t) <= 0.06 + 1e-6, (u, np.linalg.norm(t))
+
+    def test_anneal_rollback_when_nothing_improves(self, tmp_path):
+        """Perfectly aligned chunks: no round can improve the (already tiny)
+        worst separation — corrections stay identity and nothing degrades."""
+        import json
+        import numpy as np
+        from reconstruction.surface_fit.fine_register import run as run_finereg
+        self._write_scene(tmp_path, offset_m=0.0)
+        run_finereg(tmp_path, accept_sep_m=0.024, max_correction_m=0.05,
+                    pieces_per_chunk=1, anneal_rounds=4)
+        rep = json.loads((tmp_path / "fine_register_report.json").read_text())
+        worst_b = max(rep["sep_before_m"].values())
+        worst_a = max(rep["sep_after_m"].values())
+        assert worst_a <= max(worst_b, 0.024) + 1e-6
+        if rep["anneal"]["rolled_back"]:
+            for M in rep["corrections"].values():
+                assert np.allclose(np.array(M), np.eye(4))

@@ -402,6 +402,10 @@ def _run_fine_register_step(pipe: WorkerPipe, output_dir: Path, recon_cfg: dict)
         cmd += ["--capture", str(fcfg["capture_m"])]
     if fcfg.get("iters") is not None:
         cmd += ["--iters", str(fcfg["iters"])]
+    if fcfg.get("anneal_rounds") is not None:
+        cmd += ["--anneal-rounds", str(fcfg["anneal_rounds"])]
+    if fcfg.get("max_total_correction_m") is not None:
+        cmd += ["--max-total-correction", str(fcfg["max_total_correction_m"])]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, bufsize=1, cwd=str(server_dir))
     for line in p.stdout:
@@ -1573,11 +1577,22 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                     # coarse point-map fit (25-30cm)
         cfg_v["Model"]["frame_ownership"] = True    # one frame → one writer: overlap
                                                     # frames stop entering the cloud twice
+        cfg_v["Model"]["ownership_backfill"] = bool(  # Phase D: the non-owner copy
+            _va_cfg.get("ownership_backfill", True))  # recovers EXACTLY the pixels the
+                                                    # owner drops (frozen thresholds →
+                                                    # complements, never duplicates)
         cfg_v["Model"]["elastic_seam"] = bool(      # per-frame seam CONSENSUS: the same
             _va_cfg.get("elastic_seam", True))      # pixel seen by two chunks lands at
                                                     # ONE 3D position (rigid residual per
                                                     # shared frame, blended across the
                                                     # overlap, poses moved with points)
+        cfg_v["Model"]["elastic_smooth_win"] = int( # tame the per-frame fits: moving
+            _va_cfg.get("elastic_smooth_win", 5))   # average along the trajectory —
+                                                    # adjacent frames stop receiving
+                                                    # uncorrelated rigid moves
+        cfg_v["Model"]["elastic_max_t_m"] = float(  # |t| cap per fit: beyond this the
+            _va_cfg.get("elastic_max_t_m", 0.30))   # correction is an upstream pose
+                                                    # problem, scaled down not faked
         cfg_v["Model"]["intra_chunk"] = bool(       # INTRA-CHUNK per-frame consensus:
             _va_cfg.get("intra_chunk", True))       # bounded fields, endpoints clamped
                                                     # to the seam consensus — corrections
@@ -1585,6 +1600,14 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                     # by construction; per-chunk held-out
                                                     # gates; worst case = identity per
                                                     # chunk (run 3 behaviour).
+        cfg_v["Model"]["hybrid_da3"] = bool(        # Phase E-lite: per-frame DA3 depth
+            _va_cfg.get("hybrid_da3", True))        # SHAPE at omega scale/pose — the
+                                                    # serpenteado is intrinsic to omega's
+                                                    # feed-forward output (A/B 2026-07-11),
+                                                    # DA3's isolated depth is straight
+        cfg_v["Model"]["hybrid_da3_far_m"] = float( # beyond this omega depth the frame
+            _va_cfg.get("hybrid_da3_far_m", 15.0))  # keeps omega (isolated DA3 degrades
+                                                    # at range — user-observed)
         cfg_v["Model"]["depth_graph"] = True        # per-frame DEPTH graph: different
                                                     # frames agree on the depth of the
                                                     # same surface (kills the in-depth
@@ -1673,8 +1696,18 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             _chunk = max(24, min(60, _fits))
             _ov = _chunk // 2
             _chunked_already = True
-            _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov, _anch_per_chunk)
-            _ensure_anchors([_sel_files[i] for i in _anchor_idx])
+            if bool(_va_cfg.get("hybrid_da3", True)):
+                # Phase E-lite: EVERY keyframe needs its isolated DA3 depth map
+                # (the hybrid write re-shapes each frame on DA3) — the anchor
+                # subset alone would leave most frames on raw omega depth
+                pipe.send_log(f"HYBRID-DA3: extracting isolated DA3 depth for all "
+                              f"{_n_selected} keyframes (shape source for the "
+                              f"hybrid write)")
+                _ensure_anchors(list(_sel_files))
+            else:
+                _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov,
+                                                  _anch_per_chunk)
+                _ensure_anchors([_sel_files[i] for i in _anchor_idx])
             _apply_chunked_metric(vggt_config, _chunk, _ov)
         else:
             _chunk = min(int(vggt_config["Model"]["chunk_size"]), _fits)

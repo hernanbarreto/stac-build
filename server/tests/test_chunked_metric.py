@@ -246,6 +246,119 @@ def test_frame_owner_partitions_every_frame_once():
             assert owner[mid] == k
 
 
+def _synthetic_frame(H=24, W=32, z_true=None, fx=40.0):
+    """Camera at a known c2w; world points unprojected from a given depth map."""
+    c2w = np.eye(4)
+    c2w[:3, 3] = [1.0, -2.0, 0.5]
+    if z_true is None:
+        z_true = np.full((H, W), 4.0, np.float32)
+    us, vs = np.meshgrid(np.arange(W), np.arange(H))
+    rays = np.stack([(us - W / 2) / fx, (vs - H / 2) / fx, np.ones_like(us)],
+                    axis=-1).astype(np.float64)
+    pts_cam = rays * z_true[..., None]
+    wp = pts_cam @ c2w[:3, :3].T + c2w[:3, 3]
+    return wp, z_true, c2w
+
+
+def test_hybrid_substitute_recovers_straight_wall():
+    """Omega sees a WAVY wall (sinusoidal depth ripple on a flat surface); DA3
+    sees it straight but at a jittered absolute scale. The hybrid must return
+    the straight shape AT omega's scale, moving points along their own rays."""
+    from loop_utils.metric_lock import hybrid_substitute, anchor_ratio
+    H, W = 24, 32
+    flat = np.full((H, W), 4.0, np.float32)
+    ripple = flat + 0.15 * np.sin(np.linspace(0, 6 * np.pi, W))[None, :].astype(np.float32)
+    wp, zo, c2w = _synthetic_frame(H, W, z_true=ripple)
+    conf = np.ones((H, W), np.float32)
+    da3 = flat * 1.18                               # straight, wrong absolute scale
+    r = anchor_ratio(zo, da3, conf=conf)
+    wp_new, z_new, n, med = hybrid_substitute(wp, conf, zo, c2w, da3, r)
+    assert n > H * W * 0.9
+    # depth is now flat (shape from DA3) and scale-consistent with omega
+    inner = z_new[:, 2:-2]
+    assert float(inner.std()) < 0.01, float(inner.std())
+    # scale stays in omega's neighbourhood (the NEAR-band ratio biases toward
+    # ripple troughs on this synthetic — chunk-level scale graph owns precision)
+    assert abs(float(np.median(z_new)) / 4.0 - 1.0) < 0.06
+    # points moved along their own rays: direction from camera unchanged
+    C = c2w[:3, 3]
+    d_old = wp.reshape(-1, 3) - C
+    d_new = wp_new.reshape(-1, 3) - C
+    cos = np.sum(d_old * d_new, axis=1) / (
+        np.linalg.norm(d_old, axis=1) * np.linalg.norm(d_new, axis=1))
+    assert np.all(cos > 1 - 1e-9)
+
+
+def test_hybrid_substitute_gates():
+    """Far pixels, sky pixels and gross-disagreement pixels keep omega."""
+    from loop_utils.metric_lock import hybrid_substitute
+    H, W = 10, 12
+    zo = np.full((H, W), 4.0, np.float32)
+    zo[0, :] = 30.0                                  # far row
+    wp, _, c2w = _synthetic_frame(H, W, z_true=zo)
+    conf = np.ones((H, W), np.float32)
+    conf[1, :] = 0.0                                 # sky row
+    da3 = np.full((H, W), 4.0, np.float32)
+    da3[2, :] = 40.0                                 # gross disagreement row
+    wp_new, z_new, n, _ = hybrid_substitute(wp, conf, zo, c2w, da3, 1.0,
+                                            far_m=15.0)
+    assert np.allclose(wp_new[0], wp[0]) and np.allclose(z_new[0], zo[0])   # far
+    assert np.allclose(wp_new[1], wp[1])                                    # sky
+    assert np.allclose(wp_new[2], wp[2])                                    # gated
+    assert n == (H - 3) * W
+
+
+def test_hybrid_substitute_starved_is_identity():
+    from loop_utils.metric_lock import hybrid_substitute
+    H, W = 6, 8
+    zo = np.full((H, W), 4.0, np.float32)
+    wp, _, c2w = _synthetic_frame(H, W, z_true=zo)
+    conf = np.zeros((H, W), np.float32)              # nothing valid
+    wp_new, z_new, n, med = hybrid_substitute(wp, conf, zo, c2w, zo, 1.0)
+    assert n == 0 and med == 0.0
+    assert np.allclose(wp_new, wp) and np.allclose(z_new, zo)
+
+
+def test_backfill_mask_complements_owner_writes():
+    """The write mask of the owner and the backfill mask of the non-owner are
+    exact complements over the pixel grid: every pixel is written by exactly one
+    side (or by nobody when invalid in both)."""
+    from loop_utils.metric_lock import backfill_mask
+    rng9 = np.random.default_rng(31)
+    conf_owner = rng9.uniform(0, 1, 4000).astype(np.float32)
+    conf_owner[:200] = 0.0                                   # sky/invalid in owner
+    thr = float(np.percentile(conf_owner[conf_owner > 1e-5], 10.0))
+    owner_writes = (conf_owner >= thr) & (conf_owner > 1e-5)
+    bf = backfill_mask(conf_owner, thr)
+    assert not np.any(owner_writes & bf)                     # never both
+    assert np.all(owner_writes | bf)                         # never neither
+    # sick owner (thr None): everything may be backfilled
+    assert backfill_mask(conf_owner, None).all()
+    # conf filter off (thr -1.0): owner writes all valid px → backfill only invalid
+    bf_off = backfill_mask(conf_owner, -1.0)
+    assert np.array_equal(bf_off, conf_owner <= 1e-5)
+
+
+def test_backfill_never_duplicates_a_pixel():
+    """End-to-end mask algebra on a synthetic shared frame: owner copy + backfilled
+    non-owner copy write disjoint pixel sets whose union is every pixel valid in
+    at least one copy that passes its own bar."""
+    from loop_utils.metric_lock import backfill_mask
+    rngA = np.random.default_rng(32)
+    HW = 3000
+    conf_owner = rngA.uniform(0, 1, HW).astype(np.float32)
+    conf_other = rngA.uniform(0, 1, HW).astype(np.float32)
+    conf_other[100:150] = 0.0                                # sky in the non-owner
+    thr_o = float(np.percentile(conf_owner[conf_owner > 1e-5], 10.0))
+    owner_px = (conf_owner >= thr_o) & (conf_owner > 1e-5)
+    kept = np.where(backfill_mask(conf_owner, thr_o), conf_other, 0.0)
+    nonowner_px = kept > 1e-5                                # what the writer keeps
+    assert not np.any(owner_px & nonowner_px)
+    # a pixel the owner dropped and the non-owner sees IS recovered
+    recovered = ~owner_px & (conf_other > 1e-5)
+    assert np.array_equal(nonowner_px, recovered)
+
+
 # ── elastic per-frame seam consensus ─────────────────────────────────
 
 def _small_rigid(rng_, ang_deg, t_m):
@@ -314,6 +427,71 @@ def test_elastic_corrections_smooth_fields():
         steps = np.linalg.norm(np.diff(corr[:, :3, 3], axis=0), axis=1)
         t_max = max(np.linalg.norm(fits[j][g][1]) for j in fits for g in fits[j])
         assert steps.max() <= t_max / 13.0 * 1.5 + 1e-12, (k, steps.max())
+
+
+def test_smooth_seam_fits_passthrough_and_smoothing():
+    """window=1 + no cap is a passthrough; window>1 damps uncorrelated
+    frame-to-frame fit jitter without biasing a constant fit."""
+    from loop_utils.metric_lock import smooth_seam_fits, rigid_mat
+    rng7 = np.random.default_rng(21)
+    fits = {0: {g: _small_rigid(rng7, 0.4, 0.05) for g in range(14, 28)}}
+    same, ncap = smooth_seam_fits(fits, window=1, max_t=None)
+    assert ncap == 0
+    for g in fits[0]:
+        assert np.allclose(rigid_mat(*same[0][g]), rigid_mat(*fits[0][g]), atol=1e-12)
+    # jitter damping: variance of translation steps shrinks
+    sm, _ = smooth_seam_fits(fits, window=5, max_t=None)
+    gs = sorted(fits[0])
+    step = lambda d: np.linalg.norm(np.diff([d[g][1] for g in gs], axis=0), axis=1)
+    assert step(sm[0]).mean() < step(fits[0]).mean() * 0.75
+    # constant fits stay exactly constant (no smoothing bias)
+    R, t = _small_rigid(rng7, 0.3, 0.02)
+    const = {0: {g: (R, t) for g in range(10)}}
+    smc, _ = smooth_seam_fits(const, window=5, max_t=None)
+    for g in range(10):
+        assert np.allclose(smc[0][g][0], R, atol=1e-12)
+        assert np.allclose(smc[0][g][1], t, atol=1e-12)
+
+
+def test_smooth_seam_fits_translation_cap():
+    """A fit beyond max_t is scaled down AS A WHOLE TWIST: |t| lands exactly at
+    the cap and the rotation angle shrinks by the same fraction."""
+    import cv2
+    from loop_utils.metric_lock import smooth_seam_fits
+    ang = np.radians(2.0)
+    R = np.array([[np.cos(ang), -np.sin(ang), 0],
+                  [np.sin(ang), np.cos(ang), 0], [0, 0, 1.0]])
+    t = np.array([0.6, 0.0, 0.0])                      # 60 cm, cap at 30
+    fits = {0: {5: (R, t)}}
+    sm, ncap = smooth_seam_fits(fits, window=1, max_t=0.30)
+    assert ncap == 1
+    Rc, tc = sm[0][5]
+    assert abs(np.linalg.norm(tc) - 0.30) < 1e-9
+    rv, _ = cv2.Rodrigues(Rc)
+    assert abs(np.linalg.norm(rv) - ang * 0.5) < 1e-9
+    # a fit under the cap is untouched
+    fits_ok = {0: {5: (R, np.array([0.1, 0.0, 0.0]))}}
+    same, ncap2 = smooth_seam_fits(fits_ok, window=1, max_t=0.30)
+    assert ncap2 == 0 and np.allclose(same[0][5][1], [0.1, 0, 0], atol=1e-12)
+
+
+def test_smooth_seam_fits_preserves_consensus_coincidence():
+    """Corrections built from SMOOTHED fits still make both copies coincide:
+    A_g @ T_g_smooth == B_g (both sides consume the same tamed fit)."""
+    from loop_utils.metric_lock import (smooth_seam_fits, elastic_corrections,
+                                        rigid_mat)
+    rng8 = np.random.default_rng(22)
+    ci = [(0, 28), (14, 42), (28, 56)]
+    raw = {j: {g: _small_rigid(rng8, 0.5, 0.4)      # some fits exceed the cap
+               for g in range(ci[j + 1][0], ci[j][1])} for j in range(2)}
+    fits, _ = smooth_seam_fits(raw, window=5, max_t=0.30)
+    corr = [elastic_corrections(ci, k, fits) for k in range(3)]
+    for j in range(2):
+        for g in range(ci[j + 1][0], ci[j][1]):
+            T = rigid_mat(*fits[j][g])
+            A = corr[j][g - ci[j][0]]
+            B = corr[j + 1][g - ci[j + 1][0]]
+            assert np.allclose(A @ T, B, atol=1e-10), (j, g)
 
 
 def test_elastic_end_to_end_copies_coincide():

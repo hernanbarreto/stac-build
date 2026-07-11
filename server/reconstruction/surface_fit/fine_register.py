@@ -207,6 +207,23 @@ def _rodrigues(w: np.ndarray) -> np.ndarray:
     return np.eye(3) + np.sin(th) * K + (1 - np.cos(th)) * (K @ K)
 
 
+def _scale_rigid(T: np.ndarray, frac: float) -> np.ndarray:
+    """Fraction of a rigid transform: rotation angle (on its own axis) and
+    translation both scaled by ``frac`` — the bounded step of the anneal."""
+    R = np.asarray(T[:3, :3], np.float64)
+    tr = np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0)
+    ang = float(np.arccos(tr))
+    if ang < _EPS:
+        w = np.zeros(3)
+    else:
+        w = (ang / (2.0 * np.sin(ang))) * np.array(
+            [R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
+    out = np.eye(4)
+    out[:3, :3] = _rodrigues(w * frac)
+    out[:3, 3] = np.asarray(T[:3, 3], np.float64) * frac
+    return out
+
+
 def fit_shared_ground(ground_pts: Dict, corr: Dict,
                       tilt_lock_deg: float = 2.0) -> Optional[Tuple[np.ndarray, float]]:
     """One shared ground plane (n, d) fitted to a LEVEL's (corrected) ground
@@ -559,7 +576,8 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
         max_correction_m: float = 0.12, dist_thresh: float = 0.015,
         max_planes: int = 8, pieces_per_chunk: int = 5,
         ground_datum: bool = True, capture_m: float = 0.25,
-        iters: int = 20) -> int:
+        iters: int = 20, anneal_rounds: int = 3,
+        max_total_correction_m: float = 0.75) -> int:
     """Fine-register all backbone chunk_N.ply in place; rewrite poses of the
     frames each chunk owns. Returns the number of corrected chunks.
 
@@ -676,17 +694,84 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
         return out
 
     report.sep_before_m = _pair_metric(planes)
-    corr = solve_joint(planes, anchor, iters=iters, capture_m=capture_m,
-                       ground_pts=gpts or None, unit_conf=unit_conf or None)
+    worst_before = max(report.sep_before_m.values(), default=0.0)
 
-    # refusal per unit: beyond the cap = upstream pose problem, don't fake it
-    for u in list(corr.keys()):
-        shift = float(np.linalg.norm(corr[u][:3, 3]))
-        if shift > max_correction_m:
-            logger.warning("fine_register: unit %s correction %.1fmm exceeds max "
-                           "%.1fmm — REFUSED", u, shift * 1000, max_correction_m * 1000)
-            corr[u] = np.eye(4)
-            report.accepted = False
+    # ── ANNEAL: up to ``anneal_rounds`` bounded solve→apply→re-measure rounds.
+    # test4 measured chunk offsets of 300-1100mm that a single 250mm-capped solve
+    # can only REFUSE; bounded steps let a real large offset accumulate while the
+    # per-round cap still refuses any single-step fantasy. Two honesty guards:
+    # per-unit total budget (``max_total_correction_m``) and a FULL ROLLBACK to
+    # identity if the final worst separation did not improve on where it started
+    # (an accumulation that doesn't pay for itself is a warp, not a fix). ──
+    corr = {u: np.eye(4) for u in planes}
+    best_corr = {u: np.eye(4) for u in planes}
+    worst_best = worst_before
+    cur = planes
+    worst_prev = worst_before
+    rounds_run = 0
+    worst_by_round = []
+    for rnd in range(1, max(int(anneal_rounds), 1) + 1):
+        step = solve_joint(cur, anchor, iters=iters, capture_m=capture_m,
+                           ground_pts=gpts or None, unit_conf=unit_conf or None)
+        n_act, n_ref = 0, 0
+        for u in list(step.keys()):
+            shift = float(np.linalg.norm(step[u][:3, 3]))
+            if shift > max_correction_m:
+                if anneal_rounds > 1:
+                    # bounded step toward the solve's direction: the re-measure
+                    # after every round (plus the rollback) polices whether the
+                    # direction was real — refusal-only never accumulates
+                    step[u] = _scale_rigid(step[u], max_correction_m / shift)
+                    logger.info("fine_register: unit %s correction %.1fmm CLAMPED "
+                                "to %.0fmm step (round %d)",
+                                u, shift * 1000, max_correction_m * 1000, rnd)
+                else:
+                    logger.warning("fine_register: unit %s correction %.1fmm "
+                                   "exceeds max %.1fmm — REFUSED (round %d)",
+                                   u, shift * 1000, max_correction_m * 1000, rnd)
+                    step[u] = np.eye(4)
+                    report.accepted = False
+                    n_ref += 1
+                    continue
+            total = step[u] @ corr[u]
+            if float(np.linalg.norm(total[:3, 3])) > max_total_correction_m:
+                logger.warning("fine_register: unit %s total correction would "
+                               "exceed budget %.0fmm — HELD (round %d)",
+                               u, max_total_correction_m * 1000, rnd)
+                step[u] = np.eye(4)
+                n_ref += 1
+                continue
+            if shift > 1e-6:
+                n_act += 1
+            corr[u] = total
+        rounds_run = rnd
+        cur = {u: [_apply_to_plane(p, step[u]) for p in cur[u]] for u in cur}
+        worst_now = max(_pair_metric(cur).values(), default=0.0)
+        worst_by_round.append(worst_now)
+        logger.info("fine_register: anneal round %d/%d — worst separation "
+                    "%.2fmm → %.2fmm (%d unit step(s), %d refused/held)",
+                    rnd, anneal_rounds, worst_prev * 1000, worst_now * 1000,
+                    n_act, n_ref)
+        if worst_now < worst_best:
+            worst_best = worst_now
+            best_corr = {u: M.copy() for u, M in corr.items()}
+        if n_act == 0:
+            logger.info("fine_register: anneal converged — no unit moved in "
+                        "round %d", rnd)
+            break
+        if worst_now <= accept_sep_m or worst_now > worst_prev * 0.98:
+            break                       # goal reached, or <2% gain: stop honestly
+        worst_prev = worst_now
+
+    rolled_back = worst_best >= worst_before and worst_before > 0
+    if rolled_back:
+        logger.warning("fine_register: no round improved the worst separation "
+                       "(%.2fmm best vs %.2fmm before) — FULL ROLLBACK, chunks "
+                       "left untouched", worst_best * 1000, worst_before * 1000)
+        corr = {u: np.eye(4) for u in planes}
+        report.accepted = False
+    else:
+        corr = best_corr
 
     fixed = {u: [_apply_to_plane(p, corr[u]) for p in planes[u]] for u in planes}
     report.sep_after_m = _pair_metric(fixed)
@@ -711,6 +796,10 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
         "ground_datum_units": [sorted(str(u) for u in g) for g in gpts],
         "loop_pairs": loop_pairs,
         "unit_conf": {str(u): c for u, c in unit_conf.items()},
+        "anneal": {"rounds_requested": anneal_rounds, "rounds_run": rounds_run,
+                   "worst_by_round_m": worst_by_round,
+                   "max_total_correction_m": max_total_correction_m,
+                   "rolled_back": rolled_back},
     }, indent=2))
 
     # ── apply: per-frame interpolated correction (points + poses) ──
@@ -796,10 +885,15 @@ def main():
                     help="plane-match capture radius (m) for the solve's first half")
     ap.add_argument("--iters", type=int, default=20,
                     help="joint Gauss-Newton iterations")
+    ap.add_argument("--anneal-rounds", type=int, default=3,
+                    help="bounded solve→apply→re-measure rounds (1 = single-shot)")
+    ap.add_argument("--max-total-correction", type=float, default=0.75,
+                    help="per-unit accumulated correction budget across rounds (m)")
     a = ap.parse_args()
     run(Path(a.output_dir), accept_sep_m=a.accept_sep,
         max_correction_m=a.max_correction, pieces_per_chunk=a.pieces,
-        ground_datum=not a.no_ground_datum, capture_m=a.capture, iters=a.iters)
+        ground_datum=not a.no_ground_datum, capture_m=a.capture, iters=a.iters,
+        anneal_rounds=a.anneal_rounds, max_total_correction_m=a.max_total_correction)
 
 
 if __name__ == "__main__":
