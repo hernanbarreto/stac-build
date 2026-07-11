@@ -1578,6 +1578,13 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                     # ONE 3D position (rigid residual per
                                                     # shared frame, blended across the
                                                     # overlap, poses moved with points)
+        cfg_v["Model"]["intra_chunk"] = bool(       # INTRA-CHUNK per-frame consensus:
+            _va_cfg.get("intra_chunk", True))       # bounded fields, endpoints clamped
+                                                    # to the seam consensus — corrections
+                                                    # longer than one chunk are impossible
+                                                    # by construction; per-chunk held-out
+                                                    # gates; worst case = identity per
+                                                    # chunk (run 3 behaviour).
         cfg_v["Model"]["depth_graph"] = True        # per-frame DEPTH graph: different
                                                     # frames agree on the depth of the
                                                     # same surface (kills the in-depth

@@ -732,6 +732,14 @@ reconstruction:
                                         # SUSPECT — the chunk keeps writing points but argues
                                         # more quietly (elastic consensus biased toward the
                                         # trusted side; finereg down-weights its planes 0.5).
+    intra_chunk: true                   # INTRA-CHUNK per-frame consensus (set false → run 3
+                                        # exactly). Corrects the warp BETWEEN frames of the
+                                        # same chunk: each chunk solved ALONE with endpoints
+                                        # clamped to the seam consensus — a correction longer
+                                        # than one chunk is impossible by construction (the
+                                        # lesson from the failed global pose graph); per-chunk
+                                        # held-out pairs gate each field; a chunk that does
+                                        # not earn its correction stays identity, alone.
 
   # ── SIMPLE pipeline (one concept — validated 2026-07-09 vs the VGGT-Omega web demo) ──
   # Sparse frames (~1 fps) → ONE VGGT-Omega pass (no windows → no seams → no onion) →

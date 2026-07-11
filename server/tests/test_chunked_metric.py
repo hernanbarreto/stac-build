@@ -816,3 +816,65 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn(); print("PASS", name)
     print("all chunked-metric tests passed")
+
+
+# ── intra-chunk consensus (bounded fields, anchored boundaries) ──────
+
+def test_solve_chunk_field_bump_recovered_boundaries_clamped():
+    """A warp bump INSIDE the chunk is recovered; the endpoints are exactly
+    zero (hard clamp) — no field longer than the chunk can exist."""
+    from loop_utils.metric_lock import solve_chunk_field
+    rng20 = np.random.default_rng(60)
+    S = 42
+    ty = 0.06 * np.sin(np.pi * np.arange(S) / (S - 1)) ** 2   # bump, 0 at ends
+    xi_true = np.zeros((S, 6)); xi_true[:, 4] = ty
+    taus = [(f, f + d, xi_true[f] - xi_true[f + d] + rng20.normal(0, 5e-4, 6), 1.0)
+            for d in (1, 2, 3, 5, 8, 12) for f in range(S - d)]
+    xi = solve_chunk_field(taus, S)
+    assert abs(xi[0, 4]) < 1e-12 and abs(xi[S - 1, 4]) < 1e-12
+    corr = np.dot(xi[:, 4], ty) / np.dot(ty, ty)
+    assert corr > 0.6, corr                    # bump captured (prior damps a bit)
+    # pure noise never integrates into a bend
+    noise = [(f, f + d, rng20.normal(0, 5e-4, 6), 1.0)
+             for d in (1, 2, 3, 5) for f in range(S - d)]
+    xi_n = solve_chunk_field(noise, S)
+    assert np.max(np.abs(xi_n)) < 0.003
+
+
+def test_blend_chunk_fields_continuous_and_consistent():
+    """Shared frames get ONE blended correction; chunks without a field
+    contribute identity; the blend never exceeds the inputs."""
+    from loop_utils.metric_lock import blend_chunk_fields
+    ci = [(0, 42), (21, 63), (42, 84)]
+    S = 42
+    f0 = np.zeros((S, 6)); f0[:, 4] = 0.04 * np.sin(np.pi * np.arange(S) / (S - 1)) ** 2
+    f2 = np.zeros((S, 6)); f2[:, 4] = -0.03 * np.sin(np.pi * np.arange(S) / (S - 1)) ** 2
+    xi = blend_chunk_fields(ci, {0: f0, 2: f2}, 84)
+    assert np.max(np.abs(xi[:, 4])) <= 0.04 + 1e-9
+    # frame 21 (start of chunk 1, inside chunk 0): single value, no conflict
+    assert xi.shape == (84, 6)
+    # chunk 1 contributed nothing → its exclusive centre region is only pulled
+    # by neighbours' near-zero edges: tiny
+    assert abs(xi[42, 4]) < 0.02
+
+
+def test_chunk_field_verdict_gates():
+    from loop_utils.metric_lock import solve_chunk_field, chunk_field_verdict
+    rng21 = np.random.default_rng(61)
+    S = 42
+    ty = 0.05 * np.sin(np.pi * np.arange(S) / (S - 1)) ** 2
+    xi_true = np.zeros((S, 6)); xi_true[:, 4] = ty
+    taus = [(f, f + d, xi_true[f] - xi_true[f + d] + rng21.normal(0, 5e-4, 6), 1.0)
+            for d in (1, 2, 3, 5, 8, 12) for f in range(S - d)]
+    held = []
+    for f in range(S - 4):
+        p = rng21.uniform(-3, 3, (400, 3))
+        q = p + (xi_true[f, 3:] - xi_true[f + 4, 3:])
+        held.append((f, f + 4, p, q))
+    xi = solve_chunk_field(taus, S)
+    v = chunk_field_verdict(xi, taus, held)
+    assert v["bounded"] and v["improves"], v
+    # a wild field fails bounded (median-based signal scale)
+    wild = xi.copy(); wild[:, 4] += np.linspace(0, 1.0, S)
+    v_w = chunk_field_verdict(wild, taus, held)
+    assert not v_w["bounded"]
