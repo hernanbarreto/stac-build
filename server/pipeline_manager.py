@@ -528,15 +528,29 @@ class PipelineManager:
         # up front, THEN run every stage. The resume probes are skipped entirely:
         # consulting them first is what made Replace a no-op on sessions whose
         # artifacts all probed complete.
-        if replace:
+        #
+        # RECONSTRUCTION always starts from scratch: whenever the reconstruction
+        # stage is part of this run, output/ is wiped UNCONDITIONALLY — a
+        # reconstruction must never reuse any prior artifact (resume subtleties
+        # inside the stages caused silent partial reuse; the only safe contract
+        # is a clean slate). Stage-only runs (TSDF / segmentation) still resume
+        # on the existing outputs.
+        recon_requested = any(
+            s.stage.enabled and s.stage.id == StageId.RECONSTRUCTION
+            for s in job.stages)
+        if replace or recon_requested:
+            if recon_requested and not replace:
+                logger.info("[Pipeline] reconstruction stage requested → output/ "
+                            "wiped unconditionally (a reconstruction never reuses "
+                            "prior artifacts)")
             self._wipe_outputs_for_replace(Path(session_dir), output_dir)
 
-        # RESUME MODE (replace off): the pipeline detects on its own which stages
+        # RESUME MODE (no wipe): the pipeline detects on its own which stages
         # this session already completed (artifact + freshness probes) and only
         # runs what is missing/stale — the user never selects stages. Once any
         # stage actually runs, everything downstream is considered stale (its
         # inputs just changed) and runs too.
-        upstream_ran = replace
+        upstream_ran = replace or recon_requested
 
         for idx, stage_state in enumerate(job.stages):
             if not stage_state.stage.enabled:
