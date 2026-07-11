@@ -743,7 +743,13 @@ reconstruction:
                                         # in serpenteado or duplicates — acquitted as the
                                         # visible-warp culprit despite its unsmoothed
                                         # per-frame fits (|t| up to 159 cm at seam 7->8).
-    hybrid_da3: true                    # Phase E-lite 2026-07-11 (BEST OF BOTH WORLDS): each
+    hybrid_da3: false                   # E2 2026-07-11 VERDICT: the DA3 shape DOES reduce
+                                        # serpenteado (bet validated) but naive per-frame
+                                        # substitution is mutually inconsistent between frames
+                                        # (depth-graph disagreement 0.72->2.17%) -> layered
+                                        # drift dominates. OFF: multi-view consistency now
+                                        # comes from pose_refine (E-full); DA3 stays a scale
+                                        # anchor. Original E-lite doc: each
                                         # keyframe adopts DA3's per-pixel depth SHAPE at
                                         # omega's scale and pose, right after metric-lock —
                                         # Phase A proved the serpenteado is intrinsic to
@@ -863,8 +869,32 @@ reconstruction:
   # relative drift) → refined camera_poses.txt. The TSDF then integrates depth at the refined
   # poses. Applies to ALL chunked backbones — da3, mapanything AND vggtomega (for omega
   # the order is Omega → scale_align → BA, so the BA refines already-metric poses).
+  pose_refine:                          # E-full 2026-07-11: JOINT point-to-plane optimization of
+    enabled: true                       # ALL frame poses (multi-view global ICP over per-frame
+                                        # world corrections + odometry smoothness + weak identity
+                                        # leash, gauge on frame 0). Attacks the root defect Phase A
+                                        # isolated: omega's feed-forward per-frame poses are never
+                                        # reconciled -> covisible frames place the same surface at
+                                        # different poses (layering/drift, wavy edges). Self-gated:
+                                        # a FRESH post-solve measurement must show >= min_gain less
+                                        # inter-frame disagreement or NOTHING is applied. Synthetic
+                                        # validation: disagreement 31 -> 14 mm, exact on perfect
+                                        # correspondences. Pure CPU, runs after finereg slot.
+    # pair_window: 10                   # covisibility span in keyframe order
+    # samples_per_frame: 4000           # projected samples per frame
+    # rel_tol: 0.15                     # depth-compat tolerance (rel; abs cap 0.6 m)
+    # odo_weight: 2.0                   # smoothness of corrections along the walk
+    # leash_weight: 0.1                 # weak pull toward identity (unobservable dirs)
+    # min_gain: 0.10                    # required fresh-measure improvement, else identity
+    # outer_iters: 3                    # measure->solve->re-place rounds (global ICP)
   fine_register:                        # surface_fit stage 0 — INDEPENDENT of the BA (which stays
-    enabled: true                       # off): plane-constrained point-to-plane alignment between
+    enabled: false                      # E2 2026-07-11: NEUTRALIZED on test4 — its plane-match
+                                        # constraints carry no usable signal here (E1: null-space
+                                        # proposals, 250mm applied for 0.4mm gain; E2: even
+                                        # projected corrections degrade -> FULL ROLLBACK, 0 chunks).
+                                        # OFF to save GPU-run minutes; pose_refine (E-full) is the
+                                        # grounded replacement. Original doc:
+                                        # plane-constrained point-to-plane alignment between
                                         # chunk PLYs, run before CloudComPy merges them. Collapses
                                         # the residual mm→cm inter-chunk bias that becomes TSDF
                                         # double layers; the affected frame poses get the same rigid

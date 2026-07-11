@@ -378,6 +378,41 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # just layered — the surface_fit stage-1 WLOP will partially compensate). ──
     if (recon_cfg.get("fine_register", {}) or {}).get("enabled", True):
         _run_fine_register_step(pipe, output_dir, recon_cfg)
+    # ── E-full pose_refine: JOINT point-to-plane optimization of all frame
+    # poses (multi-view global ICP + smoothness priors) — attacks the root
+    # defect Phase A isolated: feed-forward per-frame poses never reconciled.
+    # Self-gated: a fresh post-solve measurement must show the cloud disagrees
+    # with itself less, else it applies nothing. Best-effort like finereg. ──
+    if (recon_cfg.get("pose_refine", {}) or {}).get("enabled", True):
+        _run_pose_refine_step(pipe, output_dir, recon_cfg)
+
+
+def _run_pose_refine_step(pipe: WorkerPipe, output_dir: Path, recon_cfg: dict):
+    """E-full over output/chunk_*.ply (reproject_chunks contract): global
+    per-frame pose refinement. Skips itself when inputs are missing."""
+    server_dir = Path(__file__).resolve().parent.parent
+    py = sys.executable
+    pipe.send_progress(69, "Global pose refinement (multi-view consensus)...",
+                       stage="reconstruction")
+    cmd = [py, "-m", "reconstruction.pose_refine",
+           "--output-dir", str(output_dir)]
+    pcfg = recon_cfg.get("pose_refine", {}) or {}
+    for key, flag in (("pair_window", "--pair-window"),
+                      ("samples_per_frame", "--samples"),
+                      ("rel_tol", "--rel-tol"),
+                      ("odo_weight", "--odo-weight"),
+                      ("leash_weight", "--leash-weight"),
+                      ("min_gain", "--min-gain"),
+                      ("outer_iters", "--outer-iters")):
+        if pcfg.get(key) is not None:
+            cmd += [flag, str(pcfg[key])]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, bufsize=1, cwd=str(server_dir))
+    for line in p.stdout:
+        pipe.send_log("[pose-refine] " + line.rstrip())
+    if p.wait() != 0:
+        pipe.send_log("[pose-refine] ⚠ pose refinement failed — continuing "
+                      "with unrefined poses", level="warning")
 
 
 def _run_fine_register_step(pipe: WorkerPipe, output_dir: Path, recon_cfg: dict):
