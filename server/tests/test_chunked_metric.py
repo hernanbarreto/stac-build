@@ -966,3 +966,25 @@ def test_iterate_chunk_fields_trust_region():
     xi_d, rounds_d = iterate_chunk_fields(measure, ci, 42, max_rounds=6)
     assert np.max(np.abs(xi_d[:, 4])) <= 0.03 + 1e-6
     assert rounds_d[-1]["max_inc_cm"] <= rounds_d[0]["max_inc_cm"]
+
+
+def test_iterate_chunk_fields_stall_guard_rolls_back():
+    """run-7 failure mode: a signal the clamped fields cannot express (a
+    constant boundary offset the measurement keeps reporting regardless of
+    state) must NOT integrate round after round — the stall guard detects
+    non-shrinking increments and rolls the stalled rounds back."""
+    from loop_utils.metric_lock import iterate_chunk_fields
+    ci = [(0, 42)]
+
+    def measure(k, xi_total):
+        out = []
+        for f in range(15, 25):
+            t = np.zeros(6); t[4] = 0.20        # unexpressible: never shrinks
+            out.append((f, -1, t, 1.0))
+        return out
+
+    xi, rounds = iterate_chunk_fields(measure, ci, 42, max_rounds=6)
+    assert len(rounds) < 6                      # stopped early
+    assert any(h.get("rolled_back") for h in rounds)
+    # the rolled-back state never integrated the persistent push
+    assert np.max(np.abs(xi[:, 4])) < 3 * 0.20
