@@ -71,3 +71,29 @@ docs/pose_refinement.md ("VGGT must be finished with BA"). DA3 does not show it
 run-6 config (all ON). Attack paths that remain: Phase C (DA3 unary priors →
 global consistency/duplicates), Phase E (windowed RGB-D BA or DA3-depth-through-
 omega-poses → the only fixes that can straighten the waviness itself).
+
+### BATCH B+C+D+E-lite implemented (2026-07-11, commit 9587e3c, vendor 01f6fa9)
+
+User decision: GPU runs are expensive → implement everything remaining at once,
+one validation run. All config-gated (each can be turned off individually):
+
+- **B** elastic taming: fits smoothed along trajectory (win 5) + |t| cap 30 cm
+  (`elastic_smooth_win`, `elastic_max_t_m`). Log: `[elastic] fits tamed: ...`.
+- **C** finereg anneal: ≤3 bounded rounds, over-cap steps CLAMPED to 250 mm/round,
+  total budget 750 mm/unit, FULL ROLLBACK if worst separation doesn't improve
+  (`anneal_rounds`, `max_total_correction_m`). Log: `anneal round N/3 — worst ...`.
+- **D** density: ownership backfill — non-owner writes exactly the owner-dropped
+  pixels (`ownership_backfill`); `conf_percentile` 20→10. Log: `backfill armed`,
+  `+ backfills N owner-dropped px`.
+- **E-lite** hybrid DA3 write (THE serpenteado bet): every keyframe adopts DA3's
+  depth SHAPE at omega's scale/pose right after metric-lock (`hybrid_da3`,
+  `hybrid_da3_far_m: 15`). DA3 runs on ALL 210 kf (~8× anchor extraction time,
+  one-off cache) → **metric-lock fingerprint WILL shift (denser anchors) — do
+  not read that as a regression**. Log: `[hybrid-da3] chunk k: N/42 frames
+  re-shaped ...`.
+
+Expected in the E1 log vs run6: hybrid-da3 lines (new), tamed elastic (smaller
+max translations), anneal rounds in finereg (worst separation should finally
+drop well below ~117 mm or roll back), backfill px counts, bigger cloud.
+Suite: 106 passed.
+| E1 | pending | 9587e3c (vendor 01f6fa9) | BATCH: B elastic tamed + C finereg anneal + D backfill & conf 10% + E-lite hybrid DA3 write | | questions: serpenteado reduced? duplicates? holes? end-of-walk placement? |
