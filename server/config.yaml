@@ -743,12 +743,10 @@ reconstruction:
                                         # in serpenteado or duplicates — acquitted as the
                                         # visible-warp culprit despite its unsmoothed
                                         # per-frame fits (|t| up to 159 cm at seam 7->8).
-    intra_chunk: false                  # A4 EXPERIMENT (test4 serpenteado A/B): intra-chunk
-                                        # per-frame consensus OFF ("run 3 exactly") — the last
-                                        # per-frame warp stage still active (corrections up to
-                                        # 58 cm, chunk 7). If serpenteado persists with this
-                                        # off, the waviness comes from omega's raw feed-forward
-                                        # output itself. true → run-6 behaviour.
+    intra_chunk: true                   # KEEP ON — A4 2026-07-11 tested false on test4:
+                                        # serpenteado unchanged (it is intrinsic to omega's
+                                        # feed-forward output, not our stages) and duplicates
+                                        # slightly worse without it.
                                         # Original doc: INTRA-CHUNK per-frame consensus, ITERATIVE (set
                                         # false → run 3 exactly). Corrects the warp BETWEEN
                                         # frames of the same chunk. Two measured lessons baked

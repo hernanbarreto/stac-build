@@ -58,4 +58,16 @@ verifies each new log against this file.
 | A1 | 2026-07-11 18:21 | d2e280e | none (control) | ✅ MATCH: all deterministic stages bit-identical (scales 40.4436/0.9698, anchor 0.78→0.38%, seams 6.6…8.4 cm, elastic, intra 7A/2I, depth-graph ⛔, trim 13 tail kf). finereg (nondet): 5 pairs (0-2,0-3,1-3,2-4,5-7 — lost 6-8), 126 poses, 5 chunks, plane 117.25→117.95 mm (slightly WORSENED, no rollback in run6 finereg). Cloud 38.9M→23.78M | ✅ user: looks like run 6 |
 | A2 | 2026-07-11 18:57 | 0cc1858 | `elastic_seam: false` (flag now configurable; depth-cap far-drop self-off — not a density gain) | elastic OFF confirmed (0 [elastic] lines). Upstream identical (seams 6.6…8.4). Phase-2 scale 0.9714 (vs .9698 — points moved less). Intra-chunk verdicts shifted: 4 APPLY (1,4,7,8) vs 7 — endpoints clamp to a different seam consensus. finereg 7 pairs/147 poses/6 chunks, 117.7→118.0 mm. Cloud 39.9M (+1M = far-drop off) → 25.6M | ❌ user: NO visible difference — serpenteado AND duplicates unchanged. **Elastic acquitted** |
 | A3 | 2026-07-11 19:29 | 12eee62 | `scale_drift: false`, elastic back to true | drift OFF confirmed (0 DRIFT lines, no "drift APPLIED"). Scale spread widened ×1.63→×1.72; no held-out anchor improvement (0.78→0.38 line gone). Seams shifted (6.9…9.8 cm), elastic similar, intra 6 APPLY, finereg 7 pairs/168 poses/7 chunks 119.9→119.4 mm. Cloud 39.2M→22.9M | ❌ user: MANY more duplicates + serpenteado persists. **Drift acquitted for serpenteado AND proven to REDUCE duplicates — keep ON** |
-| A4 | pending | caf35c2 | `intra_chunk: false` (drift+elastic back to run-6 true), "run 3 behaviour" | | question: serpenteado gone? Last per-frame warp stage. If it persists → cause is omega's raw feed-forward output (Phase C/E territory) |
+| A4 | 2026-07-11 20:02 | caf35c2 | `intra_chunk: false` (drift+elastic back to run-6 true), "run 3 behaviour" | intra OFF confirmed (0 intra lines). Drift applied, anchor 0.78→0.38%, spread ×1.63, seams + elastic identical to run6, finereg 5 pairs/147 poses/6 chunks 119.4→118.1 mm. Cloud 39.1M→25.5M | ❌ user: serpenteado FIRM; duplicates ≈ run6 or a touch more. **Intra-chunk acquitted (and mildly protective)** |
+
+### PHASE A CONCLUSION (2026-07-11)
+
+All three correction stages acquitted by visual A/B: elastic (A2), scale drift
+(A3 — protective vs duplicates, pinned ON), intra-chunk (A4 — mildly protective).
+**Serpenteado is INTRINSIC to omega's raw feed-forward output** (per-frame
+pose/depth noise, no BA inside a chunk) — user's read, consistent with
+docs/pose_refinement.md ("VGGT must be finished with BA"). DA3 does not show it
+(but has onion/duplicate problems of its own). Correction stages restored to
+run-6 config (all ON). Attack paths that remain: Phase C (DA3 unary priors →
+global consistency/duplicates), Phase E (windowed RGB-D BA or DA3-depth-through-
+omega-poses → the only fixes that can straighten the waviness itself).
