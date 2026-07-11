@@ -732,6 +732,12 @@ reconstruction:
                                         # SUSPECT — the chunk keeps writing points but argues
                                         # more quietly (elastic consensus biased toward the
                                         # trusted side; finereg down-weights its planes 0.5).
+    elastic_seam: false                 # A2 EXPERIMENT (test4 serpenteado A/B): per-frame
+                                        # seam consensus OFF. The per-frame rigid fits are
+                                        # independent (no along-trajectory smoothing) and on
+                                        # test4 fitted |t| median 63 cm / max 159 cm at seam
+                                        # 7->8 to fix an 8 cm disagreement — prime suspect for
+                                        # wavy straight edges. true → run-6 behaviour.
     intra_chunk: true                   # INTRA-CHUNK per-frame consensus, ITERATIVE (set
                                         # false → run 3 exactly). Corrects the warp BETWEEN
                                         # frames of the same chunk. Two measured lessons baked

@@ -1573,8 +1573,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                     # coarse point-map fit (25-30cm)
         cfg_v["Model"]["frame_ownership"] = True    # one frame → one writer: overlap
                                                     # frames stop entering the cloud twice
-        cfg_v["Model"]["elastic_seam"] = True       # per-frame seam CONSENSUS: the same
-                                                    # pixel seen by two chunks lands at
+        cfg_v["Model"]["elastic_seam"] = bool(      # per-frame seam CONSENSUS: the same
+            _va_cfg.get("elastic_seam", True))      # pixel seen by two chunks lands at
                                                     # ONE 3D position (rigid residual per
                                                     # shared frame, blended across the
                                                     # overlap, poses moved with points)
