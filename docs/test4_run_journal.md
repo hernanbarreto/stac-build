@@ -26,8 +26,8 @@ DISCARDED FOREVER: ICP dense_fusion (tested, fails, texture mis-mapping).
 | Elastic before → after (median cm) | 4.6–9.6 → 2.75–5.65 |
 | Elastic per-frame fits (seam 7 = worst) | \|t\| median 63 cm, max 159 cm — the smoking gun |
 | Depth-graph | REFUSED (⛔ model ladder) — expected |
-| Intra-chunk | SKIP all chunks — expected |
-| finereg | 6 non-adjacent pairs, 147 poses, 6 chunks corrected, plane 116.7→116.6 mm (RANSAC → mild run-to-run variation is normal) |
+| Intra-chunk | 7 APPLY / 2 IDENTITY (chunks 1, 5); held-out improves ~11→8 … 5→3 cm; max corrections 8.8–58.1 cm (chunk 7 the largest) — identical across runs |
+| finereg | 6 non-adjacent pairs, 147 poses, 6 chunks corrected, plane 116.7→116.6 mm (RANSAC → the ONLY nondeterministic stage; 4–6 pairs, 117–120 mm across runs) |
 | Coverage trim | 13 tail kf dropped, walk kept 60.5/81.1 m |
 | Cloud | ~39.0M merged → ~24–25M cleaned |
 
@@ -55,4 +55,4 @@ verifies each new log against this file.
 | # | Date | Commit | Config delta | Fingerprint vs run6 | Visual verdict (user) |
 |---|---|---|---|---|---|
 | run6 | 2026-07-11 08:29 | 26ffde4 (vendor ea178bc) | — | reference | serpenteado + duplicates + end mispositioned + holes; BEST so far |
-| A1 | pending | d2e280e | none (control) | | |
+| A1 | 2026-07-11 18:21 | d2e280e | none (control) | ✅ MATCH: all deterministic stages bit-identical (scales 40.4436/0.9698, anchor 0.78→0.38%, seams 6.6…8.4 cm, elastic, intra 7A/2I, depth-graph ⛔, trim 13 tail kf). finereg (nondet): 5 pairs (0-2,0-3,1-3,2-4,5-7 — lost 6-8), 126 poses, 5 chunks, plane 117.25→117.95 mm (slightly WORSENED, no rollback in run6 finereg). Cloud 38.9M→23.78M | pending user |
