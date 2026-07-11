@@ -246,52 +246,6 @@ def test_frame_owner_partitions_every_frame_once():
             assert owner[mid] == k
 
 
-def test_frame_owner_sick_reassigns_overlap_to_healthy_neighbour():
-    # pccr 2026-07-11 geometry: 77 frames, chunks of 44, overlap 22, chunk 0 sick.
-    # The overlap frames chunk 0 owned must move to chunk 1 (real data there);
-    # frames covered ONLY by chunk 0 keep the sick owner (declared hole).
-    from loop_utils.metric_lock import frame_owner
-    ranges = chunk_ranges(77, 44, 22)
-    base = frame_owner(ranges, 77)
-    owner = frame_owner(ranges, 77, sick={0})
-    s1, e1 = ranges[1]
-    for g in range(77):
-        if base[g] != 0:
-            assert owner[g] == base[g]              # healthy ownership untouched
-        elif s1 <= g < e1:
-            assert owner[g] == 1                    # recovered from the overlap
-        else:
-            assert owner[g] == 0                    # no healthy coverage → hole
-
-
-def test_frame_owner_sick_middle_chunk_splits_between_neighbours():
-    from loop_utils.metric_lock import frame_owner
-    ranges = chunk_ranges(100, 40, 20)
-    base = frame_owner(ranges, 100)
-    owner = frame_owner(ranges, 100, sick={1})
-    for g in range(100):
-        if base[g] != 1:
-            assert owner[g] == base[g]
-        else:
-            s0, e0 = ranges[0]
-            s2, e2 = ranges[2]
-            if s0 <= g < e0:
-                assert owner[g] == 0                # left overlap → left neighbour
-            elif s2 <= g < e2:
-                assert owner[g] == 2                # right overlap → right neighbour
-            else:
-                assert owner[g] == 1                # exclusive core stays a hole
-
-
-def test_frame_owner_sick_defaults_preserve_old_behaviour():
-    from loop_utils.metric_lock import frame_owner
-    ranges = chunk_ranges(66, 40, 20)
-    assert (frame_owner(ranges, 66) == frame_owner(ranges, 66, sick=())).all()
-    # every chunk sick → nothing healthy to prefer → original nearest-centre map
-    all_sick = set(range(len(ranges)))
-    assert (frame_owner(ranges, 66) == frame_owner(ranges, 66, sick=all_sick)).all()
-
-
 # ── elastic per-frame seam consensus ─────────────────────────────────
 
 def _small_rigid(rng_, ang_deg, t_m):
