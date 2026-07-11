@@ -732,14 +732,21 @@ reconstruction:
                                         # SUSPECT — the chunk keeps writing points but argues
                                         # more quietly (elastic consensus biased toward the
                                         # trusted side; finereg down-weights its planes 0.5).
-    intra_chunk: true                   # INTRA-CHUNK per-frame consensus (set false → run 3
-                                        # exactly). Corrects the warp BETWEEN frames of the
-                                        # same chunk: each chunk solved ALONE with endpoints
-                                        # clamped to the seam consensus — a correction longer
-                                        # than one chunk is impossible by construction (the
-                                        # lesson from the failed global pose graph); per-chunk
-                                        # held-out pairs gate each field; a chunk that does
-                                        # not earn its correction stays identity, alone.
+    intra_chunk: true                   # INTRA-CHUNK per-frame consensus, ITERATIVE (set
+                                        # false → run 3 exactly). Corrects the warp BETWEEN
+                                        # frames of the same chunk. Two measured lessons baked
+                                        # in: endpoints clamped to the seam consensus (no
+                                        # correction longer than one chunk — the failed global
+                                        # pose graph), and BLOCK RELAXATION until convergence
+                                        # (run 6: one-shot per-chunk gating left neighbours
+                                        # diverged 24 cm — correcting a chunk CREATES the need
+                                        # for its neighbours' corrections, so every round
+                                        # re-measures each chunk against its neighbours'
+                                        # current state, cross-chunk pairs included, applies
+                                        # under-relaxed increments and repeats until they
+                                        # vanish). Final self-gate on pre-correction held-out
+                                        # (within + cross strata; no seam may degrade); fail →
+                                        # the whole stage is identity.
 
   # ── SIMPLE pipeline (one concept — validated 2026-07-09 vs the VGGT-Omega web demo) ──
   # Sparse frames (~1 fps) → ONE VGGT-Omega pass (no windows → no seams → no onion) →

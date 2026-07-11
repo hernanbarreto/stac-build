@@ -878,3 +878,91 @@ def test_chunk_field_verdict_gates():
     wild = xi.copy(); wild[:, 4] += np.linspace(0, 1.0, S)
     v_w = chunk_field_verdict(wild, taus, held)
     assert not v_w["bounded"]
+
+
+# ── iterative intra-chunk relaxation ─────────────────────────────────
+
+def test_solve_chunk_field_cross_anchor_rows():
+    """Cross-chunk pairs (g = -1: partner fixed in a neighbour) pull the field
+    toward the neighbour's state — the coupling of the iterative scheme."""
+    from loop_utils.metric_lock import solve_chunk_field
+    S = 42
+    # neighbour says: your frames 30..40 sit 3 cm below where I see the surface
+    taus = []
+    for f in range(30, 41):
+        t = np.zeros(6); t[4] = 0.03
+        taus.append((f, -1, t, 1.0))
+    for f in range(S - 1):                      # consistent within-chunk pairs
+        taus.append((f, f + 1, np.zeros(6), 1.0))
+    xi = solve_chunk_field(taus, S)
+    assert abs(xi[0, 4]) < 1e-12 and abs(xi[S - 1, 4]) < 1e-12
+    assert xi[35, 4] > 0.012                    # pulled toward the neighbour
+    assert np.max(xi[:, 4]) <= 0.03 + 1e-9
+
+
+def test_iterate_chunk_fields_run6_scenario_converges():
+    """The run-6 failure, solved by iteration: a warp spanning two chunks.
+    One-shot per-chunk gating left neighbours diverged; the relaxation must
+    let each chunk respond to the other's correction and CONVERGE — residual
+    error collapses, increments shrink to zero."""
+    from loop_utils.metric_lock import iterate_chunk_fields
+    rng30 = np.random.default_rng(70)
+    ci = [(0, 42), (21, 63), (42, 84)]
+    N = 84
+    E0 = np.zeros(N)                            # true per-frame error (ty)
+    for g in range(23, 40):                     # bump ~0 at every chunk endpoint
+        E0[g] = 0.08 * np.sin(np.pi * (g - 23) / 16.0) ** 2
+
+    def measure(k, xi_total):
+        start, end = ci[k]
+        S = end - start
+        e = E0 + xi_total[:, 4]                 # current residual error
+        out = []
+        for f in range(S):
+            for d in (1, 2, 3, 5, 8, 12):
+                gg = start + f + d
+                if gg >= N:
+                    continue
+                cross = not (start <= gg < end)
+                if cross and not any(s <= gg < e2 for s, e2 in ci):
+                    continue
+                t = np.zeros(6)
+                t[4] = e[gg] - e[start + f] + rng30.normal(0, 5e-4)
+                out.append((f, -1 if cross else f + d, t, 1.0))
+        return out
+
+    xi, rounds = iterate_chunk_fields(measure, ci, N)
+    resid = E0 + xi[:, 4]
+    assert np.max(np.abs(resid[1:-1])) < 0.35 * np.max(E0), np.max(np.abs(resid))
+    assert np.median(np.abs(resid)) < 0.01
+    # increments shrink — convergence, not oscillation
+    incs = [h["max_inc_cm"] for h in rounds]
+    assert incs[-1] < incs[0]
+    assert incs[-1] < 1.5                       # last round below ~1.5 cm
+
+
+def test_iterate_chunk_fields_trust_region():
+    """The trust region caps any round whose increment exceeds bound× the
+    round's own p90 pair signal (integration blow-up guard). Solutions
+    CONSISTENT with their pairs stay within the pair magnitude — garbage-
+    consistent taus are the final held-out verdict's kill, not the cap's."""
+    from loop_utils.metric_lock import iterate_chunk_fields
+    ci = [(0, 42)]
+
+    def measure(k, xi_total):
+        out = []
+        for f in range(10, 30):
+            t = np.zeros(6)
+            t[4] = 0.03 - xi_total[f, 4]        # residual vs CURRENT state
+            out.append((f, -1, t, 1.0))
+        return out
+
+    # tight bound forces the cap: every round flagged, increments scaled down
+    xi_c, rounds_c = iterate_chunk_fields(measure, ci, 42, max_rounds=2, bound=0.1)
+    assert all(h["capped"] for h in rounds_c)
+    assert np.max(np.abs(xi_c[:, 4])) <= 2 * 0.1 * 0.03 + 1e-9
+
+    # default bound: converges to ~the pair magnitude, never beyond it
+    xi_d, rounds_d = iterate_chunk_fields(measure, ci, 42, max_rounds=6)
+    assert np.max(np.abs(xi_d[:, 4])) <= 0.03 + 1e-6
+    assert rounds_d[-1]["max_inc_cm"] <= rounds_d[0]["max_inc_cm"]
