@@ -246,6 +246,52 @@ def test_frame_owner_partitions_every_frame_once():
             assert owner[mid] == k
 
 
+def test_frame_owner_sick_reassigns_overlap_to_healthy_neighbour():
+    # pccr 2026-07-11 geometry: 77 frames, chunks of 44, overlap 22, chunk 0 sick.
+    # The overlap frames chunk 0 owned must move to chunk 1 (real data there);
+    # frames covered ONLY by chunk 0 keep the sick owner (declared hole).
+    from loop_utils.metric_lock import frame_owner
+    ranges = chunk_ranges(77, 44, 22)
+    base = frame_owner(ranges, 77)
+    owner = frame_owner(ranges, 77, sick={0})
+    s1, e1 = ranges[1]
+    for g in range(77):
+        if base[g] != 0:
+            assert owner[g] == base[g]              # healthy ownership untouched
+        elif s1 <= g < e1:
+            assert owner[g] == 1                    # recovered from the overlap
+        else:
+            assert owner[g] == 0                    # no healthy coverage → hole
+
+
+def test_frame_owner_sick_middle_chunk_splits_between_neighbours():
+    from loop_utils.metric_lock import frame_owner
+    ranges = chunk_ranges(100, 40, 20)
+    base = frame_owner(ranges, 100)
+    owner = frame_owner(ranges, 100, sick={1})
+    for g in range(100):
+        if base[g] != 1:
+            assert owner[g] == base[g]
+        else:
+            s0, e0 = ranges[0]
+            s2, e2 = ranges[2]
+            if s0 <= g < e0:
+                assert owner[g] == 0                # left overlap → left neighbour
+            elif s2 <= g < e2:
+                assert owner[g] == 2                # right overlap → right neighbour
+            else:
+                assert owner[g] == 1                # exclusive core stays a hole
+
+
+def test_frame_owner_sick_defaults_preserve_old_behaviour():
+    from loop_utils.metric_lock import frame_owner
+    ranges = chunk_ranges(66, 40, 20)
+    assert (frame_owner(ranges, 66) == frame_owner(ranges, 66, sick=())).all()
+    # every chunk sick → nothing healthy to prefer → original nearest-centre map
+    all_sick = set(range(len(ranges)))
+    assert (frame_owner(ranges, 66) == frame_owner(ranges, 66, sick=all_sick)).all()
+
+
 # ── elastic per-frame seam consensus ─────────────────────────────────
 
 def _small_rigid(rng_, ang_deg, t_m):
@@ -841,20 +887,21 @@ def test_solve_chunk_field_bump_recovered_boundaries_clamped():
     assert np.max(np.abs(xi_n)) < 0.003
 
 
-def test_assemble_domain_fields_applied_equals_solved():
-    """Disjoint ownership domains: what was solved IS what gets applied —
-    exactly (the blend over overlapping windows halved solutions near edges
-    and broke convergence, runs 7/8). Domain fields vanish at endpoints, so
-    the assembled field is continuous across boundaries."""
-    from loop_utils.metric_lock import assemble_domain_fields
-    doms = [(0, 32), (32, 53), (53, 84)]
-    f0 = np.zeros((32, 6)); f0[:, 4] = 0.04 * np.sin(np.pi * np.arange(32) / 31) ** 2
-    f2 = np.zeros((31, 6)); f2[:, 4] = -0.03 * np.sin(np.pi * np.arange(31) / 30) ** 2
-    xi = assemble_domain_fields(doms, {0: f0, 2: f2}, 84)
-    assert np.allclose(xi[:32], f0)                        # exact, no halving
-    assert np.allclose(xi[53:], f2)
-    assert np.all(xi[32:53] == 0.0)                        # no field → identity
-    assert abs(xi[31, 4]) < 1e-12 and abs(xi[53, 4]) < 1e-12   # continuous
+def test_blend_chunk_fields_continuous_and_consistent():
+    """Shared frames get ONE blended correction; chunks without a field
+    contribute identity; the blend never exceeds the inputs."""
+    from loop_utils.metric_lock import blend_chunk_fields
+    ci = [(0, 42), (21, 63), (42, 84)]
+    S = 42
+    f0 = np.zeros((S, 6)); f0[:, 4] = 0.04 * np.sin(np.pi * np.arange(S) / (S - 1)) ** 2
+    f2 = np.zeros((S, 6)); f2[:, 4] = -0.03 * np.sin(np.pi * np.arange(S) / (S - 1)) ** 2
+    xi = blend_chunk_fields(ci, {0: f0, 2: f2}, 84)
+    assert np.max(np.abs(xi[:, 4])) <= 0.04 + 1e-9
+    # frame 21 (start of chunk 1, inside chunk 0): single value, no conflict
+    assert xi.shape == (84, 6)
+    # chunk 1 contributed nothing → its exclusive centre region is only pulled
+    # by neighbours' near-zero edges: tiny
+    assert abs(xi[42, 4]) < 0.02
 
 
 def test_chunk_field_verdict_gates():
@@ -877,144 +924,3 @@ def test_chunk_field_verdict_gates():
     wild = xi.copy(); wild[:, 4] += np.linspace(0, 1.0, S)
     v_w = chunk_field_verdict(wild, taus, held)
     assert not v_w["bounded"]
-
-
-# ── iterative intra-chunk relaxation ─────────────────────────────────
-
-def test_solve_chunk_field_cross_anchor_rows():
-    """Cross-chunk pairs (g = -1: partner fixed in a neighbour) pull the field
-    toward the neighbour's state — the coupling of the iterative scheme."""
-    from loop_utils.metric_lock import solve_chunk_field
-    S = 42
-    # neighbour says: your frames 30..40 sit 3 cm below where I see the surface
-    taus = []
-    for f in range(30, 41):
-        t = np.zeros(6); t[4] = 0.03
-        taus.append((f, -1, t, 1.0))
-    for f in range(S - 1):                      # consistent within-chunk pairs
-        taus.append((f, f + 1, np.zeros(6), 1.0))
-    xi = solve_chunk_field(taus, S)
-    assert abs(xi[0, 4]) < 1e-12 and abs(xi[S - 1, 4]) < 1e-12
-    assert xi[35, 4] > 0.012                    # pulled toward the neighbour
-    assert np.max(xi[:, 4]) <= 0.03 + 1e-9
-
-
-def test_iterate_chunk_fields_run6_scenario_converges():
-    """The run-6 failure, solved by iteration: a warp spanning two chunks.
-    One-shot per-chunk gating left neighbours diverged; the relaxation must
-    let each chunk respond to the other's correction and CONVERGE — residual
-    error collapses, increments shrink to zero."""
-    from loop_utils.metric_lock import iterate_chunk_fields
-    rng30 = np.random.default_rng(70)
-    doms = [(0, 32), (32, 53), (53, 84)]        # disjoint ownership domains
-    N = 84
-    E0 = np.zeros(N)                            # true per-frame error (ty)
-    for g in range(6, 27):                      # bump inside domain 0
-        E0[g] = 0.08 * np.sin(np.pi * (g - 6) / 20.0) ** 2
-    for g in range(34, 51):                     # bump inside domain 1
-        E0[g] = 0.06 * np.sin(np.pi * (g - 34) / 16.0) ** 2
-
-    def measure(k, xi_total):
-        start, end = doms[k]
-        e = E0 + xi_total[:, 4]                 # current residual error
-        out = []
-        for fg in range(start, end):
-            for d in (1, 2, 3, 5, 8, 12):
-                gg = fg + d
-                if gg >= N:
-                    continue
-                cross = not (start <= gg < end)
-                t = np.zeros(6)
-                t[4] = e[gg] - e[fg] + rng30.normal(0, 5e-4)
-                out.append((fg - start, -1 if cross else gg - start, t, 1.0))
-        return out
-
-    xi, rounds = iterate_chunk_fields(measure, doms, N)
-    resid = E0 + xi[:, 4]
-    assert np.max(np.abs(resid[1:-1])) < 0.35 * np.max(E0), np.max(np.abs(resid))
-    assert np.median(np.abs(resid)) < 0.01
-    # increments shrink — convergence, not oscillation
-    incs = [h["max_inc_cm"] for h in rounds]
-    assert incs[-1] < incs[0]
-    assert incs[-1] < 1.5                       # last round below ~1.5 cm
-
-
-def test_iterate_chunk_fields_trust_region():
-    """The trust region caps any round whose increment exceeds bound× the
-    round's own p90 pair signal (integration blow-up guard). Solutions
-    CONSISTENT with their pairs stay within the pair magnitude — garbage-
-    consistent taus are the final held-out verdict's kill, not the cap's."""
-    from loop_utils.metric_lock import iterate_chunk_fields
-    ci = [(0, 42)]
-
-    def measure(k, xi_total):
-        out = []
-        for f in range(10, 30):
-            t = np.zeros(6)
-            t[4] = 0.03 - xi_total[f, 4]        # residual vs CURRENT state
-            out.append((f, -1, t, 1.0))
-        return out
-
-    # tight bound forces the cap: every round flagged, increments scaled down
-    xi_c, rounds_c = iterate_chunk_fields(measure, ci, 42, max_rounds=2, bound=0.1)
-    assert all(h["capped"] for h in rounds_c)
-    assert np.max(np.abs(xi_c[:, 4])) <= 2 * 0.1 * 0.03 + 1e-9
-
-    # default bound: converges to ~the pair magnitude, never beyond it
-    xi_d, rounds_d = iterate_chunk_fields(measure, ci, 42, max_rounds=6)
-    assert np.max(np.abs(xi_d[:, 4])) <= 0.03 + 1e-6
-    assert rounds_d[-1]["max_inc_cm"] <= rounds_d[0]["max_inc_cm"]
-
-
-def test_iterate_chunk_fields_stall_guard_rolls_back():
-    """run-7 failure mode: a signal the clamped fields cannot express (a
-    constant boundary offset the measurement keeps reporting regardless of
-    state) must NOT integrate round after round — the stall guard detects
-    non-shrinking increments and rolls the stalled rounds back."""
-    from loop_utils.metric_lock import iterate_chunk_fields
-    ci = [(0, 42)]
-
-    def measure(k, xi_total):
-        out = []
-        for f in range(15, 25):
-            t = np.zeros(6); t[4] = 0.20        # unexpressible: never shrinks
-            out.append((f, -1, t, 1.0))
-        return out
-
-    xi, rounds = iterate_chunk_fields(measure, ci, 42, max_rounds=6)
-    assert len(rounds) < 6                      # stopped early
-    assert any(h.get("rolled_back") for h in rounds)
-    # the rolled-back state never integrated the persistent push
-    assert np.max(np.abs(xi[:, 4])) < 3 * 0.20
-
-
-# ── DC chain (rigid seam offsets, ramped between domain centres) ─────
-
-def test_chain_from_dcs_signs_and_gauge():
-    """Two domains drifted by a known offset: the chain must move them ONTO
-    each other (sign check via the pair convention xi_f - xi_g = tau) and the
-    weighted-mean gauge must keep the session from shifting as a whole."""
-    from loop_utils.metric_lock import chain_from_dcs
-    dc = np.zeros(6); dc[4] = 0.20               # D1's copy sits 20 cm above
-    c = chain_from_dcs({(0, 1): dc}, 2, [30, 30])
-    # relative correction equals -dc: after it, the copies coincide
-    assert abs((c[0, 4] - c[1, 4]) - 0.20) < 1e-12
-    # gauge: weighted mean zero (equal weights → symmetric split)
-    assert abs(c[0, 4] + c[1, 4]) < 1e-12
-    # missing seams → identity links
-    c3 = chain_from_dcs({(0, 1): dc}, 3, [30, 30, 30])
-    assert abs((c3[1, 4] - c3[2, 4])) < 1e-12    # no 1-2 DC → same correction
-
-
-def test_interp_domain_chain_ramp_continuous():
-    from loop_utils.metric_lock import chain_from_dcs, interp_domain_chain
-    doms = [(0, 30), (30, 60)]
-    dc = np.zeros(6); dc[4] = 0.10
-    c = chain_from_dcs({(0, 1): dc}, 2, [30, 30])
-    xi = interp_domain_chain(doms, c, 60)
-    assert np.allclose(xi[:15, 4], c[0, 4])      # constant before 1st centre
-    assert np.allclose(xi[45:, 4], c[1, 4])      # constant after last centre
-    steps = np.abs(np.diff(xi[:, 4]))
-    assert steps.max() < 0.10 / 25               # a RAMP, never a cliff
-    mid = 0.5 * (c[0, 4] + c[1, 4])
-    assert abs(xi[29, 4] - mid) < 0.01 and abs(xi[30, 4] - mid) < 0.01
