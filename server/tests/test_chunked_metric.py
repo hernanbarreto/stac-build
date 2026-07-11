@@ -841,21 +841,20 @@ def test_solve_chunk_field_bump_recovered_boundaries_clamped():
     assert np.max(np.abs(xi_n)) < 0.003
 
 
-def test_blend_chunk_fields_continuous_and_consistent():
-    """Shared frames get ONE blended correction; chunks without a field
-    contribute identity; the blend never exceeds the inputs."""
-    from loop_utils.metric_lock import blend_chunk_fields
-    ci = [(0, 42), (21, 63), (42, 84)]
-    S = 42
-    f0 = np.zeros((S, 6)); f0[:, 4] = 0.04 * np.sin(np.pi * np.arange(S) / (S - 1)) ** 2
-    f2 = np.zeros((S, 6)); f2[:, 4] = -0.03 * np.sin(np.pi * np.arange(S) / (S - 1)) ** 2
-    xi = blend_chunk_fields(ci, {0: f0, 2: f2}, 84)
-    assert np.max(np.abs(xi[:, 4])) <= 0.04 + 1e-9
-    # frame 21 (start of chunk 1, inside chunk 0): single value, no conflict
-    assert xi.shape == (84, 6)
-    # chunk 1 contributed nothing → its exclusive centre region is only pulled
-    # by neighbours' near-zero edges: tiny
-    assert abs(xi[42, 4]) < 0.02
+def test_assemble_domain_fields_applied_equals_solved():
+    """Disjoint ownership domains: what was solved IS what gets applied —
+    exactly (the blend over overlapping windows halved solutions near edges
+    and broke convergence, runs 7/8). Domain fields vanish at endpoints, so
+    the assembled field is continuous across boundaries."""
+    from loop_utils.metric_lock import assemble_domain_fields
+    doms = [(0, 32), (32, 53), (53, 84)]
+    f0 = np.zeros((32, 6)); f0[:, 4] = 0.04 * np.sin(np.pi * np.arange(32) / 31) ** 2
+    f2 = np.zeros((31, 6)); f2[:, 4] = -0.03 * np.sin(np.pi * np.arange(31) / 30) ** 2
+    xi = assemble_domain_fields(doms, {0: f0, 2: f2}, 84)
+    assert np.allclose(xi[:32], f0)                        # exact, no halving
+    assert np.allclose(xi[53:], f2)
+    assert np.all(xi[32:53] == 0.0)                        # no field → identity
+    assert abs(xi[31, 4]) < 1e-12 and abs(xi[53, 4]) < 1e-12   # continuous
 
 
 def test_chunk_field_verdict_gates():
@@ -907,31 +906,30 @@ def test_iterate_chunk_fields_run6_scenario_converges():
     error collapses, increments shrink to zero."""
     from loop_utils.metric_lock import iterate_chunk_fields
     rng30 = np.random.default_rng(70)
-    ci = [(0, 42), (21, 63), (42, 84)]
+    doms = [(0, 32), (32, 53), (53, 84)]        # disjoint ownership domains
     N = 84
     E0 = np.zeros(N)                            # true per-frame error (ty)
-    for g in range(23, 40):                     # bump ~0 at every chunk endpoint
-        E0[g] = 0.08 * np.sin(np.pi * (g - 23) / 16.0) ** 2
+    for g in range(6, 27):                      # bump inside domain 0
+        E0[g] = 0.08 * np.sin(np.pi * (g - 6) / 20.0) ** 2
+    for g in range(34, 51):                     # bump inside domain 1
+        E0[g] = 0.06 * np.sin(np.pi * (g - 34) / 16.0) ** 2
 
     def measure(k, xi_total):
-        start, end = ci[k]
-        S = end - start
+        start, end = doms[k]
         e = E0 + xi_total[:, 4]                 # current residual error
         out = []
-        for f in range(S):
+        for fg in range(start, end):
             for d in (1, 2, 3, 5, 8, 12):
-                gg = start + f + d
+                gg = fg + d
                 if gg >= N:
                     continue
                 cross = not (start <= gg < end)
-                if cross and not any(s <= gg < e2 for s, e2 in ci):
-                    continue
                 t = np.zeros(6)
-                t[4] = e[gg] - e[start + f] + rng30.normal(0, 5e-4)
-                out.append((f, -1 if cross else f + d, t, 1.0))
+                t[4] = e[gg] - e[fg] + rng30.normal(0, 5e-4)
+                out.append((fg - start, -1 if cross else gg - start, t, 1.0))
         return out
 
-    xi, rounds = iterate_chunk_fields(measure, ci, N)
+    xi, rounds = iterate_chunk_fields(measure, doms, N)
     resid = E0 + xi[:, 4]
     assert np.max(np.abs(resid[1:-1])) < 0.35 * np.max(E0), np.max(np.abs(resid))
     assert np.median(np.abs(resid)) < 0.01
