@@ -721,7 +721,13 @@ reconstruction:
                                         # pixels vote (npz 'conf'); 0 disables the gate.
                                         # Fallback ladder if a filter starves: near∩conf →
                                         # conf → near → all valid.
-    # scale_drift: true                 # metric-lock: per-chunk LINEAR scale drift (log-scale,
+    scale_drift: false                  # A3 EXPERIMENT (test4 serpenteado A/B): per-chunk
+                                        # LINEAR scale ramp OFF — a scale that varies along
+                                        # the walk scales the same surface differently frame
+                                        # to frame (test4: ±12%/chunk) and can bow straight
+                                        # edges. true → run-6 behaviour (self-gated drift).
+                                        # Original doc of the drift, kept for reference:
+                                        # metric-lock: per-chunk LINEAR scale drift (log-scale,
                                         # 2 DOF/chunk) from positioned DA3 anchors + per-frame
                                         # seam ratios, SELF-GATED on held-out seam observations
                                         # (applies only when it beats the constant model ≥25%
@@ -732,12 +738,11 @@ reconstruction:
                                         # SUSPECT — the chunk keeps writing points but argues
                                         # more quietly (elastic consensus biased toward the
                                         # trusted side; finereg down-weights its planes 0.5).
-    elastic_seam: false                 # A2 EXPERIMENT (test4 serpenteado A/B): per-frame
-                                        # seam consensus OFF. The per-frame rigid fits are
-                                        # independent (no along-trajectory smoothing) and on
-                                        # test4 fitted |t| median 63 cm / max 159 cm at seam
-                                        # 7->8 to fix an 8 cm disagreement — prime suspect for
-                                        # wavy straight edges. true → run-6 behaviour.
+    elastic_seam: true                  # per-frame seam consensus (run-6 behaviour). A2
+                                        # 2026-07-11 tested false on test4: NO visible change
+                                        # in serpenteado or duplicates — acquitted as the
+                                        # visible-warp culprit despite its unsmoothed
+                                        # per-frame fits (|t| up to 159 cm at seam 7->8).
     intra_chunk: true                   # INTRA-CHUNK per-frame consensus, ITERATIVE (set
                                         # false → run 3 exactly). Corrects the warp BETWEEN
                                         # frames of the same chunk. Two measured lessons baked
