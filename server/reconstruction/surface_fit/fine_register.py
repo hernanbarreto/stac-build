@@ -73,6 +73,8 @@ class FineRegisterReport:
     sep_after_m: Dict[str, float] = field(default_factory=dict)
     accept_sep_m: float = 0.024
     accepted: bool = True
+    rolled_back: bool = False                                     # solve degraded → identity
+    sep_rejected_m: Dict[str, float] = field(default_factory=dict)  # the degraded after-map
 
 
 # ── plane extraction ────────────────────────────────────────────────
@@ -653,10 +655,24 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
             health = json.loads(health_path.read_text())
             weak = set(map(int, (health.get("suspect") or {}).keys()))
             weak |= set(map(int, (health.get("sick") or {}).keys()))
-            unit_conf = {u: 0.5 for u in unit_pts if u[0] in weak}
+            # chunk_health.json speaks ORIGINAL vendor chunk indices, but the
+            # backbone PLYs are densely renumbered once sick chunks are excluded
+            # (chunk_000.ply may be source chunk 1) — translate through each
+            # PLY's chunk_*_meta.json (source_chunk). No meta → identity
+            # (legacy runs, where nothing was excluded).
+            weak_dense = set()
+            for cid in clouds:
+                meta = output_dir / f"chunk_{cid:03d}_meta.json"
+                src = cid
+                if meta.exists():
+                    src = int(json.loads(meta.read_text()).get("source_chunk", cid))
+                if src in weak:
+                    weak_dense.add(cid)
+            unit_conf = {u: 0.5 for u in unit_pts if u[0] in weak_dense}
             if unit_conf:
                 logger.info("fine_register: down-weighting units of suspect/sick "
-                            "chunks %s (conf 0.5)", sorted(weak))
+                            "chunks %s (source idx %s, conf 0.5)",
+                            sorted(weak_dense), sorted(weak))
         except Exception as e:
             logger.warning("fine_register: chunk_health.json unreadable (%s)", e)
 
@@ -694,6 +710,22 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
         if v > accept_sep_m:
             report.accepted = False
 
+    # self-gate: the correction must EARN its application. A solve whose worst
+    # inter-chunk separation comes out WORSE than it went in chased the wrong
+    # signal (ground datum / loop pairs at the seams' expense) — applying it
+    # bends straight geometry (pccr 2026-07-11: 91.4mm → 116.7mm applied
+    # anyway, cabinet rows serpentined). Roll everything back to identity.
+    _wb = max(report.sep_before_m.values(), default=0.0)
+    _wa = max(report.sep_after_m.values(), default=0.0)
+    if _wa > _wb:
+        logger.warning("fine_register: worst separation DEGRADED %.2fmm → %.2fmm "
+                       "— all corrections ROLLED BACK to identity", _wb * 1000, _wa * 1000)
+        corr = {u: np.eye(4) for u in corr}
+        report.sep_rejected_m = dict(report.sep_after_m)
+        report.sep_after_m = dict(report.sep_before_m)   # identity: cloud unchanged
+        report.accepted = False
+        report.rolled_back = True
+
     # non-adjacent chunk pairs with matched planes ARE the geometric loop
     # closures — surfaced in the report so their effect is auditable.
     loop_pairs = sorted(k for k in set(report.sep_before_m) | set(report.sep_after_m)
@@ -707,6 +739,8 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
         "sep_after_m": report.sep_after_m,
         "accept_sep_m": report.accept_sep_m,
         "accepted": report.accepted,
+        "rolled_back": report.rolled_back,
+        "sep_rejected_m": report.sep_rejected_m,
         "pieces_per_chunk": pieces_per_chunk,
         "ground_datum_units": [sorted(str(u) for u in g) for g in gpts],
         "loop_pairs": loop_pairs,
