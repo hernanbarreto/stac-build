@@ -696,6 +696,40 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
     report.sep_before_m = _pair_metric(planes)
     worst_before = max(report.sep_before_m.values(), default=0.0)
 
+    # ── OBSERVABILITY projector per unit: point-to-plane residuals only see
+    # translation ALONG matched plane normals — any in-plane component of a
+    # solved correction is pure null-space drift (E1 measured it: 41 units
+    # proposed 700-1500mm, applying 250mm steps moved the worst separation
+    # 0.4mm). Project every solved translation onto the span of the unit's
+    # MATCHED normals; on a linear walk (floor + walk-parallel walls) this
+    # zeroes the unobservable along-walk component instead of trusting it. ──
+    matched_normals: Dict[tuple, list] = {u: [] for u in planes}
+    us_all = sorted(planes.keys())
+    for i in range(len(us_all)):
+        for j in range(i + 1, len(us_all)):
+            a, b = us_all[i], us_all[j]
+            if a[0] == b[0]:
+                continue
+            for ia, ib, _sep in match_planes(planes[a], planes[b],
+                                             max_offset_m=capture_m):
+                matched_normals[a].append(planes[a][ia].normal)
+                matched_normals[b].append(planes[b][ib].normal)
+    for g in gpts:
+        for u in g:
+            if u in matched_normals:
+                matched_normals[u].append(np.array([0.0, 1.0, 0.0]))
+
+    def _observable_projector(u) -> np.ndarray:
+        ns = matched_normals.get(u) or []
+        if not ns:
+            return np.zeros((3, 3))                 # nothing observable → no move
+        N = np.stack(ns)
+        _, sv, Vt = np.linalg.svd(N, full_matrices=False)
+        keep = Vt[sv > 0.2 * sv[0]]
+        return keep.T @ keep
+
+    proj = {u: _observable_projector(u) for u in planes}
+
     # ── ANNEAL: up to ``anneal_rounds`` bounded solve→apply→re-measure rounds.
     # test4 measured chunk offsets of 300-1100mm that a single 250mm-capped solve
     # can only REFUSE; bounded steps let a real large offset accumulate while the
@@ -715,6 +749,16 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
                            ground_pts=gpts or None, unit_conf=unit_conf or None)
         n_act, n_ref = 0, 0
         for u in list(step.keys()):
+            raw_shift = float(np.linalg.norm(step[u][:3, 3]))
+            # null-space removal: keep only the observable translation
+            t_obs = proj[u] @ step[u][:3, 3]
+            removed = raw_shift - float(np.linalg.norm(t_obs))
+            if removed > 0.02:
+                logger.info("fine_register: unit %s solved %.0fmm, observable "
+                            "%.0fmm — %.0fmm of in-plane null-space drift "
+                            "removed (round %d)", u, raw_shift * 1000,
+                            np.linalg.norm(t_obs) * 1000, removed * 1000, rnd)
+            step[u][:3, 3] = t_obs
             shift = float(np.linalg.norm(step[u][:3, 3]))
             if shift > max_correction_m:
                 if anneal_rounds > 1:
@@ -763,11 +807,16 @@ def run(output_dir: Path, accept_sep_m: Optional[float] = None,
             break                       # goal reached, or <2% gain: stop honestly
         worst_prev = worst_now
 
-    rolled_back = worst_best >= worst_before and worst_before > 0
+    # keep only a correction that PAYS: ≥3% relative gain on the worst
+    # separation (E1 lesson: a 0.3% gain bought 250mm of real chunk motion)
+    rolled_back = (worst_before > 0
+                   and worst_best > worst_before * 0.97
+                   and worst_best > accept_sep_m)
     if rolled_back:
-        logger.warning("fine_register: no round improved the worst separation "
-                       "(%.2fmm best vs %.2fmm before) — FULL ROLLBACK, chunks "
-                       "left untouched", worst_best * 1000, worst_before * 1000)
+        logger.warning("fine_register: best round gained <3%% on the worst "
+                       "separation (%.2fmm best vs %.2fmm before) — FULL "
+                       "ROLLBACK, chunks left untouched",
+                       worst_best * 1000, worst_before * 1000)
         corr = {u: np.eye(4) for u in planes}
         report.accepted = False
     else:

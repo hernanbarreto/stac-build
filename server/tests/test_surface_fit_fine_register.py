@@ -383,6 +383,52 @@ class TestAnneal:
             t = np.array(M)[:3, 3]
             assert np.linalg.norm(t) <= 0.06 + 1e-6, (u, np.linalg.norm(t))
 
+    def test_nullspace_translation_zeroed_on_degenerate_scene(self, tmp_path):
+        """Linear-walk geometry (floor z=0 + wall y=0, NO wall constraining x):
+        point-to-plane cannot observe x — whatever the solver drifts along x
+        must be projected out, and the observable y/z bias still corrected.
+        This is the E1 failure (700-1500mm proposals, 0.4mm real gain)."""
+        import json
+        import numpy as np
+        from plyfile import PlyData, PlyElement
+        from reconstruction.surface_fit.fine_register import run as run_finereg
+        rng = np.random.default_rng(51)
+
+        def make_corridor(n=20_000, seed=0, span=6.0):
+            r = np.random.default_rng(seed)
+            floor = np.column_stack([r.uniform(0, span, n), r.uniform(0, span, n),
+                                     r.normal(0, SIGMA, n)])
+            wall = np.column_stack([r.uniform(0, span, n),
+                                    r.normal(0, SIGMA, n),
+                                    r.uniform(0, 3, n)])
+            return np.vstack([floor, wall])
+
+        def write_chunk(cid, pts, frames):
+            v = np.zeros(len(pts), dtype=[("x", "f4"), ("y", "f4"), ("z", "f4")])
+            v["x"], v["y"], v["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
+            PlyData([PlyElement.describe(v, "vertex")], text=False).write(
+                str(tmp_path / f"chunk_{cid:03d}.ply"))
+            np.savez(tmp_path / f"chunk_{cid:03d}_origins.npz",
+                     frame_global=frames.astype(np.int64))
+
+        A = make_corridor(seed=52)
+        write_chunk(0, A, rng.integers(0, 10, len(A)))
+        B = make_corridor(n=15_000, seed=53)
+        write_chunk(1, B + np.array([0.0, 0.03, 0.02]),    # y/z observable bias
+                    rng.integers(10, 20, len(B)))
+        (tmp_path / "camera_frames.txt").write_text(
+            " ".join(str(f) for f in range(20)))
+        eye = " ".join(f"{x:.9g}" for x in np.eye(4).reshape(-1))
+        (tmp_path / "camera_poses.txt").write_text("\n".join([eye] * 20) + "\n")
+
+        run_finereg(tmp_path, accept_sep_m=0.024, max_correction_m=0.25,
+                    pieces_per_chunk=1, anneal_rounds=3, ground_datum=False)
+        rep = json.loads((tmp_path / "fine_register_report.json").read_text())
+        for u, M in rep["corrections"].items():
+            t = np.array(M)[:3, 3]
+            assert abs(t[0]) < 0.005, (u, t)         # x unobservable → ~zero
+        assert max(rep["sep_after_m"].values()) < 0.024, rep["sep_after_m"]
+
     def test_anneal_rollback_when_nothing_improves(self, tmp_path):
         """Perfectly aligned chunks: no round can improve the (already tiny)
         worst separation — corrections stay identity and nothing degrades."""

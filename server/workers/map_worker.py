@@ -1897,8 +1897,19 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > comfort "
                           f"{_max_walk:g} m → phase 2: chunked-metric re-run "
                           f"({_chunk} kf/chunk ≈ {_chunk_walk:g} m walked each)")
-            _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov, _anch_per_chunk)
-            _ensure_anchors([_sel_files[i] for i in _anchor_idx])
+            if bool(_va_cfg.get("hybrid_da3", True)):
+                # Phase E-lite (SAME rule as the direct-chunked path — E1 bug:
+                # this re-run path kept the 25-anchor subset, so only 5-8/42
+                # frames per chunk had a DA3 map to re-shape on): EVERY keyframe
+                # needs its isolated DA3 depth for the hybrid write
+                pipe.send_log(f"HYBRID-DA3: extracting isolated DA3 depth for all "
+                              f"{_n_selected} keyframes (shape source for the "
+                              f"hybrid write)")
+                _ensure_anchors(list(_sel_files))
+            else:
+                _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov,
+                                                  _anch_per_chunk)
+                _ensure_anchors([_sel_files[i] for i in _anchor_idx])
             # wipe phase-1 reconstruction artifacts (NOT da3_run — the anchors live there)
             for _pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
                 for _f in output_dir.glob(_pat):
