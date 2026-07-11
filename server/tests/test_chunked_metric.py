@@ -986,3 +986,35 @@ def test_iterate_chunk_fields_stall_guard_rolls_back():
     assert any(h.get("rolled_back") for h in rounds)
     # the rolled-back state never integrated the persistent push
     assert np.max(np.abs(xi[:, 4])) < 3 * 0.20
+
+
+# ── DC chain (rigid seam offsets, ramped between domain centres) ─────
+
+def test_chain_from_dcs_signs_and_gauge():
+    """Two domains drifted by a known offset: the chain must move them ONTO
+    each other (sign check via the pair convention xi_f - xi_g = tau) and the
+    weighted-mean gauge must keep the session from shifting as a whole."""
+    from loop_utils.metric_lock import chain_from_dcs
+    dc = np.zeros(6); dc[4] = 0.20               # D1's copy sits 20 cm above
+    c = chain_from_dcs({(0, 1): dc}, 2, [30, 30])
+    # relative correction equals -dc: after it, the copies coincide
+    assert abs((c[0, 4] - c[1, 4]) - 0.20) < 1e-12
+    # gauge: weighted mean zero (equal weights → symmetric split)
+    assert abs(c[0, 4] + c[1, 4]) < 1e-12
+    # missing seams → identity links
+    c3 = chain_from_dcs({(0, 1): dc}, 3, [30, 30, 30])
+    assert abs((c3[1, 4] - c3[2, 4])) < 1e-12    # no 1-2 DC → same correction
+
+
+def test_interp_domain_chain_ramp_continuous():
+    from loop_utils.metric_lock import chain_from_dcs, interp_domain_chain
+    doms = [(0, 30), (30, 60)]
+    dc = np.zeros(6); dc[4] = 0.10
+    c = chain_from_dcs({(0, 1): dc}, 2, [30, 30])
+    xi = interp_domain_chain(doms, c, 60)
+    assert np.allclose(xi[:15, 4], c[0, 4])      # constant before 1st centre
+    assert np.allclose(xi[45:, 4], c[1, 4])      # constant after last centre
+    steps = np.abs(np.diff(xi[:, 4]))
+    assert steps.max() < 0.10 / 25               # a RAMP, never a cliff
+    mid = 0.5 * (c[0, 4] + c[1, 4])
+    assert abs(xi[29, 4] - mid) < 0.01 and abs(xi[30, 4] - mid) < 0.01
