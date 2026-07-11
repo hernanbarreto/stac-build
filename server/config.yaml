@@ -721,12 +721,12 @@ reconstruction:
                                         # pixels vote (npz 'conf'); 0 disables the gate.
                                         # Fallback ladder if a filter starves: near∩conf →
                                         # conf → near → all valid.
-    scale_drift: false                  # A3 EXPERIMENT (test4 serpenteado A/B): per-chunk
-                                        # LINEAR scale ramp OFF — a scale that varies along
-                                        # the walk scales the same surface differently frame
-                                        # to frame (test4: ±12%/chunk) and can bow straight
-                                        # edges. true → run-6 behaviour (self-gated drift).
-                                        # Original doc of the drift, kept for reference:
+    scale_drift: true                   # per-chunk LINEAR scale drift — KEEP ON. A3
+                                        # 2026-07-11 tested false on test4: serpenteado
+                                        # unchanged and duplicates got MUCH worse (spread
+                                        # ×1.63→×1.72, held-out anchor gain lost). The drift
+                                        # is earning its keep against overlap duplication.
+                                        # Original doc:
                                         # metric-lock: per-chunk LINEAR scale drift (log-scale,
                                         # 2 DOF/chunk) from positioned DA3 anchors + per-frame
                                         # seam ratios, SELF-GATED on held-out seam observations
@@ -743,7 +743,13 @@ reconstruction:
                                         # in serpenteado or duplicates — acquitted as the
                                         # visible-warp culprit despite its unsmoothed
                                         # per-frame fits (|t| up to 159 cm at seam 7->8).
-    intra_chunk: true                   # INTRA-CHUNK per-frame consensus, ITERATIVE (set
+    intra_chunk: false                  # A4 EXPERIMENT (test4 serpenteado A/B): intra-chunk
+                                        # per-frame consensus OFF ("run 3 exactly") — the last
+                                        # per-frame warp stage still active (corrections up to
+                                        # 58 cm, chunk 7). If serpenteado persists with this
+                                        # off, the waviness comes from omega's raw feed-forward
+                                        # output itself. true → run-6 behaviour.
+                                        # Original doc: INTRA-CHUNK per-frame consensus, ITERATIVE (set
                                         # false → run 3 exactly). Corrects the warp BETWEEN
                                         # frames of the same chunk. Two measured lessons baked
                                         # in: endpoints clamped to the seam consensus (no
