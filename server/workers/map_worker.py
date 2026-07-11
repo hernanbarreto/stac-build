@@ -400,6 +400,8 @@ def _run_pose_refine_step(pipe: WorkerPipe, output_dir: Path, recon_cfg: dict):
     for key, flag in (("pair_window", "--pair-window"),
                       ("samples_per_frame", "--samples"),
                       ("rel_tol", "--rel-tol"),
+                      ("max_depth", "--max-depth"),
+                      ("near_ref", "--near-ref"),
                       ("odo_weight", "--odo-weight"),
                       ("leash_weight", "--leash-weight"),
                       ("min_gain", "--min-gain"),

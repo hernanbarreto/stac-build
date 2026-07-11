@@ -195,15 +195,21 @@ def gather_matches(pts_i: np.ndarray, w2c_j: np.ndarray, K_j: np.ndarray,
                    raster_j: np.ndarray, world_j_grid: np.ndarray,
                    normal_j: np.ndarray, rel_tol: float = 0.15,
                    abs_tol: float = 0.60, max_depth: float = 8.0,
+                   near_ref: float = 8.0,
                    min_matches: int = 200, max_matches: int = 400,
                    trust_j: Optional[np.ndarray] = None, seed: int = 0
-                   ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+                   ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray,
+                                       np.ndarray]]:
     """Surface matches between frames i and j: project i's world samples into
     j; where j has a TRUSTED rastered point at that pixel with compatible
     depth and a defined normal, (p_i, q_j, n_j) is one placement pair of the
-    same surface. Trust filters: near field only (``max_depth`` — pixel-match
-    error grows with depth), non-grazing pixels, depth compatibility
-    min(rel_tol*z, abs_tol). Returns (P, Q, N) arrays or None.
+    same surface. Trust filters: depth cap ``max_depth``, non-grazing pixels,
+    depth compatibility min(rel_tol*z, abs_tol). Beyond ``near_ref`` a match's
+    weight falls as (near_ref/z)^2 — pixel-match error grows with depth, so
+    the near field keeps the authority while FAR landmarks (F1's chimney,
+    ~image 704: seen only beyond 8 m, it had NO voice in the consensus and
+    drifted when its observers' poses moved 16 cm) still anchor rotations.
+    Returns (P, Q, N, W) arrays or None.
 
     The matches feed a JOINT point-to-plane solve — no per-edge rigid fit:
     a 6-DOF fit per edge would have to invent the in-plane (unobservable)
@@ -236,11 +242,12 @@ def gather_matches(pts_i: np.ndarray, w2c_j: np.ndarray, K_j: np.ndarray,
     P = src_w[ok]
     Q = world_j_grid[v[ok], u[ok]]
     N = nrm[ok]
+    Wt = (float(near_ref) / np.maximum(zj[ok], float(near_ref))) ** 2
     if len(P) > max_matches:
         keep = np.random.default_rng(seed).choice(len(P), max_matches,
                                                   replace=False)
-        P, Q, N = P[keep], Q[keep], N[keep]
-    return P, Q, N
+        P, Q, N, Wt = P[keep], Q[keep], N[keep], Wt[keep]
+    return P, Q, N, Wt
 
 
 # ── pose graph solve ─────────────────────────────────────────────────
@@ -248,7 +255,7 @@ def gather_matches(pts_i: np.ndarray, w2c_j: np.ndarray, K_j: np.ndarray,
 def _edge_residuals(edge, Cs):
     """Point-to-plane residuals of one edge under corrections Cs.
     Returns (r [M], p' [M,3], n' [M,3]) — p', n' already in corrected world."""
-    i, j, P, Q, N = edge
+    i, j, P, Q, N = edge[0], edge[1], edge[2], edge[3], edge[4]
     Ci, Cj = Cs[i], Cs[j]
     p = P @ Ci[:3, :3].T + Ci[:3, 3]
     q = Q @ Cj[:3, :3].T + Cj[:3, 3]
@@ -281,6 +288,8 @@ def solve_pose_graph(n: int, edges: List[tuple], odo_weight: float = 2.0,
             r, p, nr = _edge_residuals(edge, Cs)
             w = np.where(np.abs(r) <= huber_m, 1.0,
                          huber_m / np.maximum(np.abs(r), 1e-12))
+            if len(edge) > 5 and edge[5] is not None:
+                w = w * edge[5]         # per-match depth weight (near_ref/z)^2
             w = w * (edge_mass / max(len(r), 1))   # bounded mass per edge:
             # thousands of sub-mm-biased matches must not out-vote the leash
             # on clean data, yet real signal must beat the priors
@@ -333,8 +342,9 @@ def edge_errors(edges, Cs) -> np.ndarray:
 
 # ── orchestration ────────────────────────────────────────────────────
 
-def run(output_dir: Path, pair_window: int = 10, samples_per_frame: int = 4000,
-        rel_tol: float = 0.15, odo_weight: float = 2.0,
+def run(output_dir: Path, pair_window: int = 15, samples_per_frame: int = 4000,
+        rel_tol: float = 0.15, max_depth: float = 30.0, near_ref: float = 8.0,
+        odo_weight: float = 2.0,
         leash_weight: float = 0.1, min_gain: float = 0.10,
         holdout_frac: float = 0.2, outer_iters: int = 3, seed: int = 0) -> int:
     """Refine all frame poses; returns number of frames actually moved."""
@@ -433,6 +443,7 @@ def run(output_dir: Path, pair_window: int = 10, samples_per_frame: int = 4000,
                     continue
                 e = gather_matches(samp[i], w2c_cur[j], Ks[j], rasters[j],
                                    worlds[j], normals[j], rel_tol=rel_tol,
+                                   max_depth=max_depth, near_ref=near_ref,
                                    trust_j=trusts[j],
                                    seed=seed + it * 999983 + i * 1000 + j)
                 if e is not None:
@@ -543,7 +554,9 @@ def main():
                         format="%(asctime)s %(levelname)s %(message)s")
     ap = argparse.ArgumentParser(description="E-full global pose refinement")
     ap.add_argument("--output-dir", required=True)
-    ap.add_argument("--pair-window", type=int, default=10)
+    ap.add_argument("--pair-window", type=int, default=15)
+    ap.add_argument("--max-depth", type=float, default=30.0)
+    ap.add_argument("--near-ref", type=float, default=8.0)
     ap.add_argument("--samples", type=int, default=4000)
     ap.add_argument("--rel-tol", type=float, default=0.15)
     ap.add_argument("--odo-weight", type=float, default=2.0)
@@ -553,6 +566,7 @@ def main():
     a = ap.parse_args()
     run(Path(a.output_dir), pair_window=a.pair_window,
         samples_per_frame=a.samples, rel_tol=a.rel_tol,
+        max_depth=a.max_depth, near_ref=a.near_ref,
         odo_weight=a.odo_weight, leash_weight=a.leash_weight,
         min_gain=a.min_gain, outer_iters=a.outer_iters)
 

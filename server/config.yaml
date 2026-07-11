@@ -880,7 +880,13 @@ reconstruction:
                                         # inter-frame disagreement or NOTHING is applied. Synthetic
                                         # validation: disagreement 31 -> 14 mm, exact on perfect
                                         # correspondences. Pure CPU, runs after finereg slot.
-    # pair_window: 10                   # covisibility span in keyframe order
+    pair_window: 15                     # F2: 10→15 — distant frames that see the same far
+                                        # landmark (F1's chimney, ~image 704) get direct edges
+    max_depth: 30.0                     # F2: 8→30 m — far landmarks ENTER the consensus...
+    near_ref: 8.0                       # ...with weight (near_ref/z)^2: near field keeps the
+                                        # authority, far anchors the rotations. F1 lesson: the
+                                        # chimney (only seen beyond 8 m) had no voice and
+                                        # drifted when its observers' poses moved 16 cm.
     # samples_per_frame: 4000           # projected samples per frame
     # rel_tol: 0.15                     # depth-compat tolerance (rel; abs cap 0.6 m)
     # odo_weight: 2.0                   # smoothness of corrections along the walk

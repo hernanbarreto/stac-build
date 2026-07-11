@@ -32,8 +32,12 @@ def _corridor_points(rng, n=60000, span=20.0):
     slabs = []
     n_slab = (n // 3) // 5
     for zc in np.arange(4.0, span + 1e-6, 4.0):
-        slabs.append(np.column_stack([rng.uniform(-1.5, 1.8, n_slab),
-                                      rng.uniform(0.0, 2.2, n_slab),
+        # facades GROW with distance (like real scenes): far ones peek around
+        # the near ones instead of being fully occluded
+        hx = 0.45 * zc
+        hy = 0.5 + 0.35 * zc
+        slabs.append(np.column_stack([rng.uniform(-hx, hx * 1.1, n_slab),
+                                      rng.uniform(0.0, hy, n_slab),
                                       np.full(n_slab, zc)]))
     return np.vstack([floor, wall] + slabs)
 
@@ -104,8 +108,38 @@ def _build_edges(frames, pair_window=6, samples=1500, seed=3):
                                norms[j], min_matches=80, trust_j=trusts[j],
                                seed=seed + i * 100 + j)
             if e is not None:
-                edges.append((i, j) + e)
+                edges.append((i, j) + e)         # (i, j, P, Q, N, W)
     return edges
+
+
+def test_gather_matches_depth_weights():
+    """Far matches enter beyond near_ref but with (near_ref/z)^2 weight; a
+    max_depth of 8 excludes them entirely (the F1 chimney failure mode)."""
+    frames = _noisy_frames(seed=21, noise_t=0.0, noise_r=0.0, n_frames=4)
+    f0, f1 = frames[0], frames[1]
+    w2c = np.linalg.inv(f1["pose"])
+    Xc = f1["P"] @ w2c[:3, :3].T + w2c[:3, 3]
+    r, Wg = rasterize_frame(f1["P"], Xc[:, 2], f1["rows"], f1["cols"], H, W)
+    tr = grazing_mask(r)
+    nr = normal_grid(Wg, r > 1e-6)
+    rng = np.random.default_rng(4)
+    samp = f0["P"][rng.choice(len(f0["P"]), 6000, replace=False)]
+    wide = gather_matches(samp, w2c, K, r, Wg, nr, min_matches=50,
+                          max_depth=30.0, near_ref=8.0, trust_j=tr,
+                          max_matches=100000)
+    near = gather_matches(samp, w2c, K, r, Wg, nr, min_matches=50,
+                          max_depth=8.0, near_ref=8.0, trust_j=tr,
+                          max_matches=100000)
+    assert wide is not None and near is not None
+    P, Q, N, Wt = wide
+    zj = (Q @ w2c[:3, :3].T + w2c[:3, 3])[:, 2]
+    far = zj > 8.5
+    assert far.any(), "wide gather must include far matches"
+    assert len(P) > len(near[0])
+    # weights: 1.0 in the near field, (8/z)^2 beyond
+    assert np.allclose(Wt[zj <= 8.0], 1.0)
+    exp = (8.0 / zj[far]) ** 2
+    assert np.allclose(Wt[far], exp, rtol=1e-6)
 
 
 def test_se3_exp_log_roundtrip():
