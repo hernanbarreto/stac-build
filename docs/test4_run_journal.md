@@ -59,6 +59,7 @@ verifies each new log against this file.
 | A2 | 2026-07-11 18:57 | 0cc1858 | `elastic_seam: false` (flag now configurable; depth-cap far-drop self-off — not a density gain) | elastic OFF confirmed (0 [elastic] lines). Upstream identical (seams 6.6…8.4). Phase-2 scale 0.9714 (vs .9698 — points moved less). Intra-chunk verdicts shifted: 4 APPLY (1,4,7,8) vs 7 — endpoints clamp to a different seam consensus. finereg 7 pairs/147 poses/6 chunks, 117.7→118.0 mm. Cloud 39.9M (+1M = far-drop off) → 25.6M | ❌ user: NO visible difference — serpenteado AND duplicates unchanged. **Elastic acquitted** |
 | A3 | 2026-07-11 19:29 | 12eee62 | `scale_drift: false`, elastic back to true | drift OFF confirmed (0 DRIFT lines, no "drift APPLIED"). Scale spread widened ×1.63→×1.72; no held-out anchor improvement (0.78→0.38 line gone). Seams shifted (6.9…9.8 cm), elastic similar, intra 6 APPLY, finereg 7 pairs/168 poses/7 chunks 119.9→119.4 mm. Cloud 39.2M→22.9M | ❌ user: MANY more duplicates + serpenteado persists. **Drift acquitted for serpenteado AND proven to REDUCE duplicates — keep ON** |
 | A4 | 2026-07-11 20:02 | caf35c2 | `intra_chunk: false` (drift+elastic back to run-6 true), "run 3 behaviour" | intra OFF confirmed (0 intra lines). Drift applied, anchor 0.78→0.38%, spread ×1.63, seams + elastic identical to run6, finereg 5 pairs/147 poses/6 chunks 119.4→118.1 mm. Cloud 39.1M→25.5M | ❌ user: serpenteado FIRM; duplicates ≈ run6 or a touch more. **Intra-chunk acquitted (and mildly protective)** |
+| E1 | pending | 9587e3c (vendor 01f6fa9) | BATCH: B elastic tamed + C finereg anneal + D backfill & conf 10% + E-lite hybrid DA3 write | | questions: serpenteado reduced? duplicates? holes? end-of-walk placement? |
 
 ### PHASE A CONCLUSION (2026-07-11)
 
@@ -96,4 +97,3 @@ Expected in the E1 log vs run6: hybrid-da3 lines (new), tamed elastic (smaller
 max translations), anneal rounds in finereg (worst separation should finally
 drop well below ~117 mm or roll back), backfill px counts, bigger cloud.
 Suite: 106 passed.
-| E1 | pending | 9587e3c (vendor 01f6fa9) | BATCH: B elastic tamed + C finereg anneal + D backfill & conf 10% + E-lite hybrid DA3 write | | questions: serpenteado reduced? duplicates? holes? end-of-walk placement? |
