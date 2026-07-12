@@ -870,7 +870,14 @@ reconstruction:
   # poses. Applies to ALL chunked backbones — da3, mapanything AND vggtomega (for omega
   # the order is Omega → scale_align → BA, so the BA refines already-metric poses).
   pose_refine:                          # E-full 2026-07-11: JOINT point-to-plane optimization of
-    enabled: true                       # ALL frame poses (multi-view global ICP over per-frame
+    enabled: false                      # F1/F2 verdict (user, visual): does NOT pay vs run6 on
+                                        # test4 — it moves poses ~20 cm median and far landmarks
+                                        # (the chimney, ~image 704) end up displaced, while run6's
+                                        # untouched poses kept them solid. The coverage/density
+                                        # wins the user liked come from ownership_backfill +
+                                        # conf_percentile 10, NOT from this stage. Kept as opt-in
+                                        # (gate + report proven working) for future scenes.
+                                        # Original doc: ALL frame poses (multi-view global ICP over per-frame
                                         # world corrections + odometry smoothness + weak identity
                                         # leash, gauge on frame 0). Attacks the root defect Phase A
                                         # isolated: omega's feed-forward per-frame poses are never
