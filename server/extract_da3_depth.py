@@ -21,6 +21,11 @@ def main():
                              "— no cross-frame attention). Used for the metric scale "
                              "anchor, where frames are seconds apart and must not be "
                              "treated as a multi-view set.")
+    parser.add_argument("--process_res", type=int, default=None,
+                        help="DA3 processing resolution (upper-bound long side; model "
+                             "default 504). Phase C detail transfer uses ~1008 so the "
+                             "depth carries detail above the omega grid's Nyquist. "
+                             "ViT cost grows ~quadratically — keyframes only.")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -66,6 +71,12 @@ def main():
         raise RuntimeError("model did not reach the GPU — aborting instead of "
                            "silently burning CPU")
 
+    # Optional processing-resolution override (Phase C hi-res detail source)
+    _res_kw = {}
+    if args.process_res:
+        _res_kw["process_res"] = int(args.process_res)
+        print(f"[DA3 Extractor] process_res override: {args.process_res}")
+
     # Run inference: one joint batch (default) or strictly per-frame (--per_frame)
     if args.per_frame:
         d_list, c_list, k_list = [], [], []
@@ -73,7 +84,7 @@ def main():
             for i, img_path in enumerate(images):
                 print(f"[DA3 Extractor] isolated inference {i+1}/{len(images)}: "
                       f"{os.path.basename(img_path)}")
-                pred = model.inference([img_path])
+                pred = model.inference([img_path], **_res_kw)
                 d = pred.depth
                 c = pred.conf
                 k = getattr(pred, "intrinsics", None)
@@ -86,7 +97,7 @@ def main():
         intrinsics = np.concatenate(k_list, axis=0) if len(k_list) == len(images) else None
     else:
         with torch.no_grad():
-            prediction = model.inference(images)
+            prediction = model.inference(images, **_res_kw)
         # prediction.depth has shape [N, H, W], prediction.conf has shape [N, H, W]
         depths = prediction.depth
         confs = prediction.conf
@@ -105,6 +116,9 @@ def main():
 
     print(f"[DA3 Extractor] Depth range: [{depths.min():.3f}, {depths.max():.3f}]")
     print(f"[DA3 Extractor] Conf range:  [{confs.min():.3f}, {confs.max():.3f}]")
+    if device.type == "cuda":
+        print(f"[DA3 Extractor] peak VRAM: "
+              f"{torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
 
     for i, img_path in enumerate(images):
         basename = os.path.basename(img_path)
