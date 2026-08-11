@@ -17,11 +17,26 @@ the metric DA3 depth (the surface source) are untouched.
 
 Run (mapanything env), after VGGT-Long[Omega] produced poses + the DA3 per-frame npz:
     python -m reconstruction.scale_align --output-dir <out> [--dry-run]
+
+────────────────────────────────────────────────────────────────────────────────
+v2 (precision task, Phase A). The single-median estimator above stays the
+production baseline (mode "global_median", bit-identical). On top of it:
+  - configurable estimator modes "affine_robust" / "depth_dependent"
+    (reconstruction/scale_model.py — evidence-gated, auto-degrading);
+  - an optional VIO scale source (reconstruction/vio_scale.py): when the session
+    carries a VIO trajectory (docs/VIO_FORMAT.md), VIO SETS the scale and DA3
+    becomes the cross-check; the VIO↔DA3 agreement is always reported;
+  - a persisted per-session diagnostic (output/scale_diagnostics.json): per-anchor
+    ratios, dispersion, s along the walk, residual vs depth, model selection
+    verdicts, VIO agreement, and an aggregate scale_confidence health metric.
+The applied correction remains ONE global similarity s in every mode (omega's
+only gauge freedom — see scale_model.py docstring); fail-hard rules unchanged.
 """
 from __future__ import annotations
 
 import argparse
 import glob
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -30,6 +45,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 logger = logging.getLogger("ScaleAlign")
+
+DIAGNOSTICS_NAME = "scale_diagnostics.json"
 
 
 def _da3_npz_dir(output_dir: Path) -> Optional[Path]:
@@ -326,8 +343,162 @@ def apply_scale(output_dir: Path, s: float, dry_run: bool = False) -> None:
         logger.info(f"  scaled {pp} (backup {bak.name})")
 
 
+def _kf_centres_and_times(output_dir: Path, session_dir: Path):
+    """Keyframe camera centres (up-to-scale, pre-apply) + timestamps (s) for the
+    VIO segment ratio. Timestamps = frame_number / video fps. Raises with the
+    exact reason when fps cannot be established (VIO needs a time base)."""
+    from reconstruction.vio_scale import video_fps
+    lines, nums, _ = _read_poses(output_dir)
+    mats = [np.array([float(x) for x in ln.split()], np.float64).reshape(4, 4)
+            for ln in lines if len(ln.split()) == 16]
+    centres = np.stack([m[:3, 3] for m in mats])
+    fps = video_fps(session_dir)
+    if not fps:
+        raise RuntimeError("VIO present but the video fps could not be read "
+                           "(no source_video.* or unreadable) — VIO timestamps cannot "
+                           "be matched to frames. Fix or remove the VIO file.")
+    t = np.asarray(nums, np.float64) / float(fps)
+    return t, centres
+
+
+def estimate_v2(output_dir: Path, log=None, near_frac: float = 0.25,
+                conf_top_frac: float = 0.0, cfg: Optional[dict] = None,
+                session_dir: Optional[Path] = None) -> Tuple[Optional[float], dict]:
+    """Phase-A estimator + diagnostics. Returns (s_applied, diagnostics dict).
+
+    Scale source priority: VIO (when detected and enabled) SETS s; the DA3 model
+    is always estimated as well — as the applied source when no VIO, as the
+    cross-check when VIO is present. s_applied None ⇒ genuine failure (fatal
+    upstream). VIO present-but-unusable RAISES (fail-hard, no silent fallback)."""
+    from reconstruction import scale_model as sm
+    _log = log if log is not None else (lambda m: logger.info(m))
+    cfg = cfg or {}
+    mode = str(cfg.get("mode", "global_median"))
+    session_dir = Path(session_dir) if session_dir else output_dir.parent
+
+    diag: dict = {"version": 1, "generated_by": "scale_align_v2",
+                  "mode_requested": mode, "near_frac": near_frac,
+                  "conf_top_frac": conf_top_frac}
+
+    # ── DA3 model (baseline s always computed via the untouched production path) ──
+    s_baseline = estimate_scale(output_dir, log=log, near_frac=near_frac,
+                                conf_top_frac=conf_top_frac)
+    frames = sm.collect_frame_samples(output_dir, near_frac=near_frac,
+                                      conf_top_frac=conf_top_frac)
+    s_da3: Optional[float] = s_baseline
+    sel = None
+    if mode != "global_median" and frames:
+        sel = sm.select_model(frames, mode)
+        s_model = sm.applied_gain(sel["model"], frames)
+        if s_model is not None and np.isfinite(s_model) and s_model > 0:
+            s_da3 = float(s_model)
+        _log(f"mode {mode} → used {sel['mode_used']}"
+             + (f" (DEGRADED: {sel['degrade_reason']})" if sel["degraded"] else "")
+             + (f" — s={s_da3:.4f} (baseline global_median {s_baseline:.4f})"
+                if s_da3 is not None and s_baseline is not None else ""))
+        diag.update({"mode_used": sel["mode_used"], "degraded": sel["degraded"],
+                     "degrade_reason": sel["degrade_reason"],
+                     "model": {"kind": sel["model"]["kind"], "params": sel["model"]["params"]}
+                     if sel["model"] else None,
+                     "cv_loss": sel["cv"], "bic": sel["bic"]})
+    else:
+        diag.update({"mode_used": "global_median", "degraded": False,
+                     "degrade_reason": None, "model": None,
+                     "cv_loss": {}, "bic": {}})
+    diag["s_da3_global_median"] = s_baseline
+    diag["s_da3"] = s_da3
+
+    # ── VIO source (optional; VIO commands when present) ──
+    vio_info = None
+    s_vio: Optional[float] = None
+    if bool(cfg.get("vio", True)):
+        from ingestors.vio_detector import detect_vio_data
+        det = detect_vio_data(session_dir)
+        if det["has_vio"]:
+            from reconstruction.vio_scale import (load_vio_trajectory,
+                                                  estimate_vio_scale)
+            _log(f"VIO trajectory detected: {det['vio_path'].name} — VIO sets the "
+                 f"scale, DA3 becomes the cross-check")
+            vt, vp, _fps_hint = load_vio_trajectory(det["vio_path"])
+            kf_t, kf_c = _kf_centres_and_times(output_dir, session_dir)
+            vio_info = estimate_vio_scale(
+                vt, vp, kf_t, kf_c,
+                segment_s=float(cfg.get("vio_segment_s", 5.0)),
+                min_segments=int(cfg.get("vio_min_segments", 8)),
+                min_coverage=float(cfg.get("vio_min_coverage", 0.5)))
+            vio_info["file"] = det["vio_path"].name
+            vio_info.pop("segments", None)      # keep the JSON compact; ratios summarized
+            s_vio = vio_info["s_vio"]
+            _log(f"VIO scale s={s_vio:.4f} (median over {vio_info['n_segments']} segments, "
+                 f"MAD {100 * (vio_info['mad_rel'] or 0):.1f}%, coverage "
+                 f"{vio_info['coverage_frac']:.0%})")
+
+    # ── source priority + agreement ──
+    if s_vio is not None:
+        s_applied, source = s_vio, "vio"
+        if s_da3 is not None:
+            agreement = 100.0 * (s_da3 / s_vio - 1.0)
+            vio_info["agreement_pct"] = agreement
+            _log(f"VIO↔DA3 agreement: DA3 is {agreement:+.2f}% vs VIO "
+                 f"(DA3 s={s_da3:.4f}, VIO s={s_vio:.4f}) — DA3 scale-bias diagnostic")
+        else:
+            vio_info["agreement_pct"] = None
+            _log("VIO↔DA3 agreement: DA3 estimate unavailable — no cross-check")
+    else:
+        s_applied, source = s_da3, "da3"
+    diag["scale_source"] = source
+    diag["vio"] = vio_info
+    diag["s_applied"] = s_applied
+
+    # ── per-anchor diagnostics + confidence ──
+    if frames:
+        ratios = np.array([f["s_f"] for f in frames])
+        med = float(np.median(ratios))
+        mad_rel = float(np.median(np.abs(ratios - med)) / med) if med else None
+        diag["anchors"] = {
+            "count": len(frames),
+            "mad_rel": mad_rel,
+            "spread": [float(ratios.min()), float(ratios.max())],
+            "frames": [{"num": f["num"], "s_f": f["s_f"], "n_px": f["n_px"],
+                        "z_median_omega": f["z_median"], "d_median_m": f["d_median"]}
+                       for f in frames],
+            "s_over_walk": [{"num": f["num"], "s_f": f["s_f"]} for f in frames],
+        }
+        diag["jackknife"] = sm.jackknife_s(frames)
+        if s_applied is not None and source == "da3":
+            diag["residual_vs_depth"] = sm.residual_depth_profile(frames, s_applied)
+        elif s_da3 is not None:
+            diag["residual_vs_depth"] = sm.residual_depth_profile(frames, s_da3)
+        else:
+            diag["residual_vs_depth"] = []
+        heldout = (sel or {}).get("cv", {}).get("scale_only") if sel else \
+            sm._cv_frame_loss(frames, "scale_only")
+        diag["heldout_cv_loss_scale_only"] = heldout
+        conf, terms = sm.scale_confidence(
+            mad_rel, len(frames), heldout,
+            (vio_info or {}).get("agreement_pct") if vio_info else None)
+    else:
+        diag["anchors"] = {"count": 0, "mad_rel": None, "spread": None,
+                           "frames": [], "s_over_walk": []}
+        diag["jackknife"] = None
+        diag["residual_vs_depth"] = []
+        diag["heldout_cv_loss_scale_only"] = None
+        conf, terms = sm.scale_confidence(
+            None, 0, None, (vio_info or {}).get("agreement_pct") if vio_info else None)
+    diag["scale_confidence"] = conf
+    diag["confidence_terms"] = terms
+    if s_applied is not None:
+        _log(f"scale diagnostics: source={source}, s={s_applied:.4f}, "
+             f"anchors={diag['anchors']['count']}, "
+             f"MAD {100 * (diag['anchors']['mad_rel'] or 0):.1f}%, "
+             f"confidence {conf:.2f}")
+    return s_applied, diag
+
+
 def run(output_dir: Path, dry_run: bool = False, log=None,
-        near_frac: float = 0.25, conf_top_frac: float = 0.0) -> Optional[float]:
+        near_frac: float = 0.25, conf_top_frac: float = 0.0,
+        cfg: Optional[dict] = None, session_dir: Optional[Path] = None
+        ) -> Optional[float]:
     """Estimate + apply the metric scale. Returns the scale s (float) on success OR when
     it was ALREADY applied (marker present → output is already metric). Returns None ONLY
     when the scale could not be estimated (genuine failure) — the caller MUST treat None
@@ -346,13 +517,21 @@ def run(output_dir: Path, dry_run: bool = False, log=None,
         _log(f"ALREADY METRIC: marker present ({txt}) → output already scaled, not re-scaling "
              f"(Replace clears the marker to re-scale)")
         return s_prev          # non-None → caller knows it IS metric (not a failure)
-    s = estimate_scale(output_dir, log=log, near_frac=near_frac, conf_top_frac=conf_top_frac)
+    s, diag = estimate_v2(output_dir, log=log, near_frac=near_frac,
+                          conf_top_frac=conf_top_frac, cfg=cfg, session_dir=session_dir)
+    diag["dry_run"] = bool(dry_run)
+    try:
+        (output_dir / DIAGNOSTICS_NAME).write_text(json.dumps(diag, indent=2))
+        _log(f"scale diagnostics persisted → {DIAGNOSTICS_NAME}")
+    except Exception as e:  # noqa: BLE001 — diagnostics must never mask the scale itself
+        _log(f"WARNING: could not write {DIAGNOSTICS_NAME}: {e}")
     if s is None:
         return None            # genuine failure → caller makes it FATAL
     apply_scale(output_dir, s, dry_run=dry_run)
     if not dry_run:
         marker.write_text(f"s={s:.6f}\n")
-    _log(f"✅ metric scale {'(dry-run) ' if dry_run else ''}s={s:.4f} applied")
+    _log(f"✅ metric scale {'(dry-run) ' if dry_run else ''}s={s:.4f} applied "
+         f"(source={diag.get('scale_source', 'da3')})")
     return s
 
 
@@ -361,8 +540,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--mode", default="global_median",
+                    choices=["global_median", "affine_robust", "depth_dependent"])
+    ap.add_argument("--no-vio", action="store_true",
+                    help="ignore a VIO trajectory even if the session has one")
     args = ap.parse_args()
-    run(Path(args.output_dir), dry_run=args.dry_run)
+    run(Path(args.output_dir), dry_run=args.dry_run,
+        cfg={"mode": args.mode, "vio": not args.no_vio})
 
 
 if __name__ == "__main__":
