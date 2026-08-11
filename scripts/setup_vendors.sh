@@ -41,7 +41,20 @@ GIT_VENDORS=(
   "oneTBB-src|https://github.com/uxlfoundation/oneTBB.git|e9af1a1b38b8"
   "vggt-omega|https://github.com/facebookresearch/vggt-omega.git|39a0cb8af885"
   "ShapeR|https://github.com/facebookresearch/ShapeR.git|d4402f55dc69"
+  "pgsr|https://github.com/zju3dv/PGSR.git|de24f1a38b35"
 )
+
+# vendor/pgsr carries ONE local patch (inline quaternion_to_matrix so the whole
+# pytorch3d dependency is not needed) — applied after the pinned clone.
+apply_pgsr_patch() {
+  local patch="${ROOT}/server/patches/pgsr_inline_quaternion_to_matrix.patch"
+  [ -d "${VENDOR}/pgsr" ] && [ -f "${patch}" ] || return 0
+  if git -C "${VENDOR}/pgsr" apply --check "${patch}" 2>/dev/null; then
+    git -C "${VENDOR}/pgsr" apply "${patch}" && info "pgsr: local patch applied"
+  else
+    info "pgsr: local patch already applied (or not applicable)"
+  fi
+}
 
 # ── Non-git vendors (documented; not clonable) ──────────────────────────────
 # name|how-to-provision
@@ -108,6 +121,7 @@ for e in "${GIT_VENDORS[@]}"; do
   [ -n "${ONLY}" ] && [ "${ONLY}" != "${d}" ] && continue
   clone_pinned "${d}" "${u}" "${c}" || rc=1
 done
+apply_pgsr_patch
 
 # 3) non-git reminders
 if [ -z "${ONLY}" ]; then

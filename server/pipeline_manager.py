@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 class StageId(str, Enum):
     RECONSTRUCTION = "reconstruction"
     CLOUDCOMPY = "cloudcompy"
+    PGSR = "pgsr"
     TSDF = "tsdf"
     VLM = "vlm"
     SAM3 = "sam3"
@@ -33,6 +34,7 @@ class StageId(str, Enum):
 STAGE_REGISTRY = {
     StageId.RECONSTRUCTION:   {"label": "3D Reconstruction", "icon": "🔨", "module": "workers.map_worker"},
     StageId.CLOUDCOMPY:       {"label": "Cloud Cleaning",    "icon": "🧹", "module": "workers.cloudcompy_worker"},
+    StageId.PGSR:             {"label": "Precision (PGSR)",  "icon": "💎", "module": "workers.pgsr_worker"},
     StageId.TSDF:             {"label": "TSDF Mesh",         "icon": "🧊", "module": "workers.tsdf_worker"},
     StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker"},
     StageId.SAM3:             {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
@@ -56,6 +58,10 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
     StageId.VLM,
     StageId.SAM3,
     StageId.CLOUDCOMPY,
+    StageId.PGSR,          # precision mode only: no-ops unless backend is
+                           # vggtomega_pgsr (seeds from cleaned_cloud, so it runs
+                           # after CloudCompy; the TSDF then integrates its
+                           # rendered depths via depth_source "pgsr_render")
     StageId.TSDF,
 ]
 
@@ -308,6 +314,7 @@ class PipelineManager:
                              # → its products are THIS stage's outputs, not SAM3's
                              "segmentation_result.json", "seg_broadcast.json",
                              "classification.npy", "corrected_cloud.ply"],
+        StageId.PGSR: ["pgsr_scene", "pgsr_model", "pgsr_render"],
         StageId.TSDF: ["tsdf/scene"],
         StageId.VLM: ["scene_analysis.json", "vlm_analysis.json",
                       "scene_understanding.json", "autoprompt_instances.json",
@@ -340,6 +347,7 @@ class PipelineManager:
             StageId.VLM,              # scene analysis ran on old keyframes
             StageId.SAM3,             # segmentation ran on old frames
             StageId.CLOUDCOMPY,       # cleaned_cloud depends on chunks
+            StageId.PGSR,             # PGSR trained on old poses/cloud
             StageId.TSDF,             # TSDF mesh integrated old depth/poses
             StageId.INSTANCE_CLEANER, # instance PLYs from old segmentation
         ],
@@ -348,11 +356,16 @@ class PipelineManager:
             StageId.INSTANCE_CLEANER,
         ],
         StageId.SAM3: [
+            StageId.PGSR,             # dynamic masks come from SAM3 artifacts
             StageId.INSTANCE_CLEANER, # instances depend on segmentation
         ],
         StageId.CLOUDCOMPY: [
+            StageId.PGSR,             # the Gaussian seed is the cleaned cloud
             StageId.TSDF,             # TSDF masks to the old cleaned_cloud
             StageId.INSTANCE_CLEANER,
+        ],
+        StageId.PGSR: [
+            StageId.TSDF,             # precision TSDF integrates pgsr_render depths
         ],
     }
 
@@ -825,6 +838,24 @@ class PipelineManager:
                 except Exception:
                     pass
             return True, "segmentation.json + masks on disk"
+
+        if stage_id == StageId.PGSR:
+            # active only under backend vggtomega_pgsr — for every other backend the
+            # worker no-ops, so "complete" here is simply "nothing pending" unless
+            # the render products are expected and missing.
+            from config import load_config as _lc
+            try:
+                _backend = str((_lc().get("reconstruction", {}) or {})
+                               .get("backend", "")).lower()
+            except Exception:
+                _backend = ""
+            if _backend != "vggtomega_pgsr":
+                return True, "backend is not vggtomega_pgsr — stage not applicable"
+            render_dir = output_dir / "pgsr_render"
+            if (render_dir / "report.json").exists() and \
+                    any(render_dir.glob("frame_*.npz")):
+                return True, "pgsr_render depths + report on disk"
+            return False, "no PGSR rendered depths"
 
         if stage_id == StageId.TSDF:
             scene_dir = output_dir / "tsdf" / "scene"

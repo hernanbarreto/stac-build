@@ -340,6 +340,16 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         # per-frame metric depth (NO streaming) is the metric anchor; VGGT-Long[Omega]
         # gives up-to-scale poses; scale_align makes them metric. No ICP dense-fusion.
         _run_vggtomega(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
+    elif backend == "vggtomega_pgsr":
+        # PRECISION MODE (precision task, Phase D): the full vggtomega pipeline runs
+        # first and its output initializes a per-scene PGSR photometric optimization
+        # at NATIVE resolution (fixed initial poses + cloud as Gaussian seed; planar +
+        # multi-view geometric regularization; SAM3 dynamic masks excluded from the
+        # loss; optional photometric pose refinement by flag). The trainer exports
+        # rendered depths → the TSDF integrates them via depth_source "pgsr_render".
+        # NOTE: the PGSR stage itself runs AFTER CloudCompPy (it seeds from the
+        # cleaned cloud) — pipeline_manager triggers _run_pgsr_stage there.
+        _run_vggtomega(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
     else:
         _run_mapanything(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
 
