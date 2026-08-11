@@ -158,6 +158,11 @@ def load_keep_masks(mask_dir, cameras, device):
 
 def main():
     import torch
+    # Vendor parity (train.py: torch.set_num_threads(8)) — dropped in the first
+    # port and it COST 5-10x: on a 255-core box torch's default thread pool
+    # thrashes on the many small CPU ops of the multi-view block (GPU idles at
+    # 0% while CPU burns 2000%). 8 threads is the vendor's validated setting.
+    torch.set_num_threads(int(os.environ.get("STAC_TORCH_THREADS", "8")))
     import torch.nn.functional as F
     import cv2  # noqa: F401 — vendor utils expect it importable
 

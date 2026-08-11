@@ -66,7 +66,17 @@ def _pgsr_work(pipe: WorkerPipe, session_dir: str, config: dict):
            "--scene", str(scene_dir),
            "--model_dir", str(output_dir / "pgsr_model"),
            "--render_dir", str(output_dir / "pgsr_render"),
-           "--iterations", str(int(pcfg.get("iterations", 30000)))]
+           "--iterations", str(int(pcfg.get("iterations", 30000))),
+           # vendor's published max-quality regime (see config.yaml pgsr:) —
+           # validated on test2 2026-08-11 (30k in 1h57, PSNR 24.8, 11.3 GB peak)
+           "--resolution", str(int(pcfg.get("resolution", 2))),
+           "--ncc_scale", str(float(pcfg.get("ncc_scale", 0.5))),
+           "--densify_abs_grad_threshold",
+           str(float(pcfg.get("densify_abs_grad_threshold", 0.00015))),
+           "--opacity_cull_threshold",
+           str(float(pcfg.get("opacity_cull_threshold", 0.05)))]
+    if bool(pcfg.get("exposure_compensation", True)):
+        cmd.append("--exposure_compensation")
     if bool(pcfg.get("pose_refine", False)):
         cmd.append("--pose_refine")
     if bool(pcfg.get("quick", False)):

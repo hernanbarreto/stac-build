@@ -86,3 +86,55 @@ source: 66 keyframes at process_res 1008, one-off cached per session.
 3. **test7 confirmation — not required** (pre-registered: only if test2 showed
    a win). **test4 excluded by data**: its source video is 360×640, below the
    omega grid — no native detail exists to recover.
+
+## Phase D — precision mode (vggtomega_pgsr) internal verdict (test2)
+
+Training (vendor TnT max-quality config: r2, ncc_scale 0.5, outdoor densify
+thresholds, exposure compensation + STAC thread fix): 30,000 iterations in
+**1 h 57 min**, PSNR 24.8, 2.1M Gaussians, peak 11.3 GB VRAM. Precision TSDF
+(depth_source `pgsr_render`, production 12 mm voxel): 581 s. Two porting
+lessons cost ~7 GPU-hours before this run and are fixed in code: the vendor's
+`torch.set_num_threads(8)` (without it the multi-view stage ran 10× slower on
+a 255-core box, GPU idling) and the vendor's published quality configuration
+being r2 — full-res 1080p is outside PGSR's validated regime at 4× the cost.
+
+### Precision vs fast mode (COMMON patches, n=11)
+
+| mode | RMS med mm | RMS p90 | bimodal | surface area |
+|---|---|---|---|---|
+| fast (A+B winners) | **8.95** | 10.83 | **4/11** | 202 m² |
+| PGSR precision | 9.05 (+1.1%) | **10.01** | 9/11 | **377 m² (+86%)** |
+
+### Verdict (pre-registered bars)
+
+- **Precision mode does NOT clear its shape bar on this scene**: the bar
+  required RMS −15% relative; measured +1.1% (tie/slightly worse), and the
+  double-surface fraction rises (4/11 → 9/11 at ~4 cm separations). Its real,
+  measured wins: the error TAIL improves (p90 10.83 → 10.01 mm) and coverage
+  nearly doubles (+86% area — PGSR reconstructs where the omega depth was
+  discarded). The pattern mirrors the run journal's history: challengers win
+  coverage; the baseline's solidity is hard to beat.
+- **Consequence**: `vggtomega_pgsr` stays an OPTIONAL mode (never was a
+  default candidate), fully wired end-to-end and reproducible; the EXTERNAL
+  judge for the RealityScan-parity question is Phase E's scorecard (deferred
+  by the user).
+- **Test-time LoRA pre-step**: not entered — the pre-registered condition was
+  "only if the failure mode is bad seeding"; the seed converged fine
+  (PSNR 24.8, loss stable); the gap is in surface statistics, not
+  initialization.
+### pose_refine flag A/B (same config, 30k, 1 h 57)
+
+| | RMS med mm | RMS p90 | bimodal | PSNR | max pose Δ |
+|---|---|---|---|---|---|
+| PGSR (poses fixed) | **8.74*** | **10.01** | 9/12* | **24.78** | — |
+| PGSR + pose_refine | 9.74 | 10.98 | 7/12* | 24.45 | 4.6 cm |
+
+(*summary over measured patches; common-patch table in ab_metrics_d/mesh_ab.json)
+
+**pose_refine → default OFF.** The bar required RMS −5% with PSNR not
+dropping; measured RMS +11% WORSE and PSNR −0.33 dB. The se(3) deltas moved
+cameras up to 4.6 cm away from the pipeline's metric poses and the surface
+got softer — consistent with the journal's F1/F2 lesson: the omega poses are
+already excellent on these scenes and photometric refinement walks away from
+a better optimum. The dense-photometric pose path is now IMPLEMENTED and
+A/B'd (the task's mandate), and the evidence says: keep the pipeline's poses.

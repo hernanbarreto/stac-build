@@ -897,10 +897,20 @@ reconstruction:
   pgsr:
     iterations: 30000                   # full PGSR schedule; quick: true halves it
     quick: false                        # 15k-iteration schedule (A/B turnaround)
-    pose_refine: false                  # OPTIONAL photometric pose refinement (the dense
-                                        # replacement for the failed track BA): per-camera
-                                        # se(3) delta optimized through the rasterizer.
-                                        # Default OFF until it wins its A/B (evidence rule).
+    pose_refine: false                  # A/B 2026-08-11 (test2, 30k vs 30k): RMS +11% WORSE
+                                        # (8.74→9.74 mm), PSNR −0.33 dB, poses walked up to
+                                        # 4.6 cm from the metric solution — the omega poses
+                                        # are already excellent (journal F1/F2 said the same
+                                        # for point-to-plane refinement). STAYS OFF.
+    # ── training config = the vendor's published max-quality regime (their DTU/TnT
+    # scripts) + measured on test2: 30k in 1h57, PSNR 24.8, peak 11.3 GB ──
+    resolution: 2                       # vendor -r2: PGSR's validated quality regime
+                                        # (full-res 1080p is out-of-spec at 4× the cost)
+    ncc_scale: 0.5                      # vendor NCC patch scale (all their datasets)
+    densify_abs_grad_threshold: 0.00015 # vendor outdoor (TnT) densification threshold
+    opacity_cull_threshold: 0.05        # vendor outdoor culling
+    exposure_compensation: true         # vendor outdoor: per-image appearance model
+                                        # (worksite lighting varies along the walk)
     max_seed_pts: 1500000               # cleaned-cloud subsample seeding the Gaussians
     exclusive_gpu: true                 # stop vLLM during training (native-res needs VRAM)
 
