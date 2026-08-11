@@ -721,6 +721,44 @@ reconstruction:
                                         # pixels vote (npz 'conf'); 0 disables the gate.
                                         # Fallback ladder if a filter starves: near∩conf →
                                         # conf → near → all valid.
+    scale_mode: "global_median"         # Phase A (precision task) estimator mode:
+                                        # "global_median" (baseline, bit-identical to the
+                                        # validated production estimator) | "affine_robust"
+                                        # (Huber gain+offset in depth space; offset kept only
+                                        # if it wins leave-frames-out CV + BIC, else auto-
+                                        # degrades and reports) | "depth_dependent" (low-order
+                                        # gain vs depth, same evidence gate). The APPLIED
+                                        # correction is always ONE global similarity s (omega's
+                                        # only gauge freedom); the structured models de-bias
+                                        # the estimate of s and diagnose DA3's bias structure.
+                                        # A/B 2026-08-11 (test2/4/7, docs/scale_ab_results.md):
+                                        # the CV/BIC gate itself rejected the structured models
+                                        # in 8/9 cells (no offset/depth structure in our DA3↔Ω
+                                        # residuals); the one kept cell (test4 K=12 affine)
+                                        # failed the jackknife stability bar. Baseline STAYS
+                                        # the default — same discipline as bundle_adjust.
+    scale_vio: true                     # Phase A: auto-detect a VIO trajectory recorded with
+                                        # the video (vio_trajectory.csv/json in the session
+                                        # dir — docs/VIO_FORMAT.md). When present VIO SETS the
+                                        # scale (per-segment robust length ratio — VIO drifts
+                                        # in pose but its short-horizon scale is excellent);
+                                        # DA3 becomes the cross-check and the VIO↔DA3
+                                        # agreement % is always reported (DA3 bias diagnostic).
+                                        # A VIO file that is present but unusable ABORTS —
+                                        # no silent fallback.
+    vio_segment_s: 5.0                  # VIO↔omega ratio segment length (seconds)
+    vio_min_segments: 8                 # fewer usable segments than this → abort (fail-hard)
+    vio_min_coverage: 0.5               # segments must span ≥ this fraction of the keyframe
+                                        # time range → else abort (fail-hard)
+    scale_anchor_depth_coverage: false  # Phase A: after the omega pass, top-up DA3 anchors
+                                        # so the anchor set covers the scene's DEPTH RANGE
+                                        # (time-uniform picking alone can miss depth bins).
+                                        # A/B 2026-08-11 (test2/4/7): the top-up triggers
+                                        # (1-2 uncovered bins per scene) but the effect is
+                                        # NEUTRAL — pair-reprojection ±0.002 pts, jackknife
+                                        # mixed, s moves ≤0.5% — so it stays OFF per the
+                                        # evidence rule (implemented, flag-gated, documented).
+    scale_anchor_topup_max: 8           # cap on extra DA3 extractions for depth coverage
     scale_drift: true                   # per-chunk LINEAR scale drift — KEEP ON. A3
                                         # 2026-07-11 tested false on test4: serpenteado
                                         # unchanged and duplicates got MUCH worse (spread

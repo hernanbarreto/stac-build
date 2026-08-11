@@ -1777,11 +1777,32 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                           int(cfg_v["Model"]["chunk_size"]),
                           int(cfg_v["Model"]["overlap"]),
                           selected_frames_path, pipe)
+        # ── Phase A: anchor DEPTH-RANGE coverage top-up. Anchors were picked
+        # uniformly in time BEFORE any depth existed; now that the omega depth is
+        # on disk, extract DA3 for keyframes in depth bins no anchor covers
+        # (the scale model must see the whole depth range it will correct).
+        if _sel_files and bool(_va_cfg.get("scale_anchor_depth_coverage", False)):
+            from reconstruction.scale_model import plan_depth_coverage_topup
+            _topup = plan_depth_coverage_topup(
+                output_dir, list(_sel_files),
+                max_topup=int(_va_cfg.get("scale_anchor_topup_max", 8)))
+            if _topup:
+                pipe.send_log(f"[scale-align] anchor depth-coverage top-up: extracting "
+                              f"DA3 on {len(_topup)} extra keyframes "
+                              f"({', '.join(os.path.splitext(f)[0] for f in _topup)}) — "
+                              f"uncovered depth bins")
+                _ensure_anchors(_topup)
         from reconstruction.scale_align import run as _scale_run
         _s = _scale_run(output_dir, dry_run=False,
                         log=lambda m: pipe.send_log(f"[scale-align] {m}"),
                         near_frac=float(_va_cfg.get("scale_near_frac", 0.25)),
-                        conf_top_frac=float(_va_cfg.get("scale_conf_top_frac", 0.10)))
+                        conf_top_frac=float(_va_cfg.get("scale_conf_top_frac", 0.10)),
+                        cfg={"mode": str(_va_cfg.get("scale_mode", "global_median")),
+                             "vio": bool(_va_cfg.get("scale_vio", True)),
+                             "vio_segment_s": float(_va_cfg.get("vio_segment_s", 5.0)),
+                             "vio_min_segments": int(_va_cfg.get("vio_min_segments", 8)),
+                             "vio_min_coverage": float(_va_cfg.get("vio_min_coverage", 0.5))},
+                        session_dir=frames_dir.parent)
         # METRIC IS MANDATORY: a non-metric cloud is useless (BIM comparison needs real
         # units). If scale_align could not estimate s, FAIL — never ship up-to-scale.
         if _s is None:
