@@ -1,4 +1,4 @@
-# Phases B & C — A/B acceptance criteria (defined BEFORE the verdicts)
+# Phases B, C & D — A/B acceptance criteria (defined BEFORE the verdicts)
 
 Precision task. Same pre-registration discipline as Phase A
 (scale_ab_criteria.md): this file is written before the deciding runs finish;
@@ -53,6 +53,35 @@ justify its DA3 hi-res extraction cost (time/VRAM measured and reported).
 **Voxel default** moves from 12 mm only to the ELBOW of the quality/cost curve:
 the finest voxel whose RMS gain vs the next coarser step is ≥ 5% relative
 while time and VRAM stay within 2× of the 12 mm cell. Otherwise 12 mm stays.
+
+## Phase D — precision mode (backend vggtomega_pgsr) internal A/B
+
+Session: test2 (1080p, 66 keyframes). Comparison: FAST mode (the winners of
+A+B+C at production voxel) vs PRECISION mode (PGSR-rendered depths through the
+same TSDF at the same voxel; `pgsr_render`). Phase E's external scorecard is
+DEFERRED by the user, so this is the internal verdict only — recorded as such.
+
+**Precision mode is declared the better-SHAPE mode iff (common patches):**
+
+- planar-patch RMS median improves **≥ 15% relative** vs fast mode, AND
+- the bimodal (double-surface) fraction does not increase, AND
+- mesh completeness (surface area) stays within **−10%** of fast mode,
+- and the visual crops (same zones) do not show new artifacts (user verdict).
+
+Cost is reported (train time, peak VRAM, end-to-end), not gated: this is the
+deliverable mode by design ("decenas de minutos a pocas horas").
+
+**pose_refine flag** (photometric pose refinement) defaults ON only if, vs the
+same training without it: RMS improves **≥ 5% relative** AND final PSNR does
+not drop AND max pose delta stays plausible (< 10 cm — larger means the
+optimization is escaping the validated initialization, exactly what the
+journal's F1/F2 lesson warns about).
+
+**Test-time LoRA pre-step ("Free Geometry")**: evaluated on cost grounds
+first — it only enters if the PGSR A/B shows the INITIALIZATION (not the
+optimization) is the bottleneck: i.e., if PGSR fails its bar AND the failure
+mode is bad seeding (large early loss, holes at seed-sparse zones). Decision
+recorded with numbers either way.
 
 ## Recorded interim results (test2, written 2026-08-11 before test4 finished)
 

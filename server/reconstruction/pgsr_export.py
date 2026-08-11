@@ -128,7 +128,9 @@ def export_scene(output_dir: Path, frames_dir: Path, max_seed_pts: int = 1_500_0
     """Build output/pgsr_scene from the finished pipeline output. Returns the
     scene path. Idempotent (rebuilds cheap text/symlinks every call)."""
     _log = log if log is not None else (lambda m: logger.info(m))
-    output_dir, frames_dir = Path(output_dir), Path(frames_dir)
+    # resolve() both: the image symlinks embed frames_dir verbatim — a relative
+    # caller path would produce symlinks that only work from one cwd
+    output_dir, frames_dir = Path(output_dir).resolve(), Path(frames_dir).resolve()
     from reconstruction.scale_align import _read_poses
     from PIL import Image
 

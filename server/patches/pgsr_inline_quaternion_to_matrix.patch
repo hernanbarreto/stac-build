@@ -1,3 +1,19 @@
+diff --git a/scene/dataset_readers.py b/scene/dataset_readers.py
+index 94b6c87..ddf5274 100644
+--- a/scene/dataset_readers.py
++++ b/scene/dataset_readers.py
+@@ -187,7 +187,10 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
+     ply_path = os.path.join(path, "sparse/points3D.ply")
+     bin_path = os.path.join(path, "sparse/points3D.bin")
+     txt_path = os.path.join(path, "sparse/points3D.txt")
+-    if not os.path.exists(ply_path) or True:
++    # STAC patch: the vendor's "or True" (debug leftover) forced a bin/txt →
++    # ply reconversion on EVERY open and crashed when only points3D.ply exists
++    # (our exporter writes the ply directly). Use an existing ply as-is.
++    if not os.path.exists(ply_path):
+         print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+         try:
+             xyz, rgb, _ = read_points3D_binary(bin_path)
 diff --git a/scene/gaussian_model.py b/scene/gaussian_model.py
 index e7a691c..216ef18 100644
 --- a/scene/gaussian_model.py
@@ -23,14 +39,3 @@ index e7a691c..216ef18 100644
  
  def dilate(bin_img, ksize=5):
      pad = (ksize - 1) // 2
-diff --git a/submodules/diff-plane-rasterization/diff_plane_rasterization.egg-info/PKG-INFO b/submodules/diff-plane-rasterization/diff_plane_rasterization.egg-info/PKG-INFO
-index 8135050..fec747e 100644
---- a/submodules/diff-plane-rasterization/diff_plane_rasterization.egg-info/PKG-INFO
-+++ b/submodules/diff-plane-rasterization/diff_plane_rasterization.egg-info/PKG-INFO
-@@ -1,4 +1,5 @@
--Metadata-Version: 2.1
-+Metadata-Version: 2.4
- Name: diff_plane_rasterization
- Version: 0.0.0
- License-File: LICENSE.md
-+Dynamic: license-file
