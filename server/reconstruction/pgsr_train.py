@@ -197,7 +197,7 @@ def main():
     from utils.image_utils import psnr
     import random as _random
 
-    safe_state(True)
+    safe_state(False)   # True SILENCES stdout (vendor wrapper) — we stream progress
     os.makedirs(dataset.model_path, exist_ok=True)
     torch.cuda.reset_peak_memory_stats()
     t_start = time.time()

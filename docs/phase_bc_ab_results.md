@@ -44,4 +44,45 @@ under the 40% pose/scale alarm.
 - Visual crop pairs: `output/tsdf/ab_metrics/crop_p*_{baseline,mv_mask}.ply`
   per session, same world-space zones, for the user's visual confirmation.
 
-## Phase C — native-resolution depth (results appended when the sweep lands)
+## Phase C — native-resolution depth + voxel matrix (test2, clean GPU-exclusive runs)
+
+Full 3×3 matrix, Phase-B mask ON in every cell, production TSDF config,
+geometry only. Times are CLEAN (one job per GPU — the earlier contaminated
+sweep measured 3.1× for the 8 mm step; clean it is 1.8×). DA3 hi-res detail
+source: 66 keyframes at process_res 1008, one-off cached per session.
+
+### Quality (COMMON patches, n=10) and cost
+
+| cell | RMS med mm | bimodal | TSDF time | peak GPU |
+|---|---|---|---|---|
+| **off @ 12 mm** (production) | **8.85** | **3/10** | 374 s | — |
+| guided @ 12 | 8.86 | 7/10 | 494 s | 17.7 GB |
+| da3 @ 12 | 8.84 | 7/10 | 445 s | 16.9 GB |
+| off @ 8 | 9.01 | 4/10 | 679 s (1.8×) | 17.5 GB |
+| guided @ 8 | 9.05 | 7/10 | 829 s | 17.5 GB |
+| da3 @ 8 | 9.12 | 5/10 | 809 s | 18.8 GB |
+| off @ 6 | 9.34* | 4/10* | 1098 s (2.9×) | 18.7 GB |
+| guided @ 6 | 9.65* | 7/10* | 1682 s | 18.9 GB |
+| da3 @ 6 | 9.67* | 7/10* | 1655 s | 18.9 GB |
+
+(* summary over measured patches; common-patch table for the 12/8 rows in
+`ab_metrics_c/mesh_ab.json`, crops included.)
+
+### Verdicts (pre-registered bars)
+
+1. **native_depth_method → stays OFF.** RMS ties at the production voxel
+   (8.85 / 8.86 / 8.84 — within 0.2%), but BOTH refinement methods more than
+   double the double-surface incidence (3/10 → 7/10). The added high-frequency
+   content carries inter-frame inconsistencies that the coarser depth
+   naturally averaged out — the same failure mode that A/B'd the legacy
+   `upsample_depth` OFF, now measured precisely. The bar said "double-surface
+   must not increase": both fail decisively. Implemented, flag-gated,
+   documented.
+2. **Voxel → stays 12 mm.** 8 mm passes the cost bar (1.8× ≤ 2×) but WORSENS
+   RMS (8.85 → 9.01; the bar required a ≥5% gain); 6 mm fails cost (2.9×) and
+   quality both. Finer voxels only sharpen the noise our depth already has —
+   the resolution ceiling is the depth consistency, not the grid. That is
+   PRECISELY what Phase D attacks (photometric optimization).
+3. **test7 confirmation — not required** (pre-registered: only if test2 showed
+   a win). **test4 excluded by data**: its source video is 360×640, below the
+   omega grid — no native detail exists to recover.

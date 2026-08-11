@@ -506,8 +506,15 @@ tsdf:
   #   da3_detail_transfer — low freq (metric) from omega + high freq from DA3 hi-res
   #                         (process_res ≈1008, keyframes only), robust local gain,
   #                         detail capped vs the base (no hallucinated geometry).
-  native_depth_method: "off"   # off | guided_filter | da3_detail_transfer — default OFF
-                               # until a variant wins its A/B (evidence rule)
+  native_depth_method: "off"   # off | guided_filter | da3_detail_transfer.
+                               # A/B 2026-08-11 (test2 full 3×3 matrix, clean runs,
+                               # docs/phase_bc_ab_results.md): RMS TIES at 12 mm
+                               # (8.85/8.86/8.84 mm) but both methods more than double
+                               # the double-surface incidence (3/10 → 7/10 patches) —
+                               # the upsampled detail carries inter-frame inconsistency
+                               # the coarse depth averaged out (same failure that killed
+                               # legacy upsample_depth). STAYS OFF; the resolution
+                               # ceiling is depth CONSISTENCY, which Phase D attacks.
   native_depth_factor: 2       # upsample factor toward native res
   native_depth_sigma_depth_rel: 0.05   # depth-edge stop (relative)
   native_depth_detail_cap_rel: 0.10    # max detail deviation vs the metric base
@@ -585,7 +592,11 @@ tsdf:
                              # ACTIVE in DA3-dense mode (depth_source: da3) — DA3 raw depth has
                              # flying pixels and there's no cloud mask to drop them, so the 8cm→5cm
                              # gradient cutoff matters. (Bypassed only in faithful raster mode.)
-  voxel_length: 0.012        # 1.2 cm — back COARSER. The 0.8cm "for detail" was a mistake: with
+  voxel_length: 0.012        # 1.2 cm — CONFIRMED by the Phase-C voxel matrix 2026-08-11
+                             # (docs/phase_bc_ab_results.md): 8 mm costs 1.8× and WORSENS
+                             # RMS (8.85→9.01 mm), 6 mm costs 2.9× and worsens further —
+                             # finer grids only sharpen the depth noise. Original note:
+                             # 1.2 cm — back COARSER. The 0.8cm "for detail" was a mistake: with
                              # the masked depth being patchy (discrete cloud-pixel projections), a
                              # fine voxel isolates each patch → the mesh comes out as disconnected
                              # "brushstrokes". A coarser voxel + wide truncation MERGES neighbouring
