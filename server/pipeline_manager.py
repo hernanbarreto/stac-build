@@ -915,8 +915,8 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
             return False
         if not auto_segment and stage_id in _semantic_stages:
             return False
-        if not auto_tsdf and stage_id == StageId.TSDF:
-            return False
+        if not auto_tsdf and stage_id in (StageId.TSDF, StageId.PGSR):
+            return False   # no mesh requested → the 2h PGSR stage has no consumer
         return True
 
     return [PipelineStage(id=stage_id, enabled=_enabled(stage_id))

@@ -1674,6 +1674,16 @@ def export_tsdf_scene(
     #   3. raw LiDAR
     _cp = da3_conf_percentile if da3_conf_percentile > 0 else None
     _ds = str(depth_source or "auto").lower()
+    # AUTO + the session ran the PGSR precision stage → its rendered depths ARE
+    # this session's depth source (that is what the stage is for). Artifact-based,
+    # so old sessions (no pgsr_render/) keep their original behaviour, and an
+    # explicit depth_source always wins.
+    if _ds == "auto":
+        _pr_dir = output_dir / "pgsr_render"
+        if (_pr_dir / "report.json").exists() and any(_pr_dir.glob("frame_*.npz")):
+            _ds = "pgsr_render"
+            logger.info("[TSDF-scene] auto: session has PGSR renders → "
+                        "depth_source=pgsr_render (precision mode)")
     # DA3-DENSE FUSION (asymmetric design): integrate DA3's per-frame depth for EVERY
     # blur-valid frame (a superset of the VGGT keyframes), not the keyframe-only
     # MapAnything depth. The cloud/poses are keyframe-based, so this also drives pose

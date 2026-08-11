@@ -36,8 +36,10 @@ server:
 
 # ── Pipeline ───────────────────────────────────────────────────────
 pipeline:
-  auto_tsdf: false      # false = the pipeline STOPS after the cleaned cloud (see it fast);
-                        # the TSDF/texrecon (slow) is triggered manually from the UI.
+  auto_tsdf: true       # USER MANDATE 2026-08-11: every reconstruction (first run AND
+                        # re-runs) must ALWAYS finish with the MESH — never end at the
+                        # Potree cloud only. false = old behaviour (stop at cleaned
+                        # cloud, mesh triggered manually).
   # Full semantic chain inside the reconstruct pipeline:
   # VLM scene understanding → SAM3 segment-everything. false = the pipeline runs
   # RECONSTRUCTION → CLOUDCOMPY → TSDF only, and segmentation stays on-demand.
@@ -658,9 +660,12 @@ tsdf:
                              # so long scans keep view density. Higher ⇒ better coverage but slower MRF.
   texture_max_views_ceiling: 600   # hard cap on the auto-scaled view count (texrecon cost grows with it).
                                    # 600 (was 1200) ~halves the View-selection MRF — the slow stage.
-  depth_source: mapanything  # ("pgsr_render" = precision mode, Phase D: integrate the depths
-                             # RENDERED by the PGSR photometric optimization — pair with
-                             # reconstruction.backend: "vggtomega_pgsr"; missing renders are FATAL)
+  depth_source: auto         # "auto" (default): if the session ran the PGSR precision stage
+                             # (output/pgsr_render/ present) integrate ITS rendered depths;
+                             # else the omega chunk depth (mapanything); else DA3/LiDAR.
+                             # Explicit values force one source ("pgsr_render" is FATAL if
+                             # the renders are missing — never a silent fallback).
+                             # Original mapanything note:
                              # omega keyframe depth ONLY (same source as the cloud) → the TSDF
                              # matches the cloud. da3_frames mixed in DA3 filler depth (a DIFFERENT
                              # source than the omega cloud) → mesh didn't coincide (1.4-1.7x extent,
@@ -735,11 +740,15 @@ poisson:
 #   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
-  backend: "vggtomega"                  # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid" | "vggtomega"
-                                        # | "vggtomega_pgsr" (PRECISION MODE, Phase D: the full
-                                        #   vggtomega pipeline + per-scene PGSR photometric
-                                        #   optimization at native res; pair it with
-                                        #   tsdf.depth_source: "pgsr_render")
+  backend: "vggtomega_pgsr"             # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
+                                        # | "vggtomega" | "vggtomega_pgsr"
+                                        # DEFAULT = vggtomega_pgsr (USER DECISION 2026-08-11):
+                                        # the PGSR precision stage nearly doubles mesh COVERAGE
+                                        # (+86% area on test2) and improves the error tail
+                                        # (p90 10.83→10.01 mm) at ~2 h extra per scene.
+                                        # Trade-off on record: planar RMS ties (+1.1%) and the
+                                        # double-surface stat rises (docs/phase_bc_ab_results.md).
+                                        # "vggtomega" = the fast mode (no PGSR stage).
                                         # vggtomega = SOTA pose backbone (CVPR 2026), dynamic-scene robust:
                                         # DA3 metric depth (anchor) → Omega up-to-scale poses → scale_align
                                         # (metric) → BA. da3 = DENSE backbone: cm-level chunk alignment +
