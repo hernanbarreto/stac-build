@@ -480,6 +480,33 @@ bim:
 # surfaces (distant walls/doors) that show fine in the cloud.
 tsdf:
   mask_to_cleaned_cloud: true  # integrate EXACTLY the cloud's pixels (the source of truth)
+  # ── Phase B (precision task): multi-view geometric consistency filter (pre-TSDF) ──
+  # Every keyframe depth pixel is projected into its N nearest keyframes at the final
+  # poses; it integrates only if ≥ mv_min_consistent_views neighbours agree within
+  # mv_tau_rel relative depth (the standard MVS fusion check; poses untouched).
+  # reconstruction/mv_consistency.py — masks + telemetry in output/mv_consistency/.
+  mv_consistency: false        # default OFF until the A/B verdict (evidence rule)
+  mv_neighbors: 4              # N neighbour keyframes per pixel check
+  mv_min_consistent_views: 2   # pixel survives with ≥ this many agreeing neighbours
+  mv_tau_rel: 0.02             # relative depth agreement |z−d|/d
+  mv_replace_median: false     # variant: median of consistent estimates replaces the value
+  mv_warn_discard_pct: 40.0    # global discard above this ⇒ STRONG warning: poses/scale
+                               # are bad — a filter discarding half the scene is not "working"
+  # ── Phase C (precision task): native-resolution keyframe depth (pre-TSDF) ──
+  # Omega infers at ~512; the video is 1080p+. Refine each keyframe's depth to native
+  # resolution BEFORE integration (reconstruction/native_depth.py):
+  #   guided_filter       — deterministic joint-bilateral ×factor with a DEPTH-edge stop
+  #                         (the term whose absence made the legacy upsample_depth smear
+  #                         edges and lose its A/B).
+  #   da3_detail_transfer — low freq (metric) from omega + high freq from DA3 hi-res
+  #                         (process_res ≈1008, keyframes only), robust local gain,
+  #                         detail capped vs the base (no hallucinated geometry).
+  native_depth_method: "off"   # off | guided_filter | da3_detail_transfer — default OFF
+                               # until a variant wins its A/B (evidence rule)
+  native_depth_factor: 2       # upsample factor toward native res
+  native_depth_sigma_depth_rel: 0.05   # depth-edge stop (relative)
+  native_depth_detail_cap_rel: 0.10    # max detail deviation vs the metric base
+  native_depth_da3_res: 1008   # DA3 process_res for the hi-res detail source
   # FAITHFUL cloud-raster integration: z-buffer the cleaned_cloud's OWN points back into
   # each frame and integrate THAT, instead of the raw neural depth. The raw depth still
   # carries the flying-pixel/far-phantom returns that CloudCompPy's SOR + noise filter
@@ -615,7 +642,10 @@ tsdf:
                              # so long scans keep view density. Higher ⇒ better coverage but slower MRF.
   texture_max_views_ceiling: 600   # hard cap on the auto-scaled view count (texrecon cost grows with it).
                                    # 600 (was 1200) ~halves the View-selection MRF — the slow stage.
-  depth_source: mapanything  # omega keyframe depth ONLY (same source as the cloud) → the TSDF
+  depth_source: mapanything  # ("pgsr_render" = precision mode, Phase D: integrate the depths
+                             # RENDERED by the PGSR photometric optimization — pair with
+                             # reconstruction.backend: "vggtomega_pgsr"; missing renders are FATAL)
+                             # omega keyframe depth ONLY (same source as the cloud) → the TSDF
                              # matches the cloud. da3_frames mixed in DA3 filler depth (a DIFFERENT
                              # source than the omega cloud) → mesh didn't coincide (1.4-1.7x extent,
                              # 22% of verts outside the cloud bbox). Revert to omega-only.
@@ -690,6 +720,10 @@ poisson:
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
   backend: "vggtomega"                  # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid" | "vggtomega"
+                                        # | "vggtomega_pgsr" (PRECISION MODE, Phase D: the full
+                                        #   vggtomega pipeline + per-scene PGSR photometric
+                                        #   optimization at native res; pair it with
+                                        #   tsdf.depth_source: "pgsr_render")
                                         # vggtomega = SOTA pose backbone (CVPR 2026), dynamic-scene robust:
                                         # DA3 metric depth (anchor) → Omega up-to-scale poses → scale_align
                                         # (metric) → BA. da3 = DENSE backbone: cm-level chunk alignment +
@@ -833,6 +867,26 @@ reconstruction:
                                         # vanish). Final self-gate on pre-correction held-out
                                         # (within + cross strata; no seam may degrade); fail →
                                         # the whole stage is identity.
+
+  # ── PRECISION MODE (precision task, Phase D): backend "vggtomega_pgsr" ──
+  # The ingredient RealityScan's shape quality comes from is per-scene photometric
+  # optimization at native resolution. This mode runs the FULL vggtomega pipeline
+  # (Ω + scale_align v2 + cloud) and uses its output as initialization for a
+  # PGSR-class Gaussian surface optimization (vendor/pgsr, planar + multi-view
+  # geometric regularization): fixed initial poses, cleaned cloud as seed,
+  # SAM3 dynamic-class masks excluded from the loss. The trainer renders
+  # per-keyframe depth → the TSDF integrates it (tsdf.depth_source: "pgsr_render",
+  # fine voxels from Phase C matrix). Deliverable mode, not the routine mode:
+  # tens of minutes to a few hours per scene (cost measured in pgsr_render/report.json).
+  pgsr:
+    iterations: 30000                   # full PGSR schedule; quick: true halves it
+    quick: false                        # 15k-iteration schedule (A/B turnaround)
+    pose_refine: false                  # OPTIONAL photometric pose refinement (the dense
+                                        # replacement for the failed track BA): per-camera
+                                        # se(3) delta optimized through the rasterizer.
+                                        # Default OFF until it wins its A/B (evidence rule).
+    max_seed_pts: 1500000               # cleaned-cloud subsample seeding the Gaussians
+    exclusive_gpu: true                 # stop vLLM during training (native-res needs VRAM)
 
   # ── SIMPLE pipeline (one concept — validated 2026-07-09 vs the VGGT-Omega web demo) ──
   # Sparse frames (~1 fps) → ONE VGGT-Omega pass (no windows → no seams → no onion) →

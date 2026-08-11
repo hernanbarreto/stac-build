@@ -269,7 +269,8 @@ def _resolve_da3_frame_source(output_dir: Path, conf_percentile: Optional[float]
     return _load, (h, w)
 
 
-def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float] = None
+def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float] = None,
+                               mv_dir: Optional[Path] = None
                                ) -> Optional[Tuple[Callable[[int], Optional[dict]],
                                                    Tuple[int, int]]]:
     """VGGT-Long ('mapanything' backend): per-frame depth lives INSIDE the per-chunk
@@ -402,9 +403,74 @@ def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float
                 K_intr = ki[local].reshape(3, 3)
             elif ki.shape == (3, 3):
                 K_intr = ki.reshape(3, 3)
+        # ── Phase B: multi-view consistency masks (reconstruction/mv_consistency).
+        # mv_dir is set ONLY when tsdf.mv_consistency is enabled AND the masks were
+        # just (re)generated for this run — a missing per-frame file at this point
+        # is an inconsistent state, not a fallback situation: fail fast.
+        if mv_dir is not None:
+            mp = mv_dir / f"frame_{int(frame_idx)}.npz"
+            if not mp.exists():
+                raise RuntimeError(
+                    f"mv_consistency enabled but {mp.name} is missing — masks and "
+                    f"depth are out of sync (delete {mv_dir} to regenerate)")
+            mv = np.load(mp)
+            mvv = mv["valid"]
+            if mvv.shape != d.shape:
+                raise RuntimeError(
+                    f"mv_consistency mask {mp.name} shape {mvv.shape} != depth "
+                    f"{d.shape} — stale masks (delete {mv_dir} to regenerate)")
+            valid &= mvv
+            if "depth" in mv.files:          # median-replace variant
+                d = mv["depth"].astype(np.float32)
         return {"depth": d, "valid": valid, "K": K_intr, "rgb": None, "hw": d.shape}
 
     return _load, (h, w)
+
+
+def _resolve_pgsr_render_depth(output_dir: Path
+                               ) -> Optional[Tuple[Callable[[int], Optional[dict]],
+                                                   Tuple[int, int]]]:
+    """PRECISION MODE (Phase D): per-frame depth RENDERED by the PGSR photometric
+    optimization (output/pgsr_render/frame_<num>.npz, written by
+    reconstruction/pgsr_train.py) at native resolution. K comes from
+    intrinsic.txt scaled omega-grid → render grid (same math as the scene
+    export). Returns (loader, (h, w)) or None when no renders exist."""
+    render_dir = output_dir / "pgsr_render"
+    files = sorted(render_dir.glob("frame_*.npz"))
+    if not files:
+        return None
+    probe = np.load(files[0])
+    h, w = probe["depth"].shape
+
+    intr = output_dir / "intrinsic.txt"
+    K_map: Dict[int, np.ndarray] = {}
+    try:
+        from reconstruction.scale_align import _read_poses, _omega_depth
+        _, nums, _ = _read_poses(output_dir)
+        rows = [[float(x) for x in ln.split()]
+                for ln in intr.read_text().splitlines() if ln.strip()]
+        om = _omega_depth(output_dir)
+        Hd, Wd = next(iter(om.values())).shape if om else (h, w)
+        sx, sy = w / Wd, h / Hd
+        for n, r in zip(nums, rows):
+            fx, fy, cx, cy = r[:4]
+            K_map[int(n)] = np.array([[fx * sx, 0, cx * sx],
+                                      [0, fy * sy, cy * sy], [0, 0, 1.0]])
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[TSDF-scene] pgsr_render: could not build per-frame K "
+                       f"({e}) — frames without K will be skipped")
+
+    def _load(frame_idx: int) -> Optional[dict]:
+        p = render_dir / f"frame_{int(frame_idx)}.npz"
+        if not p.exists():
+            return None
+        d = np.load(p)
+        depth = d["depth"].astype(np.float32)
+        valid = d["valid"] if "valid" in d.files else depth > 1e-4
+        return {"depth": depth, "valid": valid.astype(bool),
+                "K": K_map.get(int(frame_idx)), "rgb": None, "hw": depth.shape}
+
+    return _load, (int(h), int(w))
 
 
 def _dilate_mask(mask: np.ndarray, radius: int) -> np.ndarray:
@@ -1443,6 +1509,27 @@ def export_tsdf_scene(
     reliable_depth_m: float = 8.0,       # neural depth (≈294×518) is reliable to ~this range;
                                          # auto_tune caps depth_trunc to min(this, depth_trunc).
     max_decimate: int = 4_000_000,       # ceiling for the auto-scaled decimate_target (viewer/RAM).
+    mv_consistency: bool = False,        # Phase B (precision task): multi-view geometric
+                                         # consistency filter on the keyframe depth BEFORE
+                                         # integration (reconstruction/mv_consistency.py).
+                                         # OFF until it wins its A/B (evidence rule).
+    mv_neighbors: int = 4,               # N neighbour keyframes each pixel is checked against
+    mv_min_consistent_views: int = 2,    # pixel survives with ≥ this many agreeing neighbours
+    mv_tau_rel: float = 0.02,            # relative depth agreement threshold |z−d|/d
+    mv_replace_median: bool = False,     # variant: replace surviving pixels by the median of
+                                         # the consistent estimates instead of the raw value
+    mv_warn_discard_pct: float = 40.0,   # global discard above this ⇒ STRONG warning (bad
+                                         # poses/scale, not a working filter) — never silent
+    native_depth_method: str = "off",    # Phase C (precision task): refine keyframe depth to
+                                         # native resolution BEFORE integration
+                                         # (reconstruction/native_depth.py):
+                                         #   "off" | "guided_filter" | "da3_detail_transfer"
+                                         # OFF until a variant wins its A/B (evidence rule).
+    native_depth_factor: int = 2,        # upsample factor toward the video's native res
+    native_depth_sigma_depth_rel: float = 0.05,  # depth-edge stop of the guided filter (the
+                                         # term the legacy upsample_depth lacked)
+    native_depth_detail_cap_rel: float = 0.10,   # detail-transfer bound vs the metric base
+    native_depth_da3_res: int = 1008,    # DA3 hi-res process_res for the detail source
     depth_source: str = "auto",          # which per-frame depth the TSDF integrates:
                                          #   "auto"        → MapAnything chunk depth if present,
                                          #                   else DA3, else LiDAR (legacy default)
@@ -1602,9 +1689,41 @@ def export_tsdf_scene(
     # "da3" (dense_da3). This is what lets the TSDF integrate the extra frames' depth so the
     # mesh gains inter-keyframe coverage. MapAnything's keyframe-only depth is skipped.
     mapany_src = None
-    if _ds != "da3" and ((backend or "").startswith("mapanything")
-                         or (output_dir / "maplong_run").exists()):
-        mapany_src = _resolve_mapanything_depth(output_dir, conf_percentile=_cp)
+    _mv_dir = None
+    _nd_dir = None
+    if _ds not in ("da3", "pgsr_render") and (
+            (backend or "").startswith("mapanything")
+            or (output_dir / "maplong_run").exists()):
+        # ── Phase B: multi-view geometric consistency filter (pre-TSDF). Generates
+        # (resume-aware) per-keyframe masks that drop pixels no ≥mv_min_consistent_views
+        # neighbours confirm within mv_tau_rel, then the loader applies them. Poses are
+        # NOT touched. Default OFF until it wins its A/B (config tsdf.mv_consistency).
+        if mv_consistency:
+            from reconstruction.mv_consistency import run as _mv_run, MV_DIRNAME
+            _mv_run(output_dir, n_neighbors=int(mv_neighbors),
+                    min_consistent_views=int(mv_min_consistent_views),
+                    tau_rel=float(mv_tau_rel),
+                    replace_median=bool(mv_replace_median),
+                    warn_discard_pct=float(mv_warn_discard_pct),
+                    log=lambda m: logger.info(f"[TSDF-scene][mv] {m}"))
+            _mv_dir = output_dir / MV_DIRNAME
+        mapany_src = _resolve_mapanything_depth(output_dir, conf_percentile=_cp,
+                                                mv_dir=_mv_dir)
+        # ── Phase C: native-resolution depth refinement (pre-TSDF). Generates
+        # (resume-aware) ×factor refined depth per keyframe — guided filter or DA3
+        # detail transfer — consumed at the integrate hook below. Runs on the
+        # CONSISTENCY-FILTERED depth when Phase B is on (task-mandated order).
+        _nd_dir = None
+        if str(native_depth_method or "off").lower() != "off" and mapany_src is not None:
+            from reconstruction.native_depth import run as _nd_run, ND_DIRNAME
+            _nd_run(output_dir, frames_dir,
+                    method=str(native_depth_method).lower(),
+                    factor=int(native_depth_factor),
+                    sigma_depth_rel=float(native_depth_sigma_depth_rel),
+                    detail_cap_rel=float(native_depth_detail_cap_rel),
+                    da3_res=int(native_depth_da3_res), mv_dir=_mv_dir,
+                    log=lambda m: logger.info(f"[TSDF-scene][native-depth] {m}"))
+            _nd_dir = output_dir / ND_DIRNAME
     if _ds in ("da3", "da3_frames") and da3_depth is None:
         logger.warning(f"[TSDF-scene] depth_source='{_ds}' but no DA3 per-frame depth found "
                        "(da3_run/results_output/frame_*.npz) — falling back to auto")
@@ -1655,6 +1774,32 @@ def export_tsdf_scene(
             frame_loader = _hybrid
             depth_kind = f"HYBRID: MapAnything (keyframes) + DA3 resized→{_mw}x{_mh} (fillers)"
             logger.info(f"[TSDF-scene] per-frame source: {depth_kind}")
+    elif _ds == "pgsr_render":
+        # PRECISION MODE (Phase D): integrate the depths RENDERED by the PGSR
+        # photometric optimization. Missing renders are FATAL — this source is
+        # requested explicitly (backend vggtomega_pgsr), never a fallback.
+        pgsr_src = _resolve_pgsr_render_depth(output_dir)
+        if pgsr_src is None:
+            raise RuntimeError(
+                "depth_source='pgsr_render' but output/pgsr_render/ has no rendered "
+                "depths — run the PGSR stage (backend vggtomega_pgsr) first")
+        frame_loader, (depth_h, depth_w) = pgsr_src
+        depth_kind = "PGSR rendered depth (photometric precision mode)"
+        # photometric pose refinement (if it ran) exported refined c2w poses next
+        # to the depths — they MUST be the integration poses for these renders
+        _pr = output_dir / "pgsr_render" / "poses_refined.txt"
+        if _pr.exists():
+            _n_over = 0
+            for ln in _pr.read_text().splitlines():
+                t = ln.split()
+                if len(t) == 17:
+                    cam.pose_map[int(t[0])] = np.array(
+                        [float(x) for x in t[1:]], np.float64).reshape(4, 4)
+                    _n_over += 1
+            logger.info(f"[TSDF-scene] pgsr_render: {_n_over} poses OVERRIDDEN by "
+                        f"the photometric pose refinement (poses_refined.txt)")
+        logger.info(f"[TSDF-scene] per-frame source: {depth_kind} "
+                    f"@ {depth_w}x{depth_h}")
     elif mapany_src is not None:
         frame_loader, (depth_h, depth_w) = mapany_src
         depth_kind = ("MapAnything/VGGT-Long neural depth"
@@ -2064,7 +2209,26 @@ def export_tsdf_scene(
             # texturing is unaffected. Skipped in raster mode (cloud points, no grid).
             cur_h, cur_w = depth_h, depth_w
             up_color = None
-            if (upsample_depth and upsample_depth > 1 and not use_raster
+            # ── Phase C: precomputed native-resolution refined depth (guided filter
+            # or DA3 detail transfer — reconstruction/native_depth.py). Takes
+            # precedence over the legacy in-loop upsample; a missing per-frame npz
+            # at this point is an inconsistent state → fail fast, never silent.
+            if _nd_dir is not None and not use_raster and depth_m is not None:
+                _ndp = _nd_dir / f"frame_{fidx}.npz"
+                if not _ndp.exists():
+                    raise RuntimeError(
+                        f"native_depth enabled but {_ndp.name} is missing — refined "
+                        f"depth and keyframes out of sync (delete {_nd_dir} to regen)")
+                _nd = np.load(_ndp)
+                _ndd = _nd["depth"].astype(np.float32)
+                _f = _ndd.shape[0] // depth_m.shape[0]
+                depth_m, depth_valid = _ndd, _nd["valid"]
+                K_d = np.asarray(K_d, dtype=np.float64).copy()
+                K_d[:2, :] *= _f
+                cur_h, cur_w = depth_m.shape
+                up_color = _load_rgb_at_depth(frames_dir, fidx, cur_h, cur_w,
+                                              frame_name=kf_name_map.get(fidx))
+            elif (upsample_depth and upsample_depth > 1 and not use_raster
                     and depth_m is not None):
                 f = int(upsample_depth)
                 Hh, Ww = depth_h * f, depth_w * f
