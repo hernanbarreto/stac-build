@@ -938,7 +938,15 @@ reconstruction:
                                         # input amplifies feed-forward drift — FastVGGT / the
                                         # VGGT-Long README's own drift note); fast stretches
                                         # get more (no 9 m jumps). "fps" = plain time sampling.
-    keyframe_motion_quantum: 250.0      # motion units (mean gray-diff @320px) per keyframe.
+    keyframe_motion_quantum: 250.0      # 250 CONFIRMED AGAIN 2026-08-11 (bufferStop A/B):
+                                        # 150 was tried against ghosting and made it WORSE —
+                                        # denser low-baseline keyframes amplify feed-forward
+                                        # drift (exactly as this note already warned) AND the
+                                        # extra zigzag path pushed the measured walk over the
+                                        # 15 m single-pass limit → chunked mode on a scene
+                                        # that doesn't need it (walk mis-measured 32 m vs ~14
+                                        # real, scale confidence 0.82→0.73). Do not lower.
+                                        # Original: motion units (mean gray-diff @320px) per keyframe.
                                         # Measured: ≈734 units/m close-range, ≈160 units/m in
                                         # a big hall → ~0.3-1.5 m baseline depending on scene
                                         # depth — parallax is what the estimator feels, meters
@@ -997,7 +1005,13 @@ reconstruction:
   # poses. Applies to ALL chunked backbones — da3, mapanything AND vggtomega (for omega
   # the order is Omega → scale_align → BA, so the BA refines already-metric poses).
   pose_refine:                          # E-full 2026-07-11: JOINT point-to-plane optimization of
-    enabled: false                      # F1/F2 verdict (user, visual): does NOT pay vs run6 on
+    enabled: true                       # ON 2026-08-11 (user, bufferStop): jerky close-range
+                                        # capture shows exactly the layering/ghosting this stage
+                                        # attacks (F1 measured −52% layering). This is the
+                                        # "future scene" the opt-in was kept for. Self-gated:
+                                        # if the fresh post-solve measurement doesn't improve,
+                                        # NOTHING is applied — safe on scenes like test4.
+                                        # Previous note (test4): F1/F2 verdict (user, visual): does NOT pay vs run6 on
                                         # test4 — it moves poses ~20 cm median and far landmarks
                                         # (the chimney, ~image 704) end up displaced, while run6's
                                         # untouched poses kept them solid. The coverage/density

@@ -365,6 +365,28 @@ TSDF integrate at the same corrected poses. The metric hierarchy is inviolable:
 ChArUco/Umeyama + survey network always outrank semantic anchors; conflicts are logged,
 never silently resolved.
 
+### Pose & scale accuracy — measured state (precision task, 2026-08)
+
+Numbers from the phase A–D A/B campaign (criteria pre-registered before each run;
+full tables in `docs/scale_ab_results.md` and `docs/phase_bc_ab_results.md`):
+
+- **Scale**: one global similarity from 12 DA3 anchors (near-band + confidence
+  gated). Held-out anchor depth error 4.5–9% median across test sessions; anchor
+  ratio MAD 3.5–6.7%; every run persists `output/scale_diagnostics.json`
+  (per-anchor ratios, jackknife, residual-vs-depth, `scale_confidence` 0–1).
+  Structured estimators (affine / depth-dependent) were REJECTED by their own
+  cross-validation gate on all sessions. An optional **VIO trajectory**
+  (`docs/VIO_FORMAT.md`) takes over the scale when present; VIO↔DA3 agreement
+  is reported per session.
+- **Surface quality (fast mode)**: multi-view consistency filter ON — planar-patch
+  RMS 9.00→8.70 mm (test2), double-surface patches down, TSDF 8–16% faster.
+- **Precision mode** (`vggtomega_pgsr`): +86% mesh coverage and better error tail
+  (p90 10.83→10.01 mm) at ~2 h/scene; planar RMS ties the fast mode. Photometric
+  pose refinement lost its A/B (poses are better left at the pipeline's solution);
+  the point-to-plane `pose_refine` stage is self-gated and enabled.
+- **Not yet measured**: parity vs RealityScan — needs the Phase E external
+  scorecard (COLMAP/OpenMVS proxy + RealityScan import), pending.
+
 ---
 
 ## Pipeline Configuration
@@ -372,38 +394,39 @@ never silently resolved.
 All pipeline parameters are centralized in `server/config.yaml`. Current shipped values:
 
 ```yaml
+pipeline:
+  auto_tsdf: true              # every reconstruction ALWAYS ends with the textured mesh
+                               # (never stops at the Potree cloud)
+
 reconstruction:
-  backend: "vggtomega"         # vggtomega (default) | mapanything | da3 | hybrid | hybrid_cond | lidar
-  frames_selector: "dino"      # dino (DINO-cosine, default) | parallax (geometric) | stride | none
-  blur_filter: true            # Laplacian blur cull before selection
-  vggtomega:                   # default backbone (gated weights → vendor/vggt-omega-weights/)
-    chunk_size: 120
-    chunk_overlap: 60
-    loop_closure: true
-    resolution: 512
+  backend: "vggtomega_pgsr"    # DEFAULT (2026-08): full vggtomega pipeline + per-scene PGSR
+                               # photometric optimization (precision stage). "vggtomega" =
+                               # fast mode without the ~2 h PGSR stage.
+  vggtomega:                   # Ω backbone (gated weights → vendor/vggt-omega-weights/)
     scale_align: true          # metric: global similarity vs DA3 depth (fails hard if unrecoverable)
-  mapanything:                 # alternative backbone (VGGT-Long framework)
-    use_da3_priors: true       # feed DA3 metric depth + intrinsics as prior
-    da3_prior_use_poses: false # also inject DA3 poses (auto-true in hybrid_cond)
-    conf_threshold_coef: 0.75
-  fine_register:
-    enabled: true              # plane-constrained inter-chunk registration (per-chunk pieces)
+    scale_mode: global_median  # A/B'd vs affine/depth-dependent models — baseline won
+    scale_vio: true            # optional VIO trajectory sets the scale when present (docs/VIO_FORMAT.md)
+  simple:
+    keyframe_motion_quantum: 250.0  # parallax-uniform keyframes (denser was A/B'd: WORSE)
+    scale_anchor_frames: 12    # DA3 metric anchors (12 vs 24/32 A/B'd: 12 stays)
+  pose_refine:
+    enabled: true              # point-to-plane joint pose reconciliation, SELF-GATED
+                               # (applies only if the fresh measurement improves)
+  pgsr:                        # precision stage (vendor PGSR @ de24f1a, env `pgsr`)
+    iterations: 30000          # ~2 h/scene on A100 (measured), PSNR ~24.8, ~11 GB VRAM
+    resolution: 2              # vendor's published max-quality regime (r2 + ncc 0.5)
+    pose_refine: false         # photometric pose refinement LOST its A/B (RMS +11%)
   bundle_adjust:
     enabled: false             # OFF — degraded the metric vggtomega result in A/B; machinery kept
-  dense_fusion:
-    enabled: false             # OFF — legacy inter-keyframe ICP, superseded
-
-frame_selection:
-  dino_threshold: 0.99         # cosine keyframe threshold (frames_selector: dino)
-  theta_parallax: 1.5          # deg (frames_selector: parallax)
-  min_global_baseline_m: 0.3   # parallax mode: pure rotation / no baseline → ABORT
 
 tsdf:                          # final stage: textured mesh
-  voxel_length: 0.012          # 1.2 cm voxels
-  depth_source: mapanything    # Ω keyframe depth ONLY — same source as the cloud
-  tsdf_tile_length_m: 10.0     # 3D cube tiling welded into one mesh
+  voxel_length: 0.012          # 1.2 cm voxels (8/6 mm A/B'd: worse RMS and/or >2× cost)
+  depth_source: auto           # PGSR renders when the precision stage ran; else Ω keyframe depth
+  mv_consistency: true         # multi-view consistency filter pre-TSDF (A/B: less noise,
+                               # fewer double surfaces, FASTER integration)
+  native_depth_method: "off"   # RGB-guided native-res depth refinement (A/B'd: double
+                               # surfaces doubled — consistency, not resolution, is the ceiling)
   tsdf_max_edge_m: 0.10        # cull triangles bridging gaps/discontinuities
-  fill_holes: true
   texture_mode: "texrecon"     # UV-atlas photographic texture (MVS-Texturing)
 
 alignment:
