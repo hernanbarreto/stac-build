@@ -928,6 +928,15 @@ reconstruction:
                                         # (worksite lighting varies along the walk)
     max_seed_pts: 1500000               # cleaned-cloud subsample seeding the Gaussians
     exclusive_gpu: true                 # stop vLLM during training (native-res needs VRAM)
+    consistent_cloud: true              # "ir para atrás con la nube" (user, 2026-08-12):
+                                        # after training, the user-facing cloud + Potree are
+                                        # REBUILT from the PGSR depths at the refined poses —
+                                        # the SAME source the mesh integrates, so cloud and
+                                        # mesh always agree (no more ghosted viewer cloud).
+                                        # cleaned_cloud.ply itself is untouched (segmentation
+                                        # mapping / BIM keep their source).
+    cloud_stride: 2                     # pixel stride when unprojecting the renders
+    cloud_voxel_m: 0.006                # 6 mm voxel downsample of the consistent cloud
 
   # ── SIMPLE pipeline (one concept — validated 2026-07-09 vs the VGGT-Omega web demo) ──
   # Sparse frames (~1 fps) → ONE VGGT-Omega pass (no windows → no seams → no onion) →

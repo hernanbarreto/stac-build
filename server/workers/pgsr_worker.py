@@ -113,6 +113,25 @@ def _pgsr_work(pipe: WorkerPipe, session_dir: str, config: dict):
         raise RuntimeError(f"PGSR produced no rendered depths in {render_dir} — "
                            f"the precision-mode TSDF cannot run")
     pipe.send_log(f"[pgsr] rendered depths: {n_depths} frames → {render_dir}")
+
+    # 5) CONSISTENT CLOUD ("ir para atrás con la nube"): rebuild the user-facing
+    # point cloud + Potree FROM the same verified depths the mesh integrates, so
+    # cloud and mesh always agree. cleaned_cloud.ply stays untouched (it remains
+    # the source for segmentation mapping / BIM).
+    if bool(pcfg.get("consistent_cloud", True)):
+        pipe.send_progress(92, "PGSR: rebuilding consistent cloud + Potree...",
+                           stage="pgsr")
+        from reconstruction.pgsr_cloud import build_cloud
+        ply = build_cloud(output_dir, frames_dir,
+                          stride=int(pcfg.get("cloud_stride", 2)),
+                          voxel_m=float(pcfg.get("cloud_voxel_m", 0.006)),
+                          log=lambda m: pipe.send_log(f"[pgsr] {m}"))
+        from potree_converter import convert_ply_to_potree
+        ok = convert_ply_to_potree(session_path, force=True, ply_override=ply)
+        if not ok:
+            raise RuntimeError("pgsr consistent cloud: Potree rebuild failed — "
+                               "the viewer would show the stale ghosted cloud")
+        pipe.send_log("[pgsr] Potree rebuilt from the consistent cloud ✓")
     pipe.send_progress(100, "PGSR complete", stage="pgsr")
 
 
