@@ -482,6 +482,12 @@ bim:
 # surfaces (distant walls/doors) that show fine in the cloud.
 tsdf:
   mask_to_cleaned_cloud: true  # integrate EXACTLY the cloud's pixels (the source of truth)
+  pgsr_mask_to_cleaned_cloud: false  # PRECISION MODE (user-validated "V1", bufferStop
+                               # 2026-08-11): when depth_source resolves to pgsr_render the
+                               # cloud mask is DROPPED — the rendered depth is already
+                               # photometrically verified and cropping it to the cleaned
+                               # cloud re-imported that cloud's holes/fragments (V1 showed
+                               # fewer holes + more completeness). Fast mode keeps the mask.
   # ── Phase B (precision task): multi-view geometric consistency filter (pre-TSDF) ──
   # Every keyframe depth pixel is projected into its N nearest keyframes at the final
   # poses; it integrates only if ≥ mv_min_consistent_views neighbours agree within

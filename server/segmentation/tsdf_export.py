@@ -1458,6 +1458,15 @@ def export_tsdf_scene(
     conf_min: int = 2,                   # Stray/ARKit conf 0/1/2 — 2=high only (raw-LiDAR path)
     da3_conf_percentile: float = 50.0,   # drop the lowest-conf % of each DA3 frame (0 = off)
     mask_to_cleaned_cloud: bool = True,  # integrate only pixels present in cleaned_cloud.ply
+    pgsr_mask_to_cleaned_cloud: bool = False,  # PRECISION MODE override (user-validated
+                                         # "V1" 2026-08-11, bufferStop): the PGSR-rendered
+                                         # depth is already photometrically verified by the
+                                         # training — cropping it to the cleaned cloud's
+                                         # pixels re-imports THAT cloud's holes/fragments
+                                         # into a better depth source. False = full
+                                         # coverage (fewer holes, less fragmentation).
+                                         # Applies ONLY when depth_source resolves to
+                                         # pgsr_render; the fast path keeps the mask.
     cleaned_cloud_dilate: int = 3,       # px dilation of the cleaned-cloud pixel mask
                                          # (legacy raw-depth path only)
     rasterize_cloud_depth: bool = True,  # FAITHFUL mode: integrate the cloud's OWN points
@@ -1684,6 +1693,11 @@ def export_tsdf_scene(
             _ds = "pgsr_render"
             logger.info("[TSDF-scene] auto: session has PGSR renders → "
                         "depth_source=pgsr_render (precision mode)")
+    if _ds == "pgsr_render" and mask_to_cleaned_cloud != bool(pgsr_mask_to_cleaned_cloud):
+        mask_to_cleaned_cloud = bool(pgsr_mask_to_cleaned_cloud)
+        logger.info(f"[TSDF-scene] precision mode: mask_to_cleaned_cloud → "
+                    f"{mask_to_cleaned_cloud} (pgsr_mask_to_cleaned_cloud; the rendered "
+                    f"depth is photometrically verified — full coverage)")
     # DA3-DENSE FUSION (asymmetric design): integrate DA3's per-frame depth for EVERY
     # blur-valid frame (a superset of the VGGT keyframes), not the keyframe-only
     # MapAnything depth. The cloud/poses are keyframe-based, so this also drives pose
