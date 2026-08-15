@@ -217,7 +217,11 @@ export class StacXREngine {
         }
         const h = (surf && surf[0]) || (feat && feat[0])
         if (h) {
-          this.reticle.position.set(h.position.x, h.position.y, h.position.z)
+          // GROUND PLANE convention: the engine's world y=0 IS the floor (the
+          // initial camera height defines eye-above-ground). Feature-point
+          // hits land at arbitrary heights (walls, tables) — snapping the
+          // reticle to y=0 keeps it ON the floor and the model seated there.
+          this.reticle.position.set(h.position.x, 0, h.position.z)
           const d = Math.max(
             this.reticle.position.distanceTo(this.camera!.position) / 6, 0.6)
           this.reticle.scale.setScalar(d)
@@ -300,7 +304,7 @@ export class StacXREngine {
   /** The scene origin is wherever the capture walk started — often tens of
    *  meters from the geometry. Place the CONTENT's bbox center on the target,
    *  with the pipeline-calibrated floor plane (model y=0) on the hit height. */
-  private placeAt(x: number, y: number, z: number) {
+  private placeAt(x: number, _y: number, z: number) {
     this.contentGroup.visible = true
     this.placed = true
     const box = new THREE.Box3().setFromObject(this.contentGroup)
@@ -308,8 +312,11 @@ export class StacXREngine {
     const c = box.getCenter(new THREE.Vector3())
     this.modelGroup.position.x += x - c.x
     this.modelGroup.position.z += z - c.z
-    this.modelGroup.position.y = y
-    this.lastAnchor = new THREE.Vector3(x, y, z)
+    // model floor (pipeline-calibrated y=0) ALWAYS on the world ground plane
+    // (engine y=0) — never on the tapped point's height, which for feature
+    // points is arbitrary (that floated/buried the model)
+    this.modelGroup.position.y = 0
+    this.lastAnchor = new THREE.Vector3(x, 0, z)
   }
 
   /** Single tap from the React layer. Returns a short status for the UI. */
