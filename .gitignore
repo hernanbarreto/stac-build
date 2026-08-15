@@ -165,3 +165,6 @@ archive/
 # R3D (cloned by setup; env `r3d`) — spatial reasoning reuse (Phases R & 5)
 vendor/r3d/
 vendor/pgsr/
+
+# JWT signing key (generated at first boot — never commit)
+server/.jwt_secret

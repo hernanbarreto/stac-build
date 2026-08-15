@@ -158,11 +158,12 @@ The step that gives precision mode its name (~2 h/scene, exclusive GPU):
 `depth_source: auto` resolves to the **PGSR renders** whenever the precision stage ran
 (explicit `pgsr_render` is fatal if renders are missing — never a silent fallback). In
 precision mode the cleaned-cloud pixel mask is deliberately **dropped**
-(`pgsr_mask_to_cleaned_cloud: false`): the rendered depth is already photometrically
-verified, and masking would re-import the cloud's holes — this is what gives the mesh
-**full coverage**. On the non-PGSR (fast-mode) depth path, a multi-view geometric
-consistency filter (`mv_consistency`, 4 neighbours / 2 agreeing views) screens the
-depth instead.
+(`pgsr_mask_to_cleaned_cloud: false`): the rendered depth is photometrically
+optimized, and masking would re-import the cloud's holes — this is what gives the mesh
+**full coverage**. The multi-view geometric consistency filter (`mv_consistency`,
+4 neighbours / 2 agreeing views within 2%) screens the depth on **both** paths: the Ω
+chunk depth in fast mode, and the PGSR renders in precision mode (the same vote that
+gates the consistent cloud — rendered depth is optimized, not multi-view verified).
 
 Integration: VoxelBlockGrid on GPU, **12 mm voxels** (8/6 mm lost their A/B: worse RMS
 at 1.8–2.9× cost), SDF truncation 6 cm, fixed 10 m 3D cube tiling welded on a shared

@@ -48,7 +48,7 @@ Not clonable. Provision as noted; none is fetched by `git`.
 
 | Dir | Type | How to provision |
 |-----|------|------------------|
-| `vendor/sam3` | code checkout, **DEFAULT** seg baseline | Pinned to the **SAM 3.0 release** of `facebookresearch/sam3`. Weights: `bash setup_weights.sh sam3` → `weights/sam3`. This is the default (`models.segmentation.version: sam3`). |
+| `vendor/sam3` | code checkout, seg **ROLLBACK** baseline | Pinned to the **SAM 3.0 release** of `facebookresearch/sam3`. Weights: `bash setup_weights.sh sam3` → `weights/sam3`. NOT the default since 2026-08: the shipped default is SAM 3.1 (`vendor/sam31`, `config.yaml models.segmentation.version: sam3.1`); this checkout is the measured rollback path. |
 | `vendor/cloudcompy` | compiled runtime tree (`bin/`,`lib/`) | Built install consumed by `vendor_paths.py`. `conda env create -f docs/migration/environment_CloudComPy310.yml`, then place the install here. |
 | `vendor/CloudComPy310` | build/source tree | See `docs/migration/MIGRATION_GUIDE.md`. |
 | `vendor/MapAnything2` | optional fallback | `conda env create -f docs/migration/environment_mapanything.yml`. |

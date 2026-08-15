@@ -9,7 +9,36 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # ─── Configuration ─────────────────────────────────────────────
 
-SECRET_KEY = "stac-build-secret-key-change-in-production"
+import os
+import secrets
+from pathlib import Path
+
+
+def _load_secret_key() -> str:
+    """JWT signing key. Priority: STAC_JWT_SECRET env var → persisted secret
+    file (server/.jwt_secret, generated once, chmod 600, git-ignored) →
+    ephemeral per-process fallback. The key was previously a hardcoded literal
+    committed to the repo — anyone with repo access could forge admin tokens
+    against any deployment."""
+    env = os.environ.get("STAC_JWT_SECRET")
+    if env:
+        return env
+    path = Path(__file__).resolve().parent.parent / ".jwt_secret"
+    try:
+        if path.exists():
+            key = path.read_text().strip()
+            if key:
+                return key
+        key = secrets.token_hex(32)
+        path.write_text(key)
+        os.chmod(path, 0o600)
+        return key
+    except OSError:
+        # unwritable filesystem: ephemeral key (tokens die with the process)
+        return secrets.token_hex(32)
+
+
+SECRET_KEY = _load_secret_key()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 

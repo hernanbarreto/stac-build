@@ -350,8 +350,16 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         # NOTE: the PGSR stage itself runs AFTER CloudCompPy (it seeds from the
         # cleaned cloud) — pipeline_manager triggers _run_pgsr_stage there.
         _run_vggtomega(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
-    else:
+    elif backend == "mapanything":
         _run_mapanything(pipe, frames_dir, output_dir, selected_frames_path, recon_cfg, config)
+    else:
+        # FAIL LOUD: an unknown backend used to fall through silently to the
+        # legacy mapanything path — a typo or a stale UI selection would run a
+        # visibly worse pipeline with no error. Removed backends (gaus_slam*,
+        # nerfstudio) land here too.
+        raise RuntimeError(
+            f"unknown reconstruction backend '{backend}' — valid: vggtomega_pgsr "
+            f"(default), vggtomega, da3, mapanything, hybrid, hybrid_cond, lidar")
 
     # ── Step 4 (opt-in): dense pose densification + fusion ("ventana-VGGT") ──
     # Anchor the non-keyframe DA3 depths to the VGGT keyframe poses and back-project

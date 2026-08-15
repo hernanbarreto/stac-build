@@ -185,7 +185,11 @@ def main():
     args.source_path = str(Path(args.scene).resolve())
     args.model_path = str(Path(args.model_dir).resolve())
     args.images = "images"
-    args.resolution = 1                    # NATIVE resolution — the whole point
+    # --resolution is honoured as passed (config reconstruction.pgsr.resolution;
+    # 1 = native, the validated default). An earlier hard override to 1 here
+    # made the flag inert — every measured run trained at native regardless.
+    if args.resolution in (None, -1):
+        args.resolution = 1                # vendor default -1 → native
     if args.quick:
         args.iterations = 15000
         for k in ("position_lr_max_steps", "densify_until_iter"):

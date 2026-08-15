@@ -23,7 +23,9 @@ conda activate semantic
 SEM_PORT="$(python - <<'EOF'
 import yaml
 cfg = yaml.safe_load(open("/workspace/stac-build/server/config.yaml"))
-print(cfg.get("semantic", {}).get("port", 8799))
+# The real key is semantic.service.port (semantic/semantic_config.py) — the old
+# read of semantic.port only worked because its fallback matched the default.
+print(cfg.get("semantic", {}).get("service", {}).get("port", 8799))
 EOF
 )"
 if curl -s -o /dev/null -m 3 "http://127.0.0.1:${SEM_PORT}/health"; then

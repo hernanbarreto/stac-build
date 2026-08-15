@@ -1822,6 +1822,61 @@ def export_tsdf_scene(
                     _n_over += 1
             logger.info(f"[TSDF-scene] pgsr_render: {_n_over} poses OVERRIDDEN by "
                         f"the photometric pose refinement (poses_refined.txt)")
+        # ── Phase B on the PRECISION path: the rendered depth is photometrically
+        # optimized but NOT multi-view verified — the raw unprojection of these
+        # same renders measured up to 39% inconsistent pixels on real scenes
+        # (pgsr_cloud gates the CLOUD with this exact vote; this gates the MESH
+        # input). Masks live in their own dir so they never collide with the
+        # fast-mode masks (different depth grid).
+        if mv_consistency:
+            from reconstruction.mv_consistency import run as _mv_run
+            from reconstruction.scale_align import _read_poses
+            _MV_PGSR_DIRNAME = "mv_consistency_pgsr"
+            _plines, _pnums, _ = _read_poses(output_dir)
+            _pframes: Dict[int, dict] = {}
+            for _pn in _pnums:
+                _fr = frame_loader(int(_pn))
+                if _fr is None or _fr.get("K") is None:
+                    continue
+                _T = cam.pose_map.get(int(_pn))
+                if _T is None:
+                    continue
+                _pframes[int(_pn)] = {
+                    "depth": np.asarray(_fr["depth"], np.float32),
+                    "K": np.asarray(_fr["K"], np.float64),
+                    "T": np.asarray(_T, np.float64)}
+            _mv_run(output_dir, n_neighbors=int(mv_neighbors),
+                    min_consistent_views=int(mv_min_consistent_views),
+                    tau_rel=float(mv_tau_rel),
+                    replace_median=bool(mv_replace_median),
+                    warn_discard_pct=float(mv_warn_discard_pct),
+                    log=lambda m: logger.info(f"[TSDF-scene][mv-pgsr] {m}"),
+                    dirname=_MV_PGSR_DIRNAME,
+                    _frames_override=_pframes)
+            _mv_pgsr_dir = output_dir / _MV_PGSR_DIRNAME
+
+            def _pgsr_mv_load(fidx, _base=frame_loader, _md=_mv_pgsr_dir):
+                fr = _base(fidx)
+                if fr is None or fr.get("K") is None:
+                    return fr           # no-K frames never got a mask (nor integrate)
+                mp = _md / f"frame_{int(fidx)}.npz"
+                if not mp.exists():
+                    raise RuntimeError(
+                        f"mv_consistency enabled but {mp.name} is missing — masks "
+                        f"and renders are out of sync (delete {_md} to regenerate)")
+                mv = np.load(mp)
+                mvv = mv["valid"]
+                if mvv.shape != fr["depth"].shape:
+                    raise RuntimeError(
+                        f"mv_consistency mask {mp.name} shape {mvv.shape} != render "
+                        f"{fr['depth'].shape} — stale masks (delete {_md} to regenerate)")
+                fr["valid"] = fr["valid"] & mvv
+                if "depth" in mv.files:  # median-replace variant
+                    fr["depth"] = mv["depth"].astype(np.float32)
+                return fr
+
+            frame_loader = _pgsr_mv_load
+            depth_kind += " · mv-consistency filtered"
         logger.info(f"[TSDF-scene] per-frame source: {depth_kind} "
                     f"@ {depth_w}x{depth_h}")
     elif mapany_src is not None:

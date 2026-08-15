@@ -492,7 +492,12 @@ tsdf:
   # Every keyframe depth pixel is projected into its N nearest keyframes at the final
   # poses; it integrates only if ≥ mv_min_consistent_views neighbours agree within
   # mv_tau_rel relative depth (the standard MVS fusion check; poses untouched).
-  # reconstruction/mv_consistency.py — masks + telemetry in output/mv_consistency/.
+  # reconstruction/mv_consistency.py. Applies on BOTH depth paths since 2026-08-15:
+  # fast mode filters the omega chunk depth (masks in output/mv_consistency/),
+  # precision mode filters the PGSR renders (masks in output/mv_consistency_pgsr/ —
+  # the renders are photometrically optimized but NOT multi-view verified: their raw
+  # unprojection measured up to 39% inconsistent px, the same junk pgsr_cloud gates
+  # out of the CLOUD with this exact vote; before this fix the mesh integrated it).
   mv_consistency: true         # A/B 2026-08-11 (test2+test4, docs/phase_bc_ab_results.md):
                                # mask variant passed every pre-registered bar on BOTH
                                # sessions — RMS not worse (test2 −3.3%, test4 −0.3%),
@@ -919,8 +924,11 @@ reconstruction:
                                         # for point-to-plane refinement). STAYS OFF.
     # ── training config = the vendor's published max-quality regime (their DTU/TnT
     # scripts) + measured on test2: 30k in 1h57, PSNR 24.8, peak 11.3 GB ──
-    resolution: 2                       # vendor -r2: PGSR's validated quality regime
-                                        # (full-res 1080p is out-of-spec at 4× the cost)
+    resolution: 1                       # 1 = NATIVE resolution — the regime every measured
+                                        # run actually trained at (pgsr_train.py hard-forced
+                                        # 1 until 2026-08-15, so the old "2" here was inert).
+                                        # The flag is live now: 2 = vendor -r2 half-res for
+                                        # cheaper A/B turnaround, at a quality cost.
     ncc_scale: 0.5                      # vendor NCC patch scale (all their datasets)
     densify_abs_grad_threshold: 0.00015 # vendor outdoor (TnT) densification threshold
     opacity_cull_threshold: 0.05        # vendor outdoor culling

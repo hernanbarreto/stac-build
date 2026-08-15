@@ -1755,27 +1755,25 @@ async def get_available_backends(session_id: str, scan_key: str = None):
     # Detect Stray Scanner data
     stray_info = detect_stray_data(session_dir)
 
-    # Always available
-    backends = ["da3", "mapanything"]
+    # Always available (video-only) — mirrors the ACTUAL dispatch in
+    # workers/map_worker.py. vggtomega_pgsr is the shipped default (precision
+    # mode); vggtomega is fast mode; da3/mapanything are the legacy fallbacks.
+    # gaus_slam*/nerfstudio have NO dispatch branch any more — never offer them.
+    backends = ["vggtomega_pgsr", "vggtomega", "da3", "mapanything"]
 
-    # Stray Scanner backends (streaming)
+    # Stray Scanner backends (need LiDAR/ARKit session data)
     if stray_info["is_stray_session"]:
-        backends.insert(1, "hybrid")
-        backends.insert(2, "lidar")
+        backends.append("hybrid")
+        backends.append("lidar")
+        if stray_info["has_lidar"] and stray_info["has_arkit"]:
+            backends.append("hybrid_cond")                 # full ARKit+LiDAR prior
 
-    # GauS-SLAM backends
-    backends.append("gaus_slam_da3")                       # always available (no LiDAR needed)
+    # Recommendation: the config default (precision mode) unless the session
+    # explicitly carries the full Stray prior, where hybrid_cond exploits it.
     if stray_info["has_lidar"] and stray_info["has_arkit"]:
-        backends.append("gaus_slam_lidar")                 # LiDAR + ARKit
-        backends.append("gaus_slam_hybrid")                # LiDAR-calibrated DA3 + ARKit
-
-    # Recommendation
-    if stray_info["has_lidar"] and stray_info["has_arkit"]:
-        recommended = "gaus_slam_lidar"
-    elif stray_info["is_stray_session"]:
-        recommended = "hybrid"
+        recommended = "hybrid_cond"
     else:
-        recommended = "da3"
+        recommended = "vggtomega_pgsr"
 
     return {
         "session_id": session_id,

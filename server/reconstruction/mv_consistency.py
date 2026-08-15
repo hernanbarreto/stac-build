@@ -26,9 +26,11 @@ TELEMETRY IS A HEALTH SIGNAL: a global discard above `warn_discard_pct`
 (default 40%) means POSES OR SCALE ARE WRONG, not that the filter is working —
 it is logged as a strong warning and flagged in the report. Never silent.
 
-The TSDF applies the masks via _resolve_mapanything_depth(mv_dir=…) — see
-segmentation/tsdf_export.py. Enabled by config.yaml `tsdf.mv_consistency`
-(default OFF until it wins its A/B, per the evidence rule).
+The TSDF applies the masks on BOTH depth paths (see segmentation/tsdf_export.py):
+fast mode via _resolve_mapanything_depth(mv_dir=…) on the omega chunk depth
+(masks in output/mv_consistency/), precision mode via a loader wrapper on the
+PGSR renders (masks in output/mv_consistency_pgsr/ — own dir, different grid).
+Enabled by config.yaml `tsdf.mv_consistency`.
 """
 from __future__ import annotations
 
@@ -149,13 +151,19 @@ def _load_keyframe_data(output_dir: Path, log) -> Dict[int, dict]:
 def run(output_dir: Path, n_neighbors: int = 4, min_consistent_views: int = 2,
         tau_rel: float = 0.02, replace_median: bool = False,
         warn_discard_pct: float = 40.0, log=None, device=None,
-        _frames_override: Optional[Dict[int, dict]] = None) -> dict:
+        _frames_override: Optional[Dict[int, dict]] = None,
+        dirname: str = MV_DIRNAME) -> dict:
     """Generate per-keyframe consistency masks + report. Resume-aware: if the
     report exists with identical params and every npz is present, it is a no-op.
-    Fail-fast on missing inputs. Returns the report dict."""
+    Fail-fast on missing inputs. Returns the report dict.
+
+    `dirname` selects the output directory: the default MV_DIRNAME holds masks
+    for the omega chunk depth (fast mode); the precision path passes its own
+    dirname so masks for the DIFFERENT depth grid (PGSR renders) never collide
+    with — or resume from — the fast-mode masks."""
     _log = log if log is not None else (lambda m: logger.info(m))
     output_dir = Path(output_dir)
-    mv_dir = output_dir / MV_DIRNAME
+    mv_dir = output_dir / dirname
     params = {"n_neighbors": int(n_neighbors),
               "min_consistent_views": int(min_consistent_views),
               "tau_rel": float(tau_rel), "replace_median": bool(replace_median)}

@@ -20,8 +20,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MIGRATION_DIR="$REPO_DIR/docs/migration"
 
-# Envs que vamos a crear (los YAMLs ya están en docs/migration/)
-ENVS=(stac-build da3 sam3 mapanything semantic)
+# Envs que vamos a crear (los YAMLs ya están en docs/migration/).
+# NOTA: no existe env `sam3` — SAM 3.x corre in-process dentro del server (env
+# `da3`, vendor/sam31 inyectado al sys.path por vendor_paths.py). Los envs
+# `pgsr` (clon de da3 + extensiones CUDA compiladas) y `nodejs` se crean en
+# bloques propios más abajo — no salen de un YAML.
+ENVS=(stac-build da3 mapanything semantic CloudComPy310)
 
 SSH="ssh -p $POD_PORT -i $POD_KEY -o StrictHostKeyChecking=accept-new"
 SCP="scp -P $POD_PORT -i $POD_KEY -o StrictHostKeyChecking=accept-new"
@@ -88,6 +92,35 @@ for yml in envs_pod/*.yml; do
     echo "[pod] Creando env $env_name desde $yml"
     conda env create -n "$env_name" -f "$yml" || echo "  ⚠ falló create de $env_name"
 done
+
+echo
+# ── Env pgsr: REQUERIDO por el backend DEFAULT (vggtomega_pgsr). Clon del env
+# da3 + extensiones CUDA de vendor/pgsr compiladas (VENDORS.lock.md §2). Sin
+# este env la etapa PGSR del pipeline default falla en un pod nuevo. ──
+if conda env list | awk '{print $1}' | grep -qx "pgsr"; then
+    echo "[pod] env pgsr ya existe — skipping"
+elif [ ! -d /workspace/stac-builder/vendor/pgsr/submodules ]; then
+    echo "  ⚠ vendor/pgsr no está provisionado (corré scripts/setup_vendors.sh) — salteando env pgsr"
+else
+    echo "[pod] Creando env pgsr (clon de da3) y compilando extensiones PGSR"
+    conda create -n pgsr --clone da3 -y
+    conda activate pgsr
+    export TORCH_CUDA_ARCH_LIST="8.0;8.6"
+    pip install /workspace/stac-builder/vendor/pgsr/submodules/diff-plane-rasterization \
+        || echo "  ⚠ falló diff-plane-rasterization — compilar a mano"
+    pip install /workspace/stac-builder/vendor/pgsr/submodules/simple-knn \
+        || echo "  ⚠ falló simple-knn — compilar a mano"
+    conda deactivate
+fi
+
+echo
+# ── Env nodejs: Vite/Electron + tools/glb (compresión de mallas) ──
+if conda env list | awk '{print $1}' | grep -qx "nodejs"; then
+    echo "[pod] env nodejs ya existe — skipping"
+else
+    echo "[pod] Creando env nodejs"
+    conda create -n nodejs -c conda-forge nodejs=20 -y || echo "  ⚠ falló create de nodejs"
+fi
 
 echo
 # ── Env milo: usa install.py de vendor/MILo (compila rasterizers CUDA) ──
