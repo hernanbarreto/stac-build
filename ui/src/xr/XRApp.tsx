@@ -131,13 +131,15 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
       // cannot reach private/tailnet URLs (the root cause of the earlier
       // infinite-loading hang)
       try {
-        const url = await window.VLaunch!.getLaunchUrl(location.href)
-        // VARIANT BUG: their API returns the launchUrl as http:// and their
-        // server refuses port 80 — the phone hung on a dead connection. One
-        // letter was the whole failure. Force https.
-        const fixed = url.replace(/^http:\/\//, 'https://')
-        tele('vlaunch-navigate', { url: fixed.slice(0, 90) })
-        location.href = fixed
+        // PREFER the direct Apple App Clip URL (skips Variant's interstitial,
+        // which hung repeatedly); fall back to their launch page with the
+        // http:// scheme bug fixed (their API omits the s; port 80 refuses).
+        const direct = (window.VLaunch as any).directAppClipUrl as string | undefined
+        const url = direct
+          ?? (await window.VLaunch!.getLaunchUrl(location.href))
+            .replace(/^http:\/\//, 'https://')
+        tele('vlaunch-navigate', { direct: !!direct, url: url.slice(0, 90) })
+        location.href = url
       } catch (e: any) {
         tele('vlaunch-error', { msg: String(e?.message ?? e) })
         say(`ARKit launch failed: ${e?.message ?? e}`, 6000)

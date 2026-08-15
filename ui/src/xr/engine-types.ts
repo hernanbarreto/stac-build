@@ -34,9 +34,14 @@ export function tele(event: string, data: Record<string, unknown> = {}) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ event: `xr-${event}`, ...data }),
+      keepalive: true,   // survive page navigation (pre-launch events were lost)
     }).catch(() => {})
   } catch { /* telemetry must never break the app */ }
 }
+
+// bundle identity in every boot — Safari cache made "which version ran?" a
+// guessing game; import.meta.url carries the content-hashed filename
+tele('bundle', { id: import.meta.url.split('/').pop() })
 
 // XR browsers have no devtools: EVERY uncaught exception must reach the pod
 // log, or failures die silently
