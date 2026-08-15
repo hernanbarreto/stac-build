@@ -132,7 +132,12 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
       // infinite-loading hang)
       try {
         const url = await window.VLaunch!.getLaunchUrl(location.href)
-        location.href = url
+        // VARIANT BUG: their API returns the launchUrl as http:// and their
+        // server refuses port 80 — the phone hung on a dead connection. One
+        // letter was the whole failure. Force https.
+        const fixed = url.replace(/^http:\/\//, 'https://')
+        tele('vlaunch-navigate', { url: fixed.slice(0, 90) })
+        location.href = fixed
       } catch (e: any) {
         tele('vlaunch-error', { msg: String(e?.message ?? e) })
         say(`ARKit launch failed: ${e?.message ?? e}`, 6000)
