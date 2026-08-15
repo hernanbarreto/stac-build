@@ -166,7 +166,25 @@ function initThree() {
   bindPinchFov();
 }
 
+const _centerNdc = new THREE.Vector2(0, 0);
+
 function onFrame(_t, frame) {
+  // Cam AR reticle: the screen center projected onto the virtual floor — aim
+  // with the phone, tap to place (Move tool)
+  if (camAR.on) {
+    if (currentTool === 'move') {
+      raycaster.setFromCamera(_centerNdc, camera);
+      const hit = new THREE.Vector3();
+      if (raycaster.ray.intersectPlane(_floorPlane, hit)
+          && hit.distanceTo(camera.position) < 60) {
+        reticle.matrixAutoUpdate = true;
+        reticle.position.copy(hit);
+        const d = Math.max(hit.distanceTo(camera.position) / 6, 0.6);
+        reticle.scale.setScalar(d);          // keep it visible at distance
+        reticle.visible = true;
+      } else reticle.visible = false;
+    } else reticle.visible = false;
+  }
   if (frame && hitTestSource) {
     const hits = frame.getHitTestResults(hitTestSource);
     if (hits.length) {
@@ -445,6 +463,8 @@ async function enterAR() {
     try { await xrSession.requestReferenceSpace('local-floor'); }
     catch { refType = 'local'; }
     renderer.xr.setReferenceSpaceType(refType);
+    reticle.matrixAutoUpdate = false;          // XR drives it via matrix
+    reticle.scale.setScalar(1);
     xrRefType = refType;
     await renderer.xr.setSession(xrSession);
     xrRefSpace = renderer.xr.getReferenceSpace();
@@ -547,7 +567,12 @@ function bindTapPicking() {
     const ndc = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1,
                                   -(e.clientY / innerHeight) * 2 + 1);
     if (currentTool === 'move') {
-      if (camAR.on) camARPlace(ndc);          // tap the floor to re-place
+      if (camAR.on) {
+        // place at the reticle (screen center) — tap anywhere confirms
+        if (reticle.visible) placeContentAt(reticle.position.x, reticle.position.z);
+        else camARPlace(ndc);
+        toast('Placed — switch to Dist/Ang/Vol to measure');
+      }
       return;
     }
     raycaster.setFromCamera(ndc, camera);
@@ -800,7 +825,7 @@ async function enterCamAR() {
     $('btn-camar').classList.add('active');
     tele('camar-start', { fov: camAR.baseFov });
     toast('Cam AR: pan the phone · tap the floor to re-place · pinch = FOV calibration');
-    try { navigator.wakeLock?.request('screen'); } catch { /* optional */ }
+    navigator.wakeLock?.request('screen').catch(() => {});   // optional
   } catch (e) {
     tele('camar-error', { msg: String(e.message || e) });
     toast(`Cam AR failed: ${e.message || e}`, 5000);
@@ -809,6 +834,8 @@ async function enterCamAR() {
 
 function exitCamAR() {
   camAR.on = false;
+  reticle.visible = false;
+  reticle.scale.setScalar(1);
   camAR.stream?.getTracks().forEach((t) => t.stop());
   camAR.stream = null;
   const v = $('camfeed');
