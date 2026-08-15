@@ -21,6 +21,11 @@ import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-
 ;(THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree
 ;(THREE.Mesh.prototype as any).raycast = acceleratedRaycast
 
+// The 8th Wall ThreeJS pipeline module requires a GLOBAL three (it does not
+// bundle its own): without this line XR8.Threejs.pipelineModule() throws and
+// every AR start dies before the camera — the root cause of the silent stalls.
+;(window as any).THREE = THREE
+
 declare global {
   interface Window { XR8: any }
 }
@@ -33,6 +38,7 @@ export interface EngineCallbacks {
   onError: (msg: string) => void
   onToast: (msg: string) => void
   onPlaced: () => void
+  onTracking: (status: string) => void
 }
 
 export function tele(event: string, data: Record<string, unknown> = {}) {
@@ -44,6 +50,13 @@ export function tele(event: string, data: Record<string, unknown> = {}) {
     }).catch(() => {})
   } catch { /* telemetry must never break the app */ }
 }
+
+// XR browsers have no devtools: EVERY uncaught exception must reach the pod
+// log, or failures die silently (which is exactly what burned this whole day)
+window.addEventListener('error', (e) =>
+  tele('js-error', { msg: String(e.message), src: `${e.filename}:${e.lineno}` }))
+window.addEventListener('unhandledrejection', (e) =>
+  tele('promise-rejection', { msg: String((e as any).reason).slice(0, 300) }))
 
 export class StacXREngine {
   private scene: THREE.Scene | null = null
@@ -61,6 +74,9 @@ export class StacXREngine {
   placed = false
   tool: Tool = 'move'
   scaleIdx = 0
+  trackingStatus = 'UNSPECIFIED'   // SLAM needs device TRANSLATION to reach
+                                   // NORMAL — until then content slides and
+                                   // scale is not metric (root of both bugs)
 
   constructor(
     private sessionId: string,
@@ -80,18 +96,64 @@ export class StacXREngine {
     try { window.XR8?.stop() } catch { /* engine may not have started */ }
   }
 
+  private cameraStarted = false
+
   private startEngine(canvas: HTMLCanvasElement) {
     const XR8 = window.XR8
     this.running = true
     tele('engine-loaded', { version: XR8.version ?? '?' })
-    XR8.XrController.configure({ scale: 'absolute' })   // METRIC world units
-    XR8.addCameraPipelineModules([
-      XR8.GlTextureRenderer.pipelineModule(),           // camera feed
-      XR8.Threejs.pipelineModule(),                     // three scene from SLAM
-      XR8.XrController.pipelineModule(),                // 6DoF tracking
-      this.pipelineModule(),
-    ])
-    XR8.run({ canvas })
+    // FULL-WINDOW CANVAS: the engine renders at the canvas's pixel size — the
+    // default 300×150 showed the camera as a tiny corner rectangle. (XRExtras'
+    // FullWindowCanvas module does this in stock 8th Wall setups.)
+    // FROZEN canvas size for the whole AR session: ANY canvas.width/height
+    // reassignment resets the GL context → the engine restarts the camera →
+    // the SLAM loses its map (the drift the user saw). iOS resize events fire
+    // constantly as Safari's bars animate — so we size ONCE and never again.
+    canvas.width = document.documentElement.clientWidth
+    canvas.height = document.documentElement.clientHeight
+    // FAIL LOUD on unsupported browsers: on iPhone every browser is Safari's
+    // engine by Apple mandate — Chrome-iOS stalls silently without this check
+    try {
+      const compat = XR8.XrDevice?.isDeviceBrowserCompatible?.()
+      if (compat === false) {
+        const reasons = XR8.XrDevice?.incompatibleReasons?.() ?? []
+        tele('incompatible', { reasons })
+        const ios = /iPhone|iPad|iPod/.test(navigator.userAgent)
+        this.cb.onError(ios
+          ? 'This browser cannot run AR on iPhone. Apple forces every iOS '
+            + 'browser (Chrome included) onto Safari\'s engine — open this '
+            + 'page in Safari, the only one the AR engine supports there.'
+          : 'This browser cannot run AR on this device — use Chrome on Android.')
+        return
+      }
+    } catch { /* older engine builds may lack the API */ }
+    // watchdog: a camera that never reports within 12 s is a silent stall
+    setTimeout(() => {
+      if (this.running && !this.cameraStarted) {
+        tele('camera-stall', {})
+        const ios = /iPhone|iPad|iPod/.test(navigator.userAgent)
+        this.cb.onError(ios
+          ? 'The camera never started. On iPhone, open this page in Safari '
+            + '(Apple blocks the AR engine in every other browser).'
+          : 'The camera never started — check the camera permission for this '
+            + 'site and reload.')
+      }
+    }, 12000)
+    try {
+      XR8.XrController.configure({ scale: 'absolute' })   // METRIC world units
+      XR8.addCameraPipelineModules([
+        XR8.GlTextureRenderer.pipelineModule(),           // camera feed
+        XR8.Threejs.pipelineModule(),                     // three scene from SLAM
+        XR8.XrController.pipelineModule(),                // 6DoF tracking
+        this.pipelineModule(),
+      ])
+      XR8.run({ canvas })
+      tele('run-called', {})
+    } catch (e: any) {
+      tele('start-exception', { msg: String(e?.message ?? e).slice(0, 300),
+                                stack: String(e?.stack ?? '').slice(0, 300) })
+      this.cb.onError(`Engine start failed: ${e?.message ?? e}`)
+    }
   }
 
   private pipelineModule() {
@@ -123,11 +185,25 @@ export class StacXREngine {
             tele('mesh-error', { msg: String(e?.message ?? e) })
           })
       },
-      onUpdate: () => {
+      onUpdate: (args: any) => {
+        // SLAM tracking status: LIMITED = sliding content + non-metric scale.
+        // Surface it so the UI can coach the user into initializing (walk a
+        // step) and so placement is gated on NORMAL.
+        const reality = args?.processCpuResult?.reality
+        const ts = reality?.trackingStatus
+        if (ts && ts !== this.trackingStatus) {
+          this.trackingStatus = ts
+          tele('tracking', { status: ts, reason: reality?.trackingReason })
+          this.cb.onTracking(ts)
+        }
         if (!this.scene || !this.reticle) return
-        if (this.tool !== 'move') { this.reticle.visible = false; return }
+        if (this.tool !== 'move' || this.trackingStatus !== 'NORMAL') {
+          this.reticle.visible = false
+          return
+        }
+        // surfaces only — free-floating feature points make garbage anchors
         const hits = window.XR8.XrController.hitTest(0.5, 0.5,
-          ['DETECTED_SURFACE', 'ESTIMATED_SURFACE', 'FEATURE_POINT'])
+          ['DETECTED_SURFACE', 'ESTIMATED_SURFACE'])
         const h = hits && hits[0]
         if (h) {
           this.reticle.position.set(h.position.x, h.position.y, h.position.z)
@@ -141,6 +217,7 @@ export class StacXREngine {
       },
       onCameraStatusChange: (e: any) => {
         tele('camera-status', { status: e?.status })
+        if (e?.status && e.status !== 'failed') this.cameraStarted = true
         if (e?.status === 'failed') {
           this.cb.onError('Camera access failed — allow the camera for this '
             + 'site (aA menu → Website settings) and retry')
@@ -228,6 +305,7 @@ export class StacXREngine {
   tap(clientX: number, clientY: number): string | null {
     if (!this.scene || !this.camera) return null
     if (this.tool === 'move') {
+      if (this.trackingStatus !== 'NORMAL') return 'tracking'
       if (this.reticle?.visible) {
         const p = this.reticle.position
         this.placeAt(p.x, p.y, p.z)

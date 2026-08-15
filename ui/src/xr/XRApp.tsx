@@ -74,6 +74,7 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const engineRef = useRef<StacXREngine | null>(null)
   const [phase, setPhase] = useState<'arm' | 'starting' | 'ready'>('arm')
+  const [tracking, setTracking] = useState('UNSPECIFIED')
   const [error, setError] = useState<string | null>(null)
   const [tool, setTool] = useState<Tool>('move')
   const [scaleLabel, setScaleLabel] = useState('1:10')
@@ -92,6 +93,7 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
       onError: (msg) => setError(msg),
       onToast: say,
       onPlaced: () => say('Placed — scale button for 1:1, tools below to measure'),
+      onTracking: (status) => setTracking(status),
     })
     engineRef.current = engine
     return () => { engine.stop() }
@@ -119,7 +121,8 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
   const onTap = useCallback((e: React.TouchEvent) => {
     const t = e.changedTouches[0]
     const res = engineRef.current?.tap(t.clientX, t.clientY)
-    if (res === 'no-surface') say('No surface detected — sweep the phone slowly')
+    if (res === 'tracking') say('Tracking not ready — walk a slow step pointing at the floor')
+    else if (res === 'no-surface') say('No surface detected — sweep the phone slowly')
     else if (res === 'place-first') say('Place the model first (Move + tap)')
     else if (res === 'no-mesh') say('No mesh under the tap')
   }, [say])
@@ -158,6 +161,12 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
           Clear
         </button>
       </nav>
+      {phase === 'ready' && tracking !== 'NORMAL' && (
+        <div className="xr-coach">
+          📐 Initializing tracking — <strong>walk a slow step</strong> pointing
+          the camera at the floor
+        </div>
+      )}
       {toast && <div className="xr-toast">{toast}</div>}
       {(phase !== 'ready' || error) && (
         <div className="xr-splash">

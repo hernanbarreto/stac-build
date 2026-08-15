@@ -113,6 +113,24 @@ html, body, #root {
   z-index: 10;
 }
 
+.xr-coach {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  top: calc(70px + env(safe-area-inset-top));
+  background: rgba(240, 168, 57, 0.16);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 10px 16px;
+  border-radius: 12px;
+  font-size: 14px;
+  max-width: 88%;
+  text-align: center;
+  z-index: 11;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
 .xr-toast {
   position: absolute;
   left: 50%;
