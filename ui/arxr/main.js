@@ -916,6 +916,19 @@ async function quickLook() {
     toast('Quick Look needs the mesh — reopen the session with mesh enabled');
     return;
   }
+  // on-device USDZ building OOM-crashes the tab on multi-M-triangle meshes
+  // (measured: two page reloads on a 4M-tri scene) — hard cap until the
+  // server-side USDZ endpoint exists
+  let tris = 0;
+  contentGroup.traverse((o) => {
+    if (o.isMesh) tris += (o.geometry.index?.count || o.geometry.attributes.position.count) / 3;
+  });
+  if (tris > 1_200_000) {
+    tele('quicklook-skip', { tris });
+    toast(`Mesh too heavy for on-device USDZ (${(tris / 1e6).toFixed(1)}M tris) — `
+      + 'server-side export pending', 6000);
+    return;
+  }
   loading(true, 'Building USDZ for AR Quick Look… (up to ~30 s)');
   const prevFull = fullbright;
   try {
