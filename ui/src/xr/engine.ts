@@ -77,6 +77,7 @@ export class StacXREngine {
   trackingStatus = 'UNSPECIFIED'   // SLAM needs device TRANSLATION to reach
                                    // NORMAL — until then content slides and
                                    // scale is not metric (root of both bugs)
+  private lastHitTele = 0
 
   constructor(
     private sessionId: string,
@@ -201,10 +202,20 @@ export class StacXREngine {
           this.reticle.visible = false
           return
         }
-        // surfaces only — free-floating feature points make garbage anchors
-        const hits = window.XR8.XrController.hitTest(0.5, 0.5,
+        // surfaces preferred; feature points as FALLBACK (less precise, but a
+        // reticle that never appears is worse). Hit counts go to telemetry
+        // once per second so the surface-detection health is visible remotely.
+        const surf = window.XR8.XrController.hitTest(0.5, 0.5,
           ['DETECTED_SURFACE', 'ESTIMATED_SURFACE'])
-        const h = hits && hits[0]
+        const feat = surf?.length ? [] : window.XR8.XrController.hitTest(
+          0.5, 0.5, ['FEATURE_POINT'])
+        const now = Date.now()
+        if (now - this.lastHitTele > 1000) {
+          this.lastHitTele = now
+          tele('hit-test', { surf: surf?.length ?? 0, feat: feat?.length ?? 0,
+                             tracking: this.trackingStatus })
+        }
+        const h = (surf && surf[0]) || (feat && feat[0])
         if (h) {
           this.reticle.position.set(h.position.x, h.position.y, h.position.z)
           const d = Math.max(

@@ -108,11 +108,17 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
     try {
       const DME: any = (window as any).DeviceMotionEvent
       if (typeof DME?.requestPermission === 'function') {
-        await DME.requestPermission().catch(() => {})
+        const m = await DME.requestPermission().catch((e: any) => `err:${e}`)
+        tele('motion-permission', { result: String(m) })
+        if (m === 'denied') {
+          say('Motion DENIED — without it tracking cannot hold. Close this tab '
+            + 'completely, reopen, and tap Allow.', 8000)
+        }
       }
       const DOE: any = (window as any).DeviceOrientationEvent
       if (typeof DOE?.requestPermission === 'function') {
-        await DOE.requestPermission().catch(() => {})
+        const o = await DOE.requestPermission().catch((e: any) => `err:${e}`)
+        tele('orientation-permission', { result: String(o) })
       }
     } catch { /* permission APIs are iOS-only */ }
     engineRef.current?.start(canvasRef.current!)
