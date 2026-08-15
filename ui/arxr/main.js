@@ -163,6 +163,7 @@ function initThree() {
 
   renderer.setAnimationLoop(onFrame);
   bindTapPicking();
+  bindPinchFov();
 }
 
 function onFrame(_t, frame) {
@@ -540,9 +541,13 @@ function bindTapPicking() {
     if (!downPos) return;
     const dx = e.clientX - downPos[0], dy = e.clientY - downPos[1];
     downPos = null;
-    if (Math.hypot(dx, dy) > 8 || currentTool === 'move') return;   // drag = orbit
+    if (Math.hypot(dx, dy) > 8) return;                             // drag = orbit
     const ndc = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1,
                                   -(e.clientY / innerHeight) * 2 + 1);
+    if (currentTool === 'move') {
+      if (camAR.on) camARPlace(ndc);          // tap the floor to re-place
+      return;
+    }
     raycaster.setFromCamera(ndc, camera);
     raycaster.params.Points.threshold = 0.02 * displayScale * 3;
     const hits = raycaster.intersectObjects(raycastTargets, false);
@@ -731,6 +736,121 @@ async function askAI(question) {
   }
 }
 
+// ── Cam AR: camera-feed + gyro fallback (no WebXR needed — works in Safari) ──
+// WebXR Viewer reports blend:opaque (it never composites the camera), so real
+// passthrough needs a browser-agnostic path: getUserMedia environment camera
+// as a fullscreen <video> behind the transparent WebGL canvas, and
+// deviceorientation driving the virtual camera (permission flow + YXZ euler +
+// screen-orientation compensation ported from the legacy static/xr_viewer.html).
+// No positional tracking: the user pans from a standpoint and re-places by
+// tapping the floor. Pinch calibrates the FOV against real references so 1:1
+// reads correctly on screen.
+
+let camAR = { on: false, stream: null, yawPitch: null, initialAlpha: null,
+              screenO: 0, baseFov: 62 };
+
+function camQuatFromOrientation(ev) {
+  const alpha = THREE.MathUtils.degToRad(ev.alpha || 0);
+  const beta = THREE.MathUtils.degToRad(ev.beta || 0);
+  const gamma = THREE.MathUtils.degToRad(ev.gamma || 0);
+  if (camAR.initialAlpha === null) camAR.initialAlpha = alpha;
+  const euler = new THREE.Euler(beta - Math.PI / 2, alpha - camAR.initialAlpha,
+                                -gamma, 'YXZ');
+  const q = new THREE.Quaternion().setFromEuler(euler);
+  q.multiply(new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 0, 1), -THREE.MathUtils.degToRad(camAR.screenO)));
+  return q;
+}
+
+function onDeviceOrientation(ev) {
+  if (!camAR.on) return;
+  camera.quaternion.copy(camQuatFromOrientation(ev));
+}
+
+async function enterCamAR() {
+  if (camAR.on) { exitCamAR(); return; }
+  try {
+    // iOS 13+ requires an explicit user-gesture permission for the gyro
+    if (typeof DeviceOrientationEvent !== 'undefined'
+        && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      const p = await DeviceOrientationEvent.requestPermission();
+      if (p !== 'granted') { toast('Motion permission denied'); return; }
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' }, audio: false });
+    const v = $('camfeed');
+    v.srcObject = stream;
+    v.style.display = 'block';
+    await v.play();
+    camAR.stream = stream;
+    camAR.on = true;
+    camAR.initialAlpha = null;
+    camAR.screenO = (screen.orientation?.angle ?? window.orientation) || 0;
+    controls.enabled = false;
+    camera.position.set(0, 1.5, 0);            // standing eye height
+    camera.fov = camAR.baseFov;
+    camera.updateProjectionMatrix();
+    setScaleIdx(0);                            // metric first
+    modelGroup.position.set(0, 0, -4);
+    window.addEventListener('deviceorientation', onDeviceOrientation);
+    setTool('move');
+    $('btn-camar').classList.add('active');
+    tele('camar-start', { fov: camAR.baseFov });
+    toast('Cam AR: pan the phone · tap the floor to re-place · pinch = FOV calibration');
+    try { navigator.wakeLock?.request('screen'); } catch { /* optional */ }
+  } catch (e) {
+    tele('camar-error', { msg: String(e.message || e) });
+    toast(`Cam AR failed: ${e.message || e}`, 5000);
+  }
+}
+
+function exitCamAR() {
+  camAR.on = false;
+  camAR.stream?.getTracks().forEach((t) => t.stop());
+  camAR.stream = null;
+  const v = $('camfeed');
+  v.srcObject = null;
+  v.style.display = 'none';
+  window.removeEventListener('deviceorientation', onDeviceOrientation);
+  $('btn-camar').classList.remove('active');
+  controls.enabled = true;
+  camera.fov = 60;
+  camera.updateProjectionMatrix();
+  modelGroup.position.set(0, 0, 0);
+  frameContent();
+}
+
+// Move tool in Cam AR: tap → ray → virtual floor plane y=0 → re-place there
+const _floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+function camARPlace(ndc) {
+  raycaster.setFromCamera(ndc, camera);
+  const hit = new THREE.Vector3();
+  if (raycaster.ray.intersectPlane(_floorPlane, hit)) {
+    modelGroup.position.set(hit.x, 0, hit.z);
+  }
+}
+
+// pinch = FOV calibration (match the virtual FOV to the phone camera's so 1:1
+// reads true on screen); metric scale itself is never touched
+let _pinchD = null;
+function bindPinchFov() {
+  const el = renderer.domElement;
+  el.addEventListener('touchmove', (e) => {
+    if (!camAR.on || e.touches.length !== 2) { _pinchD = null; return; }
+    e.preventDefault();
+    const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                         e.touches[0].clientY - e.touches[1].clientY);
+    if (_pinchD !== null) {
+      camera.fov = THREE.MathUtils.clamp(camera.fov * (_pinchD / d), 35, 85);
+      camAR.baseFov = camera.fov;
+      camera.updateProjectionMatrix();
+      toast(`FOV ${camera.fov.toFixed(0)}°`, 800);
+    }
+    _pinchD = d;
+  }, { passive: false });
+  el.addEventListener('touchend', () => { _pinchD = null; });
+}
+
 // ── scale / lighting / wiring ────────────────────────────────────────────────
 
 function clearMeasures() {
@@ -749,9 +869,11 @@ function setScaleIdx(i) {
 function wireUI() {
   $('btn-back').onclick = () => {
     renderer?.xr.getSession()?.end();
+    if (camAR.on) exitCamAR();
     $('viewer').style.display = 'none';
     $('home').style.display = 'block';
   };
+  $('btn-camar').onclick = () => enterCamAR();
   $('btn-scale').onclick = () => setScaleIdx(scaleIdx + 1);
   $('btn-light').onclick = () => { fullbright = !fullbright; applyLighting(); };
   $('btn-clear').onclick = clearMeasures;
