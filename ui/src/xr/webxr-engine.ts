@@ -188,7 +188,23 @@ export class WebXREngine implements IXREngine {
     } catch { /* orientation stays as baked */ }
   }
 
+  private projTeleSent = false
+
   private onFrame(frame: any) {
+    // one-shot: report the ACTUAL projection the runtime feeds the render —
+    // a FOV mismatch vs the phone camera's optics makes 1:1 content read
+    // systematically smaller/larger than reality (user reports ~40% small)
+    if (!this.projTeleSent && this.renderer!.xr.isPresenting) {
+      const cams = (this.renderer!.xr.getCamera() as any).cameras
+      if (cams?.length) {
+        const p = cams[0].projectionMatrix.elements
+        const fovY = 2 * Math.atan(1 / p[5]) * 180 / Math.PI
+        const fovX = 2 * Math.atan(1 / p[0]) * 180 / Math.PI
+        this.projTeleSent = true
+        tele('projection', { fovY: +fovY.toFixed(1), fovX: +fovX.toFixed(1),
+                             views: cams.length })
+      }
+    }
     if (frame && this.hitTestSource && this.reticle) {
       if (this.tool === 'move') {
         const hits = frame.getHitTestResults(this.hitTestSource)
@@ -266,13 +282,20 @@ export class WebXREngine implements IXREngine {
     this.modelGroup.updateWorldMatrix(true, true)
     const down = new THREE.Raycaster(
       new THREE.Vector3(x, y + 80, z), new THREE.Vector3(0, -1, 0))
-    ;(down as any).firstHitOnly = true
-    const hit = down.intersectObjects(this.raycastTargets, false)[0]
-    if (hit) {
-      const dy = y - hit.point.y
+    ;(down as any).firstHitOnly = false     // need ALL hits along the column
+    const hits = down.intersectObjects(this.raycastTargets, false)
+    if (hits.length) {
+      // pick the surface CLOSEST TO FLOOR LEVEL — the first hit from above
+      // is often a roof/overpass (measured: test4 hit +1.65 and sank the
+      // model 1.65 m). The model's ground at this XZ is the hit nearest y.
+      let ground = hits[0].point
+      for (const h of hits) {
+        if (Math.abs(h.point.y - y) < Math.abs(ground.y - y)) ground = h.point
+      }
+      const dy = y - ground.y
       this.modelGroup.position.y += dy
-      tele('terrain-seat', { localGroundY: +hit.point.y.toFixed(2),
-                             shift: +dy.toFixed(2) })
+      tele('terrain-seat', { localGroundY: +ground.y.toFixed(2),
+                             nHits: hits.length, shift: +dy.toFixed(2) })
     }
     this.lastAnchor = new THREE.Vector3(x, y, z)
     // ground-truth numbers for remote diagnosis: where did it actually land
