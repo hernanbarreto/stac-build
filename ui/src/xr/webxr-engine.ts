@@ -212,6 +212,7 @@ export class WebXREngine implements IXREngine {
   private placeAt(x: number, y: number, z: number) {
     this.contentGroup.visible = true
     this.placed = true
+    this.modelGroup.updateWorldMatrix(true, true)
     const box = new THREE.Box3().setFromObject(this.contentGroup)
     if (box.isEmpty()) return
     const c = box.getCenter(new THREE.Vector3())
@@ -219,6 +220,17 @@ export class WebXREngine implements IXREngine {
     this.modelGroup.position.z += z - c.z
     this.modelGroup.position.y = y              // model floor on the REAL surface
     this.lastAnchor = new THREE.Vector3(x, y, z)
+    // ground-truth numbers for remote diagnosis: where did it actually land
+    this.modelGroup.updateWorldMatrix(true, true)
+    const after = new THREE.Box3().setFromObject(this.contentGroup)
+    const cam = this.renderer!.xr.getCamera()
+    tele('place-geom', {
+      hitY: +y.toFixed(2),
+      boxMinY: +after.min.y.toFixed(2), boxMaxY: +after.max.y.toFixed(2),
+      boxMinX: +after.min.x.toFixed(1), boxMaxX: +after.max.x.toFixed(1),
+      camY: +cam.position.y.toFixed(2),
+      scale: SCALES[this.scaleIdx][1],
+    })
   }
 
   setTool(tool: Tool) {
