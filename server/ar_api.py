@@ -204,6 +204,80 @@ async def ar_cloud(session_id: str, points: int = 1_500_000):
                         filename=f"{session_id}_cloud.bin")
 
 
+# ── server-side USDZ for AR Quick Look ───────────────────────────────────────
+# Building on the phone OOM-crashed the tab on multi-M-tri meshes; here the
+# textured GLB is decimated (UV-preserving) and packaged ARKit-compliant by
+# tools/glb_to_usdz.py under the isolated /workspace/usdtools venv (~2-3 min,
+# cached). The app calls ?prepare=1 and polls until {status: ready}, then
+# navigates an <a rel="ar"> to the bare URL → native Quick Look.
+
+_USDTOOLS_PY = "/workspace/usdtools/bin/python"
+_usdz_jobs: dict = {}
+
+
+def _build_usdz(glb: Path, dst: Path, floor_tf: Optional[list],
+                tris: int) -> dict:
+    import subprocess
+    script = Path(__file__).resolve().parent / "tools" / "glb_to_usdz.py"
+    cmd = [_USDTOOLS_PY, str(script), "--glb", str(glb), "--out", str(dst),
+           "--target-tris", str(tris)]
+    if floor_tf:
+        cmd += ["--floor-transform", json.dumps(floor_tf)]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:]
+        raise RuntimeError(f"usdz build failed: {' '.join(tail)[:300]}")
+    stats = json.loads(r.stdout.strip().splitlines()[-1])
+    meta = {"source_mtime": glb.stat().st_mtime, "target_tris": tris, **stats}
+    dst.with_suffix(".json").write_text(json.dumps(meta))
+    logger.info(f"[ar] usdz built: {dst.name} {meta}")
+    return meta
+
+
+@router.get("/usdz/{session_id}")
+async def ar_usdz(session_id: str, prepare: int = 0, tris: int = 700_000):
+    import asyncio
+    out = _latest_output_dir(session_id)
+    glb = (out / "tsdf" / "scene" / "scene.glb.orig") if out else None
+    if glb is None or not glb.exists():
+        return JSONResponse({"error": f"no mesh (scene.glb.orig) for "
+                             f"'{session_id}'"}, status_code=404)
+    dst = out / "ar_scene.usdz"
+    meta_p = dst.with_suffix(".json")
+    fresh = False
+    if dst.exists() and meta_p.exists():
+        try:
+            meta = json.loads(meta_p.read_text())
+            fresh = (meta.get("source_mtime") == glb.stat().st_mtime
+                     and meta.get("target_tris") == tris)
+        except Exception:
+            fresh = False
+    if fresh:
+        if prepare:
+            return {"status": "ready", **json.loads(meta_p.read_text())}
+        return FileResponse(str(dst), media_type="model/vnd.usdz+zip",
+                            filename=f"{session_id}.usdz")
+    floor_tf = _floor_transform(out)
+    if prepare:
+        job = _usdz_jobs.get(session_id)
+        if job is not None:
+            if not job.done():
+                return {"status": "building"}
+            exc = job.exception()
+            _usdz_jobs.pop(session_id, None)
+            if exc is not None:
+                return JSONResponse({"status": "error", "error": str(exc)},
+                                    status_code=500)
+            return {"status": "ready"}
+        _usdz_jobs[session_id] = asyncio.create_task(
+            asyncio.to_thread(_build_usdz, glb, dst, floor_tf, tris))
+        return {"status": "building"}
+    # direct GET while stale: build synchronously (CLI/testing path)
+    await asyncio.to_thread(_build_usdz, glb, dst, floor_tf, tris)
+    return FileResponse(str(dst), media_type="model/vnd.usdz+zip",
+                        filename=f"{session_id}.usdz")
+
+
 @router.post("/log")
 async def ar_client_log(body: dict):
     """Client-side telemetry from the phone app (XR capabilities, errors) —

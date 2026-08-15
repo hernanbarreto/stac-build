@@ -18,7 +18,6 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
-import { USDZExporter } from 'three/examples/jsm/exporters/USDZExporter.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 
 // BVH-accelerated raycast: the TSDF mesh has millions of triangles — the
@@ -906,52 +905,42 @@ function bindPinchFov() {
   el.addEventListener('touchend', () => { _pinchD = null; });
 }
 
-// ── AR Quick Look (iOS native): USDZ built on-device from the loaded mesh ────
+// ── AR Quick Look (iOS native): USDZ prepared on the SERVER ──────────────────
 // Apple's own AR viewer: perfect passthrough + ARKit anchoring at true metric
-// scale (USDZ metersPerUnit=1 — our units ARE meters). Mesh only, no tools —
-// the measured/AI workflow stays in the app; this is the reliable projection.
+// scale (USDZ meters). The pod decimates + packages the textured mesh
+// (UV-preserving, ARKit-compliant, cached); the phone only downloads and
+// opens it — on-device conversion OOM-crashed the tab on 4M-tri scenes.
+
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function quickLook() {
-  if (!contentGroup.children.some((o) => !o.userData?.isCloud)) {
-    toast('Quick Look needs the mesh — reopen the session with mesh enabled');
+  if (!session?.has_mesh) {
+    toast('Quick Look needs a session with a mesh');
     return;
   }
-  // on-device USDZ building OOM-crashes the tab on multi-M-triangle meshes
-  // (measured: two page reloads on a 4M-tri scene) — hard cap until the
-  // server-side USDZ endpoint exists
-  let tris = 0;
-  contentGroup.traverse((o) => {
-    if (o.isMesh) tris += (o.geometry.index?.count || o.geometry.attributes.position.count) / 3;
-  });
-  if (tris > 1_200_000) {
-    tele('quicklook-skip', { tris });
-    toast(`Mesh too heavy for on-device USDZ (${(tris / 1e6).toFixed(1)}M tris) — `
-      + 'server-side export pending', 6000);
-    return;
-  }
-  loading(true, 'Building USDZ for AR Quick Look… (up to ~30 s)');
-  const prevFull = fullbright;
+  loading(true, 'Preparing USDZ on the server… (first time ~2-3 min, then cached)');
   try {
-    fullbright = false; applyLighting();       // exporter wants PBR materials
-    contentGroup.updateWorldMatrix(true, true);
-    const exporter = new USDZExporter();
-    const data = await exporter.parseAsync(contentGroup);
-    const url = URL.createObjectURL(
-      new Blob([data], { type: 'model/vnd.usdz+zip' }));
+    for (let i = 0; i < 90; i++) {                    // poll up to ~7.5 min
+      const r = await fetch(
+        `${API}/api/ar/usdz/${encodeURIComponent(session.id)}?prepare=1`);
+      const st = await r.json();
+      if (!r.ok) throw new Error(st.error || `HTTP ${r.status}`);
+      if (st.status === 'ready') break;
+      loading(true, `Preparing USDZ… (server is decimating + packaging)`);
+      await _sleep(5000);
+    }
     const a = document.createElement('a');
     a.rel = 'ar';
-    a.href = url;
-    a.appendChild(document.createElement('img'));   // Safari requires an <img> child
+    a.href = `${API}/api/ar/usdz/${encodeURIComponent(session.id)}`;
+    a.appendChild(document.createElement('img'));     // Safari requires an <img> child
     document.body.appendChild(a);
     a.click();
     a.remove();
-    tele('quicklook', { bytes: data.byteLength });
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    tele('quicklook-open', { session: session.id });
   } catch (e) {
     tele('quicklook-error', { msg: String(e.message || e) });
-    toast(`USDZ export failed: ${e.message || e}`, 6000);
+    toast(`Quick Look failed: ${e.message || e}`, 6000);
   } finally {
-    fullbright = prevFull; applyLighting();
     loading(false);
   }
 }
