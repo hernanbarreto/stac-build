@@ -168,3 +168,7 @@ vendor/pgsr/
 
 # JWT signing key (generated at first boot — never commit)
 server/.jwt_secret
+
+# Tailscale TLS material — never commit
+*.ts.net.crt
+*.ts.net.key
