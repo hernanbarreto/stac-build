@@ -63,7 +63,16 @@ export class WebXREngine implements IXREngine {
       this.scene.add(this.reticle)
 
       this.setScaleIdx(0)
-      await this.loadMesh()
+      // Session FIRST, inside the tap gesture (iOS requires it) — the camera
+      // shows immediately; the mesh streams in the background and announces
+      // itself when ready. Awaiting the 33 MB download first both blanked the
+      // screen AND dropped the user-gesture context for requestSession.
+      this.loadMesh()
+        .then(() => this.cb.onToast('Mesh loaded — aim the circle and tap to place'))
+        .catch((e) => {
+          tele('mesh-error', { msg: String(e?.message ?? e) })
+          this.cb.onError(`Mesh load failed: ${e?.message ?? e}`)
+        })
 
       const overlayRoot = document.getElementById('root') ?? document.body
       const session = await (navigator as any).xr.requestSession('immersive-ar', {
