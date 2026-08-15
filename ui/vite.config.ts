@@ -31,6 +31,14 @@ export default defineConfig(async () => {
 
   return {
     plugins,
+    build: {
+      rollupOptions: {
+        input: {
+          index: path.join(__dirname, 'index.html'),
+          xr: path.join(__dirname, 'xr.html'),      // mobile XR viewer entry
+        },
+      },
+    },
     server: {
       // Proxy API requests to STAC server (avoids CORS)
       proxy: {

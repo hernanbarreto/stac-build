@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <title>STAC XR</title>
+    <!-- 8th Wall XR engine (self-hosted binary from @8thwall/engine-binary):
+         SLAM world tracking + absolute metric scale over the live camera.
+         Works in iOS Safari (no WebXR there) AND Android browsers alike. -->
+    <script src="/static/ar/xr8/xr.js" async data-preload-chunks="slam"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/xr/main.tsx"></script>
+  </body>
+</html>

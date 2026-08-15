@@ -446,23 +446,18 @@ async function setupARButton() {
   const btn = $('btn-ar');
   const ok = navigator.xr && await navigator.xr.isSessionSupported?.('immersive-ar')
     .catch(() => false);
-  const vlaunch = !ok && typeof window.VLaunch !== 'undefined'
-    && /iPhone|iPad|iPod/.test(navigator.userAgent);
-  tele('xr-support', { immersiveAR: !!ok, vlaunch: !!vlaunch });
-  btn.style.display = (ok || vlaunch) ? 'block' : 'none';
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  tele('xr-support', { immersiveAR: !!ok, ios });
+  btn.style.display = (ok || ios) ? 'block' : 'none';
   if (ok) {
+    // native WebXR (Android Chrome and friends) — the canonical path
     btn.onclick = enterAR;
-  } else if (vlaunch) {
-    // Variant Launch App Clip — explicit user choice, never an auto-redirect
-    btn.onclick = async () => {
-      try {
-        tele('vlaunch-go', {});
-        const url = await window.VLaunch.getLaunchUrl(location.href);
-        location.href = url;
-      } catch (e) {
-        tele('vlaunch-error', { msg: String(e.message || e) });
-        toast(`Variant Launch failed: ${e.message || e}`, 5000);
-      }
+  } else if (ios) {
+    // iOS Safari has NO WebXR (2026) — dedicated page on the self-hosted
+    // 8th Wall engine (own SLAM + absolute metric scale over the camera)
+    btn.onclick = () => {
+      if (!session?.has_mesh) { toast('XR needs a session with a mesh'); return; }
+      location.href = `ios.html?session=${encodeURIComponent(session.id)}`;
     };
   } else {
     toast('WebXR AR not available in this browser — 3D mode only', 4000);

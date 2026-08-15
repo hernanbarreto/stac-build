@@ -932,6 +932,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+# ── Built React app (ui/dist — `npm run build:xr` in ui/) ───────────────
+# Serves the production web bundle at /app; today its consumer is the mobile
+# XR viewer (/app/xr.html). Mounted only when a build exists on disk.
+_UI_DIST = Path(__file__).parent.parent / "ui" / "dist"
+if _UI_DIST.is_dir():
+    app.mount("/app", StaticFiles(directory=str(_UI_DIST), html=True), name="app")
+
 # ── Potree octree file serving ──────────────────────────────────────────
 # Serves pre-built LOD octree files (metadata.json, octree.bin, hierarchy.bin)
 from potree_converter import convert_ply_to_potree, convert_ply_to_potree_async
