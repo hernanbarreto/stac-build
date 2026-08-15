@@ -12,4 +12,8 @@ export PATH="/workspace/miniforge3/envs/nodejs/bin:$PATH"
 ./node_modules/.bin/esbuild arxr/main.js \
     --bundle --format=esm --minify \
     --outfile=../static/ar/app.js
-echo "built → static/ar/app.js ($(du -h ../static/ar/app.js | cut -f1))"
+# cache-bust: stamp the content hash into index.html — a stale cached app.js
+# against a fresh index.html took the whole app down with a TypeError once
+HASH=$(md5sum ../static/ar/app.js | cut -c1-10)
+sed -i -E "s/app\.js\?v=[a-z0-9]+/app.js?v=${HASH}/" ../static/ar/index.html
+echo "built → static/ar/app.js ($(du -h ../static/ar/app.js | cut -f1), v=${HASH})"
