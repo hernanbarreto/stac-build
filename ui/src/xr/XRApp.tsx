@@ -73,7 +73,7 @@ function SessionList({ onOpen }: { onOpen: (s: ArSession) => void }) {
 function XRView({ session, onBack }: { session: ArSession, onBack: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const engineRef = useRef<StacXREngine | null>(null)
-  const [ready, setReady] = useState(false)
+  const [phase, setPhase] = useState<'arm' | 'starting' | 'ready'>('arm')
   const [error, setError] = useState<string | null>(null)
   const [tool, setTool] = useState<Tool>('move')
   const [scaleLabel, setScaleLabel] = useState('1:10')
@@ -88,16 +88,33 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
 
   useEffect(() => {
     const engine = new StacXREngine(session.id, {
-      onReady: () => { setReady(true); say(TOOL_HINTS.move, 4000) },
+      onReady: () => { setPhase('ready'); say(TOOL_HINTS.move, 4000) },
       onError: (msg) => setError(msg),
       onToast: say,
       onPlaced: () => say('Placed — scale button for 1:1, tools below to measure'),
     })
     engineRef.current = engine
-    engine.start(canvasRef.current!)
     return () => { engine.stop() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id])
+
+  // iOS grants camera/motion permission ONLY inside a direct user gesture —
+  // auto-starting the engine on mount left the camera dead (black screen).
+  const armAR = useCallback(async () => {
+    tele('start-tap', {})
+    setPhase('starting')
+    try {
+      const DME: any = (window as any).DeviceMotionEvent
+      if (typeof DME?.requestPermission === 'function') {
+        await DME.requestPermission().catch(() => {})
+      }
+      const DOE: any = (window as any).DeviceOrientationEvent
+      if (typeof DOE?.requestPermission === 'function') {
+        await DOE.requestPermission().catch(() => {})
+      }
+    } catch { /* permission APIs are iOS-only */ }
+    engineRef.current?.start(canvasRef.current!)
+  }, [])
 
   const onTap = useCallback((e: React.TouchEvent) => {
     const t = e.changedTouches[0]
@@ -142,13 +159,19 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
         </button>
       </nav>
       {toast && <div className="xr-toast">{toast}</div>}
-      {(!ready || error) && (
+      {(phase !== 'ready' || error) && (
         <div className="xr-splash">
-          {!error && <div className="spin" />}
+          {!error && phase === 'starting' && <div className="spin" />}
           <div className="msg">
-            {error ?? <>Starting camera + tracking…<br />
-              <small>Allow camera and motion access when asked</small></>}
+            {error ?? (phase === 'arm'
+              ? <><strong>{session.id}</strong><br />
+                  Point the camera at your surroundings and place the metric mesh.</>
+              : <>Starting camera + tracking, loading mesh…<br />
+                  <small>Allow camera and motion access when asked</small></>)}
           </div>
+          {!error && phase === 'arm' && (
+            <button className="btn primary-cta" onClick={armAR}>Start AR</button>
+          )}
           {error && <button className="btn" onClick={() => location.reload()}>Retry</button>}
         </div>
       )}

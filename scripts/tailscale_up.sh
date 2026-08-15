@@ -49,6 +49,8 @@ $TS up --hostname=stac-pod >/dev/null 2>&1 || true
 # 3. publish the backend inside the tailnet with a valid TLS cert.
 #    The backend speaks HTTPS with a self-signed cert → https+insecure.
 $TS serve --bg "https+insecure://localhost:${BACKEND_PORT}" >/dev/null
+#    AR server (phone XR, own process, plain HTTP internally) on :8443.
+$TS serve --bg --https=8443 "http://127.0.0.1:8766" >/dev/null
 echo "[tailscale] serve configured:"
 $TS serve status
 echo

@@ -41,6 +41,11 @@ fi
 tmux new-session -d -s backend
 tmux send-keys -t backend "$CONDA && $ENV && cd /workspace/stac-build && export CONDA_ROOT=/workspace/miniforge3 && bash scripts/start.sh" Enter
 
+# 2b. AR SERVER (phone XR surface — own process, decoupled from the backend;
+#     published by tailscale serve --https=8443 with a valid cert)
+tmux new-session -d -s arserver
+tmux send-keys -t arserver "$CONDA && $ENV && cd /workspace/stac-build && bash scripts/serve_ar.sh" Enter
+
 # 3. VITE
 tmux new-session -d -s vite
 tmux send-keys -t vite "$CONDA && conda activate nodejs && cd /workspace/stac-build/ui && npm run dev:web" Enter

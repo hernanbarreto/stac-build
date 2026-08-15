@@ -139,6 +139,13 @@ export class StacXREngine {
           this.reticle.visible = false
         }
       },
+      onCameraStatusChange: (e: any) => {
+        tele('camera-status', { status: e?.status })
+        if (e?.status === 'failed') {
+          this.cb.onError('Camera access failed — allow the camera for this '
+            + 'site (aA menu → Website settings) and retry')
+        }
+      },
       listeners: [{
         event: 'reality.error',
         process: (e: any) => {
