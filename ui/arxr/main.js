@@ -446,10 +446,27 @@ async function setupARButton() {
   const btn = $('btn-ar');
   const ok = navigator.xr && await navigator.xr.isSessionSupported?.('immersive-ar')
     .catch(() => false);
-  tele('xr-support', { immersiveAR: !!ok });
-  btn.style.display = ok ? 'block' : 'none';
-  if (!ok) toast('WebXR AR not available in this browser — 3D mode only', 4000);
-  btn.onclick = enterAR;
+  const vlaunch = !ok && typeof window.VLaunch !== 'undefined'
+    && /iPhone|iPad|iPod/.test(navigator.userAgent);
+  tele('xr-support', { immersiveAR: !!ok, vlaunch: !!vlaunch });
+  btn.style.display = (ok || vlaunch) ? 'block' : 'none';
+  if (ok) {
+    btn.onclick = enterAR;
+  } else if (vlaunch) {
+    // Variant Launch App Clip — explicit user choice, never an auto-redirect
+    btn.onclick = async () => {
+      try {
+        tele('vlaunch-go', {});
+        const url = await window.VLaunch.getLaunchUrl(location.href);
+        location.href = url;
+      } catch (e) {
+        tele('vlaunch-error', { msg: String(e.message || e) });
+        toast(`Variant Launch failed: ${e.message || e}`, 5000);
+      }
+    };
+  } else {
+    toast('WebXR AR not available in this browser — 3D mode only', 4000);
+  }
 }
 
 async function enterAR() {
@@ -982,7 +999,8 @@ function wireUI() {
     $('viewer').style.display = 'none';
     $('home').style.display = 'block';
   };
-  $('btn-camar').onclick = () => enterCamAR();
+  const _camarBtn = $('btn-camar');            // retired from the UI; code kept
+  if (_camarBtn) _camarBtn.onclick = () => enterCamAR();
   const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
   $('btn-ql').style.display = isIOS ? 'block' : 'none';
   $('btn-ql').onclick = () => quickLook();

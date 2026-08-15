@@ -101,7 +101,6 @@
         <button id="btn-light" title="toggle lighting">☀</button>
         <button id="btn-scale">1:1</button>
         <button id="btn-ql" class="primary" style="display:none">AR&nbsp;👁</button>
-        <button id="btn-camar">Cam AR</button>
         <button id="btn-ar" class="primary" style="display:none">XR</button>
       </div>
       <div id="toolbar">
@@ -125,10 +124,11 @@
     </div>
   </div>
 
-  <!-- Variant Launch: real WebXR on iOS Safari via App Clip (domain-bound key;
-       registered for stac-pod.tail9cfdd1.ts.net). Must load BEFORE app.js so
-       navigator.xr is shimmed when the app probes immersive-ar support. -->
-  <script src="https://launchar.app/sdk/v1?key=O0j6XZVvKo3Ns3GiqezRiAOBpVnW66px&redirect=true"></script>
+  <!-- Variant Launch: real WebXR on iOS Safari via App Clip (domain-bound key).
+       redirect=false — redirect=true hijacked the page load into the App Clip
+       before the session list could even render (looked like a dead page).
+       The XR button triggers the launch explicitly instead. -->
+  <script src="https://launchar.app/sdk/v1?key=O0j6XZVvKo3Ns3GiqezRiAOBpVnW66px&redirect=false"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>
