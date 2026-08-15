@@ -92,7 +92,8 @@ let modelGroup;          // placed/scaled in AR; children live in METRIC model s
 let contentGroup;        // mesh + cloud
 let measureGroup;        // measurement geometry (model space)
 let aiGroup;             // AI trace markers (model space)
-let reticle, hitTestSource = null, xrRefSpace = null;
+let reticle, hitTestSource = null, xrRefSpace = null, xrRefType = 'local-floor';
+let hudGroup = null, hudButtons = [], hudStatus = null, xrBlendMode = '';
 let session = null;      // current STAC session entry
 let floorMatrix = null;  // upright transform for sessions whose in-pipeline
                          // orientation was refused (server sends 4x4 row-major)
@@ -106,6 +107,7 @@ const savedMaterials = new Map();
 
 function initThree() {
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setClearColor(0x000000, 0);   // AR passthrough needs a transparent clear
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
   renderer.xr.enabled = true;
@@ -158,6 +160,7 @@ function onFrame(_t, frame) {
       reticle.visible = false;
     }
   }
+  updateHudPlacement();
   controls.enabled = !renderer.xr.isPresenting;
   renderer.render(scene, camera);
 }
@@ -283,6 +286,124 @@ function frameContent() {
   camera.updateProjectionMatrix();
 }
 
+// ── in-scene AR HUD ──────────────────────────────────────────────────────────
+// XRViewer (and other older XR browsers) do NOT support dom-overlay, so the
+// HTML toolbar is invisible inside AR. This camera-anchored sprite toolbar is
+// tappable through the XR select ray in ANY WebXR browser: tools, scale,
+// clear, exit — plus a status line with capability diagnostics.
+
+function hudCanvasTex(text, active, statusStyle = false) {
+  const fs = statusStyle ? 30 : 44, pad = statusStyle ? 10 : 16;
+  const cv = document.createElement('canvas');
+  const cx = cv.getContext('2d');
+  cx.font = `600 ${fs}px system-ui`;
+  cv.width = Math.max(cx.measureText(text).width + pad * 2, statusStyle ? 40 : 100);
+  cv.height = fs + pad * 2;
+  cx.font = `600 ${fs}px system-ui`;
+  cx.fillStyle = active ? 'rgba(46,160,67,0.95)' : 'rgba(24,29,36,0.92)';
+  cx.fillRect(0, 0, cv.width, cv.height);
+  if (!statusStyle) {
+    cx.strokeStyle = active ? '#4ade80' : '#57606d';
+    cx.lineWidth = 4;
+    cx.strokeRect(2, 2, cv.width - 4, cv.height - 4);
+  }
+  cx.fillStyle = '#fff';
+  cx.textAlign = 'center';
+  cx.textBaseline = 'middle';
+  cx.fillText(text, cv.width / 2, cv.height / 2);
+  return { tex: new THREE.CanvasTexture(cv), aspect: cv.width / cv.height };
+}
+
+function makeHudSprite(action, text, h = 0.055, statusStyle = false) {
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ depthTest: false }));
+  sp.renderOrder = 999;
+  sp.userData = { action, hudButton: !statusStyle };
+  sp.userData.redraw = (label, active = false) => {
+    const { tex, aspect } = hudCanvasTex(label, active, statusStyle);
+    sp.material.map?.dispose();
+    sp.material.map = tex;
+    sp.material.needsUpdate = true;
+    sp.scale.set(h * aspect, h, 1);
+  };
+  sp.userData.redraw(text);
+  return sp;
+}
+
+function layoutHud() {
+  const gap = 0.012;
+  const total = hudButtons.reduce((a, b) => a + b.scale.x, 0)
+    + gap * (hudButtons.length - 1);
+  let x = -total / 2;
+  for (const b of hudButtons) {
+    b.position.set(x + b.scale.x / 2, 0, 0);
+    x += b.scale.x + gap;
+  }
+  hudStatus.position.set(0, 0.062, 0);
+}
+
+function buildHud() {
+  removeHud();
+  hudGroup = new THREE.Group();
+  hudButtons = [];
+  const defs = [['move', 'Move'], ['dist', 'Dist'], ['angle', 'Ang'],
+                ['vol', 'Vol'], ['scale', SCALES[scaleIdx][1]],
+                ['clear', 'Clear'], ['exit', '✕']];
+  for (const [action, text] of defs) {
+    const b = makeHudSprite(action, text);
+    hudButtons.push(b);
+    hudGroup.add(b);
+  }
+  hudStatus = makeHudSprite('', '', 0.034, true);
+  hudGroup.add(hudStatus);
+  layoutHud();
+  refreshHud();
+  scene.add(hudGroup);
+}
+
+function removeHud() {
+  if (hudGroup) scene.remove(hudGroup);
+  hudGroup = null;
+  hudButtons = [];
+  hudStatus = null;
+}
+
+function refreshHud() {
+  if (!hudGroup) return;
+  for (const b of hudButtons) {
+    if (b.userData.action === 'scale') b.userData.redraw(SCALES[scaleIdx][1]);
+    else b.userData.redraw(hudLabel(b.userData.action),
+                           b.userData.action === currentTool);
+  }
+  hudStatus.userData.redraw(
+    `${currentTool} · ${SCALES[scaleIdx][1]} · blend:${xrBlendMode || '?'}`
+    + `${hitTestSource ? ' · hit-test' : ''}`);
+  layoutHud();
+}
+
+function hudLabel(action) {
+  return { move: 'Move', dist: 'Dist', angle: 'Ang', vol: 'Vol',
+           clear: 'Clear', exit: '✕' }[action] || action;
+}
+
+function updateHudPlacement() {
+  if (!hudGroup || !renderer.xr.isPresenting) return;
+  const cam = renderer.xr.getCamera();
+  const q = cam.quaternion;
+  const p = cam.position.clone()
+    .addScaledVector(new THREE.Vector3(0, 0, -1).applyQuaternion(q), 0.62)
+    .addScaledVector(new THREE.Vector3(0, -1, 0).applyQuaternion(q), 0.20);
+  hudGroup.position.lerp(p, 0.35);
+  hudGroup.quaternion.slerp(q, 0.35);
+}
+
+function doHudAction(action) {
+  if (action === 'exit') { renderer.xr.getSession()?.end(); return; }
+  if (action === 'scale') { setScaleIdx(scaleIdx + 1); refreshHud(); return; }
+  if (action === 'clear') { clearMeasures(); return; }
+  setTool(action);
+  refreshHud();
+}
+
 // ── AR session ────────────────────────────────────────────────────────────────
 
 async function setupARButton() {
@@ -306,21 +427,31 @@ async function enterAR() {
     try { await xrSession.requestReferenceSpace('local-floor'); }
     catch { refType = 'local'; }
     renderer.xr.setReferenceSpaceType(refType);
+    xrRefType = refType;
     await renderer.xr.setSession(xrSession);
     xrRefSpace = renderer.xr.getReferenceSpace();
+    xrBlendMode = xrSession.environmentBlendMode || '?';
     try {
       const viewerSpace = await xrSession.requestReferenceSpace('viewer');
       hitTestSource = await xrSession.requestHitTestSource?.({ space: viewerSpace }) || null;
     } catch { hitTestSource = null; }
-    // start miniature 1.2 m ahead: the user re-places with Move, and can go 1:1
-    setScaleIdx(1);
-    modelGroup.position.set(0, 0, -1.2);
+    // METRIC FIRST: start at 1:1, 2 m ahead, on the floor (the user asked for
+    // real scale as the default; the HUD scale button cycles miniatures)
+    setScaleIdx(0);
+    modelGroup.position.set(0, refType === 'local' ? -1.4 : 0, -2);
+    buildHud();
+    const hadOverlay = !!xrSession.domOverlayState;
     xrSession.addEventListener('select', onXRSelect);
     xrSession.addEventListener('end', () => {
-      hitTestSource = null; reticle.visible = false;
+      const diag = `AR caps — blend:${xrBlendMode} · hit-test:${!!hitTestSource}`
+        + ` · dom-overlay:${hadOverlay} · ref:${xrRefType}`;
+      hitTestSource = null;
+      reticle.visible = false;
+      removeHud();
       setScaleIdx(0);
       modelGroup.position.set(0, 0, 0);
       frameContent();
+      toast(diag, 12000);       // report what the browser actually supported
     });
     toast('Tap to place (Move) — switch tools below');
   } catch (e) {
@@ -330,28 +461,35 @@ async function enterAR() {
 
 function onXRSelect(ev) {
   const frame = ev.frame;
+  // ray from the input source (screen tap on handheld AR)
+  const pose = frame.getPose(ev.inputSource.targetRaySpace, xrRefSpace);
+  let origin = null, dir = null;
+  if (pose) {
+    const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
+    origin = new THREE.Vector3().setFromMatrixPosition(m);
+    dir = new THREE.Vector3(0, 0, -1).applyMatrix4(
+      new THREE.Matrix4().extractRotation(m)).normalize();
+    // the in-scene HUD has tap priority over the model
+    raycaster.set(origin, dir);
+    raycaster.camera = renderer.xr.getCamera();   // Sprite.raycast needs it
+    const hudHit = raycaster.intersectObjects(hudButtons, false);
+    if (hudHit.length) { doHudAction(hudHit[0].object.userData.action); return; }
+  }
   if (currentTool === 'move') {
     if (reticle.visible) {
       const p = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
       reticle.matrix.decompose(p, q, s);
       modelGroup.position.copy(p);
     } else {
-      // no hit-test (older XR browsers): drop 1.5 m in front of the camera
+      // no hit-test (older XR browsers): drop 2 m in front of the camera
       const cam = renderer.xr.getCamera();
       const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
-      modelGroup.position.copy(cam.position).addScaledVector(fwd, 1.5);
-      modelGroup.position.y = 0;
+      modelGroup.position.copy(cam.position).addScaledVector(fwd, 2.0);
+      modelGroup.position.y = xrRefType === 'local' ? cam.position.y - 1.4 : 0;
     }
     return;
   }
-  // measurement tap: ray from the input source (screen tap on handheld AR)
-  const pose = frame.getPose(ev.inputSource.targetRaySpace, xrRefSpace);
-  if (!pose) return;
-  const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
-  const origin = new THREE.Vector3().setFromMatrixPosition(m);
-  const dir = new THREE.Vector3(0, 0, -1).applyMatrix4(
-    new THREE.Matrix4().extractRotation(m)).normalize();
-  pickAndMeasure(origin, dir);
+  if (origin && dir) pickAndMeasure(origin, dir);
 }
 
 // ── picking (shared XR / non-XR) ─────────────────────────────────────────────
@@ -572,6 +710,12 @@ async function askAI(question) {
 
 // ── scale / lighting / wiring ────────────────────────────────────────────────
 
+function clearMeasures() {
+  pending = [];
+  while (measureGroup.children.length) measureGroup.children.pop();
+  while (aiGroup.children.length) aiGroup.children.pop();
+}
+
 function setScaleIdx(i) {
   scaleIdx = i % SCALES.length;
   displayScale = SCALES[scaleIdx][0];
@@ -587,11 +731,7 @@ function wireUI() {
   };
   $('btn-scale').onclick = () => setScaleIdx(scaleIdx + 1);
   $('btn-light').onclick = () => { fullbright = !fullbright; applyLighting(); };
-  $('btn-clear').onclick = () => {
-    pending = [];
-    while (measureGroup.children.length) measureGroup.children.pop();
-    while (aiGroup.children.length) aiGroup.children.pop();
-  };
+  $('btn-clear').onclick = clearMeasures;
   document.querySelectorAll('#toolbar [data-tool]').forEach((b) => {
     b.onclick = () => setTool(b.dataset.tool);
   });
