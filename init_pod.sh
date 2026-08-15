@@ -3,6 +3,7 @@
 # Arranque del pod STAC-BUILD
 # source /workspace/miniforge3/etc/profile.d/conda.sh
 # bash /workspace/stac-build/init_pod.sh
+# variant launch <script src="https://launchar.app/sdk/v1?key=O0j6XZVvKo3Ns3GiqezRiAOBpVnW66px&redirect=true"></script>
 
 # 1. paquetes de sistema si faltan: tmux + stack de escritorio para Electron/noVNC
 #    (libnss3 etc. son runtime de Chromium; sin ellos Electron no arranca — visto

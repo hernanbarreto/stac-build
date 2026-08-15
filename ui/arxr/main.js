@@ -150,7 +150,8 @@ function initThree() {
 
   reticle = new THREE.Mesh(
     new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI / 2),
-    new THREE.MeshBasicMaterial({ color: 0x4ade80 }));
+    new THREE.MeshBasicMaterial({ color: 0x4ade80, depthTest: false }));
+  reticle.renderOrder = 998;          // never hidden behind model geometry
   reticle.matrixAutoUpdate = false;
   reticle.visible = false;
   scene.add(reticle);
@@ -473,12 +474,14 @@ async function enterAR() {
       const viewerSpace = await xrSession.requestReferenceSpace('viewer');
       hitTestSource = await xrSession.requestHitTestSource?.({ space: viewerSpace }) || null;
     } catch { hitTestSource = null; }
-    // METRIC FIRST: start at 1:1, 2 m ahead, on the floor (the user asked for
-    // real scale as the default; the HUD scale button cycles miniatures)
-    setScaleIdx(0);
+    // AR entry: NOTHING placed yet — auto-placing a building-sized model
+    // engulfed the user (its walls occluded the camera AND the reticle, which
+    // read as "no passthrough"). Camera + reticle only; the user aims and
+    // taps to place a 1:10 miniature on the real floor, then scales up.
+    contentGroup.visible = false;
+    lastAnchor = null;
+    setScaleIdx(1);                            // 1:10 tabletop first
     modelGroup.position.set(0, 0, 0);
-    placeContentAt(0, -6);                     // bbox-centered, floor on ground
-    if (refType === 'local') modelGroup.position.y -= 1.4;   // floor guess
     buildHud();
     const hadOverlay = !!xrSession.domOverlayState;
     tele('ar-start', {
@@ -493,6 +496,8 @@ async function enterAR() {
       hitTestSource = null;
       reticle.visible = false;
       removeHud();
+      contentGroup.visible = true;
+      lastAnchor = null;
       setScaleIdx(0);
       modelGroup.position.set(0, 0, 0);
       frameContent();
@@ -525,13 +530,14 @@ function onXRSelect(ev) {
     if (reticle.visible) {
       const p = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
       reticle.matrix.decompose(p, q, s);
-      modelGroup.position.copy(p);
+      placeContentAt(p.x, p.z, p.y);           // bbox on the REAL tapped floor
     } else {
-      // no hit-test (older XR browsers): drop 2 m in front of the camera
+      // no hit-test: drop 2 m in front of the camera at floor-guess height
       const cam = renderer.xr.getCamera();
       const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
-      modelGroup.position.copy(cam.position).addScaledVector(fwd, 2.0);
-      modelGroup.position.y = xrRefType === 'local' ? cam.position.y - 1.4 : 0;
+      const y = xrRefType === 'local' ? cam.position.y - 1.4 : 0;
+      const t = cam.position.clone().addScaledVector(fwd, 2.0);
+      placeContentAt(t.x, t.z, y);
     }
     return;
   }
@@ -862,16 +868,20 @@ function exitCamAR() {
 // capture walk started — often tens of meters away from the geometry — so
 // placing the group origin makes the building land far away and read tiny.
 // This puts the content's bbox center on the target and its bbox floor at y=0.
-function placeContentAt(x, z) {
+let lastAnchor = null;   // last placed world point — scale cycles re-anchor here
+
+function placeContentAt(x, z, y = 0) {
+  contentGroup.visible = true;
   const box = new THREE.Box3().setFromObject(contentGroup);
   if (box.isEmpty()) return;
   const c = box.getCenter(new THREE.Vector3());
   modelGroup.position.x += x - c.x;
   modelGroup.position.z += z - c.z;
   // The pipeline already calibrated the model's floor at y=0 (baked orient or
-  // floor_transform) — pin THAT plane to the ground. Never use bbox.min.y:
-  // below-floor noise points made the model float by that margin.
-  modelGroup.position.y = 0;
+  // floor_transform) — pin THAT plane to the tapped ground height. Never use
+  // bbox.min.y: below-floor noise points made the model float by that margin.
+  modelGroup.position.y = y;
+  lastAnchor = new THREE.Vector3(x, y, z);
 }
 
 // Move tool in Cam AR: tap → ray → virtual floor plane y=0 → re-place there
@@ -958,6 +968,11 @@ function setScaleIdx(i) {
   displayScale = SCALES[scaleIdx][0];
   modelGroup.scale.setScalar(displayScale);
   $('btn-scale').textContent = SCALES[scaleIdx][1];
+  // keep the placed anchor fixed while cycling scales (otherwise scaling
+  // swings the content away from the tapped point)
+  if (lastAnchor && renderer?.xr.isPresenting) {
+    placeContentAt(lastAnchor.x, lastAnchor.z, lastAnchor.y);
+  }
 }
 
 function wireUI() {
