@@ -86,7 +86,7 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
   const [tracking, setTracking] = useState('UNSPECIFIED')
   const [error, setError] = useState<string | null>(null)
   const [tool, setTool] = useState<Tool>('move')
-  const [scaleLabel, setScaleLabel] = useState('1:10')
+  const [scaleLabel, setScaleLabel] = useState('1:1')   // engine default = metric
   const [toast, setToast] = useState<string | null>(null)
   const toastTimer = useRef<ReturnType<typeof setTimeout>>()
 

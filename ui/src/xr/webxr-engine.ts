@@ -93,6 +93,9 @@ export class WebXREngine implements IXREngine {
           .requestHitTestSource?.({ space: viewer }) ?? null
       } catch { this.hitTestSource = null }
 
+      // page background transparent while the session runs — dom-overlay
+      // draws the page OVER the camera; opaque dark bg = no passthrough
+      document.documentElement.classList.add('xr-session')
       tele('webxr-start', {
         session: this.sessionId, refType,
         blend: (session as any).environmentBlendMode,
@@ -100,7 +103,10 @@ export class WebXREngine implements IXREngine {
         domOverlay: !!(session as any).domOverlayState,
       })
       session.addEventListener('select', (ev: any) => this.onSelect(ev))
-      session.addEventListener('end', () => { this.cb.onError('AR session ended') })
+      session.addEventListener('end', () => {
+        document.documentElement.classList.remove('xr-session')
+        this.cb.onError('AR session ended')
+      })
       this.renderer.setAnimationLoop((_t, frame) => this.onFrame(frame))
       this.cb.onTracking('NORMAL')                // ARKit is solid by contract
       this.cb.onReady()

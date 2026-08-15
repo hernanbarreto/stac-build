@@ -26,6 +26,15 @@ html, body, #root {
   font-family: 'Inter', -apple-system, system-ui, sans-serif;
 }
 
+/* WebXR dom-overlay renders the WHOLE page over the camera feed — an opaque
+   page background occludes the passthrough entirely (the 'black screen with
+   no camera'). While an XR session runs, every layer under the UI must be
+   transparent. */
+html.xr-session, html.xr-session body, html.xr-session #root,
+html.xr-session .xr-view, html.xr-session .xr-canvas {
+  background: transparent !important;
+}
+
 .btn {
   font: inherit;
   font-size: 14px;
