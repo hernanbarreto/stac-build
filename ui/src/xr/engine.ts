@@ -31,7 +31,8 @@ declare global {
 }
 
 export type Tool = 'move' | 'dist' | 'angle' | 'vol'
-export const SCALES: Array<[number, string]> = [[0.1, '1:10'], [1, '1:1'], [0.02, '1:50']]
+// METRIC FIRST (user mandate): 1:1 is the default; miniatures are the option
+export const SCALES: Array<[number, string]> = [[1, '1:1'], [0.1, '1:10'], [0.02, '1:50']]
 
 export interface EngineCallbacks {
   onReady: () => void
@@ -78,6 +79,12 @@ export class StacXREngine {
                                    // NORMAL — until then content slides and
                                    // scale is not metric (root of both bugs)
   private lastHitTele = 0
+  // MEASURED floor height: the engine's theoretical ground (world y=0) assumes
+  // the phone started exactly at the configured eye height — holding it lower/
+  // higher floats or sinks the model. Estimate the real floor from hits that
+  // sit at plausible floor depth below the camera (0.8–2.5 m), smoothed.
+  private floorY = 0
+  private floorSamples = 0
 
   constructor(
     private sessionId: string,
@@ -217,11 +224,15 @@ export class StacXREngine {
         }
         const h = (surf && surf[0]) || (feat && feat[0])
         if (h) {
-          // GROUND PLANE convention: the engine's world y=0 IS the floor (the
-          // initial camera height defines eye-above-ground). Feature-point
-          // hits land at arbitrary heights (walls, tables) — snapping the
-          // reticle to y=0 keeps it ON the floor and the model seated there.
-          this.reticle.position.set(h.position.x, 0, h.position.z)
+          // floor-like hits (well below the camera) refine the measured floor
+          const camY = this.camera!.position.y
+          if (h.position.y < camY - 0.8 && h.position.y > camY - 2.5) {
+            this.floorY = this.floorSamples === 0
+              ? h.position.y
+              : this.floorY * 0.8 + h.position.y * 0.2
+            this.floorSamples++
+          }
+          this.reticle.position.set(h.position.x, this.floorY, h.position.z)
           const d = Math.max(
             this.reticle.position.distanceTo(this.camera!.position) / 6, 0.6)
           this.reticle.scale.setScalar(d)
@@ -312,11 +323,9 @@ export class StacXREngine {
     const c = box.getCenter(new THREE.Vector3())
     this.modelGroup.position.x += x - c.x
     this.modelGroup.position.z += z - c.z
-    // model floor (pipeline-calibrated y=0) ALWAYS on the world ground plane
-    // (engine y=0) — never on the tapped point's height, which for feature
-    // points is arbitrary (that floated/buried the model)
-    this.modelGroup.position.y = 0
-    this.lastAnchor = new THREE.Vector3(x, 0, z)
+    // model floor (pipeline-calibrated y=0) on the MEASURED floor height
+    this.modelGroup.position.y = this.floorY
+    this.lastAnchor = new THREE.Vector3(x, this.floorY, z)
   }
 
   /** Single tap from the React layer. Returns a short status for the UI. */
