@@ -8,363 +8,215 @@ surface_fitting (superficies ajustadas + residuos como medición).
 Objetivo de esta tarea (implementación completa, sin recortes):
 
 
-Qwen3-VL como SERVICIO SEMÁNTICO PERSISTENTE único (un endpoint vLLM) con MÚLTIPLES
-consumidores a lo largo del pipeline.
-FASE R nueva: usar la maquinaria de R3D (https://github.com/facebookresearch/r3d) no
-solo aguas abajo (Q&A) sino aguas ARRIBA, como capa de ANCLAJE SEMÁNTICO: identidad de
-instancia SAM3 para refinar poses y profundidad entre ventanas y eliminar superficies
-duplicadas ("cebolla") y drift. La segmentación corre lo más temprano posible.
-Sistema de Q&A espacial basado en R3D sobre la escena resultante.
-
-
-Uso de código externo: estamos en fase de research. Usá el código de R3D directamente
-donde acelere (depth-lift, voto de pluralidad, filtrado KNN, OBB, tools): portá, adaptá o
-vendoreá según convenga técnicamente. Solo documentá en cada módulo qué viene de R3D u
-otro repo externo y qué es nuestro (mapa para el futuro; hoy sin restricción alguna).
-
-Principio arquitectónico INVIOLABLE
-
-El VLM propone, describe, detecta, clasifica y orquesta. JAMÁS mide. Toda cifra métrica
-proviene de tools determinísticas sobre la geometría  o del módulo
-surface_fitting. Aplicado a la FASE R: las máscaras SAM3 ASOCIAN (qué píxeles son el mismo
-objeto físico entre vistas/ventanas); los residuales métricos salen SIEMPRE de geometría
-determinista por instancia (OBB, primitivas, ICP restringido). Bordes de máscara jamás
-como medida. Cada salida del VLM que entre a un entregable debe estar marcada con su
-origen (vlm_proposed / tool_measured / human_validated) en metadatos. Las propuestas del
-VLM son validables por humano; las mediciones son trazables por diseño.
-
-Entorno
-
-
-RunPod, network volume pleased_gray_penguin. GPU actual: RTX A6000 48 GB (sm_86,
-Ampere). Compilaciones CUDA: TORCH_CUDA_ARCH_LIST="8.6". Nada de Blackwell.
-El servicio vLLM debe CONVIVIR con la reconstrucción completa en 48 GB: arrancá con
-gpu_memory_utilization ≈ 0.35 y ajustá midiendo. Reportá presupuesto real (vLLM en
-reposo / bajo carga / pico de reconstrucción conviviendo).
-Envs existentes (NO tocar): stac-build, da3, sam3, CloudComPy310, mapanything.
-Backend: env da3, bash scripts/start.sh. UI: npm run dev:web desde ui/. init_pod.sh
-automatiza arranque.
-HF_TOKEN estará en el entorno. NO hay ni habrá ANTHROPIC_API_KEY: todo corre con
-modelos LOCALES, sin ninguna API externa de pago.
-Presupuesto de disco estimado: ~35–45 GB (pesos de modelos + envs + repo R3D + stores).
-Reportá el real al final.
-
-
-FASE 0 — Servicio semántico (infraestructura compartida)
-
-
-Env conda nuevo semantic con vLLM para A6000 sm_86.
-Modelos (solo locales, al network volume, convención de pesos del repo):
-a) Baseline obligatorio: Qwen/Qwen3-VL-8B-Instruct. Verificá antes en el código de R3D
-qué variante exacta usa el paper y priorizá esa.
-b) Candidato mayor: investigá qué existe hoy en HF de la familia Qwen3-VL por encima
-de 8B en variantes cuantizadas (AWQ/GPTQ/FP8) que entren en 48 GB con margen para
-el pipeline conviviendo. Si hay uno viable, bajalo y compáralo contra el 8B en la
-suite de Fase 7 (accuracy de tool-calling encadenado, latencia, VRAM). Criterio de
-corte: convivencia sin OOM manda sobre accuracy marginal.
-Servir con vLLM: API OpenAI-compatible en localhost, plantilla de tool-calling nativa
-de Qwen3 (parser hermes/qwen según recomendación vLLM para esta familia), soporte de
-imagen habilitado. max_model_len dimensionado midiendo el system prompt real con una
-escena típica, con margen.
-Cliente Python único semantic_client en el repo: interfaz LLMBackend con
-implementaciones qwen_local (default) y qwen_local_large (candidato mayor, para
-comparación). Todos los consumidores usan este cliente; nadie habla con vLLM directo.
-Integrar a init_pod.sh como servicio con flag y healthcheck. Logging centralizado de
-todas las llamadas (consumidor, prompt, imágenes ref, respuesta, latencia) a JSONL.
-Smoke tests: texto solo, imagen+texto, tool-calling con tool dummy. Reportar VRAM
-ocupada por vLLM en reposo y bajo carga.
-
-
-FASE 1 — Consumidor: Auto-prompting de SAM3 (máxima prioridad)
-
-Reemplaza el prompting manual como vía por defecto; el Segmentation Manager pasa a rol de
-corrección/excepciones. Su modo batch es además el PRODUCTOR de masklets tempranos para
-la FASE R.
-
-
-Estudiá cómo el Segmentation Manager manda prompts a SAM3 hoy (formato exacto de
-puntos/cajas por objeto y frame) — el auto-prompter debe producir exactamente eso.
-Pipeline: keyframes → Qwen3-VL con prompt de detección open-vocabulary grounded →
-cajas + etiquetas. Vocabulario de obra configurable en YAML (default: columna, muro,
-bóveda, piso, andén, vía, durmiente, catenaria, señal, luminaria, tubería, bandeja de
-cables, puerta, equipo, andamio, persona). Pedí salida JSON estricta (cajas
-normalizadas + etiqueta + confianza) y parseá con tolerancia a errores de formato
-(reintento con corrección si el JSON viene roto).
-Asociación temporal: mismo objeto detectado en múltiples keyframes → un solo objeto
-SAM3 con prompts en varios frames (usá IoU entre cajas proyectadas con las poses ya
-conocidas del BA — tenemos geometría, usala para el matching, no solo apariencia).
-Umbral de confianza configurable; detecciones dudosas van a una cola de revisión, no
-se descartan silenciosamente. Una instancia dudosa puede participar del voto de la
-FASE R pero NO genera residuales de pose hasta ser validada o superar umbral.
-Salida: sesión de segmentación pre-poblada que se abre en el Segmentation Manager para
-revisión/corrección humana. Integrá un modo batch CLI: video/keyframes in → máscaras
-trackeadas out, sin UI.
-Evaluación: sobre un dataset nuestro ya segmentado a mano, reportá recall/precision por
-clase contra las máscaras manuales (IoU>0.5), y tiempo total vs. flujo manual estimado.
-Documentá clases donde el 8B flaquea (objetos chicos: señales, catenaria fina) — dato
-para decidir si escalar de modelo.
-
-
-FASE R — Anclaje semántico: refinamiento instance-aware de poses y profundidad
-
-Se inserta entre la reconstrucción por ventanas (VGGT-Ω/VGGT-Long + DA3-Streaming) y la
-fusión final (TSDF/surface_fitting). Objetivo: usar identidad de instancia SAM3 como capa
-de asociación para corregir drift y cebolla y profundidad entre ventanas.
-
-R.1 — Segmentación temprana
-
-
-Los masklets SAM3 (vía auto-prompter de Fase 1, con fallback manual) corren sobre
-frames crudos EN PARALELO con DA3-Streaming, antes e independiente de la
-reconstrucción. El modo batch CLI de Fase 1 es el productor.
-IDs de instancia persistentes por tracking de SAM3 dentro de cada ventana.
-Re-identificación ENTRE ventanas: EXCLUSIVAMENTE por continuidad de tracking a través
-de los frames de solape (60 frames sobre ventanas de 120). PROHIBIDO el matching por
-apariencia entre instancias no conectadas por tracking: en túnel/estación las columnas
-son idénticas cada N metros y un match por apariencia crea falsos loop closures que
-destruyen la reconstrucción (aliasing perceptual). Dejá esta regla explícita en código
-y docs.
-
-
-R.2 — Depth-lift + voto de pluralidad (base: código R3D adaptado)
-
-
-Con poses provisionales de las ventanas y profundidad DA3: levantá cada máscara a 3D.
-Erosión de máscara agresiva y configurable (default sugerido 5–10 px; nuestra
-profundidad es DA3, no sensor — solo interiores de máscara alimentan el voto).
-Asignación punto→objeto por voto de pluralidad multi-vista (adaptado de R3D). Guardá
-por punto la distribución del voto.
-Entropía del voto por punto y agregada por instancia y por región: esta es la métrica
-de desalineación. Persistila.
-
-
-R.3 — Detector de cebolla
-
-
-Por instancia: fusioná sus puntos de todas las vistas/ventanas y analizá la
-distribución a lo largo de la normal de su primitiva/OBB.
-Métrica de bimodalidad (GMM de 2 componentes vs. 1 por BIC, o test equivalente) +
-separación entre modos EN METROS = error de registro local.
-Reporte por seam entre ventanas y mapa de calor por instancia. Es la métrica de salud
-central de esta fase.
-
-
-R.4 — Residuales por instancia al grafo de poses
-
-
-Gravedad: sin IMU. Se estima determinísticamente del plano dominante de las clases
-piso/losa/andén (fit por surface_fitting) y se cruza con la orientación de los
-ChArUco. Reportá el acuerdo entre ambas fuentes.
-Por instancia y por ventana: OBB alineado a gravedad (adaptado de R3D). Para clases
-estructurales (whitelist YAML) además primitiva fina de surface_fitting
-(plano/cilindro).
-Instancia i vista en ventanas k y k+1 → residual Sim(3) entre sus OBB/primitivas
-(centro + ejes + extensiones, con pesos; kernel robusto Huber). Optimización del grafo
-de poses ENTRE ventanas (Sim(3) por ventana), no BA denso completo — el BA de 2
-pasadas existente se mantiene como está dentro de ventana.
-Lazo de refinamiento: máximo 2 iteraciones (poses refinadas → re-lift → re-voto →
-re-residuales). Medí convergencia.
-
-
-R.5 — Refinamiento de profundidad condicionado por clase
-
-
-Whitelist YAML de clases estructurales (default: muro, losa, columna, bóveda, andén,
-piso). SOLO dentro de máscara erosionada de clase whitelisted: regularizar profundidad
-DA3 hacia la primitiva ajustada.
-JAMÁS para clases fuera de whitelist (cables, tuberías, equipos, catenaria: no se
-aplanan). La clase la propone el VLM/prompter (vlm_proposed); la whitelist decide si
-aplica; la primitiva determinista provee el valor.
-
-
-R.6 — Jerarquía métrica (inviolable)
-
-
-Autoridad de escala y georreferencia: ChArUco/Umeyama 7-DoF y red topográfica. SIEMPRE.
-Los anclajes semánticos solo refinan consistencia interna (poses relativas, seams,
-drift). Conflicto anclaje vs. marcador → gana el marcador y se loggea el conflicto con
-magnitud.
-El escalado S del 25% más confiable de DA3-Streaming se mantiene como prior; reportá S
-por ventana antes y después del refinamiento (su estabilidad es diagnóstico).
-
-
-R.7 — Enmascarado dinámico
-
-Clases persona / equipo móvil / tren: excluidas de la estimación de pose y de la fusión.
-Registrá cuánto píxel/frame se excluye por sesión.
-
-R.8 — Almacén de instancias (canónico)
-
-
-Store persistente por escena (SQLite; partí del esquema por objeto de R3D — scene.db /
-object_points.db — y extendelo): instancia, clase, masklets refs, puntos, OBB,
-primitiva, métricas de voto/cebolla, historial entre ventanas.
-Este store es LA fuente única de objetos para: Fase 2 (clasificación), Fase 3 (anclaje
-3D de hallazgos), Fase 5 (Q&A) y Fase 6 (reportes). Nada de estructuras paralelas de
-objetos.
-
-
-R.9 — Validación y fail-safe
-
-
-A/B sobre el corredor de 160 m con y sin FASE R: error de seam (especialmente el chunk
-2→3 conocido, mediana 13.2 / rotación ~50°), mapas de entropía de voto, métrica de
-cebolla antes/después, estabilidad de S por ventana, reproyección post-BA.
-Fail-safe obligatorio: si el refinamiento EMPEORA cualquier métrica de referencia, el
-pipeline cae automáticamente a la vía sin anclaje y lo reporta. El anclaje jamás puede
-dejar la reconstrucción peor que la línea base sin avisar.
-
-
-FASE 2 — Consumidor: Clasificación y enriquecimiento de segmentos
-
-
-Por cada instancia del store de R.8 (auto o manual): crop del mejor keyframe (mayor
-área visible, menor blur) → Qwen3-VL clasifica: clase final, material aparente, estado
-aparente, notas. JSON estricto. La clasificación consume y enriquece el store de R.8;
-NO crea objetos propios.
-Alimenta la tabla de enrutamiento clase→vía (arquitectónico → surface_fitting; objeto →
-vía visual) que ya está definida en config. La clase del VLM es propuesta
-(vlm_proposed); si contradice la clase del prompting, marcar conflicto para revisión.
-La clase final actualiza la whitelist-elegibilidad de R.5 para la siguiente iteración
-del lazo.
-Persistir en los metadatos de escena (mismo JSON/store que consume el Q&A de Fase 5).
-
-
-FASE 3 — Consumidor: Detección de hallazgos visuales anclados a 3D
-
-
-Sobre keyframes (muestreo configurable): prompt de inspección → detección de fisuras,
-humedad/filtraciones, acero expuesto, desprendimientos, corrosión, elementos
-provisorios fuera de norma aparente, obstrucciones. Salida JSON: tipo, caja/polígono,
-severidad aparente, descripción, confianza.
-Anclaje 3D: centro de la detección → rayo con la pose del frame (ya refinada por FASE
-R) → intersección con la superficie/nube de la instancia correspondiente del store de
-R.8 → coordenada 3D + id de instancia. Guardar ambos (2D y 3D).
-Deduplicación multi-vista: el mismo hallazgo visto en N frames es UN hallazgo (cluster
-por proximidad 3D + tipo).
-Cruce con surface_fitting cuando exista: si un hallazgo visual cae en zona de residuo
-geométrico alto, elevar severidad y marcar la correlación (esto es oro para el reporte).
-TODO hallazgo nace en estado "propuesto" y requiere validación humana para entrar a un
-entregable. Falsos positivos acá destruyen credibilidad: la evaluación debe reportar
-precision con brutal honestidad sobre un set anotado a mano (armá uno chico de ~50
-crops con y sin defectos de nuestros keyframes).
-
-
-FASE 4 — Consumidor: QC de captura en ingesta
-
-
-Pre-filtro antes de DA3/VGGT: muestreo de frames → Qwen3-VL evalúa blur, oclusión por
-personas/equipos, exposición, utilidad general. Combiná con métricas clásicas baratas
-(varianza del Laplaciano para blur) — el VLM decide en los casos ambiguos, no en todos
-los frames (costo).
-Reporte de cobertura post-reconstrucción: zonas con baja densidad de puntos → recuperar
-los frames que las ven → VLM describe qué falta capturar → checklist de recaptura en
-lenguaje natural para el operador de campo.
-Configurable y desactivable; jamás descarta frames sin dejar registro de cuáles y por qué.
-
-
-FASE 5 — Consumidor: Q&A espacial (arquitectura R3D completa)
-
-
-Cloná R3D (NO descargar el dataset ADT del benchmark, ~370 GB). Enumerá TODAS las tools
-espaciales que implementa (recorré el código, no solo el paper: get_distance,
-get_position, get_volume, gap_fit y todas las demás), su representación de escena, y su
-build_scene (depth-lifting, voto de pluralidad multi-vista, filtrado KNN, OBB alineado
-a gravedad — que además reutilizás en FASE R). Reportame el catálogo y seguí.
-Adaptador de escena: el Q&A consume DIRECTAMENTE el store de instancias de R.8 (nubes
-por objeto + clases de Fase 2 + escala ChArUco + poses refinadas + superficies
-surface_fitting con residuos + métricas de voto/cebolla). Benchmarkeá el voto de
-pluralidad y fit de OBB de R3D contra nuestra vía en un dataset chico.
-Portá TODAS las tools de R3D + implementá las de supervisión de obra:
-get_clearance (distancia mínima real entre nubes/superficies, con par de puntos),
-fits_through (paso de equipos por huecos), get_flatness_report (puente a
-surface_fitting), get_plumb / get_level (desplome/desnivel vs. gravedad), get_span,
-count_objects / list_objects, get_height_profile (gálibos), measure_between (features
-nombrables; primero centroides/caras de OBB, hooks para features finas),
-get_findings(región/objeto) (consulta los hallazgos de Fase 3), y las de salud de
-alineación de FASE R: get_alignment_health(región|instancia) (entropía de voto +
-métrica de cebolla), get_onion_report(seam|instancia) (separación entre modos en
-metros, estado), get_instance_history(instancia) (ventanas donde fue vista, residuales
-aplicados). Cada tool: función pura tipada, docstring claro (el LLM la lee), unidades
-SI, estimación de confianza (densidad local, residuos), y test unitario con geometría
-sintética. Una tool sin respaldo de datos suficiente responde "datos insuficientes",
-nunca extrapola.
-Orquestador sobre semantic_client: system prompt con inventario de escena resumido
-(desde el store R.8) + catálogo de tools + reglas (toda cifra de tool, citar tool y
-argumentos, declarar incertidumbre, responder en el idioma de la pregunta).
-Multimodal: adjuntar keyframe del objeto referido para desambiguar ("la columna de la
-izquierda"). Loop de tool-calling con límite de iteraciones y log JSON completo por
-sesión.
-Interfaces: CLI spatial_qa --scene <path> --backend qwen_local "pregunta" + endpoint
-en el backend según convención del repo (UI no en esta tarea).
-
-
-FASE 6 — Consumidor: Generación de reportes
-
-
-Generador de borrador de informe de supervisión por escena: inventario de elementos
-(Fase 2), hallazgos validados (Fase 3) con sus capturas y coordenadas, mediciones
-solicitadas (vía tools de Fase 5), reportes de planitud/desplome (surface_fitting),
-estado de cobertura (Fase 4), y sección "Calidad de reconstrucción": métricas de
-cebolla/voto por zona, S por ventana, conflictos anclaje-marcador loggeados (FASE R).
-Bilingüe ES/FR configurable (stakeholders IN3).
-Toda cifra en el reporte lleva su traza (tool + argumentos + timestamp); toda
-observación del VLM va marcada como propuesta pendiente de validación si no fue
-validada. Salida: Markdown + assets (el docx/pdf final no es de esta tarea).
-
-
-FASE 7 — Validación integral
-
-
-Suite Q&A: 25–30 preguntas con respuesta verificada a mano en CloudCompare sobre una
-escena nuestra (usar la de la bóveda si está disponible: planitud + gálibo + Q&A es la
-demo del Pitch 2). Incluir 5 preguntas trampa cuya respuesta correcta es "datos
-insuficientes" y 3–5 preguntas que ejerciten las tools de salud de alineación de FASE
-R. Correr con qwen_local Y qwen_local_large (si el candidato mayor resultó viable);
-reportar accuracy por categoría, latencia, y patrones de fallo de tool-calling
-encadenado del 8B.
-Métricas por consumidor: Fase 1 recall/precision por clase; FASE R el A/B completo del
-corredor de 160 m (R.9); Fase 3 precision sobre el set anotado; Fase 4 tasa de falsos
-descartes.
-Prueba de convivencia en A6000 48 GB: vLLM sirviendo mientras corre una reconstrucción
-completa + FASE R en la misma GPU — reportar si hay OOM o degradación, y la config de
-memoria final o el particionado temporal si no conviven.
-Script de demo reproducible end-to-end para el Pitch 2: video in → auto-segmentación →
-reconstrucción con anclaje semántico → escena → 6–8 preguntas vistosas respondidas con
-trazas → borrador de reporte.
-
-
-Metodología
-
-
-Orden estricto: Fase 0 → 1 → R → 5 → 2 → 3 → 4 → 6 → 7 (el valor está en 1, R y 5;
-2–4 y 6 se apoyan en ellas). La FASE R entra apenas exista el auto-prompter mínimo de
-Fase 1; el Q&A de Fase 5 consume el store de R.8 desde el arranque. Al cierre de CADA
-fase: resumen + métricas + esperar mi OK.
-Commits atómicos por componente. Config YAML por consumidor, consistente con el repo.
-Sin dependencias pesadas no justificadas; nada de difusión/nerfstudio.
-
-
-Restricciones
-
-
-Env conda nuevo r3d para lo de R3D (o integrarlo a stac-build si las dependencias
-no chocan — evaluá y justificá). No tocar los envs existentes.
-NO descargar ADT ni ningún dataset del benchmark.
-Sin ninguna API externa de pago; todo local.
-Todo el código, YAML, docstrings, nombres y comentarios EN INGLÉS.
-
-
-Reporte final
-
-
-Catálogo completo de tools (R3D portadas + nuestras, con mapeo).
-Métricas de todos los consumidores + delta de métricas atribuible a FASE R (el A/B
-completo del corredor).
-Comparativa de modelos locales (8B vs. candidato mayor cuantizado) con números, y
-recomendación fundamentada: ¿el 8B alcanza para producción o qué consumidores necesitan
-el modelo más grande?
-VRAM/latencias reales en A6000 con todo conviviendo; config de memoria final.
-Inventario módulo por módulo de qué código proviene de R3D u otros repos externos
-(solo como mapa para el futuro, sin restricción alguna ahora).
-Espacio total real ocupado en disco (pesos + envs + stores).
+# STAC-BUILD — Precisión absoluta: paridad de forma con RealityScan (escala v2 + consistencia multi-vista + profundidad nativa + modo precisión PGSR + banco de pruebas)
+
+# Contexto
+Leé primero CLAUDE.md, README y docs/ del repo para el estado actual. Pipeline SIMPLE
+vigente: frames → VGGT-Ω (una pasada ≤600 frames, o ventanas 500/250 con loop closure)
+→ scale_align (similitud global s = mediana DA3/Ω sobre 12 frames ancla aislados) →
+Phase R → CloudComPy → TSDF (VoxelBlockGrid, voxel 1.2 cm, depth_source = profundidad Ω
+de keyframes) → texrecon. BA de dos pasadas: shipped pero deshabilitado (el A/B contra
+la línea base dio peor — NO re-habilitarlo en esta tarea; la vía de refinamiento de
+poses acá es fotométrica densa, no de tracks).
+
+## Objetivo
+El objetivo a batir es RealityScan. Se descompone con honestidad técnica:
+1. FORMA (geometría relativa: detalle, aristas, ruido de superficie): RealityScan gana
+   hoy por su optimización fotométrica por escena a resolución nativa. Hay que cerrar
+   esa brecha hasta la paridad, medida con un banco de pruebas — no declarada.
+2. ESCALA ABSOLUTA: la fotogrametría clásica es ciega a la escala desde video puro
+   (reconstruye hasta una similitud; RealityScan obtiene metros de GCPs/distancias
+   conocidas/GPS). Nuestro pipeline SÍ produce escala absoluta (DA3, y ahora VIO
+   opcional). Acá el trabajo es cuantificar y acotar nuestro propio error, con
+   diagnóstico por sesión.
+
+## Fuera de alcance duro
+No escribir código que toque ni referencie: BIM, gizmo, registración scan-to-BIM,
+LiDAR/Stray como fuente del pipeline, marcadores físicos, redes de control externas.
+
+# Principios
+- Fail-fast y resume-aware como el resto del pipeline; nada de fallbacks silenciosos.
+- Cada mejora entra con flag en config.yaml (single source of truth), default OFF hasta
+  ganar su A/B. Si el A/B da peor o neutro, queda OFF y documentado — la evidencia
+  manda, sin excepciones (misma disciplina que bundle_adjust).
+- GPU: A6000 48 GB sm_86, TORCH_CUDA_ARCH_LIST="8.6". Sin dependencias pesadas fuera de
+  las explícitamente habilitadas acá: un trainer clase PGSR/2DGS (Fase D) y
+  COLMAP/OpenMVS para el banco de pruebas (Fase E). Nada de nerfstudio/difusión.
+- Todo el código, YAML, docstrings y comentarios en INGLÉS.
+
+# FASE A — scale_align v2: modelo de escala con diagnóstico + fuente VIO opcional
+Hoy: un escalar global s = mediana(DA3/Ω) sobre 12 frames ancla. La escala métrica de
+DA3 tiene sesgo sistemático por escena y potencialmente estructura dependiente de la
+profundidad; un escalar único lo promedia todo adentro y no lo vemos.
+
+1. Refactorizá reconstruction/scale_align.py en modos configurables:
+   - `global_median` (actual, queda como baseline).
+   - `affine_robust`: ajuste robusto (Huber o RANSAC) de ganancia+offset (s, b) en
+     espacio de profundidad sobre los píxeles confiables de todos los frames ancla. El
+     offset b solo se conserva si mejora bajo validación cruzada / BIC contra
+     scale-only; si no, degradá automáticamente y reportalo.
+   - `depth_dependent`: ganancia de bajo orden en función de la profundidad (lineal en
+     d o dos tramos). Solo se conserva si la estructura del residuo lo justifica con el
+     mismo criterio. Nada de sobreajuste.
+2. Frames ancla: cantidad configurable (default 12; probá 24 y 32), distribución
+   uniforme en el tiempo Y cobertura del rango de profundidades de la escena.
+3. FUENTE DE ESCALA VIO (nueva, opcional por sesión): cualquier teléfono moderno (con o
+   sin LiDAR) produce poses métricas por odometría visual-inercial (ARCore/ARKit).
+   - Definí un formato de ingesta simple para una trayectoria VIO grabada junto al
+     video (CSV/JSON: timestamp, posición, orientación; documentalo en docs/ para que
+     cualquier app de captura VIO estándar pueda producirlo). Detección automática en
+     la sesión, como ya se hace con Stray.
+   - Escala VIO = razón robusta entre longitudes de trayectoria VIO y Ω, calculada por
+     tramos (mediana de razones por segmento, no un cociente global único — el VIO
+     drifta en pose pero su escala de corto plazo es excelente).
+   - Prioridad cuando VIO está presente: VIO manda, DA3 queda como verificación
+     cruzada. Reportá SIEMPRE el acuerdo VIO↔DA3 (%): es el mejor diagnóstico del
+     sesgo de escala de DA3 en nuestras escenas que vamos a tener.
+4. Diagnóstico persistido por sesión (JSON en artifacts + entrada en el reporte): s por
+   frame ancla, dispersión (MAD), evolución a lo largo del recorrido, residuo del
+   modelo vs. profundidad, fuente de escala usada, acuerdo VIO↔DA3 si aplica, y un
+   `scale_confidence` agregado como métrica de salud.
+5. Las reglas fail-hard actuales se mantienen (escala irrecuperable → abort).
+6. A/B (consistencia interna, sin referencia externa): por modo, sobre 2–3 sesiones
+   existentes: error de reproyección de profundidad entre keyframes tras escalar,
+   residuos de plano sobre superficies estructurales (surface_fitting o RANSAC de
+   parches), estabilidad de s por jackknife sobre subconjuntos de anclas. Criterio de
+   aceptación definido ANTES de correr.
+
+# FASE B — Filtrado de consistencia geométrica multi-vista (pre-TSDF)
+El TSDF hoy integra la profundidad de cada keyframe tal cual; el ruido de superficie se
+promedia adentro. Antes de integrar, validá cada píxel contra sus vecinos — el chequeo
+estándar de fusión MVS, sin tocar poses.
+
+1. Módulo nuevo (ubicación según convención del repo): para cada depth map de keyframe
+   (la misma fuente que consume el TSDF), proyectá su profundidad a N keyframes vecinos
+   con las poses finales (post Phase R); discrepancia relativa por píxel; un píxel es
+   válido si al menos `min_consistent_views` vecinos coinciden dentro de `tau_rel`
+   (defaults sugeridos: N=4, min=2, tau_rel=0.02 — todos en config).
+2. Los píxeles inconsistentes se enmascaran fuera de la integración TSDF. Variante con
+   flag: reemplazar el valor por la mediana de las estimaciones consistentes en vez del
+   valor crudo — evaluá ambas en el A/B.
+3. Implementación torch/GPU por lotes; tiene que escalar a cientos de keyframes sin
+   reventar VRAM (chunks). Reportá el costo en tiempo.
+4. Telemetría: % de píxeles descartados por keyframe y global. Descarte global por
+   encima de un umbral configurable (default 40%) → warning fuerte en log y reporte:
+   eso indica poses o escala malas, no un filtro exitoso. Jamás descarte silencioso.
+5. A/B: RMS local sobre parches planos (antes vs. después), métrica de doble superficie
+   (reutilizá la maquinaria de onion de Phase R), pares de crops de malla de las mismas
+   zonas. Default ON solo si gana.
+
+# FASE C — Profundidad a resolución nativa + TSDF fino
+Ω infiere a 512; el video es 1080p+. El detalle geométrico de esos píxeles hoy se
+descarta antes de empezar. Refiná la profundidad del keyframe a resolución nativa ANTES
+del TSDF, con guía RGB, sin alucinar geometría.
+
+1. Dos variantes, decisión por A/B:
+   a) `guided_filter`: joint bilateral / guided filter determinista de la profundidad Ω
+      (post-escala, post-consistencia) a resolución nativa, guiado por el frame RGB.
+      Línea base obligatoria, sin modelos nuevos.
+   b) `da3_detail_transfer`: DA3 a resolución alta sobre el keyframe como fuente de
+      detalle: baja frecuencia (métrica) de Ω escalado + alta frecuencia de DA3 hi-res
+      (transferencia de detalle / guided filter). DA3 hi-res solo sobre keyframes; medí
+      VRAM/tiempo.
+2. Edge-aware obligatorio: el upsampling no cruza bordes de profundidad; el long-edge
+   cull del TSDF (0.10 m) se mantiene como red de seguridad.
+3. TSDF: matriz de `voxel_length` {1.2 cm (baseline), 8 mm, 6 mm} con profundidad
+   nativa. Medí VRAM, tiempo, tamaño de malla; el tiling de 10 m ya existe. Default por
+   el codo de la curva calidad/costo.
+4. A/B: perfiles de sección sobre aristas conocidas, RMS sobre parches planos (no debe
+   EMPEORAR: ruido nuevo en superficies lisas = upsampling mal calibrado), crops
+   visuales, tiempos end-to-end.
+
+# FASE D — Modo precisión: backend `vggtomega_pgsr` (optimización fotométrica por escena)
+El ingrediente que le da a RealityScan su forma es la optimización fotométrica por
+escena a resolución nativa. La vía moderna y GPU-nativa es reconstrucción de superficie
+por Gaussians con regularización planar (clase PGSR/2DGS con regularización geométrica
+multi-vista), inicializada desde nuestro resultado Ω. El repo ya tiene backends
+gaus_slam experimentales — estudialos antes de decidir si extender uno o integrar un
+trainer nuevo; justificá la elección.
+
+1. Backend nuevo `vggtomega_pgsr` en el dispatcher multi-backend (map_worker.py):
+   corre el pipeline actual completo (Ω + scale_align v2 + Phase R) y usa su salida
+   como inicialización: poses fijas iniciales + nube como semilla de Gaussians.
+2. Optimización fotométrica a resolución nativa del video (no a 512), con:
+   - Regularización planar y de normales (clase PGSR: Gaussians alineados a planos con
+     normal y distancia con signo) + regularización geométrica multi-vista.
+   - Refinamiento de poses FOTOMÉTRICO opcional (flag, default a decidir por A/B):
+     poses Ω como inicialización, optimización conjunta densa. Esto reemplaza al BA de
+     tracks que falló — es la otra vía de refinar poses, sobre toda la evidencia
+     fotométrica. Compará con-refino vs. sin-refino.
+   - Sinergia con la capa semántica existente: las máscaras SAM3 de clases dinámicas
+     (persona / equipo móvil / tren) EXCLUIDAS de la pérdida fotométrica — reutilizá el
+     enmascarado dinámico de Phase R.
+3. Extracción de malla: TSDF sobre las profundidades renderizadas de los Gaussians
+   (reutilizá la etapa TSDF existente con depth_source nuevo `pgsr_render`), a los
+   voxels finos de la Fase C. La textura sigue por texrecon.
+4. Escalabilidad en A6000 48 GB: presupuesto de VRAM, y tiling/particionado espacial
+   para escenas grandes (el tiling TSDF de 10 m como referencia de diseño). Tiempo
+   objetivo: decenas de minutos a pocas horas por escena — es el modo entregable, no el
+   modo rutina. Documentá el costo real.
+5. Opcional (evaluá y decidí con números, es barato): refinamiento test-time
+   auto-supervisado tipo LoRA sobre el modelo feed-forward (estilo "Free Geometry",
+   ~minutos por escena) como pre-paso antes de la optimización — solo queda si mejora
+   la inicialización de forma medible.
+6. A/B interno del modo: contra el pipeline rápido (A+B+C) con las mismas métricas
+   internas + el banco de pruebas de la Fase E.
+
+# FASE E — Banco de pruebas: el scorecard contra el objetivo a batir
+No se puede ganar lo que no se mide. Harness reproducible que compara nuestra salida
+contra el paradigma fotogramétrico sobre LOS MISMOS keyframes.
+
+1. Pipeline de referencia scriptable en el pod: COLMAP (SfM) + OpenMVS (densificación y
+   malla) end-to-end sobre los keyframes de la sesión, automatizado, en su propio env.
+   Es el proxy Linux del paradigma de RealityScan. Si COLMAP falla en una escena (baja
+   textura), ESO SE REPORTA como dato — es exactamente la debilidad del paradigma que
+   nuestro pipeline no tiene.
+2. Alineación para comparar: Sim(3) robusto entre nuestra malla/nube y la de
+   referencia. La escala libre en la alineación es DELIBERADA: aísla la comparación de
+   FORMA, que es la pelea justa (la referencia no tiene escala absoluta propia).
+3. Scorecard (JSON + Markdown por sesión):
+   - Distancias cloud-to-cloud bidireccionales: mediana, P90, P95.
+   - RMS sobre parches planos comunes (mismos parches en ambas mallas).
+   - Perfiles de sección sobre 3–5 aristas/esquinas definidas por sesión (nitidez de
+     arista, redondeo).
+   - Completitud recíproca (% de cada malla cubierto por la otra a umbral).
+   - Tiempos de cómputo de cada vía.
+4. Import externo: un comando que ingiere una malla/nube producida por RealityScan en
+   Windows (PLY/OBJ exportado a mano) y corre el mismo scorecard contra ella. RS es el
+   tablero oficial; COLMAP/OpenMVS es el tablero de iteración diaria.
+5. Criterio de paridad DEFINIDO EN CÓDIGO: paridad = diferencias dentro del piso de
+   ruido mutuo (estimá el piso repitiendo la referencia con seeds/submuestreos y
+   midiendo su propia variabilidad). Reportar "paridad alcanzada sí/no" por métrica,
+   sin ambigüedad.
+
+# FASE F — Validación integral y cierre
+1. Matriz sobre 2–3 sesiones representativas: baseline actual vs. A vs. A+B+C (modo
+   rápido mejorado) vs. A+B+C+D (modo precisión), cada celda con métricas internas +
+   scorecard de la Fase E + tiempos.
+2. Defaults finales de config.yaml según ganadores; lo que no ganó queda OFF con flag y
+   justificación escrita.
+3. Reporte en docs/ (precision_report.md): metodología, matriz completa, brecha
+   medida contra la referencia por métrica, decisiones, y qué quedó abierto.
+4. Actualizá README (sección pose/scale accuracy) con el estado real — números, sin
+   marketing. Actualizá docs/SCANNING_GUIDE.md con el protocolo de captura del modo
+   precisión (obturación alta / modo fotos, caminata lenta, pasadas convergentes sobre
+   superficies críticas, y grabación VIO si la app lo permite): a igual algoritmo, la
+   captura pone el techo — el sub-píxel no existe donde el píxel está borroneado.
+
+# Metodología
+- Orden: A → B → C → D → E → F. (La Fase E puede desarrollarse en paralelo desde el
+  cierre de B, porque D itera contra ella.) Al cierre de CADA fase: resumen + métricas
+  + esperar mi OK.
+- Commits atómicos por componente. Flags y parámetros nuevos SOLO en config.yaml.
+- Nada de re-habilitar bundle_adjust ni dense_fusion.
+
+# Reporte final
+- Scorecard completo por sesión contra COLMAP/OpenMVS (y contra RealityScan donde haya
+  export manual), con veredicto de paridad por métrica.
+- Matriz de la Fase F con la config ganadora y el costo real de cada modo (tiempos,
+  VRAM pico, disco).
+- Diagnóstico de escala por sesión (modo ganador, s por frame, dispersión, confianza, y
+  acuerdo VIO↔DA3 donde exista) y conclusión sobre el sesgo de escala de DA3 en
+  nuestras escenas.
+- Qué NO funcionó y por qué, con los números — mismo estándar de honestidad que el A/B
+  del BA.

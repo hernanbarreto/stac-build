@@ -1,13 +1,15 @@
-import { app as n, BrowserWindow as i } from "electron";
-import { fileURLToPath as a } from "node:url";
-import o from "node:path";
-const s = o.dirname(a(import.meta.url));
-process.env.APP_ROOT = o.join(s, "..");
-const t = process.env.VITE_DEV_SERVER_URL, _ = o.join(process.env.APP_ROOT, "dist-electron"), l = o.join(process.env.APP_ROOT, "dist");
-process.env.VITE_PUBLIC = t ? o.join(process.env.APP_ROOT, "public") : l;
-let e;
-function d() {
-  e = new i({
+import { app, BrowserWindow } from "electron";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+const __dirname$1 = path.dirname(fileURLToPath(import.meta.url));
+process.env.APP_ROOT = path.join(__dirname$1, "..");
+const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
+const MAIN_DIST = path.join(process.env.APP_ROOT, "dist-electron");
+const RENDERER_DIST = path.join(process.env.APP_ROOT, "dist");
+process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, "public") : RENDERER_DIST;
+let win;
+function createWindow() {
+  win = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 900,
@@ -16,27 +18,44 @@ function d() {
     backgroundColor: "#0d1117",
     titleBarStyle: "default",
     webPreferences: {
-      preload: o.join(s, "preload.mjs"),
+      preload: path.join(__dirname$1, "preload.mjs"),
       // Allow WebGL for Three.js
-      webgl: !0
+      webgl: true
     }
-  }), e.webContents.on("render-process-gone", (c, r) => {
-    console.error(`[electron] renderer gone: ${r.reason} (exitCode=${r.exitCode})`), r.reason !== "clean-exit" && setTimeout(() => {
-      e && !e.isDestroyed() && e.webContents.reloadIgnoringCache();
-    }, 1e3);
-  }), e.webContents.on("unresponsive", () => {
+  });
+  win.webContents.on("render-process-gone", (_event, details) => {
+    console.error(`[electron] renderer gone: ${details.reason} (exitCode=${details.exitCode})`);
+    if (details.reason !== "clean-exit") {
+      setTimeout(() => {
+        if (win && !win.isDestroyed()) win.webContents.reloadIgnoringCache();
+      }, 1e3);
+    }
+  });
+  win.webContents.on("unresponsive", () => {
     console.warn("[electron] renderer unresponsive (heavy load or hang)");
-  }), e.maximize(), t ? (e.loadURL(t), process.env.STAC_DEVTOOLS && e.webContents.openDevTools({ mode: "right" })) : e.loadFile(o.join(l, "index.html"));
+  });
+  win.maximize();
+  if (VITE_DEV_SERVER_URL) {
+    win.loadURL(VITE_DEV_SERVER_URL);
+    if (process.env.STAC_DEVTOOLS) win.webContents.openDevTools({ mode: "right" });
+  } else {
+    win.loadFile(path.join(RENDERER_DIST, "index.html"));
+  }
 }
-n.on("window-all-closed", () => {
-  process.platform !== "darwin" && (n.quit(), e = null);
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") {
+    app.quit();
+    win = null;
+  }
 });
-n.on("activate", () => {
-  i.getAllWindows().length === 0 && d();
+app.on("activate", () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
+  }
 });
-n.whenReady().then(d);
+app.whenReady().then(createWindow);
 export {
-  _ as MAIN_DIST,
-  l as RENDERER_DIST,
-  t as VITE_DEV_SERVER_URL
+  MAIN_DIST,
+  RENDERER_DIST,
+  VITE_DEV_SERVER_URL
 };

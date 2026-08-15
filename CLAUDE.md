@@ -20,9 +20,15 @@ them blindly):
   outdoor thresholds, exposure comp) in env `pgsr`; `torch.set_num_threads(8)`
   is LOAD-BEARING (without it the multi-view stage is ~10× slower on many-core
   boxes — GPU idles, CPU thrashes).
-- Keyframe quantum 250 re-confirmed: denser keyframes AMPLIFY feed-forward
-  drift (bufferStop A/B made it worse and tipped the walk over the single-pass
-  limit). Do not lower it to fight ghosting.
+- Keyframe quantum: 80 since 2026-08-15 (USER DECISION after a visual A/B on
+  bufferStop: markedly more complete, less ghosting; caveat — the visual
+  baseline was the pre-08-12-pipeline run, so quantum and pipeline upgrades are
+  confounded). Denser keyframes give PGSR ~3× more training views; the measured
+  trade-offs on bufferStop were scale MAD 3.5%→11.1% (confidence 0.82→0.50),
+  probe walk over-measured (28.8 vs 12.7 m real → chunked mode fires), runtime
+  1h34→2h50. Status: UNDER EVALUATION across more scenes; do not flip it back
+  or "re-validate" without the user's word. (History: 250 had won the
+  2026-08-11 A/B on pose-proxy metrics.)
 
 ## Operating lessons (user feedback, hard-earned)
 - NEVER launch a long GPU run without a performance checkpoint in the first

@@ -953,7 +953,16 @@ reconstruction:
                                         # input amplifies feed-forward drift — FastVGGT / the
                                         # VGGT-Long README's own drift note); fast stretches
                                         # get more (no 9 m jumps). "fps" = plain time sampling.
-    keyframe_motion_quantum: 250.0      # 250 CONFIRMED AGAIN 2026-08-11 (bufferStop A/B):
+    keyframe_motion_quantum: 80.0       # 80 since 2026-08-15 (user decision after visual A/B on
+                                        # bufferStop: markedly more complete, less ghosting —
+                                        # note the comparison is confounded with the 08-12
+                                        # pipeline upgrades). Denser keyframes = more PGSR
+                                        # training views; measured trade-offs on bufferStop:
+                                        # scale MAD 3.5%→11.1% (confidence 0.82→0.50), probe
+                                        # walk over-measured 28.8 vs 12.7 m real → chunked mode
+                                        # triggers, runtime 1h34→2h50. Under evaluation across
+                                        # more scenes before it is considered validated.
+                                        # HISTORY — 250 confirmed 2026-08-11 (bufferStop A/B):
                                         # 150 was tried against ghosting and made it WORSE —
                                         # denser low-baseline keyframes amplify feed-forward
                                         # drift (exactly as this note already warned) AND the
