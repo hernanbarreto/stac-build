@@ -7,239 +7,293 @@
 </p>
 
 <p align="center">
-  <em>AI-powered As-Built vs As-Planned comparison via dense 3D reconstruction, semantic anchoring and BIM deviation analysis</em>
+  <em>AI-powered As-Built vs As-Planned comparison via dense metric 3D reconstruction, photometric surface refinement and BIM deviation analysis</em>
 </p>
 
 ---
 
 ## What is STAC?
 
-**STAC Build** is a construction dimensional control system that compares **As-Built reality** (captured via smartphone video) against **As-Planned design** (BIM/IFC models) to detect geometric deviations and track construction progress.
+**STAC Build** is a construction dimensional control system that compares **As-Built
+reality** (captured with a smartphone video) against **As-Planned design** (BIM/IFC
+models) to detect geometric deviations and track construction progress.
 
-The system reconstructs a dense, metric **point cloud + textured mesh** from a phone
-video (optionally with iPad/iPhone LiDAR), understands and segments the scene with a
-local VLM + SAM3, **anchors the reconstruction semantically** (Phase R: instance-aware
-pose/depth refinement), and compares the result against the BIM/IFC model to measure
-deviations and coverage. A persistent **Qwen3-VL semantic layer** then makes the scene
-queryable (spatial Q&A with deterministic measurement tools) and reportable.
-
-### Core Workflow (the SIMPLE one-pass pipeline)
-
-Orchestrated by `pipeline_manager.py` (`DEFAULT_STAGE_ORDER`); each stage runs as an
-isolated subprocess. The pipeline is **automatic and resume-aware** (per-stage artifact
-probes: finished stages are skipped) and **fail-fast** (a stage that cannot do its job
-raises — no silent fallbacks). One concept: **sparse frames → ONE reconstruction pass →
-no window seams → no "onion"** (validated 2026-07-09 against the VGGT-Omega web demo).
-Heavy stages get the GPU to themselves (the vLLM semantic service is stopped during
-reconstruction and SAM3, and auto-restarts on the next VLM use).
-
-```
-📱 Capture: smartphone video (MP4)  +  optional 📷 Stray Scanner (LiDAR + ARKit)
-    │
-    ▼
-🔨 1. 3D Reconstruction   (backend: vggtomega ← default │ mapanything │ da3 │ hybrid │ hybrid_cond │ lidar)
-    ├─ Laplacian blur filter → temporal sampling at ~4 fps (reconstruction.simple.target_fps)
-    ├─ VGGT-Ω (CVPR 2026) in ONE single pass when the set fits (≤600 frames AND free
-    │     VRAM, ~86 MB/frame): no chunking, no Sim3 gluing, no loop closure needed.
-    │     Longer videos fall back to windowed mode (500/250, 50% overlap) with a
-    │     real free-VRAM check that shrinks the chunk instead of OOM-ing.
-    ├─ aggressive point-confidence filter (conf >= mean×0.6 ≈ the web demo at 20%)
-    ├─ metric scale: 12 evenly-spread DA3 anchor frames, ISOLATED per-frame inference
-    │     (no streaming) → s = median(DA3/Ω depth) applied as a global similarity
-    │     (fails hard if the scale cannot be recovered)
-    └─ upright orientation BAKED into cloud + poses (reconstruction/orient.py):
-          gravity = mean camera-down axis, floor at y=0 — deterministic, no floor RANSAC
-    │
-    ▼
-🔍 2. Scene Understanding  → Qwen3-VL (semantic service): understands the scene from
-    │                        ~8 keyframes and emits ONE RICH noun phrase per object
-    │                        type ("concrete support column"), consolidated across
-    │                        frames. No per-keyframe detection, no boxes.
-    ▼
-🏷️ 3. Segmentation         → SAM3: each phrase runs as its OWN concept session over ALL
-    │                        sampled frames — SAM3 finds, labels and tracks; its
-    │                        tracking IS the instance identity. Post-pass: same-SPACE
-    │                        dedupe (5 cm voxel occupancy) merges duplicates of one
-    │                        physical object, tiny slivers are dropped, and the
-    │                        canonical instance store (scene_r.db) is rebuilt from the
-    │                        clean instances (display frame) for phases 2-6.
-    ▼
-🧹 4. Cloud Cleaning       → CloudCompPy SOR + voxel merge → cleaned_cloud.ply
-    │                        + mask→cloud instance mapping
-    ▼
-🧊 5. TSDF Mesh            → textured surface mesh (Open3D VoxelBlockGrid, GPU, 3D cube
-    │                        tiling welded into one mesh; depth_source: mapanything —
-    │                        the SAME Ω keyframe depth as the cloud; texrecon UV-atlas
-    │                        photo texture)
-    │
-    ▼
-📐 BIM Comparison & Registration
-    ├─ Scan-to-BIM alignment (gizmo + ICP)
-    ├─ Cloud-to-Mesh deviation (C2M)
-    └─ Coverage analysis per BIM element
-    │
-    ▼
-📊 Visualization, Q&A & Reports
-    ├─ Sábana: color-coded deviation map
-    ├─ Potree: level-of-detail point cloud streaming
-    ├─ BIM overlay: Three.js + IFC rendering
-    ├─ AI Assistant: spatial Q&A with animated measurement replay
-    └─ Bilingual (ES/FR) supervision report drafts with per-number tool traces
-```
-
-Notes on the stage machinery (`pipeline_manager.py`):
-- Registered stages: RECONSTRUCTION, VLM, SAM3, PHASE_R, CLOUDCOMPY, TSDF, plus an
-  INSTANCE_CLEANER stage (per-instance DBSCAN + smoothing) that is registered but not
-  part of the default order.
-- `pipeline.auto_segment: false` disables the semantic chain (VLM/SAM3/Phase R) for a
-  pure-geometry run; GauS-SLAM experimental backends skip the cloud-cleaning stage.
-
-### Pose accuracy — what actually runs today
-
-The current worksite default is the **VGGT-Ω backbone**: SOTA feed-forward camera poses
-(CVPR 2026, +77% on Sintel, robust to dynamic scenes — moving people/machinery), made
-metric by aligning to DA3 depth. On top of it:
-
-1. **Loop closure** — SALAD/DINOv2 place recognition + Sim3 optimization inside
-   VGGT-Long closes drift over long sequences.
-2. **`scale_align`** (`reconstruction/scale_align.py`) — one global similarity from the
-   median DA3/Ω depth ratio makes poses + cloud metric. Fail-fast: no scale → abort.
-3. **`fine_register`** — plane-constrained inter-chunk registration with per-chunk
-   pieces and per-frame interpolation (absorbs intra-chunk drift on long hostile
-   captures).
-4. **Phase R** (`server/phase_r/`) — instance-aware inter-window Sim(3) pose-graph
-   refinement + depth regularization, with an A/B fail-safe and writeback into cloud
-   and TSDF (see the Semantic Intelligence Layer below).
-
-**About the two-pass bundle adjustment.** The repo ships a full dense two-pass
-COLMAP/Ceres BA over learned VGGSfM tracks
-(`reconstruction/{vggt_tracks,colmap_ba,run_colmap_ba,densify_fillers,reproject_chunks}.py`:
-pass 1 refines keyframes with pose priors, pass 2 localises inter-keyframe fillers
-against the fixed map, then densifies them back into the cloud). It is currently
-**disabled by default** (`bundle_adjust.enabled: false`): on the metric VGGT-Ω
-reconstruction the A/B against the no-BA baseline came out *worse*, so Ω poses +
-`scale_align` are kept as-is. Do not re-enable for `vggtomega` without re-validating.
-The legacy inter-keyframe ICP (`dense_fusion`) is likewise off.
-
-**Auto-leveling** (RANSAC floor detection → gravity alignment) lives in
-`alignment_manager.py` and runs as part of alignment, not inside the reconstruction
-worker.
+From a phone video (optionally iPad/iPhone LiDAR) the system produces a dense,
+**metric** point cloud and a **photometrically refined textured mesh**, registers them
+against the BIM/IFC model, and measures deviations and coverage. A persistent local
+**Qwen3-VL semantic layer** can then segment the scene, classify instances, detect
+findings, answer spatial questions with deterministic measurement tools, and draft
+bilingual supervision reports — all local, no paid external APIs.
 
 ---
 
-## Technology Stack
+## The default pipeline (precision mode, `vggtomega_pgsr`)
 
-### Reconstruction, Understanding & Segmentation
+Orchestrated by `pipeline_manager.py`. Each stage runs as an isolated subprocess
+(spawned process group, Pipe IPC); the pipeline is **resume-aware** (per-stage artifact
+probes skip finished stages) and **fail-fast** (a stage that cannot do its job raises —
+no silent fallbacks). GPU-heavy stages take the GPU exclusively: the vLLM semantic
+service is stopped before reconstruction, PGSR and SAM3, and restarts on the next VLM
+use.
 
-| Component | Technology | Purpose |
-|-----------|-----------|---------|
-| **VGGT-Ω** (default backbone) | [VGGT-Ω](https://vggt-omega.github.io/) (CVPR 2026) | SOTA feed-forward camera/pose backbone, dynamic-scene robust. Runs per chunk inside VGGT-Long; up-to-scale → made metric via `scale_align` against DA3 depth. Gated weights (`vendor/vggt-omega-weights/`) |
-| **DA3** | [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3) | Metric monocular depth (+ optional poses). The **metric anchor** for `vggtomega`, the **depth+K prior** for `mapanything`, and a standalone SLAM backend (`da3`). In `hybrid_cond` it is ARKit-pose-conditioned + LiDAR-calibrated |
-| **MapAnything** (option) | [MapAnything](https://github.com/facebookresearch/map-anything) (Meta) inside [VGGT-Long](https://github.com/DengKaiCQ/VGGT-Long) | Feed-forward metric 3D backbone alternative; fed DA3 depth+K as prior (poses too in `hybrid_cond`). Its keyframe depth is also the TSDF `depth_source` |
-| **Loop closure** | [DINOv2](https://github.com/facebookresearch/dinov2) / SALAD | Place-recognition retrieval + Sim3 optimization closes drift over long sequences |
-| **Keyframe selection** | DINOv2-cosine (default) / parallax | `frames_selector: dino` — appearance-redundancy cut (0.99 cosine), the literature-recommended family for transformer multi-view stages. `parallax` (triangulation-angle, aborts on pure rotation), `stride`, `none` also available |
-| **Bundle adjustment** (off by default) | [VGGSfM](https://github.com/facebookresearch/vggsfm) tracks + [pycolmap](https://github.com/colmap/colmap)/Ceres | Dense two-pass pose-prior BA + filler densification — shipped but disabled for `vggtomega` (degraded the metric result in A/B) |
-| **Stray Scanner** | [Stray Scanner](https://apps.apple.com/app/stray-scanner/id1557051662) (iOS) | iPhone/iPad Pro LiDAR + ARKit capture for `hybrid` / `hybrid_cond` / `lidar` modes |
-| **Semantic service** | [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) on [vLLM](https://github.com/vllm-project/vllm) 0.19 | Persistent local VLM (`127.0.0.1:8799`, OpenAI-compatible) shared by every consumer: scene understanding, auto-prompting, classification, findings, QC, Q&A orchestration, reports. Optional 32B-FP8 candidate |
-| **Scene understanding / auto-prompter** | Qwen3-VL (semantic service) | Open-vocabulary grounded detection over keyframes → SAM3 box prompts. (InternVL3 remains only as a disabled legacy fallback, `scene_analysis.enabled: false`) |
-| **Segmentation** | [SAM3](https://github.com/facebookresearch/sam2) — SAM 3.0 default, SAM 3.1 optional (`models.segmentation.version`) | Tracked per-frame **2D instance masks**, stored cloud-agnostically; mask→cloud mapping is deferred to the cleaning stage |
-| **Phase R geometry** | [R3D](https://github.com/facebookresearch/r3d) (vendored, adapted) | Depth-lift, plurality vote, KNN filtering, gravity-aligned OBBs — reused for semantic anchoring and the spatial-Q&A scene build |
-| **Cloud merge** | [CloudComPy](https://www.cloudcompare.org/) | SOR outlier removal + voxel downsample, chunk/LiDAR-complement merge → `cleaned_cloud.ply` |
-| **TSDF mesh** | [Open3D](https://www.open3d.org/) VoxelBlockGrid (CUDA) | Textured surface mesh (GPU integrate, 3D cube tiling welded into one mesh, long-edge cull 0.10 m, hole-fill) |
-| **Texture** | [MVS-Texturing](https://github.com/nmoehrle/mvs-texturing) (texrecon, default) / [nvdiffrast](https://github.com/NVlabs/nvdiffrast) | UV-atlas photographic texture bake (default `texture_mode: texrecon`); GPU vertex bake available |
-| **Per-object meshes** | MeshFlow (vendored; replaced ShapeR) | Generative per-object mesh reconstruction |
-| **Point Cloud Viz** | [Potree](https://potree.github.io/) + [Three.js](https://threejs.org/) | Level-of-detail point cloud rendering |
+The stage order is:
+
+```
+RECONSTRUCTION → [VLM → SAM3]* → CLOUDCOMPY → PGSR → TSDF
+```
+
+\* The semantic chain (VLM auto-prompter → SAM3) is registered in the pipeline but
+currently **disabled by default** (`pipeline.auto_segment: false`) while the SAM3
+session handling is reworked — segmentation runs **on demand** from the UI or CLI
+instead. `pipeline.auto_tsdf: true` guarantees every run ends with the textured mesh,
+never Potree-only.
+
+### Stage 1 — Metric reconstruction (VGGT-Ω, the SIMPLE one-pass concept)
+
+One concept, validated against the VGGT-Ω web demo: **sparse motion keyframes → ONE
+reconstruction pass → no window seams → no "onion"**. Chunking exists only as a
+measured escape hatch (phase 2 below), never as the default.
+
+```
+📱 video frames (all of them, e.g. 1097)
+ │
+ ├─ Frame quality analysis (frames/quality.py)
+ │    FFT sharpness + Laplacian variance (adaptive p15 blur gate)
+ │    + inter_frame_diff = mean gray difference @320px (pixel-motion proxy)
+ │    → frames/frame_quality.json
+ │
+ ├─ Motion keyframe selection (parallax-uniform)
+ │    one keyframe per keyframe_motion_quantum (80) of ACCUMULATED pixel motion,
+ │    sharpest frame per window; all-blurry windows keep their least-blurry frame.
+ │    Standing still adds ~no keyframes; fast walking adds more (no 9 m jumps).
+ │    → frames/selected_frames.json  (single source of truth downstream)
+ │
+ ├─ DA3 metric anchors: 12 evenly-spread keyframes, ISOLATED per-frame inference
+ │    (depth-anything/DA3NESTED-GIANT-LARGE-1.1, no streaming — scale is a depth
+ │    RATIO, poses don't participate) → output/da3_run/results_output/
+ │
+ ├─ VGGT-Ω single pass (vendor VGGT-Long framework, env `mapanything`)
+ │    · sky masked per frame (skyseg.onnx) before confidence voting
+ │    · single-pass gate: n ≤ min(600, free-VRAM budget) → one chunk, loop
+ │      closure OFF (nothing to close)
+ │    · confidence filter: drop the bottom 10% of valid points (percentile mode)
+ │    → chunk PLYs + camera_poses.txt + per-frame Ω depth (omega_run/)
+ │
+ ├─ scale_align (reconstruction/scale_align.py) — FAIL-HARD metric scale
+ │    s = median over keyframes of median(DA3/Ω depth) on the near-25% band ∩
+ │    top-10%-confidence pixels; global_median mode (structured models lost their
+ │    own CV gate in the A/B campaign). A VIO trajectory (docs/VIO_FORMAT.md),
+ │    when present in the session, SETS the scale and DA3 becomes the cross-check.
+ │    → output/scale_diagnostics.json (per-anchor ratios, MAD, scale_confidence)
+ │
+ ├─ Upright orientation (reconstruction/orient.py, gated)
+ │    gravity = consensus camera-down over all poses; refuses below 0.7 alignment
+ │    (the CloudCompy floor leveler is the fallback); floor at y=0
+ │
+ ├─ pose_refine (reconstruction/pose_refine.py) — SELF-GATED, enabled
+ │    joint point-to-plane multi-view optimization over per-frame corrections
+ │    (pair window 15, odometry smoothness, identity leash); applies only if the
+ │    fresh held-out measurement actually improves, else identity
+ │
+ └─ Walk probe: trajectory length measured in METERS (post-scale).
+      walk ≤ 15 m → the single pass IS the result.
+      walk > 15 m → phase 2: chunked-metric re-run (below).
+```
+
+**Phase 2 — chunked-metric** (only when the measured walk exceeds Omega's 15 m
+comfort range; Omega drifts ~1.3 cm/m past it):
+
+- **Coverage trim**: static or optically-zoomed head/tail keyframe runs are dropped
+  (median-step decade criterion + robust-z on per-frame focal) — mid-walk stretches are
+  never cut.
+- **Denser re-selection**: the quantum is re-derived so each ~12 m chunk holds ~45
+  keyframes.
+- **Chunks sized by walked meters** (12 m each, clamped [24, 150] keyframes, 50%
+  overlap), each metric-locked by **3 DA3 anchors spread inside every chunk**.
+- Vendor machinery (STAC fork of VGGT-Long): **SE(3) seam gluing from exact pixel
+  correspondences** (scale is not a degree of freedom), a **scale graph** over seams +
+  anchors with self-gated per-chunk scale drift, **frame ownership** (one writer per
+  frame, non-owner backfills exactly the dropped pixels), **elastic per-frame seam
+  consensus** (shared pixels share one 3D position, poses move with points),
+  **intra-chunk consensus fields** (held-out gated, worst case identity), a **depth
+  graph** (frames agree on shared-surface depth), and a session-derived **write-depth
+  cap** that drops far points contradicted by near observations.
+- **SALAD/DINOv2 loop closure runs here** (and only here — the single pass has nothing
+  to close).
+
+### Stage 2 — Cloud post-processing (CloudCompPy, env `CloudComPy310`)
+
+Merge the chunk PLYs, inject per-point **traceability scalar fields** (`frame_global`,
+`pixel_row`, `pixel_col`, `confidence` — they survive every later filter), voxel
+subsample (5 mm) + SOR outlier removal → `cleaned_cloud.ply`. Then a **scene
+consolidate** pass (normal-aware robust MLS, adaptive radius 2–6 cm, opposite faces
+never merge) tightens the surface in place — the raw measurement is preserved as
+`cleaned_cloud_raw.ply` and `surface_fit` residuals always use it. Finally the
+**Potree octree** is built (confidence and origin fields carried into LAS).
+
+### Stage 3 — PGSR photometric refinement (the precision stage, env `pgsr`)
+
+The step that gives precision mode its name (~2 h/scene, exclusive GPU):
+
+- **Scene export**: native-resolution keyframe images + the pipeline's poses/intrinsics
+  in COLMAP layout, seeded with `cleaned_cloud.ply` (≤1.5 M points).
+- **Training**: PGSR (Planar-based Gaussian Splatting, vendor `zju3dv/PGSR` @
+  `de24f1a3`) at the vendor's published max-quality regime — 30 000 iterations, NCC
+  scale 0.5, outdoor densify/cull thresholds, exposure compensation, native
+  resolution. Geometric single-view (from iter 7000) and multi-view NCC losses make
+  the Gaussians converge to actual surfaces. `torch.set_num_threads(8)` is
+  load-bearing (vendor parity; without it the multi-view stage is ~10× slower on
+  many-core boxes). Photometric *pose* refinement is OFF (it lost its A/B: RMS +11%).
+- **Render/export**: every camera re-rendered → per-frame **photometrically verified
+  depth** (`output/pgsr_render/frame_*.npz`) + `report.json` (PSNR, VRAM, timing).
+- **Consistent cloud**: the viewer cloud is REBUILT by unprojecting the PGSR depths at
+  the final poses through three gates — depth-edge cull, a 2-view consistency vote
+  (2% relative tolerance), and a 20 m cap — then 6 mm voxel + SOR →
+  `pgsr_cloud.ply`, and the **Potree octree is rebuilt from it**, so the cloud you
+  see and the mesh agree. `cleaned_cloud.ply` is left untouched (it remains the
+  source for segmentation and BIM).
+
+### Stage 4 — TSDF textured mesh (Open3D CUDA)
+
+`depth_source: auto` resolves to the **PGSR renders** whenever the precision stage ran
+(explicit `pgsr_render` is fatal if renders are missing — never a silent fallback). In
+precision mode the cleaned-cloud pixel mask is deliberately **dropped**
+(`pgsr_mask_to_cleaned_cloud: false`): the rendered depth is already photometrically
+verified, and masking would re-import the cloud's holes — this is what gives the mesh
+**full coverage**. On the non-PGSR (fast-mode) depth path, a multi-view geometric
+consistency filter (`mv_consistency`, 4 neighbours / 2 agreeing views) screens the
+depth instead.
+
+Integration: VoxelBlockGrid on GPU, **12 mm voxels** (8/6 mm lost their A/B: worse RMS
+at 1.8–2.9× cost), SDF truncation 6 cm, fixed 10 m 3D cube tiling welded on a shared
+global grid, depth clipped to the reliable 15 m band. Post-mesh chain: long-edge cull
+(0.10 m bridge/spike triangles) → speck cleanup (aborts if it would drop >5% of
+triangles) → hole fill (≤0.25 m — doors and windows stay open) → Taubin smoothing (×5,
+shrinkage-free) → quadric decimation (≈4 M triangles, auto-scaled to scene size). An
+**ICP-snap gate** aligns mesh + cameras to the cloud before texturing, but only when
+fitness/RMSE/motion bounds all pass — otherwise the mesh stays in the pose frame.
+Texture: **texrecon** UV-atlas photographic bake (MVS-Texturing, up to 400–600 views);
+the GLB ships meshopt + WebP compressed (~6×), with the uncompressed original kept
+alongside.
+
+**Artifacts of a finished run** (under the session's `output/`): `cleaned_cloud.ply` +
+`cleaned_cloud_raw.ply`, `pgsr_cloud.ply` (+ rebuilt `potree/`), `pgsr_render/` +
+`pgsr_model/`, `tsdf/scene/scene.glb` (+ `.orig`), `camera_poses.txt`,
+`scale_diagnostics.json`, `pose_refine_report.json`, `scene_consolidate_report.json`.
+
+### Keyframe density (current experiment)
+
+`keyframe_motion_quantum` is **80** since 2026-08-15 (user decision after a visual A/B
+on a real scene: markedly more complete, less ghosting — denser keyframes give PGSR
+~3× more training views). The measured trade-offs on the same scene: scale anchor MAD
+3.5%→11.1% (confidence 0.82→0.50), the walk probe over-measures (drift zigzag) so
+chunked mode fires more readily, and runtime roughly doubles. **Status: under
+evaluation across more scenes** — 250 had won the earlier pose-proxy A/B and remains
+the documented fallback.
+
+---
+
+## Pose & scale accuracy — measured state (A/B campaign, 2026-08)
+
+Every default below was decided by a pre-registered A/B on real scenes (full tables in
+`docs/scale_ab_results.md`, `docs/phase_bc_ab_results.md`):
+
+- **Scale**: one global similarity from 12 DA3 anchors (near-band ∩ top-confidence).
+  Held-out anchor depth error 4.5–9% median across test sessions; anchor ratio MAD
+  3.5–6.7% (at quantum 250); every run persists `scale_diagnostics.json` (per-anchor
+  ratios, jackknife, `scale_confidence` 0–1). Structured estimators (affine /
+  depth-dependent) were rejected by their own cross-validation gate on all sessions.
+  A **VIO trajectory** takes over the scale when present (`docs/VIO_FORMAT.md`).
+- **Surface (fast mode)**: multi-view consistency filter ON — planar-patch RMS
+  9.00→8.70 mm, fewer double surfaces, faster TSDF.
+- **Precision mode** (`vggtomega_pgsr`, the default): **+86% mesh coverage** and a
+  better error tail (p90 10.83→10.01 mm) at ~2 h extra per scene; planar RMS ties the
+  fast mode.
+- **Active refinement**: the point-to-plane `pose_refine` stage is ON and self-gated
+  (measured −52% ghost layering on jerky close-range captures; applies nothing unless
+  its own held-out metric improves).
+- **Retired machinery** (shipped, off, do not re-enable without re-validating): the
+  two-pass COLMAP/Ceres bundle adjustment over VGGSfM tracks (degraded the metric
+  result), `fine_register` plane-constrained chunk registration (no usable signal),
+  `dense_fusion` inter-keyframe ICP (superseded), native-resolution depth refinement
+  (doubled double-surface incidence), PGSR photometric pose refinement (RMS +11%).
+- **Not yet measured**: parity vs RealityScan (external scorecard pending).
+
+---
+
+## Technology stack
+
+### Models & reconstruction
+
+| Component | Technology | Role |
+|-----------|-----------|------|
+| **VGGT-Ω** (backbone) | [VGGT-Ω](https://vggt-omega.github.io/) 1B @ 512 px (CVPR 2026) inside the STAC fork of [VGGT-Long](https://github.com/DengKaiCQ/VGGT-Long) | Feed-forward camera poses + dense points, dynamic-scene robust. Gated weights (`vendor/vggt-omega-weights/vggt_omega_1b_512.pt`) |
+| **DA3** | [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3) `DA3NESTED-GIANT-LARGE-1.1` (STAC private fork) | The **metric anchor**: isolated per-frame depth on 12 keyframes → global scale; also a standalone SLAM backend |
+| **PGSR** | [PGSR](https://github.com/zju3dv/PGSR) @ `de24f1a3` (planar Gaussian splatting; Inria non-commercial license) | The precision stage: photometric surface optimization → verified depth renders that feed the TSDF and rebuild the viewer cloud |
+| **Loop closure** | [DINOv2](https://github.com/facebookresearch/dinov2) + SALAD place recognition | Chunked-metric mode only (the single pass has no loops to close) |
+| **Sky removal** | `skyseg.onnx` | Per-frame sky mask before confidence voting |
+| **TSDF + mesh** | [Open3D](https://www.open3d.org/) VoxelBlockGrid (CUDA) | 12 mm textured mesh, tiled + welded, hole-filled, Taubin-smoothed |
+| **Texture** | [MVS-Texturing](https://github.com/nmoehrle/mvs-texturing) (texrecon) | UV-atlas photographic texture (default); nvdiffrast GPU vertex bake available |
+| **Cloud post** | [CloudComPy](https://www.cloudcompare.org/) | Merge + scalar-field injection, voxel + SOR, MLS scene consolidate |
+| **Point cloud viz** | [Potree](https://potree.github.io/) + [Three.js](https://threejs.org/) | Level-of-detail streaming of the consistent cloud |
+| **Semantic service** | [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) on [vLLM](https://github.com/vllm-project/vllm) 0.19 | Persistent local VLM (`127.0.0.1:8799`, OpenAI-compatible, tool calling); optional 32B-FP8 candidate backend |
+| **Segmentation** | [SAM 3.1](https://github.com/facebookresearch/sam3) Object Multiplex (**default**; SAM 3.0 rollback available) | Tracked per-frame 2D instance masks — 6.1× faster than 3.0 at equivalent quality (measured); tracking IS the instance identity |
+| **Per-object meshes** | MeshFlow (vendored, gated ckpt) | Generative per-object visual meshes — explicitly **non-metric**, never for architectural classes |
+| **Surface fitting** | `reconstruction/surface_fit/` (plane→cylinder→sphere→swept→b-spline ladder) | Deterministic primitive fitting + residuals — the measurement engine behind findings and spatial Q&A |
+
+### Reconstruction backends (`reconstruction.backend`)
+
+| Backend | Status | What it is |
+|---------|--------|------------|
+| **`vggtomega_pgsr`** | **DEFAULT** | Full VGGT-Ω pipeline + the PGSR precision stage (+86% mesh coverage, ~2 h extra) |
+| `vggtomega` | wired | Fast mode: same reconstruction, no PGSR stage |
+| `da3` | wired | DA3 streaming SLAM standalone (neural depth, SALAD loops) |
+| `mapanything` | wired (legacy fallback) | DA3 depth+K prior into MapAnything per chunk (VGGT-Long framework) |
+| `hybrid` / `hybrid_cond` | wired | Stray Scanner captures: LiDAR-calibrated DA3, optionally ARKit-pose-conditioned |
+| `lidar` | wired | Pure LiDAR backprojection (Stray only, no neural inference) |
+| `gaus_slam*`, `nerfstudio` | removed | No dispatch branch remains; config vestiges only |
 
 ### Platform
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| **BIM Parsing** | [IfcOpenShell](https://ifcopenshell.org/) | IFC geometry extraction |
-| **Backend** | Python, **FastAPI + uvicorn** (HTTPS, self-signed certs), WebSockets | Pipeline orchestration + API on port **8765** (`scripts/start.sh`, conda env `da3`) |
-| **Frontend** | React 18 + TypeScript + Vite (+ **Electron** desktop) | IDE-style viewer; industrial design system (tokens, mono numerics). On headless pods the Electron app is viewable over **noVNC** (`:6080/vnc.html`, `scripts/launch_electron.sh`) |
-| **Auth** | JWT (HS256, python-jose) + bcrypt | Role-based access (admin/viewer), team workspaces, activity logging |
-| **Infrastructure** | Conda envs per component, CUDA (sm_86), Docker available | GPU-accelerated deployment; dev/reference GPU: RTX A6000 48 GB |
-
----
-
-## Features
-
-### Dense 3D Reconstruction
-- **Multi-backend architecture** (`reconstruction.backend` in `config.yaml`, dispatched in `map_worker.py`):
-  - **`vggtomega`** (default, video-only): **VGGT-Ω** per-chunk poses + cloud inside VGGT-Long (loop closure on), made **metric** by `scale_align` against DA3 depth. No ICP dense-fusion, no BA — its poses are the reference. Robust to dynamic worksite scenes.
-  - **`mapanything`** (video-only): DA3 metric depth + intrinsics fed as a **prior** into **MapAnything** (per-chunk, VGGT-Long framework). MapAnything estimates its own poses (`da3_prior_use_poses: false`) and closes loops via SALAD/DINOv2 + Sim3.
-  - **`hybrid_cond`** (Stray / LiDAR, full prior): Stray ARKit + LiDAR → DA3 is **pose-conditioned** (ARKit poses via cam_enc) with **LiDAR-calibrated** metric depth → MapAnything receives the FULL prior (depth + K + poses) → loop closure.
-  - **`da3`**: DA3 streaming standalone (neural depth + SLAM, no LiDAR, no MapAnything).
-  - **`hybrid`**: DA3 calibrated with Stray LiDAR depth (estimate-then-inject poses).
-  - **`lidar`**: pure LiDAR backprojection (Stray only, no neural inference).
-  - **`gaus_slam*`** / **`nerfstudio`**: experimental Gaussian-surfel SLAM and NeuS-SDF variants.
-- **Chunked inference** (`chunk_size: 120` / `chunk_overlap: 60`) with Sim3 overlap alignment for long sequences; `fine_register` (plane-constrained, per-chunk pieces) absorbs intra-chunk drift.
-- **Keyframe selection**: `dino` (DINO-cosine 0.99) by default; `parallax` geometric selection available — DA3 depth+pose on all blur-valid frames, keyframes by median triangulation angle, **aborts on pure rotation / no baseline**. Optional Laplacian blur filter (`blur_filter: true`).
-- Confidence filtering at the authors' defaults (DA3 prior percentile 40, VGGT-Long `conf_threshold_coef: 0.75`).
-- RANSAC auto-leveling (floor detection → gravity alignment, `alignment_manager.py`).
-- **Fail-fast pipeline**: every stage aborts on failure (no silent fallbacks) — a finished run means every stage actually worked. Resume-aware: finished stages are skipped via artifact/freshness probes.
-- **TSDF meshing** (final stage): Open3D VoxelBlockGrid on GPU, 1.2 cm voxels, 3D cube tiling (10 m) welded into one mesh, long-edge cull (0.10 m) + hole-fill, Taubin smoothing, `depth_source: mapanything` (the same Ω keyframe depth as the cloud → cloud/mesh consistency), **texrecon UV-atlas photo texture**.
-
-### Scene Understanding & Segmentation
-- **Auto-prompter (Phase 1)**: Qwen3-VL open-vocabulary grounded detection over keyframes → SAM3 box prompts, with geometric (pose-based IoU) temporal association. The construction vocabulary (`autoprompt/vocabulary.yaml`) is a **canonicalization overlay, never a detection filter** — the system segments *everything* it sees. No canned-category fallback: scene understanding drives segmentation or the stage fails loudly. Adaptive keyframe sampling keeps VLM calls bounded.
-- **SAM3**: tracked per-frame 2D instance masks, stored cloud-agnostically; the mask→cloud mapping is **deferred** to the cleaning stage so it lands on the Phase-R-corrected cloud.
-- **Instance cleaning** (optional stage): per-instance DBSCAN + CloudCompPy smoothing.
-- **Segmentation Manager** in the UI for human review/correction and interactive retroactive prompting; a batch CLI (`segmentation/autoprompt/cli.py`) runs video-in → tracked-masks-out without the UI.
-
-### BIM Integration
-- Full IFC parsing: geometry extraction for all physical elements
-- Scan-to-BIM registration via gizmo alignment + ICP refinement
-- Cloud-to-Mesh (C2M) deviation calculation per element (`tolerance_mm: 50`, warning/error/critical bands at 10/20/30 mm)
-- Coverage analysis: percentage of BIM surface observed by scan (`coverage_proximity_m: 0.15`)
-- Quality classification: Good / Regular / Bad per element
-- `GET /api/sessions/{id}/available_backends` auto-detects which backends are viable per session (presence of Stray data: `depth/`, `odometry.csv`, `camera_matrix.csv`)
-
-### Sábana Visualization
-- Color-coded deviation map: Green (within tolerance) → Yellow → Red (out of tolerance)
-- Rendered as a point cloud overlaid on BIM for direct visual inspection
-- Semi-transparent BIM and scan cloud to highlight deviations
-- Per-element statistics: mean, max, P95 deviation, pass rate
-
-### Potree Streaming
-- Custom Potree integration for level-of-detail rendering of massive point clouds
-- Hierarchical octree with progressive loading
-- Point budget management for smooth navigation
-
-### Team & Session Management
-- JWT authentication with role-based access (admin/viewer)
-- Multi-user team workspaces
-- Session persistence with full pipeline state
-- Real-time WebSocket progress streaming (`/ws/logs`, `/ws/viewer`, `/ws/camera`, `/ws/team`)
-- Activity logging per user
+| **BIM parsing** | [IfcOpenShell](https://ifcopenshell.org/) | IFC geometry extraction |
+| **Backend** | Python, FastAPI + uvicorn, WebSockets | API on port **8765**; HTTPS (self-signed) when started via `scripts/start.sh` |
+| **Frontend** | React 18 + TypeScript + Vite (+ Electron desktop) | IDE-style viewer; on headless pods the Electron app is viewable over noVNC (`:6080/vnc.html`) |
+| **Auth** | JWT (HS256) + bcrypt | Role-based access (**admin / manager / viewer**), team workspaces, activity logging |
+| **Infrastructure** | Conda envs per component, CUDA sm_86 | Dev/reference GPU: RTX A6000 48 GB; everything local, no paid APIs |
 
 ---
 
 ## Semantic Intelligence Layer (Phases 0–7)
 
-A persistent **Qwen3-VL** vision-language layer sits on top of the reconstruction
-pipeline, turning the point cloud into a **queryable, supervised, reportable**
-scene. It is governed by one inviolable rule:
+A persistent **Qwen3-VL** vision-language layer sits on top of the geometry pipeline,
+turning the point cloud into a queryable, supervised, reportable scene. It is governed
+by one inviolable rule:
 
 > **The VLM proposes, describes, detects, classifies and orchestrates.
-> It NEVER measures.** Every metric comes from deterministic tools over geometry
-> / `surface_fitting`. Every output is tagged `vlm_proposed`, `tool_measured`, or
+> It NEVER measures.** Every metric comes from deterministic tools over geometry /
+> `surface_fitting`. Every output is tagged `vlm_proposed`, `tool_measured`, or
 > `human_validated`.
 
-| Phase | Path | Purpose | Status |
-|-------|------|---------|--------|
-| **0 · Semantic Service** | `server/semantic/` | Persistent vLLM 0.19 serving **Qwen3-VL-8B-Instruct** on `127.0.0.1:8799` (OpenAI-compatible, tool-calling, images), own `semantic` env; all consumers go through `semantic_client` (`LLMBackend`: `qwen_local` default, `qwen_local_large` = Qwen3-VL-32B-FP8 candidate). JSONL call logging, healthcheck, smoke tests | ✅ |
-| **1 · Auto-prompter** | `server/segmentation/autoprompt/` | Understanding-driven, **open-vocabulary** detection → SAM3 box prompts. Segments *everything*; the construction vocabulary is a canonicalization overlay, never a filter. Batch CLI + pre-populated sessions for human review | ✅ |
-| **R · Semantic anchoring** | `server/phase_r/` (+ `workers/phase_r_worker.py`, **in the default pipeline**) | Canonical R.8 instance store (SQLite), gravity-aligned OBBs, vote-entropy + onion (double-surface) metrics, inter-window Sim(3) pose graph, class-conditioned depth regularization, A/B fail-safe, and **writeback** of refined poses/depth into the cloud and TSDF fusion | ✅ |
-| **5 · Spatial Q&A** | `server/phase5_qa/` | Deterministic `SpatialTools` (distance, clearance, plumb, level, volume, fits_through, flatness bridge, height profile, measure_between, findings, alignment health…) + user-defined **evaluation volumes**, driven by a tool-calling orchestrator. CLI + `POST /api/spatial_qa` + `/api/scene/*` | ✅ |
-| **2 · Classification** | `server/phase2_classify/` | Per-instance class / material / state, label-conflict flags, structural→`surface_fitting` routing; enriches the R.8 store (never creates parallel objects) | ✅ |
-| **3 · Findings** | `server/phase3_findings/` | Cracks / moisture / spalling / corrosion detection, **3D-anchored** via the R-refined pose, multi-view deduped, residual-correlated; honest precision eval; everything born `proposed` until human-validated | ✅ |
-| **4 · Capture QC** | `server/phase4_qc/` | Ingestion pre-filter (cheap Laplacian blur + exposure; VLM only on the ambiguous band) + post-reconstruction coverage → recapture checklist. Never deletes frames silently | ✅ |
-| **6 · Report** | `server/phase6_report/` | Bilingual **ES/FR** supervision-report draft; every number carries a `tool(args)+timestamp` trace; VLM text flagged *pending validation* | ✅ |
-| **7 · Validation** | `server/phase7_validation/` | 28-question spatial-Q&A suite (incl. insufficient-data traps), GPU coexistence probe (vLLM + full reconstruction on one A6000 48 GB), reproducible Pitch-2 demo | ✅ |
+**Current integration**: the in-pipeline chain (VLM → SAM3) is temporarily disabled by
+default (`pipeline.auto_segment: false`) while SAM3 session handling is reworked —
+a default run is pure geometry, and segmentation + the phases below run **on demand**
+(UI, CLI, or API). Consequences of a segmentation-less run: PGSR trains without
+dynamic-object masks (static-scene assumption, logged explicitly) and no per-object
+mesh crops are produced.
 
-Each phase ships a CLI, unit tests, and phase reports under `docs/`
-(`phase{0,1,3,4,6,7}_report.md`). The only open items are **external data / human**
-dependencies (hand-segmented GT, a multi-window corridor scan, larger annotated sets).
+| Phase | Path | Purpose | Wiring |
+|-------|------|---------|--------|
+| **0 · Semantic service** | `server/semantic/` | vLLM 0.19 serving **Qwen3-VL-8B-Instruct** on `127.0.0.1:8799` (OpenAI-compatible, hermes tool parser, 8 images/prompt, deterministic T=0), own `semantic` env; every consumer goes through `semantic_client` (`qwen_local` default, `qwen_local_large` = Qwen3-VL-32B-FP8 candidate). JSONL call log, healthcheck, GPU handover: stopped for reconstruction/PGSR/SAM3, restarted by the next consumer | service |
+| **1 · Auto-prompter** | `server/segmentation/autoprompt/` | Scene understanding over ~8 keyframes → ONE RICH noun phrase per object type (**concept phrases, no boxes**); each phrase runs as its own SAM3 concept session over the sampled frames — SAM3 finds, labels and tracks, its tracking IS the identity. The construction vocabulary is a canonicalization overlay, never a detection filter: the system segments *everything*. Batch CLI available | CLI + pipeline (gated) |
+| **Instance data layer** | `server/phase_r/` | What remains of the former "Phase R": the canonical instance store (`scene_r.db`, R3D-derived schema — single source of objects for phases 2/3/5/6), gravity-aligned OBB geometry, deterministic plane-fit depth regularization. The inter-window Sim(3) anchoring machinery was **removed 2026-07-09** (the one-pass pipeline has no window seams, and it never survived its own A/B gate) | library |
+| **2 · Classification** | `server/phase2_classify/` | Per-instance class / material / state via best-keyframe crops; label-conflict flags; architectural→`surface_fitting` routing. Enriches the store, never creates parallel objects | CLI |
+| **3 · Findings** | `server/phase3_findings/` | Cracks / moisture / spalling / corrosion detection, 3D-anchored via depth + pose, multi-view deduped, residual-correlated severity; everything born `proposed` until human-validated | CLI |
+| **4 · Capture QC** | `server/phase4_qc/` | Ingestion pre-filter (cheap blur/exposure, VLM only on the ambiguous band — frames are never silently deleted) + post-reconstruction coverage → recapture checklist | CLI |
+| **5 · Spatial Q&A** | `server/phase5_qa/` | ~20 deterministic `SpatialTools` (distance, clearance, plumb, level, span, volume, fits_through, flatness, height profile, alignment health…) + user-defined evaluation volumes, driven by a bounded tool-calling loop | CLI + **HTTP**: `POST /api/spatial_qa`, `POST /api/scene/objects`, `/api/scene/volumes/*`, `GET /api/semantic/status?warmup=` |
+| **6 · Report** | `server/phase6_report/` | Bilingual **ES/FR** supervision-report draft; every number carries a `tool(args)+timestamp` trace; VLM prose flagged *pending validation* | CLI |
+| **7 · Validation** | `server/phase7_validation/` | 28-question spatial-Q&A suite (incl. insufficient-data traps) + the GPU coexistence probe (vLLM + full reconstruction on one A6000 48 GB) | CLI |
 
 **Run the semantic service** (own env, isolated from the reconstruction envs):
 
@@ -252,20 +306,43 @@ bash scripts/serve_semantic.sh         # → http://127.0.0.1:8799/v1
 
 ### Immersive AI Assistant (in the viewer)
 
-The 3D viewer includes an **AI Assistant** panel (`AssistantPanel.tsx`):
-ask a question in natural language and the answer is measured by the Phase-5
-tools and **replayed as animated three.js geometry** — you literally see *how*
-each distance, volume, plumb angle or clearance was measured. Drop **evaluation
-volumes** into the scene to assess spaces (occupancy, free m³, "does this fit?").
-The chat is backed by `POST /api/spatial_qa`; geometry by `POST /api/scene/*`.
+The 3D viewer includes an **AI Assistant** panel (`AssistantPanel.tsx`): ask a question
+in natural language and the answer is measured by the Phase-5 tools and **replayed as
+animated three.js geometry** — you literally see *how* each distance, volume, plumb
+angle or clearance was measured. Drop **evaluation volumes** into the scene to assess
+spaces (occupancy, free m³, "does this fit?"). Chat backed by `POST /api/spatial_qa`;
+geometry by `POST /api/scene/*`.
 
 ### Reproducible end-to-end demo
 
 ```bash
 scripts/demo_pitch2.sh <session_dir> scene.db out_dir
-# segment → Phase R store → classify → findings → coverage
+# segment → instance store → classify → findings → coverage
 # → 8 spatial questions answered WITH traces → bilingual report draft
 ```
+
+---
+
+## BIM integration & visualization
+
+- Full IFC parsing (IFC 2x3 / 4 / 4.3): geometry extraction for all physical elements.
+- Scan-to-BIM registration: gizmo alignment + ICP refinement (50 iterations).
+- **Cloud-to-Mesh (C2M) deviation** per element: `tolerance_mm: 50`, heatmap bands
+  warning/error/critical at 10/20/30 mm.
+- **Coverage analysis**: % of BIM surface observed (`coverage_proximity_m: 0.15`);
+  per-element quality classification Good ≥80% / Regular ≥50% / Bad.
+- **Sábana**: color-coded deviation map rendered as a point overlay on the
+  semi-transparent BIM (3 mm points, 1 mm subsample), with per-element mean / max /
+  P95 / pass-rate statistics.
+- **Potree streaming**: LOD octree of the consistent cloud with progressive loading
+  and point-budget management.
+
+## Team & session management
+
+- JWT authentication, roles **admin / manager / viewer**, multi-user team workspaces,
+  per-user activity logging.
+- Session persistence with full pipeline state; resume-aware re-runs.
+- Real-time WebSockets: `/ws/logs`, `/ws/viewer`, `/ws/camera`, `/ws/team`, `/ws/scan`.
 
 ---
 
@@ -273,194 +350,132 @@ scripts/demo_pitch2.sh <session_dir> scene.db out_dir
 
 ```
 stac-build/
-├─ server/                    # Python backend (FastAPI + uvicorn, port 8765, HTTPS)
+├─ server/                    # Python backend (FastAPI + uvicorn, port 8765)
 │   ├─ main.py                # FastAPI app, WebSockets, API routes (+ auth/team/spatial-QA routers)
-│   ├─ pipeline_manager.py    # Stage orchestrator — DEFAULT_STAGE_ORDER:
-│   │                          #   RECONSTRUCTION → VLM → SAM3 → PHASE_R → CLOUDCOMPY → TSDF
+│   ├─ pipeline_manager.py    # Stage orchestrator — default order:
+│   │                          #   RECONSTRUCTION → [VLM → SAM3]* → CLOUDCOMPY → PGSR → TSDF
+│   │                          #   (* gated by pipeline.auto_segment, currently false)
 │   ├─ workers/               # Subprocess workers (GPU-isolated, WorkerPipe IPC)
-│   │   ├─ base.py            # WorkerPipe IPC protocol
-│   │   ├─ map_worker.py      # 1. Reconstruction dispatcher (vggtomega/mapanything/da3/hybrid/...)
-│   │   │                      #    + frame selection + scale_align + fine_register (+ optional BA)
-│   │   ├─ vlm_worker.py      # 2. Scene understanding (Qwen3-VL auto-prompter; InternVL3 = disabled fallback)
-│   │   ├─ sam3_worker.py     # 3. SAM3 tracked 2D instance masks
-│   │   ├─ phase_r_worker.py  # 4. Phase R semantic anchoring (pose/depth refinement + writeback)
-│   │   ├─ cloudcompy_worker.py # 5. Cloud cleaning (SOR + voxel) + deferred mask→cloud mapping
-│   │   ├─ tsdf_worker.py     # 6. TSDF textured mesh (Open3D VoxelBlockGrid, GPU)
-│   │   └─ instance_cleaner_worker.py # optional: per-instance DBSCAN + smoothing
+│   │   ├─ map_worker.py      #   reconstruction dispatcher: frame quality → motion keyframes
+│   │   │                      #   → DA3 anchors → Ω pass → scale_align → orient → pose_refine
+│   │   │                      #   → walk probe → (chunked-metric phase 2 when needed)
+│   │   ├─ cloudcompy_worker.py # cloud merge/clean/consolidate + Potree
+│   │   ├─ pgsr_worker.py     #   PGSR precision stage + consistent-cloud rebuild
+│   │   ├─ tsdf_worker.py     #   TSDF textured mesh (Open3D VoxelBlockGrid, GPU)
+│   │   ├─ vlm_worker.py / sam3_worker.py   # semantic chain (gated)
+│   │   └─ instance_cleaner_worker.py       # on-demand API action (not a pipeline stage)
+│   ├─ reconstruction/        # scale_align, orient, pose_refine, chunk_plan, pgsr_{export,train,cloud},
+│   │   │                      #   dynamic_masks, mv_consistency, texture_bake, surface_fit/
+│   │   └─ (colmap_ba, vggt_tracks, fine_register, …)   # retired machinery, shipped but off
+│   ├─ frames/                # quality analysis + selectors (motion / fps / dino / parallax)
 │   ├─ semantic/              # Phase 0: vLLM launcher, LLMBackend client, healthcheck, call log
-│   ├─ segmentation/          # SAM3 wrapper, 2D-mask store, autoprompt/ (Phase 1)
-│   ├─ phase_r/               # Phase R: instance store, vote, onion, residuals, regularization,
-│   │                          #   metric hierarchy, fail-safe, writeback
-│   ├─ phase2_classify/ … phase7_validation/   # Phases 2–7 (CLI + tests each)
-│   ├─ frames/selector.py     # Keyframe selection: DINOv2-cosine (default) + parallax (geometric)
-│   ├─ frame_quality.py       # Blur detection (Laplacian)
-│   ├─ reconstruction/        # scale_align, fine-register/geometry, texture bake,
-│   │   │                      #   surface_fit/, per-object machinery
-│   │   ├─ scale_align.py     #   metric scale for the VGGT-Ω path (align to DA3)
-│   │   ├─ vggt_tracks.py     #   VGGSfM correspondences   ┐
-│   │   ├─ colmap_ba.py       #   two-pass COLMAP/Ceres BA │ shipped, disabled by default
-│   │   ├─ run_colmap_ba.py   #   BA runner                │ (bundle_adjust.enabled: false)
-│   │   ├─ densify_fillers.py #   filler densification     │
-│   │   └─ reproject_chunks.py#   chunk re-projection      ┘
+│   ├─ segmentation/          # SAM3 wrapper (3.1 multiplex), mask store, autoprompt/ (Phase 1)
+│   ├─ phase_r/               # instance store (scene_r.db) + OBB geometry (data layer)
+│   ├─ phase2_classify/ … phase7_validation/   # Phases 2–7 (CLI each; Phase 5 also HTTP)
+│   ├─ bim/                   # C2M deviation, sábana, coverage, registration (root shims kept)
 │   ├─ ingestors/             # Stray Scanner auto-detection + loaders (ARKit poses, LiDAR depth)
-│   ├─ alignment_manager.py   # SIM3 alignment + RANSAC auto-leveling
-│   ├─ bim_comparison.py      # C2M deviation, sábana, coverage
-│   ├─ bim_registration.py    # Scan-to-BIM alignment (ICP)
 │   ├─ auth/                  # JWT auth, roles, team workspaces, activity log
 │   └─ config.yaml            # All pipeline configuration (single source of truth)
 │
 ├─ ui/                        # React 18 + TypeScript + Vite (+ Electron desktop)
-│   └─ src/
-│       ├─ App.tsx             # Main application shell
-│       ├─ components/
-│       │   ├─ AssistantPanel.tsx  # AI Assistant (spatial Q&A + measurement replay)
-│       │   ├─ IFCLoader.ts    # BIM model rendering
-│       │   ├─ PotreeLoader.ts # Point cloud streaming
-│       │   └─ InteractiveSegmentation.tsx
-│       └─ pages/LoginPage.tsx
+│   └─ src/components/        # AssistantPanel, Viewport (Potree + GLB w/ meshopt),
+│                              #   InteractiveSegmentation, BIM panels, TeamPanel, …
 │
-├─ vendor/                    # AI model integrations (git-ignored; see VENDORS.lock.md)
-│   ├─ vggt-omega/            # VGGT-Ω backbone (default backend; gated weights →
-│   │   │                      #   vendor/vggt-omega-weights/)
-│   ├─ VGGT-Long/             # framework: per-chunk backbone + SALAD/DINOv2 loop closure + Sim3
-│   │                          #   + vendored VGGSfM tracker + VGGTOmega adapter (STAC fork, submodule)
-│   ├─ depth-anything-3/      # DA3 — metric depth anchor/prior (STAC fork, private submodule)
-│   ├─ MapAnything2/          # MapAnything model (alternative backbone; TSDF depth source)
-│   ├─ r3d/                   # R3D machinery (Phase R + spatial-Q&A scene build)
-│   ├─ sam3/ + sam31/         # SAM3 (3.0 default) / SAM 3.1 (optional)
-│   ├─ CloudComPy310/         # CloudCompare Python — cloud SOR + voxel merge
-│   ├─ mvs-texturing/         # texrecon UV-atlas photo texture (default texture_mode)
-│   ├─ nvdiffrast/            # GPU vertex texture bake (alternative)
-│   ├─ meshflow/              # per-object generative meshes (replaced ShapeR)
-│   └─ PotreeConverter/       # Octree generation
+├─ vendor/                    # AI model integrations (git-ignored; authoritative
+│   │                          #   inventory + pins: vendor/VENDORS.lock.md)
+│   ├─ VGGT-Long/             # STAC fork (submodule): Ω adapter + chunked-metric machinery
+│   ├─ depth-anything-3/      # STAC fork (PRIVATE submodule): DA3 + patches
+│   ├─ vggt-omega/ + vggt-omega-weights/   # Ω code + gated 1B/512 checkpoint
+│   ├─ pgsr/                  # PGSR @ de24f1a3 (patched: no pytorch3d dep)
+│   ├─ sam3/ + sam31/         # SAM 3.0 / SAM 3.1 (3.1 = default)
+│   ├─ CloudComPy310/, MapAnything2/, r3d/, mvs-texturing/, nvdiffrast/,
+│   └─ meshflow/, PotreeConverter/, oneTBB/
 │
-├─ docs/                      # ARCHITECTURE, ROADMAP, FUTURE_VISION, SCANNING_GUIDE,
-│                              #   pose_refinement.md, r3d_catalog.md, phaseN_report.md, migration/
-├─ scripts/                   # start.sh (backend), serve_semantic.sh, launch_electron.sh,
+├─ docs/                      # ARCHITECTURE, SCANNING_GUIDE, VIO_FORMAT, A/B results,
+│                              #   phaseN reports, migration/ (env exports)
+├─ scripts/                   # start.sh, serve_semantic.sh, launch_electron.sh,
 │                              #   setup_vendors.sh, setup_pod_envs.sh, demo_pitch2.sh, …
 └─ static/                    # Legacy viewer + camera capture
 ```
 
 ---
 
-## Camera Pose & Localization
+## Configuration (current shipped defaults)
 
-Accurate camera poses drive the whole pipeline — they place every depth observation into the global cloud, refine it via loop closure, and let the TSDF mesh be photo-textured from the source frames.
-
-| Source | Type | Accuracy | When |
-|--------|------|----------|------|
-| **VGGT-Ω + loop closure + scale_align** | Feed-forward poses, SALAD/Sim3-refined, DA3-scaled | SOTA relative (CVPR'26), metric via DA3 anchor | **Default** (`vggtomega`) — these become `camera_poses.txt` used downstream |
-| **MapAnything + loop closure** | Feed-forward poses (DA3 depth+K prior), SALAD/Sim3-refined | High relative, ~cm inter-frame | `mapanything` / `hybrid_cond` backends |
-| **ARKit (Stray Scanner)** | VIO + IMU + LiDAR | ~cm absolute, metric-scale | `hybrid_cond` — injected into MapAnything as a **pose prior**, then loop-closed |
-| **DA3 SLAM** | Neural SLAM (SALAD), loop-closed | High relative, ~cm inter-frame | `da3` standalone backend |
-| **Phase R Sim(3) pose graph** | Instance-anchored inter-window refinement | Seam/drift correction, A/B fail-safe | Anchored pipeline (after SAM3, before fusion) |
-| **Gizmo + ICP** | Manual alignment → refinement | Depends on user + ICP | Scan→BIM registration |
-
-**Global consistency**: over long sequences, per-chunk poses drift. Three active layers
-fix it: (1) SALAD/DINOv2 place-recognition + Sim3 loop closure inside VGGT-Long,
-(2) `fine_register` plane-constrained inter-chunk registration (per-chunk pieces +
-per-frame interpolation), and (3) **Phase R**'s instance-anchored inter-window Sim(3)
-pose graph, whose refined poses/depth are **written back** so the cleaned cloud and the
-TSDF integrate at the same corrected poses. The metric hierarchy is inviolable:
-ChArUco/Umeyama + survey network always outrank semantic anchors; conflicts are logged,
-never silently resolved.
-
-### Pose & scale accuracy — measured state (precision task, 2026-08)
-
-Numbers from the phase A–D A/B campaign (criteria pre-registered before each run;
-full tables in `docs/scale_ab_results.md` and `docs/phase_bc_ab_results.md`):
-
-- **Scale**: one global similarity from 12 DA3 anchors (near-band + confidence
-  gated). Held-out anchor depth error 4.5–9% median across test sessions; anchor
-  ratio MAD 3.5–6.7%; every run persists `output/scale_diagnostics.json`
-  (per-anchor ratios, jackknife, residual-vs-depth, `scale_confidence` 0–1).
-  Structured estimators (affine / depth-dependent) were REJECTED by their own
-  cross-validation gate on all sessions. An optional **VIO trajectory**
-  (`docs/VIO_FORMAT.md`) takes over the scale when present; VIO↔DA3 agreement
-  is reported per session.
-- **Surface quality (fast mode)**: multi-view consistency filter ON — planar-patch
-  RMS 9.00→8.70 mm (test2), double-surface patches down, TSDF 8–16% faster.
-- **Precision mode** (`vggtomega_pgsr`): +86% mesh coverage and better error tail
-  (p90 10.83→10.01 mm) at ~2 h/scene; planar RMS ties the fast mode. Photometric
-  pose refinement lost its A/B (poses are better left at the pipeline's solution);
-  the point-to-plane `pose_refine` stage is self-gated and enabled.
-- **Not yet measured**: parity vs RealityScan — needs the Phase E external
-  scorecard (COLMAP/OpenMVS proxy + RealityScan import), pending.
-
----
-
-## Pipeline Configuration
-
-All pipeline parameters are centralized in `server/config.yaml`. Current shipped values:
+All pipeline parameters live in `server/config.yaml` (loaded once at server start — a
+config change requires a backend restart). The load-bearing defaults:
 
 ```yaml
 pipeline:
-  auto_tsdf: true              # every reconstruction ALWAYS ends with the textured mesh
-                               # (never stops at the Potree cloud)
+  auto_tsdf: true              # every run ALWAYS ends with the textured mesh
+  auto_segment: false          # semantic chain on demand (temporarily out of the default run)
 
 reconstruction:
-  backend: "vggtomega_pgsr"    # DEFAULT (2026-08): full vggtomega pipeline + per-scene PGSR
-                               # photometric optimization (precision stage). "vggtomega" =
-                               # fast mode without the ~2 h PGSR stage.
-  vggtomega:                   # Ω backbone (gated weights → vendor/vggt-omega-weights/)
-    scale_align: true          # metric: global similarity vs DA3 depth (fails hard if unrecoverable)
-    scale_mode: global_median  # A/B'd vs affine/depth-dependent models — baseline won
-    scale_vio: true            # optional VIO trajectory sets the scale when present (docs/VIO_FORMAT.md)
-  simple:
-    keyframe_motion_quantum: 250.0  # parallax-uniform keyframes (denser was A/B'd: WORSE)
+  backend: "vggtomega_pgsr"    # DEFAULT: precision mode (+86% mesh coverage, ~2 h/scene extra)
+                               # "vggtomega" = fast mode without the PGSR stage
+  vggtomega:
+    scale_align: true          # metric scale vs DA3 anchors — fails hard if unrecoverable
+    scale_mode: global_median  # structured models lost their own CV gate in the A/B
+    scale_vio: true            # a VIO trajectory, when present, SETS the scale
+    loop_closure: true         # effective only in chunked-metric mode
+  simple:                      # the one-pass pipeline (enabled)
+    frame_selection: motion    # parallax-uniform keyframes (fps/dino/parallax also exist)
+    keyframe_motion_quantum: 80.0   # 80 since 2026-08-15 (visual A/B) — UNDER EVALUATION;
+                               # 250 is the previous pose-proxy-validated value
+    max_walk_single_pass_m: 15.0    # beyond → phase 2 chunked-metric re-run
+    chunk_walk_m: 12.0         # phase-2 chunks sized by walked meters, 50% overlap
+    conf_percentile: 10.0      # drop the bottom 10% of valid points
     scale_anchor_frames: 12    # DA3 metric anchors (12 vs 24/32 A/B'd: 12 stays)
   pose_refine:
-    enabled: true              # point-to-plane joint pose reconciliation, SELF-GATED
-                               # (applies only if the fresh measurement improves)
-  pgsr:                        # precision stage (vendor PGSR @ de24f1a, env `pgsr`)
-    iterations: 30000          # ~2 h/scene on A100 (measured), PSNR ~24.8, ~11 GB VRAM
-    resolution: 2              # vendor's published max-quality regime (r2 + ncc 0.5)
+    enabled: true              # point-to-plane joint refinement, SELF-GATED
+  pgsr:                        # precision stage (vendor PGSR @ de24f1a3, env `pgsr`)
+    iterations: 30000          # ~2 h/scene, PSNR ~24.8, ~11 GB VRAM (measured)
+    ncc_scale: 0.5             # vendor max-quality regime + exposure compensation
     pose_refine: false         # photometric pose refinement LOST its A/B (RMS +11%)
-  bundle_adjust:
-    enabled: false             # OFF — degraded the metric vggtomega result in A/B; machinery kept
+    consistent_cloud: true     # rebuild cloud + Potree from the PGSR depths
+  bundle_adjust: { enabled: false }   # retired: degraded the metric result
+  fine_register: { enabled: false }   # retired: no usable signal
 
 tsdf:                          # final stage: textured mesh
-  voxel_length: 0.012          # 1.2 cm voxels (8/6 mm A/B'd: worse RMS and/or >2× cost)
-  depth_source: auto           # PGSR renders when the precision stage ran; else Ω keyframe depth
-  mv_consistency: true         # multi-view consistency filter pre-TSDF (A/B: less noise,
-                               # fewer double surfaces, FASTER integration)
-  native_depth_method: "off"   # RGB-guided native-res depth refinement (A/B'd: double
-                               # surfaces doubled — consistency, not resolution, is the ceiling)
-  tsdf_max_edge_m: 0.10        # cull triangles bridging gaps/discontinuities
-  texture_mode: "texrecon"     # UV-atlas photographic texture (MVS-Texturing)
+  depth_source: auto           # PGSR renders when the precision stage ran; else Ω depth
+  pgsr_mask_to_cleaned_cloud: false   # precision mode = full coverage (verified depth)
+  voxel_length: 0.012          # 12 mm voxels (8/6 mm A/B'd: worse at 1.8–2.9× cost)
+  mv_consistency: true         # multi-view depth filter (fast-mode depth path)
+  native_depth_method: "off"   # A/B'd: doubled double-surface incidence
+  tsdf_max_edge_m: 0.10        # cull bridge/spike triangles
+  texture_mode: "texrecon"     # UV-atlas photographic texture
 
-alignment:
-  method: "scale+se3"          # SIM3 alignment
-  auto_leveling:
-    enabled: true              # RANSAC floor detection → gravity
+models:
+  segmentation:
+    version: "sam3.1"          # Object Multiplex — 6.1× faster than 3.0, measured
+
+semantic:                      # Phase 0 service
+  service: { host: 127.0.0.1, port: 8799 }
+  backends:
+    qwen_local: { model_id: "Qwen/Qwen3-VL-8B-Instruct" }             # default
+    qwen_local_large: { model_id: "Qwen/Qwen3-VL-32B-Instruct-FP8" }  # opt-in candidate
 
 bim:
   deviation:
     tolerance_mm: 50           # C2M threshold (warning/error/critical: 10/20/30 mm)
     coverage_proximity_m: 0.15
-
-semantic:                      # Phase 0 service
-  service: { host: 127.0.0.1, port: 8799 }
-  backends:
-    qwen_local: { model_id: "Qwen/Qwen3-VL-8B-Instruct" }        # default
-    qwen_local_large: { model_id: "Qwen/Qwen3-VL-32B-Instruct-FP8" }  # opt-in candidate
 ```
 
 ---
 
-## Environments & Services
+## Environments & services
 
 Each heavy component lives in its own conda env (export YAMLs in `docs/migration/`):
 
 | Env | Used by |
 |-----|---------|
-| `da3` | Backend server (`scripts/start.sh`) + DA3 |
+| `da3` | Backend server (`scripts/start.sh`) + DA3 + SAM3 (in-process) |
 | `semantic` | vLLM / Qwen3-VL service (`scripts/serve_semantic.sh`) |
-| `sam3` | SAM3 segmentation worker |
-| `mapanything` | MapAnything / VGGT-Long / VGGT-Ω backbone (+ BA tooling) |
+| `mapanything` | VGGT-Ω / VGGT-Long / MapAnything reconstruction pass |
+| `pgsr` | PGSR precision trainer (`server/run_pgsr.sh`) |
 | `CloudComPy310` | CloudCompPy cloud cleaning |
 | `meshflow` | Per-object generative meshes |
-| `nodejs` | Vite dev server + Electron |
+| `nodejs` | Vite dev server + Electron + GLB compression tools |
 
 `init_pod.sh` boots everything on a fresh pod as tmux sessions: `backend` (API on
 8765), `vite` (UI dev server), `electron` (desktop app over noVNC on `:6080/vnc.html`,
@@ -468,66 +483,60 @@ skip with `START_ELECTRON=0`), `semantic` (vLLM + healthcheck window, skip with
 `START_SEMANTIC=0` when the GPU is fully needed by a heavy reconstruction), `claude`.
 
 **Hardware**: developed and validated on a single **RTX A6000 48 GB** (sm_86), with the
-semantic service and a full reconstruction coexisting on the same GPU (Phase 7
-coexistence probe; `gpu_memory_utilization` budgeted in `config.yaml`). Everything runs
-locally — no paid external APIs.
+semantic service (GPU util 0.50) and a full reconstruction coexisting on the same GPU
+(Phase 7 coexistence probe). Everything runs locally — no paid external APIs.
 
 ---
 
-## Quick Start
+## Quick start
 
 ### 1. Clone WITH submodules (required — a plain `git clone` will NOT work)
 
-Several vendored dependencies are pinned as **git submodules**, including two **STAC forks
-that carry local patches the pipeline depends on**:
+Two vendored dependencies are pinned as **git submodules**, both STAC forks carrying
+local patches the pipeline depends on:
 
 | Submodule | Remote | Notes |
 |-----------|--------|-------|
-| `vendor/VGGT-Long` | `hernanbarreto/VGGT-Long` (STAC fork) | loop-closure + sky-removal + DA3-prior patches + VGGT-Ω adapter |
+| `vendor/VGGT-Long` | `hernanbarreto/VGGT-Long` (STAC fork) | Ω adapter + chunked-metric machinery (seam gluing, metric lock, elastic consensus, depth graph) + sky removal |
 | `vendor/depth-anything-3` | `hernanbarreto/Depth-Anything-3` (STAC fork, **private**) | cam-encoder pose conditioning + sky drop |
 
 ```bash
-# Clone the repo AND all submodules in one step (recommended)
 git clone --recursive https://github.com/hernanbarreto/stac-build.git
 cd stac-build
-
-# If you already cloned without --recursive:
+# if already cloned without --recursive:
 git submodule update --init --recursive
 ```
 
-> ⚠️ `vendor/depth-anything-3` points to a **PRIVATE** STAC fork. You need GitHub access to
-> `hernanbarreto/Depth-Anything-3` (a PAT / SSH key configured) or the submodule fetch fails.
-> The patches there are **required** — without them DA3 behaves differently than here.
+> ⚠️ `vendor/depth-anything-3` points to a **PRIVATE** STAC fork. You need GitHub
+> access to `hernanbarreto/Depth-Anything-3` (PAT / SSH key) or the submodule fetch
+> fails. The patches there are **required**.
 
-### 2. Provision the git-ignored vendors (NOT in the repo)
+### 2. Provision the git-ignored vendors
 
-Heavy/third-party vendors are **git-ignored** and are **not** fetched by clone or by Docker
-(`Dockerfile` does `COPY vendor/ ./vendor/`, i.e. it copies whatever is already on disk).
-The git-based ones are pinned and restored automatically:
+Heavy/third-party vendors are git-ignored and not fetched by clone or Docker. The
+git-based ones are pinned and restored automatically:
 
 ```bash
 bash scripts/setup_vendors.sh          # clone every pinned git vendor + init submodules
 bash scripts/setup_vendors.sh --list   # show the full manifest without touching anything
 ```
 
-This restores the pinned clones — `r3d`, `sam31`, `nvdiffrast`, `meshflow`,
-`mvs-texturing`, `oneTBB-src`, `vggt-omega`, `ShapeR` — at their locked commits.
-The **non-git** vendors (weights / build trees / prebuilt binaries) still need manual
-provisioning: `sam3` (default segmentation baseline), `cloudcompy` / `CloudComPy310`,
-`MapAnything2`, `PotreeConverter`, `oneTBB` (built from `oneTBB-src`), and
-`vggt-omega-weights` (**gated** — request access at `huggingface.co/facebook/VGGT-Omega`,
-place `vggt_omega_1b_512.pt` in `vendor/vggt-omega-weights/`). The authoritative
-inventory — every vendor, its source, pin, and provisioning method — is
-[`vendor/VENDORS.lock.md`](vendor/VENDORS.lock.md).
+This restores the pinned clones — `pgsr`, `r3d`, `sam31`, `nvdiffrast`, `meshflow`,
+`mvs-texturing`, `oneTBB-src`, `vggt-omega` — at their locked commits. The **non-git**
+vendors (weights / build trees / prebuilt binaries) still need manual provisioning:
+`sam3`, `cloudcompy` / `CloudComPy310`, `MapAnything2`, `PotreeConverter`, `oneTBB`,
+and `vggt-omega-weights` (**gated** — request access at
+`huggingface.co/facebook/VGGT-Omega`, place `vggt_omega_1b_512.pt` in
+`vendor/vggt-omega-weights/`). The authoritative inventory — every vendor, its source,
+pin, and provisioning method — is [`vendor/VENDORS.lock.md`](vendor/VENDORS.lock.md).
 
 ### 3. Set up environments & download model weights
 
 ```bash
-bash scripts/setup_pod_envs.sh         # restore the conda envs (da3, sam3, mapanything, semantic, …)
-
+bash scripts/setup_pod_envs.sh         # restore the conda envs
 ./setup_weights.sh all                 # da3 (DINO-SALAD) + sam3 + vlm + semantic (Qwen3-VL-8B)
 # or individually: ./setup_weights.sh  da3 | sam3 | vlm | semantic | semantic-large
-# (DA3 / InternVL3 model weights auto-download via HF Hub on first run)
+# (DA3 model weights auto-download via HF Hub on first run)
 ```
 
 ### 4. Run
@@ -548,22 +557,24 @@ Access the application at `https://localhost:8765` (self-signed certificate).
 
 ---
 
-## Supported Formats
+## Supported formats
 
 | Type | Formats |
 |------|---------|
 | **Video input** | MP4, AVI, MOV |
 | **LiDAR input** | Stray Scanner (depth PNGs + odometry CSV + intrinsics CSV) |
+| **VIO input** | `vio_trajectory.csv/json` (`docs/VIO_FORMAT.md`) — sets the metric scale when present |
 | **BIM models** | IFC 2x3, IFC 4, IFC 4.3 |
 | **Point clouds** | PLY (native), Potree octree |
-| **Meshes** | GLB (TSDF textured surface mesh; per-object meshes via MeshFlow) |
+| **Meshes** | GLB (TSDF textured surface mesh, meshopt+WebP compressed) |
 | **Export** | PLY, GLB, JSON metrics, Potree, Markdown reports (ES/FR) |
 
 ---
 
 ## Roadmap
 
-See [ROADMAP.md](docs/ROADMAP.md) for the full development roadmap and [FUTURE_VISION.md](docs/FUTURE_VISION.md) for the strategic platform vision.
+See [ROADMAP.md](docs/ROADMAP.md) for the development roadmap and
+[FUTURE_VISION.md](docs/FUTURE_VISION.md) for the strategic platform vision.
 
 ---
 
