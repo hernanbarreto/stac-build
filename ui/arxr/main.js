@@ -1,0 +1,615 @@
+// STAC-Builder — WebXR AR viewer (phone, over the tailnet).
+//
+// Session picker → metric mesh (scene.glb, meshopt+WebP) and/or decimated
+// point cloud (ARC1 binary) → WebXR immersive-ar placement with hit-test when
+// the browser offers it → measurement tools (distance / angle / volume box,
+// computed in MODEL space so they stay metric at any display scale) → Spatial
+// AI chat against POST /api/spatial_qa with best-effort 3D markers from the
+// tool traces.
+//
+// Non-XR fallback: the same scene with OrbitControls — every tool works there
+// too, so the app is fully testable from a desktop browser.
+//
+// Built with esbuild (ui/arxr/build.sh) → static/ar/app.js.
+//
+// Hernán Barreto - Ingerop IN3 Session IV - STAC
+
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+
+// BVH-accelerated raycast: the TSDF mesh has millions of triangles — the
+// stock raycaster takes seconds per tap on a phone, the BVH takes ~1 ms.
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+const $ = (id) => document.getElementById(id);
+const API = '';                       // same origin
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+
+let toastTimer = null;
+function toast(msg, ms = 2600) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(toastTimer);
+  if (ms > 0) toastTimer = setTimeout(() => { t.style.display = 'none'; }, ms);
+}
+function loading(on, msg = 'Loading…') {
+  $('loading').style.display = on ? 'flex' : 'none';
+  $('loading-msg').textContent = msg;
+}
+
+// ── session picker ────────────────────────────────────────────────────────────
+
+async function loadSessions() {
+  const cards = $('cards');
+  try {
+    const r = await fetch(`${API}/api/ar/sessions`);
+    const data = await r.json();
+    if (!data.sessions?.length) {
+      cards.innerHTML = '<div class="empty">No reconstructions with mesh or cloud yet.</div>';
+      return;
+    }
+    cards.innerHTML = '';
+    for (const s of data.sessions) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const mb = s.mesh_bytes ? ` (${(s.mesh_bytes / 1e6).toFixed(0)} MB)` : '';
+      card.innerHTML = `
+        <div class="name">${s.id}</div>
+        <div class="badges">
+          <span class="badge ${s.has_mesh ? 'on' : ''}">mesh${s.has_mesh ? mb : ' ✕'}</span>
+          <span class="badge ${s.has_cloud ? 'on' : ''}">cloud${s.has_cloud ? ` · ${s.cloud_source}` : ' ✕'}</span>
+          <span class="badge ${s.has_ai ? 'on' : ''}">AI ${s.has_ai ? '✦' : '✕ (no instance store)'}</span>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" class="ck-mesh" ${s.has_mesh ? 'checked' : 'disabled'}> mesh</label>
+          <label><input type="checkbox" class="ck-cloud" ${s.has_cloud && !s.has_mesh ? 'checked' : ''} ${s.has_cloud ? '' : 'disabled'}> cloud</label>
+          <button class="open primary">Open</button>
+        </div>`;
+      card.querySelector('.open').onclick = () => {
+        const wantMesh = card.querySelector('.ck-mesh').checked;
+        const wantCloud = card.querySelector('.ck-cloud').checked;
+        if (!wantMesh && !wantCloud) { toast('Pick mesh, cloud, or both'); return; }
+        openViewer(s, wantMesh, wantCloud);
+      };
+      cards.appendChild(card);
+    }
+  } catch (e) {
+    cards.innerHTML = `<div class="empty">Backend unreachable: ${e}</div>`;
+  }
+}
+
+// ── three.js scene ────────────────────────────────────────────────────────────
+
+let renderer, scene, camera, controls;
+let modelGroup;          // placed/scaled in AR; children live in METRIC model space
+let contentGroup;        // mesh + cloud
+let measureGroup;        // measurement geometry (model space)
+let aiGroup;             // AI trace markers (model space)
+let reticle, hitTestSource = null, xrRefSpace = null;
+let session = null;      // current STAC session entry
+let floorMatrix = null;  // upright transform for sessions whose in-pipeline
+                         // orientation was refused (server sends 4x4 row-major)
+let raycastTargets = [];
+let displayScale = 1;    // 1, 0.1, 0.02
+const SCALES = [[1, '1:1'], [0.1, '1:10'], [0.02, '1:50']];
+let scaleIdx = 0;
+let currentTool = 'move';
+let fullbright = true;
+const savedMaterials = new Map();
+
+function initThree() {
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.xr.enabled = true;
+  $('canvas-wrap').appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.02, 300);
+  camera.position.set(4, 3, 4);
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.1));
+  const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+  dir.position.set(3, 10, 4);
+  scene.add(dir);
+
+  modelGroup = new THREE.Group();
+  contentGroup = new THREE.Group();
+  measureGroup = new THREE.Group();
+  aiGroup = new THREE.Group();
+  modelGroup.add(contentGroup, measureGroup, aiGroup);
+  scene.add(modelGroup);
+
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 1, 0);
+
+  reticle = new THREE.Mesh(
+    new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0x4ade80 }));
+  reticle.matrixAutoUpdate = false;
+  reticle.visible = false;
+  scene.add(reticle);
+
+  window.addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+  renderer.setAnimationLoop(onFrame);
+  bindTapPicking();
+}
+
+function onFrame(_t, frame) {
+  if (frame && hitTestSource) {
+    const hits = frame.getHitTestResults(hitTestSource);
+    if (hits.length) {
+      const pose = hits[0].getPose(xrRefSpace);
+      reticle.visible = currentTool === 'move';
+      reticle.matrix.fromArray(pose.transform.matrix);
+    } else {
+      reticle.visible = false;
+    }
+  }
+  controls.enabled = !renderer.xr.isPresenting;
+  renderer.render(scene, camera);
+}
+
+// ── asset loading ─────────────────────────────────────────────────────────────
+
+async function loadMesh(id) {
+  const loader = new GLTFLoader();
+  loader.setMeshoptDecoder(MeshoptDecoder);
+  const gltf = await loader.loadAsync(`${API}/api/ar/mesh/${encodeURIComponent(id)}`);
+  const root = gltf.scene;
+  root.traverse((o) => {
+    if (o.isMesh) {
+      o.geometry.computeBoundsTree();
+      raycastTargets.push(o);
+      savedMaterials.set(o, o.material);
+    }
+  });
+  contentGroup.add(root);
+  applyLighting();
+}
+
+async function loadCloud(id) {
+  const r = await fetch(`${API}/api/ar/cloud/${encodeURIComponent(id)}`);
+  if (!r.ok) throw new Error(`cloud HTTP ${r.status}`);
+  const buf = await r.arrayBuffer();
+  const dv = new DataView(buf);
+  if (dv.getUint32(0, false) !== 0x41524331) throw new Error('bad ARC1 magic');
+  const n = dv.getUint32(4, true);
+  const xyz = new Float32Array(buf, 32, n * 3);
+  const rgbU8 = new Uint8Array(buf, 32 + n * 12, n * 3);
+  const col = new Float32Array(n * 3);
+  for (let i = 0; i < n * 3; i++) col[i] = rgbU8[i] / 255;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(xyz, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const pts = new THREE.Points(g, new THREE.PointsMaterial({
+    size: 0.014, vertexColors: true, sizeAttenuation: true }));
+  pts.userData.isCloud = true;
+  contentGroup.add(pts);
+  raycastTargets.push(pts);
+}
+
+function applyLighting() {
+  contentGroup.traverse((o) => {
+    if (!o.isMesh) return;
+    if (fullbright) {
+      if (!o.userData.fbMat) {
+        const src = savedMaterials.get(o);
+        o.userData.fbMat = new THREE.MeshBasicMaterial({
+          map: src && src.map ? src.map : null,
+          vertexColors: !!(src && src.vertexColors),
+          color: src && src.color ? src.color.clone() : new THREE.Color(0xffffff),
+        });
+      }
+      o.material = o.userData.fbMat;
+    } else if (savedMaterials.has(o)) {
+      o.material = savedMaterials.get(o);
+    }
+  });
+}
+
+async function openViewer(s, wantMesh, wantCloud) {
+  session = s;
+  $('home').style.display = 'none';
+  $('viewer').style.display = 'block';
+  $('v-title').textContent = s.id;
+  if (!renderer) initThree();
+  clearContent();
+  loading(true, `Loading ${s.id}…`);
+  try {
+    if (wantMesh) { loading(true, 'Loading mesh…'); await loadMesh(s.id); }
+    if (wantCloud) { loading(true, 'Loading point cloud…'); await loadCloud(s.id); }
+    // upright the content when the pipeline's own orientation gate refused
+    // (measurements + AR floor placement need gravity-aligned Y)
+    floorMatrix = null;
+    if (s.floor_transform) {
+      floorMatrix = new THREE.Matrix4().set(...s.floor_transform);
+      contentGroup.matrixAutoUpdate = false;
+      contentGroup.matrix.copy(floorMatrix);
+      contentGroup.matrixWorldNeedsUpdate = true;
+    }
+    frameContent();
+    setTool('move');
+    toast(s.has_ai ? 'Tip: the AI ✦ button answers with real measurements'
+                   : 'AI disabled: this session has no instance store (run segmentation)');
+  } catch (e) {
+    toast(`Load failed: ${e.message || e}`, 6000);
+  } finally {
+    loading(false);
+  }
+  setupARButton();
+}
+
+function clearContent() {
+  for (const grp of [contentGroup, measureGroup, aiGroup]) {
+    while (grp.children.length) {
+      const c = grp.children.pop();
+      c.traverse?.((o) => { o.geometry?.dispose?.(); });
+    }
+  }
+  raycastTargets = [];
+  savedMaterials.clear();
+  contentGroup.matrixAutoUpdate = true;
+  contentGroup.matrix.identity();
+  contentGroup.position.set(0, 0, 0);
+  contentGroup.quaternion.identity();
+  floorMatrix = null;
+  modelGroup.position.set(0, 0, 0);
+  modelGroup.quaternion.identity();
+  setScaleIdx(0);
+}
+
+function frameContent() {
+  const box = new THREE.Box3().setFromObject(contentGroup);
+  if (box.isEmpty()) return;
+  const c = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3()).length();
+  controls.target.copy(c);
+  camera.position.copy(c).add(new THREE.Vector3(size * 0.4, size * 0.3, size * 0.4));
+  camera.near = Math.max(size / 1000, 0.01);
+  camera.far = size * 20;
+  camera.updateProjectionMatrix();
+}
+
+// ── AR session ────────────────────────────────────────────────────────────────
+
+async function setupARButton() {
+  const btn = $('btn-ar');
+  const ok = navigator.xr && await navigator.xr.isSessionSupported?.('immersive-ar')
+    .catch(() => false);
+  btn.style.display = ok ? 'block' : 'none';
+  if (!ok) toast('WebXR AR not available in this browser — 3D mode only', 4000);
+  btn.onclick = enterAR;
+}
+
+async function enterAR() {
+  try {
+    const xrSession = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: [],
+      optionalFeatures: ['local-floor', 'hit-test', 'dom-overlay'],
+      domOverlay: { root: $('overlay') },
+    });
+    // older XR browsers (Mozilla XRViewer) may not grant local-floor
+    let refType = 'local-floor';
+    try { await xrSession.requestReferenceSpace('local-floor'); }
+    catch { refType = 'local'; }
+    renderer.xr.setReferenceSpaceType(refType);
+    await renderer.xr.setSession(xrSession);
+    xrRefSpace = renderer.xr.getReferenceSpace();
+    try {
+      const viewerSpace = await xrSession.requestReferenceSpace('viewer');
+      hitTestSource = await xrSession.requestHitTestSource?.({ space: viewerSpace }) || null;
+    } catch { hitTestSource = null; }
+    // start miniature 1.2 m ahead: the user re-places with Move, and can go 1:1
+    setScaleIdx(1);
+    modelGroup.position.set(0, 0, -1.2);
+    xrSession.addEventListener('select', onXRSelect);
+    xrSession.addEventListener('end', () => {
+      hitTestSource = null; reticle.visible = false;
+      setScaleIdx(0);
+      modelGroup.position.set(0, 0, 0);
+      frameContent();
+    });
+    toast('Tap to place (Move) — switch tools below');
+  } catch (e) {
+    toast(`AR failed: ${e.message || e}`, 5000);
+  }
+}
+
+function onXRSelect(ev) {
+  const frame = ev.frame;
+  if (currentTool === 'move') {
+    if (reticle.visible) {
+      const p = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
+      reticle.matrix.decompose(p, q, s);
+      modelGroup.position.copy(p);
+    } else {
+      // no hit-test (older XR browsers): drop 1.5 m in front of the camera
+      const cam = renderer.xr.getCamera();
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+      modelGroup.position.copy(cam.position).addScaledVector(fwd, 1.5);
+      modelGroup.position.y = 0;
+    }
+    return;
+  }
+  // measurement tap: ray from the input source (screen tap on handheld AR)
+  const pose = frame.getPose(ev.inputSource.targetRaySpace, xrRefSpace);
+  if (!pose) return;
+  const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
+  const origin = new THREE.Vector3().setFromMatrixPosition(m);
+  const dir = new THREE.Vector3(0, 0, -1).applyMatrix4(
+    new THREE.Matrix4().extractRotation(m)).normalize();
+  pickAndMeasure(origin, dir);
+}
+
+// ── picking (shared XR / non-XR) ─────────────────────────────────────────────
+
+const raycaster = new THREE.Raycaster();
+raycaster.firstHitOnly = true;        // three-mesh-bvh fast path
+
+function pickAndMeasure(origin, dir) {
+  raycaster.set(origin, dir);
+  raycaster.params.Points.threshold = 0.02 * displayScale * 3;
+  const hits = raycaster.intersectObjects(raycastTargets, false);
+  if (!hits.length) { toast('No surface under the tap'); return; }
+  const world = hits[0].point.clone();
+  const model = modelGroup.worldToLocal(world.clone());   // METRIC coordinates
+  addMeasurePoint(model);
+}
+
+function bindTapPicking() {
+  let downPos = null;
+  renderer.domElement.addEventListener('pointerdown', (e) => {
+    downPos = [e.clientX, e.clientY];
+  });
+  renderer.domElement.addEventListener('pointerup', (e) => {
+    if (renderer.xr.isPresenting) return;              // XR taps come via 'select'
+    if (!downPos) return;
+    const dx = e.clientX - downPos[0], dy = e.clientY - downPos[1];
+    downPos = null;
+    if (Math.hypot(dx, dy) > 8 || currentTool === 'move') return;   // drag = orbit
+    const ndc = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1,
+                                  -(e.clientY / innerHeight) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    raycaster.params.Points.threshold = 0.02 * displayScale * 3;
+    const hits = raycaster.intersectObjects(raycastTargets, false);
+    if (!hits.length) return;
+    addMeasurePoint(modelGroup.worldToLocal(hits[0].point.clone()));
+  });
+}
+
+// ── measurement tools (all math in metric MODEL space) ───────────────────────
+
+let pending = [];        // clicked model-space points for the current tool
+
+function setTool(tool) {
+  currentTool = tool;
+  pending = [];
+  document.querySelectorAll('#toolbar [data-tool]').forEach((b) =>
+    b.classList.toggle('active', b.dataset.tool === tool));
+  const hints = {
+    move: 'Move: tap the floor to place the model (AR)',
+    dist: 'Distance: tap two points',
+    angle: 'Angle: tap 3 points (vertex second)',
+    vol: 'Volume: tap 2 base corners, then a height point',
+  };
+  toast(hints[tool] || tool);
+}
+
+function fmt(m) {
+  return m >= 1 ? `${m.toFixed(2)} m` : `${(m * 100).toFixed(1)} cm`;
+}
+
+function marker(p, color = 0xffc107) {
+  const s = new THREE.Mesh(new THREE.SphereGeometry(0.02, 12, 12),
+                           new THREE.MeshBasicMaterial({ color }));
+  s.position.copy(p);
+  measureGroup.add(s);
+  return s;
+}
+
+function line(points, color = 0xffc107) {
+  const g = new THREE.BufferGeometry().setFromPoints(points);
+  const l = new THREE.Line(g, new THREE.LineBasicMaterial({ color }));
+  measureGroup.add(l);
+  return l;
+}
+
+function label(text, p, group = measureGroup) {
+  const pad = 8, fs = 34;
+  const cv = document.createElement('canvas');
+  const cx = cv.getContext('2d');
+  cx.font = `600 ${fs}px system-ui`;
+  cv.width = cx.measureText(text).width + pad * 2;
+  cv.height = fs + pad * 2;
+  cx.font = `600 ${fs}px system-ui`;
+  cx.fillStyle = 'rgba(12,16,20,0.85)';
+  cx.fillRect(0, 0, cv.width, cv.height);
+  cx.fillStyle = '#ffd866';
+  cx.textBaseline = 'middle';
+  cx.fillText(text, pad, cv.height / 2);
+  const tex = new THREE.CanvasTexture(cv);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+  const h = 0.12;                                    // 12 cm tall at 1:1
+  sp.scale.set(h * cv.width / cv.height, h, 1);
+  sp.position.copy(p);
+  group.add(sp);
+  return sp;
+}
+
+function addMeasurePoint(p) {
+  if (currentTool === 'dist') {
+    pending.push(p); marker(p);
+    if (pending.length === 2) {
+      const [a, b] = pending;
+      line([a, b]);
+      label(fmt(a.distanceTo(b)), a.clone().add(b).multiplyScalar(0.5));
+      pending = [];
+    }
+  } else if (currentTool === 'angle') {
+    pending.push(p); marker(p, 0x79c0ff);
+    if (pending.length === 3) {
+      const [a, v, b] = pending;
+      line([a, v, b], 0x79c0ff);
+      const u1 = a.clone().sub(v).normalize(), u2 = b.clone().sub(v).normalize();
+      const deg = THREE.MathUtils.radToDeg(Math.acos(
+        THREE.MathUtils.clamp(u1.dot(u2), -1, 1)));
+      label(`${deg.toFixed(1)}°`, v.clone().addScaledVector(
+        u1.clone().add(u2).normalize(), 0.25));
+      pending = [];
+    }
+  } else if (currentTool === 'vol') {
+    pending.push(p); marker(p, 0x4ade80);
+    if (pending.length === 3) {
+      const [a, b, c] = pending;
+      const y0 = Math.min(a.y, b.y);
+      const h = Math.max(Math.abs(c.y - y0), 0.05);
+      const min = new THREE.Vector3(Math.min(a.x, b.x), y0, Math.min(a.z, b.z));
+      const max = new THREE.Vector3(Math.max(a.x, b.x), y0 + h, Math.max(a.z, b.z));
+      const size = max.clone().sub(min);
+      const vol = size.x * size.y * size.z;
+      const geo = new THREE.BoxGeometry(size.x, size.y, size.z);
+      const box = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+        color: 0x4ade80, transparent: true, opacity: 0.18, depthWrite: false }));
+      box.position.copy(min).add(size.clone().multiplyScalar(0.5));
+      measureGroup.add(box);
+      measureGroup.add(new THREE.LineSegments(
+        new THREE.EdgesGeometry(geo),
+        new THREE.LineBasicMaterial({ color: 0x4ade80 }))).children.at(-1)
+        .position.copy(box.position);
+      label(`${size.x.toFixed(2)}×${size.z.toFixed(2)}×${size.y.toFixed(2)} m = ${vol.toFixed(2)} m³`,
+            box.position.clone().setY(max.y + 0.1));
+      pending = [];
+    }
+  }
+}
+
+// ── AI chat (Phase 5 spatial QA) ─────────────────────────────────────────────
+
+function chatMsg(html, cls = '') {
+  const d = document.createElement('div');
+  d.className = `msg ${cls}`;
+  d.innerHTML = html;
+  $('msgs').appendChild(d);
+  $('msgs').scrollTop = $('msgs').scrollHeight;
+  return d;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+
+// best-effort: pull [x,y,z] positions out of tool results and mark them in 3D
+function extractPoints(obj, out = [], depth = 0) {
+  if (depth > 6 || out.length > 20 || obj == null) return out;
+  if (Array.isArray(obj)) {
+    if (obj.length === 3 && obj.every((v) => typeof v === 'number')) {
+      out.push(new THREE.Vector3(obj[0], obj[1], obj[2]));
+    } else obj.forEach((v) => extractPoints(v, out, depth + 1));
+  } else if (typeof obj === 'object') {
+    for (const [k, v] of Object.entries(obj)) {
+      if (/pos|point|center|centroid|p1|p2|start|end|corner/i.test(k)) {
+        extractPoints(v, out, depth + 1);
+      } else if (typeof v === 'object') extractPoints(v, out, depth + 1);
+    }
+  }
+  return out;
+}
+
+async function askAI(question) {
+  chatMsg(esc(question), 'q');
+  const wait = chatMsg('…thinking (deterministic tools measure, the VLM narrates)');
+  try {
+    const r = await fetch(`${API}/api/spatial_qa`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, session_id: session.id }),
+    });
+    const data = await r.json();
+    if (r.status === 503 && data.status === 'loading') {
+      wait.innerHTML = '⏳ The VLM is loading on the pod GPU (it frees VRAM during '
+        + 'reconstruction) — ask again in ~2 minutes.';
+      return;
+    }
+    if (!r.ok) { wait.innerHTML = `⚠ ${esc(data.error || r.status)}`; return; }
+    let html = esc(data.answer || '(no answer)');
+    if (data.tool_trace?.length) {
+      const tr = data.tool_trace.map((t) =>
+        `▸ ${esc(t.tool || t.name || '?')}(${esc(JSON.stringify(t.args ?? t.arguments ?? {}))})`
+      ).join('\n');
+      html += `<div class="trace">${tr}</div>`;
+    }
+    wait.innerHTML = html;
+    // markers from trace results
+    while (aiGroup.children.length) aiGroup.children.pop();
+    // store coordinates live in the RAW model frame — upright them like the content
+    const pts = extractPoints(data.tool_trace)
+      .map((p) => (floorMatrix ? p.applyMatrix4(floorMatrix) : p));
+    pts.slice(0, 20).forEach((p, i) => {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(0.03, 12, 12),
+                               new THREE.MeshBasicMaterial({ color: 0xd65db1 }));
+      m.position.copy(p);
+      aiGroup.add(m);
+      if (i < 8) label(`✦${i + 1}`, p.clone().add(new THREE.Vector3(0, 0.12, 0)), aiGroup);
+    });
+    if (pts.length) toast(`${pts.length} AI reference point(s) marked in the scene`);
+  } catch (e) {
+    wait.innerHTML = `⚠ ${esc(e.message || e)}`;
+  }
+}
+
+// ── scale / lighting / wiring ────────────────────────────────────────────────
+
+function setScaleIdx(i) {
+  scaleIdx = i % SCALES.length;
+  displayScale = SCALES[scaleIdx][0];
+  modelGroup.scale.setScalar(displayScale);
+  $('btn-scale').textContent = SCALES[scaleIdx][1];
+}
+
+function wireUI() {
+  $('btn-back').onclick = () => {
+    renderer?.xr.getSession()?.end();
+    $('viewer').style.display = 'none';
+    $('home').style.display = 'block';
+  };
+  $('btn-scale').onclick = () => setScaleIdx(scaleIdx + 1);
+  $('btn-light').onclick = () => { fullbright = !fullbright; applyLighting(); };
+  $('btn-clear').onclick = () => {
+    pending = [];
+    while (measureGroup.children.length) measureGroup.children.pop();
+    while (aiGroup.children.length) aiGroup.children.pop();
+  };
+  document.querySelectorAll('#toolbar [data-tool]').forEach((b) => {
+    b.onclick = () => setTool(b.dataset.tool);
+  });
+  $('btn-chat').onclick = () => { $('chat').style.display = 'flex'; };
+  $('btn-chat-close').onclick = () => { $('chat').style.display = 'none'; };
+  $('chatform').onsubmit = (e) => {
+    e.preventDefault();
+    const q = $('chat-in').value.trim();
+    if (!q) return;
+    $('chat-in').value = '';
+    if (!session?.has_ai) {
+      chatMsg('⚠ This session has no instance store (scene_r.db) — run the '
+        + 'segmentation + store build first, then the AI can measure it.', '');
+      return;
+    }
+    askAI(q);
+  };
+}
+
+wireUI();
+loadSessions();

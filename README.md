@@ -338,6 +338,34 @@ scripts/demo_pitch2.sh <session_dir> scene.db out_dir
 - **Potree streaming**: LOD octree of the consistent cloud with progressive loading
   and point-budget management.
 
+## AR on the phone (WebXR over the tailnet)
+
+A dedicated phone app at **`/ar`** (`static/ar/`, three.js bundle built by
+`ui/arxr/build.sh`) projects any reconstruction in augmented reality:
+
+- **Session picker** — every project with a mesh or cloud, with AI availability
+  badges (`GET /api/ar/sessions`).
+- **Assets** — the textured TSDF mesh streams as-is (meshopt + WebP, decoded
+  on-device) and the point cloud arrives phone-sized (`GET /api/ar/cloud/…`,
+  server-decimated + cached ARC1 binary). Sessions whose in-pipeline
+  orientation was refused are uprighted client-side with the persisted RANSAC
+  floor transform.
+- **WebXR immersive-ar** — tap-to-place (hit-test when the browser offers it),
+  scale toggle 1:1 / 1:10 / 1:50, works in WebXR-capable iOS browsers (e.g.
+  XRViewer — Safari has no WebXR); a full 3D fallback with OrbitControls keeps
+  every feature usable on any browser.
+- **Measurement tools** — distance, angle and volume box, computed in metric
+  model space (correct at any display scale).
+- **Spatial AI chat** — the Phase-5 orchestrator (`POST /api/spatial_qa`)
+  answers with deterministic measurements; tool-trace positions are marked in
+  the 3D scene. Needs the session's instance store (segmentation run).
+
+**Connectivity**: the pod is reached through a private **Tailscale** network —
+no public ports, valid TLS (required by iOS WebXR). One-time setup:
+`bash scripts/tailscale_up.sh` on the pod (authenticate the printed URL, re-run
+to configure `tailscale serve`), install the Tailscale app on the phone, then
+open `https://stac-pod.<tailnet>.ts.net/ar`.
+
 ## Team & session management
 
 - JWT authentication, roles **admin / manager / viewer**, multi-user team workspaces,
