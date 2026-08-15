@@ -55,24 +55,56 @@ def _latest_output_dir(session_id: str) -> Optional[Path]:
 
 
 def _floor_transform(out: Path) -> Optional[list]:
-    """Row-major 4x4 upright transform for sessions whose in-pipeline
-    orientation was refused (weak camera-down consensus): CloudCompy's RANSAC
-    floor leveler persists s/R/t in floor_transform.npz. None when the model
-    is already upright (.orientation_applied) or no transform exists."""
-    p = out / "floor_transform.npz"
-    if not p.exists():
-        return None
+    """Row-major 4x4 that uprights the model AND guarantees its floor sits at
+    y=0. The stored floor_transform.npz alone proved unreliable (double-applied
+    on top of baked orientation it SANK observatorio 13 cm; other sessions have
+    none at all) — so the floor height is MEASURED from the session's cloud
+    (p1 of Y after the transform) and compensated. Cached per source mtimes."""
+    npz = out / "floor_transform.npz"
+    cloud = next((c for c in (out / "pgsr_cloud.ply",
+                              out / "cleaned_cloud.ply") if c.exists()), None)
+    cache = out / "ar_upright.json"
+    key = {"npz_mtime": npz.stat().st_mtime if npz.exists() else 0,
+           "cloud_mtime": cloud.stat().st_mtime if cloud else 0}
+    if cache.exists():
+        try:
+            c = json.loads(cache.read_text())
+            if c.get("key") == key:
+                return c.get("matrix")
+        except Exception:
+            pass
+    M = np.eye(4)
+    if npz.exists():
+        try:
+            d = np.load(npz)
+            M[:3, :3] = float(d["s"]) * np.asarray(d["R"], np.float64)
+            M[:3, 3] = np.asarray(d["t"], np.float64)
+        except Exception:  # noqa: BLE001
+            logger.warning(f"[ar] unreadable {npz}")
+            M = np.eye(4)
+    off = 0.0
+    if cloud is not None:
+        try:
+            import open3d as o3d
+            pcd = o3d.io.read_point_cloud(str(cloud))
+            pts = np.asarray(pcd.voxel_down_sample(0.05).points)
+            if len(pts) > 100:
+                y = (M[:3, :3] @ pts.T).T[:, 1] + M[1, 3]
+                off = -float(np.percentile(y, 1))   # floor (p1) → exactly 0
+                M[1, 3] += off
+        except Exception:  # noqa: BLE001
+            logger.warning(f"[ar] floor measurement failed for {cloud}")
+    matrix = None
+    if not (np.allclose(M, np.eye(4), atol=1e-4)):
+        matrix = [round(float(x), 8) for x in M.reshape(-1)]
     try:
-        d = np.load(p)
-        s, R, t = float(d["s"]), np.asarray(d["R"], np.float64), \
-            np.asarray(d["t"], np.float64)
-        M = np.eye(4)
-        M[:3, :3] = s * R
-        M[:3, 3] = t
-        return [round(float(x), 8) for x in M.reshape(-1)]
-    except Exception:  # noqa: BLE001
-        logger.warning(f"[ar] unreadable {p}")
-        return None
+        cache.write_text(json.dumps({"key": key, "matrix": matrix,
+                                     "floor_offset": round(off, 4)}))
+    except OSError:
+        pass
+    logger.info(f"[ar] upright for {out.parent.parent.parent.name}: "
+                f"floor offset {off:+.3f} m")
+    return matrix
 
 
 def _session_assets(out: Path) -> dict:

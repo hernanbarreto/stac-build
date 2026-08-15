@@ -122,9 +122,45 @@ export class WebXREngine implements IXREngine {
     this.renderer?.dispose()
   }
 
+  private cloudPoints: THREE.Points | null = null
+
+  /** ARC1 binary cloud → THREE.Points (loaded alongside the mesh). */
+  private async loadCloud() {
+    try {
+      const r = await fetch(`/api/ar/cloud/${encodeURIComponent(this.sessionId)}`)
+      if (!r.ok) return
+      const buf = await r.arrayBuffer()
+      const dv = new DataView(buf)
+      if (dv.getUint32(0, false) !== 0x41524331) return
+      const n = dv.getUint32(4, true)
+      const xyz = new Float32Array(buf, 32, n * 3)
+      const rgbU8 = new Uint8Array(buf, 32 + n * 12, n * 3)
+      const col = new Float32Array(n * 3)
+      for (let i = 0; i < n * 3; i++) col[i] = rgbU8[i] / 255
+      const g = new THREE.BufferGeometry()
+      g.setAttribute('position', new THREE.BufferAttribute(xyz, 3))
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3))
+      this.cloudPoints = new THREE.Points(g, new THREE.PointsMaterial({
+        size: 0.014, vertexColors: true, sizeAttenuation: true }))
+      this.cloudPoints.visible = this.cloudVisible
+      this.contentGroup.add(this.cloudPoints)
+      tele('cloud-loaded', { points: n })
+    } catch (e: any) {
+      tele('cloud-error', { msg: String(e?.message ?? e) })
+    }
+  }
+
+  cloudVisible = true
+  toggleCloud(): boolean {
+    this.cloudVisible = !this.cloudVisible
+    if (this.cloudPoints) this.cloudPoints.visible = this.cloudVisible
+    return this.cloudVisible
+  }
+
   private async loadMesh() {
     const loader = new GLTFLoader()
     loader.setMeshoptDecoder(MeshoptDecoder)
+    this.loadCloud()          // streams in parallel with the mesh
     const gltf = await loader.loadAsync(
       `/api/ar/mesh/${encodeURIComponent(this.sessionId)}`)
     gltf.scene.traverse((o: any) => {

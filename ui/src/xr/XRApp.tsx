@@ -208,6 +208,12 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
         <button className="btn" onClick={() => engineRef.current?.clearMeasures()}>
           Clear
         </button>
+        <button className="btn" onClick={() => {
+          const eng = engineRef.current as any
+          if (eng?.toggleCloud) say(eng.toggleCloud() ? 'Cloud ON' : 'Cloud OFF', 1200)
+        }}>
+          Cloud
+        </button>
       </nav>
       {phase === 'ready' && tracking !== 'NORMAL' && (
         <div className="xr-coach">
