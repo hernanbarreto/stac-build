@@ -776,16 +776,25 @@ async function askAI(question) {
 let camAR = { on: false, stream: null, yawPitch: null, initialAlpha: null,
               screenO: 0, baseFov: 62 };
 
+// Canonical device-orientation → camera quaternion, verbatim from three.js's
+// battle-tested DeviceOrientationControls: YXZ euler, then the fixed -90° X
+// correction (the camera looks out the BACK of the device, not the top), then
+// the live screen-orientation twist. The earlier ad-hoc `beta − π/2` version
+// coupled the axes — panning the phone rotated the world.
+const _zee = new THREE.Vector3(0, 0, 1);
+const _qBack = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);
+
 function camQuatFromOrientation(ev) {
   const alpha = THREE.MathUtils.degToRad(ev.alpha || 0);
   const beta = THREE.MathUtils.degToRad(ev.beta || 0);
   const gamma = THREE.MathUtils.degToRad(ev.gamma || 0);
-  if (camAR.initialAlpha === null) camAR.initialAlpha = alpha;
-  const euler = new THREE.Euler(beta - Math.PI / 2, alpha - camAR.initialAlpha,
-                                -gamma, 'YXZ');
-  const q = new THREE.Quaternion().setFromEuler(euler);
-  q.multiply(new THREE.Quaternion().setFromAxisAngle(
-    new THREE.Vector3(0, 0, 1), -THREE.MathUtils.degToRad(camAR.screenO)));
+  if (camAR.initialAlpha === null) camAR.initialAlpha = alpha;   // yaw zero = where you look on enable
+  const orient = THREE.MathUtils.degToRad(
+    (screen.orientation?.angle ?? window.orientation) || 0);
+  const q = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler(beta, alpha - camAR.initialAlpha, -gamma, 'YXZ'));
+  q.multiply(_qBack);
+  q.multiply(new THREE.Quaternion().setFromAxisAngle(_zee, -orient));
   return q;
 }
 
@@ -812,7 +821,6 @@ async function enterCamAR() {
     camAR.stream = stream;
     camAR.on = true;
     camAR.initialAlpha = null;
-    camAR.screenO = (screen.orientation?.angle ?? window.orientation) || 0;
     controls.enabled = false;
     camera.position.set(0, 1.5, 0);            // standing eye height
     camera.fov = camAR.baseFov;
