@@ -296,10 +296,4 @@ async def ar_client_log(body: dict):
     return {"ok": True}
 
 
-# Convenience: https://<host>/ar → the static app.
-page_router = APIRouter()
-
-
-@page_router.get("/ar", include_in_schema=False)
-async def ar_page():
-    return RedirectResponse(url="/static/ar/index.html")
+# The phone XR viewer lives in the built React app: /app/xr.html.

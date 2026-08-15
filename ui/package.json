@@ -9,7 +9,8 @@
     "build": "tsc && vite build && electron-builder",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
-    "build:xr": "WEB_ONLY=true vite build --base=/app/"
+    "build:xr": "npm run provision:xr8 && WEB_ONLY=true vite build --base=/app/",
+    "provision:xr8": "mkdir -p ../static/xr8 && cp -r node_modules/@8thwall/engine-binary/dist/* ../static/xr8/"
   },
   "dependencies": {
     "@types/three": "^0.182.0",
@@ -19,6 +20,7 @@
     "react-chartjs-2": "^5.3.1",
     "react-dom": "^18.2.0",
     "three": "^0.182.0",
+    "three-mesh-bvh": "^0.9.14",
     "web-ifc": "^0.0.75"
   },
   "devDependencies": {
@@ -33,8 +35,6 @@
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.5",
-    "puppeteer": "^24.43.1",
-    "three-mesh-bvh": "^0.9.14",
     "typescript": "^5.2.2",
     "vite": "^5.1.6",
     "vite-plugin-electron": "^0.28.6",

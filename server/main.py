@@ -1111,10 +1111,9 @@ app.include_router(team_router)
 from phase5_qa.api import router as spatial_qa_router
 app.include_router(spatial_qa_router)
 
-# Mount AR/XR delivery routes (/api/ar/*, /ar — phone viewer over the tailnet)
-from ar_api import router as ar_router, page_router as ar_page_router
+# Mount AR/XR delivery routes (/api/ar/* — phone viewer: /app/xr.html)
+from ar_api import router as ar_router
 app.include_router(ar_router)
-app.include_router(ar_page_router)
 
 @app.get("/")
 async def root():

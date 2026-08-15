@@ -173,5 +173,5 @@ server/.jwt_secret
 *.ts.net.crt
 *.ts.net.key
 
-# 8th Wall engine binary — provisioned from npm @8thwall/engine-binary (ui/arxr/build.sh)
-static/ar/xr8/
+# 8th Wall engine binary — provisioned from npm @8thwall/engine-binary (ui npm run build:xr)
+static/xr8/
