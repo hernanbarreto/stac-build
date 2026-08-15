@@ -187,8 +187,12 @@ export class WebXREngine implements IXREngine {
         const p = new THREE.Vector3(), q = new THREE.Quaternion(),
               s = new THREE.Vector3()
         this.reticle.matrix.decompose(p, q, s)
-        // ARKit hit-test lands on REAL surfaces — trust its height directly
-        this.placeAt(p.x, p.y, p.z)
+        // Horizontal hits include TABLES (measured: a tap on a desk at
+        // y=1.04 floated the whole model a meter up). local-floor already
+        // knows the real floor (y=0): anything higher than 40 cm is
+        // furniture — take its X/Z but seat the model on the floor.
+        const y = p.y > 0.4 ? 0 : p.y
+        this.placeAt(p.x, y, p.z)
         this.cb.onPlaced()
         tele('webxr-placed', { scale: SCALES[this.scaleIdx][1] })
       }
