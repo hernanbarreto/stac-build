@@ -18,6 +18,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
+import { USDZExporter } from 'three/examples/jsm/exporters/USDZExporter.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 
 // BVH-accelerated raycast: the TSDF mesh has millions of triangles — the
@@ -868,7 +869,10 @@ function placeContentAt(x, z) {
   const c = box.getCenter(new THREE.Vector3());
   modelGroup.position.x += x - c.x;
   modelGroup.position.z += z - c.z;
-  modelGroup.position.y += -box.min.y;
+  // The pipeline already calibrated the model's floor at y=0 (baked orient or
+  // floor_transform) — pin THAT plane to the ground. Never use bbox.min.y:
+  // below-floor noise points made the model float by that margin.
+  modelGroup.position.y = 0;
 }
 
 // Move tool in Cam AR: tap → ray → virtual floor plane y=0 → re-place there
@@ -902,6 +906,43 @@ function bindPinchFov() {
   el.addEventListener('touchend', () => { _pinchD = null; });
 }
 
+// ── AR Quick Look (iOS native): USDZ built on-device from the loaded mesh ────
+// Apple's own AR viewer: perfect passthrough + ARKit anchoring at true metric
+// scale (USDZ metersPerUnit=1 — our units ARE meters). Mesh only, no tools —
+// the measured/AI workflow stays in the app; this is the reliable projection.
+
+async function quickLook() {
+  if (!contentGroup.children.some((o) => !o.userData?.isCloud)) {
+    toast('Quick Look needs the mesh — reopen the session with mesh enabled');
+    return;
+  }
+  loading(true, 'Building USDZ for AR Quick Look… (up to ~30 s)');
+  const prevFull = fullbright;
+  try {
+    fullbright = false; applyLighting();       // exporter wants PBR materials
+    contentGroup.updateWorldMatrix(true, true);
+    const exporter = new USDZExporter();
+    const data = await exporter.parseAsync(contentGroup);
+    const url = URL.createObjectURL(
+      new Blob([data], { type: 'model/vnd.usdz+zip' }));
+    const a = document.createElement('a');
+    a.rel = 'ar';
+    a.href = url;
+    a.appendChild(document.createElement('img'));   // Safari requires an <img> child
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    tele('quicklook', { bytes: data.byteLength });
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    tele('quicklook-error', { msg: String(e.message || e) });
+    toast(`USDZ export failed: ${e.message || e}`, 6000);
+  } finally {
+    fullbright = prevFull; applyLighting();
+    loading(false);
+  }
+}
+
 // ── scale / lighting / wiring ────────────────────────────────────────────────
 
 function clearMeasures() {
@@ -925,6 +966,9 @@ function wireUI() {
     $('home').style.display = 'block';
   };
   $('btn-camar').onclick = () => enterCamAR();
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  $('btn-ql').style.display = isIOS ? 'block' : 'none';
+  $('btn-ql').onclick = () => quickLook();
   $('btn-scale').onclick = () => setScaleIdx(scaleIdx + 1);
   $('btn-light').onclick = () => { fullbright = !fullbright; applyLighting(); };
   $('btn-clear').onclick = clearMeasures;
