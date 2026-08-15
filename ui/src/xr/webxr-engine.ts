@@ -156,13 +156,23 @@ export class WebXREngine implements IXREngine {
     if (frame && this.hitTestSource && this.reticle) {
       if (this.tool === 'move') {
         const hits = frame.getHitTestResults(this.hitTestSource)
-        if (hits.length) {
-          const pose = hits[0].getPose(this.refSpace!)
-          this.reticle.matrix.fromArray(pose.transform.matrix)
-          this.reticle.visible = true
-        } else {
-          this.reticle.visible = false
+        let shown = false
+        for (const h of hits) {
+          const pose = h.getPose(this.refSpace!)
+          // FLOOR-ONLY placement: ARKit hit-tests walls too — anchoring the
+          // model floor at a wall point floated it mid-air. Accept only
+          // horizontal-up surfaces (hit pose +Y ≈ world up).
+          const m = new THREE.Matrix4().fromArray(pose.transform.matrix)
+          const up = new THREE.Vector3(0, 1, 0)
+            .applyMatrix4(new THREE.Matrix4().extractRotation(m))
+          if (up.y > 0.85) {
+            this.reticle.matrix.copy(m)
+            this.reticle.visible = true
+            shown = true
+            break
+          }
         }
+        if (!shown) this.reticle.visible = false
       } else {
         this.reticle.visible = false
       }
