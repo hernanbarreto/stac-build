@@ -222,7 +222,22 @@ export class WebXREngine implements IXREngine {
     const c = box.getCenter(new THREE.Vector3())
     this.modelGroup.position.x += x - c.x
     this.modelGroup.position.z += z - c.z
-    this.modelGroup.position.y = y              // model floor on the REAL surface
+    this.modelGroup.position.y = y              // global floor plane on the surface
+    // TERRAIN-AWARE seating: the site's ground is not one plane (measured:
+    // median geometry sits 1.15 m above the global floor plane — track bed vs
+    // platforms). Drop a ray at the tapped point and shift so the model's
+    // LOCAL ground there touches the real floor.
+    this.modelGroup.updateWorldMatrix(true, true)
+    const down = new THREE.Raycaster(
+      new THREE.Vector3(x, y + 80, z), new THREE.Vector3(0, -1, 0))
+    ;(down as any).firstHitOnly = true
+    const hit = down.intersectObjects(this.raycastTargets, false)[0]
+    if (hit) {
+      const dy = y - hit.point.y
+      this.modelGroup.position.y += dy
+      tele('terrain-seat', { localGroundY: +hit.point.y.toFixed(2),
+                             shift: +dy.toFixed(2) })
+    }
     this.lastAnchor = new THREE.Vector3(x, y, z)
     // ground-truth numbers for remote diagnosis: where did it actually land
     this.modelGroup.updateWorldMatrix(true, true)
