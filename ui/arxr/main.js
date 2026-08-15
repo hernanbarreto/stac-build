@@ -456,7 +456,9 @@ async function enterAR() {
     // METRIC FIRST: start at 1:1, 2 m ahead, on the floor (the user asked for
     // real scale as the default; the HUD scale button cycles miniatures)
     setScaleIdx(0);
-    modelGroup.position.set(0, refType === 'local' ? -1.4 : 0, -2);
+    modelGroup.position.set(0, 0, 0);
+    placeContentAt(0, -6);                     // bbox-centered, floor on ground
+    if (refType === 'local') modelGroup.position.y -= 1.4;   // floor guess
     buildHud();
     const hadOverlay = !!xrSession.domOverlayState;
     tele('ar-start', {
@@ -791,7 +793,8 @@ async function enterCamAR() {
     camera.fov = camAR.baseFov;
     camera.updateProjectionMatrix();
     setScaleIdx(0);                            // metric first
-    modelGroup.position.set(0, 0, -4);
+    modelGroup.position.set(0, 0, 0);
+    placeContentAt(0, -6);                     // content bbox 6 m ahead, floor on ground
     window.addEventListener('deviceorientation', onDeviceOrientation);
     setTool('move');
     $('btn-camar').classList.add('active');
@@ -820,13 +823,26 @@ function exitCamAR() {
   frameContent();
 }
 
+// Place the CONTENT at a world point. The scene's own origin is wherever the
+// capture walk started — often tens of meters away from the geometry — so
+// placing the group origin makes the building land far away and read tiny.
+// This puts the content's bbox center on the target and its bbox floor at y=0.
+function placeContentAt(x, z) {
+  const box = new THREE.Box3().setFromObject(contentGroup);
+  if (box.isEmpty()) return;
+  const c = box.getCenter(new THREE.Vector3());
+  modelGroup.position.x += x - c.x;
+  modelGroup.position.z += z - c.z;
+  modelGroup.position.y += -box.min.y;
+}
+
 // Move tool in Cam AR: tap → ray → virtual floor plane y=0 → re-place there
 const _floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 function camARPlace(ndc) {
   raycaster.setFromCamera(ndc, camera);
   const hit = new THREE.Vector3();
   if (raycaster.ray.intersectPlane(_floorPlane, hit)) {
-    modelGroup.position.set(hit.x, 0, hit.z);
+    placeContentAt(hit.x, hit.z);
   }
 }
 
