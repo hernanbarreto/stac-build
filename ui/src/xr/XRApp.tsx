@@ -8,6 +8,14 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StacXREngine, tele, type Tool } from './engine'
+import { WebXREngine } from './webxr-engine'
+import type { IXREngine } from './engine-types'
+
+declare global {
+  interface Window { VLaunch?: { getLaunchUrl: (url: string) => Promise<string> } }
+}
+
+type XRMode = 'webxr' | 'vlaunch' | 'engine'
 
 interface ArSession {
   id: string
@@ -72,8 +80,9 @@ function SessionList({ onOpen }: { onOpen: (s: ArSession) => void }) {
 
 function XRView({ session, onBack }: { session: ArSession, onBack: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const engineRef = useRef<StacXREngine | null>(null)
+  const engineRef = useRef<IXREngine | null>(null)
   const [phase, setPhase] = useState<'arm' | 'starting' | 'ready'>('arm')
+  const [mode, setMode] = useState<XRMode | null>(null)
   const [tracking, setTracking] = useState('UNSPECIFIED')
   const [error, setError] = useState<string | null>(null)
   const [tool, setTool] = useState<Tool>('move')
@@ -87,33 +96,55 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
     toastTimer.current = setTimeout(() => setToast(null), ms)
   }, [])
 
+  // capability probe: real WebXR (Android Chrome natively, or iPhone INSIDE
+  // the Variant App Clip = ARKit) → best; iOS Safari outside the clip →
+  // vlaunch button; anything else → the 8th Wall engine fallback
   useEffect(() => {
-    const engine = new StacXREngine(session.id, {
-      onReady: () => { setPhase('ready'); say(TOOL_HINTS.move, 4000) },
-      onError: (msg) => setError(msg),
-      onToast: say,
-      onPlaced: () => say('Placed — scale button for 1:1, tools below to measure'),
-      onTracking: (status) => setTracking(status),
-    })
-    engineRef.current = engine
-    return () => { engine.stop() }
+    let alive = true
+    ;(async () => {
+      const ok = await (navigator as any).xr
+        ?.isSessionSupported?.('immersive-ar').catch(() => false)
+      const ios = /iPhone|iPad|iPod/.test(navigator.userAgent)
+      const m: XRMode = ok ? 'webxr'
+        : (ios && window.VLaunch ? 'vlaunch' : 'engine')
+      if (alive) { setMode(m); tele('xr-mode', { mode: m, session: session.id }) }
+    })()
+    return () => { alive = false; engineRef.current?.stop() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id])
+
+  const mkCallbacks = useCallback(() => ({
+    onReady: () => { setPhase('ready'); say(TOOL_HINTS.move, 4000) },
+    onError: (msg: string) => setError(msg),
+    onToast: say,
+    onPlaced: () => say('Placed — scale button cycles the scale, tools below to measure'),
+    onTracking: (status: string) => setTracking(status),
+  }), [say])
 
   // iOS grants camera/motion permission ONLY inside a direct user gesture —
   // auto-starting the engine on mount left the camera dead (black screen).
   const armAR = useCallback(async () => {
-    tele('start-tap', {})
+    tele('start-tap', { mode })
+    if (mode === 'vlaunch') {
+      // hand off to the Variant App Clip (real ARKit): the page must live on
+      // a PUBLIC domain authorized in the Variant dashboard — App Clips
+      // cannot reach private/tailnet URLs (the root cause of the earlier
+      // infinite-loading hang)
+      try {
+        const url = await window.VLaunch!.getLaunchUrl(location.href)
+        location.href = url
+      } catch (e: any) {
+        tele('vlaunch-error', { msg: String(e?.message ?? e) })
+        say(`ARKit launch failed: ${e?.message ?? e}`, 6000)
+      }
+      return
+    }
     setPhase('starting')
     try {
       const DME: any = (window as any).DeviceMotionEvent
       if (typeof DME?.requestPermission === 'function') {
         const m = await DME.requestPermission().catch((e: any) => `err:${e}`)
         tele('motion-permission', { result: String(m) })
-        if (m === 'denied') {
-          say('Motion DENIED — without it tracking cannot hold. Close this tab '
-            + 'completely, reopen, and tap Allow.', 8000)
-        }
       }
       const DOE: any = (window as any).DeviceOrientationEvent
       if (typeof DOE?.requestPermission === 'function') {
@@ -121,8 +152,12 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
         tele('orientation-permission', { result: String(o) })
       }
     } catch { /* permission APIs are iOS-only */ }
-    engineRef.current?.start(canvasRef.current!)
-  }, [])
+    const engine: IXREngine = mode === 'webxr'
+      ? new WebXREngine(session.id, mkCallbacks())
+      : new StacXREngine(session.id, mkCallbacks())
+    engineRef.current = engine
+    engine.start(canvasRef.current!)
+  }, [mode, session.id, mkCallbacks, say])
 
   const onTap = useCallback((e: React.TouchEvent) => {
     const t = e.changedTouches[0]
@@ -184,9 +219,12 @@ function XRView({ session, onBack }: { session: ArSession, onBack: () => void })
               : <>Starting camera + tracking, loading mesh…<br />
                   <small>Allow camera and motion access when asked</small></>)}
           </div>
-          {!error && phase === 'arm' && (
-            <button className="btn primary-cta" onClick={armAR}>Start AR</button>
+          {!error && phase === 'arm' && mode !== null && (
+            <button className="btn primary-cta" onClick={armAR}>
+              {mode === 'vlaunch' ? 'Start AR (ARKit)' : 'Start AR'}
+            </button>
           )}
+          {!error && phase === 'arm' && mode === null && <div className="spin" />}
           {error && <button className="btn" onClick={() => location.reload()}>Retry</button>}
         </div>
       )}

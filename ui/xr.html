@@ -9,6 +9,12 @@
     <!-- 8th Wall XR engine (self-hosted binary from @8thwall/engine-binary):
          SLAM world tracking + absolute metric scale over the live camera.
          Works in iOS Safari (no WebXR there) AND Android browsers alike. -->
+    <!-- Variant Launch: real ARKit WebXR on iPhone via App Clip. Requires the
+         page to be served from a PUBLIC domain listed in the Variant
+         dashboard's Authorized Domains (App Clips cannot reach private/tailnet
+         URLs — the root cause of the earlier infinite-loading hang). -->
+    <script src="https://launchar.app/sdk/v1?key=O0j6XZVvKo3Ns3GiqezRiAOBpVnW66px&redirect=false"></script>
+    <!-- 8th Wall engine: FALLBACK only — its free SLAM proved weak. -->
     <script src="/static/xr8/xr.js" async data-preload-chunks="slam"></script>
   </head>
   <body>
