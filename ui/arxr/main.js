@@ -29,6 +29,22 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 const $ = (id) => document.getElementById(id);
 const API = '';                       // same origin
 
+// remote telemetry: XR browsers have no devtools — report capabilities and
+// errors to the pod (POST /api/ar/log → logs/ar_client.jsonl)
+function tele(event, data = {}) {
+  try {
+    fetch(`${API}/api/ar/log`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event, ...data }),
+    }).catch(() => {});
+  } catch { /* never break the app for telemetry */ }
+}
+window.addEventListener('error', (e) =>
+  tele('js-error', { msg: String(e.message), src: `${e.filename}:${e.lineno}` }));
+window.addEventListener('unhandledrejection', (e) =>
+  tele('promise-rejection', { msg: String(e.reason).slice(0, 300) }));
+tele('boot', { ua: navigator.userAgent, hasXR: !!navigator.xr });
+
 // ── UI helpers ────────────────────────────────────────────────────────────────
 
 let toastTimer = null;
@@ -410,6 +426,7 @@ async function setupARButton() {
   const btn = $('btn-ar');
   const ok = navigator.xr && await navigator.xr.isSessionSupported?.('immersive-ar')
     .catch(() => false);
+  tele('xr-support', { immersiveAR: !!ok });
   btn.style.display = ok ? 'block' : 'none';
   if (!ok) toast('WebXR AR not available in this browser — 3D mode only', 4000);
   btn.onclick = enterAR;
@@ -441,6 +458,11 @@ async function enterAR() {
     modelGroup.position.set(0, refType === 'local' ? -1.4 : 0, -2);
     buildHud();
     const hadOverlay = !!xrSession.domOverlayState;
+    tele('ar-start', {
+      blend: xrBlendMode, refType, hitTest: !!hitTestSource,
+      domOverlay: hadOverlay, session: session?.id,
+      interactionMode: xrSession.interactionMode || null,
+    });
     xrSession.addEventListener('select', onXRSelect);
     xrSession.addEventListener('end', () => {
       const diag = `AR caps — blend:${xrBlendMode} · hit-test:${!!hitTestSource}`
@@ -455,6 +477,7 @@ async function enterAR() {
     });
     toast('Tap to place (Move) — switch tools below');
   } catch (e) {
+    tele('ar-error', { msg: String(e.message || e) });
     toast(`AR failed: ${e.message || e}`, 5000);
   }
 }

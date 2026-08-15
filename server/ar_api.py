@@ -204,6 +204,24 @@ async def ar_cloud(session_id: str, points: int = 1_500_000):
                         filename=f"{session_id}_cloud.bin")
 
 
+@router.post("/log")
+async def ar_client_log(body: dict):
+    """Client-side telemetry from the phone app (XR capabilities, errors) —
+    remote debugging is impossible otherwise: the XR browsers have no
+    devtools. Appended to logs/ar_client.jsonl and echoed to the server log."""
+    import time
+    line = {"ts": time.time(), **(body or {})}
+    logger.info(f"[ar-client] {json.dumps(line)[:800]}")
+    try:
+        logdir = Path(__file__).resolve().parent.parent / "logs"
+        logdir.mkdir(exist_ok=True)
+        with open(logdir / "ar_client.jsonl", "a") as f:
+            f.write(json.dumps(line) + "\n")
+    except OSError:
+        pass
+    return {"ok": True}
+
+
 # Convenience: https://<host>/ar → the static app.
 page_router = APIRouter()
 
