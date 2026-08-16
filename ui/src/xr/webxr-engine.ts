@@ -217,7 +217,11 @@ export class WebXREngine implements IXREngine {
           const m = new THREE.Matrix4().fromArray(pose.transform.matrix)
           const up = new THREE.Vector3(0, 1, 0)
             .applyMatrix4(new THREE.Matrix4().extractRotation(m))
-          if (up.y > 0.85) {
+          const hy = new THREE.Vector3().setFromMatrixPosition(m).y
+          // FLOOR-LEVEL only: couches/tables are horizontal too (telemetry:
+          // grid at 0.81-0.99 m floated the model at couch height). The real
+          // floor is y≈0 in local-floor — reject anything above ±30 cm.
+          if (up.y > 0.85 && Math.abs(hy) < 0.3) {
             this.reticle.matrix.copy(m)
             this.reticle.visible = true
             shown = true
