@@ -239,12 +239,9 @@ export class WebXREngine implements IXREngine {
         const p = new THREE.Vector3(), q = new THREE.Quaternion(),
               s = new THREE.Vector3()
         this.reticle.matrix.decompose(p, q, s)
-        // Horizontal hits include TABLES (measured: a tap on a desk at
-        // y=1.04 floated the whole model a meter up). local-floor already
-        // knows the real floor (y=0): anything higher than 40 cm is
-        // furniture — take its X/Z but seat the model on the floor.
-        const y = p.y > 0.4 ? 0 : p.y
-        this.placeAt(p.x, y, p.z)
+        // USER SPEC: the bbox BASE sits at the reticle's level at click time,
+        // bbox-centered on X/Z over that point.
+        this.placeAt(p.x, p.y, p.z)
         this.cb.onPlaced()
         tele('webxr-placed', { scale: SCALES[this.scaleIdx][1] })
       }
@@ -274,29 +271,9 @@ export class WebXREngine implements IXREngine {
     const c = box.getCenter(new THREE.Vector3())
     this.modelGroup.position.x += x - c.x
     this.modelGroup.position.z += z - c.z
-    this.modelGroup.position.y = y              // global floor plane on the surface
-    // TERRAIN-AWARE seating: the site's ground is not one plane (measured:
-    // median geometry sits 1.15 m above the global floor plane — track bed vs
-    // platforms). Drop a ray at the tapped point and shift so the model's
-    // LOCAL ground there touches the real floor.
-    this.modelGroup.updateWorldMatrix(true, true)
-    const down = new THREE.Raycaster(
-      new THREE.Vector3(x, y + 80, z), new THREE.Vector3(0, -1, 0))
-    ;(down as any).firstHitOnly = false     // need ALL hits along the column
-    const hits = down.intersectObjects(this.raycastTargets, false)
-    if (hits.length) {
-      // pick the surface CLOSEST TO FLOOR LEVEL — the first hit from above
-      // is often a roof/overpass (measured: test4 hit +1.65 and sank the
-      // model 1.65 m). The model's ground at this XZ is the hit nearest y.
-      let ground = hits[0].point
-      for (const h of hits) {
-        if (Math.abs(h.point.y - y) < Math.abs(ground.y - y)) ground = h.point
-      }
-      const dy = y - ground.y
-      this.modelGroup.position.y += dy
-      tele('terrain-seat', { localGroundY: +ground.y.toFixed(2),
-                             nHits: hits.length, shift: +dy.toFixed(2) })
-    }
+    // USER SPEC: bbox base at the reticle level (the server-measured floor
+    // plane IS the bbox base, junk excluded), bbox-centered X/Z on the tap.
+    this.modelGroup.position.y = y
     this.lastAnchor = new THREE.Vector3(x, y, z)
     // ground-truth numbers for remote diagnosis: where did it actually land
     this.modelGroup.updateWorldMatrix(true, true)

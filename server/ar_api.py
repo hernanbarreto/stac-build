@@ -37,6 +37,11 @@ logger = logging.getLogger("ARApi")
 
 router = APIRouter(prefix="/api/ar", tags=["ar"])
 
+# User field calibration (2026-08-16): known 1.435 m elements measure 1.1 m in
+# the reconstructions — a systematic under-dimension across sessions. Factor
+# baked into the AR upright matrix (model AND measurements calibrate together).
+AR_SCALE_CALIBRATION = 1.435 / 1.1        # ≈ 1.3045
+
 _AR_CLOUD_NAME = "ar_cloud_{n}.bin"
 
 
@@ -65,7 +70,8 @@ def _floor_transform(out: Path) -> Optional[list]:
                               out / "cleaned_cloud.ply") if c.exists()), None)
     cache = out / "ar_upright.json"
     key = {"npz_mtime": npz.stat().st_mtime if npz.exists() else 0,
-           "cloud_mtime": cloud.stat().st_mtime if cloud else 0}
+           "cloud_mtime": cloud.stat().st_mtime if cloud else 0,
+           "cal": AR_SCALE_CALIBRATION}
     if cache.exists():
         try:
             c = json.loads(cache.read_text())
@@ -94,6 +100,11 @@ def _floor_transform(out: Path) -> Optional[list]:
                 M[1, 3] += off
         except Exception:  # noqa: BLE001
             logger.warning(f"[ar] floor measurement failed for {cloud}")
+    # GLOBAL SCALE CALIBRATION (user field measurement 2026-08-16: elements of
+    # 1.435 m real read 1.1 m in the reconstructions — ALL sessions come out
+    # under-dimensioned). Applied about the origin AFTER the floor sits at
+    # y=0, so the floor stays at 0 and model+measurements calibrate together.
+    M = np.diag([AR_SCALE_CALIBRATION] * 3 + [1.0]) @ M
     matrix = None
     if not (np.allclose(M, np.eye(4), atol=1e-4)):
         matrix = [round(float(x), 8) for x in M.reshape(-1)]
