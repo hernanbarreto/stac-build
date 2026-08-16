@@ -2031,6 +2031,26 @@ def export_tsdf_scene(
     # real far surface the cloud captured from >reliable_depth_m away.)
     raster_active = bool(rasterize_cloud_depth and cc_frame_pix is not None)
 
+    # PRECISION MODE repair: with the cloud MASK off (pgsr_mask_to_cleaned_cloud)
+    # nothing loaded the cloud POINTS either — so the spatial tiler had no xyz,
+    # ran the whole scene as ONE grid, hit the extract-safe block ceiling and
+    # STOPPED integrating mid-scene (test2: 110/197 frames = half the coverage,
+    # mesh far sparser than pgsr_cloud). Load points-only here: tiling + bbox
+    # work again while the pixel mask stays off (full-coverage renders).
+    if cc_xyz is None:
+        _cc_p = output_dir / "cleaned_cloud.ply"
+        if _cc_p.exists():
+            try:
+                _pc = o3d.io.read_point_cloud(str(_cc_p))
+                if len(_pc.points):
+                    cc_xyz = np.asarray(_pc.points, dtype=np.float64)
+                    logger.info(f"[TSDF-scene] tiling points loaded from "
+                                f"{_cc_p.name} ({len(cc_xyz):,} pts) — pixel "
+                                f"mask stays OFF")
+            except Exception as _e:  # noqa: BLE001
+                logger.warning(f"[TSDF-scene] could not read cloud points for "
+                               f"tiling ({_e})")
+
     # Cloud bbox — used to bound the TSDF to the cloud's extent (esp. in the unmasked
     # fallback, where depth_trunc=100m would otherwise mesh far beyond the cloud).
     cloud_bbox = None
@@ -2229,10 +2249,12 @@ def export_tsdf_scene(
                 skipped_empty += 1
                 continue
 
-            # DA3-DENSE: skip a frame BEFORE loading its npz if its precomputed world
-            # extent doesn't reach this tile (+halo). This is what makes many small tiles
+            # Skip a frame BEFORE loading its npz if its precomputed world extent
+            # doesn't reach this tile (+halo). This is what makes many small tiles
             # viable — without it every tile re-loads+integrates ALL frames.
-            if dense_da3 and tile_bounds is not None:
+            # (Applies to EVERY spatially-cropped path — dense-DA3 and the unmasked
+            # precision/fallback tiles — not just dense-DA3.)
+            if tile_bounds is not None:
                 if tile_bounds[0] == "box3d":
                     _, _lo, _hi, _halo = tile_bounds          # _lo,_hi are xyz vectors
                     _bx = frame_box_extent.get(fidx)
@@ -2355,10 +2377,14 @@ def export_tsdf_scene(
                         cc_ply_hw[0], cc_ply_hw[1], cleaned_cloud_dilate,
                     )
 
-                # DA3-DENSE spatial tile crop: no cloud mask, so keep only the depth
-                # whose unprojected WORLD coord lands in this tile (+halo). Bounds the
-                # tile's grid without the cloud pixels.
-                if dense_da3 and tile_bounds is not None:
+                # Spatial tile crop: no cloud mask, so keep only the depth whose
+                # unprojected WORLD coord lands in this tile (+halo). Bounds the
+                # tile's grid without the cloud pixels. MUST apply on every path
+                # that passes tile_bounds (dense-DA3 AND the unmasked precision
+                # tiles) — gating it on dense_da3 left precision-mode cubes
+                # uncropped: every cube integrated the whole scene, saturated at
+                # the same block count, and split into 8 forever (test2 runaway).
+                if tile_bounds is not None:
                     if tile_bounds[0] == "box3d":
                         # 3D CUBE: the pixel must be inside the cube box on ALL three axes.
                         _, _lo, _hi, _halo = tile_bounds
@@ -2577,8 +2603,11 @@ def export_tsdf_scene(
     # BEFORE loading their npz. Cube mode stores the full 3D box; slab mode the 1D axis
     # span. Only worthwhile when tiling.
     _n_tiles_now = len(cubes) if cube_mode else len(tiles)
-    if dense_da3 and (cube_mode or _n_tiles_now > 1) and frame_loader is not None:
-        logger.info(f"[TSDF-scene] dense-DA3: precomputing world extents for "
+    # Precompute per-frame world extents for ANY tiled unmasked path (dense-DA3
+    # or precision/fallback) — the tile loop uses them to skip frames that don't
+    # reach a tile before paying the npz load.
+    if (cube_mode or _n_tiles_now > 1) and frame_loader is not None:
+        logger.info(f"[TSDF-scene] tiled: precomputing world extents for "
                     f"{len(sorted_frames)} frames…")
         _t_pre = time.time()
         for _fi in sorted_frames:
