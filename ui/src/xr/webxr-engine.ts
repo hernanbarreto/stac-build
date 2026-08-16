@@ -306,9 +306,26 @@ export class WebXREngine implements IXREngine {
     this.modelGroup.position.x += x - c.x
     this.modelGroup.position.z += z - c.z
     // USER SPEC: base at the reticle level, bbox-centered X/Z on the tap.
-    // Base = the mesh's VISIBLE ground (detected from its vertex low band),
-    // scaled by the current display scale.
-    this.modelGroup.position.y = y - this.groundY * SCALES[this.scaleIdx][0]
+    // Base = the mesh's VISIBLE ground (statistical low band), then a FINE
+    // snap: ray down at the exact tap point, take the mesh surface within
+    // ±40 cm of the grid and land it exactly (roofs can't reach the clamp).
+    const k = SCALES[this.scaleIdx][0]
+    this.modelGroup.position.y = y - this.groundY * k
+    this.modelGroup.updateWorldMatrix(true, true)
+    const down = new THREE.Raycaster(
+      new THREE.Vector3(x, y + 5, z), new THREE.Vector3(0, -1, 0))
+    ;(down as any).firstHitOnly = false
+    let best: number | null = null
+    for (const h of down.intersectObjects(this.raycastTargets, false)) {
+      const d = h.point.y - y
+      if (Math.abs(d) < 0.4 && (best === null || Math.abs(d) < Math.abs(best))) {
+        best = d
+      }
+    }
+    if (best !== null) {
+      this.modelGroup.position.y -= best
+      tele('fine-snap', { residual: +best.toFixed(3) })
+    }
     this.lastAnchor = new THREE.Vector3(x, y, z)
     // ground-truth numbers for remote diagnosis: where did it actually land
     this.modelGroup.updateWorldMatrix(true, true)
