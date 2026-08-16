@@ -176,6 +176,7 @@ export class WebXREngine implements IXREngine {
     this.contentGroup.add(gltf.scene)
     try {
       const r = await fetch('/api/ar/sessions')
+      // (floor transform applied below; ground detection runs after it)
       const d = await r.json()
       const s = d.sessions?.find((x: any) => x.id === this.sessionId)
       if (s?.floor_transform) {
@@ -186,6 +187,35 @@ export class WebXREngine implements IXREngine {
         this.contentGroup.matrixWorldNeedsUpdate = true
       }
     } catch { /* orientation stays as baked */ }
+    this.detectMeshGround()
+  }
+
+  /** The VISIBLE ground of the mesh in model space. Seating on the cloud's
+   *  p1 (server floor) leaves the reconstructed floor hovering above the
+   *  grid — p1 is below-floor noise. Sample mesh vertices (post-transform)
+   *  and take the median of the low band (p2–p15) as the true ground. */
+  private groundY = 0
+  private detectMeshGround() {
+    this.modelGroup.updateWorldMatrix(true, true)
+    const ys: number[] = []
+    for (const o of this.raycastTargets) {
+      const mesh = o as THREE.Mesh
+      const pos = (mesh.geometry as THREE.BufferGeometry).attributes.position
+      const step = Math.max(1, Math.floor(pos.count / (60000 / this.raycastTargets.length)))
+      const v = new THREE.Vector3()
+      for (let i = 0; i < pos.count; i += step) {
+        v.fromBufferAttribute(pos as any, i).applyMatrix4(mesh.matrixWorld)
+        ys.push(v.y)
+      }
+    }
+    if (ys.length < 100) return
+    ys.sort((a, b) => a - b)
+    const p = (q: number) => ys[Math.floor(q * (ys.length - 1))]
+    const lo = p(0.02), hi = p(0.15)
+    const band = ys.filter((y) => y >= lo && y <= hi)
+    this.groundY = band[Math.floor(band.length / 2)] ?? 0
+    tele('mesh-ground', { groundY: +this.groundY.toFixed(2),
+                          p2: +lo.toFixed(2), p15: +hi.toFixed(2) })
   }
 
   private projTeleSent = false
@@ -275,9 +305,10 @@ export class WebXREngine implements IXREngine {
     const c = box.getCenter(new THREE.Vector3())
     this.modelGroup.position.x += x - c.x
     this.modelGroup.position.z += z - c.z
-    // USER SPEC: bbox base at the reticle level (the server-measured floor
-    // plane IS the bbox base, junk excluded), bbox-centered X/Z on the tap.
-    this.modelGroup.position.y = y
+    // USER SPEC: base at the reticle level, bbox-centered X/Z on the tap.
+    // Base = the mesh's VISIBLE ground (detected from its vertex low band),
+    // scaled by the current display scale.
+    this.modelGroup.position.y = y - this.groundY * SCALES[this.scaleIdx][0]
     this.lastAnchor = new THREE.Vector3(x, y, z)
     // ground-truth numbers for remote diagnosis: where did it actually land
     this.modelGroup.updateWorldMatrix(true, true)
