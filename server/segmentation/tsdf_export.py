@@ -1450,6 +1450,34 @@ def export_tsdf_scene(
     output_dir: Path,
     frames_dir: Path,
     session_dir: Optional[Path] = None,
+    mesh_method: str = "tsdf",           # "tsdf" | "cloud_delaunay" — cloud_delaunay meshes the
+                                         # cleaned cloud DIRECTLY (Delaunay + visibility graph
+                                         # cut, reconstruction/cloud_mesh.py): vertices ARE cloud
+                                         # points, onion carved by per-point camera rays. The
+                                         # doctrine's mesh-FROM-the-cloud path (2026-08-16).
+    cm_max_points: int = 6_000_000,      # cloud_delaunay: SAFETY cap; resolution comes from
+    cm_target_voxel: float = 0.012,      #   cm_target_voxel (m) — 12mm = the validated TSDF
+                                         #   resolution
+    cm_lambda: float = 0.6,              # cloud_delaunay: smoothness vs visibility votes
+    cm_max_edge_m: float = 0.0,          # cloud_delaunay: drop tris with a longer edge (0 = auto)
+    cm_min_component_tris: int = 60,     # cloud_delaunay: dust components below this dropped
+    cm_finish: str = "implicit",         # cloud_delaunay SURFACE FINISH: "implicit" = screened
+                                         # Poisson over the cut-validated points (cut-oriented
+                                         # normals), cropped to the master surface → the
+                                         # continuous TSDF/PGSR look with our coverage.
+                                         # "vertex" = taubin polish path (fallback).
+    cm_finish_crop: float = 0.02,        # implicit crop distance (m) to the master surface
+    cm_polish: str = "taubin",           # cloud_delaunay POLISH on the finished mesh: strong
+                                         # Taubin blended per-vertex by cloud confidence
+                                         # (measured: roughness 7.0→1.1mm, true-error 3.2→1.1mm
+                                         # on the synthetic sphere) | "off"
+    cm_polish_steps: int = 30,           # taubin iterations of the smooth target
+    cm_tsdf_guide: bool = True,          # BEST-OF-BOTH: first build the classic TSDF mesh
+                                         # (untextured) as a FINISH GUIDE — where the Delaunay
+                                         # surface lies within cm_guide_max_dist of it, vertices
+                                         # adopt the TSDF's smooth surface; everywhere else the
+                                         # Delaunay coverage stands. Guide failure ≠ run failure.
+    cm_guide_max_dist: float = 0.03,     # guide attraction radius (m)
     voxel_length: float = 0.015,         # 1.5 cm — matched to iPad-LiDAR footprint
     sdf_trunc: float = 0.05,             # 5 cm — reconciles noisy depth into one surface
     depth_trunc: float = 5.0,
@@ -1529,6 +1557,11 @@ def export_tsdf_scene(
                                          # the consistent estimates instead of the raw value
     mv_warn_discard_pct: float = 40.0,   # global discard above this ⇒ STRONG warning (bad
                                          # poses/scale, not a working filter) — never silent
+    mv_self_gate_pct: float = 25.0,      # SELF-GATE: global discard above this ⇒ the filter is
+                                         # starving the mesh (too few overlapping views to vote,
+                                         # e.g. 12-keyframe sessions hit 53% and fragmented into
+                                         # islands) → masks are SKIPPED for this run, loudly.
+                                         # Healthy dense runs discard 2.5-5%. 0 disables the gate.
     native_depth_method: str = "off",    # Phase C (precision task): refine keyframe depth to
                                          # native resolution BEFORE integration
                                          # (reconstruction/native_depth.py):
@@ -1582,9 +1615,15 @@ def export_tsdf_scene(
     global mesh. Output goes to ``output_dir/tsdf_scene/scene.glb`` with a
     ``scene.meta.json`` sidecar.
 
+    ``mesh_method: "cloud_delaunay"`` bypasses the depth integration entirely
+    and meshes the cleaned cloud itself (Delaunay + visibility graph cut —
+    reconstruction/cloud_mesh.py). Same entry points, same deliverable slot.
+
     Returns the path of the written GLB, or None if no frames could be
     integrated.
     """
+    _entry_kwargs = dict(locals())       # exactly the call's parameters — used to
+                                         # re-invoke ourselves for the TSDF guide
     import open3d as o3d  # local — heavy
 
     output_dir = Path(output_dir)
@@ -1592,6 +1631,62 @@ def export_tsdf_scene(
     if session_dir is None:
         session_dir = frames_dir.parent
     session_dir = Path(session_dir)
+
+    # ── mesh-FROM-the-cloud dispatch (doctrine 2026-08-16) ──
+    if str(mesh_method).lower() == "cloud_delaunay":
+        from reconstruction.cloud_mesh import export_cloud_mesh_scene
+        logger.info("[TSDF-scene] mesh_method=cloud_delaunay → Delaunay + "
+                    "visibility graph cut ON the cleaned cloud (no depth "
+                    "re-integration)")
+        # best-of-both: the classic TSDF (untextured) first, as the FINISH
+        # GUIDE. It writes into the same slot — we park its uncompressed copy
+        # and then overwrite the slot with the final combined mesh.
+        guide_glb = None
+        if cm_tsdf_guide:
+            try:
+                if progress_cb:
+                    progress_cb("guide_tsdf", 0.0, None)
+                logger.info("[TSDF-scene] building the TSDF FINISH GUIDE "
+                            "(untextured) …")
+                _gkw = {**_entry_kwargs, "mesh_method": "tsdf",
+                        "texture": False, "cm_tsdf_guide": False}
+                _gres = export_tsdf_scene(**_gkw)
+                _orig = (Path(_gres).with_suffix(".glb.orig")
+                         if _gres else None)
+                _src = _orig if (_orig and _orig.exists()) else _gres
+                if _src and Path(_src).exists():
+                    guide_glb = output_dir / "tsdf" / "guide_tsdf.glb"
+                    import shutil as _sh
+                    _sh.copy2(_src, guide_glb)
+                    logger.info(f"[TSDF-scene] guide parked → {guide_glb.name}")
+                    # EMPTY the live slot: the guide is an intermediate and the
+                    # UI shows whatever sits in tsdf/scene — twice the user got
+                    # the half-product served as if final. Slot stays empty
+                    # until the FUSED mesh lands.
+                    for _f in ("scene.glb", "scene.glb.orig", "scene.meta.json",
+                               "scene_meta.json"):
+                        (output_dir / "tsdf" / "scene" / _f).unlink(missing_ok=True)
+                    logger.info("[TSDF-scene] live slot emptied until the final "
+                                "fused mesh is written")
+            except Exception as _e:  # noqa: BLE001 — guide failure ≠ run failure
+                logger.warning(f"[TSDF-scene] TSDF guide failed ({_e}) — "
+                               f"meshing without it")
+                guide_glb = None
+        res = export_cloud_mesh_scene(
+            output_dir=output_dir, frames_dir=frames_dir,
+            session_dir=session_dir, texture=texture,
+            texture_max_views=texture_max_views,
+            cm_max_points=cm_max_points, cm_target_voxel=cm_target_voxel,
+            cm_lambda=cm_lambda,
+            cm_max_edge_m=cm_max_edge_m,
+            cm_min_component_tris=cm_min_component_tris,
+            cm_finish=cm_finish, cm_finish_crop=cm_finish_crop,
+            cm_polish=cm_polish, cm_polish_steps=cm_polish_steps,
+            guide_glb=str(guide_glb) if guide_glb else None,
+            cm_guide_max_dist=cm_guide_max_dist,
+            fill_holes=fill_holes, fill_hole_size=fill_hole_size,
+            progress_cb=progress_cb)
+        return Path(res) if res else None
 
     t0 = time.time()
     logger.info(f"[TSDF-scene] start  output_dir={output_dir}  session_dir={session_dir}")
@@ -1724,13 +1819,20 @@ def export_tsdf_scene(
         # NOT touched. Default OFF until it wins its A/B (config tsdf.mv_consistency).
         if mv_consistency:
             from reconstruction.mv_consistency import run as _mv_run, MV_DIRNAME
-            _mv_run(output_dir, n_neighbors=int(mv_neighbors),
-                    min_consistent_views=int(mv_min_consistent_views),
-                    tau_rel=float(mv_tau_rel),
-                    replace_median=bool(mv_replace_median),
-                    warn_discard_pct=float(mv_warn_discard_pct),
-                    log=lambda m: logger.info(f"[TSDF-scene][mv] {m}"))
-            _mv_dir = output_dir / MV_DIRNAME
+            _mv_rep = _mv_run(output_dir, n_neighbors=int(mv_neighbors),
+                              min_consistent_views=int(mv_min_consistent_views),
+                              tau_rel=float(mv_tau_rel),
+                              replace_median=bool(mv_replace_median),
+                              warn_discard_pct=float(mv_warn_discard_pct),
+                              log=lambda m: logger.info(f"[TSDF-scene][mv] {m}"))
+            _mv_disc = float((_mv_rep or {}).get("global_discard_pct", 0.0))
+            if mv_self_gate_pct and _mv_disc > float(mv_self_gate_pct):
+                logger.warning(
+                    f"[TSDF-scene][mv] SELF-GATED OFF: global discard "
+                    f"{_mv_disc:.1f}% > {mv_self_gate_pct:.0f}% — too few "
+                    f"overlapping views to vote; integrating UNFILTERED")
+            else:
+                _mv_dir = output_dir / MV_DIRNAME
         mapany_src = _resolve_mapanything_depth(output_dir, conf_percentile=_cp,
                                                 mv_dir=_mv_dir)
         # ── Phase C: native-resolution depth refinement (pre-TSDF). Generates
@@ -1845,15 +1947,23 @@ def export_tsdf_scene(
                     "depth": np.asarray(_fr["depth"], np.float32),
                     "K": np.asarray(_fr["K"], np.float64),
                     "T": np.asarray(_T, np.float64)}
-            _mv_run(output_dir, n_neighbors=int(mv_neighbors),
-                    min_consistent_views=int(mv_min_consistent_views),
-                    tau_rel=float(mv_tau_rel),
-                    replace_median=bool(mv_replace_median),
-                    warn_discard_pct=float(mv_warn_discard_pct),
-                    log=lambda m: logger.info(f"[TSDF-scene][mv-pgsr] {m}"),
-                    dirname=_MV_PGSR_DIRNAME,
-                    _frames_override=_pframes)
+            _mv_rep = _mv_run(output_dir, n_neighbors=int(mv_neighbors),
+                              min_consistent_views=int(mv_min_consistent_views),
+                              tau_rel=float(mv_tau_rel),
+                              replace_median=bool(mv_replace_median),
+                              warn_discard_pct=float(mv_warn_discard_pct),
+                              log=lambda m: logger.info(f"[TSDF-scene][mv-pgsr] {m}"),
+                              dirname=_MV_PGSR_DIRNAME,
+                              _frames_override=_pframes)
             _mv_pgsr_dir = output_dir / _MV_PGSR_DIRNAME
+            _mv_disc = float((_mv_rep or {}).get("global_discard_pct", 0.0))
+            if mv_self_gate_pct and _mv_disc > float(mv_self_gate_pct):
+                logger.warning(
+                    f"[TSDF-scene][mv-pgsr] SELF-GATED OFF: global discard "
+                    f"{_mv_disc:.1f}% > {mv_self_gate_pct:.0f}% — too few "
+                    f"overlapping views to vote (12-kf sessions hit 53% and the "
+                    f"mesh fragmented); integrating UNFILTERED")
+                _mv_pgsr_dir = None
 
             def _pgsr_mv_load(fidx, _base=frame_loader, _md=_mv_pgsr_dir):
                 fr = _base(fidx)
@@ -1875,8 +1985,11 @@ def export_tsdf_scene(
                     fr["depth"] = mv["depth"].astype(np.float32)
                 return fr
 
-            frame_loader = _pgsr_mv_load
-            depth_kind += " · mv-consistency filtered"
+            if _mv_pgsr_dir is not None:
+                frame_loader = _pgsr_mv_load
+                depth_kind += " · mv-consistency filtered"
+            else:
+                depth_kind += " · mv-consistency SELF-GATED OFF"
         logger.info(f"[TSDF-scene] per-frame source: {depth_kind} "
                     f"@ {depth_w}x{depth_h}")
     elif mapany_src is not None:

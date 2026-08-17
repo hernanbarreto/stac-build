@@ -268,6 +268,79 @@ def bake_texture(
         if progress_cb:
             progress_cb("converting")
         textured = trimesh.load(str(obj_path), process=False)  # Scene or Trimesh
+
+        # ── UNSEEN faces → true VERTEX COLOURS (not the green fill) ──
+        # texrecon (--keep_unseen_faces) maps every face no camera saw onto ONE
+        # shared 3×3 pixel patch (generate_texture_patches.cpp) — after seam
+        # levelling that renders as the flat greenish stain. Those faces are
+        # exactly detectable: their UV triangle is sub-texel. The mesh we hand
+        # texrecon carries TRUE per-vertex colours (cloud points), so unseen
+        # faces are split into a second, vertex-coloured primitive: photo where
+        # there is photo, real cloud colour where there is none. Non-fatal.
+        try:
+            _src = trimesh.load(str(ply_path), process=False)
+            _src_colors = (np.asarray(_src.visual.vertex_colors)[:, :3]
+                           if hasattr(_src.visual, "vertex_colors")
+                           and _src.visual.vertex_colors is not None else None)
+            _geoms0 = (list(textured.geometry.values())
+                       if hasattr(textured, "geometry") else [textured])
+            if _src_colors is not None and len(_src_colors) == len(_src.vertices):
+                from scipy.spatial import cKDTree
+                _tree = cKDTree(np.asarray(_src.vertices))
+                for _g in list(_geoms0):
+                    _uv = getattr(_g.visual, "uv", None)
+                    if _uv is None or getattr(_g.visual, "material", None) is None:
+                        continue
+                    _img = getattr(_g.visual.material, "image", None)
+                    if _img is None:
+                        continue
+                    _aw, _ah = _img.size
+                    _fuv = np.asarray(_uv)[np.asarray(_g.faces)]      # (F,3,2)
+                    # texrecon maps EVERY unseen face onto ONE shared 3×3 patch
+                    # with IDENTICAL texcoords (generate_texture_patches.cpp) —
+                    # so unseen faces all carry the exact same UV-triangle
+                    # signature. Detect by MODAL signature, not by area: an
+                    # area threshold false-positived 700k genuinely textured
+                    # small faces on 360×640 imagery ("más ahuecada").
+                    _sig = np.round(_fuv.reshape(len(_fuv), 6) * 65536).astype(np.int64)
+                    _key = (_sig * np.array([1, 7919, 104729, 1299709,
+                                             15485863, 179424673])).sum(1)
+                    _vals, _inv, _cnt = np.unique(_key, return_inverse=True,
+                                                  return_counts=True)
+                    _mode = int(np.argmax(_cnt))
+                    _e1 = (_fuv[:, 1] - _fuv[:, 0]) * (_aw, _ah)
+                    _e2 = (_fuv[:, 2] - _fuv[:, 0]) * (_aw, _ah)
+                    _area_tx = 0.5 * np.abs(_e1[:, 0] * _e2[:, 1]
+                                            - _e1[:, 1] * _e2[:, 0])
+                    _unseen = np.zeros(len(_fuv), bool)
+                    # the shared patch: same exact UVs on MANY faces AND sub-texel
+                    if _cnt[_mode] >= 50:
+                        _cand = _inv == _mode
+                        if float(np.median(_area_tx[_cand])) < 1.5:
+                            _unseen = _cand
+                    if not _unseen.any():
+                        continue
+                    _uf = np.asarray(_g.faces)[_unseen]
+                    _d, _ni = _tree.query(np.asarray(_g.vertices), k=1)
+                    _vc = _src_colors[_ni]
+                    _vm = trimesh.Trimesh(vertices=np.asarray(_g.vertices),
+                                          faces=_uf, process=False)
+                    _vm.visual = trimesh.visual.ColorVisuals(
+                        _vm, vertex_colors=np.hstack([
+                            _vc, np.full((len(_vc), 1), 255, np.uint8)]))
+                    _vm.remove_unreferenced_vertices()
+                    _g.update_faces(~_unseen)
+                    if hasattr(textured, "add_geometry"):
+                        textured.add_geometry(_vm, geom_name="unseen_vertexcolor")
+                    else:
+                        textured = trimesh.Scene(
+                            {"textured": _g, "unseen_vertexcolor": _vm})
+                    logger.info(f"[TextureBake] {int(_unseen.sum()):,} unseen "
+                                f"faces → true vertex colours (green fill "
+                                f"replaced)")
+        except Exception as e:  # noqa: BLE001 — cosmetic path must never kill the bake
+            logger.warning(f"[TextureBake] unseen-face recolour skipped ({e})")
+
         # Sanitise before GLB export. trimesh tolerates NaN/Inf, but the glTF
         # JSON chunk it then writes carries `NaN` in accessor min/max — invalid
         # JSON, which three.js's JSON.parse rejects (mesh fails to load in the

@@ -14,6 +14,12 @@ Protocol (stdout):
     [TSDF-RESULT]<glb_path>      (or [TSDF-RESULT]NONE on failure)
 Everything else printed is plain log forwarded to the server console.
 """
+import os
+# OMP cap BEFORE any numeric import: on this 252-core box unbounded OpenMP
+# (Open3D Poisson, scipy) THRASHES — same load-bearing lesson as PGSR's
+# torch.set_num_threads(8). Must be set before the first parallel region.
+os.environ.setdefault("OMP_NUM_THREADS", "8")
+
 import argparse
 import faulthandler
 import json
@@ -57,7 +63,9 @@ class _FlushingStream(logging.StreamHandler):
 
 
 # Loggers we MUST capture (each may set propagate=False → invisible to root).
-_CAPTURED_LOGGERS = ("TSDFExport", "TextureBake", "NvdiffrastBake", "CameraSource")
+_CAPTURED_LOGGERS = ("TSDFExport", "TextureBake", "NvdiffrastBake", "CameraSource",
+                     "CloudMesh", "MeshFusion")  # cloud_delaunay stage — a silent
+                     # death in the pipeline path proved these MUST be captured
 _LOG_FORMAT = logging.Formatter("[%(name)s] %(message)s")
 
 _stdout_handler = _FlushingStream(sys.stdout)

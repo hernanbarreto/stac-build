@@ -54,34 +54,48 @@ def _tsdf_work(pipe: WorkerPipe, session_dir: str, config: dict):
     pipe.send_log(f"TSDF kwargs (overrides): {kwargs}" if kwargs
                   else "TSDF using export defaults")
 
-    # Forward the export_tsdf_scene logger ("TSDFExport") to server.log via the pipe so
-    # its coverage diagnostics (n_integrated / skipped / mask points / depth source /
-    # "integrating unmasked") are visible — otherwise they only hit the worker console.
-    import logging as _logging
-    _tsdf_logger = _logging.getLogger("TSDFExport")
-
-    class _PipeLogHandler(_logging.Handler):
-        def emit(self, record):
+    # ONE execution path (user mandate 2026-08-17: "debe funcionar exactamente
+    # igual"). The stage spawns the SAME run_tsdf_scene.py subprocess the UI
+    # button uses — same logger capture (TSDFExport, CloudMesh, MeshFusion,
+    # TextureBake into run.log + stream), same faulthandler, same OMP cap.
+    # The previous in-process call ran the mesher BLIND (its loggers were not
+    # forwarded) and WITHOUT those protections — a silent death mid-stage left
+    # no trace. Never let the two paths diverge again.
+    import json as _json
+    import subprocess as _sp
+    import sys as _sys
+    _script = Path(__file__).resolve().parent.parent / "run_tsdf_scene.py"
+    _cmd = [_sys.executable, str(_script),
+            "--output-dir", str(output_dir),
+            "--frames-dir", str(frames_dir),
+            "--session-dir", str(session_path),
+            "--params", _json.dumps(kwargs)]
+    import os as _os
+    _proc = _sp.Popen(_cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
+                      cwd=str(Path(__file__).resolve().parent.parent),
+                      env={**_os.environ, "PYTHONUNBUFFERED": "1",
+                           "PYTHONFAULTHANDLER": "1"})
+    path = None
+    assert _proc.stdout is not None
+    for _line in _proc.stdout:
+        _line = _line.rstrip()
+        if not _line:
+            continue
+        if _line.startswith("[TSDF-PROGRESS]"):
             try:
-                pipe.send_log(f"[TSDF] {record.getMessage()}",
-                              level="warning" if record.levelno >= _logging.WARNING else "info")
+                _upd = _json.loads(_line[len("[TSDF-PROGRESS]"):])
+                _cb(_upd.get("phase"), _upd.get("elapsed"))
             except Exception:
                 pass
-
-    _ph = _PipeLogHandler()
-    _ph.setLevel(_logging.INFO)
-    if not any(isinstance(h, _PipeLogHandler) for h in _tsdf_logger.handlers):
-        _tsdf_logger.addHandler(_ph)
-    _tsdf_logger.setLevel(_logging.INFO)
-
-    from segmentation.tsdf_export import export_tsdf_scene
-    path = export_tsdf_scene(
-        output_dir=output_dir,
-        frames_dir=frames_dir,
-        session_dir=session_path,
-        progress_cb=_cb,
-        **kwargs,
-    )
+        elif _line.startswith("[TSDF-RESULT]"):
+            _r = _line[len("[TSDF-RESULT]"):].strip()
+            path = None if _r == "NONE" else _r
+        else:
+            pipe.send_log(_line)
+    _proc.wait()
+    if _proc.returncode != 0:
+        raise RuntimeError(f"TSDF subprocess died (exit {_proc.returncode}) — "
+                           f"see run.log / fault log in output/tsdf/scene/")
     if not path:
         raise RuntimeError("export_tsdf_scene produced no mesh (no depth source / "
                            "no integrable frames)")

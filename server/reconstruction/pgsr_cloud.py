@@ -94,52 +94,68 @@ def build_cloud(output_dir: Path, frames_dir: Path, stride: int = 2,
     centres = np.stack([frames[n]["T"][:3, 3] for n in ordered])
     nbrs = _neighbor_indices(centres, mv_neighbors)
 
-    pts_all, rgb_all = [], []
-    raw_px = kept_px = 0
-    for i, n in enumerate(ordered):
-        f = frames[n]
-        depth, valid, K, T = f["depth"], f["valid"], f["K"], f["T"]
-        H, W = depth.shape
-        # 1) silhouette/edge cull (gradient in metres, same rule as the TSDF)
-        dz = np.where(valid, depth, 0.0)
-        gx = np.abs(np.diff(dz, axis=1, prepend=dz[:, :1]))
-        gy = np.abs(np.diff(dz, axis=0, prepend=dz[:1, :]))
-        mask = valid & (gx < edge_thresh) & (gy < edge_thresh)
-        # 2) multi-view consistency vote against the neighbour renders
-        js = [ordered[j] for j in nbrs[i]]
-        votes, _, _ = compute_frame_consistency(
-            depth, K, T, [frames[j]["depth"] for j in js],
-            [frames[j]["K"] for j in js], [frames[j]["T"] for j in js],
-            mv_tau_rel)
-        mask &= votes >= int(mv_min_views)
-        # 3) depth cap
-        if max_depth_m:
-            mask &= depth < float(max_depth_m)
+    def _unproject(use_vote: bool):
+        pts_all, rgb_all = [], []
+        raw_px = kept_px = 0
+        for i, n in enumerate(ordered):
+            f = frames[n]
+            depth, valid, K, T = f["depth"], f["valid"], f["K"], f["T"]
+            H, W = depth.shape
+            # 1) silhouette/edge cull (gradient in metres, same rule as the TSDF)
+            dz = np.where(valid, depth, 0.0)
+            gx = np.abs(np.diff(dz, axis=1, prepend=dz[:, :1]))
+            gy = np.abs(np.diff(dz, axis=0, prepend=dz[:1, :]))
+            mask = valid & (gx < edge_thresh) & (gy < edge_thresh)
+            # 2) multi-view consistency vote against the neighbour renders
+            if use_vote:
+                js = [ordered[j] for j in nbrs[i]]
+                votes, _, _ = compute_frame_consistency(
+                    depth, K, T, [frames[j]["depth"] for j in js],
+                    [frames[j]["K"] for j in js], [frames[j]["T"] for j in js],
+                    mv_tau_rel)
+                mask &= votes >= int(mv_min_views)
+            # 3) depth cap
+            if max_depth_m:
+                mask &= depth < float(max_depth_m)
 
-        jp = frames_dir / f"{n:06d}.jpg"
-        if not jp.exists():
-            raise RuntimeError(f"pgsr_cloud: frame image {jp.name} missing")
-        rgb = np.asarray(Image.open(jp).convert("RGB").resize((W, H),
-                                                              Image.BILINEAR))
-        m = mask[::stride, ::stride]
-        raw_px += int(valid[::stride, ::stride].sum())
-        kept_px += int(m.sum())
-        if not m.any():
-            continue
-        v, u = np.mgrid[0:H:stride, 0:W:stride]
-        z = depth[::stride, ::stride][m].astype(np.float64)
-        u, vv = u[m].astype(np.float64), v[m].astype(np.float64)
-        x = (u - K[0, 2]) / K[0, 0] * z
-        y = (vv - K[1, 2]) / K[1, 1] * z
-        Pw = (T @ np.stack([x, y, z, np.ones_like(z)]))[:3].T
-        pts_all.append(Pw.astype(np.float32))
-        rgb_all.append(rgb[::stride, ::stride][m])
+            jp = frames_dir / f"{n:06d}.jpg"
+            if not jp.exists():
+                raise RuntimeError(f"pgsr_cloud: frame image {jp.name} missing")
+            rgb = np.asarray(Image.open(jp).convert("RGB").resize((W, H),
+                                                                  Image.BILINEAR))
+            m = mask[::stride, ::stride]
+            raw_px += int(valid[::stride, ::stride].sum())
+            kept_px += int(m.sum())
+            if not m.any():
+                continue
+            v, u = np.mgrid[0:H:stride, 0:W:stride]
+            z = depth[::stride, ::stride][m].astype(np.float64)
+            u, vv = u[m].astype(np.float64), v[m].astype(np.float64)
+            x = (u - K[0, 2]) / K[0, 0] * z
+            y = (vv - K[1, 2]) / K[1, 1] * z
+            Pw = (T @ np.stack([x, y, z, np.ones_like(z)]))[:3].T
+            pts_all.append(Pw.astype(np.float32))
+            rgb_all.append(rgb[::stride, ::stride][m])
+        kept_pct = 100.0 * kept_px / max(raw_px, 1)
+        return pts_all, rgb_all, kept_pct
+
+    pts_all, rgb_all, kept_pct = _unproject(use_vote=True)
+    # SELF-GATE: a healthy vote keeps 73-94% (dense captures). Keeping under
+    # half doesn't mean half the render is junk — it means there aren't enough
+    # overlapping views to CONFIRM anything (test3 @ 12 keyframes kept 39% and
+    # the cloud/mesh fell apart into islands). Rebuild without the vote; edge
+    # cull + depth cap + SOR still apply (the pre-vote pipeline that worked).
+    if kept_pct < 50.0:
+        _log(f"SELF-GATE: vote kept only {kept_pct:.1f}% (<50%) — too few "
+             f"overlapping views to vote; rebuilding WITHOUT the multi-view "
+             f"vote (edge cull + depth cap + SOR only)")
+        pts_all, rgb_all, kept_pct = _unproject(use_vote=False)
     if not pts_all:
         raise RuntimeError("pgsr_cloud: no points survived the consistency gates")
     pts = np.concatenate(pts_all)
     cols = np.concatenate(rgb_all)
     _log(f"unprojected {len(pts):,} CONSISTENT points from {len(ordered)} renders "
-         f"(kept {100.0 * kept_px / max(raw_px, 1):.1f}% — edge cull + "
+         f"(kept {kept_pct:.1f}% — edge cull + "
          f"{mv_min_views}-view vote @ {mv_tau_rel:.0%} + <{max_depth_m:g} m)")
 
     import open3d as o3d

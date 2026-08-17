@@ -74,7 +74,17 @@ def _pgsr_work(pipe: WorkerPipe, session_dir: str, config: dict):
            "--densify_abs_grad_threshold",
            str(float(pcfg.get("densify_abs_grad_threshold", 0.00015))),
            "--opacity_cull_threshold",
-           str(float(pcfg.get("opacity_cull_threshold", 0.05)))]
+           str(float(pcfg.get("opacity_cull_threshold", 0.05))),
+           # vendor README, custom-data guidance (2026-08-17 research): weakly
+           # textured scenes (construction walls/floors) must DISABLE the
+           # abs-split densification — our benchmark-tuned aggressive threshold
+           # over-densified exactly there.
+           "--max_abs_split_points",
+           str(int(pcfg.get("max_abs_split_points", 0)))]
+    if bool(pcfg.get("use_depth_filter", True)):
+        # vendor README: filter grazing-angle depth at export (floaters /
+        # insufficient viewpoints) — cleaner renders into the TSDF guide
+        cmd.append("--use_depth_filter")
     if bool(pcfg.get("exposure_compensation", True)):
         cmd.append("--exposure_compensation")
     if bool(pcfg.get("pose_refine", False)):

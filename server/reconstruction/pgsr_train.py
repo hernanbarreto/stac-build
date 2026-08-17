@@ -180,6 +180,11 @@ def main():
     parser.add_argument("--pose_lr", type=float, default=1e-4)
     parser.add_argument("--quick", action="store_true",
                         help="15k iterations (half schedule) for A/B turnaround")
+    parser.add_argument("--use_depth_filter", action="store_true",
+                        help="vendor README custom-data recommendation: drop "
+                             "rendered-depth pixels whose depth-normal is at a "
+                             "grazing angle (>80°) to the view ray — unreliable "
+                             "depth that would otherwise feed the TSDF")
     args = parser.parse_args()
 
     args.source_path = str(Path(args.scene).resolve())
@@ -195,6 +200,37 @@ def main():
         for k in ("position_lr_max_steps", "densify_until_iter"):
             setattr(args, k, min(getattr(args, k), 15000 if k.endswith("steps")
                                  else 9000))
+
+    # NOTE on schedule vs view count: a linear passes-per-photo scaling was
+    # tried on 2026-08-16 (test3, 302 views → 45.3k iters) and REVERTED the
+    # same day — no literature support and the A/B came out worse. The 30k
+    # vendor schedule is validated from ~12 well-spread views (our q250 runs)
+    # through DTU (49-64) to MipNeRF-360 (~300): iteration count is not the
+    # critical variable, view DISTRIBUTION is. Few-shot regimes (<10 views)
+    # would need fewer iters + extra regularisation (FSGS/FewViewGS), not
+    # proportional clocks.
+
+    # ── Multi-view pairs need real parallax ────────────────────────────────
+    # Vendor multi_view_min_dis=0.01 (1 cm): with dense captures the "nearest"
+    # pairs are near-identical viewpoints — no parallax, so the NCC/geo terms
+    # fit noise and warp the geometry (test3: 8 cm baselines → wavy walls,
+    # holes). Require a baseline proportional to scene size (seed-cloud diag).
+    try:
+        from plyfile import PlyData
+        _seed = next(p for p in (Path(args.scene) / "sparse" / "points3D.ply",
+                                 Path(args.scene) / "sparse" / "0" / "points3D.ply",
+                                 Path(args.scene) / "input.ply") if p.exists())
+        _v = PlyData.read(str(_seed))["vertex"]
+        _xyz = np.stack([_v["x"], _v["y"], _v["z"]], axis=1)
+        _diag = float(np.linalg.norm(_xyz.max(0) - _xyz.min(0)))
+        _min_dis = float(np.clip(0.015 * _diag, 0.05, 0.5))
+        if _min_dis > args.multi_view_min_dis:
+            args.multi_view_min_dis = _min_dis
+            print(f"[stac-pgsr] multi_view_min_dis={_min_dis:.2f}m "
+                  f"(1.5% of scene diag {_diag:.1f}m)", flush=True)
+    except Exception as _e:  # noqa: BLE001 — no baseline gate beats a dead run
+        print(f"[stac-pgsr] min-baseline auto skipped ({_e})", flush=True)
+
     dataset, opt, pipe = lp.extract(args), op.extract(args), pp.extract(args)
 
     from utils.loss_utils import l1_loss, ssim, lncc, get_img_grad_weight
@@ -219,6 +255,20 @@ def main():
     app_model.cuda()
 
     cams = scene.getTrainCameras()
+    # A camera left with NO pairs by the raised min-baseline falls back to the
+    # vendor threshold: weak parallax beats dropping its multi-view term.
+    _orphans = [c for c in cams if len(c.nearest_id) == 0]
+    if _orphans and len(cams) > 1:
+        _centers = torch.stack([c.camera_center for c in cams])
+        for c in _orphans:
+            _d = torch.norm(_centers - c.camera_center, dim=-1)
+            _ok = (_d > 0.01) & (_d < args.multi_view_max_dis)
+            for _i in torch.argsort(torch.where(_ok, _d, torch.tensor(float("inf"), device=_d.device)))[:4]:
+                if _ok[_i]:
+                    c.nearest_id.append(int(_i))
+        print(f"[stac-pgsr] {len(_orphans)} cams had no pairs at "
+              f"min_dis={args.multi_view_min_dis:.2f}m — vendor-threshold "
+              f"fallback", flush=True)
     keep_masks = load_keep_masks(args.mask_dir or
                                  (Path(args.scene) / "masks"), cams, "cuda")
     print(f"[stac-pgsr] {len(cams)} cameras, {len(keep_masks)} dynamic masks, "
@@ -417,13 +467,24 @@ def main():
         for cam in cams:
             g_render = posed(gaussians, cam)
             pkg = render(cam, g_render, pipe, bg, app_model=app_model,
-                         return_plane=True, return_depth_normal=False)
+                         return_plane=True,
+                         return_depth_normal=bool(args.use_depth_filter))
             depth = pkg["plane_depth"].squeeze().detach().cpu().numpy() \
                 .astype(np.float32)
             alpha = pkg.get("rendered_alpha")
             valid = (depth > 1e-4)
             if alpha is not None:
                 valid &= (alpha.squeeze().detach().cpu().numpy() > 0.5)
+            if args.use_depth_filter and pkg.get("depth_normal") is not None:
+                # vendor render.py --use_depth_filter, verbatim logic: depth
+                # whose normal grazes the view ray (>80°) is unreliable
+                _vd = torch.nn.functional.normalize(cam.get_rays(), p=2, dim=-1)
+                _dn = torch.nn.functional.normalize(
+                    pkg["depth_normal"].permute(1, 2, 0), p=2, dim=-1)
+                _ang = torch.acos(torch.sum(_vd * _dn, dim=-1).abs())
+                _graze = (_ang > (80.0 / 180.0 * 3.14159)) \
+                    .detach().cpu().numpy()
+                valid &= ~_graze
             num = int(Path(cam.image_name).stem) if cam.image_name.split(".")[0] \
                 .isdigit() else int("".join(ch for ch in cam.image_name if ch.isdigit()))
             np.savez_compressed(render_dir / f"frame_{num}.npz",

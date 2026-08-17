@@ -63,7 +63,7 @@ measured escape hatch (phase 2 below), never as the default.
  │    → frames/frame_quality.json
  │
  ├─ Motion keyframe selection (parallax-uniform)
- │    one keyframe per keyframe_motion_quantum (80) of ACCUMULATED pixel motion,
+ │    one keyframe per keyframe_motion_quantum (250) of ACCUMULATED pixel motion,
  │    sharpest frame per window; all-blurry windows keep their least-blurry frame.
  │    Standing still adds ~no keyframes; fast walking adds more (no 9 m jumps).
  │    → frames/selected_frames.json  (single source of truth downstream)
@@ -153,44 +153,67 @@ The step that gives precision mode its name (~2 h/scene, exclusive GPU):
   see and the mesh agree. `cleaned_cloud.ply` is left untouched (it remains the
   source for segmentation and BIM).
 
-### Stage 4 — TSDF textured mesh (Open3D CUDA)
+### Stage 4 — The fused mesh (`tsdf.mesh_method: "cloud_delaunay"`, 2026-08-17)
 
-`depth_source: auto` resolves to the **PGSR renders** whenever the precision stage ran
-(explicit `pgsr_render` is fatal if renders are missing — never a silent fallback). In
-precision mode the cleaned-cloud pixel mask is deliberately **dropped**
-(`pgsr_mask_to_cleaned_cloud: false`): the rendered depth is photometrically
-optimized, and masking would re-import the cloud's holes — this is what gives the mesh
-**full coverage**. The multi-view geometric consistency filter (`mv_consistency`,
-4 neighbours / 2 agreeing views within 2%) screens the depth on **both** paths: the Ω
-chunk depth in fast mode, and the PGSR renders in precision mode (the same vote that
-gates the consistent cloud — rendered depth is optimized, not multi-view verified).
+The mesh is built **FROM the cleaned cloud** (the project's validated truth) by
+**region fusion of two specialists** — each technique used exactly where it is
+measurably strong (design distilled from per-scene visual verdicts):
 
-Integration: VoxelBlockGrid on GPU, **12 mm voxels** (8/6 mm lost their A/B: worse RMS
-at 1.8–2.9× cost), SDF truncation 6 cm, fixed 10 m 3D cube tiling welded on a shared
-global grid, depth clipped to the reliable 15 m band. Post-mesh chain: long-edge cull
-(0.10 m bridge/spike triangles) → speck cleanup (aborts if it would drop >5% of
-triangles) → hole fill (≤0.25 m — doors and windows stay open) → Taubin smoothing (×5,
-shrinkage-free) → quadric decimation (≈4 M triangles, auto-scaled to scene size). An
-**ICP-snap gate** aligns mesh + cameras to the cloud before texturing, but only when
-fitness/RMSE/motion bounds all pass — otherwise the mesh stays in the pose frame.
-Texture: **texrecon** UV-atlas photographic bake (MVS-Texturing, up to 400–600 views);
-the GLB ships meshopt + WebP compressed (~6×), with the uncompressed original kept
-alongside.
+1. **Finish guide — PGSR→TSDF** (`guide_tsdf.glb`, untextured): the classic TSDF
+   integration of the PGSR-refined renders (`depth_source: auto` picks them up when
+   the precision stage ran). Its measured strength: **complex objects** — whatever it
+   reconstructs, it reconstructs well. Its weakness: coverage (it demands multi-frame
+   agreement, which large planes at grazing angles never achieve).
+2. **Coverage mesh — Delaunay + visibility graph cut** (`reconstruction/cloud_mesh.py`,
+   Labatut 2007 / Jancosek 2011 — the RealityScan algorithm family): the cloud's own
+   points are tetrahedralized and each point's ORIGIN-camera ray (the SAM3
+   traceability) carves free space; the surface is the min-cut boundary. Complete
+   floors/walls, onion/floaters carved by construction. Vertex spacing targets **6 mm**
+   (the cloud's own build resolution; a safety cap of 6 M points regulates huge
+   scenes); each vertex is the **mean of its cell's cloud points** (noise cancelled),
+   finished with confidence-adaptive Taubin (strong where the cloud is weak, gentle
+   where it is dense).
+3. **Region fusion** (`reconstruction/mesh_fusion.py`): the scene is split into 25 cm
+   cells and scored against the cloud. **A-primary rule**: the PGSR→TSDF guide wins
+   every cell where its surface genuinely tracks the cloud (coverage ≥ 0.5, fidelity
+   ≥ 0.4); Delaunay fills everything else. (A symmetric score contest was tried first
+   and removed: Delaunay's vertices ARE the cloud points, so "closeness to the cloud"
+   rewarded hugging the noise and stomped the well-reconstructed objects.) Seams are
+   welded by attracting Delaunay boundary vertices onto the guide surface; every
+   decision is auditable in `fusion_report.json`.
+4. Small-hole fill (≤ 0.25 m — doors/windows stay open) → **texrecon** UV-atlas
+   photographic bake over the fused geometry (up to 400–600 views; faces no camera saw
+   are painted with true cloud vertex colours, never a flat fill) → meshopt + WebP
+   compressed GLB (uncompressed `.orig` kept alongside).
+
+Both entry points (pipeline stage and the UI mesh button) run the **same
+`run_tsdf_scene.py` subprocess** — same params, same logger capture (`run.log`), same
+faulthandler, same thread caps; the live slot `tsdf/scene/` stays **empty during the
+build** so the viewer never sees an intermediate. The legacy depth-integration TSDF
+remains available as `tsdf.mesh_method: "tsdf"`.
+
+**Tried and discarded on measured/user-validated evidence** (do not revisit blindly):
+classical photogrammetry as backend (COLMAP — far worse cloud and mesh on phone
+video), scene-scale screened Poisson (non-convergent solves at 5 M points on this
+hardware), TwoStep bilateral polish (barely smooths, diverges when pushed), and the
+symmetric fusion contest (structurally biased).
 
 **Artifacts of a finished run** (under the session's `output/`): `cleaned_cloud.ply` +
 `cleaned_cloud_raw.ply`, `pgsr_cloud.ply` (+ rebuilt `potree/`), `pgsr_render/` +
-`pgsr_model/`, `tsdf/scene/scene.glb` (+ `.orig`), `camera_poses.txt`,
-`scale_diagnostics.json`, `pose_refine_report.json`, `scene_consolidate_report.json`.
+`pgsr_model/`, `tsdf/scene/scene.glb` (+ `.orig`), `tsdf/guide_tsdf.glb`,
+`tsdf/fusion_report.json`, `camera_poses.txt`, `scale_diagnostics.json`,
+`pose_refine_report.json`, `scene_consolidate_report.json`.
 
-### Keyframe density (current experiment)
+### Keyframe density
 
-`keyframe_motion_quantum` is **80** since 2026-08-15 (user decision after a visual A/B
-on a real scene: markedly more complete, less ghosting — denser keyframes give PGSR
-~3× more training views). The measured trade-offs on the same scene: scale anchor MAD
-3.5%→11.1% (confidence 0.82→0.50), the walk probe over-measures (drift zigzag) so
-chunked mode fires more readily, and runtime roughly doubles. **Status: under
-evaluation across more scenes** — 250 had won the earlier pose-proxy A/B and remains
-the documented fallback.
+`keyframe_motion_quantum` is back to **250** (2026-08-16). The denser experiments lost
+decisively on real scenes: 80 gave 35 low-parallax keyframes on a short-walk scene and
+1 (all sharp frames) gave 302 — both degraded VGGT-Ω poses/scale and broke PGSR's
+multi-view stage (its "nearest" training pairs collapse to centimetre baselines that
+cannot triangulate; a scene-size-proportional `multi_view_min_dis` floor now guards
+the pair selection). PGSR additionally runs the vendor's own custom-data guidance:
+`max_abs_split_points 0` (weakly textured scenes) and `--use_depth_filter` (grazing
+depth dropped at render export).
 
 ---
 
@@ -449,7 +472,7 @@ reconstruction:
     loop_closure: true         # effective only in chunked-metric mode
   simple:                      # the one-pass pipeline (enabled)
     frame_selection: motion    # parallax-uniform keyframes (fps/dino/parallax also exist)
-    keyframe_motion_quantum: 80.0   # 80 since 2026-08-15 (visual A/B) — UNDER EVALUATION;
+    keyframe_motion_quantum: 250.0  # back to 250 (2026-08-16): denser sets (80 / 1) degraded
                                # 250 is the previous pose-proxy-validated value
     max_walk_single_pass_m: 15.0    # beyond → phase 2 chunked-metric re-run
     chunk_walk_m: 12.0         # phase-2 chunks sized by walked meters, 50% overlap
@@ -465,14 +488,16 @@ reconstruction:
   bundle_adjust: { enabled: false }   # retired: degraded the metric result
   fine_register: { enabled: false }   # retired: no usable signal
 
-tsdf:                          # final stage: textured mesh
-  depth_source: auto           # PGSR renders when the precision stage ran; else Ω depth
-  pgsr_mask_to_cleaned_cloud: false   # precision mode = full coverage (verified depth)
-  voxel_length: 0.012          # 12 mm voxels (8/6 mm A/B'd: worse at 1.8–2.9× cost)
-  mv_consistency: true         # multi-view depth filter (fast-mode depth path)
-  native_depth_method: "off"   # A/B'd: doubled double-surface incidence
-  tsdf_max_edge_m: 0.10        # cull bridge/spike triangles
-  texture_mode: "texrecon"     # UV-atlas photographic texture
+tsdf:                          # final stage: the fused mesh
+  mesh_method: "cloud_delaunay"  # PGSR→TSDF guide + Delaunay-visibility mesh + A-primary
+                               # region fusion (see Stage 4); "tsdf" = legacy depth path
+  cm_target_voxel: 0.006       # mesh vertex spacing = the cloud's own build resolution
+  cm_tsdf_guide: true          # build the PGSR→TSDF guide (objects specialist, mesh A)
+  cm_polish: "taubin"          # confidence-adaptive Taubin ×30 (measured on synthetic)
+  depth_source: auto           # guide uses PGSR renders when the precision stage ran
+  mv_consistency: true         # multi-view depth filter, SELF-GATED (>25% discard = off:
+                               # sparse-view sessions starve; the filter shuts itself)
+  texture_mode: "texrecon"     # UV-atlas photographic texture over the FUSED geometry
 
 models:
   segmentation:

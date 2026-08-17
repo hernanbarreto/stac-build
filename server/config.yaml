@@ -481,6 +481,45 @@ bim:
 # per-frame cutoffs (distance / confidence / weight / edge) that were dropping real
 # surfaces (distant walls/doors) that show fine in the cloud.
 tsdf:
+  mesh_method: "cloud_delaunay" # 2026-08-16 (doctrine): the mesh is built FROM the cleaned
+                               # cloud — Delaunay tetrahedra + VISIBILITY graph cut
+                               # (reconstruction/cloud_mesh.py; Labatut 2007 / Jancosek 2011,
+                               # the RealityScan algorithm family). Vertices ARE cloud points;
+                               # each point's origin-camera ray (SAM3 traceability) carves the
+                               # onion/floaters; tetrahedra close the surface without the
+                               # TSDF's agreement-starvation holes. "tsdf" = the old depth
+                               # re-integration path (kept as fallback).
+  cm_target_voxel: 0.006       # mesh vertex spacing (m). 6mm = the PHYSICAL floor: the
+                               # cleaned cloud itself is built at 5mm cells, below that there
+                               # is no new information. THE micro-quality knob (the old 1.2M
+                               # cap crushed test2's 11M-pt cloud to 46mm cells). On huge
+                               # clouds the cm_max_points safety grows it (~8mm on test2).
+                               # Meshing-only — the cloud is untouched.
+  cm_max_points: 6000000       # SAFETY cap (Qhull time/RAM), no longer the resolution driver
+  cm_lambda: 0.6               # smoothness (face-area weighted) vs visibility votes
+  cm_max_edge_m: 0.0           # drop triangles with a longer edge; 0 = auto (8× subsample
+                               # voxel) — kills hull-closing monsters, keeps real surface
+  cm_min_component_tris: 60    # dust components below this size are dropped
+  cm_finish: "off"             # POISSON DESCARTADO (user verdict 2026-08-17: "poisson no
+                               # sirve"): 47 min stuck in the solve on a 5M-pt scene (flat
+                               # RAM, no phase progression) — scene-scale Poisson does not
+                               # converge in useful time on this machine, matching earlier
+                               # attempts. The region-fusion architecture replaces it.
+                               # "implicit" (parked) | "vertex" = taubin polish.
+  cm_finish_crop: 0.02         # implicit crop distance (m) to the master surface
+  cm_polish: "taubin"          # POLISH stage ON the finished mesh (topology/completeness
+                               # untouched — only vertex positions low-passed): strong Taubin
+                               # blended per-vertex by the cloud's CONFIDENCE (low conf =
+                               # full smoothing, high conf keeps detail). MEASURED on the
+                               # synthetic noisy sphere: roughness 7.0→1.1mm AND true-surface
+                               # error 3.2→1.1mm (recovers shape, no shrink). The bilateral/
+                               # TwoStep variant measured WORSE and was removed. "off" = none.
+  cm_polish_steps: 30          # taubin iterations of the smooth target
+  cm_tsdf_guide: true          # BEST-OF-BOTH (2026-08-17): build the classic TSDF mesh first
+                               # (untextured, ~2-5 min) as a FINISH GUIDE — Delaunay vertices
+                               # within cm_guide_max_dist adopt its smooth surface; everywhere
+                               # else the Delaunay coverage stands. Guide failure never blocks.
+  cm_guide_max_dist: 0.03      # guide attraction radius (m), quadratic falloff (no seams)
   mask_to_cleaned_cloud: true  # integrate EXACTLY the cloud's pixels (the source of truth)
   pgsr_mask_to_cleaned_cloud: false  # PRECISION MODE (user-validated "V1", bufferStop
                                # 2026-08-11): when depth_source resolves to pgsr_render the
@@ -582,7 +621,12 @@ tsdf:
   max_decimate: 4000000      # ceiling for the auto-scaled decimate_target. Big scenes scale UP from
                              # decimate_target (∝ scene diagonal) so they keep detail, up to this cap.
   da3_conf_percentile: 0     # raster mode: moot (cloud already filtered); legacy: conf re-filter
-  tsdf_weight_thresh: 2.0    # back to 2 for DENSE depth: drops single-view flying pixels at
+  tsdf_weight_thresh: 1.0    # 1 since 2026-08-16 (user decision, test3): with FEW keyframes
+                             # (12-view sessions) most surfaces are seen by ONE frame — requiring
+                             # 2 observations deleted 54% of the cloud's coverage from the mesh
+                             # ("mesh is only a portion of the cloud"). The cloud mask already
+                             # keeps junk out of the integration.
+                             # HISTORY — 2.0: back to 2 for DENSE depth: drops single-view flying pixels at
                              # silhouettes (the real "lines in the middle"). (1.0 was only safe in raster.)
                              # the middle" — single-view FLYING PIXELS from RAW neural depth at
                              # silhouette edges. BUT in raster mode (rasterize_cloud_depth: true)
@@ -751,7 +795,18 @@ poisson:
 #   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
-  backend: "vggtomega_pgsr"             # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
+  backend: "vggtomega_pgsr"             # COMPLETO SIEMPRE (user 2026-08-17): full precision
+                                        # pipeline — PGSR trains and its renders feed the
+                                        # TSDF guide (mesh A: objects specialist) of the
+                                        # region FUSION; Delaunay covers the rest.
+                                        # THE cloud pipeline: VGGT-Ω + DA3 metric + all its
+                                        # improvements. 2026-08-16: classical photogrammetry
+                                        # (COLMAP) was tried as a full backend and DISCARDED —
+                                        # do NOT revisit (phone video is not SIFT territory; the
+                                        # VGGT-Ω+DA3 cloud won by far). The open front is the
+                                        # MESH built FROM this cloud (no holes, onion fixed by
+                                        # per-point visibility), never a parallel geometry path.
+                                        # "da3" | "mapanything" (VGGT-Long) | "lidar" | "hybrid"
                                         # | "vggtomega" | "vggtomega_pgsr"
                                         # DEFAULT = vggtomega_pgsr (USER DECISION 2026-08-11):
                                         # the PGSR precision stage nearly doubles mesh COVERAGE
@@ -917,6 +972,12 @@ reconstruction:
   pgsr:
     iterations: 30000                   # full PGSR schedule; quick: true halves it
     quick: false                        # 15k-iteration schedule (A/B turnaround)
+    max_abs_split_points: 0             # 0 since 2026-08-17 (vendor README, custom-data guidance):
+                                        # weakly textured scenes must DISABLE abs-split
+                                        # densification — our benchmark-tuned aggressive regime
+                                        # over-densified noisy gaussians on plain walls/floors
+    use_depth_filter: true              # vendor README: drop grazing-angle (>80°) rendered depth
+                                        # at export — unreliable pixels stop feeding the TSDF
     pose_refine: false                  # A/B 2026-08-11 (test2, 30k vs 30k): RMS +11% WORSE
                                         # (8.74→9.74 mm), PSNR −0.33 dB, poses walked up to
                                         # 4.6 cm from the metric solution — the omega poses
@@ -961,7 +1022,16 @@ reconstruction:
                                         # input amplifies feed-forward drift — FastVGGT / the
                                         # VGGT-Long README's own drift note); fast stretches
                                         # get more (no 9 m jumps). "fps" = plain time sampling.
-    keyframe_motion_quantum: 80.0       # 80 since 2026-08-15 (user decision after visual A/B on
+    keyframe_motion_quantum: 250.0      # BACK to 250 on 2026-08-16 (user decision) after the
+                                        # test3 series came out monotonically worse with denser
+                                        # keyframes: 12 views (q250) good → 35 (q80) holes+waves
+                                        # → 302 (q1) worst, even with a min-baseline gate on the
+                                        # PGSR multi-view pairs and a scaled schedule (scaling
+                                        # reverted — no literature support; PGSR's 30k is
+                                        # validated from ~12 well-spread views to ~300). Dense
+                                        # low-baseline keyframes hurt BOTH VGGT-Ω (feed-forward
+                                        # drift) and PGSR (degenerate multi-view pairs).
+                                        # HISTORY — 80 set 2026-08-15 (user decision after visual A/B on
                                         # bufferStop: markedly more complete, less ghosting —
                                         # note the comparison is confounded with the 08-12
                                         # pipeline upgrades). Denser keyframes = more PGSR
