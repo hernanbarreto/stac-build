@@ -27,19 +27,24 @@ bilingual supervision reports — all local, no paid external APIs.
 
 ---
 
-## The default pipeline (precision mode, `vggtomega_pgsr`)
+## The default pipeline (`vggtomega`)
 
 Orchestrated by `pipeline_manager.py`. Each stage runs as an isolated subprocess
 (spawned process group, Pipe IPC); the pipeline is **resume-aware** (per-stage artifact
 probes skip finished stages) and **fail-fast** (a stage that cannot do its job raises —
 no silent fallbacks). GPU-heavy stages take the GPU exclusively: the vLLM semantic
-service is stopped before reconstruction, PGSR and SAM3, and restarts on the next VLM
-use.
+service is stopped before reconstruction and SAM3, and restarts on the next VLM use.
+
+**The doctrine (2026-08-18):** the VGGT-Ω+DA3 cloud is the project's truth and nothing
+downstream modifies it; the mesh is built **from that cloud** (TSDF over the cloud's
+own points rasterized into every camera) and texrecon photographs it. The PGSR
+photometric stage is out of the default pipeline (its renders no longer feed the mesh,
+so its ~2 h/scene bought nothing); it remains selectable as backend `vggtomega_pgsr`.
 
 The stage order is:
 
 ```
-RECONSTRUCTION → [VLM → SAM3]* → CLOUDCOMPY → PGSR → TSDF
+RECONSTRUCTION → [VLM → SAM3]* → CLOUDCOMPY → TSDF
 ```
 
 \* The semantic chain (VLM auto-prompter → SAM3) is registered in the pipeline but
@@ -131,9 +136,41 @@ never merge) tightens the surface in place — the raw measurement is preserved 
 `cleaned_cloud_raw.ply` and `surface_fit` residuals always use it. Finally the
 **Potree octree** is built (confidence and origin fields carried into LAS).
 
-### Stage 3 — PGSR photometric refinement (the precision stage, env `pgsr`)
+### Stage 3 — The mesh: TSDF from the rasterized cloud (`tsdf.mesh_method: "tsdf"` + `rasterize_cloud_depth`, 2026-08-18)
 
-The step that gives precision mode its name (~2 h/scene, exclusive GPU):
+The mesh is built **from the cleaned cloud and nothing else** — the cloud is the
+truth, the mesh copies it:
+
+1. **Cloud rasterization** (`segmentation/tsdf_export.py::_rasterize_cloud_depth`):
+   for every posed camera, ALL in-frustum points of `cleaned_cloud.ply` are z-buffered
+   into a depth map (`raster_full_cloud`, occlusions resolved by the z-buffer —
+   integrating only each frame's own traced slice was the historical "dust" bug).
+   Each point is splatted with an **adaptive radius** (`cloud_spacing_m` 6 mm: near
+   points spread wide, far points 1 px) so the rasterized surface has no pinholes.
+   Edge/confidence/truncation cutoffs are bypassed — the depth IS clean cloud.
+2. **TSDF fusion** (12 mm voxel, GPU, auto-tiled on large scenes): the per-camera
+   rasters are integrated into one volume; the extracted surface is a single,
+   watertight-where-observed copy of the cloud. Speck clusters dropped, small holes
+   filled (≤ 0.25 m — doors/windows stay open), long bridge edges cut.
+3. **texrecon** UV-atlas photographic bake (up to 400–600 views; faces no camera saw
+   are painted with true cloud vertex colours, never a flat fill) → meshopt + WebP
+   compressed GLB (uncompressed `.orig` kept alongside).
+
+First measured run (pccr, 2026-08-18, `tool_measured`): 10.5 min end-to-end, mesh
+median 12 mm from the cloud (RMS 16 mm — voxel scale), **0.43 %** of mesh area farther
+than 5 cm from any cloud point (no invented geometry), 87 % of cloud points within
+5 cm of the mesh.
+
+Both entry points (pipeline stage and the UI mesh button) run the **same
+`run_tsdf_scene.py` subprocess** — same params, same logger capture (`run.log`), same
+faulthandler, same thread caps; the live slot `tsdf/scene/` stays **empty during the
+build** so the viewer never sees an intermediate.
+
+### Optional stage — PGSR photometric refinement (backend `vggtomega_pgsr`, env `pgsr`)
+
+Out of the default pipeline since 2026-08-18 (the mesh no longer consumes its
+renders). When selected, it runs between CloudCompPy and the TSDF (~2 h/scene,
+exclusive GPU):
 
 - **Scene export**: native-resolution keyframe images + the pipeline's poses/intrinsics
   in COLMAP layout, seeded with `cleaned_cloud.ply` (≤1.5 M points).
@@ -153,11 +190,12 @@ The step that gives precision mode its name (~2 h/scene, exclusive GPU):
   see and the mesh agree. `cleaned_cloud.ply` is left untouched (it remains the
   source for segmentation and BIM).
 
-### Stage 4 — The fused mesh (`tsdf.mesh_method: "cloud_delaunay"`, 2026-08-17)
+### Alternative mesh path — the fused mesh (`tsdf.mesh_method: "cloud_delaunay"`, 2026-08-17)
 
-The mesh is built **FROM the cleaned cloud** (the project's validated truth) by
-**region fusion of two specialists** — each technique used exactly where it is
-measurably strong (design distilled from per-scene visual verdicts):
+Superseded as the default by the rasterized-cloud TSDF above (the fused result never
+reached the required quality: Delaunay complete but ugly, PGSR→TSDF pretty but
+incomplete — the user's verdict). Kept selectable; its design, for the record —
+**region fusion of two specialists**:
 
 1. **Finish guide — PGSR→TSDF** (`guide_tsdf.glb`, untextured): the classic TSDF
    integration of the PGSR-refined renders (`depth_source: auto` picks them up when
@@ -181,28 +219,20 @@ measurably strong (design distilled from per-scene visual verdicts):
    rewarded hugging the noise and stomped the well-reconstructed objects.) Seams are
    welded by attracting Delaunay boundary vertices onto the guide surface; every
    decision is auditable in `fusion_report.json`.
-4. Small-hole fill (≤ 0.25 m — doors/windows stay open) → **texrecon** UV-atlas
-   photographic bake over the fused geometry (up to 400–600 views; faces no camera saw
-   are painted with true cloud vertex colours, never a flat fill) → meshopt + WebP
-   compressed GLB (uncompressed `.orig` kept alongside).
-
-Both entry points (pipeline stage and the UI mesh button) run the **same
-`run_tsdf_scene.py` subprocess** — same params, same logger capture (`run.log`), same
-faulthandler, same thread caps; the live slot `tsdf/scene/` stays **empty during the
-build** so the viewer never sees an intermediate. The legacy depth-integration TSDF
-remains available as `tsdf.mesh_method: "tsdf"`.
+4. Small-hole fill + the same texrecon bake as the default path.
 
 **Tried and discarded on measured/user-validated evidence** (do not revisit blindly):
 classical photogrammetry as backend (COLMAP — far worse cloud and mesh on phone
 video), scene-scale screened Poisson (non-convergent solves at 5 M points on this
-hardware), TwoStep bilateral polish (barely smooths, diverges when pushed), and the
-symmetric fusion contest (structurally biased).
+hardware), TwoStep bilateral polish (barely smooths, diverges when pushed), the
+symmetric fusion contest (structurally biased), and per-frame-slice raster
+integration (the "dust" — superseded by the full-frustum raster).
 
 **Artifacts of a finished run** (under the session's `output/`): `cleaned_cloud.ply` +
-`cleaned_cloud_raw.ply`, `pgsr_cloud.ply` (+ rebuilt `potree/`), `pgsr_render/` +
-`pgsr_model/`, `tsdf/scene/scene.glb` (+ `.orig`), `tsdf/guide_tsdf.glb`,
-`tsdf/fusion_report.json`, `camera_poses.txt`, `scale_diagnostics.json`,
-`pose_refine_report.json`, `scene_consolidate_report.json`.
+`cleaned_cloud_raw.ply` (+ `potree/`), `tsdf/scene/scene.glb` (+ `.orig`),
+`camera_poses.txt`, `scale_diagnostics.json`, `pose_refine_report.json`,
+`scene_consolidate_report.json` — plus, under backend `vggtomega_pgsr`:
+`pgsr_render/` + `pgsr_model/`, `pgsr_cloud.ply` (+ rebuilt `potree/`).
 
 ### Keyframe density
 
@@ -230,9 +260,10 @@ Every default below was decided by a pre-registered A/B on real scenes (full tab
   A **VIO trajectory** takes over the scale when present (`docs/VIO_FORMAT.md`).
 - **Surface (fast mode)**: multi-view consistency filter ON — planar-patch RMS
   9.00→8.70 mm, fewer double surfaces, faster TSDF.
-- **Precision mode** (`vggtomega_pgsr`, the default): **+86% mesh coverage** and a
-  better error tail (p90 10.83→10.01 mm) at ~2 h extra per scene; planar RMS ties the
-  fast mode.
+- **PGSR mode** (`vggtomega_pgsr`, optional since 2026-08-18): measured **+86% mesh
+  coverage** and a better error tail (p90 10.83→10.01 mm) at ~2 h extra per scene in
+  the era when the mesh integrated its renders; the rasterized-cloud mesh made it
+  moot (the cloud itself is the coverage).
 - **Active refinement**: the point-to-plane `pose_refine` stage is ON and self-gated
   (measured −52% ghost layering on jerky close-range captures; applies nothing unless
   its own held-out metric improves).
@@ -253,7 +284,7 @@ Every default below was decided by a pre-registered A/B on real scenes (full tab
 |-----------|-----------|------|
 | **VGGT-Ω** (backbone) | [VGGT-Ω](https://vggt-omega.github.io/) 1B @ 512 px (CVPR 2026) inside the STAC fork of [VGGT-Long](https://github.com/DengKaiCQ/VGGT-Long) | Feed-forward camera poses + dense points, dynamic-scene robust. Gated weights (`vendor/vggt-omega-weights/vggt_omega_1b_512.pt`) |
 | **DA3** | [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3) `DA3NESTED-GIANT-LARGE-1.1` (STAC private fork) | The **metric anchor**: isolated per-frame depth on 12 keyframes → global scale; also a standalone SLAM backend |
-| **PGSR** | [PGSR](https://github.com/zju3dv/PGSR) @ `de24f1a3` (planar Gaussian splatting; Inria non-commercial license) | The precision stage: photometric surface optimization → verified depth renders that feed the TSDF and rebuild the viewer cloud |
+| **PGSR** | [PGSR](https://github.com/zju3dv/PGSR) @ `de24f1a3` (planar Gaussian splatting; Inria non-commercial license) | Optional photometric stage (backend `vggtomega_pgsr`): surface optimization → verified depth renders + consistent-cloud rebuild |
 | **Loop closure** | [DINOv2](https://github.com/facebookresearch/dinov2) + SALAD place recognition | Chunked-metric mode only (the single pass has no loops to close) |
 | **Sky removal** | `skyseg.onnx` | Per-frame sky mask before confidence voting |
 | **TSDF + mesh** | [Open3D](https://www.open3d.org/) VoxelBlockGrid (CUDA) | 12 mm textured mesh, tiled + welded, hole-filled, Taubin-smoothed |
@@ -269,8 +300,8 @@ Every default below was decided by a pre-registered A/B on real scenes (full tab
 
 | Backend | Status | What it is |
 |---------|--------|------------|
-| **`vggtomega_pgsr`** | **DEFAULT** | Full VGGT-Ω pipeline + the PGSR precision stage (+86% mesh coverage, ~2 h extra) |
-| `vggtomega` | wired | Fast mode: same reconstruction, no PGSR stage |
+| **`vggtomega`** | **DEFAULT** (2026-08-18) | VGGT-Ω one-pass + DA3 metric scale → cloud → rasterized-cloud TSDF mesh |
+| `vggtomega_pgsr` | wired (optional) | Same + the PGSR photometric stage between CloudCompPy and the mesh (~2 h extra; its renders no longer feed the default mesh) |
 | `da3` | wired | DA3 streaming SLAM standalone (neural depth, SALAD loops) |
 | `mapanything` | wired (legacy fallback) | DA3 depth+K prior into MapAnything per chunk (VGGT-Long framework) |
 | `hybrid` / `hybrid_cond` | wired | Stray Scanner captures: LiDAR-calibrated DA3, optionally ARKit-pose-conditioned |
@@ -405,7 +436,8 @@ stac-build/
 ├─ server/                    # Python backend (FastAPI + uvicorn, port 8765)
 │   ├─ main.py                # FastAPI app, WebSockets, API routes (+ auth/team/spatial-QA routers)
 │   ├─ pipeline_manager.py    # Stage orchestrator — default order:
-│   │                          #   RECONSTRUCTION → [VLM → SAM3]* → CLOUDCOMPY → PGSR → TSDF
+│   │                          #   RECONSTRUCTION → [VLM → SAM3]* → CLOUDCOMPY → TSDF
+│   │                          #   (+ PGSR before TSDF under backend vggtomega_pgsr)
 │   │                          #   (* gated by pipeline.auto_segment, currently false)
 │   ├─ workers/               # Subprocess workers (GPU-isolated, WorkerPipe IPC)
 │   │   ├─ map_worker.py      #   reconstruction dispatcher: frame quality → motion keyframes
@@ -463,8 +495,9 @@ pipeline:
   auto_segment: false          # semantic chain on demand (temporarily out of the default run)
 
 reconstruction:
-  backend: "vggtomega_pgsr"    # DEFAULT: precision mode (+86% mesh coverage, ~2 h/scene extra)
-                               # "vggtomega" = fast mode without the PGSR stage
+  backend: "vggtomega"         # DEFAULT (2026-08-18): the cloud is the truth, the mesh
+                               # copies it — PGSR out of the default pipeline
+                               # "vggtomega_pgsr" = optional PGSR photometric stage
   vggtomega:
     scale_align: true          # metric scale vs DA3 anchors — fails hard if unrecoverable
     scale_mode: global_median  # structured models lost their own CV gate in the A/B
@@ -480,7 +513,7 @@ reconstruction:
     scale_anchor_frames: 12    # DA3 metric anchors (12 vs 24/32 A/B'd: 12 stays)
   pose_refine:
     enabled: true              # point-to-plane joint refinement, SELF-GATED
-  pgsr:                        # precision stage (vendor PGSR @ de24f1a3, env `pgsr`)
+  pgsr:                        # OPTIONAL stage (backend vggtomega_pgsr only)
     iterations: 30000          # ~2 h/scene, PSNR ~24.8, ~11 GB VRAM (measured)
     ncc_scale: 0.5             # vendor max-quality regime + exposure compensation
     pose_refine: false         # photometric pose refinement LOST its A/B (RMS +11%)
@@ -488,16 +521,17 @@ reconstruction:
   bundle_adjust: { enabled: false }   # retired: degraded the metric result
   fine_register: { enabled: false }   # retired: no usable signal
 
-tsdf:                          # final stage: the fused mesh
-  mesh_method: "cloud_delaunay"  # PGSR→TSDF guide + Delaunay-visibility mesh + A-primary
-                               # region fusion (see Stage 4); "tsdf" = legacy depth path
-  cm_target_voxel: 0.006       # mesh vertex spacing = the cloud's own build resolution
-  cm_tsdf_guide: true          # build the PGSR→TSDF guide (objects specialist, mesh A)
-  cm_polish: "taubin"          # confidence-adaptive Taubin ×30 (measured on synthetic)
-  depth_source: auto           # guide uses PGSR renders when the precision stage ran
+tsdf:                          # final stage: the mesh FROM the cloud
+  mesh_method: "tsdf"          # DEFAULT (2026-08-18): TSDF over the rasterized cloud;
+                               # "cloud_delaunay" = the fused-mesh alternative
+  rasterize_cloud_depth: true  # z-buffer ALL in-frustum cleaned-cloud points per camera
+  raster_full_cloud: true      #   (full-frustum; per-frame slices were the "dust" bug)
+  cloud_spacing_m: 0.006       # drives the adaptive splat radius (cloud build resolution)
+  voxel_length: 0.012          # 12 mm TSDF voxel (8/6 mm lost their A/B)
+  tsdf_weight_thresh: 1.0      # raster depth is clean cloud — single-view evidence counts
   mv_consistency: true         # multi-view depth filter, SELF-GATED (>25% discard = off:
                                # sparse-view sessions starve; the filter shuts itself)
-  texture_mode: "texrecon"     # UV-atlas photographic texture over the FUSED geometry
+  texture_mode: "texrecon"     # UV-atlas photographic texture
 
 models:
   segmentation:

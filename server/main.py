@@ -1767,10 +1767,11 @@ async def get_available_backends(session_id: str, scan_key: str = None):
     stray_info = detect_stray_data(session_dir)
 
     # Always available (video-only) — mirrors the ACTUAL dispatch in
-    # workers/map_worker.py. vggtomega_pgsr is the shipped default (precision
-    # mode); vggtomega is fast mode; da3/mapanything are the legacy fallbacks.
+    # workers/map_worker.py. vggtomega is the shipped default (user 2026-08-18:
+    # the mesh is TSDF from the rasterized cloud — PGSR buys nothing now);
+    # vggtomega_pgsr remains selectable; da3/mapanything are legacy fallbacks.
     # gaus_slam*/nerfstudio have NO dispatch branch any more — never offer them.
-    backends = ["vggtomega_pgsr", "vggtomega", "da3", "mapanything"]
+    backends = ["vggtomega", "vggtomega_pgsr", "da3", "mapanything"]
 
     # Stray Scanner backends (need LiDAR/ARKit session data)
     if stray_info["is_stray_session"]:
@@ -1779,12 +1780,12 @@ async def get_available_backends(session_id: str, scan_key: str = None):
         if stray_info["has_lidar"] and stray_info["has_arkit"]:
             backends.append("hybrid_cond")                 # full ARKit+LiDAR prior
 
-    # Recommendation: the config default (precision mode) unless the session
-    # explicitly carries the full Stray prior, where hybrid_cond exploits it.
+    # Recommendation: the config default unless the session explicitly
+    # carries the full Stray prior, where hybrid_cond exploits it.
     if stray_info["has_lidar"] and stray_info["has_arkit"]:
         recommended = "hybrid_cond"
     else:
-        recommended = "vggtomega_pgsr"
+        recommended = "vggtomega"
 
     return {
         "session_id": session_id,

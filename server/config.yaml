@@ -481,7 +481,18 @@ bim:
 # per-frame cutoffs (distance / confidence / weight / edge) that were dropping real
 # surfaces (distant walls/doors) that show fine in the cloud.
 tsdf:
-  mesh_method: "cloud_delaunay" # 2026-08-16 (doctrine): the mesh is built FROM the cleaned
+  mesh_method: "tsdf"          # EXPERIMENT 2026-08-18 (user: "TSDF completo, solo TSDF y
+                               # texrecon"): classic TSDF fed by the CLOUD ITSELF — see
+                               # rasterize_cloud_depth below. One geometry source, the TSDF
+                               # finish, the cloud's coverage. "cloud_delaunay" = the fusion
+                               # path (guide + Delaunay + region fusion), still selectable.
+  rasterize_cloud_depth: true  # z-buffer the cleaned cloud into every camera (FULL-FRUSTUM:
+                               # all visible points, occlusion by z-buffer) with ADAPTIVE
+                               # splats (near→wide, far→1px; cloud_spacing_m drives the
+                               # footprint) — perfectly self-consistent, complete depth. The
+                               # historical dust/bridges came from rastering only each
+                               # frame's own traced slice with fixed 1px splats.
+  # 2026-08-16 (doctrine): the mesh is built FROM the cleaned
                                # cloud — Delaunay tetrahedra + VISIBILITY graph cut
                                # (reconstruction/cloud_mesh.py; Labatut 2007 / Jancosek 2011,
                                # the RealityScan algorithm family). Vertices ARE cloud points;
@@ -577,9 +588,9 @@ tsdf:
   # already stripped from the cloud — integrating it made the mesh grow streaks and
   # phantom surfaces the cloud doesn't have ("no copia la nube" / "líneas incorrectas").
   # With raster ON every depth sample IS a cleaned cloud point → the mesh copies the cloud.
-  rasterize_cloud_depth: false # DENSE depth (solid continuous surface). Raster z-buffered sparse
-                              # cloud points → 3.5M disconnected fragments (dust) + 83m bridge tris on
-                              # test4 — wrong technique here. Dense gives ONE connected surface.
+  # (rasterize_cloud_depth is set ABOVE, next to mesh_method — the old duplicate
+  # "false" here silently overrode it via YAML last-key-wins. The 2026-08-18
+  # full-frustum + adaptive-splat raster supersedes the old dust/bridge verdict.)
                               # points back into each frame and integrate THAT. Unlike raw dense
                               # depth (capped at reliable_depth_m=8m by auto_tune → drops the far
                               # half of long scans seen from >8m away, the test4 missing-tail bug),
@@ -795,10 +806,14 @@ poisson:
 #   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
-  backend: "vggtomega_pgsr"             # COMPLETO SIEMPRE (user 2026-08-17): full precision
-                                        # pipeline — PGSR trains and its renders feed the
-                                        # TSDF guide (mesh A: objects specialist) of the
-                                        # region FUSION; Delaunay covers the rest.
+  backend: "vggtomega"                  # USER 2026-08-18: PGSR REMOVED from the pipeline.
+                                        # Doctrine: the VGGT-Ω cloud is the truth and nothing
+                                        # modifies it; the mesh is TSDF fed by rasterizing THAT
+                                        # cloud into every camera (tsdf.rasterize_cloud_depth)
+                                        # + texrecon. video → cloud → clean → Potree → TSDF.
+                                        # (History: vggtomega_pgsr was "completo siempre"
+                                        # 2026-08-17; superseded — PGSR renders no longer feed
+                                        # the mesh, so its ~2 h/scene buys nothing.)
                                         # THE cloud pipeline: VGGT-Ω + DA3 metric + all its
                                         # improvements. 2026-08-16: classical photogrammetry
                                         # (COLMAP) was tried as a full backend and DISCARDED —
@@ -978,6 +993,10 @@ reconstruction:
                                         # over-densified noisy gaussians on plain walls/floors
     use_depth_filter: true              # vendor README: drop grazing-angle (>80°) rendered depth
                                         # at export — unreliable pixels stop feeding the TSDF
+    sky_mask: true                      # 2026-08-17 (test4: PGSR trained the SKY — its photometric
+                                        # loss grows far gaussians for it): skyseg masks merged
+                                        # into the training masks (sky excluded from the loss).
+                                        # The fusion also drops off-table faces as the last net.
     pose_refine: false                  # A/B 2026-08-11 (test2, 30k vs 30k): RMS +11% WORSE
                                         # (8.74→9.74 mm), PSNR −0.33 dB, poses walked up to
                                         # 4.6 cm from the metric solution — the omega poses

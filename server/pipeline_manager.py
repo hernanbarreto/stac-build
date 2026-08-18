@@ -919,5 +919,10 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
             return False   # no mesh requested → the 2h PGSR stage has no consumer
         return True
 
+    # The PGSR stage exists only for backend vggtomega_pgsr; for every other
+    # backend it is dropped from the list entirely (user 2026-08-18: the UI
+    # must not show a "Precision (PGSR)" step the pipeline will never run).
+    order = [s for s in DEFAULT_STAGE_ORDER
+             if s != StageId.PGSR or backend == "vggtomega_pgsr"]
     return [PipelineStage(id=stage_id, enabled=_enabled(stage_id))
-            for stage_id in DEFAULT_STAGE_ORDER]
+            for stage_id in order]

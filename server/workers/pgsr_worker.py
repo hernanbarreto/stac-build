@@ -24,6 +24,51 @@ from pathlib import Path
 from workers.base import WorkerPipe, run_worker_safe, stop_semantic_service
 
 
+def _write_sky_masks(output_dir: Path, frames_dir: Path, masks_dir: Path,
+                     log=print) -> int:
+    """skyseg.onnx over the PGSR keyframes → sky=255 (DROP) OR-merged into
+    masks/<name>.jpg.png (the SAM3 dynamic-mask convention). Returns the
+    number of keyframes masked."""
+    import json
+    import numpy as np
+    import sys as _sys
+    from PIL import Image
+    vendor = Path(__file__).resolve().parent.parent.parent / "vendor" / "VGGT-Long"
+    _sys.path.insert(0, str(vendor))
+    import onnxruntime
+    from loop_utils.visual_util import segment_sky, download_file_from_url
+    onnx_path = vendor / "skyseg.onnx"
+    if not onnx_path.exists():
+        log("sky masks: downloading skyseg.onnx …")
+        download_file_from_url(
+            "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx",
+            str(onnx_path))
+    sess = onnxruntime.InferenceSession(str(onnx_path))
+    sel = json.load(open(frames_dir / "selected_frames.json"))
+    masks_dir.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for name in sel.get("selected_files", []):
+        src = frames_dir / name
+        if not src.exists():
+            continue
+        sky = segment_sky(str(src), sess, None)          # 255 = NON-sky
+        if sky is None:
+            continue
+        with Image.open(src) as im:
+            W, H = im.size
+        if sky.shape[:2] != (H, W):
+            sky = np.array(Image.fromarray(sky).resize((W, H), Image.NEAREST))
+        drop = (sky <= 25).astype(np.uint8) * 255        # sky → 255 = DROP
+        dst = masks_dir / f"{name}.png"
+        if dst.exists():                                  # OR with SAM3 dynamic
+            prev = np.asarray(Image.open(dst).convert("L"))
+            if prev.shape == drop.shape:
+                drop = np.maximum(drop, prev)
+        Image.fromarray(drop).save(dst)
+        n += 1
+    return n
+
+
 def _pgsr_work(pipe: WorkerPipe, session_dir: str, config: dict):
     session_path = Path(session_dir)
     frames_dir = (session_path / "frames").resolve()
@@ -53,6 +98,20 @@ def _pgsr_work(pipe: WorkerPipe, session_dir: str, config: dict):
     masks_dir = scene_dir / "masks"
     pipe.send_progress(5, "PGSR: dynamic masks from SAM3...", stage="pgsr")
     _gen_masks(output_dir, masks_dir, log=lambda m: pipe.send_log(f"[pgsr] {m}"))
+
+    # 1b) SKY masks (test4 verdict 2026-08-17: PGSR trained the sky — its
+    # photometric loss happily grows far gaussians for it, which then reach
+    # the renders → the TSDF guide. VGGT masks sky for the CLOUD only; the
+    # trainer needs its own mask). skyseg (the same model the VGGT path uses)
+    # marks sky=255 = DROP, OR-merged into the SAM3 dynamic masks. Non-fatal.
+    if bool(pcfg.get("sky_mask", True)):
+        try:
+            _n_sky = _write_sky_masks(output_dir, frames_dir, masks_dir,
+                                      log=lambda m: pipe.send_log(f"[pgsr] {m}"))
+            pipe.send_log(f"[pgsr] sky masks merged for {_n_sky} keyframes "
+                          f"(sky excluded from the training loss)")
+        except Exception as e:  # noqa: BLE001 — masking must never kill the stage
+            pipe.send_log(f"[pgsr] sky masks skipped ({e})", level="warning")
 
     # 2) scene export (poses + intrinsics + seed cloud at native res)
     pipe.send_progress(10, "PGSR: exporting COLMAP scene...", stage="pgsr")

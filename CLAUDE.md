@@ -1,17 +1,23 @@
 # CLAUDE.md — working rules for this repo
 
-## Precision task status (claude_stac.txt, phases A–F) — updated 2026-08-12
+## Precision task status (claude_stac.txt, phases A–F) — updated 2026-08-18
 Phases A–D are CLOSED with pre-registered A/B verdicts (docs/scale_ab_results.md,
 docs/phase_bc_ab_results.md); E (external scorecard vs COLMAP/OpenMVS +
 RealityScan import) and F (final matrix + precision_report.md) are DEFERRED by
 the user. Current production defaults (all evidence-backed, do not "improve"
 them blindly):
-- backend `vggtomega_pgsr` (user decision: +86% mesh coverage, ~2 h/scene PGSR
-  stage; `vggtomega` = fast mode), `pipeline.auto_tsdf: true` (every run ends
-  with the mesh, never Potree-only).
-- `tsdf.mv_consistency: true` (won its A/B), `tsdf.depth_source: auto` (prefers
-  the session's PGSR renders), voxel 12 mm (8/6 mm lost), `native_depth_method`
-  off (lost: doubles the double-surface stat).
+- DOCTRINE 2026-08-18 (user): the VGGT-Ω cloud is the truth, nothing modifies
+  it; the mesh is built FROM it. Backend `vggtomega` (PGSR REMOVED from the
+  default pipeline — its renders no longer feed the mesh; `vggtomega_pgsr`
+  stays selectable). Mesh: `tsdf.mesh_method: "tsdf"` +
+  `rasterize_cloud_depth: true` (full-frustum z-buffer of the cleaned cloud,
+  adaptive splats) + texrecon. First run pccr: 10.5 min, mesh↔cloud median
+  12 mm, invented area 0.43% — user: "funcionó a la perfección".
+  `pipeline.auto_tsdf: true` (every run ends with the mesh, never Potree-only).
+- `tsdf.mv_consistency: true` (won its A/B), `tsdf.depth_source: auto`, voxel
+  12 mm (8/6 mm lost), `native_depth_method` off (lost: doubles the
+  double-surface stat). `cloud_delaunay` (Delaunay+fusion) kept as alternative
+  — superseded: never reached the required quality.
 - scale: `global_median`, 12 anchors (structured models + more anchors + depth
   top-up all lost or neutral); VIO source auto-detected when present.
 - `reconstruction.pose_refine.enabled: true` (point-to-plane, SELF-GATED);

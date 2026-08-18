@@ -520,7 +520,8 @@ def _build_segment_mask_at_depth(pr_rgb: np.ndarray, pc_rgb: np.ndarray,
 
 def _rasterize_cloud_depth(xyz: np.ndarray, c2w: np.ndarray, K: np.ndarray,
                            depth_h: int, depth_w: int,
-                           splat_radius: int = 0) -> np.ndarray:
+                           splat_radius: int = 0,
+                           spacing_m: float = 0.0) -> np.ndarray:
     """Z-buffer a frame's cleaned-cloud points back into its depth grid.
 
     This is the faithful inverse of how the cloud was built, and the core of the
@@ -569,7 +570,25 @@ def _rasterize_cloud_depth(xyz: np.ndarray, c2w: np.ndarray, K: np.ndarray,
     ui, vi, z = ui[inb], vi[inb], z[inb]
 
     depth = np.full((depth_h, depth_w), np.inf, dtype=np.float64)
-    if splat_radius and splat_radius > 0:
+    if spacing_m and spacing_m > 0:
+        # ADAPTIVE splat (2026-08-18): each point covers its LOCAL SAMPLING
+        # footprint in pixels — r = fx·spacing/z. Near points (big footprint)
+        # splat wide so walls close ranks; far points stay 1 px. This is what
+        # kills the historical "dust" (fixed 1 px splats left gaps between
+        # points at close range, letting far depth leak through as spikes).
+        r_px = np.clip(np.rint(K[0, 0] * float(spacing_m)
+                               / np.maximum(z, 1e-6) * 0.75), 1, 4).astype(np.int64)
+        for rad in (1, 2, 3, 4):
+            sel = r_px == rad
+            if not sel.any():
+                continue
+            vs, us, zs = vi[sel], ui[sel], z[sel]
+            for dy in range(-rad, rad + 1):
+                for dx in range(-rad, rad + 1):
+                    yy, xx = vs + dy, us + dx
+                    ok = (yy >= 0) & (yy < depth_h) & (xx >= 0) & (xx < depth_w)
+                    np.minimum.at(depth, (yy[ok], xx[ok]), zs[ok])
+    elif splat_radius and splat_radius > 0:
         for dy in range(-splat_radius, splat_radius + 1):
             for dx in range(-splat_radius, splat_radius + 1):
                 yy, xx = vi + dy, ui + dx
@@ -1498,6 +1517,11 @@ def export_tsdf_scene(
     cleaned_cloud_dilate: int = 3,       # px dilation of the cleaned-cloud pixel mask
                                          # (legacy raw-depth path only)
     rasterize_cloud_depth: bool = True,  # FAITHFUL mode: integrate the cloud's OWN points
+    raster_full_cloud: bool = True,      # raster ALL in-frustum cloud points per frame (z-buffer
+                                         # handles occlusion) — the per-frame traced slice was
+                                         # ~1/N of the cloud and produced the historical dust
+    cloud_spacing_m: float = 0.006,      # local cloud sampling (CloudCompy voxel ≈5mm) → drives
+                                         # the ADAPTIVE splat footprint (near→wide, far→1px)
                                          # (z-buffered back into each frame) instead of the
                                          # raw neural depth, so the TSDF meshes EXACTLY the
                                          # cleaned cloud — no SOR-stripped outliers/streaks/
@@ -2142,7 +2166,8 @@ def export_tsdf_scene(
     # depth_trunc cap must NOT apply in raster mode — the z-buffered depth IS clean cloud
     # geometry, so capping it to the neural-depth reliable range would silently drop the
     # real far surface the cloud captured from >reliable_depth_m away.)
-    raster_active = bool(rasterize_cloud_depth and cc_frame_pix is not None)
+    raster_active = bool(rasterize_cloud_depth and (
+        cc_frame_pix is not None or raster_full_cloud))
 
     # PRECISION MODE repair: with the cloud MASK off (pgsr_mask_to_cleaned_cloud)
     # nothing loaded the cloud POINTS either — so the spatial tiler had no xyz,
@@ -2341,13 +2366,16 @@ def export_tsdf_scene(
                 continue
             # Whether THIS frame integrates the faithful cloud-raster depth: needs
             # rasterize_cloud_depth ON and per-frame cloud traceability (cc_fp).
-            use_raster = rasterize_cloud_depth and cc_fp is not None
+            use_raster = rasterize_cloud_depth and (
+                cc_fp is not None
+                or (raster_full_cloud and cc_xyz is not None and len(cc_xyz)))
 
             # In raster mode, a frame with no points in THIS tile contributes nothing —
             # skip it BEFORE loading its npz. With many small tiles (the extract-safe
             # split) most frames miss most tiles, so this avoids thousands of wasted
             # per-frame npz reads.
-            if use_raster and cc_fp.get(fidx) is None:
+            if use_raster and cc_fp is not None and cc_fp.get(fidx) is None \
+                    and not (raster_full_cloud and cc_xyz is not None):
                 skipped_empty += 1
                 continue
 
@@ -2457,17 +2485,24 @@ def export_tsdf_scene(
                     up_color = guide           # reuse the high-res photo as integ. colour
 
             if use_raster:
-                # FAITHFUL path: z-buffer the cleaned cloud's own surviving points
-                # (this frame's slice, restricted to this tile via cc_fp) back into
-                # the frame. No raw neural depth, so no flying-pixel streaks and no
-                # far phantoms — the TSDF can only mesh what the cloud contains. The
-                # edge/conf/dilate cutoffs are moot here (the cloud is already clean).
-                fp = cc_fp.get(fidx)
-                if fp is None:
-                    skipped_empty += 1
-                    continue
+                # FAITHFUL path: z-buffer cleaned-cloud points back into the frame.
+                # No raw neural depth, so no flying-pixel streaks and no far
+                # phantoms — the TSDF can only mesh what the cloud contains.
+                # FULL-FRUSTUM mode (2026-08-18): raster ALL cloud points visible
+                # to this camera, not just the frame's own traced slice (~1/N of
+                # the cloud — the historical "dust" sparsity); the z-buffer
+                # resolves occlusion, the adaptive splat closes the wall ranks.
+                if raster_full_cloud and cc_xyz is not None and len(cc_xyz):
+                    _pts = cc_xyz
+                else:
+                    fp = cc_fp.get(fidx) if cc_fp is not None else None
+                    if fp is None:
+                        skipped_empty += 1
+                        continue
+                    _pts = fp[2]
                 depth_m = _rasterize_cloud_depth(
-                    fp[2], c2w, K_d, depth_h, depth_w, cloud_splat_radius)
+                    _pts, c2w, K_d, depth_h, depth_w, cloud_splat_radius,
+                    spacing_m=float(cloud_spacing_m))
                 mask = (depth_m > depth_min) & (depth_m < depth_trunc)
             else:
                 # LEGACY path: raw neural/LiDAR depth, masked to the cloud's pixels.
