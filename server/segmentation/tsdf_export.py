@@ -521,7 +521,8 @@ def _build_segment_mask_at_depth(pr_rgb: np.ndarray, pc_rgb: np.ndarray,
 def _rasterize_cloud_depth(xyz: np.ndarray, c2w: np.ndarray, K: np.ndarray,
                            depth_h: int, depth_w: int,
                            splat_radius: int = 0,
-                           spacing_m: float = 0.0) -> np.ndarray:
+                           spacing_m: float = 0.0,
+                           band_avg_m: float = 0.0) -> np.ndarray:
     """Z-buffer a frame's cleaned-cloud points back into its depth grid.
 
     This is the faithful inverse of how the cloud was built, and the core of the
@@ -597,6 +598,24 @@ def _rasterize_cloud_depth(xyz: np.ndarray, c2w: np.ndarray, K: np.ndarray,
     else:
         np.minimum.at(depth, (vi, ui), z)
     depth[np.isinf(depth)] = 0.0
+
+    # BAND-AVERAGE (2026-08-18, user verdict "muy ruidoso"): min-z rides the
+    # FRONT of the cloud's noise band (~1-3 cm thick) and each camera rides
+    # DIFFERENT outliers — the TSDF then fuses 60+ inconsistent versions of the
+    # same wall into roughness. Second pass: per pixel, average ALL points
+    # within band_avg_m of the nearest one → the CENTER of the band, the same
+    # surface estimate from every view. Coverage untouched (splat-only pixels
+    # keep their min-z).
+    if band_avg_m and band_avg_m > 0:
+        zmin_at_pt = depth[vi, ui]                      # min-z of each point's own pixel
+        in_band = (zmin_at_pt > 0) & (z <= zmin_at_pt + float(band_avg_m))
+        if in_band.any():
+            acc = np.zeros((depth_h, depth_w), dtype=np.float64)
+            cnt = np.zeros((depth_h, depth_w), dtype=np.int64)
+            np.add.at(acc, (vi[in_band], ui[in_band]), z[in_band])
+            np.add.at(cnt, (vi[in_band], ui[in_band]), 1)
+            hit = cnt > 0
+            depth[hit] = acc[hit] / cnt[hit]
     return depth.astype(np.float32)
 
 
@@ -1469,7 +1488,14 @@ def export_tsdf_scene(
     output_dir: Path,
     frames_dir: Path,
     session_dir: Optional[Path] = None,
-    mesh_method: str = "tsdf",           # "tsdf" | "cloud_delaunay" — cloud_delaunay meshes the
+    nksr_detail_level: float = 0.0,      # nksr: NVIDIA NKSR detail level (research eval)
+    nksr_voxel_size: float = 0.02,       # nksr: finest kernel voxel (m); 0 = detail_level
+    nksr_chunk_size: float = 0.0,        # nksr: metres, >0 = out-of-core chunked mode
+    nksr_max_points: int = 0,            # nksr: subsample cap (0 = full cloud)
+    nksr_max_dist_m: float = 0.05,       # nksr: ANTI-INVENTION gate — faces with all verts
+                                         # farther than this from the cloud are dropped
+    nksr_min_component_tris: int = 200,  # nksr: speck clusters below this dropped
+    mesh_method: str = "tsdf",           # "tsdf" | "cloud_delaunay" | "nksr" — cloud_delaunay meshes the
                                          # cleaned cloud DIRECTLY (Delaunay + visibility graph
                                          # cut, reconstruction/cloud_mesh.py): vertices ARE cloud
                                          # points, onion carved by per-point camera rays. The
@@ -1528,6 +1554,31 @@ def export_tsdf_scene(
                                          # phantoms. Needs PLY traceability; else falls back.
     cloud_splat_radius: int = 1,         # px splat (same z) when rasterizing — fills single-
                                          # point gaps so coverage matches the cloud's density
+    cloud_band_avg_m: float = 0.02,      # BAND-AVERAGE raster (2026-08-18): per pixel, average
+                                         # every point within this distance of the nearest one —
+                                         # the CENTER of the cloud's noise band, consistent from
+                                         # every view (min-z alone rides the band's noisy front).
+                                         # 0 = nearest-z only.
+    raster_conf_hierarchy: bool = True,  # CONFIDENCE-HIERARCHICAL raster (user 2026-08-18):
+                                         # the surface is built from HIGH-confidence points
+                                         # (measured 4-7mm local noise); LOW-confidence points
+                                         # (13-15mm noise) only FILL pixels where nothing
+                                         # better exists. Same coverage, noise only as a
+                                         # last resort. Needs the cloud's confidence field.
+    raster_conf_percentile: float = 50.0,  # points at/above this confidence percentile form
+                                         # the primary surface (50 = the clean upper half)
+    raster_max_px: int = 700_000,        # cap on the raster integration grid (px). The 1080p
+                                         # PGSR grid (2.1M px) spread the cloud too thin —
+                                         # raster pinholes meshed as HOLES; ~700k px matches
+                                         # the validated chunk-grid density (auto ÷2 for 1080p)
+    pgsr_blend_tau_m: float = 0.024,     # MAX-PRECISION blend (user 2026-08-18): when the
+                                         # session has PGSR renders AND raster mode is on, a
+                                         # pixel takes the PGSR depth ONLY if it agrees with
+                                         # the cloud raster within this band (2×voxel);
+                                         # everywhere else the cloud raster integrates. PGSR
+                                         # refines INSIDE the cloud's noise band — it can
+                                         # never invent geometry the cloud doesn't have.
+                                         # 0 disables the blend (pure cloud raster).
     conf_min_norm: float = 0.0,          # confidence gate in [0,1] — SAME min-max normalisation
                                          # as the UI slider: keep cloud points whose
                                          # (conf-min)/(max-min) ≥ this before meshing. 0 = off.
@@ -1657,6 +1708,24 @@ def export_tsdf_scene(
     session_dir = Path(session_dir)
 
     # ── mesh-FROM-the-cloud dispatch (doctrine 2026-08-16) ──
+    if str(mesh_method).lower() == "nksr":
+        # RESEARCH EVALUATION (user 2026-08-18): NVIDIA NKSR straight on the
+        # cleaned cloud (per-point origin cameras as its sensor input), gated
+        # by the deterministic anti-invention crop, textured by texrecon.
+        from reconstruction.nksr_scene import export_nksr_scene
+        logger.info("[TSDF-scene] mesh_method=nksr → Neural Kernel Surface "
+                    "Reconstruction ON the cleaned cloud (no depth integration)")
+        return export_nksr_scene(
+            output_dir=output_dir, frames_dir=frames_dir,
+            session_dir=session_dir, texture=texture,
+            texture_max_views=texture_max_views,
+            nksr_detail_level=nksr_detail_level,
+            nksr_voxel_size=nksr_voxel_size,
+            nksr_chunk_size=nksr_chunk_size,
+            nksr_max_points=nksr_max_points,
+            nksr_max_dist_m=nksr_max_dist_m,
+            nksr_min_component_tris=nksr_min_component_tris,
+            progress_cb=progress_cb)
     if str(mesh_method).lower() == "cloud_delaunay":
         from reconstruction.cloud_mesh import export_cloud_mesh_scene
         logger.info("[TSDF-scene] mesh_method=cloud_delaunay → Delaunay + "
@@ -2093,6 +2162,8 @@ def export_tsdf_scene(
     cc_frame_pix = None
     cc_ply_hw = None
     cc_xyz = cc_fg = cc_pr = cc_pc = None  # kept for spatial tiling (point→tile assignment)
+    cc_conf = None                         # per-point confidence aligned with cc_xyz (for the
+                                           # confidence-hierarchical raster)
     if mask_to_cleaned_cloud:
         from segmentation.pipeline import _load_ply_origins
         cc_path = output_dir / "cleaned_cloud.ply"
@@ -2117,6 +2188,9 @@ def export_tsdf_scene(
                     _cc = o3d.io.read_point_cloud(str(cc_path))
                     if len(_cc.points):
                         cc_xyz = np.asarray(_cc.points, dtype=np.float64)
+                        _cf = _load_ply_confidence(cc_path)
+                        if _cf is not None and len(_cf) == len(cc_xyz):
+                            cc_conf = _cf
                 except Exception as _e:
                     logger.warning(f"[TSDF-scene] could not read cloud points for "
                                    f"bbox bound ({_e})")
@@ -2126,6 +2200,9 @@ def export_tsdf_scene(
             cc_pr = np.asarray(pr).astype(np.int32)
             cc_pc = np.asarray(pc).astype(np.int32)
             cc_xyz = np.asarray(_xyz, dtype=np.float64)  # (N,3) world points → tile assign
+            _cf = _load_ply_confidence(cc_path)
+            if _cf is not None and len(_cf) == len(cc_xyz):
+                cc_conf = _cf
 
             # ── Confidence gate (matches the UI slider) ──
             # Keep only points whose min-max-normalised confidence ≥ conf_min_norm —
@@ -2143,6 +2220,8 @@ def export_tsdf_scene(
                                 f"{int(keep.sum()):,}/{len(conf):,} ({100*keep.mean():.1f}%)")
                     cc_xyz = cc_xyz[keep]; cc_fg = cc_fg[keep]
                     cc_pr = cc_pr[keep]; cc_pc = cc_pc[keep]
+                    if cc_conf is not None:
+                        cc_conf = cc_conf[keep]
                 else:
                     logger.warning("[TSDF-scene] conf_min_norm set but no usable 'confidence' "
                                    "field in the cloud — skipping the gate")
@@ -2182,6 +2261,9 @@ def export_tsdf_scene(
                 _pc = o3d.io.read_point_cloud(str(_cc_p))
                 if len(_pc.points):
                     cc_xyz = np.asarray(_pc.points, dtype=np.float64)
+                    _cf = _load_ply_confidence(_cc_p)
+                    if _cf is not None and len(_cf) == len(cc_xyz):
+                        cc_conf = _cf
                     logger.info(f"[TSDF-scene] tiling points loaded from "
                                 f"{_cc_p.name} ({len(cc_xyz):,} pts) — pixel "
                                 f"mask stays OFF")
@@ -2331,6 +2413,7 @@ def export_tsdf_scene(
 
     sorted_frames = sorted(cam.pose_map.keys())
     skipped_no_depth = skipped_no_K = skipped_empty = 0
+    blend_px_pgsr = blend_px_cloud = 0   # max-precision blend accounting (auditable)
     native_K_map: Dict[int, np.ndarray] = {}  # per-frame npz K (depth res) for texturing
     integrated_frames: set = set()            # distinct frames integrated across all tiles
     # DA3-dense: per-frame [min,max] world coord along the tiling axis, so each tile
@@ -2347,6 +2430,31 @@ def export_tsdf_scene(
     # legacy tile crashes the extract exactly like a dense one), not just dense_da3.
     _EXTRACT_SAFE_ACTIVE = 45_000
 
+    # FULL-FRUSTUM raster cache (2026-08-18 fix, user verdict on test2): the
+    # blended cloud-raster depth is computed ONCE per frame against the WHOLE
+    # cloud (correct global occlusion) and reused by every tile — tiles crop by
+    # the winning pixel's world position afterwards. Rasterizing per-cube
+    # point-slices leaked occluded interior layers into the mesh ("ruido de la
+    # nube convertido en malla"). ~2 MB/frame at the capped grid.
+    _raster_blend_cache: Dict[int, tuple] = {}
+
+    # Confidence hierarchy: split the cloud ONCE into primary (high-confidence,
+    # clean surface) and filler (low-confidence, coverage of last resort).
+    _conf_hi_mask = None
+    if (raster_conf_hierarchy and raster_active and cc_conf is not None
+            and cc_xyz is not None and len(cc_conf) == len(cc_xyz)):
+        _thr = float(np.percentile(cc_conf, float(raster_conf_percentile)))
+        _conf_hi_mask = cc_conf >= _thr
+        logger.info(f"[TSDF-scene] confidence-hierarchical raster: primary = "
+                    f"conf ≥ {_thr:.1f} (p{raster_conf_percentile:.0f}, "
+                    f"{int(_conf_hi_mask.sum()):,} pts), filler = "
+                    f"{int((~_conf_hi_mask).sum()):,} pts (used only where the "
+                    f"primary surface has no pixel)")
+    elif raster_conf_hierarchy and raster_active:
+        logger.warning("[TSDF-scene] raster_conf_hierarchy on but the cloud has "
+                       "no aligned confidence field — single-pass raster")
+    raster_px_fill = [0, 0]   # [primary px, filler px] — auditable
+
     def _integrate(volume, cc_fp, tile_bounds=None):
         """Integrate every posed frame into `volume`. `cc_fp` maps frame → (rows,
         cols, world_xyz) for the cleaned-cloud points this frame observed (and,
@@ -2358,6 +2466,25 @@ def export_tsdf_scene(
         `tile_bounds`=(axis, lo, hi, halo) — the unprojected world axis-coord must lie
         in the tile slab. Returns the number of frames that touched this grid."""
         nonlocal skipped_no_depth, skipped_no_K, skipped_empty
+        nonlocal blend_px_pgsr, blend_px_cloud
+        # FULL-FRUSTUM raster under tiling: crop the cloud to THIS tile ONCE.
+        # Without this the unmasked raster fed the WHOLE cloud into every cube —
+        # every cube hit the extract-safe ceiling and the subdivision guard
+        # recursed forever (2026-08-18 test2: 611 cubes queued, 77 splits, 3 h).
+        _raster_tile_pts = None
+        if (rasterize_cloud_depth and raster_full_cloud and cc_xyz is not None
+                and len(cc_xyz) and tile_bounds is not None):
+            if tile_bounds[0] == "box3d":
+                _, _blo, _bhi, _bhalo = tile_bounds
+                _bsel = np.all((cc_xyz >= _blo - _bhalo)
+                               & (cc_xyz < _bhi + _bhalo), axis=1)
+            else:
+                _bax, _blo, _bhi, _bhalo = tile_bounds
+                _bsel = ((cc_xyz[:, _bax] >= _blo - _bhalo)
+                         & (cc_xyz[:, _bax] < _bhi + _bhalo))
+            _raster_tile_pts = cc_xyz[_bsel]
+            if not len(_raster_tile_pts):
+                return 0                      # tile holds no cloud → nothing to mesh
         n_local = 0
         for fidx in sorted_frames:
             fidx = int(fidx)
@@ -2489,21 +2616,94 @@ def export_tsdf_scene(
                 # No raw neural depth, so no flying-pixel streaks and no far
                 # phantoms — the TSDF can only mesh what the cloud contains.
                 # FULL-FRUSTUM mode (2026-08-18): raster ALL cloud points visible
-                # to this camera, not just the frame's own traced slice (~1/N of
-                # the cloud — the historical "dust" sparsity); the z-buffer
-                # resolves occlusion, the adaptive splat closes the wall ranks.
+                # to this camera; the z-buffer resolves occlusion against the
+                # WHOLE cloud (never a per-tile slice), the adaptive splat closes
+                # the wall ranks. Computed once per frame, cached, tile-cropped
+                # after by pixel world position.
                 if raster_full_cloud and cc_xyz is not None and len(cc_xyz):
-                    _pts = cc_xyz
+                    _cached = _raster_blend_cache.get(fidx)
+                    if _cached is None:
+                        if depth_m is not None:
+                            # cap the integration grid: the same cloud spread
+                            # over the 1080p PGSR grid (8× the chunk grid's
+                            # pixels) left raster pinholes the TSDF meshed as
+                            # HOLES — integrate at a denser-raster resolution
+                            _hw = depth_m.shape[0] * depth_m.shape[1]
+                            _s = max(1, int(np.ceil(np.sqrt(
+                                _hw / float(raster_max_px)))))
+                            if _s > 1:
+                                depth_m = depth_m[::_s, ::_s]
+                                depth_valid = depth_valid[::_s, ::_s]
+                                K_d = np.asarray(K_d, np.float64).copy()
+                                K_d[:2, :] /= _s
+                        _gh, _gw = (depth_m.shape if depth_m is not None
+                                    else (depth_h, depth_w))
+                        if _conf_hi_mask is not None:
+                            # two-pass hierarchy: clean surface first, noisy
+                            # points only where no clean pixel exists
+                            _d_hi = _rasterize_cloud_depth(
+                                cc_xyz[_conf_hi_mask], c2w, K_d, _gh, _gw,
+                                cloud_splat_radius,
+                                spacing_m=float(cloud_spacing_m),
+                                band_avg_m=float(cloud_band_avg_m))
+                            _d_lo = _rasterize_cloud_depth(
+                                cc_xyz[~_conf_hi_mask], c2w, K_d, _gh, _gw,
+                                cloud_splat_radius,
+                                spacing_m=float(cloud_spacing_m),
+                                band_avg_m=float(cloud_band_avg_m))
+                            _hi_v = _d_hi > 0
+                            _d_raster = np.where(_hi_v, _d_hi, _d_lo)
+                            raster_px_fill[0] += int(_hi_v.sum())
+                            raster_px_fill[1] += int((~_hi_v
+                                                      & (_d_lo > 0)).sum())
+                        else:
+                            _d_raster = _rasterize_cloud_depth(
+                                cc_xyz, c2w, K_d, _gh, _gw, cloud_splat_radius,
+                                spacing_m=float(cloud_spacing_m),
+                                band_avg_m=float(cloud_band_avg_m))
+                        # MAX-PRECISION BLEND (user 2026-08-18): the cloud
+                        # raster is the BASE (coverage + truth); a pixel takes
+                        # the photometric PGSR depth only when it agrees with
+                        # the cloud within pgsr_blend_tau — PGSR sharpens the
+                        # surface INSIDE the cloud's noise band and can never
+                        # add geometry the cloud doesn't have.
+                        if (_ds == "pgsr_render" and pgsr_blend_tau_m > 0
+                                and depth_m is not None
+                                and depth_m.shape == _d_raster.shape):
+                            _agree = (depth_valid & (_d_raster > 0)
+                                      & (np.abs(depth_m - _d_raster)
+                                         <= float(pgsr_blend_tau_m)))
+                            blend_px_pgsr += int(_agree.sum())
+                            blend_px_cloud += int(((_d_raster > 0)
+                                                   & ~_agree).sum())
+                            _d_raster = np.where(_agree, depth_m, _d_raster)
+                        _raster_blend_cache[fidx] = (
+                            _d_raster.astype(np.float32),
+                            np.asarray(K_d, np.float64).copy())
+                    depth_m, K_d = _raster_blend_cache[fidx]
+                    cur_h, cur_w = depth_m.shape
                 else:
                     fp = cc_fp.get(fidx) if cc_fp is not None else None
                     if fp is None:
                         skipped_empty += 1
                         continue
-                    _pts = fp[2]
-                depth_m = _rasterize_cloud_depth(
-                    _pts, c2w, K_d, depth_h, depth_w, cloud_splat_radius,
-                    spacing_m=float(cloud_spacing_m))
+                    depth_m = _rasterize_cloud_depth(
+                        fp[2], c2w, K_d, depth_h, depth_w, cloud_splat_radius,
+                        spacing_m=float(cloud_spacing_m),
+                                band_avg_m=float(cloud_band_avg_m))
                 mask = (depth_m > depth_min) & (depth_m < depth_trunc)
+                # tile crop by WORLD position of the winning pixel (occlusion
+                # already resolved globally above)
+                if tile_bounds is not None:
+                    if tile_bounds[0] == "box3d":
+                        _, _lo, _hi, _halo = tile_bounds
+                        _wxyz = _depth_world_xyz(depth_m, K_d, c2w)
+                        mask &= np.all((_wxyz >= _lo - _halo)
+                                       & (_wxyz < _hi + _halo), axis=2)
+                    else:
+                        _ax, _lo, _hi, _halo = tile_bounds
+                        _wa = _depth_axis_world_coord(depth_m, K_d, c2w, _ax)
+                        mask &= (_wa >= _lo - _halo) & (_wa < _hi + _halo)
             else:
                 # LEGACY path: raw neural/LiDAR depth, masked to the cloud's pixels.
                 mask = depth_valid & (depth_m > depth_min) & (depth_m < depth_trunc)
@@ -2929,6 +3129,18 @@ def export_tsdf_scene(
             tile_meshes.append(tmesh)
 
     n_integrated = len(integrated_frames)
+    if raster_px_fill[0] or raster_px_fill[1]:
+        _rt = raster_px_fill[0] + raster_px_fill[1]
+        logger.info(f"[TSDF-scene] confidence hierarchy: {raster_px_fill[0]:,} px "
+                    f"from the clean primary surface "
+                    f"({100.0 * raster_px_fill[0] / max(_rt, 1):.1f}%), "
+                    f"{raster_px_fill[1]:,} px filled by low-confidence points")
+    if blend_px_pgsr or blend_px_cloud:
+        _tot = blend_px_pgsr + blend_px_cloud
+        logger.info(f"[TSDF-scene] max-precision blend: {blend_px_pgsr:,} px took the "
+                    f"PGSR depth ({100.0 * blend_px_pgsr / max(_tot, 1):.1f}% — within "
+                    f"±{pgsr_blend_tau_m * 1000:.0f} mm of the cloud), "
+                    f"{blend_px_cloud:,} px stayed on the cloud raster")
     if not tile_meshes:
         logger.error(f"[TSDF-scene] no frames integrated "
                      f"(no_depth={skipped_no_depth} no_K={skipped_no_K} "
@@ -3225,6 +3437,8 @@ def export_tsdf_scene(
         "da3_conf_percentile": float(da3_conf_percentile),
         "mask_to_cleaned_cloud": bool(mask_to_cleaned_cloud),
         "integration_mode": "cloud_raster" if raster_active else "raw_depth",
+        "pgsr_blend_px": int(blend_px_pgsr),
+        "pgsr_blend_cloud_px": int(blend_px_cloud),
         "rasterize_cloud_depth": bool(rasterize_cloud_depth),
         "cloud_splat_radius": int(cloud_splat_radius),
         "smooth_iterations": int(smooth_iterations),

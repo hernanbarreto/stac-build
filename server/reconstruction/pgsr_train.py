@@ -185,6 +185,16 @@ def main():
                              "rendered-depth pixels whose depth-normal is at a "
                              "grazing angle (>80°) to the view ray — unreliable "
                              "depth that would otherwise feed the TSDF")
+    parser.add_argument("--cloud_anchor_dir", default=None,
+                        help="dir of per-keyframe cloud-raster depth npz (the "
+                             "cleaned cloud z-buffered into each camera). Adds "
+                             "a loss that penalises rendered depth leaving the "
+                             "cloud's noise band — the cloud is the PREMISE: "
+                             "PGSR refines inside the band, never drifts")
+    parser.add_argument("--cloud_anchor_weight", type=float, default=1.0)
+    parser.add_argument("--cloud_anchor_band", type=float, default=0.02,
+                        help="metres of free play around the cloud surface "
+                             "(noise band); only the EXCESS is penalised")
     args = parser.parse_args()
 
     args.source_path = str(Path(args.scene).resolve())
@@ -290,9 +300,47 @@ def main():
         R_d, t_d = se3_exp(pose_delta[i: i + 1])
         return PosedGaussians(g, R_d[0], t_d[0])
 
+    # ── cloud-anchor depth cache (max-precision mode) ──────────────────────
+    # Lazy per-camera load of the cloud-raster depth, nearest-resized once to
+    # the render grid and kept on the GPU (~2 MB/view). False = no file.
+    _anchor_dir = Path(args.cloud_anchor_dir) if args.cloud_anchor_dir else None
+    _anchor_cache: dict = {}
+
+    def _anchor_for(cam, hw):
+        if _anchor_dir is None:
+            return None
+        key = cam.image_name
+        a = _anchor_cache.get(key, "miss")
+        if a != "miss":
+            return a or None
+        p = _anchor_dir / f"{Path(key).stem}.npz"
+        if not p.exists():
+            _anchor_cache[key] = False
+            return None
+        _z = np.load(p)
+        d = torch.from_numpy(_z["depth"]).float()
+        d = F.interpolate(d[None, None], size=hw, mode="nearest")[0, 0].cuda()
+        # confidence weight map (1.0 = clean primary surface, <1 = low-conf
+        # filler: soft pull, photometry decides there). Ones if absent.
+        if "weight" in _z.files:
+            w = torch.from_numpy(_z["weight"]).float()
+            w = F.interpolate(w[None, None], size=hw, mode="nearest")[0, 0].cuda()
+        else:
+            w = torch.ones_like(d)
+        a = {"depth": d, "valid": d > 1e-4, "weight": w}
+        _anchor_cache[key] = a
+        return a
+
+    if _anchor_dir is not None:
+        print(f"[stac-pgsr] CLOUD ANCHOR on: dir={_anchor_dir.name} "
+              f"weight={args.cloud_anchor_weight} "
+              f"band={args.cloud_anchor_band * 1000:.0f}mm — the cloud is the "
+              f"premise, rendered depth may not leave its noise band", flush=True)
+
     bg = torch.zeros(3, dtype=torch.float32, device="cuda")
     viewpoint_stack = None
     ema = 0.0
+    ema_anchor = 0.0
     for iteration in range(1, opt.iterations + 1):
         gaussians.update_learning_rate(iteration)
         if iteration % 1000 == 0:
@@ -337,6 +385,26 @@ def main():
                 w_img = w_img * keep[0]
             loss = loss + opt.single_view_weight * (
                 w_img * (depth_normal - normal).abs().sum(0)).mean()
+
+        # CLOUD-ANCHOR (max-precision mode): the cloud is the premise. Penalise
+        # only the EXCESS of |rendered depth − cloud raster| beyond the noise
+        # band (dead zone: inside it photometry rules and sharpens the surface),
+        # capped at 0.5 m so a far floater can't dominate the gradient. Dynamic
+        # pixels excluded like every other term.
+        if _anchor_dir is not None and ret_plane and "plane_depth" in render_pkg:
+            d_r = render_pkg["plane_depth"].squeeze()
+            a = _anchor_for(cam, tuple(d_r.shape))
+            if a is not None:
+                m_a = a["valid"] & (d_r > 1e-4)
+                if keep is not None:
+                    m_a = m_a & (keep[0] > 0.5)
+                if m_a.any():
+                    excess = torch.clamp((d_r - a["depth"]).abs()
+                                         - args.cloud_anchor_band, min=0.0)
+                    excess = torch.clamp(excess, max=0.5) * a["weight"]
+                    l_anchor = excess[m_a].mean()
+                    loss = loss + args.cloud_anchor_weight * l_anchor
+                    ema_anchor = 0.05 * float(l_anchor.item()) + 0.95 * ema_anchor
 
         # multi-view geometric + NCC regularization (vendor logic, mask-aware)
         if iteration > opt.multi_view_weight_from_iter and len(cam.nearest_id):
@@ -428,8 +496,10 @@ def main():
         with torch.no_grad():
             ema = 0.4 * float(loss.item()) + 0.6 * ema
             if iteration % 500 == 0:
+                _anc = (f" anchor {ema_anchor * 1000:.1f}mm"
+                        if _anchor_dir is not None else "")
                 print(f"[stac-pgsr] iter {iteration}/{opt.iterations} "
-                      f"loss {ema:.4f} points {len(gaussians.get_xyz):,} "
+                      f"loss {ema:.4f}{_anc} points {len(gaussians.get_xyz):,} "
                       f"vram {torch.cuda.max_memory_allocated() / 1e9:.1f}GB",
                       flush=True)
             if iteration < opt.densify_until_iter:

@@ -175,3 +175,7 @@ server/.jwt_secret
 
 # 8th Wall engine binary — provisioned from npm @8thwall/engine-binary (ui npm run build:xr)
 static/xr8/
+
+# NKSR (research eval, NVIDIA NC license) — 676MB clone, rebuild with:
+#   git clone https://github.com/nv-tlabs/NKSR.git vendor/NKSR
+vendor/NKSR/

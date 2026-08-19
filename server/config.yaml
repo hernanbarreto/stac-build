@@ -481,17 +481,54 @@ bim:
 # per-frame cutoffs (distance / confidence / weight / edge) that were dropping real
 # surfaces (distant walls/doors) that show fine in the cloud.
 tsdf:
-  mesh_method: "tsdf"          # EXPERIMENT 2026-08-18 (user: "TSDF completo, solo TSDF y
+  mesh_method: "tsdf"          # MAX-PRECISION RUN (user 2026-08-18): raster-TSDF + the
+                               # per-pixel PGSR blend (pgsr_blend_tau_m) — PGSR trains
+                               # cloud-anchored under backend vggtomega_pgsr. NKSR was
+                               # evaluated 2026-08-18 and the user judged it NOT good
+                               # ("no dio buenos resultados") — keep selectable only.
+                               # (was: DEFAULT 2026-08-18, user: "TSDF completo, solo TSDF y
                                # texrecon"): classic TSDF fed by the CLOUD ITSELF — see
                                # rasterize_cloud_depth below. One geometry source, the TSDF
                                # finish, the cloud's coverage. "cloud_delaunay" = the fusion
                                # path (guide + Delaunay + region fusion), still selectable.
-  rasterize_cloud_depth: true  # z-buffer the cleaned cloud into every camera (FULL-FRUSTUM:
+                               # "nksr" = NVIDIA Neural Kernel Surface Reconstruction
+                               # straight on the cloud (RESEARCH EVAL 2026-08-18, env
+                               # `nksr`, license NC) — anti-invention gated + texrecon.
+  nksr_detail_level: 0.0       # nksr: detail level 0..1 (used only if nksr_voxel_size = 0)
+  nksr_voxel_size: 0.02        # nksr: finest kernel voxel (m) — 2 cm measured best on the
+                               # synthetic A/B (1 cm collapsed the ks model to 0 verts)
+  nksr_chunk_size: 8.0         # nksr: metres — chunked out-of-core (11M-pt scenes OOM the
+                               # 48GB card unchunked; precision kept via pre-scaling)
+  nksr_max_points: 0           # nksr: subsample cap (0 = full cloud)
+  nksr_max_dist_m: 0.05        # nksr: drop faces with all verts >50mm from the cloud
+  nksr_min_component_tris: 200 # nksr: speck clusters below this dropped
+  cloud_band_avg_m: 0.02       # band-average raster: per pixel, mean of all points within
+                               # 2cm of the nearest — the band CENTER, view-consistent
+                               # (min-z alone rode the noisy front of the band)
+  raster_conf_hierarchy: true  # 2026-08-18 (measured: conf<5 has 13-15mm local noise, conf>10
+                               # has 4-7mm): the surface comes from HIGH-confidence points;
+                               # low-confidence ones only FILL where nothing better exists.
+                               # Same coverage, noise only as a last resort.
+  raster_conf_percentile: 50   # primary surface = points at/above this confidence percentile
+  rasterize_cloud_depth: false # PURE ANCHORED-PGSR TEST (2026-08-18): integrate ONLY the
+                               # cloud-anchored PGSR renders (mv-filtered) — the historical
+                               # "linda pero incompleta" path, now with the anchor forcing
+                               # full-cloud coverage. true = cloud raster (FULL-FRUSTUM:
                                # all visible points, occlusion by z-buffer) with ADAPTIVE
                                # splats (near→wide, far→1px; cloud_spacing_m drives the
                                # footprint) — perfectly self-consistent, complete depth. The
                                # historical dust/bridges came from rastering only each
                                # frame's own traced slice with fixed 1px splats.
+  pgsr_blend_tau_m: 0.024      # RE-ENABLED (2026-08-18, after the isolation A/B): blend ON —
+                               # raster, the exact pccr path the user validated. The blended
+                               # test2 mesh was judged bad twice; if pure-raster is GOOD the
+                               # culprit is the PGSR blend; if equally bad, it's the cloud.
+                               # (was 0.024) MAX-PRECISION blend: when the session has PGSR
+                               # renders (backend vggtomega_pgsr + cloud_anchor training), a
+                               # pixel takes the photometric PGSR depth ONLY within ±24 mm
+                               # (2×voxel) of the cloud raster; everywhere else the cloud
+                               # integrates. Coverage = the cloud's, finish = PGSR's, and
+                               # PGSR can never invent geometry. 0 = pure cloud raster.
   # 2026-08-16 (doctrine): the mesh is built FROM the cleaned
                                # cloud — Delaunay tetrahedra + VISIBILITY graph cut
                                # (reconstruction/cloud_mesh.py; Labatut 2007 / Jancosek 2011,
@@ -632,7 +669,10 @@ tsdf:
   max_decimate: 4000000      # ceiling for the auto-scaled decimate_target. Big scenes scale UP from
                              # decimate_target (∝ scene diagonal) so they keep detail, up to this cap.
   da3_conf_percentile: 0     # raster mode: moot (cloud already filtered); legacy: conf re-filter
-  tsdf_weight_thresh: 1.0    # 1 since 2026-08-16 (user decision, test3): with FEW keyframes
+  tsdf_weight_thresh: 2.0    # RESTORED 2026-08-19: the "linda" PGSR-mesh era ran at 2.0 —
+                             # a voxel needs ≥2 cameras' agreement, killing single-render
+                             # floaters ("partes en cualquier lado" at 1.0).
+                             # (1 since 2026-08-16, user decision, test3): with FEW keyframes
                              # (12-view sessions) most surfaces are seen by ONE frame — requiring
                              # 2 observations deleted 54% of the cloud's coverage from the mesh
                              # ("mesh is only a portion of the cloud"). The cloud mask already
@@ -713,7 +753,8 @@ tsdf:
                              # with an edge longer than this (m). Real
                              # TSDF surfaces have edges ≈ voxel size; this only removes the
                              # spurious near↔far 'bridge'/spike lines. Run post-weld + post-decimate.
-  texture: true
+  texture: true                # texrecon photo texture ON (2026-08-19: the 08-11 recipe is
+                               # validated as the best config to date — final deliverable mode)
   texture_mode: "texrecon"   # UV-atlas PHOTO texture (MVS-Texturing). With the SIMPLE
                              # pipeline (~46 views / ~1.6M tris on test2) this runs in
                              # minutes, so it is the default again. "vertex_gpu" remains
@@ -806,7 +847,18 @@ poisson:
 #   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
-  backend: "vggtomega"                  # USER 2026-08-18: PGSR REMOVED from the pipeline.
+  backend: "vggtomega_pgsr"             # RESTORED 2026-08-19 (user: "volvamos al 11/08"): the
+                                        # known-good era. DA3-streaming cloud was tried 08-19 and
+                                        # judged worse than VGGT ("ni cerca"). (prev da3 A/B: single
+                                        # 600-frame chunk, vendor confidence (0.75×mean), sky
+                                        # head on → judge the DA3 cloud vs vggtomega's in
+                                        # Potree. Mesh: plain TSDF, no PGSR, no texrecon.
+                                        # (prev: "vggtomega_pgsr" MAX-PRECISION 2026-08-18: PGSR back, now
+                                        # ANCHORED to the cloud (pgsr.cloud_anchor) — it can
+                                        # only refine inside the cloud noise band; the TSDF
+                                        # takes its depth per-pixel within pgsr_blend_tau_m.
+                                        # (Earlier same day: PGSR removed when the mesh became
+                                        # pure cloud-raster.)
                                         # Doctrine: the VGGT-Ω cloud is the truth and nothing
                                         # modifies it; the mesh is TSDF fed by rasterizing THAT
                                         # cloud into every camera (tsdf.rasterize_cloud_depth)
@@ -987,13 +1039,14 @@ reconstruction:
   pgsr:
     iterations: 30000                   # full PGSR schedule; quick: true halves it
     quick: false                        # 15k-iteration schedule (A/B turnaround)
-    max_abs_split_points: 0             # 0 since 2026-08-17 (vendor README, custom-data guidance):
+    max_abs_split_points: 50000         # RESTORED 08-11: vendor default. (0 was set 2026-08-17 on
+                                        # vendor README custom-data guidance:
                                         # weakly textured scenes must DISABLE abs-split
                                         # densification — our benchmark-tuned aggressive regime
                                         # over-densified noisy gaussians on plain walls/floors
-    use_depth_filter: true              # vendor README: drop grazing-angle (>80°) rendered depth
+    use_depth_filter: false             # RESTORED 08-11: off (added 08-17). vendor README: drop grazing-angle (>80°) rendered depth
                                         # at export — unreliable pixels stop feeding the TSDF
-    sky_mask: true                      # 2026-08-17 (test4: PGSR trained the SKY — its photometric
+    sky_mask: false                     # RESTORED 08-11: off (added 08-17 for test4 sky). When true: (test4: PGSR trained the SKY — its photometric
                                         # loss grows far gaussians for it): skyseg masks merged
                                         # into the training masks (sky excluded from the loss).
                                         # The fusion also drops off-table faces as the last net.
@@ -1016,13 +1069,23 @@ reconstruction:
                                         # (worksite lighting varies along the walk)
     max_seed_pts: 1500000               # cleaned-cloud subsample seeding the Gaussians
     exclusive_gpu: true                 # stop vLLM during training (native-res needs VRAM)
-    consistent_cloud: true              # "ir para atrás con la nube" (user, 2026-08-12):
-                                        # after training, the user-facing cloud + Potree are
-                                        # REBUILT from the PGSR depths at the refined poses —
-                                        # the SAME source the mesh integrates, so cloud and
-                                        # mesh always agree (no more ghosted viewer cloud).
-                                        # cleaned_cloud.ply itself is untouched (segmentation
-                                        # mapping / BIM keep their source).
+    # ── MAX-PRECISION MODE (user 2026-08-18: "PGSR tomando como premisa la nube") ──
+    cloud_anchor: false                 # OFF 2026-08-19 (re-baseline): training = the known-good
+                                        # 08-11 recipe on today's cloud; the anchor returns as a
+                                        # SINGLE A/B variable once the baseline is validated.
+                                        # When on: the cleaned cloud is z-buffered into every keyframe
+                                        # (same rasterizer as the TSDF) and the trainer
+                                        # penalises rendered depth that leaves the cloud's
+                                        # noise band → PGSR sharpens INSIDE the band, can
+                                        # never drift from / invent beyond the cloud
+    cloud_anchor_weight: 1.0            # loss weight on the band EXCESS (metres, capped 0.5)
+    cloud_anchor_band_m: 0.02           # free play around the cloud surface (noise band)
+    cloud_anchor_spacing_m: 0.006       # splat driver for the anchor rasters (cloud voxel)
+    consistent_cloud: false             # OFF since 2026-08-18 (doctrine: NOTHING modifies the
+                                        # user-facing cloud/Potree — the VGGT-Ω cloud is the
+                                        # truth; with cloud_anchor the renders stay inside its
+                                        # noise band anyway). History: ON 2026-08-12 to fix
+                                        # cloud/mesh ghosting when the mesh used raw renders.
     cloud_stride: 2                     # pixel stride when unprojecting the renders
     cloud_voxel_m: 0.006                # 6 mm voxel downsample of the consistent cloud
 
@@ -1097,7 +1160,14 @@ reconstruction:
                                         # windowed mode with a fitting chunk when short.
     exclusive_gpu: true                 # stop vLLM before reconstruction (Omega gets the
                                         # whole GPU); the VLM stage auto-restarts it after
-    conf_percentile: 10.0               # THE confidence filter, web-demo semantics: drop the
+    conf_percentile: 10.0               # RESTORED 08-11 value (the clouds of the good era).
+                                        # (08-18 detour: 20, then 50 — both part of the noisy-mesh
+                                        # hunt; the mesh recipe was the issue, not the cloud filter.
+                                        # 50 was too aggressive. (Earlier same day: 50 VENDOR-STRENGTH "integrar basura no
+                                        # sirve") — the web demo's default cut. 10 (kept since
+                                        # 07-11 for coverage) let the noisy half through: measured
+                                        # 13-15mm local noise below the median vs 4-7mm above.
+                                        # (was 10) THE confidence filter, web-demo semantics: drop the
                                         # bottom 10% of valid (non-sky) points by confidence.
                                         # Phase D 2026-07-11: 20 → 10 — with one writer per
                                         # frame the old 2x overlap redundancy no longer
@@ -1269,8 +1339,9 @@ reconstruction:
     remove_sky: true                   # standalone da3 backend: drop sky pixels via DA3's
                                        # own sky head. Ignored in MapAnything-priors mode
                                        # (map removes sky with skyseg). true = always on.
-    chunk_size: 120
-    overlap: 60
+    chunk_size: 600                    # 2026-08-19 (user): our example scenes never exceed
+    overlap: 300                       # ~100 keyframes → ONE single chunk, DA3's sweet spot
+                                       # ("nubes extraordinarias en un solo chunk")
     loop_enable: true                  # SALAD loop closure
     infer_gs: false                    # 3D Gaussian Splatting (cosmetic) — off: 5.7GB merge hit OSError EIO; re-enable on the GPU box
     align_method: "sim3"               # "sim3" | "se3" | "scale+se3"

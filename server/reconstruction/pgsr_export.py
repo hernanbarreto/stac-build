@@ -100,6 +100,11 @@ def _write_points3d_ply(cloud_ply: Path, dst: Path, max_pts: int) -> int:
     endian = "<" if "little" in fmt else ">"
     dt = np.dtype([(nm, endian + _PLY_NP[ty]) for nm, ty in props])
     arr = np.frombuffer(raw[nl + 1:nl + 1 + n * dt.itemsize], dtype=dt)
+    # UNIFORM seed (REVERTED 2026-08-19): the 08-18 confidence-first seed left
+    # mid-confidence regions (far walls, grazing floor) seedless — densification
+    # grew unconstrained Gaussians there and the mesh got displaced floating
+    # parts ("partes de otro lado", user verdict). The known-good 08-11 recipe
+    # seeds uniformly over the WHOLE cloud.
     step = max(1, n // max_pts)
     arr = arr[::step]
     names = arr.dtype.names
@@ -201,3 +206,96 @@ def export_scene(output_dir: Path, frames_dir: Path, max_seed_pts: int = 1_500_0
     _log(f"PGSR scene: {n_img} keyframes at {native_wh[0]}x{native_wh[1]}, "
          f"{n_pts:,} seed points → {scene}")
     return scene
+
+
+ANCHOR_DIRNAME = "cloud_anchor"
+
+
+def export_cloud_anchor_depths(output_dir: Path, frames_dir: Path,
+                               spacing_m: float = 0.006, half_res: bool = True,
+                               log=None) -> Path:
+    """MAX-PRECISION anchor (user 2026-08-18: "PGSR tomando como premisa la
+    nube"): z-buffer the FULL cleaned cloud into every keyframe camera and save
+    the depth maps under pgsr_scene/cloud_anchor/<name>.npz. The trainer adds a
+    loss that penalises rendered depth that leaves the cloud's noise band —
+    PGSR refines the surface INSIDE the band, it can never drift from the cloud.
+
+    Runs in the SERVER env (open3d available), reusing the SAME rasterizer the
+    TSDF integrates with — anchor and mesh share one definition of "the cloud
+    seen from this camera". Fail-fast on missing inputs."""
+    _log = log if log is not None else (lambda m: logger.info(m))
+    output_dir, frames_dir = Path(output_dir).resolve(), Path(frames_dir).resolve()
+    from reconstruction.scale_align import _read_poses
+    from segmentation.tsdf_export import _rasterize_cloud_depth
+    import open3d as o3d
+    from PIL import Image
+
+    cloud_path = output_dir / "cleaned_cloud.ply"
+    if not cloud_path.exists():
+        raise RuntimeError("cloud_anchor: cleaned_cloud.ply missing")
+    xyz = np.asarray(o3d.io.read_point_cloud(str(cloud_path)).points, np.float64)
+    if not len(xyz):
+        raise RuntimeError("cloud_anchor: cleaned_cloud.ply is empty")
+    # CONFIDENCE-WEIGHTED anchor (2026-08-18): the anchor pulls hard toward the
+    # clean upper half of the cloud (weight 1.0) and only softly (0.3) toward
+    # low-confidence points — where the cloud is unreliable, the photometric
+    # consensus decides. Hierarchical raster: clean surface first, low-conf
+    # fills only empty pixels.
+    from segmentation.tsdf_export import _load_ply_confidence
+    conf = _load_ply_confidence(cloud_path)
+    hi_mask = None
+    if conf is not None and len(conf) == len(xyz):
+        hi_mask = conf >= float(np.percentile(conf, 50.0))
+        _log(f"cloud anchor: confidence-weighted (primary {int(hi_mask.sum()):,} "
+             f"pts w=1.0, filler {int((~hi_mask).sum()):,} pts w=0.3)")
+
+    lines, nums, _ = _read_poses(output_dir)
+    mats = [np.array([float(x) for x in ln.split()], np.float64).reshape(4, 4)
+            for ln in lines if len(ln.split()) == 16]
+    K_rows = _read_intrinsics_rows(output_dir)
+    Hd, Wd = _omega_grid_hw(output_dir)
+
+    dst = output_dir / SCENE_DIRNAME / ANCHOR_DIRNAME
+    dst.mkdir(parents=True, exist_ok=True)
+    native_wh = None
+    n_done = 0
+    for i, (n, T) in enumerate(zip(nums, mats)):
+        src = frames_dir / f"{n:06d}.jpg"
+        if not src.exists():
+            continue
+        if native_wh is None:
+            with Image.open(src) as im:
+                native_wh = im.size
+        Wn, Hn = native_wh
+        if half_res:                      # anchor tolerance is cm-scale — half
+            Wn, Hn = Wn // 2, Hn // 2     # res halves disk/VRAM at no cost
+        fx, fy, cx, cy = K_rows[i][:4]
+        K = np.array([[fx * Wn / Wd, 0, cx * Wn / Wd],
+                      [0, fy * Hn / Hd, cy * Hn / Hd], [0, 0, 1.0]])
+        if hi_mask is not None:
+            d_hi = _rasterize_cloud_depth(xyz[hi_mask], T, K, Hn, Wn, 1,
+                                          spacing_m=float(spacing_m), band_avg_m=0.02)
+            d_lo = _rasterize_cloud_depth(xyz[~hi_mask], T, K, Hn, Wn, 1,
+                                          spacing_m=float(spacing_m), band_avg_m=0.02)
+            hi_v = d_hi > 0
+            depth = np.where(hi_v, d_hi, d_lo)
+            weight = np.where(hi_v, 1.0, 0.3).astype(np.float32)
+        else:
+            depth = _rasterize_cloud_depth(xyz, T, K, Hn, Wn, 1,
+                                           spacing_m=float(spacing_m), band_avg_m=0.02)
+            weight = np.ones_like(depth, np.float32)
+        # silhouette-edge cull (same gradient rule as the TSDF/pgsr_cloud):
+        # at object boundaries the raster jumps between fore/background — an
+        # anchor there would penalise legitimate renders of either side
+        gx = np.abs(np.diff(depth, axis=1, prepend=depth[:, :1]))
+        gy = np.abs(np.diff(depth, axis=0, prepend=depth[:1, :]))
+        depth[(gx > 0.04) | (gy > 0.04)] = 0.0
+        np.savez_compressed(dst / f"{n:06d}.npz",
+                            depth=depth.astype(np.float32),
+                            weight=weight)
+        n_done += 1
+    if n_done == 0:
+        raise RuntimeError("cloud_anchor: no keyframe produced an anchor raster")
+    _log(f"cloud anchor: {n_done} keyframe rasters ({Wn}x{Hn}, full cloud "
+         f"{len(xyz):,} pts) → {dst}")
+    return dst

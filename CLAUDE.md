@@ -1,19 +1,44 @@
 # CLAUDE.md — working rules for this repo
 
-## Precision task status (claude_stac.txt, phases A–F) — updated 2026-08-18
+## ⭐ BEST CONFIGURATION TO DATE — USER-VERIFIED 2026-08-19 (do NOT change)
+The user validated this exact config visually as **the best reconstruction
+configuration we have** ("quedó la mejor configuración... de momento no tocamos
+más"). It is the restored **2026-08-11 recipe**: everything added between 08-12
+and 08-18 was tried, judged worse by the user, and REVERTED. Never re-apply
+those reverted knobs without an explicit new decision from him.
+
+    backend vggtomega_pgsr          (full PGSR precision stage)
+    simple.conf_percentile 10       (cloud filter: the 08-11 value; 20 and 50
+                                     were tried 08-18 — the mesh recipe was the
+                                     problem, not the cloud filter)
+    pgsr: max_abs_split_points 50000 (vendor default), use_depth_filter false,
+          sky_mask false, cloud_anchor false, uniform seed, resolution 1
+    tsdf: rasterize_cloud_depth false → integrate the PGSR renders directly,
+          mv_consistency true, tsdf_weight_thresh 2.0 (≥2 cameras must agree —
+          1.0 produced floating parts "en cualquier lado"), voxel 12 mm,
+          texture true (texrecon)
+
+REVERTED / DISCARDED on the user's visual verdict (all 2026-08-18/19 — do not
+resurrect blindly): full-frustum cloud raster as the mesh source (`rasterize_
+cloud_depth: true`, "muy ruidoso"), confidence-hierarchical raster, band-average
+raster, per-pixel PGSR↔cloud blend (`pgsr_blend_tau_m`), cloud-anchored PGSR
+training (`pgsr.cloud_anchor` + confidence-weighted anchor/seed — displaced
+floating parts), NVIDIA **NKSR** (built in env `nksr` from source, wired as
+`tsdf.mesh_method: "nksr"`, license NC — "no dio buenos resultados"), and the
+**DA3-streaming cloud** (single 600-frame chunk, vendor conf 0.75×mean — "no es
+mejor ni cerca que vggt"; the vendor single-chunk crash IS fixed in
+vendor/depth-anything-3, keep the patch). The code for all of these stays in
+the repo, selectable, OFF by default.
+
+## Precision task status (claude_stac.txt, phases A–F) — updated 2026-08-19
 Phases A–D are CLOSED with pre-registered A/B verdicts (docs/scale_ab_results.md,
 docs/phase_bc_ab_results.md); E (external scorecard vs COLMAP/OpenMVS +
 RealityScan import) and F (final matrix + precision_report.md) are DEFERRED by
 the user. Current production defaults (all evidence-backed, do not "improve"
 them blindly):
-- DOCTRINE 2026-08-18 (user): the VGGT-Ω cloud is the truth, nothing modifies
-  it; the mesh is built FROM it. Backend `vggtomega` (PGSR REMOVED from the
-  default pipeline — its renders no longer feed the mesh; `vggtomega_pgsr`
-  stays selectable). Mesh: `tsdf.mesh_method: "tsdf"` +
-  `rasterize_cloud_depth: true` (full-frustum z-buffer of the cleaned cloud,
-  adaptive splats) + texrecon. First run pccr: 10.5 min, mesh↔cloud median
-  12 mm, invented area 0.43% — user: "funcionó a la perfección".
-  `pipeline.auto_tsdf: true` (every run ends with the mesh, never Potree-only).
+- DOCTRINE (user, standing): the VGGT-Ω cloud is the truth and nothing modifies
+  it (`pgsr.consistent_cloud: false` — the viewer cloud/Potree is never
+  overwritten). `pipeline.auto_tsdf: true` (every run ends with the mesh).
 - `tsdf.mv_consistency: true` (won its A/B), `tsdf.depth_source: auto`, voxel
   12 mm (8/6 mm lost), `native_depth_method` off (lost: doubles the
   double-surface stat). `cloud_delaunay` (Delaunay+fusion) kept as alternative

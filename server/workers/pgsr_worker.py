@@ -119,6 +119,19 @@ def _pgsr_work(pipe: WorkerPipe, session_dir: str, config: dict):
                  max_seed_pts=int(pcfg.get("max_seed_pts", 1_500_000)),
                  log=lambda m: pipe.send_log(f"[pgsr] {m}"))
 
+    # 2b) CLOUD ANCHOR (max-precision mode, user 2026-08-18: "PGSR tomando como
+    # premisa la nube"): raster the full cleaned cloud into every keyframe (the
+    # SAME rasterizer the TSDF uses) so the trainer can penalise rendered depth
+    # that leaves the cloud's noise band. Runs here (server env has open3d).
+    anchor_dir = None
+    if bool(pcfg.get("cloud_anchor", True)):
+        pipe.send_progress(12, "PGSR: rasterizing cloud anchors...", stage="pgsr")
+        from reconstruction.pgsr_export import export_cloud_anchor_depths
+        anchor_dir = export_cloud_anchor_depths(
+            output_dir, frames_dir,
+            spacing_m=float(pcfg.get("cloud_anchor_spacing_m", 0.006)),
+            log=lambda m: pipe.send_log(f"[pgsr] {m}"))
+
     # 3) trainer subprocess (pgsr env)
     server_dir = Path(__file__).resolve().parent.parent
     cmd = ["bash", str(server_dir / "run_pgsr.sh"),
@@ -144,6 +157,12 @@ def _pgsr_work(pipe: WorkerPipe, session_dir: str, config: dict):
         # vendor README: filter grazing-angle depth at export (floaters /
         # insufficient viewpoints) — cleaner renders into the TSDF guide
         cmd.append("--use_depth_filter")
+    if anchor_dir is not None:
+        cmd += ["--cloud_anchor_dir", str(anchor_dir),
+                "--cloud_anchor_weight",
+                str(float(pcfg.get("cloud_anchor_weight", 1.0))),
+                "--cloud_anchor_band",
+                str(float(pcfg.get("cloud_anchor_band_m", 0.02)))]
     if bool(pcfg.get("exposure_compensation", True)):
         cmd.append("--exposure_compensation")
     if bool(pcfg.get("pose_refine", False)):
