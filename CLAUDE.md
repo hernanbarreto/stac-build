@@ -30,6 +30,27 @@ mejor ni cerca que vggt"; the vendor single-chunk crash IS fixed in
 vendor/depth-anything-3, keep the patch). The code for all of these stays in
 the repo, selectable, OFF by default.
 
+## ⭐ FLOW CHANGE — USER DECISION 2026-08-28 (supersedes auto-mesh mandate)
+The automatic end-of-pipeline mesh worked on some scenes and not others, so:
+- **Reconstruction ends at the CLEANED CLOUD** (`pipeline.auto_tsdf: false`);
+  the cloud is pushed to the viewer the moment CloudCompy finishes. The PGSR
+  and TSDF stages no longer run in the pipeline (the 08-19 mesh recipe above
+  stays the recipe FOR WHEN a mesh is requested).
+- **Closing the Segmentation Manager runs ONLY DBSCAN + matching + OBBs** —
+  `/api/segmentation/refresh` no longer auto-carves per-object meshes.
+- **Individual meshing (`/api/segmentation/tsdf/export`) is TSDF + texrecon
+  ONLY**: if `output/tsdf/scene/scene.glb` doesn't exist it is baked on demand
+  (config `tsdf:` recipe with `mesh_method=tsdf`, `texture_mode=texrecon`
+  forced), then instances are carved from it. The legacy untextured
+  `export_tsdf_meshes` fallback is no longer called. Without PGSR renders,
+  `depth_source: auto` falls back to the backend's native depth (artifact-based
+  — sessions that DID run PGSR still integrate its renders).
+- **Chat always available**: vLLM (Qwen3-VL) starts at server boot (lifespan),
+  is unloaded by the reconstruction workers for exclusive GPU (unchanged), and
+  `_semantic_reload_if_idle` reloads it when the pipeline finishes, fails, or
+  is cancelled (skipped while another pipeline is running/queued; multi-scan
+  reloads only after the last scan).
+
 ## Precision task status (claude_stac.txt, phases A–F) — updated 2026-08-19
 Phases A–D are CLOSED with pre-registered A/B verdicts (docs/scale_ab_results.md,
 docs/phase_bc_ab_results.md); E (external scorecard vs COLMAP/OpenMVS +
@@ -38,7 +59,8 @@ the user. Current production defaults (all evidence-backed, do not "improve"
 them blindly):
 - DOCTRINE (user, standing): the VGGT-Ω cloud is the truth and nothing modifies
   it (`pgsr.consistent_cloud: false` — the viewer cloud/Potree is never
-  overwritten). `pipeline.auto_tsdf: true` (every run ends with the mesh).
+  overwritten). `pipeline.auto_tsdf: false` since 2026-08-28 (run ends at the
+  cloud; mesh on demand only — see FLOW CHANGE block above).
 - `tsdf.mv_consistency: true` (won its A/B), `tsdf.depth_source: auto`, voxel
   12 mm (8/6 mm lost), `native_depth_method` off (lost: doubles the
   double-surface stat). `cloud_delaunay` (Delaunay+fusion) kept as alternative

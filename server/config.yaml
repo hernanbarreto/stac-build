@@ -36,10 +36,13 @@ server:
 
 # ── Pipeline ───────────────────────────────────────────────────────
 pipeline:
-  auto_tsdf: true       # USER MANDATE 2026-08-11: every reconstruction (first run AND
-                        # re-runs) must ALWAYS finish with the MESH — never end at the
-                        # Potree cloud only. false = old behaviour (stop at cleaned
-                        # cloud, mesh triggered manually).
+  auto_tsdf: false      # USER DECISION 2026-08-28 (supersedes the 2026-08-11 mandate):
+                        # the automatic mesh worked on some scenes and not others, so a
+                        # reconstruction now ends at the CLEANED CLOUD, which is pushed
+                        # to the viewer immediately. Meshing is on-demand only
+                        # (TSDF + texrecon: /api/segmentation/tsdf/export bakes the
+                        # scene mesh once if missing, then carves the instances).
+                        # true = old behaviour (pipeline ends with PGSR+TSDF stages).
   # Full semantic chain inside the reconstruct pipeline:
   # VLM scene understanding → SAM3 segment-everything. false = the pipeline runs
   # RECONSTRUCTION → CLOUDCOMPY → TSDF only, and segmentation stays on-demand.

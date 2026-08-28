@@ -847,6 +847,30 @@ alignment_manager = None
 pipeline_manager = PipelineManager()  # Pipeline orchestrator (subprocess workers)
 
 
+def _semantic_reload_if_idle(reason: str = "") -> None:
+    """Bring the vLLM chat service back up after GPU-heavy work (USER DECISION
+    2026-08-28: the chat is ALWAYS available; a reconstruction unloads it to free
+    the GPU and it must reload the moment the pipeline ends). Fire-and-forget:
+    `ensure_service(timeout_s=0.0)` kicks the launcher and returns while the
+    weights load. Skipped while any pipeline is still running/queued (multi-scan
+    runs and concurrent sessions would OOM the very job holding the GPU).
+    Blocking (health probe + Popen) — call via run_in_executor from async code."""
+    try:
+        if not (cfg.get("semantic", {}) or {}).get("enabled", True):
+            return
+        busy = any(j.get("status") in ("running", "queued")
+                   for j in pipeline_manager.get_all_jobs().values())
+        if busy:
+            print(f"[Semantic] chat reload skipped ({reason or 'n/a'}) — "
+                  "a pipeline is still using the GPU")
+            return
+        from semantic.service import ensure_service
+        print(f"[Semantic] chat reload kicked ({reason or 'n/a'})")
+        ensure_service(log=print, timeout_s=0.0)
+    except Exception as e:  # noqa: BLE001 — never break the caller over the chat
+        print(f"[Semantic] chat reload failed (non-fatal): {e}")
+
+
 
 def _resolve_segmentation_prompt(prompt: str, frames_dir: str) -> tuple:
     """
@@ -920,6 +944,12 @@ async def lifespan(app: FastAPI):
     if not any(isinstance(f, _HealthCheckFilter) for f in _ua.filters):
         _ua.addFilter(_HealthCheckFilter())
         print("[Server] access-log noise filter re-applied (206/health/polling)")
+
+    # Chat ALWAYS up (user decision 2026-08-28): start the vLLM semantic service
+    # at server boot instead of waiting for the first chat request. Fire-and-forget
+    # in a thread — the weights take minutes and must not delay the API.
+    asyncio.get_running_loop().run_in_executor(
+        None, _semantic_reload_if_idle, "server startup")
 
     yield
 
@@ -4250,15 +4280,18 @@ def _tsdf_set_overall(session_id: str, **kw):
 
 @app.post("/api/segmentation/tsdf/export")
 async def export_tsdf_endpoint(request: Request):
-    """Reconstruct TSDF meshes for selected instances.
+    """Mesh the selected instances — TSDF + texrecon ONLY (user decision
+    2026-08-28). Each instance is carved out of the texrecon-textured scene
+    TSDF mesh; when that scene mesh doesn't exist yet (the pipeline stops at
+    the cleaned cloud), it is baked here first with the config.yaml `tsdf:`
+    recipe (mesh_method=tsdf, texture=texrecon — forced), then carved.
 
     Body:
         session_id: str
         instance_ids: Optional[list[int]]
-        voxel_length: float (m, default 0.015)
-        sdf_trunc:    float (m, default 0.04)
-        depth_trunc:  float (m, default 5.0)
-        dilate_radius: int (px, default 3)
+        voxel_length / sdf_trunc / depth_trunc / dilate_radius: accepted for
+            client compatibility, but IGNORED — the bake uses the verified
+            config recipe, not the legacy per-object re-integration knobs.
     """
     body = await request.json()
     session_id = body.get("session_id")
@@ -4290,8 +4323,9 @@ async def export_tsdf_endpoint(request: Request):
 
     print(f"[TSDF] ━━━ /tsdf/export request ━━━")
     print(f"[TSDF]   session={session_id}  instance_ids={sorted(target_ids)}")
-    print(f"[TSDF]   voxel={voxel_length}m  trunc={sdf_trunc}m  "
-          f"depth_max={depth_trunc}m  dilate={dilate_radius}px")
+    print(f"[TSDF]   mode=tsdf+texrecon only (legacy per-object knobs ignored: "
+          f"voxel={voxel_length} trunc={sdf_trunc} depth_max={depth_trunc} "
+          f"dilate={dilate_radius})")
 
     async with _tsdf_progress_lock:
         sess_state = _tsdf_progress.setdefault(session_id, {})
@@ -4325,44 +4359,51 @@ async def export_tsdf_endpoint(request: Request):
         except Exception:
             pass  # progress is best-effort
 
-    def _run_tsdf():
-        from segmentation.tsdf_export import (
-            export_tsdf_meshes,
-            crop_scene_mesh_to_instances,
-        )
-        # Prefer carving each instance out of the already-reconstructed scene mesh
-        # (tsdf/scene/scene.glb). It is cloud-consistent and works for EVERY
-        # backend — including those whose per-frame depth lives under a run dir the
-        # per-object re-integration doesn't recognise (e.g. VGGTOMEGA → omega_run/),
-        # which is exactly what made the per-object TSDF report "no depth source".
-        scene_dir = output_dir / "tsdf" / "scene"
-        has_scene = ((scene_dir / "scene.glb.orig").exists()
-                     or (scene_dir / "scene.glb").exists())
-        if has_scene:
-            print("[TSDF] scene mesh present → carving instances from it (crop)")
-            return crop_scene_mesh_to_instances(
-                output_dir=output_dir,
-                segments_result=segments_result,
-                obj_ids=list(target_ids) or None,
-                progress_cb=_progress_cb,
-            )
-        print("[TSDF] no scene mesh → per-object depth re-integration (legacy)")
-        return export_tsdf_meshes(
+    def _run_crop():
+        # ONLY TSDF + texrecon (user decision 2026-08-28): every individual mesh
+        # is carved out of the texrecon-textured scene TSDF mesh, so it keeps the
+        # UV atlas and is cloud-consistent for EVERY backend — including those
+        # whose per-frame depth lives under a run dir the old per-object
+        # re-integration didn't recognise (e.g. VGGTOMEGA → omega_run/). The
+        # legacy `export_tsdf_meshes` fallback (untextured) is no longer called.
+        from segmentation.tsdf_export import crop_scene_mesh_to_instances
+        return crop_scene_mesh_to_instances(
             output_dir=output_dir,
-            frames_dir=frames_dir,
             segments_result=segments_result,
-            session_dir=frames_dir.parent,
             obj_ids=list(target_ids) or None,
-            voxel_length=voxel_length,
-            sdf_trunc=sdf_trunc,
-            depth_trunc=depth_trunc,
-            dilate_radius=dilate_radius,
             progress_cb=_progress_cb,
         )
 
     async def _bg():
         try:
-            written = await loop.run_in_executor(None, _run_tsdf)
+            scene_dir = output_dir / "tsdf" / "scene"
+            has_scene = ((scene_dir / "scene.glb.orig").exists()
+                         or (scene_dir / "scene.glb").exists())
+            if not has_scene:
+                # The pipeline now stops at the cleaned cloud (pipeline.auto_tsdf
+                # false), so the scene mesh may not exist yet: bake it HERE, once
+                # — TSDF integration + texrecon texture, forced regardless of any
+                # config experiment — then carve. Later exports reuse the bake.
+                print("[TSDF] no scene mesh → baking scene TSDF (tsdf + texrecon) "
+                      "before carving")
+                async with _tsdf_progress_lock:
+                    _tsdf_set_overall(session_id, phase="scene_tsdf")
+                from segmentation.tsdf_export import build_tsdf_scene_kwargs
+                params = build_tsdf_scene_kwargs(cfg, overrides={
+                    "mesh_method": "tsdf",
+                    "texture": True,
+                    "texture_mode": "texrecon",
+                })
+                scene_path = await _run_scene_tsdf_subprocess(
+                    session_id, output_dir, frames_dir, params)
+                if not scene_path:
+                    raise RuntimeError(
+                        "scene TSDF bake failed — cannot carve instance meshes")
+            else:
+                print("[TSDF] scene mesh present → carving instances from it (crop)")
+            async with _tsdf_progress_lock:
+                _tsdf_set_overall(session_id, phase="integrating")
+            written = await loop.run_in_executor(None, _run_crop)
             async with _tsdf_progress_lock:
                 _tsdf_set_overall(session_id, phase="done",
                                   done=len(written), finished_at=time.time())
@@ -4388,6 +4429,75 @@ async def _tsdf_apply_progress(session_id: str, inst_id: int,
 
 
 # ── Whole-scene TSDF (single mesh from all frames; no instance filtering) ──
+
+async def _run_scene_tsdf_subprocess(session_id: str, output_dir: Path,
+                                     frames_dir: Path, params: dict):
+    """Bake the scene TSDF mesh in a SEPARATE PROCESS (run_tsdf_scene.py) and
+    stream its progress into the ``__scene__`` key of the TSDF progress state.
+
+    A subprocess (not run_in_executor) because a thread still saturates this
+    process + the GIL and blocks the event loop, so /health times out and the
+    UI falsely reports "server down" during the bake.
+
+    Shared by /tsdf/scene_export (manual whole-scene button) and /tsdf/export
+    (individual meshes bake the scene first when it doesn't exist yet).
+    Returns the written mesh path, or None on failure.
+    """
+    worker = Path(SERVER_DIR) / "run_tsdf_scene.py"
+    result_path = None
+    try:
+        proc = _track_worker(await asyncio.create_subprocess_exec(
+            sys.executable, str(worker),
+            "--output-dir", str(output_dir),
+            "--frames-dir", str(frames_dir),
+            "--session-dir", str(frames_dir.parent),
+            "--params", json.dumps(params),
+            cwd=str(SERVER_DIR),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"},
+            preexec_fn=_die_with_parent_sigkill,
+        ))
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", "ignore").rstrip()
+            if not line:
+                continue
+            if line.startswith("[TSDF-PROGRESS]"):
+                try:
+                    upd = json.loads(line[len("[TSDF-PROGRESS]"):])
+                    await _tsdf_scene_apply_progress(session_id, upd)
+                    print(f"[TSDF-scene] phase={upd.get('phase')}"
+                          + (f" {upd.get('elapsed'):.0f}s" if upd.get('elapsed') else ""),
+                          flush=True)  # store phase transitions in the server log
+                except Exception:
+                    pass
+            elif line.startswith("[TSDF-RESULT]"):
+                r = line[len("[TSDF-RESULT]"):].strip()
+                result_path = None if r == "NONE" else r
+            else:
+                try:
+                    print(line, flush=True)  # forward worker logs to server console
+                except (BrokenPipeError, OSError):
+                    pass  # dead stdout must NOT abort the task or mark the scene "error"
+        await proc.wait()
+        async with _tsdf_progress_lock:
+            _tsdf_progress.setdefault(session_id, {})["__scene__"] = {
+                "phase": "done" if result_path else "error",
+                "mesh": result_path,
+                "finished_at": time.time(),
+            }
+        print(f"[TSDF-scene] ✅ wrote {result_path}" if result_path
+              else "[TSDF-scene] ❌ failed")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        async with _tsdf_progress_lock:
+            _tsdf_progress.setdefault(session_id, {})["__scene__"] = {
+                "phase": "error", "error": str(e),
+            }
+    return result_path
+
 
 @app.post("/api/segmentation/tsdf/scene_export")
 async def export_tsdf_scene_endpoint(request: Request):
@@ -4439,68 +4549,11 @@ async def export_tsdf_scene_endpoint(request: Request):
             "started_at": time.time(),
         }
 
-    # Run the heavy GPU/Open3D work in a SEPARATE PROCESS (not run_in_executor):
-    # a thread still saturates this process + the GIL and blocks the event loop,
-    # so /health times out and the UI falsely reports "server down" during a
-    # reconstruction. A subprocess read with async streams keeps the loop free.
-    # params already built above from config.yaml `tsdf:` + body overrides
-    worker = Path(SERVER_DIR) / "run_tsdf_scene.py"
-
-    async def _bg():
-        result_path = None
-        try:
-            proc = _track_worker(await asyncio.create_subprocess_exec(
-                sys.executable, str(worker),
-                "--output-dir", str(output_dir),
-                "--frames-dir", str(frames_dir),
-                "--session-dir", str(frames_dir.parent),
-                "--params", json.dumps(params),
-                cwd=str(SERVER_DIR),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"},
-                preexec_fn=_die_with_parent_sigkill,
-            ))
-            assert proc.stdout is not None
-            async for raw in proc.stdout:
-                line = raw.decode("utf-8", "ignore").rstrip()
-                if not line:
-                    continue
-                if line.startswith("[TSDF-PROGRESS]"):
-                    try:
-                        upd = json.loads(line[len("[TSDF-PROGRESS]"):])
-                        await _tsdf_scene_apply_progress(session_id, upd)
-                        print(f"[TSDF-scene] phase={upd.get('phase')}"
-                              + (f" {upd.get('elapsed'):.0f}s" if upd.get('elapsed') else ""),
-                              flush=True)  # store phase transitions in the server log
-                    except Exception:
-                        pass
-                elif line.startswith("[TSDF-RESULT]"):
-                    r = line[len("[TSDF-RESULT]"):].strip()
-                    result_path = None if r == "NONE" else r
-                else:
-                    try:
-                        print(line, flush=True)  # forward worker logs to server console
-                    except (BrokenPipeError, OSError):
-                        pass  # dead stdout must NOT abort the task or mark the scene "error"
-            await proc.wait()
-            async with _tsdf_progress_lock:
-                _tsdf_progress.setdefault(session_id, {})["__scene__"] = {
-                    "phase": "done" if result_path else "error",
-                    "mesh": result_path,
-                    "finished_at": time.time(),
-                }
-            print(f"[TSDF-scene] ✅ wrote {result_path}" if result_path
-                  else "[TSDF-scene] ❌ failed")
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            async with _tsdf_progress_lock:
-                _tsdf_progress.setdefault(session_id, {})["__scene__"] = {
-                    "phase": "error", "error": str(e),
-                }
-
-    asyncio.create_task(_bg())
+    # Heavy GPU/Open3D work runs in a SEPARATE PROCESS — see
+    # _run_scene_tsdf_subprocess (params already built above from config.yaml
+    # `tsdf:` + body overrides).
+    asyncio.create_task(
+        _run_scene_tsdf_subprocess(session_id, output_dir, frames_dir, params))
 
     return {"ok": True, "started": True}
 
@@ -4770,47 +4823,10 @@ async def refresh_segmentation(body: dict):
 
     result = await loop.run_in_executor(None, _refresh)
 
-    # Carve per-object TSDF meshes IN THE BACKGROUND — same faithful
-    # deliverable the pipeline SAM3 stage produces. Running it inline froze
-    # the refresh response for minutes (5 instances × millions of points vs
-    # a 1.7M-tri scene mesh) and the UI looked hung; a mid-wait restart then
-    # killed the crops. The refresh now returns right after DBSCAN and the
-    # crops materialize progressively (shape/tsdf lists pick them up).
-    def _crop_bg():
-        crop_tid = task_manager.start(session_id, "tsdf_crop",
-                                      "Carving per-object TSDF meshes")
-        try:
-            scene_dir = output_dir / "tsdf" / "scene"
-            if not ((scene_dir / "scene.glb.orig").exists()
-                    or (scene_dir / "scene.glb").exists()):
-                print("[SegRefresh] No scene TSDF — skipping per-object crop")
-                task_manager.finish(crop_tid)
-                return
-            from segmentation.tsdf_export import crop_scene_mesh_to_instances
-            n_tot = len(result.get("instances", []))
-            done = {"n": 0}
-
-            def _cb(inst_id, phase, elapsed, mesh_path):
-                if phase == "done":
-                    done["n"] += 1
-                    task_manager.update(crop_tid,
-                                        pct=int(done["n"] / max(n_tot, 1) * 100),
-                                        detail=f"TSDF mesh {done['n']}/{n_tot}")
-                    print(f"[SegRefresh]   TSDF crop {done['n']}/{n_tot} "
-                          f"(inst {inst_id}, {elapsed:.0f}s)")
-
-            written = crop_scene_mesh_to_instances(
-                output_dir=output_dir, segments_result=result,
-                progress_cb=_cb)
-            print(f"[SegRefresh] Per-object TSDF: wrote {len(written)} mesh(es)")
-            task_manager.finish(crop_tid)
-        except Exception as e:
-            print(f"[SegRefresh] Per-object TSDF crop failed (non-fatal): {e}")
-            task_manager.fail(crop_tid, str(e))
-
-    _crop_task = asyncio.ensure_future(loop.run_in_executor(None, _crop_bg))
-    _bg_tasks.add(_crop_task)
-    _crop_task.add_done_callback(_bg_tasks.discard)
+    # NO automatic meshing here (user decision 2026-08-28): closing the
+    # Segmentation Manager must only re-run DBSCAN + matching and produce the
+    # instances/OBBs. Per-object meshes are built EXCLUSIVELY on demand via
+    # /api/segmentation/tsdf/export (TSDF + texrecon).
     return {"ok": True, **result}
 
 
@@ -5856,9 +5872,10 @@ async def viewer_websocket(websocket: WebSocket):
                 session_id = cmd.get("session_id")
                 print(f"[Pipeline] 🔧 Starting pipeline for session {session_id}")
 
-                # The pipeline ALWAYS runs end-to-end (reconstruction → cloudcompy
-                # → tsdf) — any stage selection the client might still send is
-                # deliberately ignored (see build_pipeline_stages).
+                # The pipeline runs reconstruction → cloudcompy and ends at the
+                # cleaned cloud (pipeline.auto_tsdf false, user 2026-08-28: the
+                # mesh is on-demand only). Any stage selection the client might
+                # still send is deliberately ignored (see build_pipeline_stages).
                 from pipeline_manager import build_pipeline_stages
                 _recon_backend = cfg.get("reconstruction", {}).get("backend", "da3")
                 stages = build_pipeline_stages(backend=_recon_backend)
@@ -5892,7 +5909,7 @@ async def viewer_websocket(websocket: WebSocket):
                             _cloud_ready_sent.add(sid)
                             await viewer_manager.broadcast_text(json.dumps({
                                 "type": "status",
-                                "message": "Cloud ready — sending while the TSDF bakes..."
+                                "message": "Cloud ready — sending to the viewer..."
                             }))
                             await _notify_cloud_ready(sid)
                     except Exception as _e:
@@ -5967,7 +5984,16 @@ async def viewer_websocket(websocket: WebSocket):
                         print(f"[Pipeline] Send cloud error: {e}")
 
                 # Completion callback: send cloud + segmentation data
-                async def _on_pipeline_complete(sid, success):
+                async def _on_pipeline_complete(sid, success, restart_chat=True):
+                    # Chat back up the moment the GPU is free — success OR failure
+                    # (user decision 2026-08-28: the chat is always available; the
+                    # reconstruction stages unloaded it to get the whole GPU).
+                    # restart_chat=False between multi-scan runs: the next scan
+                    # would immediately kill it again.
+                    if restart_chat:
+                        asyncio.get_running_loop().run_in_executor(
+                            None, _semantic_reload_if_idle, "pipeline finished")
+
                     if not success:
                         _tm.fail(_pipeline_tid, "Pipeline failed")
                         try:
@@ -6049,10 +6075,16 @@ async def viewer_websocket(websocket: WebSocket):
                             # Use a future to await sequential completion
                             done_event = asyncio.Event()
                             scan_success = [True]
+                            _is_last_scan = (i == total - 1)
 
-                            async def _on_scan_complete(sid, success, _ev=done_event, _ss=scan_success):
+                            async def _on_scan_complete(sid, success, _ev=done_event,
+                                                        _ss=scan_success, _last=_is_last_scan):
                                 _ss[0] = success
-                                await _on_pipeline_complete(sid, success)
+                                # Reload the chat only when the multi-scan run is
+                                # actually over (last scan, or a failure stops it) —
+                                # the next scan would kill vLLM again right away.
+                                await _on_pipeline_complete(
+                                    sid, success, restart_chat=(_last or not success))
                                 _ev.set()
 
                             await pipeline_manager.start_pipeline(
@@ -6093,6 +6125,10 @@ async def viewer_websocket(websocket: WebSocket):
             elif cmd.get("type") == "cancel_pipeline":
                 session_id = cmd.get("session_id")
                 await pipeline_manager.cancel_pipeline(session_id)
+                # A hard task-cancel can skip the on_complete callback — make sure
+                # the chat still comes back once the GPU is released.
+                asyncio.get_running_loop().run_in_executor(
+                    None, _semantic_reload_if_idle, "pipeline cancelled")
                 await websocket.send_text(json.dumps({
                     "type": "info",
                     "message": f"Pipeline cancelled for {session_id}"
