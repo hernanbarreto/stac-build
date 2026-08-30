@@ -778,7 +778,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
                 if (octreeGroup) {
                     octreeGroup.children.forEach(c => {
-                        if ((c.name || '').startsWith('potree-node-')) {
+                        if ((c.name || '').startsWith('potree-node-') && c.visible) {
                             targets.push(c)
                         }
                     })
@@ -936,7 +936,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
                 if (octreeGroup) {
                     octreeGroup.children.forEach(c => {
-                        if ((c.name || '').startsWith('potree-node-')) {
+                        if ((c.name || '').startsWith('potree-node-') && c.visible) {
                             targets.push(c)
                         }
                     })
@@ -1447,21 +1447,31 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     }, [activeSession, onStatusMessage])
 
     // Expose sendCommand + toggleOBB + clearMeasurements + resetSectionBox to parent via ref
+    // Deep GPU disposal for mesh groups: material.dispose() does NOT free the
+    // textures it references — the texrecon atlases (tens of MB each) leaked
+    // on every clear/reload and the viewer grew heavier with use (2026-08-30)
+    const disposeMeshGroup = useCallback((root: THREE.Object3D) => {
+        root.traverse((obj) => {
+            const mesh = obj as THREE.Mesh
+            if (!(mesh as unknown as { isMesh?: boolean }).isMesh) return
+            mesh.geometry?.dispose()
+            const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+            for (const m of mats) {
+                if (!m) continue
+                const anyM = m as unknown as Record<string, { dispose?: () => void } | undefined>
+                for (const k of ['map', 'alphaMap', 'aoMap', 'emissiveMap', 'normalMap', 'roughnessMap', 'metalnessMap']) {
+                    anyM[k]?.dispose?.()
+                }
+                m.dispose()
+            }
+        })
+    }, [])
+
     // ── ShapeR mesh auto-load helpers ────────────────────────────────
     const clearAllShapes = useCallback(() => {
         const group = shapesGroupRef.current
         if (group) {
-            // Properly dispose geometry and materials to avoid GPU leaks
-            group.traverse((obj) => {
-                if (obj instanceof THREE.Mesh) {
-                    obj.geometry?.dispose()
-                    if (Array.isArray(obj.material)) {
-                        obj.material.forEach(m => m.dispose())
-                    } else {
-                        obj.material?.dispose()
-                    }
-                }
-            })
+            disposeMeshGroup(group)   // geometry + materials + TEXTURES
             const parent = group.parent
             if (parent) parent.remove(group)
         }
@@ -1521,16 +1531,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const clearAllTsdf = useCallback(() => {
         const group = tsdfGroupRef.current
         if (group) {
-            group.traverse((obj) => {
-                if (obj instanceof THREE.Mesh) {
-                    obj.geometry?.dispose()
-                    if (Array.isArray(obj.material)) {
-                        obj.material.forEach(m => m.dispose())
-                    } else {
-                        obj.material?.dispose()
-                    }
-                }
-            })
+            disposeMeshGroup(group)   // geometry + materials + TEXTURES
             const parent = group.parent
             if (parent) parent.remove(group)
         }
@@ -1623,13 +1624,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const clearAllReconScene = useCallback(() => {
         const group = reconSceneGroupRef.current
         if (group) {
-            group.traverse((obj) => {
-                if (obj instanceof THREE.Mesh) {
-                    obj.geometry?.dispose()
-                    if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose())
-                    else obj.material?.dispose()
-                }
-            })
+            disposeMeshGroup(group)   // geometry + materials + TEXTURES
             const parent = group.parent
             if (parent) parent.remove(group)
         }
@@ -1795,6 +1790,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         },
         setSegmentVisibility: (segId: number, visible: boolean) => {
             segVisRef.current.set(segId, visible)
+            // whole-node culling: octree nodes whose every point is hidden
+            // skip the draw entirely (user 2026-08-30: single-segment work
+            // was as heavy as the full cloud)
+            const hidden = new Set<number>()
+            segVisRef.current.forEach((vis, id) => { if (!vis) hidden.add(id) })
+            potreeLoaderRef.current?.setClassVisibility(hidden)
             const mat = materialRef.current
             if (!mat) return
             const idx = Math.max(0, Math.min(segId, 255))
@@ -1819,6 +1820,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         child.visible = visible
                     }
                 })
+            }
+            // re-showing the cloud must NOT resurrect nodes whose segments are
+            // hidden — reapply the class-based node culling
+            if (visible) {
+                const hidden = new Set<number>()
+                segVisRef.current.forEach((vis, id) => { if (!vis) hidden.add(id) })
+                potreeLoaderRef.current?.setClassVisibility(hidden)
             }
             // Hidden Three.js objects keep their GPU buffers, so visible=false alone
             // does NOT free VRAM — the Potree nodes kept occupying it and slowing the
@@ -2584,7 +2592,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
                 if (octreeGroup) {
                     octreeGroup.children.forEach(c => {
-                        if ((c.name || '').startsWith('potree-node-')) targets.push(c)
+                        if ((c.name || '').startsWith('potree-node-') && c.visible) targets.push(c)
                     })
                 }
             }
@@ -2837,6 +2845,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     child.visible = !hideCloud
                 }
             })
+        }
+        // re-showing must not resurrect nodes of hidden segments
+        if (!hideCloud) {
+            const hidden = new Set<number>()
+            segVisRef.current.forEach((vis, id) => { if (!vis) hidden.add(id) })
+            potreeLoaderRef.current?.setClassVisibility(hidden)
         }
     }, [confidenceThreshold])
 
@@ -3284,6 +3298,20 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const mat = materialRef.current
             if (!scene || !camera || !mat) return
 
+            // Keep loaded mesh groups ALIVE across the octree reload: they are
+            // parented under the octreeGroup (floor-transform inheritance), and
+            // the old loader's dispose() used to drop them undisposed — GPU
+            // memory leaked and meshes vanished on every erase commit/refresh
+            // (user 2026-08-30: "se pone pesada con el uso").
+            const survivingGroups: THREE.Object3D[] = []
+            for (const ref of [tsdfGroupRef, shapesGroupRef, reconSceneGroupRef]) {
+                const g = ref.current
+                if (g) {
+                    g.removeFromParent()
+                    survivingGroups.push(g)
+                }
+            }
+
             // Dispose previous loader
             if (potreeLoaderRef.current) {
                 potreeLoaderRef.current.dispose()
@@ -3291,6 +3319,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
             const loader = new PotreeOctreeLoader(scene, camera, mat, pointBudget)
             potreeLoaderRef.current = loader
+            if (survivingGroups.length) {
+                const newOctree = scene.getObjectByName('potree-octree')
+                for (const g of survivingGroups) (newOctree ?? scene).add(g)
+            }
+            // carry the user's hidden segments into the fresh loader
+            {
+                const hidden = new Set<number>()
+                segVisRef.current.forEach((vis, id) => { if (!vis) hidden.add(id) })
+                if (hidden.size) loader.setClassVisibility(hidden)
+            }
 
             loader.load(url).then((loadedPts) => {
                 // Guard: if this loader was replaced (e.g. by sábana), skip

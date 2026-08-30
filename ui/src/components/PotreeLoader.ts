@@ -543,6 +543,7 @@ export class PotreeOctreeLoader {
         // re-attach to the scene. No network, no re-parse (instant).
         if (node.points) {
             this.octreeGroup.add(node.points)
+            this._applyClassCull(node.points)
             node.loaded = true
             node.lastUsed = ++this._tick
             this.totalLoadedPoints += node.numPoints
@@ -723,6 +724,17 @@ export class PotreeOctreeLoader {
         // Use the shared material from the Viewport
         const points = new THREE.Points(geometry, this.material)
         points.name = `potree-node-${node.name}`
+        // Per-class point counts → WHOLE-NODE culling when every point in the
+        // node belongs to hidden segments (user 2026-08-30: hiding segments
+        // only discarded per-fragment — the full cloud kept costing GPU and
+        // made single-segment work "imposible")
+        const classCounts = new Map<number, number>()
+        for (let i = 0; i < validPoints; i++) {
+            const c = classIds[i]
+            classCounts.set(c, (classCounts.get(c) || 0) + 1)
+        }
+        points.userData.classCounts = classCounts
+        this._applyClassCull(points)
 
         // For small clouds (< pointBudget): disable Three.js frustum culling.
         // Three.js culls by bounding sphere which is unreliable after transforms
@@ -739,6 +751,36 @@ export class PotreeOctreeLoader {
         this.totalLoadedPoints += node.numPoints
         this._cachedPoints += node.numPoints
         this._evictCache()
+    }
+
+    // ── Class-based whole-node culling ─────────────────────────────────
+    // Segments hidden in the panel are discarded per-fragment by the shader,
+    // but a node whose EVERY point is hidden can skip the draw entirely —
+    // with one segment visible, most of the scene's nodes stop costing GPU.
+    private hiddenClasses = new Set<number>()
+
+    setClassVisibility(hidden: Set<number>): void {
+        this.hiddenClasses = new Set(hidden)
+        for (const [, node] of this.nodes) {
+            if (node.points) this._applyClassCull(node.points)
+        }
+    }
+
+    private _applyClassCull(points: THREE.Points): void {
+        if (!this.hiddenClasses.size) {
+            points.visible = true
+            return
+        }
+        const counts = points.userData.classCounts as Map<number, number> | undefined
+        if (!counts) {
+            points.visible = true
+            return
+        }
+        let visibleCount = 0
+        for (const [c, n] of counts) {
+            if (!this.hiddenClasses.has(c)) visibleCount += n
+        }
+        points.visible = visibleCount > 0
     }
 
     /** Remove a node from the scene but KEEP its geometry cached (no dispose),
