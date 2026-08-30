@@ -165,6 +165,23 @@ class SAM3Wrapper:
         self.release_batch_session()   # its decoded frames belong to the predictor
         with self.lock:
             if self.predictor is not None:
+                # BACKPORT of upstream facebookresearch/sam3 8f0b7f4 (2026-08-14,
+                # "Restore autocast state on video predictor shutdown"): SAM 3.0's
+                # tracker enters a LONG-LIVED bf16 autocast context at construction
+                # and never exits it — after unload, unrelated torch code in the
+                # same thread silently runs under bf16 (mixed-dtype native crash;
+                # the backend segfaulted ~10 s after a refresh, 2026-08-29).
+                try:
+                    tracker = getattr(getattr(self.predictor, "model", None),
+                                      "tracker", None)
+                    ctx = getattr(tracker, "bf16_context", None)
+                    if ctx is not None:
+                        ctx.__exit__(None, None, None)
+                        tracker.bf16_context = None
+                        logger.info("SAM3 tracker bf16 autocast context exited "
+                                    "(upstream 8f0b7f4 backport)")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"bf16 context cleanup warning (non-fatal): {e}")
                 try:
                     self.predictor.model.cpu()
                 except:
@@ -1033,10 +1050,21 @@ class SAM3Wrapper:
             results[frame_idx] = outputs
         return results
 
-    def propagate_interactive_stream(self, state_id: str, selected_frames: Optional[List[int]] = None):
+    def propagate_interactive_stream(self, state_id: str,
+                                     selected_frames: Optional[List[int]] = None,
+                                     output_prob_thresh: Optional[float] = None):
         """
         Generator that yields (frame_idx, num_frames, outputs) per frame.
         Enables SSE streaming of per-frame progress.
+
+        USER ORDER 2026-08-29: propagation ALWAYS covers every keyframe.
+        ``selected_frames`` is accepted for API compat but NOT forwarded —
+        SAM 3.1's base predictor ignores ``valid_frame_indices`` anyway (only
+        SAM 3.0 honored it), so forwarding it just hid the truth from the UI.
+        ``output_prob_thresh`` overrides the tracker's output gate (vendor
+        default 0.5): far from the prompted frame the object's score decays
+        under it and SAM3 emits EMPTY masks (wall1 covered 4/12 frames) —
+        0.0 emits the tracked mask wherever the tracker has one.
         """
         if not self.is_loaded or self.predictor is None:
             raise RuntimeError("SAM3 model not loaded")
@@ -1053,19 +1081,20 @@ class SAM3Wrapper:
                 num_frames = len(kf_map)
 
         try:
-            logger.info(f"[SAM3-Interactive] Propagating session {state_id} ({num_frames} frames), selected_frames={selected_frames is not None} ({len(selected_frames) if selected_frames else 0} entries)...")
+            if selected_frames:
+                logger.info(f"[SAM3-Interactive] selected_frames ({len(selected_frames)}) "
+                            "ignored — propagation always covers ALL frames (user order 2026-08-29)")
+            logger.info(f"[SAM3-Interactive] Propagating session {state_id} ({num_frames} frames, "
+                        f"output_prob_thresh={output_prob_thresh})...")
             # NOTE: We intentionally do NOT hold self.lock here.
             # Propagation is a long-running generator that yields per-frame.
             # Holding a lock across yields would block ALL other SAM3 operations
             # for the entire duration (minutes). The server-side 409 guard already
             # prevents concurrent propagations on the same session.
-            for response in self._stream(
-                request=dict(
-                    type="propagate_in_video",
-                    session_id=state_id,
-                    valid_frame_indices=selected_frames,
-                )
-            ):
+            _req = dict(type="propagate_in_video", session_id=state_id)
+            if output_prob_thresh is not None:
+                _req["output_prob_thresh"] = float(output_prob_thresh)
+            for response in self._stream(request=_req):
                 frame_idx = response["frame_index"]
                 outputs = response["outputs"]
 

@@ -23,7 +23,7 @@ function makeGltfLoader(): GLTFLoader {
     return l
 }
 
-type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align'
+type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align' | 'erase'
 
 interface ViewportProps {
     pointSize: number
@@ -44,6 +44,13 @@ interface ViewportProps {
     onHasConfidence?: (has: boolean) => void
     showCameraPoses?: boolean
     onHasCameraPoses?: (has: boolean) => void
+    /** Gizmo edit finished on an evaluation volume — persist + re-evaluate. */
+    onVolumeChanged?: (params: { volume_id: number; center: number[]; size: number[]; yaw_deg: number }) => void
+    eraseRadius?: number
+    onEraseRadiusChange?: (r: number) => void
+    onEraseMarksChanged?: (n: number) => void
+    /** Volume deleted from the viewer toolbar. */
+    onVolumeDeleted?: (volumeId: number) => void
 }
 
 export interface SegmentInstance {
@@ -70,6 +77,8 @@ export interface ViewportHandle {
     clearDeviationSurface: () => void
     applyRegistrationTransform: (transform: number[][]) => void
     clearMeasurements: () => void
+    commitErase: (target?: number | null, newLabel?: string, onlyInstances?: number[]) => Promise<void>
+    clearEraseMarks: () => void
     resetSectionBox: () => void
     resetCamera: () => void
     clearScene: () => void
@@ -100,6 +109,8 @@ export interface ViewportHandle {
     clearAssistantViz: () => void
     addUserVolume: (volume: UserVolume) => void
     removeUserVolume: (volumeId: number) => void
+    setVolumeStatus: (volumeId: number, status: 'free' | 'touching' | 'colliding') => void
+    setVolumeSolid: (volumeId: number, solid: boolean) => void
     frameBox: (min: number[], max: number[]) => void
 }
 
@@ -343,7 +354,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, onEraseRadiusChange, onEraseMarksChanged },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -398,6 +409,111 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
     // Immersive assistant visualization (animated measurements + user volumes)
     const assistantVizRef = useRef<AssistantViz | null>(null)
+    const camTweenRef = useRef<number | null>(null)
+
+    // ── evaluation-volume gizmo (select → move/rotate/resize, user 2026-08-29)
+    const [selVolume, setSelVolume] = useState<number | null>(null)
+    const [volMode, setVolMode] = useState<'translate' | 'rotate' | 'scale'>('translate')
+    const [volSolid, setVolSolid] = useState(false)
+    const volTcRef = useRef<TransformControls | null>(null)
+    const onVolumeChangedRef = useRef(onVolumeChanged)
+    const onVolumeDeletedRef = useRef(onVolumeDeleted)
+    useEffect(() => { onVolumeChangedRef.current = onVolumeChanged }, [onVolumeChanged])
+    useEffect(() => { onVolumeDeletedRef.current = onVolumeDeleted }, [onVolumeDeleted])
+
+    // Gizmo lifecycle: attach TransformControls to the selected volume group.
+    useEffect(() => {
+        const scene = sceneRef.current, camera = cameraRef.current
+        const renderer = rendererRef.current, controls = controlsRef.current
+        if (!scene || !camera || !renderer || !controls || selVolume == null) return
+        const g = assistantVizRef.current?.getVolumeGroup(selVolume)
+        if (!g) { setSelVolume(null); return }
+        const tc = new TransformControls(camera, renderer.domElement)
+        tc.setMode(volMode)
+        if (volMode === 'rotate') { tc.showX = false; tc.showZ = false }  // yaw only
+        tc.setSize(0.8)
+        tc.attach(g)
+        scene.add(tc.getHelper())
+        tc.addEventListener('dragging-changed', (e) => {
+            const dragging = !!(e as unknown as { value?: boolean }).value
+            controls.enabled = !dragging
+            if (!dragging) {
+                // drag finished → persist + re-evaluate collision state
+                const params = assistantVizRef.current?.volumeParams(selVolume)
+                if (params) onVolumeChangedRef.current?.(params)
+            }
+        })
+        volTcRef.current = tc
+        return () => {
+            scene.remove(tc.getHelper())
+            tc.detach()
+            tc.dispose()
+            volTcRef.current = null
+            controls.enabled = true
+        }
+    }, [selVolume, volMode])
+
+    // Click-select volumes (navigate tool only; a drag never selects), and
+    // Escape / Delete keyboard handling while one is selected.
+    useEffect(() => {
+        const container = containerRef.current
+        if (!container) return
+        let down: [number, number] | null = null
+        const onDown = (e: MouseEvent) => { if (e.button === 0) down = [e.clientX, e.clientY] }
+        const onClick = (e: MouseEvent) => {
+            if (activeToolRef.current !== 'navigate') return
+            if (down && (Math.abs(e.clientX - down[0]) > 4 || Math.abs(e.clientY - down[1]) > 4)) return
+            const camera = cameraRef.current, renderer = rendererRef.current
+            const viz = assistantVizRef.current
+            if (!camera || !renderer || !viz) return
+            const rect = renderer.domElement.getBoundingClientRect()
+            const mouse = new THREE.Vector2(
+                ((e.clientX - rect.left) / rect.width) * 2 - 1,
+                -((e.clientY - rect.top) / rect.height) * 2 + 1)
+            const rc = new THREE.Raycaster()
+            rc.setFromCamera(mouse, camera)
+            const hits = rc.intersectObjects(viz.pickableVolumes(), false)
+            if (hits.length) {
+                setSelVolume(hits[0].object.userData.volumeId as number)
+            } else if (!(volTcRef.current as unknown as { axis?: string } | null)?.axis) {
+                // empty click (and not on a gizmo handle) deselects
+                setSelVolume(null)
+            }
+        }
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setSelVolume(null)
+        }
+        container.addEventListener('mousedown', onDown)
+        container.addEventListener('click', onClick)
+        window.addEventListener('keydown', onKey)
+        return () => {
+            container.removeEventListener('mousedown', onDown)
+            container.removeEventListener('click', onClick)
+            window.removeEventListener('keydown', onKey)
+        }
+    }, [])
+
+    // Smooth camera flight (assistant measurements / frameBox): ease-in-out the
+    // orbit target and camera position toward the goal instead of snapping.
+    // Cancelled the moment the user grabs the controls (see 'start' listener).
+    const animateCameraTo = useCallback((toTarget: THREE.Vector3,
+                                         toPos: THREE.Vector3, dur = 950) => {
+        const camera = cameraRef.current, controls = controlsRef.current
+        if (!camera || !controls) return
+        if (camTweenRef.current != null) cancelAnimationFrame(camTweenRef.current)
+        const fromTarget = controls.target.clone()
+        const fromPos = camera.position.clone()
+        const t0 = performance.now()
+        const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
+        const step = (now: number) => {
+            const t = Math.min(1, (now - t0) / dur)
+            const k = ease(t)
+            controls.target.lerpVectors(fromTarget, toTarget, k)
+            camera.position.lerpVectors(fromPos, toPos, k)
+            camTweenRef.current = t < 1 ? requestAnimationFrame(step) : null
+        }
+        camTweenRef.current = requestAnimationFrame(step)
+    }, [])
 
     // Measurement state
     const measureGroupRef = useRef<THREE.Group | null>(null)
@@ -408,6 +524,29 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const measurementsRef = useRef<Measurement[]>([])
     const raycasterRef = useRef(new THREE.Raycaster())
     const activeToolRef = useRef(activeTool)
+    // Eraser tool (user 2026-08-29): brush radius + cursor sphere. The radius
+    // is owned by App (slider in the toolbar); the wheel changes it too and
+    // reports back so slider and wheel stay in sync.
+    const eraseRadiusRef = useRef(0.15)
+    const eraseCursorRef = useRef<THREE.Mesh | null>(null)
+    const onEraseRadiusChangeRef = useRef(onEraseRadiusChange)
+    useEffect(() => { onEraseRadiusChangeRef.current = onEraseRadiusChange }, [onEraseRadiusChange])
+    const onEraseMarksChangedRef = useRef(onEraseMarksChanged)
+    useEffect(() => { onEraseMarksChangedRef.current = onEraseMarksChanged }, [onEraseMarksChanged])
+    // mark/commit API installed by the main effect (marks live in its closure)
+    const eraseApiRef = useRef<{ commit: (target?: number | null, newLabel?: string, onlyInstances?: number[]) => Promise<void>; clear: () => void } | null>(null)
+    // bridge: renderOBBs is declared later in the file — the potree_ready
+    // handler needs it to resync OBBs + panel after an erase/refresh rebuild
+    const renderOBBsRef = useRef<((instances: Array<Record<string, unknown>>) => void) | null>(null)
+    useEffect(() => {
+        if (activeTool !== 'erase') eraseApiRef.current?.clear()
+    }, [activeTool])
+    useEffect(() => {
+        if (typeof eraseRadius === 'number' && eraseRadius > 0) {
+            eraseRadiusRef.current = eraseRadius
+            eraseCursorRef.current?.scale.setScalar(eraseRadius)
+        }
+    }, [eraseRadius])
     const hoverHighlightRef = useRef<THREE.Group | null>(null)
     const potreeLoaderRef = useRef<PotreeOctreeLoader | null>(null)
     const lastLodUpdateRef = useRef(0)
@@ -636,6 +775,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         if (shapesGroupRef.current) targets.push(shapesGroupRef.current)
         if (reconSceneGroupRef.current) targets.push(reconSceneGroupRef.current)
         if (bimGroupRef.current) targets.push(bimGroupRef.current)
+        // evaluation volumes are measurable like the scene (user 2026-08-29)
+        if (assistantVizRef.current) targets.push(...assistantVizRef.current.pickableVolumes())
         const intersects = raycaster.intersectObjects(targets)
         // Filter out section-box-clipped points
         const hit = intersects.find(i => {
@@ -792,6 +933,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         if (shapesGroupRef.current) targets.push(shapesGroupRef.current)
         if (reconSceneGroupRef.current) targets.push(reconSceneGroupRef.current)
         if (bimGroupRef.current) targets.push(bimGroupRef.current)
+        // evaluation volumes are measurable like the scene (user 2026-08-29)
+        if (assistantVizRef.current) targets.push(...assistantVizRef.current.pickableVolumes())
         const intersects = raycaster.intersectObjects(targets)
         // Filter out section-box-clipped points
         const hit = intersects.find(i => {
@@ -1587,21 +1730,25 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         visualizeMeasurement: (trace: TraceEntry[]) => {
             const box = assistantVizRef.current?.visualizeTrace(trace)
             if (box && !box.isEmpty()) {
-                // gently frame what was drawn without yanking the user around
+                // fly to what was drawn — smooth ease-in-out, cancelled by any
+                // user interaction (the geometry reveal animates in parallel)
                 const camera = cameraRef.current, controls = controlsRef.current
                 if (camera && controls) {
                     const center = box.getCenter(new THREE.Vector3())
                     const radius = Math.max(0.4, box.getSize(new THREE.Vector3()).length() / 2)
                     const dir = camera.position.clone().sub(controls.target).normalize()
                     const dist = radius / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.4
-                    controls.target.lerp(center, 0.6)
-                    camera.position.lerp(center.clone().addScaledVector(dir, dist), 0.6)
+                    animateCameraTo(center, center.clone().addScaledVector(dir, dist))
                 }
             }
         },
         clearAssistantViz: () => assistantVizRef.current?.clearMeasurements(),
         addUserVolume: (volume: UserVolume) => assistantVizRef.current?.addVolume(volume),
         removeUserVolume: (volumeId: number) => assistantVizRef.current?.removeVolume(volumeId),
+        setVolumeStatus: (volumeId: number, status: 'free' | 'touching' | 'colliding') =>
+            assistantVizRef.current?.setVolumeStatus(volumeId, status),
+        setVolumeSolid: (volumeId: number, solid: boolean) =>
+            assistantVizRef.current?.setVolumeSolid(volumeId, solid),
         frameBox: (min: number[], max: number[]) => {
             const camera = cameraRef.current, controls = controlsRef.current
             if (!camera || !controls) return
@@ -1610,8 +1757,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const radius = Math.max(0.4, box.getSize(new THREE.Vector3()).length() / 2)
             const dir = camera.position.clone().sub(controls.target).normalize()
             const dist = radius / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.4
-            controls.target.copy(center)
-            camera.position.copy(center.clone().addScaledVector(dir, dist))
+            animateCameraTo(center, center.clone().addScaledVector(dir, dist))
         },
         setFloorTransform: (arr: number[]) => {
             // Apply a new floor transform (16 floats, column-major) to the
@@ -2017,6 +2163,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
         },
         clearMeasurements: clearAllMeasurements,
+        commitErase: async (target?: number | null, newLabel?: string, onlyInstances?: number[]) => { await eraseApiRef.current?.commit(target, newLabel, onlyInstances) },
+        clearEraseMarks: () => eraseApiRef.current?.clear(),
         resetSectionBox: destroySectionBox,
         resetCamera: () => {
             const cam = cameraRef.current
@@ -2260,6 +2408,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         controls.enableZoom = true
         controls.zoomSpeed = 8.0          // Fast zoom for large clouds
         controls.zoomToCursor = true      // Zoom toward mouse pointer + auto-reposition target
+        // User interaction wins instantly over any assistant camera flight
+        controls.addEventListener('start', () => {
+            if (camTweenRef.current != null) {
+                cancelAnimationFrame(camTweenRef.current)
+                camTweenRef.current = null
+            }
+        })
         controlsRef.current = controls
 
         // Shader material for point cloud
@@ -2371,6 +2526,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 e.preventDefault()
                 cancelPending()
             }
+            if (activeToolRef.current === 'erase') e.preventDefault()   // right-click erases, no browser menu
         }
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key === 'Escape') cancelPending()
@@ -2380,12 +2536,157 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const onSectionMove = (e: MouseEvent) => handleSectionMouseMove(e)
         const onSectionUp = () => handleSectionMouseUp()
 
+        // ── Eraser tool (user 2026-08-29): brush a sphere over cloud OR mesh;
+        // the backend removes the points from their segment AND clears their
+        // mask pixels (deletion survives re-matching), crops the published
+        // mesh instantly and debounces a re-fit; the recolored octree arrives
+        // via a potree_ready broadcast and reloads in place.
+        const eraseCursor = new THREE.Mesh(
+            new THREE.SphereGeometry(1, 24, 16),
+            new THREE.MeshBasicMaterial({
+                color: 0xff4444, transparent: true, opacity: 0.28,
+                depthWrite: false,
+            }))
+        eraseCursor.visible = false
+        eraseCursor.name = 'erase-cursor'
+        scene.add(eraseCursor)
+        eraseCursorRef.current = eraseCursor
+
+        const eraseRaycast = (event: MouseEvent): THREE.Vector3 | null => {
+            const rect = renderer.domElement.getBoundingClientRect()
+            const mouse = new THREE.Vector2(
+                ((event.clientX - rect.left) / rect.width) * 2 - 1,
+                -((event.clientY - rect.top) / rect.height) * 2 + 1)
+            const raycaster = raycasterRef.current
+            raycaster.params.Points = { threshold: 0.02 }
+            raycaster.setFromCamera(mouse, camera)
+            const targets: THREE.Object3D[] = []
+            if (!cloudHiddenRef.current) {
+                if (pointCloudRef.current) targets.push(pointCloudRef.current)
+                const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
+                if (octreeGroup) {
+                    octreeGroup.children.forEach(c => {
+                        if ((c.name || '').startsWith('potree-node-')) targets.push(c)
+                    })
+                }
+            }
+            if (tsdfGroupRef.current) targets.push(tsdfGroupRef.current)
+            if (shapesGroupRef.current) targets.push(shapesGroupRef.current)
+            const hits = raycaster.intersectObjects(targets)
+            const hit = hits.find(h => h.object !== eraseCursor)
+            return hit ? hit.point.clone() : null
+        }
+        const onEraseMove = (event: MouseEvent) => {
+            if (activeToolRef.current !== 'erase') {
+                eraseCursor.visible = false
+                return
+            }
+            const p = eraseRaycast(event)
+            if (p) {
+                eraseCursor.position.copy(p)
+                eraseCursor.scale.setScalar(eraseRadiusRef.current)
+                eraseCursor.visible = true
+            } else {
+                eraseCursor.visible = false
+            }
+        }
+        // TWO-PHASE ERASE (user 2026-08-29: "iluminar los puntos y luego poner
+        // borrar"): a right-CLICK only MARKS a zone (instant red sphere, no
+        // server call); the 'Erase' button in the toolbar sub-panel commits
+        // every mark in ONE application (one mask edit, one OBB recompute,
+        // one octree rebuild). Navigation stays untouched — right-drag pans.
+        const eraseMarksGroup = new THREE.Group()
+        eraseMarksGroup.name = 'erase-marks'
+        scene.add(eraseMarksGroup)
+        const eraseMarks: { center: THREE.Vector3; radius: number }[] = []
+        const markGeom = new THREE.SphereGeometry(1, 20, 14)
+        const markMat = new THREE.MeshBasicMaterial({
+            color: 0xff3333, transparent: true, opacity: 0.38, depthWrite: false,
+        })
+        const eraseClearMarks = () => {
+            eraseMarks.length = 0
+            while (eraseMarksGroup.children.length) {
+                eraseMarksGroup.remove(eraseMarksGroup.children[0])
+            }
+            onEraseMarksChangedRef.current?.(0)
+        }
+        // commit: no target → DELETE; target id → REASSIGN into that segment;
+        // newLabel → CREATE a new segment from the zones (user 2026-08-29)
+        const eraseCommit = async (target?: number | null, newLabel?: string, onlyInstances?: number[]) => {
+            const sid = activeSessionRef.current
+            if (!sid || !eraseMarks.length) return
+            try {
+                if (onStatusMessage) onStatusMessage(`🖌 applying ${eraseMarks.length} zone(s)...`)
+                const payload: Record<string, unknown> = {
+                    session_id: sid,
+                    spheres: eraseMarks.map(m => ({
+                        center: [m.center.x, m.center.y, m.center.z],
+                        radius: m.radius,
+                    })),
+                }
+                // SAFETY: hidden segments cannot lose points
+                if (onlyInstances) payload.only_instances = onlyInstances
+                if (newLabel) {
+                    payload.reassign_to = 'new'
+                    payload.new_label = newLabel
+                } else if (target !== undefined && target !== null) {
+                    payload.reassign_to = target
+                }
+                const res = await fetch('/api/segmentation/erase', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                })
+                const data = await res.json()
+                if (onStatusMessage) {
+                    const nDel = data.total_removed || 0
+                    const nRe = data.reassigned || 0
+                    if (nRe) onStatusMessage(`🖌 ${nRe.toLocaleString()} points ${newLabel ? `→ new segment "${newLabel}"` : 'reassigned'} — recoloring...`)
+                    else if (nDel) onStatusMessage(`🧽 ${nDel.toLocaleString()} points erased from ${Object.keys(data.touched || {}).length} object(s) — recoloring...`)
+                    else onStatusMessage('🖌 the marked zones had no applicable points')
+                }
+                eraseClearMarks()
+            } catch {
+                if (onStatusMessage) onStatusMessage('🖌 apply failed')
+            }
+        }
+        eraseApiRef.current = { commit: eraseCommit, clear: eraseClearMarks }
+
+        const eraseRightDown = { x: 0, y: 0, active: false }
+        const onEraseMouseDown = (event: MouseEvent) => {
+            if (activeToolRef.current !== 'erase' || event.button !== 2) return
+            eraseRightDown.x = event.clientX
+            eraseRightDown.y = event.clientY
+            eraseRightDown.active = true
+        }
+        const onEraseMouseUp = (event: MouseEvent) => {
+            if (activeToolRef.current !== 'erase' || event.button !== 2) return
+            if (!eraseRightDown.active) return
+            eraseRightDown.active = false
+            const moved = Math.hypot(event.clientX - eraseRightDown.x,
+                                     event.clientY - eraseRightDown.y)
+            if (moved > 6) return   // that was a pan, not a mark
+            const p = eraseRaycast(event)
+            if (!p) return
+            const r = eraseRadiusRef.current
+            const mark = new THREE.Mesh(markGeom, markMat)
+            mark.position.copy(p)
+            mark.scale.setScalar(r)
+            eraseMarksGroup.add(mark)
+            eraseMarks.push({ center: p.clone(), radius: r })
+            onEraseMarksChangedRef.current?.(eraseMarks.length)
+            if (onStatusMessage) onStatusMessage(`🖌 ${eraseMarks.length} zone(s) marked — press Erase or Assign to apply`)
+        }
+
         renderer.domElement.addEventListener('click', onCanvasClick)
         renderer.domElement.addEventListener('contextmenu', onContextMenu)
         renderer.domElement.addEventListener('mousedown', onSectionDown)
         renderer.domElement.addEventListener('mousemove', onSectionMove)
         renderer.domElement.addEventListener('mousemove', handleMeasureHover)
         renderer.domElement.addEventListener('mouseup', onSectionUp)
+        renderer.domElement.addEventListener('mousemove', onEraseMove)
+        renderer.domElement.addEventListener('mousedown', onEraseMouseDown)
+        renderer.domElement.addEventListener('mouseup', onEraseMouseUp)
         window.addEventListener('keydown', onKeyDown)
 
         // Cleanup
@@ -2398,6 +2699,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             renderer.domElement.removeEventListener('mousemove', onSectionMove)
             renderer.domElement.removeEventListener('mousemove', handleMeasureHover)
             renderer.domElement.removeEventListener('mouseup', onSectionUp)
+            renderer.domElement.removeEventListener('mousemove', onEraseMove)
+            renderer.domElement.removeEventListener('mousedown', onEraseMouseDown)
+            renderer.domElement.removeEventListener('mouseup', onEraseMouseUp)
+            scene.remove(eraseCursor)
+            eraseCursor.geometry.dispose()
+            ;(eraseCursor.material as THREE.Material).dispose()
+            eraseCursorRef.current = null
+            scene.remove(eraseMarksGroup)
+            markGeom.dispose()
+            markMat.dispose()
+            eraseApiRef.current = null
             renderer.domElement.removeEventListener('webglcontextlost', handleContextLost)
             renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored)
             window.removeEventListener('keydown', onKeyDown)
@@ -2909,6 +3221,21 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 onPointCount(loadedPts)
                 if (onHasConfidence) onHasConfidence(!!serverHasConfidence)
 
+                // resync OBBs + side panel: an erase/refresh may have changed
+                // the instances behind this reload (user 2026-08-30: bbox
+                // stayed stale after erasing)
+                const sid = activeSessionRef.current
+                if (sid) {
+                    fetch(`/api/sessions/${sid}/segmentation`)
+                        .then(r => (r.ok ? r.json() : null))
+                        .then(data => {
+                            if (data && Array.isArray(data.instances)) {
+                                renderOBBsRef.current?.(data.instances)
+                            }
+                        })
+                        .catch(() => { })
+                }
+
                 // Apply floor alignment transform if provided
                 if (floorTransform && floorTransform.length === 16) {
                     loader.setTransform(floorTransform)
@@ -3402,6 +3729,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // Notify parent with segment list
         if (onSegments) onSegments(segmentList)
     }, [onSegments])
+    useEffect(() => { renderOBBsRef.current = renderOBBs }, [renderOBBs])
 
     return (
         <div style={{ position: 'relative', width: '100%', height: '100%' }}>
@@ -3455,6 +3783,40 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         onClick={saveAlignment}
                         disabled={!alignDirty}
                     >💾 Save Alignment</button>
+                </div>
+            )}
+            {/* Evaluation-volume gizmo toolbar (click a volume to select it) */}
+            {selVolume != null && (
+                <div style={{
+                    position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+                    background: 'var(--glass-bg)', borderRadius: 10, padding: '8px 12px',
+                    color: '#fff', fontSize: 12, display: 'flex', gap: 6, alignItems: 'center',
+                    border: '1px solid var(--glass-border)', backdropFilter: 'blur(8px)', zIndex: 100,
+                }}>
+                    <span style={{ fontWeight: 700, color: '#c4b5ff', marginRight: 4 }}>⬚ Volume #{selVolume}</span>
+                    {([['translate', '↔ Move'], ['rotate', '🔄 Rotate'], ['scale', '⤢ Resize']] as const).map(([m, lbl]) => (
+                        <button key={m}
+                            style={{ padding: '5px 10px', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: volMode === m ? 'var(--accent-2)' : 'var(--bg-active)', color: '#fff' }}
+                            onClick={() => setVolMode(m)}>{lbl}</button>
+                    ))}
+                    <button
+                        style={{ padding: '5px 10px', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: volSolid ? 'var(--accent)' : 'var(--bg-active)', color: '#fff' }}
+                        onClick={() => {
+                            const s = !volSolid
+                            setVolSolid(s)
+                            assistantVizRef.current?.setVolumeSolid(selVolume, s)
+                        }}>◼ Solid</button>
+                    <button
+                        style={{ padding: '5px 10px', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: 'var(--danger, #f85149)', color: '#fff' }}
+                        onClick={() => {
+                            const vid = selVolume
+                            setSelVolume(null)
+                            assistantVizRef.current?.removeVolume(vid)
+                            onVolumeDeletedRef.current?.(vid)
+                        }}>🗑</button>
+                    <button
+                        style={{ padding: '5px 8px', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, background: 'var(--bg-active)', color: '#fff' }}
+                        onClick={() => setSelVolume(null)}>✕</button>
                 </div>
             )}
             {/* Camera pose hover tooltip */}

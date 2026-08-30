@@ -5,7 +5,8 @@
 /* ── App Grid ──────────────────────────────────────────────── */
 .app-layout {
   display: grid;
-  grid-template-columns: var(--activity-bar-width) var(--sidebar-width) 1fr;
+  /* 4th column: right-side collapsible AI chat dock (0px when hidden) */
+  grid-template-columns: var(--activity-bar-width) var(--sidebar-width) 1fr var(--assistant-width, 0px);
   grid-template-rows: auto 1fr var(--statusbar-height);
   width: 100%;
   height: 100vh;
@@ -13,7 +14,7 @@
 }
 
 .app-layout.panel-collapsed {
-  grid-template-columns: var(--activity-bar-width) 0px 1fr;
+  grid-template-columns: var(--activity-bar-width) 0px 1fr var(--assistant-width, 0px);
 }
 
 /* ── Menu Bar ──────────────────────────────────────────────── */
@@ -4557,4 +4558,90 @@
     padding: 7px 12px; font-size: 11.5px;
     color: var(--text-dim); background: rgba(var(--accent-2-rgb), 0.08);
     border-bottom: 1px solid var(--border);
+}
+
+/* ── Right-side collapsible AI Assistant dock ─────────────────── */
+.assistant-dock {
+  grid-column: 4;
+  grid-row: 2 / 3;
+  position: relative;   /* anchors the left-edge resize handle */
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border);
+}
+.assistant-dock.closed { border-left: none; }
+
+/* Left-edge drag handle — mirror of .panel-resize-handle on the sidebar */
+.assistant-resize-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background var(--transition-fast);
+  z-index: 10;
+}
+.assistant-resize-handle:hover,
+.assistant-resize-handle:active {
+  background: var(--accent);
+}
+
+.assistant-dock-header {
+  height: 34px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  white-space: nowrap;
+}
+.assistant-dock-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-2);
+  letter-spacing: 0.02em;
+}
+.assistant-dock-close {
+  display: flex;
+  align-items: center;
+  padding: 3px;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.assistant-dock-close:hover { color: var(--text-primary); background: var(--bg-hover, rgba(255,255,255,0.06)); }
+
+/* Menubar chat toggle (top right, left of the user menu) */
+.menu-trigger.chat-trigger {
+  display: flex;
+  align-items: center;
+  padding: 4px 10px;
+  color: var(--accent-2);
+}
+.menu-trigger.chat-trigger.open {
+  color: var(--accent-2-hover, var(--accent-2));
+  background: rgba(var(--accent-2-rgb), 0.14);
+}
+/* model not loaded → gray/dim; loaded → normal lit accent */
+.menu-trigger.chat-trigger.model-off {
+  color: var(--text-secondary);
+  opacity: 0.55;
+  filter: grayscale(1);
+}
+.menu-trigger.chat-trigger.model-up {
+  color: var(--accent-2);
+  opacity: 1;
+  filter: none;
 }

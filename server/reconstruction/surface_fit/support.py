@@ -88,6 +88,26 @@ def trimmed_quad_mesh(uv: np.ndarray, resolution: float,
 
     gj, gi = np.divmod(used, nu + 1)
     verts_uv = np.column_stack([u0 + gi * resolution, v0 + gj * resolution])
+
+    # ── border snap (2026-08-29): quads are kept when their CENTER is within
+    # support_radius of a point, so the outer ring of vertices could overhang
+    # the measured extent by up to radius + cell (~10 cm) — the fitted wall
+    # visibly stuck out past the cloud. Pull every vertex that is farther than
+    # ~half a cell from ANY measured point onto its nearest point (in UV), so
+    # the mesh border coincides with the cloud border — outer edges AND holes
+    # (openings). Interior vertices sit within point spacing and stay put.
+    from scipy.spatial import cKDTree
+    d, nearest = cKDTree(uv).query(verts_uv, k=1)
+    overhang = d > max(0.6 * resolution, 1e-6)
+    if overhang.any():
+        verts_uv = verts_uv.copy()
+        verts_uv[overhang] = uv[nearest[overhang]]
+        # drop faces the snap collapsed (near-zero UV area)
+        tri = verts_uv[faces]
+        area2 = np.abs((tri[:, 1, 0] - tri[:, 0, 0]) * (tri[:, 2, 1] - tri[:, 0, 1])
+                       - (tri[:, 2, 0] - tri[:, 0, 0]) * (tri[:, 1, 1] - tri[:, 0, 1]))
+        faces = faces[area2 > resolution * resolution * 1e-4]
+
     return TrimmedMesh(vertices_uv=verts_uv, faces=faces,
                        support_fraction=float(n_keep) / float(nu * nv),
                        area_m2=float(n_keep) * resolution * resolution)

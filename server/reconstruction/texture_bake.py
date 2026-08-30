@@ -378,3 +378,86 @@ def bake_texture(
             logger.info(f"[TextureBake] work dir kept: {work}")
         else:
             shutil.rmtree(work, ignore_errors=True)
+
+
+def bake_object_glb(glb_path: Path, session_dir: Path, output_dir: Path,
+                    max_views: int = 200) -> bool:
+    """Stage-3 (user 2026-08-29: "siempre con textura"): bake a real texrecon
+    atlas onto an arbitrary per-object GLB, in the cloud frame, from the
+    session's posed keyframes. Thin wrapper over bake_texture — loads the GLB,
+    hands texrecon a robust PLY, and overwrites the GLB in place. Returns True
+    when the texture was baked (False keeps the untextured/vertex-colour mesh)."""
+    glb_path = Path(glb_path)
+    try:
+        import trimesh
+        from segmentation.session_io import _load_camera_source
+        cam = _load_camera_source(Path(session_dir), Path(output_dir))
+        if cam is None or not cam.pose_map:
+            logger.warning("[TextureBake] object %s: no camera source", glb_path.name)
+            return False
+        k_map = {}
+        for fidx in cam.pose_map:
+            K = cam.K_for(fidx)
+            if K is not None:
+                k_map[fidx] = np.asarray(K, dtype=np.float64)
+        if not k_map:
+            logger.warning("[TextureBake] object %s: no intrinsics", glb_path.name)
+            return False
+        m = trimesh.load(str(glb_path), force="mesh")
+        if m.is_empty or not len(m.faces):
+            return False
+        # CLEAN before texrecon: the audited grid meshes carry duplicate
+        # vertices (snap collapses) and sliver/degenerate faces — texrecon
+        # SEGFAULTED on them (libgomp crash, 2026-08-29). Weld + drop
+        # degenerates/duplicates first.
+        clean = trimesh.Trimesh(vertices=m.vertices, faces=m.faces,
+                                process=True)   # process=True welds vertices
+        clean.update_faces(clean.nondegenerate_faces())
+        clean.update_faces(clean.unique_faces())
+        clean.remove_unreferenced_vertices()
+        if not len(clean.faces):
+            return False
+        # FACE THE CAMERAS: the fitted grid meshes carry arbitrary winding —
+        # when a surface's faces point away from every view, texrecon labels
+        # them all unseen and the mesh ships untextured (user 2026-08-29:
+        # "muchos X sin textura"). Flip each face toward its nearest camera.
+        try:
+            from scipy.spatial import cKDTree as _KD
+            cams = np.array([np.asarray(p, np.float64)[:3, 3]
+                             for p in cam.pose_map.values()])
+            if len(cams):
+                fc = clean.triangles_center
+                fn = clean.face_normals
+                _, ci = _KD(cams).query(fc)
+                flip = np.einsum("ij,ij->i", fn, cams[ci] - fc) < 0
+                if flip.any():
+                    f = clean.faces.copy()
+                    f[flip] = f[flip][:, ::-1]
+                    clean = trimesh.Trimesh(vertices=clean.vertices, faces=f,
+                                            process=False)
+                    logger.info("[TextureBake] %s: flipped %d/%d faces toward "
+                                "the cameras", glb_path.name,
+                                int(flip.sum()), len(f))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[TextureBake] %s: face orientation skipped (%s)",
+                           glb_path.name, e)
+        tmp_ply = glb_path.with_suffix(".texin.ply")
+        clean.export(str(tmp_ply))
+        try:
+            res = bake_texture(
+                mesh_path=tmp_ply,
+                frames_dir=Path(session_dir) / "frames",
+                pose_map=cam.pose_map,
+                intrinsics_map=k_map,
+                out_glb=glb_path,
+                max_views=int(max_views),
+            )
+        finally:
+            tmp_ply.unlink(missing_ok=True)
+        ok = res is not None
+        logger.info("[TextureBake] object %s: %s", glb_path.name,
+                    "textured" if ok else "bake failed — mesh kept as-is")
+        return ok
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[TextureBake] object %s: %s", glb_path.name, e)
+        return False

@@ -967,8 +967,10 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     npz_data["frames"] = np.array(all_frames, dtype=np.int32)
     npz_data["scaled_res"] = np.array(scaled_res, dtype=np.int32)
     
-    # Save compressed NPZ
-    np.savez_compressed(masks_path, **npz_data)
+    # Save compressed NPZ — ATOMIC (tmp ending in .npz + replace): a crash
+    # mid-write must never truncate the session's masks (2026-08-29)
+    from segmentation.erase import _atomic_savez
+    _atomic_savez(masks_path, npz_data)
     masks_mb = masks_path.stat().st_size / (1024 * 1024)
     new_count = mask_count - len(existing_npz)
     print(f"[SegPipeline] ✅ Saved masks: {masks_path.name} "
@@ -1589,6 +1591,52 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
     return result_indices, voxel_data, face_normals_summary, face_planes, local_face_id
 
 
+def _attach_unsegmented(instances, xyz_display: np.ndarray,
+                        attach_dist_m: float = 0.03):
+    """Attach unsegmented cloud points to the NEAREST instance whose existing
+    points lie within ``attach_dist_m`` (see the call site for the doctrine).
+    Returns (n_attached, grown_instance_positions). Conflicts resolve by
+    smallest distance across instances."""
+    from scipy.spatial import cKDTree
+
+    N = len(xyz_display)
+    owner = np.full(N, -1, dtype=np.int64)
+    for k, inst in enumerate(instances):
+        gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+        owner[gi[(gi >= 0) & (gi < N)]] = k
+    un_idx = np.nonzero(owner < 0)[0]
+    if not len(un_idx):
+        return 0, []
+    un_pts = xyz_display[un_idx]
+    best_d = np.full(len(un_idx), np.inf)
+    best_k = np.full(len(un_idx), -1, dtype=np.int64)
+    for k, inst in enumerate(instances):
+        gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+        gi = gi[(gi >= 0) & (gi < N)]
+        if len(gi) < 50:
+            continue
+        sub = gi[::max(1, len(gi) // 400_000)]
+        d, _ = cKDTree(xyz_display[sub]).query(
+            un_pts, k=1, distance_upper_bound=float(attach_dist_m))
+        better = d < best_d
+        best_d[better] = d[better]
+        best_k[better] = k
+    hit = best_k >= 0
+    grown = []
+    for k in range(len(instances)):
+        add = un_idx[hit & (best_k == k)]
+        if not len(add):
+            continue
+        gi = np.asarray(instances[k].get("globalIndices") or [], dtype=np.int64)
+        merged = np.union1d(gi, add)
+        instances[k]["globalIndices"] = merged.tolist()
+        instances[k]["total_points"] = int(len(merged))
+        grown.append(k)
+        print(f"[SegPipeline]     📎 '{instances[k].get('label')}' "
+              f"#{instances[k].get('id')}: +{len(add):,} pts")
+    return int(hit.sum()), grown
+
+
 def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_obj_ids=None) -> dict:
     """
     Core processing: match SAM3 masks against PLY cloud with erosion,
@@ -1681,13 +1729,16 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     xyz_display = xyz  # default: use raw xyz
     s, R, t = 1.0, np.eye(3), np.zeros(3)  # identity transform defaults
     transform_path = output_dir / "floor_transform.npz"
-    if (output_dir / ".orientation_applied").exists():
-        # reconstruction/orient.py baked +Y up and the floor at y=0 into the cloud
-        # itself, measured from the camera-pose gravity over every frame. The raw
-        # cloud IS the display frame — any further leveling would rotate it a second
-        # time and _compute_obb's Y-up assumption would then hold in no frame at all.
-        print("[SegPipeline]   Orientation baked from camera poses — display frame is identity")
-    elif transform_path.exists():
+    # PRECEDENCE (fixed 2026-08-28): a saved floor_transform.npz ALWAYS wins —
+    # the viewer applies it to the cloud unconditionally (potree_ready), and
+    # level_floor / the alignment gizmo compose their deltas into it EVEN on
+    # sessions with baked orientation (fine floor snap). The old order
+    # (.orientation_applied → identity, npz ignored) computed freshly matched
+    # OBBs in the RAW frame while the viewer showed the leveled cloud: every
+    # box displaced by exactly the leveling delta (test3, 2026-08-28).
+    # `.orientation_applied` now only suppresses the legacy auto-compute
+    # fallback, which WOULD double-rotate a baked cloud.
+    if transform_path.exists():
         try:
             data = np.load(transform_path)
             s = float(data["s"])
@@ -1698,6 +1749,13 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                 print(f"[SegPipeline]   Floor alignment loaded from {transform_path.name}")
         except Exception as e:
             print(f"[SegPipeline]   ⚠️ Could not load floor_transform.npz: {e}")
+            s, R, t = 1.0, np.eye(3), np.zeros(3)
+    elif (output_dir / ".orientation_applied").exists():
+        # reconstruction/orient.py baked +Y up and the floor at y=0 into the cloud
+        # itself, measured from the camera-pose gravity over every frame. The raw
+        # cloud IS the display frame — any further leveling would rotate it a second
+        # time and _compute_obb's Y-up assumption would then hold in no frame at all.
+        print("[SegPipeline]   Orientation baked from camera poses — display frame is identity")
     else:
         # Fallback: compute alignment (for legacy sessions without saved transform)
         try:
@@ -1743,7 +1801,15 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         obj_ids = valid_obj_ids
     
     # Erosion kernel (configurable)
-    erosion_iterations = 2
+    # USER ORDER 2026-08-29: erosion OFF by default — it was the #1 point
+    # eater on test3 (131k mask-covered points excluded, 35.7% of the
+    # unsegmented). Re-enable via segmentation.mask_erosion_iterations if
+    # boundary bleed (masks claiming the neighbour's points) returns.
+    try:
+        erosion_iterations = int((cfg.get("segmentation", {}) or {})
+                                 .get("mask_erosion_iterations", 0))
+    except Exception:
+        erosion_iterations = 0
     erosion_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     
     # ── Phase 1: Match all objects, track per-point best assignment ──
@@ -1850,8 +1916,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             # ── Erosion: shrink mask edges for tighter boundaries ──
             # Adaptive: skip/reduce erosion for small masks to avoid eliminating them
             raw_area = float(np.sum(mask > 0))
-            if raw_area < 2000:
-                # Small object — no erosion (would shrink too much)
+            if erosion_iterations <= 0 or raw_area < 2000:
+                # erosion disabled (user 2026-08-29) or small object
                 pass
             elif raw_area < 10000:
                 # Medium object — mild erosion (1 iteration)
@@ -2103,41 +2169,36 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                   f"(<{_min_pts} pts): {_tiny_desc}{'...' if len(tiny) > 10 else ''}")
             instances = [inst for inst in instances if inst["total_points"] >= _min_pts]
 
+    # ── Geometric completion — "pegar los puntos al lugar correcto" (USER
+    # 2026-08-29): SAM3 leaves ~30% of the cloud unsegmented even where the
+    # surface clearly belongs to a segmented object (masklets die frames away
+    # from the prompt; masks under-cover inside their own frames). A point
+    # within attach_dist_m of an instance's EXISTING points is part of that
+    # surface → attached to the NEAREST instance. Purely geometric and
+    # conservative: points nobody reaches stay unsegmented (never invent).
+    _att_on = bool(_dd.get("attach_unsegmented", True))
+    _att_d = float(_dd.get("attach_dist_m", 0.03))
+    if _att_on and instances:
+        try:
+            n_att, grown = _attach_unsegmented(instances, xyz_display,
+                                               attach_dist_m=_att_d)
+            for k in grown:   # OBBs must include the attached points
+                m = np.asarray(instances[k]["globalIndices"], dtype=np.int64)
+                if len(m) >= 4:
+                    instances[k]["obb"] = _compute_obb(xyz_display[m])
+            if n_att:
+                print(f"[SegPipeline]   📎 attach: {n_att:,} unsegmented points "
+                      f"glued to their surfaces (≤{_att_d*100:.0f} cm)")
+        except Exception as e:
+            print(f"[SegPipeline] attach step failed (non-fatal): {e}")
+
     # ── Canonical instance store (scene_r.db) — THE single source of objects
     # for spatial Q&A (phase5), classification (phase2), findings (phase3) and
     # reports (phase6). Rebuilt from scratch on every segmentation, straight
     # from the CLEAN instances: points/OBBs in the DISPLAY frame (the exact
     # geometry the viewer renders and the user measures against).
     try:
-        from phase_r.instance_store import InstanceStore
-        _sp = output_dir / "scene_r.db"
-        for _suffix in ("", "-wal", "-shm"):
-            _f = Path(str(_sp) + _suffix)
-            if _f.exists():
-                _f.unlink()
-        _st = InstanceStore(_sp)
-        for inst in instances:
-            _iid = int(inst["instance_id"])
-            _m = np.asarray(inst["globalIndices"], dtype=np.int64)
-            _st.upsert_instance(_iid, str(inst["label"]), source="sam3_concepts",
-                                status="proposed", n_views=0,
-                                label_origin="vlm_proposed")
-            _st.set_points(_iid, xyz_display[_m])
-            _obb = inst.get("obb") or {}
-            if _obb.get("center") and _obb.get("half_extents"):
-                _c = np.asarray(_obb["center"], float)
-                _h = np.asarray(_obb["half_extents"], float)
-                _Rd = np.asarray(_obb.get("rotation", np.eye(3)), float)
-                _T = np.eye(4)
-                _T[:3, :3] = _Rd
-                _T[:3, 3] = _c
-                _aabb = np.array([-_h[0], _h[0], -_h[1], _h[1], -_h[2], _h[2]])
-                _st.set_obb(_iid, _T, _aabb, _c, n_points=int(inst["total_points"]),
-                            obb_origin="tool_measured")
-        _st.set_meta("built_from", "sam3_concepts_display_frame")
-        _st.close()
-        print(f"[SegPipeline] scene_r.db built: {len(instances)} instances "
-              f"(display frame — Q&A/classify/findings read from here)")
+        _write_instance_store(output_dir, instances, xyz_display)
     except Exception as e:
         print(f"[SegPipeline] instance store build failed (non-fatal): {e}")
 
@@ -2261,6 +2322,95 @@ def map_segmentation_to_cloud(output_dir) -> dict:
     # scene_r.db is (re)built inside the mask→cloud matching itself — points,
     # labels and OBBs all in the display frame, single source for phases 2-6.
     return result
+
+
+def _write_instance_store(output_dir: Path, instances: list,
+                          xyz_display: np.ndarray) -> None:
+    """Write scene_r.db from clean instances + the display-frame cloud.
+    Shared by the segmentation matcher (in-memory instances) and
+    ``rebuild_instance_store`` (instances reloaded from disk)."""
+    from phase_r.instance_store import InstanceStore
+    _sp = output_dir / "scene_r.db"
+    for _suffix in ("", "-wal", "-shm"):
+        _f = Path(str(_sp) + _suffix)
+        if _f.exists():
+            _f.unlink()
+    _st = InstanceStore(_sp)
+    for inst in instances:
+        _iid = int(inst["instance_id"])
+        _m = np.asarray(inst["globalIndices"], dtype=np.int64)
+        _st.upsert_instance(_iid, str(inst["label"]), source="sam3_concepts",
+                            status="proposed", n_views=0,
+                            label_origin="vlm_proposed")
+        _st.set_points(_iid, xyz_display[_m])
+        _obb = inst.get("obb") or {}
+        if _obb.get("center") and _obb.get("half_extents"):
+            _c = np.asarray(_obb["center"], float)
+            _h = np.asarray(_obb["half_extents"], float)
+            _Rd = np.asarray(_obb.get("rotation", np.eye(3)), float)
+            _T = np.eye(4)
+            _T[:3, :3] = _Rd
+            _T[:3, 3] = _c
+            _aabb = np.array([-_h[0], _h[0], -_h[1], _h[1], -_h[2], _h[2]])
+            _st.set_obb(_iid, _T, _aabb, _c, n_points=int(inst["total_points"]),
+                        obb_origin="tool_measured")
+    _st.set_meta("built_from", "sam3_concepts_display_frame")
+    _st.close()
+    print(f"[SegPipeline] scene_r.db built: {len(instances)} instances "
+          f"(display frame — Q&A/classify/findings read from here)")
+
+
+def rebuild_instance_store(output_dir) -> bool:
+    """Rebuild scene_r.db from the EXISTING segmentation_result.json, without
+    re-running DBSCAN/matching. Sessions segmented before the store existed —
+    or whose store a reconstruction re-run wiped while the result survived —
+    have segmentation but no db, which left the spatial-Q&A chat tool-less
+    (text answers, no 3D measurements). Same display-frame convention as
+    ``_match_and_save_result``. Returns True when the store was written."""
+    output_dir = Path(output_dir)
+    result_path = output_dir / "segmentation_result.json"
+    if not result_path.exists():
+        return False
+    try:
+        result = json.loads(result_path.read_text())
+        instances = [i for i in result.get("instances", [])
+                     if i.get("globalIndices")]
+        if not instances:
+            return False
+        ply_path = output_dir / (result.get("cloud_source") or "cleaned_cloud.ply")
+        if not ply_path.exists():
+            ply_path = output_dir / "cleaned_cloud.ply"
+        if not ply_path.exists():
+            return False
+        import open3d as o3d
+        xyz = np.asarray(o3d.io.read_point_cloud(str(ply_path)).points)
+        if not len(xyz):
+            return False
+        # Same display frame the matcher uses (viewer geometry): a saved
+        # floor_transform.npz ALWAYS wins (the viewer applies it to the cloud
+        # unconditionally — even on baked-orientation sessions, where
+        # level_floor may have composed a fine-snap delta into it); baked
+        # orientation without an npz → identity; else raw.
+        xyz_display = xyz
+        transform_path = output_dir / "floor_transform.npz"
+        if transform_path.exists():
+            try:
+                data = np.load(transform_path)
+                s, R, t = float(data["s"]), data["R"], data["t"]
+                if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+                    xyz_display = s * (xyz @ R.T) + t
+            except Exception as e:
+                print(f"[SegPipeline] rebuild: floor_transform load failed: {e}")
+        n_max = int(max(max(i["globalIndices"]) for i in instances))
+        if n_max >= len(xyz):
+            print(f"[SegPipeline] rebuild: indices exceed {ply_path.name} "
+                  f"({n_max} >= {len(xyz)}) — stale result, not rebuilding")
+            return False
+        _write_instance_store(output_dir, instances, xyz_display)
+        return True
+    except Exception as e:
+        print(f"[SegPipeline] instance store rebuild failed: {e}")
+        return False
 
 
 def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):

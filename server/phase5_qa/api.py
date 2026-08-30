@@ -39,8 +39,21 @@ def _resolve_store(body: dict) -> str | None:
             for cand in Path(PROJECTS_DIR).glob("**/output/scene_r.db"):
                 if session_id in str(cand):
                     return str(cand)
-        except Exception:
-            pass
+            # Segmented session but no store (segmented before scene_r.db
+            # existed, or the store was wiped by a recon re-run while the
+            # result survived) → rebuild it from segmentation_result.json so
+            # the chat gets its measurement tools back (2026-08-28: text-only
+            # answers with no 3D interaction traced back to exactly this).
+            for res in Path(PROJECTS_DIR).glob(
+                    f"**/{session_id}/**/segmentation_result.json"):
+                print(f"[SpatialQA] no scene_r.db for {session_id} — rebuilding "
+                      f"from {res}")
+                from segmentation.pipeline import rebuild_instance_store
+                if rebuild_instance_store(res.parent):
+                    return str(res.parent / "scene_r.db")
+                break
+        except Exception as e:  # noqa: BLE001
+            print(f"[SpatialQA] store resolve/rebuild failed: {e}")
     return None
 
 
@@ -98,11 +111,6 @@ async def spatial_qa(body: dict):
     question = (body or {}).get("question")
     if not question:
         return JSONResponse({"error": "missing 'question'"}, status_code=400)
-    store_path = _resolve_store(body)
-    if not store_path:
-        return JSONResponse(
-            {"error": "no instance store found (pass store_path, or build the "
-                      "Phase R store for this session first)"}, status_code=404)
     # The reconstruction / SAM3 stages stop vLLM to get the whole GPU, so by the
     # time the user opens the chat the service is usually down. Kick the launcher
     # and return immediately with status=loading: the weights take minutes, and
@@ -118,14 +126,76 @@ async def spatial_qa(body: dict):
             status_code=503)
 
     backend = body.get("backend", "qwen_local")
-    from phase5_qa.orchestrator import SpatialQA
-    qa = SpatialQA(store_path, backend=backend)
-    try:
-        res = qa.ask(question, images=_resolve_images(body, store_path) or None,
-                     max_iterations=body.get("max_iterations", 8))
-    finally:
-        qa.close()
+    store_path = _resolve_store(body)
+    if not store_path:
+        # No instance store — the session was never segmented (or no session is
+        # loaded). Still answer (user 2026-08-28): general chat, no tools. The
+        # provenance rule holds because the model is told it CANNOT measure and
+        # must not invent figures.
+        return await _general_chat(question, body, backend)
+
+    # Run the WHOLE tool loop in a thread: it blocks for the full multi-call
+    # vLLM conversation (30–120 s) and running it inline froze the event loop —
+    # /health timed out and the entire UI hung while the chat "thought"
+    # (verified live 2026-08-29: backend /health 000 with a question in flight).
+    import asyncio as _aio
+
+    def _run():
+        from phase5_qa.orchestrator import SpatialQA
+        qa = SpatialQA(store_path, backend=backend)
+        try:
+            return qa.ask(question,
+                          images=_resolve_images(body, store_path) or None,
+                          max_iterations=body.get("max_iterations", 8))
+        finally:
+            qa.close()
+
+    res = await _aio.get_running_loop().run_in_executor(None, _run)
     return JSONResponse(res)
+
+
+_GENERAL_SYSTEM = (
+    "You are the assistant of STAC-Build, a construction-site 3D reconstruction "
+    "and supervision tool (video scan → point cloud → segmentation → measured "
+    "spatial Q&A). The CURRENT session has NO segmentation / instance store yet, "
+    "so the deterministic measurement tools are unavailable. Answer general "
+    "questions helpfully (construction, reconstruction workflow, how to use the "
+    "tool, anything you know). If asked for scene-specific measurements or "
+    "object counts, explain that the session must be segmented first (Segment "
+    "button / Segmentation Manager) so every figure can be tool-measured — "
+    "NEVER estimate or invent measurements. Answer in the SAME LANGUAGE as the "
+    "question."
+)
+
+
+async def _general_chat(question: str, body: dict, backend: str) -> JSONResponse:
+    """Tool-less fallback chat for sessions without a Phase R store."""
+    import time
+
+    from semantic.client import get_semantic_client
+    from semantic.types import system, user
+
+    t0 = time.time()
+    try:
+        client = get_semantic_client(backend=backend, consumer="phase5.qa.general")
+        images = list(body.get("images") or [])
+        import asyncio as _aio
+        # thread, not inline: a vLLM completion takes tens of seconds and must
+        # not freeze the event loop (same fix as the orchestrated path)
+        resp = await _aio.get_running_loop().run_in_executor(
+            None, lambda: client.chat([system(_GENERAL_SYSTEM),
+                                       user(question, images=images or None)]))
+        return JSONResponse({
+            "question": question,
+            "answer": resp.content or "(no answer)",
+            "tool_trace": [],
+            "iterations": 1,
+            "stopped": "general_chat_no_store",
+            "latency_s": round(time.time() - t0, 2),
+        })
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": f"general chat failed: {e}"},
+                            status_code=500)
 
 
 # ── scene geometry + user volumes (immersive viewer) ────────────────
@@ -196,6 +266,24 @@ async def volumes_add(body: dict):
         vid = store.add_user_volume(body.get("name") or "volume", c, s,
                                     float(body.get("yaw_deg", 0.0)))
         return JSONResponse(store.get_user_volume(vid))
+    finally:
+        store.close()
+
+
+@router.post("/scene/volumes/update")
+async def volumes_update(body: dict):
+    """Gizmo edits from the viewer: move / rotate / resize a saved volume."""
+    store, err = _store_or_error(body)
+    if err:
+        return err
+    try:
+        v = store.update_user_volume(
+            int(body["volume_id"]),
+            center=body.get("center"), size=body.get("size"),
+            yaw_deg=body.get("yaw_deg"), name=body.get("name"))
+        if v is None:
+            return JSONResponse({"error": "unknown volume_id"}, status_code=404)
+        return JSONResponse(v)
     finally:
         store.close()
 

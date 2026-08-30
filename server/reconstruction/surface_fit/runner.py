@@ -57,6 +57,7 @@ def fit_segment(xyz: np.ndarray,
                 plane_dist_thresh: float = 0.012,
                 ransac_iters: int = 500,
                 min_inlier_frac: float = 0.30,
+                escalate_rms_gate_mm: float = 35.0,
                 max_fit_points: int = 400_000,
                 grid_cell_m: float = 0.05,
                 morans_z_max: float = 4.0,
@@ -69,6 +70,7 @@ def fit_segment(xyz: np.ndarray,
                 tilt_mm_per_m: float = 3.0,
                 support_radius_m: float = 0.08,
                 mesh_resolution_m: float = 0.05,
+                support_dist_m: float = 0.04,
                 heatmap_vmax_mm: Optional[float] = None,
                 ctrl_point_spacing_m: float = 0.5,
                 section_spacing_m: float = 0.20,
@@ -120,7 +122,8 @@ def fit_segment(xyz: np.ndarray,
                      section_spacing_m=section_spacing_m)
     esc = escalate_fit(fit_pts, ctx, models=models, grid_cell_m=grid_cell_m,
                        morans_z_max=morans_z_max, morans_i_min=morans_i_min,
-                       structure_min_mm=structure_min_mm)
+                       structure_min_mm=structure_min_mm,
+                       rms_accept_mm=escalate_rms_gate_mm)
     if esc is None:
         logger.warning("%s: no model could be fitted", name)
         return None
@@ -134,7 +137,7 @@ def fit_segment(xyz: np.ndarray,
         flatness_tol_mm=flatness_tol_mm, flatness_span_m=flatness_span_m,
         finding_dev_mm=finding_dev_mm, finding_min_area_m2=finding_min_area_m2,
         tilt_mm_per_m=tilt_mm_per_m, support_radius_m=support_radius_m,
-        mesh_resolution_m=mesh_resolution_m)
+        mesh_resolution_m=mesh_resolution_m, support_dist_m=support_dist_m)
 
     if out_dir is not None:
         _cb("export")
@@ -152,7 +155,8 @@ def evaluate_model(model, *, kind: str, escalation_path: List[str],
                    flatness_span_m: float = 2.0, finding_dev_mm: float = 5.0,
                    finding_min_area_m2: float = 0.05, tilt_mm_per_m: float = 3.0,
                    support_radius_m: float = 0.08,
-                   mesh_resolution_m: float = 0.05) -> FittedSurface:
+                   mesh_resolution_m: float = 0.05,
+                   support_dist_m: float = 0.04) -> FittedSurface:
     """Stage 4 + per-segment mesh for a given surface model: full residual
     report vs the ORIGINAL cloud and the support-trimmed mesh. Reused by
     fit_segment and by the scene-level regularization rebuild (stage 3)."""
@@ -179,8 +183,18 @@ def evaluate_model(model, *, kind: str, escalation_path: List[str],
                 {True: "PASS", False: "FAIL", None: "n/a"}[stats.flatness_pass],
                 len(findings))
 
+    # Support = ON-SURFACE points only (2026-08-29, wall3): a point belonging
+    # to an attached structure 30 cm off the plane must NOT create support —
+    # projected blindly it filled the wall's opening and painted flat wall
+    # over the attached cone. Off-surface points are the unexplained remainder
+    # (exported separately; the mesh export TSDFs them).
+    on_surf = np.abs(signed) <= float(support_dist_m)
+    uv_support = uv[on_surf] if bool(on_surf.any()) else uv
+    if len(uv_support) < len(uv):
+        logger.info("%s: support uses %d/%d points within %.0fmm of the surface",
+                    name, int(on_surf.sum()), len(uv), support_dist_m * 1000)
     verts, faces, support_frac, area = mesh_on_surface(
-        uv, model.uv_to_world, resolution=mesh_resolution_m,
+        uv_support, model.uv_to_world, resolution=mesh_resolution_m,
         support_radius=support_radius_m)
     logger.info("%s: mesh %d verts / %d faces, %.2f m² supported (%.0f%% of UV bbox)",
                 name, len(verts), len(faces), area, 100.0 * support_frac)

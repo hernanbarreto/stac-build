@@ -117,7 +117,8 @@ def escalate_fit(pts: np.ndarray, ctx: FitContext,
                  grid_cell_m: float = 0.05,
                  morans_z_max: float = 4.0,
                  morans_i_min: float = 0.05,
-                 structure_min_mm: float = 1.5) -> Optional[EscalationResult]:
+                 structure_min_mm: float = 1.5,
+                 rms_accept_mm: float = 0.0) -> Optional[EscalationResult]:
     """Try models lowest-DOF-first; accept the first whose residuals carry no
     RELEVANT spatial structure. Two gates must both fire to escalate:
       - statistical: Moran's I says the residual field is not white noise;
@@ -156,6 +157,19 @@ def escalate_fit(pts: np.ndarray, ctx: FitContext,
                                moran=moran, field=field,
                                residual_structured=moran.relevant)
         if not moran.relevant:
+            res.path = list(tried)
+            return res
+        # RMS accept gate (2026-08-29): when the model already explains the
+        # surface within construction-scale tolerance, STOP — the remaining
+        # structure is a finding for the report, not a reason to trade a 3-DOF
+        # plane for a free-form spline that rides layered noise (wall1: plane
+        # 17.6 mm → 99-DOF b-spline blanket). A genuinely curved surface fails
+        # this gate (plane rms is decimetres or the plane doesn't fit at all)
+        # and still escalates to the curved models.
+        if rms_accept_mm and rms_mm <= rms_accept_mm:
+            logger.info("escalate: %s rms %.2fmm ≤ accept gate %.0fmm — "
+                        "accepting despite residual structure (structure goes "
+                        "to the report)", kind, rms_mm, rms_accept_mm)
             res.path = list(tried)
             return res
         if rms_mm < best_rms:

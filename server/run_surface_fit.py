@@ -108,7 +108,6 @@ def main():
     import numpy as np
     from config import cfg
     from reconstruction.surface_fit import fit_segment, build_surface_fit_kwargs
-    from reconstruction.surface_fit.runner import load_instances, segment_points
 
     try:
         overrides = json.loads(args.params) if args.params else {}
@@ -116,7 +115,7 @@ def main():
         overrides = {}
     kwargs = build_surface_fit_kwargs(cfg, overrides)
 
-    ok, failed = [], []
+    ok, failed, skipped = [], [], []
     try:
         if args.ply:
             import open3d as o3d
@@ -141,36 +140,33 @@ def main():
             ok = rep["fitted"]
             failed = [s for s in rep["skipped_to_tsdf"]
                       if "no model" in s.get("reason", "")]
+            skipped = [s for s in rep["skipped_to_tsdf"]
+                       if "no model" not in s.get("reason", "")]
         else:
-            # single-instance mode: no scene-level regularization
+            # selective mode — SAME scene pipeline as --all (uniform config
+            # ladder — NO name routing, geometry gate accept_p95_mm, stage-3
+            # regularization among the fitted planes, hybrid report), restricted
+            # to the requested instances. The old per-segment loop here skipped
+            # regularization and ignored roles, so a selective run produced
+            # different (worse) geometry than a scene run — now they match.
+            from reconstruction.surface_fit.scene import fit_scene, scene_config_kwargs
             session_dir = Path(args.session_dir)
             base = Path(args.output_dir) if args.output_dir else session_dir / "output" / "surface_fit"
             _attach_file_log(base)
-            instances, cloud_pts, centroid, raw_pts = load_instances(session_dir)
-            wanted = set(args.instance_id or [])
+            wanted = [int(i) for i in (args.instance_id or [])]
             if not wanted:
                 ap.error("--session-dir requires --instance-id or --all")
-            for inst in instances:
-                iid = inst.get("instance_id", inst.get("id"))
-                if iid not in wanted:
-                    continue
-                label = inst.get("label", "")
-                pts = segment_points(inst, cloud_pts)
-                raw_seg = segment_points(inst, raw_pts) if raw_pts is not None else None
-                out = base / _safe_name(label, iid)
-                try:
-                    fs = fit_segment(pts, instance_id=iid, label=label,
-                                     original_xyz=raw_seg,
-                                     scene_centroid=centroid, out_dir=out,
-                                     progress_cb=_progress, **kwargs)
-                except Exception as e:
-                    traceback.print_exc()
-                    fs, out = None, None
-                    logging.getLogger("SurfaceFit").error("instance %s failed: %s", iid, e)
-                rec = {"instance_id": iid, "label": label, "dir": str(out) if fs else None}
-                (ok if fs is not None else failed).append(rec)
+            rep = fit_scene(session_dir, out_base=base, config=cfg,
+                            overrides=overrides, progress_cb=_progress,
+                            instance_ids=wanted, **scene_config_kwargs(cfg))
+            ok = rep["fitted"]
+            failed = [s for s in rep["skipped_to_tsdf"]
+                      if "no model" in s.get("reason", "")]
+            skipped = [s for s in rep["skipped_to_tsdf"]
+                       if "no model" not in s.get("reason", "")]
 
-        print("[SFIT-RESULT]" + json.dumps({"ok": ok, "failed": failed}), flush=True)
+        print("[SFIT-RESULT]" + json.dumps({"ok": ok, "failed": failed,
+                                            "skipped": skipped}), flush=True)
         sys.exit(0 if ok and not failed else (0 if ok else 1))
     except Exception as e:
         traceback.print_exc()

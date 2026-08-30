@@ -38,13 +38,177 @@ The automatic end-of-pipeline mesh worked on some scenes and not others, so:
   stays the recipe FOR WHEN a mesh is requested).
 - **Closing the Segmentation Manager runs ONLY DBSCAN + matching + OBBs** —
   `/api/segmentation/refresh` no longer auto-carves per-object meshes.
-- **Individual meshing (`/api/segmentation/tsdf/export`) is TSDF + texrecon
-  ONLY**: if `output/tsdf/scene/scene.glb` doesn't exist it is baked on demand
-  (config `tsdf:` recipe with `mesh_method=tsdf`, `texture_mode=texrecon`
-  forced), then instances are carved from it. The legacy untextured
-  `export_tsdf_meshes` fallback is no longer called. Without PGSR renders,
-  `depth_source: auto` falls back to the backend's native depth (artifact-based
-  — sessions that DID run PGSR still integrate its renders).
+- **Individual meshing (`/api/segmentation/tsdf/export`) is hybrid
+  surface_fit → TSDF** (second decision, same day): with
+  `surface_fit.export_first: true`, architectural instances
+  (`surface_fit.fitted_roles`) FIRST get a fitted smooth surface — the
+  existing `reconstruction/surface_fit` module (RANSAC plane/cylinder/… with
+  escalation, `min_inlier_frac` 0.30 as the coverage gate, scene
+  regularization, support trimming) — published into `output/tsdf/<name>/`
+  (meta `method: "surface_fit"`, untextured) so the viewer picks it up
+  unchanged; the full deliverable (residuals/heatmap) stays in
+  `output/surface_fit/`. 2026-08-29 refinements (user): per-ROLE model ladder
+  (`surface_fit.role_models` — wall/floor/etc → plane ONLY, column/beam →
+  plane+cylinder, vault/tunnel keep curved models; the generic escalation took
+  wall1 to a 99-DOF b-spline blanket — "espantoso") and border snap in
+  `support.py` (mesh borders pulled onto the measured point extent — no more
+  ~10 cm overhang past the cloud). Everything else — and every rejected fit —
+  gets a PER-OBJECT TSDF integration (USER 2026-08-29: NEVER bake the whole
+  scene because one object needs a mesh; the scene mesh is only reused via
+  crop when it already exists). `export_tsdf_meshes` depth chain: Stray →
+  PGSR renders → backend chunk depth (maplong_run) → DA3 npy; default
+  depth_trunc raised 5→12 m (a door 5.3–7 m from every camera integrated
+  ZERO frames at 5 m). Same-day refinements (all USER 2026-08-29):
+  - GEOMETRY decides, not the label (labels will be BIM names/bare codes):
+    unknown-role instances are try-fitted with the generic ladder and accepted
+    only if p95 ≤ `unknown_accept_p95_mm` (60); `escalate_rms_gate_mm` (35)
+    stops escalation once a model is within construction tolerance — a flat
+    wall never becomes a b-spline blanket regardless of its name.
+  - `ceiling` ladder includes the curved models (curved ceilings were falling
+    to broken TSDF; flat ones still stop at plane via the rms gate).
+  - Support = ON-SURFACE points only (`support_dist_m` 0.04): off-surface
+    points no longer fake support (wall3's opening stayed filled).
+  - Unexplained remainder (`unexplained_dist_m` 0.10): points the model can't
+    explain (wall3's attached cone) are TSDF'd per object and FUSED into the
+    same GLB (`fused_rest_points` in meta) — the whole object is delivered.
+  `run_surface_fit.py --instance-id` now routes through `fit_scene` (roles +
+  regularization), same as `--all`. Without PGSR renders, `depth_source: auto`
+  falls back to the backend's native depth (artifact-based — sessions that DID
+  run PGSR still integrate its renders).
+- **Chat = spatial intelligence** (USER 2026-08-29): the assistant must KNOW
+  what it is looking at, not only measure. phase5_qa additions: session header
+  + per-object y-ranges in the system prompt; `get_session_info`;
+  `describe_scene` (VLM looks at sampled scan frames, description cached in
+  the store as `scene_description`, provenance vlm_proposed);
+  `remember_note`/`recall_notes` (persistent conclusions in the store db);
+  part-aware measuring — `measure_between` features top/upper, bottom/base/
+  lower (REAL point bands, not OBB faces), highest/lowest, closest, plus
+  `axis: vertical`; `get_extent` (lowest/highest band centres — a curved
+  ceiling has both). Validated on test3: floor→ceiling lower 1.28 m vs upper
+  3.35 m; ladder base→top 2.43 m.
+- **Meshing = RANSAC + Poisson, TSDF out of the automatic chain** (USER
+  2026-08-29, evaluation mode): the per-object TSDF re-integration was 5×
+  worse than Poisson from the object's OWN cloud points (wall3 cone: p95
+  104 mm / 30% uncovered vs 20 mm / 1.4%; ladder 4.9 mm, door 6.3 mm, 0%
+  gaps) — cloud-anchored meshing is consistent because the cloud is the
+  validated truth. `/tsdf/export` now publishes BOTH per instance: the
+  surface_fit mesh (`<label>_<id>/`, remainder fused via Poisson) and a
+  Poisson mesh with cloud vertex colors (`<label>_<id>_poisson/`) so the
+  user compares them in the viewer. New: `segmentation/poisson_object.py` +
+  `run_poisson_objects.py` (subprocess, `os.sched_setaffinity` to 8 cores —
+  **ENVIRONMENT LESSON: Open3D Poisson hangs UNPINNED on this 252-core box;
+  TBB ignores OMP_NUM_THREADS**; verified: infinite hang unpinned, ~1 min/
+  object pinned). UI: one `🧩 Meshing` modal — segment selection + two
+  buttons only: `Object` (MeshFlow generative) and `Mesh` (ransac+poisson);
+  whole-scene buttons and TSDF sliders removed.
+- **Stage-1 hole audit — "understand what we reconstruct"** (USER CONCEPT
+  2026-08-29): a hole in a fitted surface is either a REAL opening or a
+  reconstruction gap, and the SCAN FRAMES are the witness.
+  `reconstruction/surface_fit/hole_audit.py`: every unsupported UV cell is
+  projected into the SAM3 mask keyframes (poses+K from session_io; K lives on
+  the TRACE grid 384×688, NOT the RGB grid; mask npz key `f<frame>_o<id>` with
+  **oid = instance_id − 1**, self-calibrated per instance by projecting its own
+  points — validated 90–100% hit on test3) and voted: covered → filled
+  (`image_supported`), uncovered → real opening (border follows the mask at
+  cell resolution), ambiguous → open (never invent). Wired into
+  `fit_scene` export (config `surface_fit.hole_audit` + ratio/votes gates);
+  residual reports still use measured points only. test3 results: wall3
+  +3.96 m² image-supported fill (wall continues behind the attached cone),
+  wall2 8.3 m² confirmed open (door opening preserved), fills ≤0.03 m².
+  Stages 2 and 3 shipped same day (USER: "incluso con razonamiento de
+  ocluido, importantísimo"):
+  - OCCLUSION REASONING: three-way vote per hole cell (own mask = direct
+    witness / OTHER instance's mask = occluded / no mask = sees past). No
+    direct witness but occluded in ≥`hole_occluded_ratio` of views → filled
+    as `occlusion_inferred` (floor behind the ladder: 2313 cells, 5.8 m²).
+  - Stage 2: the audit runs on CURVED surfaces too (bspline ceiling: 2177
+    fills), plus `silhouette_report` — mesh footprint vs own mask per
+    keyframe (precision/recall/IoU, tool_measured; high precision ≈0.86 =
+    never where the images say nothing; recall marks what remains to cover).
+  - Stage 3 (`texture_objects: true`): `bake_object_glb` (texture_bake)
+    bakes a texrecon atlas from the scan frames onto every per-object mesh —
+    fitted+audited surfaces, Poisson meshes, fused remainders. Regions no
+    camera saw stay vertex-coloured (`unseen_vertexcolor` submesh) — texture
+    is never invented either.
+  - v2 fixes after the user's first full run (2026-08-29 evening — masks are
+    2-D, they needed DEPTH): (1) votes are Z-BUFFER-verified (per-frame
+    z-buffer from the full cloud at mask res) — occluded only when measured
+    geometry sits ≥15 cm in front; a coplanar in-fill object (door leaf in
+    wall2) is NOT an occluder → the doorway stays open (fills went
+    3188→7 on wall2, 612→9 on wall1); (2) occlusion-inferred fills only in
+    ENCLOSED holes (support on all four grid sides — ladder shadow on the
+    floor yes, phantom extension past a wall edge no); (3) curved models cap
+    fills to ≤3 cells from support (bspline extrapolation spiked the
+    ceiling); (4) texrecon SEGFAULTED on audited grid meshes (duplicate
+    verts/sliver faces from the border snap) — bake_object_glb welds +
+    drops degenerates first. Ceiling precision 0.87→0.97, wall2 IoU
+    0.63→0.67. Poisson meshes deliberately do NOT get audit fills (they are
+    the "as measured" deliverable). Open item: wall1_poisson texture looked
+    slightly displaced to the user once (not reproduced later).
+  - v3 fixes after the user's second run (2026-08-29 night): (1) 'covered'
+    votes require DEPTH CONSISTENCY — measured geometry BEHIND the surface
+    through a cell (>15 cm) means the camera sees PAST it → OPEN (wall3's
+    access ARCH was filled because the attached cone — same instance, same
+    mask — was visible through it; now 3.18 m² open); (2) face WINDING
+    toward the nearest camera before texrecon — arbitrary grid winding made
+    texrecon label whole surfaces back-facing/unseen → untextured (wall3
+    went 807 textured/12036 unseen → 2997/150); (3) 3-D spike crop for
+    curved models (mesh verts >25 cm from measurement are spline behaviour —
+    ceiling dropped its 50 spike verts); (4) `hole_interp_max_cells` (30):
+    tiny ENCLOSED no-verdict gaps are interpolated across the fitted surface
+    (provenance 'interpolated') — the bounded bridging Poisson does
+    implicitly, so ransac no longer loses on small holes.
+- **Multi-primitive decomposition** (USER 2026-08-29, the train: "donde se
+  pueda aplicar ransac — conos, circunferencias, planos — debe aplicarse, y
+  poisson donde no hay manera"): `surface_fit/decompose.py` — iterative
+  largest-support-first plane/cylinder/sphere extraction (`extract_primitives`)
+  over (a) instances no single model explains (unknown-role rejects / no fit)
+  and (b) large unexplained remainders of accepted fits. Each primitive is
+  meshed with the fitted machinery; parts merge into the instance's
+  surface.glb (`parts` in results, `forced_leftover` keeps Poisson from
+  re-meshing what primitives claimed); only the residue goes to Poisson.
+  Config `surface_fit.decompose*`. Validated: wall3's attached structure →
+  sphere quadric, 40k pts, rms 19 mm, residue 7.5%. Fix (same night): the
+  train extracted ZERO primitives — the fitter's INTERNAL gate (10%) equalled
+  the first plane's real share (~10.5% at 1.2 cm) so acceptance flipped on
+  the RANSAC seed; decomposition now hands the fitters permissive gates
+  (min_inlier_frac 0.02, dist_thresh = decompose_inlier_dist_m) and OUR
+  acceptance decides → train: 6 planes, 2.13 M pts (61%), 39% Poisson residue.
+- **Contour regularization** (USER CONCEPT 2026-08-29: "las formas tienden a
+  ser perfectas — detectar la tendencia para perfeccionarlas"):
+  `surface_fit/contours.py` — every boundary/opening of a fitted PLANE is
+  vectorized (cv2) and tried against a 2-D shape ladder (circle, rectangle,
+  rounded rect, arch = rect+circular cap, direction-snapped polygon, raw);
+  among templates passing the `contour_tol_m` p95 gate, the LOWEST-DEVIATION
+  one wins (tie → lowest DOF). The OUTER outline is fitted against the
+  morphologically CLOSED support (the boundary's intent); OPENINGS are carved
+  only from the audit's image-confirmed open cells. Mesh rebuilt on a fine
+  grid clipped to the shapely region with boundary vertices PROJECTED exactly
+  onto the ideal outline (CAD-crisp edges; no earcut/triangle deps needed).
+  Shape parameters land in `contours` of the results + hole_audit.json
+  (tool_measured). Also same-day: arch leak fixed via 5-px minimum-filter
+  Z-buffer (background seen through the arch had no measured point on the
+  exact pixel), and wall3's remainder now decomposes into sphere+plane with
+  only ~4k residue pts to Poisson.
+- **Chat runs in a worker thread** (fix 2026-08-29): SpatialQA.ask ran inline
+  in the async endpoint and froze the WHOLE backend event loop for the 30–120 s
+  of the tool loop (/health 000 → UI hung). Both chat paths now run_in_executor.
+- **Evaluation volumes are first-class objects** (USER 2026-08-29): chat
+  `define_volume` RESTS the box ON the floor by default, centred on the floor
+  (or `anchor_id`); accepts `volume_m3` (cube). The volume appears in the
+  viewer IMMEDIATELY (panel refresh on define_volume in the trace). In the
+  viewer: click a volume (navigate tool) → gizmo toolbar (Move / Rotate[yaw] /
+  Resize / Solid / Delete); edits persist via `/api/scene/volumes/update`
+  (new `update_user_volume` in the store) and the box is tinted by collision
+  state vs the scene (evaluate: violet=free, amber=touching, red=colliding).
+  Volumes are raycast targets of the measure tools, and the chat measures
+  from them with `measure_volume` (box-surface clearance, intersects flag).
+- **Chat must interact with the 3D model**: text-only answers with no animated
+  measurements mean the session resolved NO instance store. Fixed 2026-08-28:
+  `_resolve_store` (phase5_qa/api.py) rebuilds `scene_r.db` on the fly from
+  `segmentation_result.json` via `segmentation.pipeline.rebuild_instance_store`
+  (validated bit-identical to the matcher-built store on test3). The tool-less
+  general-chat fallback is ONLY for sessions with no segmentation at all.
 - **Chat always available**: vLLM (Qwen3-VL) starts at server boot (lifespan),
   is unloaded by the reconstruction workers for exclusive GPU (unchanged), and
   `_semantic_reload_if_idle` reloads it when the pipeline finishes, fails, or

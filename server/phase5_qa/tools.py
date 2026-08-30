@@ -78,7 +78,19 @@ class SpatialTools:
     def __init__(self, store: InstanceStore, display_transform: np.ndarray | None = None):
         self.store = store
         if display_transform is None:
-            display_transform = load_display_transform(store.path)
+            # Stores built by segmentation/pipeline.py are ALREADY in the
+            # display frame (meta built_from=*_display_frame) — applying the
+            # floor transform again DOUBLE-transformed every point/OBB the
+            # moment the npz stopped being identity (2026-08-29: door OBB drawn
+            # tilted and low, volumes placed off-floor). Only legacy RAW-frame
+            # stores (no such meta) still need the npz mapping.
+            built_from = None
+            try:
+                built_from = store.get_meta("built_from")
+            except Exception:  # noqa: BLE001
+                pass
+            if not (built_from and "display_frame" in str(built_from)):
+                display_transform = load_display_transform(store.path)
         self._M = np.asarray(display_transform, float) if display_transform is not None else None
         # similarity scale of the display transform (uniform by construction)
         self._s = (float(np.cbrt(abs(np.linalg.det(self._M[:3, :3]))))
@@ -251,43 +263,94 @@ class SpatialTools:
                 "confidence": min(self._density_confidence(id1), self._density_confidence(id2)),
                 "source": "tool_measured"}
 
+    def _feat_point(self, iid: int, feature: str) -> np.ndarray | None:
+        """Representative point of a NAMED PART of an object, from its REAL
+        point cloud (2026-08-29: OBB face centres were wrong for curved /
+        composite shapes — a curved ceiling has a lower AND an upper part, a
+        ladder a base and a top; bands of the actual points capture them)."""
+        pts = self._points(iid)
+        if pts is not None and len(pts) >= 30:
+            y = pts[:, 1]
+            y_min, y_max = float(y.min()), float(y.max())
+            band = max(0.05, 0.05 * (y_max - y_min))
+            if feature in ("top", "upper"):
+                return pts[y >= y_max - band].mean(0)
+            if feature in ("bottom", "base", "lower"):
+                return pts[y <= y_min + band].mean(0)
+            if feature == "highest":
+                return pts[int(np.argmax(y))]
+            if feature == "lowest":
+                return pts[int(np.argmin(y))]
+            if feature == "centroid":
+                return pts.mean(0)
+        # OBB fallback (few points): centre / vertical face centres
+        obb = self._obb(iid)
+        if obb is None:
+            return None
+        T, aabb, pos = obb
+        if feature == "centroid":
+            return pos
+        off = aabb[3] if feature in ("top", "upper", "highest") else aabb[2]
+        return pos + np.asarray(T)[:3, 1] * off
+
+    _FEATURES = ("centroid", "top", "bottom", "base", "upper", "lower",
+                 "highest", "lowest", "closest")
+
     def measure_between(self, id1: int, id2: int,
-                        feature1: str = "centroid", feature2: str = "centroid") -> dict:
-        """Distance between NAMED features of two objects, metres, with the
-        endpoint pair. Features: centroid | top | bottom | closest (OBB centre,
-        top/bottom face centres, or nearest surface points). Hooks for finer
-        named features (edges, corners) plug in here."""
-        feats = {"centroid", "top", "bottom", "closest"}
-        if feature1 not in feats or feature2 not in feats:
-            return _insufficient(f"unknown feature; pick from {sorted(feats)}")
+                        feature1: str = "centroid", feature2: str = "centroid",
+                        axis: str = "straight") -> dict:
+        """Distance between NAMED PARTS of two objects, metres, with the
+        endpoint pair. Parts come from the REAL point cloud: centroid | top /
+        upper | bottom / base / lower (surface bands) | highest / lowest
+        (extreme points) | closest (nearest surface pair). axis="vertical"
+        returns the height difference |Δy| (e.g. free height floor → ceiling
+        UPPER part), axis="straight" the 3-D distance."""
+        if feature1 not in self._FEATURES or feature2 not in self._FEATURES:
+            return _insufficient(f"unknown feature; pick from {sorted(set(self._FEATURES))}")
         if feature1 == "closest" or feature2 == "closest":
             c = self.get_clearance(id1, id2)
             if c.get("insufficient_data"):
                 return c
-            return {"distance_m": c["clearance_m"], "unit": "m",
+            a = np.asarray(c["point_a_m"], float)
+            b = np.asarray(c["point_b_m"], float)
+            d = abs(float(a[1] - b[1])) if axis == "vertical" else float(c["clearance_m"])
+            return {"distance_m": round(d, 4), "unit": "m", "axis": axis,
                     "point_a_m": c["point_a_m"], "point_b_m": c["point_b_m"],
                     "feature1": "closest", "feature2": "closest",
                     "confidence": c["confidence"], "source": "tool_measured"}
 
-        def feat_point(iid: int, feature: str):
-            obb = self._obb(iid)
-            if obb is None:
-                return None
-            T, aabb, pos = obb
-            if feature == "centroid":
-                return pos
-            # top/bottom = face centre along the OBB's vertical axis (col 1)
-            off = aabb[3] if feature == "top" else aabb[2]
-            return pos + np.asarray(T)[:3, 1] * off
-
-        a, b = feat_point(id1, feature1), feat_point(id2, feature2)
+        a, b = self._feat_point(id1, feature1), self._feat_point(id2, feature2)
         if a is None or b is None:
-            return _insufficient("missing OBB for one of the objects")
-        return {"distance_m": round(float(np.linalg.norm(a - b)), 4), "unit": "m",
+            return _insufficient("missing points/OBB for one of the objects")
+        d = abs(float(a[1] - b[1])) if axis == "vertical" \
+            else float(np.linalg.norm(a - b))
+        return {"distance_m": round(d, 4), "unit": "m", "axis": axis,
                 "point_a_m": [round(float(v), 4) for v in a],
                 "point_b_m": [round(float(v), 4) for v in b],
                 "feature1": feature1, "feature2": feature2,
                 "confidence": min(self._density_confidence(id1), self._density_confidence(id2)),
+                "source": "tool_measured"}
+
+    def get_extent(self, id: int) -> dict:
+        """True point-cloud extent of an object: axis-aligned min/max (m),
+        height, and the centres of its LOWEST and HIGHEST surface bands — a
+        curved ceiling has both a lower and an upper part; this says exactly
+        where each one is."""
+        pts = self._points(id)
+        if pts is None or len(pts) < 30:
+            return _insufficient("insufficient points for an extent")
+        mn, mx = pts.min(0), pts.max(0)
+        y = pts[:, 1]
+        band = max(0.05, 0.05 * float(mx[1] - mn[1]))
+        low_c = pts[y <= mn[1] + band].mean(0)
+        high_c = pts[y >= mx[1] - band].mean(0)
+        return {"min_m": [round(float(v), 4) for v in mn],
+                "max_m": [round(float(v), 4) for v in mx],
+                "size_m": [round(float(v), 4) for v in (mx - mn)],
+                "height_m": round(float(mx[1] - mn[1]), 4),
+                "lowest_band_center_m": [round(float(v), 4) for v in low_c],
+                "highest_band_center_m": [round(float(v), 4) for v in high_c],
+                "unit": "m", "confidence": self._density_confidence(id),
                 "source": "tool_measured"}
 
     def fits_through(self, item_size: list, opening_id: int | None = None,
@@ -578,16 +641,99 @@ class SpatialTools:
         local = obb_local_coords(pts, T)
         return np.all(np.abs(local) <= half[None, :] + 1e-9, axis=1)
 
-    def define_volume(self, name: str, center: list, size: list, yaw_deg: float = 0.0) -> dict:
-        """Persist a user-defined evaluation box (DISPLAY-frame centre + full
-        extents in metres, yaw about vertical). Returns its volume_id."""
-        if center is None or size is None or len(center) != 3 or len(size) != 3:
-            return _insufficient("center and size must each be [x,y,z] in metres")
-        vid = self.store.add_user_volume(name or "volume", center, size, yaw_deg or 0.0)
+    def _floor_instance(self) -> int | None:
+        for i in self.store.list_instances():
+            if "floor" in str(i.get("label", "")).lower():
+                return int(i["instance_id"])
+        return None
+
+    def define_volume(self, name: str, size: list | None = None,
+                      center: list | None = None, yaw_deg: float = 0.0,
+                      volume_m3: float | None = None,
+                      anchor_id: int | None = None,
+                      on_floor: bool = True) -> dict:
+        """Persist a user-defined evaluation box (DISPLAY frame). PLACEMENT
+        RULES (user 2026-08-29 — volumes were landing anywhere):
+        - size = [w,h,d] m, or volume_m3 → a cube of that volume.
+        - x/z default to the anchor object's centroid (anchor_id; DEFAULT
+          anchor = the floor → 'centre of the floor'). An explicit center
+          overrides.
+        - on_floor=true (DEFAULT): the box RESTS ON the floor — base at the
+          floor surface, centre y = floor_top + h/2. Only on_floor=false uses
+          an explicit center y."""
+        if size is None and volume_m3:
+            e = float(volume_m3) ** (1.0 / 3.0)
+            size = [e, e, e]
+        if size is None or len(size) != 3:
+            return _insufficient("pass size [w,h,d] in metres, or volume_m3")
+        size = [abs(float(s)) for s in size]
+        # x/z: explicit center wins; else anchor centroid (default: the floor)
+        anchor = anchor_id if anchor_id is not None else self._floor_instance()
+        ax, az = 0.0, 0.0
+        if anchor is not None:
+            cpt = self._feat_point(int(anchor), "centroid")
+            if cpt is not None:
+                ax, az = float(cpt[0]), float(cpt[2])
+        cx = float(center[0]) if center and len(center) >= 1 and center[0] is not None else ax
+        cz = float(center[2]) if center and len(center) == 3 and center[2] is not None else az
+        # y: resting on the floor unless explicitly overridden
+        if on_floor or not (center and len(center) == 3 and center[1] is not None):
+            floor_top = 0.0   # display frame: leveled floor sits at y=0
+            fid = self._floor_instance()
+            if fid is not None:
+                tpt = self._feat_point(fid, "top")
+                if tpt is not None:
+                    floor_top = float(tpt[1])
+            cy = floor_top + size[1] / 2.0
+        else:
+            cy = float(center[1])
+        vid = self.store.add_user_volume(name or "volume", [cx, cy, cz],
+                                         size, yaw_deg or 0.0)
         self.store.set_meta("volumes_frame", "display")
-        return {"volume_id": vid, "name": name, "center": list(map(float, center)),
-                "size": list(map(float, size)), "yaw_deg": float(yaw_deg or 0.0),
+        return {"volume_id": vid, "name": name, "center": [round(cx, 4), round(cy, 4), round(cz, 4)],
+                "size": [round(s, 4) for s in size], "yaw_deg": float(yaw_deg or 0.0),
+                "on_floor": bool(on_floor), "anchor_id": anchor,
                 "source": "user_defined"}
+
+    def list_volumes(self) -> dict:
+        """The user-defined evaluation volumes saved in this scene."""
+        return {"volumes": self.store.list_user_volumes(), "source": "tool_measured"}
+
+    def measure_volume(self, volume_id: int, id: int | None = None,
+                       axis: str = "straight") -> dict:
+        """Measure FROM a user-defined volume: clearance from the box surface
+        to an object's real points (0 with points_inside>0 = they intersect),
+        plus the centre-to-centroid distance. axis='vertical' → |Δy| of the
+        nearest pair."""
+        r = self._resolve_volume(None, None, 0.0, volume_id)
+        if r is None:
+            return _insufficient("unknown volume_id")
+        c, s, yaw = r
+        T, half = self._volume_frame(np.asarray(c, float), np.asarray(s, float), float(yaw))
+        if id is None:
+            return _insufficient("pass the object id to measure against")
+        pts = self._points(int(id))
+        if pts is None or len(pts) < 30:
+            return _insufficient("insufficient points on the object")
+        local = obb_local_coords(pts, T)
+        outside = np.maximum(np.abs(local) - half[None, :], 0.0)
+        d = np.linalg.norm(outside, axis=1)
+        j = int(np.argmin(d))
+        n_inside = int((d <= 1e-9).sum())
+        # nearest object point and its counterpart on the box surface
+        p_obj = pts[j]
+        clipped = np.clip(local[j], -half, half)
+        p_box = (np.asarray(T)[:3, :3] @ clipped) + np.asarray(T)[:3, 3]
+        dist = abs(float(p_obj[1] - p_box[1])) if axis == "vertical" else float(d[j])
+        return {"clearance_m": round(dist, 4), "unit": "m", "axis": axis,
+                "intersects": bool(n_inside > 0),
+                "points_inside": n_inside,
+                "point_a_m": [round(float(v), 4) for v in p_box],
+                "point_b_m": [round(float(v), 4) for v in p_obj],
+                "center_distance_m": round(float(np.linalg.norm(
+                    np.asarray(c, float) - pts.mean(0))), 4),
+                "confidence": self._density_confidence(int(id)),
+                "source": "tool_measured"}
 
     def evaluate_volume(self, volume_id: int | None = None, center: list | None = None,
                         size: list | None = None, yaw_deg: float = 0.0,
@@ -719,6 +865,111 @@ class SpatialTools:
                         return (i, j, k)
         return None
 
+    # ── session / scene awareness (2026-08-29, user: the assistant must know
+    #    WHAT it is looking at, not only measure) ──────────────────────
+    def get_session_info(self) -> dict:
+        """WHICH session/scene is open: session + project name, frame count,
+        cloud size, object count, floor leveling state, and the cached scene
+        description when one exists."""
+        out_dir = Path(self.store.path).parent
+        session_dir = out_dir.parent
+        parts = session_dir.resolve().parts
+        project = None
+        if "projects" in parts:
+            k = parts.index("projects")
+            if k + 1 < len(parts):
+                project = parts[k + 1]
+        n_frames = len(list((session_dir / "frames").glob("*.jpg"))) \
+            if (session_dir / "frames").is_dir() else 0
+        n_cloud = None
+        cp = out_dir / "cleaned_cloud.ply"
+        if cp.exists():
+            try:
+                with open(cp, "rb") as fp:
+                    for ln in fp:
+                        if ln.startswith(b"element vertex"):
+                            n_cloud = int(ln.split()[-1])
+                        if ln.startswith(b"end_header"):
+                            break
+            except Exception:  # noqa: BLE001
+                pass
+        insts = self.store.list_instances()
+        return {"project": project, "session": session_dir.name,
+                "scan_frames": n_frames, "cloud_points": n_cloud,
+                "n_objects": len(insts),
+                "object_labels": [i["label"] for i in insts],
+                "scene_type": self.store.get_meta("scene_type"),
+                "scene_description": self.store.get_meta("scene_description"),
+                "floor_leveled": (out_dir / "floor_transform.npz").exists()
+                                 or (out_dir / ".orientation_applied").exists(),
+                "source": "tool_measured"}
+
+    def describe_scene(self, refresh: bool = False) -> dict:
+        """WHAT the scene is: the VLM LOOKS at sampled scan keyframes and
+        writes a short description (kind of space, structures, materials,
+        anything notable). Cached in the scene db (provenance vlm_proposed);
+        refresh=true re-runs. INTERPRETATION, never measurement — figures
+        still come only from the measuring tools."""
+        cached = self.store.get_meta("scene_description")
+        if cached and not refresh:
+            return {"description": cached, "cached": True,
+                    "source": "vlm_proposed"}
+        session_dir = Path(self.store.path).parent.parent
+        frames = sorted((session_dir / "frames").glob("*.jpg"))
+        if not frames:
+            return _insufficient("no scan frames on disk to look at")
+        step = max(1, len(frames) // 6)
+        pick = frames[::step][:6]
+        try:
+            from semantic.client import get_semantic_client
+            from semantic.types import system as _sys, user as _usr
+            client = get_semantic_client(consumer="phase5.describe_scene")
+            resp = client.chat([
+                _sys("You describe 3D-scanned construction scenes from their "
+                     "scan frames, for a site engineer."),
+                _usr("Describe this scanned scene: what kind of space it is, "
+                     "the main structures and materials, and anything notable. "
+                     "Concrete and concise (max 120 words). Answer in Spanish.",
+                     images=[str(p) for p in pick])])
+        except Exception as e:  # noqa: BLE001
+            return _insufficient(f"semantic service unavailable ({e}) — try "
+                                 "again once the model is loaded")
+        desc = (resp.content or "").strip()
+        if desc:
+            self.store.set_meta("scene_description", desc)
+            self.store.set_meta("scene_description_origin", "vlm_proposed")
+        return {"description": desc or "(no answer)", "cached": False,
+                "frames_used": [p.name for p in pick],
+                "source": "vlm_proposed"}
+
+    def remember_note(self, key: str, note: str) -> dict:
+        """Persist a conclusion/observation about this scene in its db so later
+        conversations can use it. Notes are vlm_proposed context, NEVER
+        measurements."""
+        import json as _json
+        import time as _time
+        try:
+            blob = _json.loads(self.store.get_meta("chat_notes") or "{}")
+        except Exception:  # noqa: BLE001
+            blob = {}
+        blob[str(key)] = {"note": str(note),
+                          "ts": _time.strftime("%Y-%m-%d %H:%M")}
+        self.store.set_meta("chat_notes", _json.dumps(blob, ensure_ascii=False))
+        return {"ok": True, "stored": str(key), "n_notes": len(blob),
+                "source": "vlm_proposed"}
+
+    def recall_notes(self, key: str | None = None) -> dict:
+        """Read the notes previously stored about this scene (all, or one key)."""
+        import json as _json
+        try:
+            blob = _json.loads(self.store.get_meta("chat_notes") or "{}")
+        except Exception:  # noqa: BLE001
+            blob = {}
+        if key is not None:
+            return {"note": blob.get(str(key)), "key": key,
+                    "source": "vlm_proposed"}
+        return {"notes": blob, "n_notes": len(blob), "source": "vlm_proposed"}
+
     # ── tool-calling schemas for the orchestrator ───────────────────
     def impls(self) -> dict:
         return {
@@ -728,6 +979,11 @@ class SpatialTools:
             "get_my_position": self.get_my_position,
             "get_distance_from_me": self.get_distance_from_me,
             "get_clearance": self.get_clearance, "measure_between": self.measure_between,
+            "get_extent": self.get_extent,
+            "get_session_info": self.get_session_info,
+            "describe_scene": self.describe_scene,
+            "remember_note": self.remember_note,
+            "recall_notes": self.recall_notes,
             "fits_through": self.fits_through, "get_plumb": self.get_plumb,
             "get_level": self.get_level, "get_span": self.get_span,
             "get_height_profile": self.get_height_profile,
@@ -737,6 +993,8 @@ class SpatialTools:
             "get_instance_history": self.get_instance_history,
             "get_findings": self.get_findings,
             "define_volume": self.define_volume,
+            "list_volumes": self.list_volumes,
+            "measure_volume": self.measure_volume,
             "evaluate_volume": self.evaluate_volume,
             "objects_in_volume": self.objects_in_volume,
             "fits_in_volume": self.fits_in_volume,
@@ -766,12 +1024,44 @@ class SpatialTools:
             fn("get_clearance", "Minimum real clearance between two objects (m) with the closest point pair.",
                {"id1": idp, "id2": idp}, ["id1", "id2"]),
             fn("measure_between",
-               "Distance between named features of two objects (m). Features: "
-               "centroid | top | bottom | closest.",
+               "Distance between NAMED PARTS of two objects (m), from their real "
+               "point clouds. Parts: centroid | top/upper | bottom/base/lower "
+               "(surface bands — a curved ceiling has BOTH) | highest/lowest "
+               "(extreme points) | closest. axis='vertical' → height difference "
+               "|Δy| (e.g. free height floor→ceiling upper part); 'straight' → 3-D.",
                {"id1": idp, "id2": idp,
-                "feature1": {"type": "string", "enum": ["centroid", "top", "bottom", "closest"]},
-                "feature2": {"type": "string", "enum": ["centroid", "top", "bottom", "closest"]}},
+                "feature1": {"type": "string",
+                             "enum": ["centroid", "top", "upper", "bottom", "base",
+                                      "lower", "highest", "lowest", "closest"]},
+                "feature2": {"type": "string",
+                             "enum": ["centroid", "top", "upper", "bottom", "base",
+                                      "lower", "highest", "lowest", "closest"]},
+                "axis": {"type": "string", "enum": ["straight", "vertical"]}},
                ["id1", "id2"]),
+            fn("get_extent",
+               "True point-cloud extent of an object: min/max XYZ, height, and "
+               "the centres of its lowest and highest surface bands (where the "
+               "lower and upper parts of a curved/composite object are).",
+               {"id": idp}, ["id"]),
+            fn("get_session_info",
+               "Which session/scene is open: project + session name, scan frame "
+               "count, cloud size, objects, floor leveling, cached scene "
+               "description. Call for any 'what am I looking at' question."),
+            fn("describe_scene",
+               "LOOK at sampled scan keyframes (VLM) and describe what the scene "
+               "is — kind of space, structures, materials, notable items. Cached "
+               "in the scene db; refresh=true re-runs. Interpretation "
+               "(vlm_proposed), NEVER measurements.",
+               {"refresh": {"type": "boolean"}}),
+            fn("remember_note",
+               "Persist a conclusion/observation about this scene in its db for "
+               "future conversations (key + note). Never store figures that did "
+               "not come from a tool.",
+               {"key": {"type": "string"}, "note": {"type": "string"}},
+               ["key", "note"]),
+            fn("recall_notes",
+               "Read notes previously stored about this scene (all, or one key).",
+               {"key": {"type": "string"}}),
             fn("fits_through",
                "Can an item [w,h,d] m pass through an opening (door/window: "
                "opening_id) or through the gap between two objects (id1+id2)?",
@@ -799,13 +1089,26 @@ class SpatialTools:
             fn("get_findings", "Visual findings for an object/region (Phase 3).",
                {"id": idp, "region": {"type": "string"}}),
             fn("define_volume",
-               "Persist a user-defined evaluation box (world centre + full extents "
-               "in metres, yaw about vertical). Use to mark a space to evaluate.",
+               "Place a user-defined evaluation box. DEFAULT: it RESTS ON the "
+               "floor, centred on the floor (or on anchor_id's x/z). Pass size "
+               "[w,h,d] m or volume_m3 (cube). Only pass center to override "
+               "x/z; center y is honoured only with on_floor=false.",
                {"name": {"type": "string"},
-                "center": {**arr, "description": "[x,y,z] world centre, metres"},
                 "size": {**arr, "description": "[w,h,d] full extents, metres"},
+                "volume_m3": {"type": "number", "description": "cube of this volume instead of size"},
+                "center": {**arr, "description": "optional [x,y,z] override, metres"},
+                "anchor_id": {"type": "integer", "description": "object whose centroid gives x/z (default: the floor)"},
+                "on_floor": {"type": "boolean", "description": "default true: base sits ON the floor"},
                 "yaw_deg": {"type": "number", "description": "rotation about vertical"}},
-               ["name", "center", "size"]),
+               ["name"]),
+            fn("list_volumes", "The evaluation volumes saved in this scene."),
+            fn("measure_volume",
+               "Measure FROM a saved volume to an object: clearance box-surface → "
+               "object points (intersects=true when points are inside), plus "
+               "centre distance. axis='vertical' → |Δy|.",
+               {"volume_id": {"type": "integer"}, "id": idp,
+                "axis": {"type": "string", "enum": ["straight", "vertical"]}},
+               ["volume_id", "id"]),
             fn("evaluate_volume",
                "Evaluate a space: objects inside, occupied vs free fraction, and "
                "free volume (m³). Pass volume_id OR center+size(+yaw).",

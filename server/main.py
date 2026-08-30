@@ -988,7 +988,11 @@ async def serve_potree_files(session_id: str, file_path: str):
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
     # Set proper content type for binary files
     content_type = "application/json" if file_path.endswith(".json") else "application/octet-stream"
-    headers = {"Cache-Control": "public, max-age=3600"}  # Cache 1h
+    # no-cache = ALWAYS revalidate (304 when unchanged — cheap). The old
+    # max-age=3600 made the browser show a STALE octree for up to an hour
+    # after an erase/refresh rebuilt it (user 2026-08-30: "los puntos siguen
+    # apareciendo una vez borrados").
+    headers = {"Cache-Control": "no-cache"}
 
     # A Replace wipe can delete the octree between the exists() check above and the
     # open() FileResponse does at send time — the response is already committed with
@@ -2236,6 +2240,14 @@ async def save_alignment(session_id: str, request: Request):
                 json.dump(result_data, f)
             print(f"[Alignment] ✅ Recomputed {n_obb} OBBs under the new frame "
                   "(no DBSCAN rerun needed)")
+            # The instance store (scene_r.db) is display-frame too — rebuild it
+            # or every chat measurement/OBB stays in the OLD frame (2026-08-29).
+            try:
+                from segmentation.pipeline import rebuild_instance_store
+                if rebuild_instance_store(output_dir):
+                    print("[Alignment] ✅ scene_r.db rebuilt under the new frame")
+            except Exception as e:
+                print(f"[Alignment] store rebuild failed (non-fatal): {e}")
         except Exception as e:
             # fallback: stale OBBs are worse than a recompute — invalidate
             print(f"[Alignment] OBB re-projection failed ({e}) — deleting "
@@ -2473,6 +2485,14 @@ async def level_floor(request: Request):
         print(f"[FloorLevel]   recomputed {n_obb} OBBs under the new frame")
         with open(result_path, "w") as f:
             json.dump(result_data, f)
+        # The instance store (scene_r.db) is display-frame too — rebuild it or
+        # every chat measurement/OBB stays in the OLD frame (2026-08-29).
+        try:
+            from segmentation.pipeline import rebuild_instance_store
+            if rebuild_instance_store(output_dir):
+                print("[FloorLevel]   scene_r.db rebuilt under the new frame")
+        except Exception as e:
+            print(f"[FloorLevel]   store rebuild failed (non-fatal): {e}")
 
         fl_path.write_text(json.dumps({
             "selected_instance_id": selected,
@@ -2750,10 +2770,17 @@ async def propagate_interactive_segmentation(request: Request):
     
     def sse_generator():
         import base64, cv2
-        actual_total = len(selected_frames) if selected_frames else None
-        
+        # USER ORDER 2026-08-29: propagation always covers ALL keyframes and
+        # must not depend on the tracker's 0.5 output gate (far from the
+        # prompted frame the score decays and masks silently vanished).
+        actual_total = None
+        _thresh = float((cfg.get("segmentation") or {})
+                        .get("propagate_output_prob_thresh", 0.0))
+
         try:
-            for frame_idx, num_frames, outputs in sam3.propagate_interactive_stream(state_id, selected_frames=selected_frames):
+            for frame_idx, num_frames, outputs in sam3.propagate_interactive_stream(
+                    state_id, selected_frames=selected_frames,
+                    output_prob_thresh=_thresh):
                 _all_masks[frame_idx] = outputs
                 effective_total = actual_total if actual_total else num_frames
                 pct = min(99, round((len(_all_masks) / max(1, effective_total)) * 100))
@@ -4095,6 +4122,173 @@ async def surface_fit_file(session_id: str, folder: str, filename: str):
                         headers={"Cache-Control": "no-cache"})
 
 
+def _fuse_unexplained_poisson(output_dir: Path, frames_dir: Path, iid: int,
+                              label: str, idx_file: Path, dst_glb: Path) -> int:
+    """Poisson-mesh the points the fitted surface did NOT explain (attached
+    structures, e.g. a cone riding on a plane-fitted wall) and fuse that mesh
+    into the instance's published GLB. Poisson from the object's own cloud —
+    USER DECISION 2026-08-29 (the TSDF remainder was 5× worse: p95 104 mm and
+    30% uncovered on the wall3 cone vs Poisson's 20 mm / 1.4%). Runs the
+    CPU-pinned subprocess (Open3D Poisson hangs unpinned on this box).
+    Returns the number of remainder points meshed (0 = nothing fused)."""
+    import subprocess as _sp
+    import trimesh
+    gi = np.load(idx_file)
+    rest_glb = dst_glb.parent / "_rest_poisson.glb"
+    worker = Path(SERVER_DIR) / "run_poisson_objects.py"
+    _tex = bool((cfg.get("surface_fit") or {}).get("texture_objects", True))
+    r = _sp.run([sys.executable, str(worker),
+                 "--output-dir", str(output_dir),
+                 "--indices-file", str(idx_file),
+                 "--out-glb", str(rest_glb)]
+                + (["--texture"] if _tex else []),
+                cwd=str(SERVER_DIR), capture_output=True, text=True,
+                timeout=1800)
+    if r.stdout:
+        print(r.stdout.strip()[-2000:], flush=True)
+    if r.returncode != 0 or not rest_glb.exists():
+        print(f"[Mesh] {label}_{iid}: remainder Poisson produced no mesh "
+              f"(rc={r.returncode})")
+        return 0
+    parts = []
+    for p in (dst_glb, rest_glb):
+        m = trimesh.load(str(p), force="scene")
+        parts.extend(m.dump())   # transformed copies
+    trimesh.Scene(parts).export(str(dst_glb))
+    rest_glb.unlink(missing_ok=True)
+    print(f"[Mesh] {label}_{iid}: fused fitted surface + Poisson remainder "
+          f"({len(gi):,} unexplained pts) → {dst_glb.name}")
+    return int(len(gi))
+
+
+async def _surface_fit_for_export(session_id: str, session_dir: Path,
+                                  output_dir: Path, ids: List[int],
+                                  progress_cb) -> List[int]:
+    """surface_fit stage of /tsdf/export (USER DECISION 2026-08-28: fitted
+    smooth surfaces are ACTIVE for segmented-object meshing).
+
+    Runs run_surface_fit.py for the requested instances — fit_scene applies
+    the uniform config ladder (NO name routing, 2026-08-29) with its
+    ``accept_p95_mm`` geometry gate — then publishes each accepted mesh into
+    ``output/tsdf/<label>_<id>/`` so the existing viewer/TSDF list picks it up
+    unchanged. Returns the published instance ids; everything else (and any
+    failure here) falls back to the TSDF crop in the caller."""
+    global _surface_fit_subprocess
+    async with _surface_fit_lock:
+        if (_surface_fit_subprocess is not None
+                and _surface_fit_subprocess.returncode is None):
+            print("[TSDF] surface_fit busy (another run in progress) — "
+                  "TSDF crop for all requested instances")
+            return []
+
+    worker = Path(SERVER_DIR) / "run_surface_fit.py"
+    cmd = [sys.executable, str(worker), "--session-dir", str(session_dir),
+           "--params", "{}"]
+    for iid in ids:
+        cmd += ["--instance-id", str(int(iid))]
+
+    result = None
+    try:
+        proc = _track_worker(await asyncio.create_subprocess_exec(
+            *cmd, cwd=str(SERVER_DIR),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            preexec_fn=_die_with_parent_sigkill,
+        ))
+        async with _surface_fit_lock:
+            _surface_fit_subprocess = proc
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", "ignore").rstrip()
+            if not line:
+                continue
+            if line.startswith("[SFIT-PROGRESS]"):
+                try:
+                    upd = json.loads(line[len("[SFIT-PROGRESS]"):])
+                    iid = upd.get("instance_id")
+                    if iid is not None:
+                        progress_cb(int(iid),
+                                    f"surface_fit:{upd.get('phase', 'fit')}",
+                                    None, None)
+                except Exception:
+                    pass
+            elif line.startswith("[SFIT-RESULT]"):
+                try:
+                    result = json.loads(line[len("[SFIT-RESULT]"):])
+                except Exception:
+                    result = None
+            else:
+                try:
+                    print(f"[SurfaceFit] {line}", flush=True)
+                except (BrokenPipeError, OSError):
+                    pass
+        await proc.wait()
+    except Exception as e:
+        print(f"[TSDF] surface_fit stage failed (non-fatal → TSDF crop): {e}")
+        return []
+    finally:
+        async with _surface_fit_lock:
+            _surface_fit_subprocess = None
+
+    published: List[int] = []
+    import shutil
+    from segmentation.tsdf_export import _safe_label
+    for entry in (result or {}).get("ok") or []:
+        try:
+            iid = int(entry["instance_id"])
+            src = Path(entry.get("dir") or "") / "surface.glb"
+            if not src.exists():
+                print(f"[TSDF] fitted but no surface.glb for instance {iid} — "
+                      "TSDF crop instead")
+                continue
+            safe = _safe_label(entry.get("label") or "segment", iid)
+            obj_dir = output_dir / "tsdf" / safe
+            obj_dir.mkdir(parents=True, exist_ok=True)
+            dst = obj_dir / f"{safe}.glb"
+            shutil.copy2(src, dst)
+            # Attached-structure remainder (user 2026-08-29, wall3): points the
+            # surface model did not explain get their own TSDF, fused into the
+            # same GLB so the whole object is delivered.
+            fused_pts = 0
+            rest_file = Path(entry.get("dir") or "") / "unexplained_idx.npy"
+            if (rest_file.exists()
+                    and int(entry.get("unexplained_points") or 0) >= 3000
+                    and float(entry.get("unexplained_frac") or 0.0) >= 0.05):
+                try:
+                    fused_pts = await asyncio.get_running_loop().run_in_executor(
+                        None, _fuse_unexplained_poisson, output_dir,
+                        session_dir / "frames", iid,
+                        str(entry.get("label") or "segment"), rest_file, dst)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[Mesh] remainder fuse failed for {safe} "
+                          f"(non-fatal, fitted surface published alone): {e}")
+            meta = {
+                "method": "surface_fit",
+                "kind": entry.get("kind"),
+                "instance_id": iid,
+                "label": entry.get("label", ""),
+                "glb_file": dst.name,
+                "textured": False,
+                "regularized": bool(entry.get("regularized")),
+                "rms_mm": entry.get("rms_mm"),
+                "p95_mm": entry.get("p95_mm"),
+                "flatness_pass": entry.get("flatness_pass"),
+                "unexplained_points": entry.get("unexplained_points", 0),
+                "fused_rest_points": fused_pts,   # >0 → GLB = surface + TSDF rest
+                "source_dir": entry.get("dir"),   # full deliverable (residuals,
+            }                                     # heatmap) stays there
+            (obj_dir / f"{safe}.meta.json").write_text(json.dumps(meta, indent=2))
+            progress_cb(iid, "done", None, str(dst))
+            published.append(iid)
+        except Exception as e:
+            print(f"[TSDF] publishing fitted mesh failed ({entry}): {e}")
+    if published:
+        print(f"[TSDF] surface_fit: {len(published)} fitted mesh(es) published "
+              f"→ tsdf/ (instances {sorted(published)})")
+    return published
+
+
 # ── Reconstruction v2 (semantic-geometric, neighbor-aware) ─────────────
 # Additive to /shape/export: classifies every instance, reconstructs parametric
 # surfaces/swept solids/boxes/linear-repeats directly (no subprocess) and uses
@@ -4280,25 +4474,29 @@ def _tsdf_set_overall(session_id: str, **kw):
 
 @app.post("/api/segmentation/tsdf/export")
 async def export_tsdf_endpoint(request: Request):
-    """Mesh the selected instances — TSDF + texrecon ONLY (user decision
-    2026-08-28). Each instance is carved out of the texrecon-textured scene
-    TSDF mesh; when that scene mesh doesn't exist yet (the pipeline stops at
-    the cleaned cloud), it is baked here first with the config.yaml `tsdf:`
-    recipe (mesh_method=tsdf, texture=texrecon — forced), then carved.
+    """Mesh the selected instances — RANSAC + Poisson, both (user decision
+    2026-08-29, evaluation mode). Per instance: (a) surface_fit publishes a
+    fitted smooth surface where a model holds (role ladder / geometry-decided,
+    remainder fused via Poisson), into output/tsdf/<label>_<id>/; (b) a
+    cloud-anchored Poisson mesh of the object's own points ALWAYS lands in
+    output/tsdf/<label>_<id>_poisson/ so both can be compared in the viewer.
+    TSDF re-integration is out of the automatic chain.
 
     Body:
         session_id: str
         instance_ids: Optional[list[int]]
         voxel_length / sdf_trunc / depth_trunc / dilate_radius: accepted for
-            client compatibility, but IGNORED — the bake uses the verified
-            config recipe, not the legacy per-object re-integration knobs.
+            client compatibility; unused by the ransac+poisson chain.
     """
     body = await request.json()
     session_id = body.get("session_id")
     instance_ids = body.get("instance_ids")
     voxel_length = float(body.get("voxel_length", 0.015))
     sdf_trunc = float(body.get("sdf_trunc", 0.04))
-    depth_trunc = float(body.get("depth_trunc", 5.0))
+    # 12 m default (2026-08-29): 5 m truncated every object farther than 5 m
+    # from all cameras (door at 5.3–7 m integrated ZERO frames). The segment
+    # mask already confines integration, so a generous cap is safe.
+    depth_trunc = float(body.get("depth_trunc", 12.0))
     dilate_radius = int(body.get("dilate_radius", 3))
 
     if not session_id:
@@ -4323,9 +4521,9 @@ async def export_tsdf_endpoint(request: Request):
 
     print(f"[TSDF] ━━━ /tsdf/export request ━━━")
     print(f"[TSDF]   session={session_id}  instance_ids={sorted(target_ids)}")
-    print(f"[TSDF]   mode=tsdf+texrecon only (legacy per-object knobs ignored: "
-          f"voxel={voxel_length} trunc={sdf_trunc} depth_max={depth_trunc} "
-          f"dilate={dilate_radius})")
+    print(f"[TSDF]   mode=surface_fit-first + per-object TSDF  "
+          f"voxel={voxel_length}m trunc={sdf_trunc}m depth_max={depth_trunc}m "
+          f"dilate={dilate_radius}px")
 
     async with _tsdf_progress_lock:
         sess_state = _tsdf_progress.setdefault(session_id, {})
@@ -4359,55 +4557,84 @@ async def export_tsdf_endpoint(request: Request):
         except Exception:
             pass  # progress is best-effort
 
-    def _run_crop():
-        # ONLY TSDF + texrecon (user decision 2026-08-28): every individual mesh
-        # is carved out of the texrecon-textured scene TSDF mesh, so it keeps the
-        # UV atlas and is cloud-consistent for EVERY backend — including those
-        # whose per-frame depth lives under a run dir the old per-object
-        # re-integration didn't recognise (e.g. VGGTOMEGA → omega_run/). The
-        # legacy `export_tsdf_meshes` fallback (untextured) is no longer called.
-        from segmentation.tsdf_export import crop_scene_mesh_to_instances
-        return crop_scene_mesh_to_instances(
-            output_dir=output_dir,
-            segments_result=segments_result,
-            obj_ids=list(target_ids) or None,
-            progress_cb=_progress_cb,
-        )
+    async def _run_poisson_stage(ids, fitted_ids):
+        """Per-object Poisson subprocess (CPU-pinned — Open3D Poisson hangs
+        unpinned on this box; see run_poisson_objects.py). Returns the ids
+        that produced a mesh."""
+        worker = Path(SERVER_DIR) / "run_poisson_objects.py"
+        cmd = [sys.executable, str(worker), "--output-dir", str(output_dir)]
+        if bool((cfg.get("surface_fit") or {}).get("texture_objects", True)):
+            cmd.append("--texture")
+        # REGULARIZED POISSON (user 2026-08-29): poisson first, ransac ironed
+        # on top + image-confirmed openings cut
+        if bool((cfg.get("surface_fit") or {}).get("poisson_regularize", True)):
+            cmd.append("--regularize")
+        for i in ids:
+            cmd += ["--instance-id", str(int(i))]
+        done_ids: set = set()
+        try:
+            proc = _track_worker(await asyncio.create_subprocess_exec(
+                *cmd, cwd=str(SERVER_DIR),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                preexec_fn=_die_with_parent_sigkill,
+            ))
+            assert proc.stdout is not None
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", "ignore").rstrip()
+                if not line:
+                    continue
+                if line.startswith("[POBJ-PROGRESS]"):
+                    try:
+                        upd = json.loads(line[len("[POBJ-PROGRESS]"):])
+                        iid = int(upd.get("instance_id"))
+                        phase = str(upd.get("phase", "poisson"))
+                        if phase == "done":
+                            done_ids.add(iid)
+                        if phase == "done" and iid in fitted_ids:
+                            # this instance already counted its 'done' when the
+                            # RANSAC mesh was published — refresh the badge only
+                            await _tsdf_apply_progress(
+                                session_id, iid,
+                                {"phase": "done", "mesh": upd.get("mesh")}, None)
+                        else:
+                            _progress_cb(iid, phase, upd.get("elapsed"),
+                                         upd.get("mesh"))
+                    except Exception:
+                        pass
+                elif line.startswith("[POBJ-RESULT]"):
+                    pass
+                else:
+                    try:
+                        print(line, flush=True)
+                    except (BrokenPipeError, OSError):
+                        pass
+            await proc.wait()
+        except Exception as e:  # noqa: BLE001
+            print(f"[Mesh] poisson stage failed (non-fatal): {e}")
+        return done_ids
 
     async def _bg():
         try:
-            scene_dir = output_dir / "tsdf" / "scene"
-            has_scene = ((scene_dir / "scene.glb.orig").exists()
-                         or (scene_dir / "scene.glb").exists())
-            if not has_scene:
-                # The pipeline now stops at the cleaned cloud (pipeline.auto_tsdf
-                # false), so the scene mesh may not exist yet: bake it HERE, once
-                # — TSDF integration + texrecon texture, forced regardless of any
-                # config experiment — then carve. Later exports reuse the bake.
-                print("[TSDF] no scene mesh → baking scene TSDF (tsdf + texrecon) "
-                      "before carving")
-                async with _tsdf_progress_lock:
-                    _tsdf_set_overall(session_id, phase="scene_tsdf")
-                from segmentation.tsdf_export import build_tsdf_scene_kwargs
-                params = build_tsdf_scene_kwargs(cfg, overrides={
-                    "mesh_method": "tsdf",
-                    "texture": True,
-                    "texture_mode": "texrecon",
-                })
-                scene_path = await _run_scene_tsdf_subprocess(
-                    session_id, output_dir, frames_dir, params)
-                if not scene_path:
-                    raise RuntimeError(
-                        "scene TSDF bake failed — cannot carve instance meshes")
-            else:
-                print("[TSDF] scene mesh present → carving instances from it (crop)")
+            selected = sorted({int(t) for t in target_ids})
+            fitted_ids: set = set()
+            # ── USER ORDER 2026-08-29 (night): the 'Mesh' button generates ONE
+            # mesh per instance — POISSON from the object's own cloud points.
+            # Poisson follows the cloud unconditionally (no cleaning contract,
+            # no decomposition, no invented shape). The parametric path
+            # (surface_fit bspline/RANSAC) is PARKED — code stays on disk —
+            # after the all-bspline run collapsed on raw segments ("ni siquiera
+            # sigue la forma"; the bóveda decomposed into disjoint pieces).
             async with _tsdf_progress_lock:
-                _tsdf_set_overall(session_id, phase="integrating")
-            written = await loop.run_in_executor(None, _run_crop)
+                _tsdf_set_overall(session_id, phase="poisson")
+            poisson_ids = await _run_poisson_stage(selected, set())
+
             async with _tsdf_progress_lock:
                 _tsdf_set_overall(session_id, phase="done",
-                                  done=len(written), finished_at=time.time())
-            print(f"[TSDF] ✅ wrote {len(written)} mesh(es)")
+                                  done=len(poisson_ids),
+                                  finished_at=time.time())
+            print(f"[Mesh] ✅ {len(poisson_ids)} poisson mesh(es)")
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -4773,6 +5000,203 @@ async def tsdf_file(session_id: str, folder: str, filename: str):
         media_type=media_type,
         headers={"Cache-Control": "no-cache"},
     )
+
+
+# ── Eraser tool (USER 2026-08-29): one gesture, one truth — points leave the
+# segment AND their mask pixels are cleared (deletion survives re-matching);
+# published meshes get an instant visual crop + a debounced re-fit; OBBs come
+# from the mesh once it exists, from the points meanwhile. ──────────────────
+_erase_sessions: Dict[str, dict] = {}
+
+
+def _erase_state(session_id: str) -> dict:
+    return _erase_sessions.setdefault(session_id, {
+        "undo": [], "touched_mesh": set(), "task": None,
+        "busy": False, "done_ts": 0.0})
+
+
+async def _erase_finalize(session_id: str, delay: float = 2.5):
+    """Debounced after the LAST stroke: octree recolor (viewer shows the new
+    unsegmented) + re-fit of every touched published mesh + mesh-derived OBBs."""
+    st = _erase_state(session_id)
+    try:
+        await asyncio.sleep(delay)
+        st["busy"] = True
+        ctx = _ctx(session_id)
+        output_dir = ctx.output_dir
+        try:
+            # same source the segmentation pipeline uses: corrected cloud when
+            # face projections exist, cleaned cloud otherwise
+            _corr = output_dir / "corrected_cloud.ply"
+            await convert_ply_to_potree_async(
+                ctx.session_dir, force=True,
+                ply_override=_corr if _corr.exists()
+                else output_dir / "cleaned_cloud.ply")
+            print(f"[Erase] octree recolored for {session_id}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[Erase] octree rebuild failed (non-fatal): {e}")
+        ids = sorted(st["touched_mesh"])
+        st["touched_mesh"] = set()
+        if ids:
+            print(f"[Erase] re-fitting {len(ids)} touched mesh(es): {ids}")
+            fitted = await _surface_fit_for_export(
+                session_id, ctx.frames_dir.parent, output_dir, ids,
+                lambda *a, **k: None)
+            # user rule: once a mesh exists, the OBB comes from the mesh
+            try:
+                from segmentation.erase import (obb_from_mesh,
+                                                published_mesh_path)
+                res_path = output_dir / "segmentation_result.json"
+                result = json.loads(res_path.read_text())
+                changed = False
+                for inst in result.get("instances") or []:
+                    iid = int(inst.get("instance_id", inst.get("id")))
+                    if iid not in (fitted or []):
+                        continue
+                    p = published_mesh_path(output_dir,
+                                            inst.get("label", ""), iid)
+                    if not p:
+                        continue
+                    obb = obb_from_mesh(p, output_dir)
+                    if obb:
+                        inst["obb"] = obb
+                        changed = True
+                if changed:
+                    res_path.write_text(json.dumps(result))
+                    from segmentation.pipeline import rebuild_instance_store
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, rebuild_instance_store, output_dir)
+                    print("[Erase] OBBs updated from regenerated meshes")
+            except Exception as e:  # noqa: BLE001
+                print(f"[Erase] mesh-OBB update failed (non-fatal): {e}")
+        # push the recolored octree to every open viewer (same message the
+        # session-open flow sends — the viewport reloads it in place)
+        try:
+            meta_path = output_dir / "potree" / "metadata.json"
+            if meta_path.exists():
+                msg = {"type": "potree_ready", "session_id": session_id,
+                       "url": f"/potree/{session_id}/",
+                       "points": json.loads(meta_path.read_text()).get("points", 0)}
+                tp = output_dir / "floor_transform.npz"
+                if tp.exists():
+                    d = np.load(tp)
+                    M = np.eye(4)
+                    M[:3, :3] = float(d["s"]) * d["R"]
+                    M[:3, 3] = d["t"]
+                    msg["floorTransform"] = M.T.flatten().tolist()
+                await viewer_manager.broadcast_text(json.dumps(msg))
+                print("[Erase] potree_ready broadcast (viewer reloads octree)")
+        except Exception as e:  # noqa: BLE001
+            print(f"[Erase] viewer notify failed (non-fatal): {e}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        print(f"[Erase] finalize failed: {e}")
+    finally:
+        st["busy"] = False
+        st["done_ts"] = time.time()
+        st["task"] = None
+
+
+@app.post("/api/segmentation/erase")
+async def segmentation_erase(request: Request):
+    body = await request.json()
+    session_id = body.get("session_id")
+    # commit form: {spheres: [{center:[3], radius}]} — one application for all
+    # marked zones (user 2026-08-29). Single {center, radius} kept for compat.
+    spheres = body.get("spheres")
+    if not spheres:
+        center = body.get("center")
+        radius = float(body.get("radius") or 0)
+        if center and len(center) == 3 and radius > 0:
+            spheres = [{"center": center, "radius": radius}]
+    if not session_id or not spheres:
+        raise HTTPException(status_code=400,
+                            detail="need session_id and spheres[]")
+    # reassign_to: the zones move INTO this instance instead of being deleted;
+    # "new" + new_label creates a brand-new segment from the zones
+    reassign_to = body.get("reassign_to")
+    new_label = None
+    if isinstance(reassign_to, str) and reassign_to.lower() == "new":
+        new_label = str(body.get("new_label") or "").strip() or "segment"
+        reassign_to = None
+    elif reassign_to is not None:
+        reassign_to = int(reassign_to)
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
+    from segmentation.erase import (crop_glb_sphere, erase_spheres,
+                                    published_mesh_path)
+    loop = asyncio.get_event_loop()
+    # SAFETY (user 2026-08-30): only the segments VISIBLE in the viewer can
+    # lose points — the UI sends their ids; hidden segments are untouchable
+    only_instances = body.get("only_instances")
+    if only_instances is not None:
+        only_instances = [int(i) for i in only_instances]
+    rep = await loop.run_in_executor(
+        None, lambda: erase_spheres(output_dir, spheres,
+                                    target_iid=reassign_to,
+                                    new_label=new_label,
+                                    only_iids=only_instances))
+    st = _erase_state(session_id)
+    if rep.get("undo"):
+        st["undo"] = (st["undo"] + [rep["undo"]])[-10:]
+    if rep.get("mesh_instances"):
+        try:
+            result = json.loads(
+                (output_dir / "segmentation_result.json").read_text())
+            labels = {int(i.get("instance_id", i.get("id"))): i.get("label", "")
+                      for i in result.get("instances") or []}
+        except Exception:  # noqa: BLE001
+            labels = {}
+        for iid in rep["mesh_instances"]:
+            p = published_mesh_path(output_dir, labels.get(iid, ""), iid)
+            if p:   # instant visual crop; the re-fit delivers the real mesh
+                for sp in spheres:
+                    await loop.run_in_executor(
+                        None, crop_glb_sphere, p, output_dir,
+                        sp["center"], float(sp["radius"]))
+            st["touched_mesh"].add(int(iid))
+    if rep.get("touched") or rep.get("reassigned"):
+        if st.get("task"):
+            st["task"].cancel()
+        # explicit commit → apply now (no debounce needed)
+        st["task"] = asyncio.create_task(_erase_finalize(session_id, delay=0.1))
+    return {"ok": True, "touched": rep.get("touched", {}),
+            "total_removed": rep.get("total_removed", 0),
+            "reassigned": rep.get("reassigned", 0),
+            "mesh_instances": rep.get("mesh_instances", [])}
+
+
+@app.post("/api/segmentation/erase/undo")
+async def segmentation_erase_undo(request: Request):
+    body = await request.json()
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="need session_id")
+    st = _erase_state(session_id)
+    if not st["undo"]:
+        return {"ok": False, "detail": "nothing to undo"}
+    undo = st["undo"].pop()
+    ctx = _ctx(session_id)
+    from segmentation.erase import undo_erase
+    loop = asyncio.get_event_loop()
+    rep = await loop.run_in_executor(
+        None, lambda: undo_erase(ctx.output_dir, undo))
+    # restored points change meshes too → same debounced finalize
+    for iid_s in (undo.get("indices") or {}):
+        st["touched_mesh"].add(int(iid_s))
+    if st.get("task"):
+        st["task"].cancel()
+    st["task"] = asyncio.create_task(_erase_finalize(session_id))
+    return {"ok": True, **rep}
+
+
+@app.get("/api/segmentation/erase/status")
+async def segmentation_erase_status(session_id: str):
+    st = _erase_state(session_id)
+    return {"busy": bool(st["busy"] or st["task"] is not None),
+            "done_ts": st["done_ts"],
+            "can_undo": bool(st["undo"])}
 
 
 @app.post("/api/segmentation/refresh")

@@ -23,7 +23,7 @@ import {
   Building2, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
   Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
   Scale, Thermometer, Loader2, BarChart3, Home, Pencil, Camera, Plus, SlidersHorizontal,
-  Sparkles,
+  Sparkles, Eraser, Undo2, Brush,
 } from 'lucide-react'
 import AssistantPanel from './components/AssistantPanel'
 
@@ -60,7 +60,7 @@ interface PipelineState {
   scans?: string[]  // scan keys being rebuilt
 }
 
-type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align'
+type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align' | 'erase'
 
 function App() {
   const { confirmDanger, dialogElement: appDialog } = useConfirmDialog()
@@ -68,12 +68,30 @@ function App() {
   const [activeSession, setActiveSession] = useState<string | null>(null)
   const [selectedSession, setSelectedSession] = useState<string | null>(null)
   const [activeTool, setActiveTool] = useState<Tool>('navigate')
+  const [eraseRadius, setEraseRadius] = useState(0.15)
+  const [eraseMarks, setEraseMarks] = useState(0)
+  const [eraseTarget, setEraseTarget] = useState<string>('')
   const [connected, setConnected] = useState(false)
   const [serverAlive, setServerAlive] = useState(false)
   const [activePanel, setActivePanel] = useState<'sessions' | 'segments' | 'bim' | 'team' | 'analysis' | 'assistant' | null>('sessions')
 
   const [bimModels, setBimModels] = useState<IFCLoadResult[]>([])
   const [sidebarWidth, setSidebarWidth] = useState(280)
+  // Right-side collapsible AI chat dock (user 2026-08-28: the chat lives on the
+  // right, always at hand — works with or without a session/segmentation).
+  const [assistantOpen, setAssistantOpen] = useState<boolean>(
+    () => localStorage.getItem('stac.assistantOpen') !== '0')
+  const [assistantWidth, setAssistantWidth] = useState<number>(
+    () => Number(localStorage.getItem('stac.assistantWidth')) || 360)
+  // Model state reported by the chat panel — drives the menubar icon (gray
+  // until the model is loaded, lit when up).
+  const [vlmStatus, setVlmStatus] = useState<'up' | 'loading' | 'busy' | 'down' | null>(null)
+  const toggleAssistant = useCallback(() => {
+    setAssistantOpen((o) => {
+      localStorage.setItem('stac.assistantOpen', o ? '0' : '1')
+      return !o
+    })
+  }, [])
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [pointSize, setPointSize] = useState(5.0)
   // Potree LOD point budget (max points rendered at once). Higher = more of the
@@ -387,27 +405,8 @@ function App() {
     } catch { /* ignore */ }
   }, [])
 
-  const openShapeModal = useCallback(async () => {
-    setShapeResult(null)
-    setShapeProgress({})
-    setShapeOverall({ phase: 'idle' })
-    setShowShapeModal(true)
-    if (!activeSession) return
-    try {
-      const res = await fetch(`/api/segmentation/shape/status/${activeSession}`)
-      const data = await res.json()
-      if (data.ok) {
-        const statusMap: Record<number, { has_pkl: boolean; has_mesh: boolean }> = {}
-        const selectedIds = new Set<number>()
-        for (const inst of data.instances) {
-          statusMap[inst.id] = { has_pkl: inst.has_pkl, has_mesh: inst.has_mesh }
-          if (!inst.has_mesh) selectedIds.add(inst.id)
-        }
-        setShapeStatus(statusMap)
-        setShapeSelected(selectedIds)
-      }
-    } catch { /* ignore */ }
-  }, [activeSession])
+  // (the old standalone Shape modal opener was removed — the 🧩 Meshing modal's
+  // Object button covers it, sharing the same segment selection)
 
   // Poll progress while running
   useEffect(() => {
@@ -495,22 +494,16 @@ function App() {
   }
   const [tsdfProgress, setTsdfProgress] = useState<Record<number, TsdfInstanceProgress>>({})
   const [tsdfOverall, setTsdfOverall] = useState<{ phase: string; total?: number; done?: number }>({ phase: 'idle' })
-  // Tunables — exposed so we can sweep voxel/sdf_trunc on the same 3 elements
-  // without re-deploying. Defaults are the room-scale lidar sweet spot.
-  const [tsdfVoxel, setTsdfVoxel] = useState(0.015)
-  const [tsdfTrunc, setTsdfTrunc] = useState(0.04)
-  const [tsdfDepthMax, setTsdfDepthMax] = useState(5.0)
-  const [tsdfDilate, setTsdfDilate] = useState(3)
 
   // Whole-scene TSDF (no instance filtering). Tracked independently from
   // per-instance progress so both can be displayed in the same modal.
+  // (scene-level jobs no longer have UI buttons — user 2026-08-29 — but the
+  // polling effect still tracks them so an externally launched run finishes
+  // cleanly; only the setters are needed.)
   const [tsdfSceneRunning, setTsdfSceneRunning] = useState(false)
-  const [tsdfScene, setTsdfScene] = useState<{ phase: string; elapsed?: number; mesh?: string; error?: string }>({ phase: 'idle' })
-
-  // Whole-scene Poisson (Option B — meshes the cleaned cloud directly). Same modal,
-  // tracked independently so it can run/show alongside the TSDF scene job.
+  const [, setTsdfScene] = useState<{ phase: string; elapsed?: number; mesh?: string; error?: string }>({ phase: 'idle' })
   const [poissonSceneRunning, setPoissonSceneRunning] = useState(false)
-  const [poissonScene, setPoissonScene] = useState<{ phase: string; elapsed?: number; mesh?: string; error?: string }>({ phase: 'idle' })
+  const [, setPoissonScene] = useState<{ phase: string; elapsed?: number; mesh?: string; error?: string }>({ phase: 'idle' })
 
   const refreshTsdfStatus = useCallback(async () => {
     if (!activeSession) return
@@ -1261,7 +1254,10 @@ function App() {
   return (
     <div
       className={`app-layout ${!panelOpen ? 'panel-collapsed' : ''}`}
-      style={panelOpen ? { '--sidebar-width': `${sidebarWidth}px` } as React.CSSProperties : undefined}
+      style={{
+        ...(panelOpen ? { '--sidebar-width': `${sidebarWidth}px` } : {}),
+        '--assistant-width': assistantOpen ? `${assistantWidth}px` : '0px',
+      } as React.CSSProperties}
     >
       {/* Hidden input used by the per-session "+" button to upload a video */}
       <input
@@ -1396,6 +1392,26 @@ function App() {
                 <span className="menu-shortcut">X</span>
               </button>
               <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => setActiveTool(activeTool === 'erase' ? 'navigate' : 'erase'))}>
+                <Eraser size={14} /> Erase Points
+                {activeTool === 'erase' && <span className="menu-shortcut">ON</span>}
+              </button>
+              <button className="menu-dropdown-item"
+                onClick={() => menuAction(async () => {
+                  if (!activeSession) return
+                  try {
+                    const r = await fetch('/api/segmentation/erase/undo', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ session_id: activeSession }),
+                    })
+                    const d = await r.json()
+                    setStatusMessage(d.ok ? `↩ erase undone (${(d.restored || 0).toLocaleString()} pts restored)` : '↩ nothing to undo')
+                  } catch { setStatusMessage('↩ undo failed') }
+                })}>
+                <Undo2 size={14} /> Undo Erase
+              </button>
+              <button className="menu-dropdown-item"
                 disabled={sabanaVisible}
                 style={sabanaVisible ? { opacity: 0.4, pointerEvents: 'none' } : {}}
                 onClick={() => menuAction(() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align'))}>
@@ -1438,6 +1454,20 @@ function App() {
 
         {/* User Menu — right side */}
         <div className="menu-spacer" />
+        {/* AI chat dock toggle — top right, left of the logged-in user.
+            Gray while the model is unloaded/loading; lit when it is up. */}
+        <div className="menu-item">
+          <button
+            className={`menu-trigger chat-trigger ${assistantOpen ? 'open' : ''} ${vlmStatus === 'up' ? 'model-up' : 'model-off'}`}
+            onClick={toggleAssistant}
+            title={`AI Assistant — ${
+              vlmStatus === 'up' ? 'model loaded'
+              : vlmStatus === 'loading' ? 'loading the model…'
+              : vlmStatus === 'busy' ? 'GPU busy — model unloaded'
+              : 'model unloaded'}`}>
+            <Sparkles size={14} />
+          </button>
+        </div>
         <div className="menu-item">
           <button className={`menu-trigger user-trigger ${openMenu === 'user' ? 'open' : ''}`}
             onClick={() => toggleMenu('user')}>
@@ -1507,12 +1537,7 @@ function App() {
             <BarChart3 size={18} />
           </button>
         )}
-        {hasSession && (
-          <button className={`activity-btn assistant-btn ${activePanel === 'assistant' ? 'active' : ''}`}
-            onClick={() => togglePanel('assistant')} title="AI Assistant — ask & measure">
-            <Sparkles size={18} />
-          </button>
-        )}
+        {/* Chat lives ONLY on the right dock (user 2026-08-28) — no toggle here */}
         <div className="activity-spacer" />
         <button className={`activity-btn ${activePanel === 'team' ? 'active' : ''}`}
           onClick={() => togglePanel('team')} title="Team">
@@ -2052,15 +2077,10 @@ function App() {
                     <Crosshair size={14} style={{ marginRight: '6px', verticalAlign: 'middle' }} /> Segmentation
                   </button>
                   <button className="bim-action-btn upload" style={{ flex: 1 }}
-                    disabled={segments.length === 0}
-                    onClick={openShapeModal}>
-                    🧊 Shape
-                  </button>
-                  <button className="bim-action-btn upload" style={{ flex: 1 }}
                     disabled={!activeSession}
-                    title="Reconstruct via Open3D TSDF — per-object (needs segmentation) or whole-scene"
+                    title="Per-object meshing: Object (generative) or Mesh (RANSAC + Poisson)"
                     onClick={openTsdfModal}>
-                    🧱 TSDF
+                    🧩 Meshing
                   </button>
                 </div>
               </div>
@@ -2139,14 +2159,6 @@ function App() {
               <BIMAnalysisPanel meta={sabanaFullMeta} sessionId={activeSession} />
             )}
 
-            {/* Immersive AI Assistant Panel */}
-            {activePanel === 'assistant' && (
-              <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-                <div className="panel-header"><Sparkles size={14} /> AI Assistant</div>
-                <AssistantPanel sessionId={activeSession} viewport={viewportRef} />
-              </div>
-            )}
-
           </div>
           {/* Resize handle */}
           <div
@@ -2196,6 +2208,103 @@ function App() {
                   onClick={() => setActiveTool('section-box')} title="Section Box"><Scissors size={16} /></button>
                 <button className={`tool-btn ${activeTool === 'align' ? 'active' : ''}`}
                   onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')} title="Align Cloud"><Move size={16} /></button>
+                <span style={{ position: 'relative', display: 'inline-block' }}>
+                  <button className={`tool-btn ${activeTool === 'erase' ? 'active' : ''}`}
+                    onClick={() => setActiveTool(activeTool === 'erase' ? 'navigate' : 'erase')}
+                    title="Mark zones (right-click) to erase or reassign"><Brush size={16} /></button>
+                  {/* Eraser sub-panel (user 2026-08-29): radius + undo live UNDER
+                      the eraser button — they are eraser functions, not toolbar
+                      tools. Visible only while the eraser is the active tool. */}
+                  {activeTool === 'erase' && (
+                    <div style={{
+                      position: 'absolute', top: 'calc(100% + 6px)', left: '50%',
+                      transform: 'translateX(-50%)', zIndex: 60,
+                      display: 'flex', flexDirection: 'column', gap: 8,
+                      background: 'rgba(24,26,31,0.97)',
+                      border: '1px solid rgba(255,255,255,0.14)',
+                      borderRadius: 8, padding: '10px 12px',
+                      boxShadow: '0 6px 18px rgba(0,0,0,0.45)',
+                      whiteSpace: 'nowrap',
+                    }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+                        title="Erase sphere radius">
+                        <input type="range" min={3} max={150} step={1}
+                          value={Math.round(eraseRadius * 100)}
+                          onChange={e => setEraseRadius(Number(e.target.value) / 100)}
+                          style={{ width: 120, accentColor: '#ff5555' }} />
+                        <span style={{ fontSize: 11, minWidth: 44, opacity: 0.85 }}>
+                          {Math.round(eraseRadius * 100)} cm
+                        </span>
+                      </span>
+                      <button className="tool-btn"
+                        disabled={eraseMarks === 0}
+                        style={{
+                          width: '100%', display: 'flex', alignItems: 'center',
+                          gap: 6, justifyContent: 'center',
+                          background: eraseMarks > 0 ? '#a83232' : undefined,
+                          opacity: eraseMarks > 0 ? 1 : 0.5,
+                        }}
+                        title="Erase the marked zones (visible segments only; points become unsegmented)"
+                        onClick={() => viewportRef.current?.commitErase(null, undefined,
+                          segments.filter(s => s.visible).map(s => s.id))}>
+                        <Eraser size={14} /> <span style={{ fontSize: 11 }}>Erase ({eraseMarks})</span>
+                      </button>
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <select value={eraseTarget}
+                          onChange={e => setEraseTarget(e.target.value)}
+                          style={{ flex: 1, fontSize: 11, background: '#1d2026', color: '#ddd', border: '1px solid rgba(255,255,255,0.18)', borderRadius: 5, padding: '4px 6px' }}>
+                          <option value="">Reassign to…</option>
+                          {segments.map(s => (
+                            <option key={s.id} value={String(s.id)}>{s.label}_{s.id}</option>
+                          ))}
+                          <option value="new">➕ New segment…</option>
+                        </select>
+                        <button className="tool-btn"
+                          disabled={eraseMarks === 0 || eraseTarget === ''}
+                          style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: (eraseMarks > 0 && eraseTarget !== '') ? 1 : 0.5 }}
+                          title="Assign the marked zones to the chosen segment (includes unsegmented points)"
+                          onClick={() => {
+                            const visibles = segments.filter(s => s.visible).map(s => s.id)
+                            if (eraseTarget === 'new') {
+                              const name = window.prompt('New segment name:')
+                              if (!name || !name.trim()) return
+                              viewportRef.current?.commitErase(null, name.trim(), visibles)
+                            } else {
+                              viewportRef.current?.commitErase(Number(eraseTarget), undefined, visibles)
+                            }
+                            setEraseTarget('')
+                          }}>
+                          <Check size={14} /> <span style={{ fontSize: 11 }}>Assign</span>
+                        </button>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button className="tool-btn"
+                          disabled={eraseMarks === 0}
+                          style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'center', opacity: eraseMarks > 0 ? 1 : 0.5 }}
+                          title="Remove all marks without erasing"
+                          onClick={() => viewportRef.current?.clearEraseMarks()}>
+                          <X size={14} /> <span style={{ fontSize: 11 }}>Clear</span>
+                        </button>
+                        <button className="tool-btn" style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'center' }}
+                          title="Undo the last applied commit"
+                          onClick={async () => {
+                            if (!activeSession) return
+                            try {
+                              const r = await fetch('/api/segmentation/erase/undo', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ session_id: activeSession }),
+                              })
+                              const d = await r.json()
+                              setStatusMessage(d.ok ? `↩ erase undone (${(d.restored || 0).toLocaleString()} pts restored)` : '↩ nothing to undo')
+                            } catch { setStatusMessage('↩ undo failed') }
+                          }}>
+                          <Undo2 size={14} /> <span style={{ fontSize: 11 }}>Undo</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </span>
                 <button className="tool-btn" onClick={() => viewportRef.current?.clearMeasurements()}
                   title="Clear Measurements"><Trash2 size={16} /></button>
                 <button className="tool-btn" onClick={() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') }}
@@ -2329,6 +2438,9 @@ function App() {
             confidenceThreshold={sabanaVisible ? 0.0 : confidenceThreshold}
             activeSession={activeSession}
             activeTool={activeTool}
+            eraseRadius={eraseRadius}
+            onEraseRadiusChange={setEraseRadius}
+            onEraseMarksChanged={setEraseMarks}
             showAxes={showAxes}
             showGrid={showGrid}
             pipelineRunning={!!pipelineRunning && pipelineRunning.status === 'running'}
@@ -2337,6 +2449,34 @@ function App() {
             onStatusMessage={setStatusMessage}
             onSegments={setSegments}
             onPipelineProgress={handlePipelineProgress}
+            onVolumeChanged={async (params) => {
+              // Gizmo edit finished: persist the volume, then re-evaluate its
+              // collision state against the scene and tint it accordingly.
+              if (!activeSession) return
+              try {
+                await fetch('/api/scene/volumes/update', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ session_id: activeSession, ...params }),
+                })
+                const er = await fetch('/api/scene/volumes/evaluate', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ session_id: activeSession, volume_id: params.volume_id }),
+                })
+                const ed = await er.json()
+                const occ = 1 - (typeof ed.free_fraction === 'number' ? ed.free_fraction : 1)
+                viewportRef.current?.setVolumeStatus(params.volume_id,
+                  occ < 0.02 ? 'free' : occ < 0.12 ? 'touching' : 'colliding')
+              } catch { /* non-fatal: the volume stays its last color */ }
+            }}
+            onVolumeDeleted={async (volumeId) => {
+              if (!activeSession) return
+              try {
+                await fetch('/api/scene/volumes/delete', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ session_id: activeSession, volume_id: volumeId }),
+                })
+              } catch { /* ignore */ }
+            }}
             onHasConfidence={(has) => {
               setHasConfidence(has)
             }}
@@ -2488,6 +2628,51 @@ function App() {
           )}
         </div>
       </main>
+
+      {/* ── Right-side collapsible AI Assistant dock ─────────────────────
+          Always mounted (the conversation survives collapse); the grid column
+          animates to 0 when hidden. Works without a session or segmentation —
+          the backend falls back to general chat. */}
+      <aside className={`assistant-dock ${assistantOpen ? '' : 'closed'}`}>
+        {/* Resize handle on the dock's left edge — same drag behaviour as the
+            left sidebar's, mirrored (dragging left widens the dock) */}
+        {assistantOpen && (
+          <div
+            className="assistant-resize-handle"
+            onMouseDown={(e) => {
+              e.preventDefault()
+              const startX = e.clientX
+              const startW = assistantWidth
+              const onMove = (ev: MouseEvent) => {
+                const newW = Math.max(260, Math.min(640, startW - (ev.clientX - startX)))
+                setAssistantWidth(newW)
+              }
+              const onUp = () => {
+                document.removeEventListener('mousemove', onMove)
+                document.removeEventListener('mouseup', onUp)
+                document.body.style.cursor = ''
+                document.body.style.userSelect = ''
+                setAssistantWidth((w) => {
+                  localStorage.setItem('stac.assistantWidth', String(w))
+                  return w
+                })
+              }
+              document.addEventListener('mousemove', onMove)
+              document.addEventListener('mouseup', onUp)
+              document.body.style.cursor = 'col-resize'
+              document.body.style.userSelect = 'none'
+            }}
+          />
+        )}
+        <div className="assistant-dock-header">
+          <span className="assistant-dock-title"><Sparkles size={14} /> AI Assistant</span>
+          <button className="assistant-dock-close" title="Hide chat" onClick={toggleAssistant}>
+            <ChevronRight size={16} />
+          </button>
+        </div>
+        <AssistantPanel sessionId={activeSession} viewport={viewportRef}
+          onVlmStatus={setVlmStatus} />
+      </aside>
 
       {/* Pipeline Config Dialog */}
       {
@@ -3016,13 +3201,15 @@ function App() {
         <div className="admin-overlay" style={{ zIndex: 2000 }}>
           <div className="admin-panel" style={{ maxWidth: 540, maxHeight: '80vh', overflow: 'auto' }}>
             <div className="admin-header">
-              <h2>🧱 TSDF Reconstruction</h2>
+              <h2>🧩 Mesh Generation</h2>
               <button className="admin-close" onClick={() => setShowTsdfModal(false)}>✕</button>
             </div>
             <div style={{ padding: 16 }}>
               <p style={{ color: 'var(--text-secondary)', marginBottom: 12, fontSize: 13 }}>
-                Volumetric integration via Open3D ScalableTSDFVolume. Best for planar/architectural
-                geometry (walls, floors). Existing meshes will be overwritten.
+                Select the segments, then choose: <strong>Object</strong> (generative
+                reconstruction, visual asset) or <strong>Mesh</strong> (RANSAC fitted
+                surface + Poisson from the object's own cloud — both, to compare).
+                Existing meshes are overwritten.
               </p>
 
               {(() => {
@@ -3098,7 +3285,7 @@ function App() {
                       )}
                       {checked && !tsdfRunning && st?.has_mesh && (
                         <div style={{ fontSize: 11, color: 'var(--warning)', padding: '2px 0 0 24px' }}>
-                          ⚠️ This object already has a TSDF mesh. Running will overwrite it.
+                          ⚠️ This object already has a mesh. Running will overwrite it.
                         </div>
                       )}
                     </div>
@@ -3112,53 +3299,10 @@ function App() {
                   background: 'var(--bg-tertiary)', borderRadius: 8,
                   color: 'var(--text-secondary)',
                 }}>
-                  No segmented objects in this session. Use{' '}
-                  <strong style={{ color: 'var(--text-primary)' }}>🌐 Reconstruct whole scene</strong>{' '}
-                  below to integrate the entire scan into one mesh — or run Segmentation
-                  first to reconstruct per object.
+                  No segmented objects in this session. Run Segmentation first —
+                  meshing is per object.
                 </div>
               )}
-
-              {/* Tunables — sweep these for A/B comparison without code changes */}
-              <div style={{ marginTop: 16, padding: 12, background: 'var(--bg-tertiary)', borderRadius: 8 }}>
-                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
-                  Parameters
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, fontSize: 12 }}>
-                  <label style={{ color: 'var(--text-secondary)' }}>
-                    Voxel (m): <strong style={{ color: 'var(--text-primary)' }}>{tsdfVoxel.toFixed(3)}</strong>
-                    <input type="range" min={0.005} max={0.05} step={0.005}
-                      value={tsdfVoxel} disabled={tsdfRunning}
-                      onChange={e => setTsdfVoxel(parseFloat(e.target.value))}
-                      style={{ width: '100%' }} />
-                  </label>
-                  <label style={{ color: 'var(--text-secondary)' }}>
-                    SDF trunc (m): <strong style={{ color: 'var(--text-primary)' }}>{tsdfTrunc.toFixed(3)}</strong>
-                    <input type="range" min={0.01} max={0.15} step={0.005}
-                      value={tsdfTrunc} disabled={tsdfRunning}
-                      onChange={e => setTsdfTrunc(parseFloat(e.target.value))}
-                      style={{ width: '100%' }} />
-                  </label>
-                  <label style={{ color: 'var(--text-secondary)' }}>
-                    Max depth (m): <strong style={{ color: 'var(--text-primary)' }}>{tsdfDepthMax.toFixed(1)}</strong>
-                    <input type="range" min={1} max={10} step={0.5}
-                      value={tsdfDepthMax} disabled={tsdfRunning}
-                      onChange={e => setTsdfDepthMax(parseFloat(e.target.value))}
-                      style={{ width: '100%' }} />
-                  </label>
-                  <label style={{ color: 'var(--text-secondary)' }}>
-                    Dilate (px): <strong style={{ color: 'var(--text-primary)' }}>{tsdfDilate}</strong>
-                    <input type="range" min={0} max={8} step={1}
-                      value={tsdfDilate} disabled={tsdfRunning}
-                      onChange={e => setTsdfDilate(parseInt(e.target.value))}
-                      style={{ width: '100%' }} />
-                  </label>
-                </div>
-                <div style={{ fontSize: 10.5, color: 'var(--text-secondary)', marginTop: 8, lineHeight: 1.4 }}>
-                  Smaller voxel → more detail, more memory. SDF trunc defines the reconciliation
-                  window (typically 2–3× voxel). Dilate fills gaps between sparse traceability seeds.
-                </div>
-              </div>
 
               {tsdfOverall.phase !== 'idle' && (tsdfRunning || tsdfOverall.phase === 'done' || tsdfOverall.phase === 'error') && (
                 <div style={{
@@ -3184,160 +3328,96 @@ function App() {
                 </div>
               )}
 
-              <button
-                className="bim-action-btn upload"
-                style={{
-                  width: '100%', padding: 12, fontWeight: 600, fontSize: 14, marginTop: 8,
-                  opacity: tsdfRunning || tsdfSelected.size === 0 ? 0.5 : 1,
-                }}
-                disabled={tsdfRunning || tsdfSelected.size === 0}
-                onClick={async () => {
-                  if (!activeSession) return
-                  setTsdfRunning(true)
-                  setTsdfProgress({})
-                  setTsdfOverall({ phase: 'integrating', total: tsdfSelected.size, done: 0 })
-                  try {
-                    const res = await fetch('/api/segmentation/tsdf/export', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        session_id: activeSession,
-                        instance_ids: [...tsdfSelected],
-                        voxel_length: tsdfVoxel,
-                        sdf_trunc: tsdfTrunc,
-                        depth_trunc: tsdfDepthMax,
-                        dilate_radius: tsdfDilate,
-                      }),
-                    })
-                    const data = await res.json()
-                    if (data.ok) {
-                      setStatusMessage(`TSDF: reconstructing ${data.count} object(s) in background`)
-                    } else {
-                      setStatusMessage(`TSDF error: ${data.detail || 'Unknown'}`)
-                      setTsdfRunning(false)
-                    }
-                  } catch (err: any) {
-                    setStatusMessage(`TSDF error: ${err.message}`)
-                    setTsdfRunning(false)
-                  }
-                }}
-              >
-                {tsdfRunning
-                  ? `🔄 Reconstructing ${tsdfOverall.done || 0}/${tsdfOverall.total || 0}…`
-                  : `🚀 Start (${tsdfSelected.size} object${tsdfSelected.size !== 1 ? 's' : ''})`}
-              </button>
-
-              {/* Whole-scene TSDF — integrates every frame's depth into one
-                  global mesh, no per-instance filtering. Useful as a context
-                  baseline / for comparison. */}
-              <div style={{ marginTop: 12, borderTop: '1px solid #2a2a2a', paddingTop: 12 }}>
+              {/* Two ways to mesh the selected segments (user 2026-08-29):
+                  Object = generative MeshFlow asset; Mesh = RANSAC + Poisson
+                  (both, cloud-anchored, so they can be compared). */}
+              <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
                 <button
                   className="bim-action-btn upload"
                   style={{
-                    width: '100%', padding: 12, fontWeight: 600, fontSize: 14,
-                    opacity: tsdfSceneRunning || tsdfRunning ? 0.5 : 1,
+                    flex: 1, padding: 12, fontWeight: 600, fontSize: 14,
+                    opacity: shapeRunning || tsdfRunning || tsdfSelected.size === 0 ? 0.5 : 1,
                   }}
-                  disabled={tsdfSceneRunning || tsdfRunning}
-                  title="Integrate every frame into ONE global TSDF mesh of the whole scene (no instance filtering)"
+                  disabled={shapeRunning || tsdfRunning || tsdfSelected.size === 0}
+                  title="Generative object reconstruction (MeshFlow) — visual asset, not metric"
                   onClick={async () => {
-                    if (!activeSession) return
-                    setTsdfSceneRunning(true)
-                    setTsdfScene({ phase: 'starting' })
+                    if (!activeSession || shapeBusyRef.current) return
+                    shapeBusyRef.current = true
+                    setShapeRunning(true)
+                    setShapeResult(null)
+                    setShapeProgress({})
+                    setShapeOverall({ phase: 'exporting_pkl', total: tsdfSelected.size, done: 0 })
                     try {
-                      // No mandamos voxel/trunc/depth desde el UI — el endpoint
-                      // de scene tiene defaults de máximo detalle (voxel 5mm,
-                      // conf_min 192, smooth 2) distintos al per-instance.
-                      const res = await fetch('/api/segmentation/tsdf/scene_export', {
+                      const res = await fetch('/api/segmentation/shape/export', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                           session_id: activeSession,
+                          instance_ids: [...tsdfSelected],
+                          auto_reconstruct: true,
                         }),
                       })
                       const data = await res.json()
                       if (data.ok) {
-                        setStatusMessage('TSDF scene: integrating whole scan in background')
+                        setStatusMessage(`Object: reconstructing ${data.count} object(s) in background`)
+                        if (!data.reconstructing) setShapeRunning(false)
                       } else {
-                        setStatusMessage(`TSDF scene error: ${data.detail || 'Unknown'}`)
-                        setTsdfSceneRunning(false)
+                        setStatusMessage(`Object error: ${data.detail || 'Unknown'}`)
+                        setShapeRunning(false)
                       }
                     } catch (err: any) {
-                      setStatusMessage(`TSDF scene error: ${err.message}`)
-                      setTsdfSceneRunning(false)
+                      setStatusMessage(`Object error: ${err.message}`)
+                      setShapeRunning(false)
+                    } finally {
+                      shapeBusyRef.current = false
                     }
                   }}
                 >
-                  {tsdfSceneRunning
-                    ? `🔄 Integrating scene (${tsdfScene.phase})…`
-                    : '🌐 Reconstruct whole scene'}
+                  {shapeRunning
+                    ? `🔄 Object ${shapeOverall.done || 0}/${shapeOverall.total || 0}…`
+                    : `🧊 Object (${tsdfSelected.size})`}
                 </button>
-                {(tsdfScene.phase === 'done' || tsdfScene.phase === 'error' || tsdfSceneRunning) && (
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
-                    {tsdfScene.phase === 'done' && (
-                      <>✅ Scene mesh written: <code>{tsdfScene.mesh}</code></>
-                    )}
-                    {tsdfScene.phase === 'error' && (
-                      <>❌ {tsdfScene.error || 'Scene integration failed'}</>
-                    )}
-                    {tsdfSceneRunning && tsdfScene.phase !== 'done' && tsdfScene.phase !== 'error' && (
-                      <>Phase: <b>{tsdfScene.phase}</b>{tsdfScene.elapsed !== undefined && ` · ${tsdfScene.elapsed.toFixed(0)}s`}</>
-                    )}
-                  </div>
-                )}
-
-                {/* Whole-scene Poisson (Option B) — meshes the cleaned cloud
-                    directly (denser than the neural depth the TSDF integrates),
-                    watertight. Writes its own scene_poisson/ folder → appears as a
-                    separate toggleable row in the TSDF mesh list below. */}
                 <button
                   className="bim-action-btn upload"
                   style={{
-                    width: '100%', padding: 12, fontWeight: 600, fontSize: 14, marginTop: 10,
-                    opacity: poissonSceneRunning || tsdfRunning ? 0.5 : 1,
+                    flex: 1, padding: 12, fontWeight: 600, fontSize: 14,
+                    opacity: tsdfRunning || shapeRunning || tsdfSelected.size === 0 ? 0.5 : 1,
                   }}
-                  disabled={poissonSceneRunning || tsdfRunning}
-                  title="Screened-Poisson surface straight from the cleaned point cloud (denser than the TSDF's neural depth, watertight). Adds a separate toggleable mesh."
+                  disabled={tsdfRunning || shapeRunning || tsdfSelected.size === 0}
+                  title="RANSAC fitted surfaces + Poisson from the object's own cloud — both meshes, for comparison"
                   onClick={async () => {
                     if (!activeSession) return
-                    setPoissonSceneRunning(true)
-                    setPoissonScene({ phase: 'starting' })
+                    setTsdfRunning(true)
+                    setTsdfProgress({})
+                    setTsdfOverall({ phase: 'surface_fit', total: tsdfSelected.size, done: 0 })
                     try {
-                      const res = await fetch('/api/segmentation/poisson/scene_export', {
+                      const res = await fetch('/api/segmentation/tsdf/export', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ session_id: activeSession }),
+                        body: JSON.stringify({
+                          session_id: activeSession,
+                          instance_ids: [...tsdfSelected],
+                        }),
                       })
                       const data = await res.json()
                       if (data.ok) {
-                        setStatusMessage('Poisson scene: meshing the cleaned cloud in background')
+                        setStatusMessage(`Mesh: ransac + poisson for ${data.count} object(s) in background`)
                       } else {
-                        setStatusMessage(`Poisson scene error: ${data.detail || 'Unknown'}`)
-                        setPoissonSceneRunning(false)
+                        setStatusMessage(`Mesh error: ${data.detail || 'Unknown'}`)
+                        setTsdfRunning(false)
                       }
                     } catch (err: any) {
-                      setStatusMessage(`Poisson scene error: ${err.message}`)
-                      setPoissonSceneRunning(false)
+                      setStatusMessage(`Mesh error: ${err.message}`)
+                      setTsdfRunning(false)
                     }
                   }}
                 >
-                  {poissonSceneRunning
-                    ? `🔄 Meshing Poisson (${poissonScene.phase})…`
-                    : '🟣 Poisson whole scene'}
+                  {tsdfRunning
+                    ? `🔄 Mesh ${tsdfOverall.done || 0}/${tsdfOverall.total || 0}…`
+                    : `🧩 Mesh (${tsdfSelected.size})`}
                 </button>
-                {(poissonScene.phase === 'done' || poissonScene.phase === 'error' || poissonSceneRunning) && (
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
-                    {poissonScene.phase === 'done' && (
-                      <>✅ Poisson mesh written: <code>{poissonScene.mesh}</code></>
-                    )}
-                    {poissonScene.phase === 'error' && (
-                      <>❌ {poissonScene.error || 'Poisson reconstruction failed'}</>
-                    )}
-                    {poissonSceneRunning && poissonScene.phase !== 'done' && poissonScene.phase !== 'error' && (
-                      <>Phase: <b>{poissonScene.phase}</b>{poissonScene.elapsed !== undefined && ` · ${poissonScene.elapsed.toFixed(0)}s`}</>
-                    )}
-                  </div>
-                )}
               </div>
+
             </div>
           </div>
         </div>

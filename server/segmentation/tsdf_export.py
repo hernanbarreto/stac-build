@@ -1063,7 +1063,13 @@ def export_tsdf_meshes(
         return []
     logger.info(f"[TSDF] backend={cam.backend}  poses={len(cam.pose_map)}")
 
-    # Depth source — first try Stray (sibling dir), then DA3 (output dir).
+    # Depth source chain (2026-08-29: per-object TSDF is THE individual-mesh
+    # path again — no whole-scene bake). Stray native depth first, then the
+    # PGSR precision renders (photometrically verified — the same depth the
+    # scene recipe integrates), then the backend's chunk depth (VGGT-Ω /
+    # VGGT-Long via maplong_run), then legacy DA3 .npy. The pgsr/mapanything
+    # loaders use the dict contract {depth, valid, K, ...} and carry their own
+    # per-frame K at depth resolution.
     stray_depth = None
     from segmentation.session_io import _find_stray_dir
     stray_dir = _find_stray_dir(session_dir)
@@ -1072,16 +1078,31 @@ def export_tsdf_meshes(
         if stray_depth is not None:
             logger.info(f"[TSDF] depth source: Stray {stray_dir} "
                         f"(shape={stray_depth[1][1]}x{stray_depth[1][0]})")
-    da3_depth = _resolve_da3_depth(output_dir) if stray_depth is None else None
-    if da3_depth is not None:
-        logger.info(f"[TSDF] depth source: DA3 .npy "
-                    f"(shape={da3_depth[1][1]}x{da3_depth[1][0]})")
+    dict_depth = None
+    if stray_depth is None:
+        dict_depth = _resolve_pgsr_render_depth(output_dir)
+        if dict_depth is not None:
+            logger.info(f"[TSDF] depth source: PGSR renders "
+                        f"(shape={dict_depth[1][1]}x{dict_depth[1][0]})")
+        else:
+            dict_depth = _resolve_mapanything_depth(output_dir)
+            if dict_depth is not None:
+                logger.info(f"[TSDF] depth source: backend chunk depth "
+                            f"(shape={dict_depth[1][1]}x{dict_depth[1][0]})")
+    da3_depth = None
+    if stray_depth is None and dict_depth is None:
+        da3_depth = _resolve_da3_depth(output_dir)
+        if da3_depth is not None:
+            logger.info(f"[TSDF] depth source: DA3 .npy "
+                        f"(shape={da3_depth[1][1]}x{da3_depth[1][0]})")
 
-    if stray_depth is None and da3_depth is None:
-        logger.error("[TSDF] no depth source found (no Stray depth/, no DA3 *_depth.npy)")
+    if stray_depth is None and dict_depth is None and da3_depth is None:
+        logger.error("[TSDF] no depth source found (no Stray depth/, no PGSR "
+                     "renders, no backend chunk depth, no DA3 *_depth.npy)")
         return []
 
-    depth_loader, (depth_h, depth_w) = stray_depth or da3_depth
+    _dict_contract = dict_depth is not None
+    depth_loader, (depth_h, depth_w) = stray_depth or dict_depth or da3_depth
 
     # RGB resolution — needed to scale K from RGB→depth and PLY pixel coords→depth.
     rgb_h: Optional[int] = None
@@ -1147,7 +1168,13 @@ def export_tsdf_meshes(
             if depth_pair is None:
                 skipped_no_depth += 1
                 continue
-            depth_m, depth_valid = depth_pair
+            K_frame = None
+            if _dict_contract:
+                depth_m = np.asarray(depth_pair["depth"], dtype=np.float32)
+                depth_valid = np.asarray(depth_pair["valid"], dtype=bool)
+                K_frame = depth_pair.get("K")   # already at depth resolution
+            else:
+                depth_m, depth_valid = depth_pair
 
             # Build the per-frame mask in depth-grid coords from this segment's
             # projected points — sparse seeds + dilation gives a usable region.
@@ -1180,11 +1207,15 @@ def export_tsdf_meshes(
             # Apply mask: zero outside the segment so TSDF only fuses our object.
             depth_masked = np.where(mask, depth_m, 0.0).astype(np.float32)
 
-            # Intrinsics at depth resolution.
-            K_rgb = cam.K_for(fidx)
-            if K_rgb is None:
-                continue
-            K_d = _intrinsics_for_depth(K_rgb, rgb_h, rgb_w, depth_h, depth_w)
+            # Intrinsics at depth resolution — the dict-contract loaders carry
+            # their own per-frame K (native/render grid); else scale RGB K.
+            if K_frame is not None:
+                K_d = np.asarray(K_frame, dtype=np.float64)
+            else:
+                K_rgb = cam.K_for(fidx)
+                if K_rgb is None:
+                    continue
+                K_d = _intrinsics_for_depth(K_rgb, rgb_h, rgb_w, depth_h, depth_w)
             intrinsic = o3d.camera.PinholeCameraIntrinsic(
                 width=depth_w, height=depth_h,
                 fx=float(K_d[0, 0]), fy=float(K_d[1, 1]),

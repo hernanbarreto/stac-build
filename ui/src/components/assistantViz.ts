@@ -155,10 +155,12 @@ export class AssistantViz {
         switch (e.tool) {
             case 'get_clearance':
             case 'get_distance':
+            case 'measure_between':
                 return this.drawSpan(r, a, now)
             case 'get_object_size':
             case 'get_object_volume':
             case 'get_span':
+            case 'get_extent':
                 return this.drawObjectBox(a.id as number, r, now)
             case 'get_position':
                 return this.drawPosition(a.id as number, r, now)
@@ -213,7 +215,10 @@ export class AssistantViz {
         // dimension label
         const dims = (r.width_m != null)
             ? `${r.width_m}×${r.height_m}×${r.depth_m} m`
-            : (r.bbox_volume_m3 != null ? `${r.bbox_volume_m3} m³` : `${r.span_m} m`)
+            : (r.bbox_volume_m3 != null ? `${r.bbox_volume_m3} m³`
+                : (Array.isArray(r.size_m)
+                    ? `${(r.size_m as number[]).map((v) => v.toFixed(2)).join('×')} m`
+                    : `${r.span_m} m`))
         const center = new THREE.Vector3().fromArray(o.obb.center)
         const label = labelSprite(`${o.label}: ${dims}`, '#f0c674')
         label.position.copy(center).y += half[1] + 0.15
@@ -240,28 +245,142 @@ export class AssistantViz {
     }
 
     private drawTilt(id: number | undefined, r: Record<string, unknown>, tool: string, now: number): THREE.Box3 | null {
+        // Concrete angle display: the REAL reference axis (true vertical /
+        // horizontal), the object's REAL tilted axis (from its OBB, leaning the
+        // way the object actually leans), and between them a swept angle arc —
+        // translucent wedge + arc + arrowhead — while the label counts up to
+        // the tool-measured value. Nothing is exaggerated: the drawn angle IS
+        // the reported one.
         const c = this.objCenter(id)
         if (!c) return null
         const o = this.objects.get(id!)
-        const h = o?.obb ? o.obb.half_extents[1] : 1
-        const len = Math.max(0.6, h)
+        const deg = ((r.plumb_deviation_deg ?? r.level_deviation_deg) as number) ?? 0
+        const mmm = r.deviation_mm_per_m != null ? `${r.deviation_mm_per_m}` : '—'
         const up = new THREE.Vector3(0, 1, 0)
-        const deg = (r.plumb_deviation_deg ?? r.level_deviation_deg) as number
-        // reference (true vertical/horizontal) + measured axis tilted by deg
+
+        // Real object axes (world columns of the OBB rotation)
+        let axes: THREE.Vector3[] = []
+        let half = [1, 1, 1]
+        if (o?.obb) {
+            const e = matrixFromStore(o.obb.transform).elements  // column-major
+            axes = [new THREE.Vector3(e[0], e[1], e[2]).normalize(),
+                    new THREE.Vector3(e[4], e[5], e[6]).normalize(),
+                    new THREE.Vector3(e[8], e[9], e[10]).normalize()]
+            half = o.obb.half_extents
+        }
+
+        let ref: THREE.Vector3
+        let planeN: THREE.Vector3
+        let len: number
+        if (tool === 'get_plumb') {
+            // reference = true vertical; tilt plane = the plane the object leans in
+            ref = up.clone()
+            let vAxis = up.clone(), vDot = 0, vLen = 1
+            axes.forEach((ax, i) => {
+                const d = Math.abs(ax.dot(up))
+                if (d > vDot) { vDot = d; vAxis = ax.clone(); vLen = half[i] }
+            })
+            if (vAxis.dot(up) < 0) vAxis.negate()
+            len = Math.max(0.6, vLen)
+            planeN = new THREE.Vector3().crossVectors(up, vAxis)
+            if (planeN.lengthSq() < 1e-10) planeN.set(0, 0, 1)
+            planeN.normalize()
+        } else {
+            // level: reference = the horizontal projection of the surface's
+            // dominant axis; the measured axis lifts toward its real lean side
+            let hAxis: THREE.Vector3 | null = null, hLen = 1
+            axes.forEach((ax, i) => {
+                if (Math.abs(ax.dot(up)) < 0.7 && (hAxis === null || half[i] > hLen)) {
+                    hAxis = ax.clone(); hLen = half[i]
+                }
+            })
+            const raw: THREE.Vector3 = hAxis ?? new THREE.Vector3(1, 0, 0)
+            const lean = raw.y >= 0 ? 1 : -1
+            ref = raw.clone().setY(0)
+            if (ref.lengthSq() < 1e-10) ref.set(1, 0, 0)
+            ref.normalize()
+            len = Math.max(0.6, hLen)
+            planeN = new THREE.Vector3().crossVectors(ref, up).normalize()
+            if (lean < 0) planeN.negate()
+        }
+
+        const rad = THREE.MathUtils.degToRad(Math.abs(deg))
+        const meas = ref.clone().applyAxisAngle(planeN, rad).normalize()
+        const ok = Math.abs(deg) <= 3
+        const okCol = ok ? GOOD : BAD
+
         const g = new THREE.Group()
-        const ref = tool === 'get_plumb' ? up.clone() : new THREE.Vector3(1, 0, 0)
-        const refLine = dashed(c, c.clone().addScaledVector(ref, len), 0x8899aa)
-        const rad = THREE.MathUtils.degToRad(deg || 0)
-        const tilt = ref.clone().applyAxisAngle(new THREE.Vector3(0, 0, 1), rad).normalize()
-        const measLine = solid(c, c.clone().addScaledVector(tilt, len), deg > 3 ? BAD : GOOD)
-        g.add(refLine); g.add(measLine)
-        const label = labelSprite(`${(deg ?? 0).toFixed(2)}° · ${(r.deviation_mm_per_m ?? 0)} mm/m`,
-            deg > 3 ? '#f85149' : '#3fb950')
-        label.position.copy(c).addScaledVector(tilt, len).y += 0.1
-        g.add(label)
+        const refEnd = c.clone().addScaledVector(ref, len)
+        const measEnd = c.clone().addScaledVector(meas, len)
+        g.add(dashed(c, refEnd, 0x8899aa))
+        g.add(marker(c, ACCENT, 0.025))
+        // measured axis grows out of the vertex first
+        const measLine = solid(c, c.clone(), okCol)
+        g.add(measLine)
+        this.animators.push(revealLine(measLine, c, measEnd, null, now, 350))
+
+        // angle arc: wedge fan + arc border, revealed as a sweep ref → meas
+        const rArc = len * 0.55
+        const SEG = 48
+        const pts: THREE.Vector3[] = []
+        for (let i = 0; i <= SEG; i++) {
+            const d = ref.clone().applyAxisAngle(planeN, rad * (i / SEG))
+            pts.push(c.clone().addScaledVector(d, rArc))
+        }
+        const fanPos: number[] = [c.x, c.y, c.z]
+        pts.forEach((p) => fanPos.push(p.x, p.y, p.z))
+        const fanIdx: number[] = []
+        for (let i = 0; i < SEG; i++) fanIdx.push(0, i + 1, i + 2)
+        const fanGeom = new THREE.BufferGeometry()
+        fanGeom.setAttribute('position', new THREE.Float32BufferAttribute(fanPos, 3))
+        fanGeom.setIndex(fanIdx)
+        const wedge = new THREE.Mesh(fanGeom, new THREE.MeshBasicMaterial({
+            color: ACCENT2, transparent: true, opacity: 0.22,
+            side: THREE.DoubleSide, depthTest: false, depthWrite: false }))
+        wedge.renderOrder = 1996
+        const arcGeom = new THREE.BufferGeometry().setFromPoints(pts)
+        const arcLine = new THREE.Line(arcGeom,
+            new THREE.LineBasicMaterial({ color: ACCENT2, depthTest: false, transparent: true }))
+        arcLine.renderOrder = 1998
+        fanGeom.setDrawRange(0, 0)
+        arcGeom.setDrawRange(0, 0)
+        g.add(wedge); g.add(arcLine)
+
+        // arrowhead at the sweep end (appears when the sweep completes)
+        const tip = new THREE.Mesh(
+            new THREE.ConeGeometry(Math.max(0.012, rArc * 0.045), Math.max(0.035, rArc * 0.13), 10),
+            new THREE.MeshBasicMaterial({ color: ACCENT2, depthTest: false, transparent: true }))
+        const tangent = new THREE.Vector3().crossVectors(planeN, meas).normalize()
+        tip.position.copy(c).addScaledVector(meas, rArc)
+        tip.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tangent)
+        tip.visible = false
+        tip.renderOrder = 1999
+        g.add(tip)
+
+        // counting label at the arc bisector: big degrees + kind · mm/m
+        const kind = tool === 'get_plumb' ? 'plumb' : 'level'
+        const sub = `${kind} · ${mmm} mm/m`
+        const lbl = tiltLabel()
+        const mid = ref.clone().applyAxisAngle(planeN, rad / 2)
+        lbl.sprite.position.copy(c).addScaledVector(mid, rArc + len * 0.22)
+        lbl.set(0, sub, ok)
+        g.add(lbl.sprite)
+
         this.group.add(g)
-        this.animators.push(pulse(measLine, now, 900))
-        return new THREE.Box3().setFromObject(g)
+        const totalDeg = Math.abs(deg)
+        this.animators.push({
+            update: (nw) => {
+                const t = Math.min(1, (nw - now - 350) / 750)  // sweep after the line reveal
+                if (t <= 0) return false
+                const k = easeOut(t)
+                arcGeom.setDrawRange(0, Math.max(2, Math.floor(k * (SEG + 1))))
+                fanGeom.setDrawRange(0, Math.max(3, Math.floor(k * SEG) * 3))
+                lbl.set(totalDeg * k, sub, ok)
+                if (t >= 1) { lbl.set(totalDeg, sub, ok); tip.visible = true; return true }
+                return false
+            },
+        })
+        return new THREE.Box3().setFromPoints([c, refEnd, measEnd, lbl.sprite.position])
     }
 
     private volumeFrame(a: Record<string, unknown>): { M: THREE.Matrix4; size: number[] } | null {
@@ -343,19 +462,26 @@ export class AssistantViz {
         return new THREE.Box3().setFromObject(edges)
     }
 
-    // ── persistent user volumes (placed from the panel) ─────────────
+    // ── persistent user volumes (placed from the chat/panel) ────────
+    // Each volume is a GROUP transformed by position/rotation/scale (geometry
+    // built at the origin), so the viewer gizmo (TransformControls) can move /
+    // rotate / resize it directly (user 2026-08-29).
     addVolume(v: UserVolume) {
         this.removeVolume(v.volume_id)
         this.volumesMeta.set(v.volume_id, v)
-        const M = new THREE.Matrix4().makeRotationY(THREE.MathUtils.degToRad(v.yaw_deg))
-        M.setPosition(new THREE.Vector3().fromArray(v.center))
         const g = new THREE.Group()
         g.name = `userVolume_${v.volume_id}`
-        const box = translucentBox(v.size, VOL, 0.08); box.applyMatrix4(M)
-        const edges = boxEdges(v.size, VOL); edges.applyMatrix4(M)
+        g.userData.volumeId = v.volume_id
+        g.userData.baseSize = [...v.size]
+        const box = translucentBox(v.size, VOL, 0.08)
+        box.userData.volumeId = v.volume_id
+        box.userData.isVolumeBox = true
+        const edges = boxEdges(v.size, VOL)
         const label = labelSprite(v.name, '#c4b5ff')
-        label.position.copy(new THREE.Vector3().fromArray(v.center)).y += v.size[1] / 2 + 0.12
+        label.position.set(0, v.size[1] / 2 + 0.12, 0)
         g.add(box); g.add(edges); g.add(label)
+        g.position.fromArray(v.center)
+        g.rotation.y = THREE.MathUtils.degToRad(v.yaw_deg)
         this.group.add(g)
         this.volumes.set(v.volume_id, g)
     }
@@ -364,6 +490,62 @@ export class AssistantViz {
         const g = this.volumes.get(id)
         if (g) { this.group.remove(g); disposeDeep(g); this.volumes.delete(id) }
         this.volumesMeta.delete(id)
+    }
+
+    getVolumeGroup(id: number): THREE.Group | null {
+        return (this.volumes.get(id) as THREE.Group) ?? null
+    }
+
+    /** Box meshes only (no sprites/edges) — raycast targets for selection and
+     *  for the measurement tools, so volumes are measurable like the scene. */
+    pickableVolumes(): THREE.Object3D[] {
+        const out: THREE.Object3D[] = []
+        this.volumes.forEach((g) => g.traverse((c) => {
+            if ((c as THREE.Mesh).userData?.isVolumeBox) out.push(c)
+        }))
+        return out
+    }
+
+    /** Current params of a volume from its (possibly gizmo-edited) group. */
+    volumeParams(id: number): { volume_id: number; center: number[]; size: number[]; yaw_deg: number } | null {
+        const g = this.volumes.get(id) as THREE.Group | undefined
+        if (!g) return null
+        const base = (g.userData.baseSize as number[]) || [1, 1, 1]
+        const size = [base[0] * g.scale.x, base[1] * g.scale.y, base[2] * g.scale.z]
+        const params = {
+            volume_id: id,
+            center: [g.position.x, g.position.y, g.position.z],
+            size,
+            yaw_deg: THREE.MathUtils.radToDeg(g.rotation.y),
+        }
+        const meta = this.volumesMeta.get(id)
+        if (meta) { meta.center = params.center; meta.size = params.size; meta.yaw_deg = params.yaw_deg }
+        return params
+    }
+
+    /** Collision state vs the scene: free (violet) | touching (amber) |
+     *  colliding (red) — tints box + edges. */
+    setVolumeStatus(id: number, status: 'free' | 'touching' | 'colliding') {
+        const g = this.volumes.get(id)
+        if (!g) return
+        const color = status === 'colliding' ? BAD : status === 'touching' ? ACCENT2 : VOL
+        g.traverse((c) => {
+            const mat = (c as THREE.Mesh).material as THREE.MeshBasicMaterial | THREE.LineBasicMaterial | undefined
+            if (mat && 'color' in mat && !(c as THREE.Sprite).isSprite) mat.color.setHex(color)
+        })
+    }
+
+    setVolumeSolid(id: number, solid: boolean) {
+        const g = this.volumes.get(id)
+        if (!g) return
+        g.traverse((c) => {
+            const mesh = c as THREE.Mesh
+            if (mesh.userData?.isVolumeBox) {
+                const mat = mesh.material as THREE.MeshBasicMaterial
+                mat.opacity = solid ? 0.55 : 0.08
+                mat.depthWrite = solid
+            }
+        })
     }
 }
 
@@ -408,15 +590,49 @@ function disposeDeep(o: THREE.Object3D) {
     })
 }
 
+// ── two-line angle label (big degrees + subtitle), redrawable per frame so
+//    the value can count up while the arc sweeps ─────────────────────
+function tiltLabel(): { sprite: THREE.Sprite; set: (deg: number, sub: string, ok: boolean) => void } {
+    const W = 420, H = 190
+    const canvas = document.createElement('canvas')
+    canvas.width = W; canvas.height = H
+    const ctx = canvas.getContext('2d')!
+    const tex = new THREE.CanvasTexture(canvas)
+    tex.anisotropy = 4
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: tex, depthTest: false, transparent: true }))
+    const scale = 0.0016
+    sprite.scale.set(W * scale, H * scale, 1)
+    sprite.renderOrder = 2001
+    const set = (deg: number, sub: string, ok: boolean) => {
+        ctx.clearRect(0, 0, W, H)
+        ctx.fillStyle = 'rgba(13,17,23,0.85)'
+        roundRect(ctx, 0, 0, W, H, 18); ctx.fill()
+        ctx.strokeStyle = ok ? 'rgba(63,185,80,0.7)' : 'rgba(248,81,73,0.7)'
+        ctx.lineWidth = 3
+        roundRect(ctx, 2, 2, W - 4, H - 4, 16); ctx.stroke()
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'alphabetic'
+        ctx.fillStyle = ok ? '#3fb950' : '#f85149'
+        ctx.font = '700 84px Inter, system-ui, sans-serif'
+        ctx.fillText(`${deg.toFixed(2)}°`, W / 2, 106)
+        ctx.fillStyle = '#9aa7b8'
+        ctx.font = '500 40px Inter, system-ui, sans-serif'
+        ctx.fillText(sub, W / 2, 160)
+        tex.needsUpdate = true
+    }
+    return { sprite, set }
+}
+
 // ── animators (return true when finished) ───────────────────────────
 function revealLine(line: THREE.Line, a: THREE.Vector3, b: THREE.Vector3,
-    label: THREE.Sprite, start: number, dur: number): Animator {
+    label: THREE.Sprite | null, start: number, dur: number): Animator {
     return {
         update: (now) => {
             const t = Math.min(1, (now - start) / dur)
             const cur = a.clone().lerp(b, t)
             line.geometry.setFromPoints([a, cur])
-            if (t >= 1) { label.visible = true; return true }
+            if (t >= 1) { if (label) label.visible = true; return true }
             return false
         },
     }

@@ -20,14 +20,36 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from phase_r.instance_store import InstanceStore
 
 from .tools import SpatialTools
 
-_SYSTEM_TEMPLATE = """You are a spatial assistant for construction-site 3D reconstruction supervision.
+_SYSTEM_TEMPLATE = """You are the spatial intelligence of STAC-Build: you supervise a 3D-reconstructed construction scene, you KNOW what session/scene you are looking at, and every figure you give is tool-measured.
 
-SCENE INVENTORY (from the reconstruction; ids are stable):
+SESSION:
+{session}
+
+SCENE INVENTORY (from the reconstruction; ids are stable; y[lo..hi] is each object's vertical extent in metres):
 {inventory}
+
+SPATIAL AWARENESS:
+- Objects have PARTS. measure_between accepts feature1/feature2: top/upper,
+  bottom/base/lower (real surface bands), highest/lowest (extreme points),
+  centroid, closest — a curved ceiling has BOTH a lower and an upper part, a
+  ladder has a base and a top. Use axis="vertical" for free heights
+  (e.g. floor → ceiling upper part). get_extent tells where an object's lower
+  and upper parts are.
+- "What session/scene is this?" → get_session_info. "What are we looking at?"
+  → describe_scene (the VLM looks at the actual scan frames; interpretation,
+  vlm_proposed). Store durable conclusions with remember_note; check
+  recall_notes for context from earlier conversations.
+- Evaluation volumes: define_volume RESTS the box ON the floor by default,
+  centred on the floor (or anchor_id) — "a 2 m³ cube at the centre of the
+  floor" is define_volume(name, volume_m3=2). Measure from a volume with
+  measure_volume; list them with list_volumes. The user can then move/rotate/
+  resize the box with the viewer gizmo.
 
 RULES:
 - You NEVER estimate or invent numbers. EVERY figure must come from a tool call.
@@ -37,6 +59,8 @@ RULES:
 - If a tool returns {{"insufficient_data": true}}, say the data is insufficient —
   do NOT extrapolate or guess.
 - Declare uncertainty when a tool reports low confidence.
+- Descriptions from describe_scene / notes are vlm_proposed context, never
+  measurements.
 - Answer in the SAME LANGUAGE as the question.
 """
 
@@ -60,9 +84,47 @@ def _inventory(store: InstanceStore, limit: int = 60) -> str:
         m = store.get_metrics(iid).get("onion")
         if m and m.get("bimodal"):
             extra += " ⚠onion"
+        # vertical extent from the OBB corners — the model should KNOW each
+        # object's y-range up front (curved ceilings span a lower→upper band)
+        try:
+            obb = store.get_obb(iid)
+            if obb is not None:
+                T, aabb, _pos = obb
+                T = np.asarray(T, float)
+                lo = np.array([aabb[0], aabb[2], aabb[4]])
+                hi = np.array([aabb[1], aabb[3], aabb[5]])
+                corners = np.array([[x, y, z] for x in (lo[0], hi[0])
+                                    for y in (lo[1], hi[1])
+                                    for z in (lo[2], hi[2])])
+                w = (T[:3, :3] @ corners.T).T + T[:3, 3]
+                extra += f" y[{w[:, 1].min():.2f}..{w[:, 1].max():.2f}]m"
+        except Exception:  # noqa: BLE001
+            pass
         lines.append(f"  id={iid} {i['label']}{extra} "
                      f"(status={i['status']}, views={i['n_views']})")
     return "\n".join(lines) if lines else "  (no objects in store)"
+
+
+def _session_block(store: InstanceStore) -> str:
+    """Session header for the system prompt — the assistant must know WHAT it
+    is looking at (user 2026-08-29)."""
+    from pathlib import Path as _P
+    out_dir = _P(store.path).parent
+    session_dir = out_dir.parent
+    parts = session_dir.resolve().parts
+    project = parts[parts.index("projects") + 1] \
+        if "projects" in parts and parts.index("projects") + 1 < len(parts) else "?"
+    n_frames = len(list((session_dir / "frames").glob("*.jpg"))) \
+        if (session_dir / "frames").is_dir() else 0
+    lines = [f"project: {project}   session: {session_dir.name}   "
+             f"scan frames: {n_frames}   objects: {len(store.list_instances())}"]
+    desc = store.get_meta("scene_description")
+    if desc:
+        lines.append(f"scene description (vlm_proposed): {desc}")
+    else:
+        lines.append("scene description: not generated yet — call describe_scene "
+                     "when asked what the scene is")
+    return "\n".join(lines)
 
 
 class SpatialQA:
@@ -77,7 +139,8 @@ class SpatialQA:
             else Path(store_path).parent / "spatial_qa_logs"
 
     def system_prompt(self) -> str:
-        return _SYSTEM_TEMPLATE.format(inventory=_inventory(self.store))
+        return _SYSTEM_TEMPLATE.format(session=_session_block(self.store),
+                                       inventory=_inventory(self.store))
 
     def ask(self, question: str, images: list | None = None,
             max_iterations: int = 8) -> dict[str, Any]:

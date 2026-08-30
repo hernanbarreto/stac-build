@@ -420,6 +420,24 @@ class InstanceStore:
                         "size": _arr(row[3], (3,)).tolist(), "yaw_deg": row[4]})
         return out
 
+    def update_user_volume(self, volume_id: int, center=None, size=None,
+                           yaw_deg=None, name=None) -> dict | None:
+        """Partial update (gizmo edits: move/rotate/resize). Returns the
+        updated row, or None when the volume does not exist."""
+        v = self.get_user_volume(volume_id)
+        if v is None:
+            return None
+        self.conn.execute(
+            "UPDATE user_volumes SET name=?, center=?, size=?, yaw_deg=? "
+            "WHERE volume_id=?",
+            (name if name is not None else v["name"],
+             _blob(np.asarray(center if center is not None else v["center"], np.float32)),
+             _blob(np.asarray(size if size is not None else v["size"], np.float32)),
+             float(yaw_deg) if yaw_deg is not None else float(v["yaw_deg"]),
+             int(volume_id)))
+        self.conn.commit()
+        return self.get_user_volume(volume_id)
+
     def delete_user_volume(self, volume_id: int) -> None:
         self.conn.execute("DELETE FROM user_volumes WHERE volume_id=?", (volume_id,))
         self.conn.commit()

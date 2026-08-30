@@ -35,6 +35,8 @@ interface Message {
 interface Props {
     sessionId: string | null
     viewport: React.RefObject<ViewportHandle | null>
+    /** Model state changes (up | loading | busy | down) — drives the menubar icon. */
+    onVlmStatus?: (status: 'up' | 'loading' | 'busy' | 'down') => void
 }
 
 const SUGGESTIONS = [
@@ -55,6 +57,12 @@ const TOOL_LABELS: Record<string, string> = {
     evaluate_volume: 'evaluated volume', objects_in_volume: 'found objects in volume',
     fits_in_volume: 'checked fit', define_volume: 'defined volume',
     get_instance_history: 'read history',
+    measure_between: 'measured between parts', get_extent: 'measured extent',
+    get_session_info: 'read session info', describe_scene: 'looked at the scene',
+    remember_note: 'saved a note', recall_notes: 'recalled notes',
+    fits_through: 'checked passage', get_height_profile: 'height profile',
+    get_flatness_report: 'checked flatness', get_my_position: 'located camera',
+    get_distance_from_me: 'measured from camera',
 }
 
 function api(session: string | null, path: string, body: Record<string, unknown>) {
@@ -64,7 +72,7 @@ function api(session: string | null, path: string, body: Record<string, unknown>
     })
 }
 
-export default function AssistantPanel({ sessionId, viewport }: Props) {
+export default function AssistantPanel({ sessionId, viewport, onVlmStatus }: Props) {
     const [messages, setMessages] = useState<Message[]>([])
     const [input, setInput] = useState('')
     const [busy, setBusy] = useState(false)
@@ -74,6 +82,28 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
     const [volForm, setVolForm] = useState({ name: 'Bay', cx: '0', cy: '0', cz: '0', w: '2', h: '2', d: '2' })
     const scrollRef = useRef<HTMLDivElement>(null)
 
+    // Volumes: fetch, draw in the viewport, and tint by collision state.
+    const refreshVolumes = useCallback(async () => {
+        if (!sessionId) return
+        try {
+            const r = await api(sessionId, '/api/scene/volumes/list', {})
+            const d = await r.json()
+            if (!Array.isArray(d.volumes)) return
+            setVolumes(d.volumes)
+            for (const v of d.volumes as UserVolume[]) {
+                viewport.current?.addUserVolume(v)
+                try {
+                    const er = await api(sessionId, '/api/scene/volumes/evaluate',
+                        { volume_id: v.volume_id })
+                    const ed = await er.json()
+                    const occ = 1 - (typeof ed.free_fraction === 'number' ? ed.free_fraction : 1)
+                    viewport.current?.setVolumeStatus(v.volume_id,
+                        occ < 0.02 ? 'free' : occ < 0.12 ? 'touching' : 'colliding')
+                } catch { /* keep default color */ }
+            }
+        } catch { /* ignore */ }
+    }, [sessionId, viewport])
+
     // Load scene objects (for OBB-aware animations) + saved volumes on session change
     useEffect(() => {
         if (!sessionId) return
@@ -81,13 +111,9 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
         api(sessionId, '/api/scene/objects', {}).then((r) => r.json()).then((d) => {
             if (!cancelled && d.objects) viewport.current?.setAssistantObjects(d.objects)
         }).catch(() => { /* store may not exist yet */ })
-        api(sessionId, '/api/scene/volumes/list', {}).then((r) => r.json()).then((d) => {
-            if (cancelled || !d.volumes) return
-            setVolumes(d.volumes)
-            d.volumes.forEach((v: UserVolume) => viewport.current?.addUserVolume(v))
-        }).catch(() => { /* ignore */ })
+        refreshVolumes()
         return () => { cancelled = true }
-    }, [sessionId, viewport])
+    }, [sessionId, viewport, refreshVolumes])
 
     useEffect(() => {
         scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
@@ -108,21 +134,24 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
                 warmed = true
                 if (cancelled) return
                 setVlmStatus(d.status)
-                if (d.status !== 'up') setTimeout(tick, 8000)
+                onVlmStatus?.(d.status)
+                // keep polling even when up — the model unloads during a
+                // reconstruction and the icon/state must reflect it
+                setTimeout(tick, d.status === 'up' ? 30000 : 8000)
             } catch {
                 if (!cancelled) setTimeout(tick, 15000)
             }
         }
         tick()
         return () => { cancelled = true }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
 
     const ask = useCallback(async (question: string) => {
         if (!question.trim() || busy) return
-        if (!sessionId) {
-            setMessages((m) => [...m, { role: 'assistant', text: 'Load a reconstructed session first.', error: true }])
-            return
-        }
+        // No session, or a session without segmentation, is fine: the backend
+        // falls back to general chat and answers with whatever it has
+        // (user 2026-08-28) — measurements just need a segmented session.
         setMessages((m) => [...m, { role: 'user', text: question },
             { role: 'assistant', text: '', pending: true }])
         setInput(''); setBusy(true)
@@ -146,7 +175,21 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
                 await new Promise((res) => setTimeout(res, 8000))
             }
             const trace: TraceEntry[] = (d.tool_trace as TraceEntry[]) || []
+            if (trace.length) {
+                // Refresh the OBB map right before animating: the instance store
+                // may have been (re)built after this panel mounted (lazy rebuild
+                // on the first question), and without OBBs the box/plumb/level
+                // animations silently draw nothing.
+                try {
+                    const or = await api(sessionId, '/api/scene/objects', {})
+                    const od = await or.json()
+                    if (od.objects) viewport.current?.setAssistantObjects(od.objects)
+                } catch { /* keep whatever objects we had */ }
+            }
             viewport.current?.visualizeMeasurement(trace)
+            // A volume was defined/edited during this answer → show it NOW
+            // (user 2026-08-29: volumes appeared "later, who knows when").
+            if (trace.some((t) => t.tool === 'define_volume')) await refreshVolumes()
             setMessages((m) => replaceLast(m, { role: 'assistant', text: String(d.answer || '(no answer)'), trace }))
         } catch (e) {
             setMessages((m) => replaceLast(m, {
@@ -156,7 +199,7 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
         } finally {
             setBusy(false)
         }
-    }, [sessionId, busy, viewport])
+    }, [sessionId, busy, viewport, refreshVolumes])
 
     const addVolume = useCallback(async () => {
         if (!sessionId) return
@@ -185,7 +228,10 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
             {vlmStatus && vlmStatus !== 'up' && (
                 <div className="assistant-status">
                     {vlmStatus === 'busy' ? (
-                        <>The GPU is busy reconstructing — the assistant loads when it finishes.</>
+                        <>⏸ Model unloaded — the GPU is busy reconstructing; the assistant
+                            loads when it finishes.</>
+                    ) : vlmStatus === 'down' ? (
+                        <><Loader2 size={12} className="spin" /> Model unloaded — starting it now…</>
                     ) : (
                         <><Loader2 size={12} className="spin" /> Loading the model (Qwen3-VL)…</>
                     )}
@@ -195,8 +241,9 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
                 {messages.length === 0 && (
                     <div className="assistant-empty">
                         <Sparkles size={22} />
-                        <p>Ask about the reconstruction. Every answer is measured by the
-                            geometry tools and <b>animated in 3D</b> so you see how.</p>
+                        <p>Ask anything. With a <b>segmented session</b> every figure is
+                            measured by the geometry tools and <b>animated in 3D</b>;
+                            without one the assistant still answers general questions.</p>
                         <div className="assistant-suggestions">
                             {SUGGESTIONS.map((s) => (
                                 <button key={s} className="chip" onClick={() => ask(s)}>{s}</button>
@@ -208,7 +255,7 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
                     <div key={i} className={`assistant-msg ${m.role} ${m.error ? 'error' : ''}`}>
                         {m.pending ? (
                             <span className="assistant-thinking">
-                                <Loader2 size={14} className="spin" /> {m.note || 'measuring…'}
+                                <Loader2 size={14} className="spin" /> {m.note || 'thinking…'}
                             </span>
                         ) : (
                             <>
@@ -274,9 +321,14 @@ export default function AssistantPanel({ sessionId, viewport }: Props) {
             </div>
 
             <form className="assistant-input" onSubmit={(e) => { e.preventDefault(); ask(input) }}>
-                <input value={input} disabled={busy} placeholder="Ask about the scene…"
+                <input value={input} disabled={busy || vlmStatus !== 'up'}
+                    placeholder={vlmStatus === 'up' ? 'Ask about the scene…'
+                        : vlmStatus === 'loading' ? 'Loading the model…'
+                        : vlmStatus === 'busy' ? 'GPU busy — model unloaded'
+                        : 'Model unloaded — starting…'}
                     onChange={(e) => setInput(e.target.value)} />
-                <button type="submit" disabled={busy || !input.trim()} aria-label="Send">
+                <button type="submit" disabled={busy || !input.trim() || vlmStatus !== 'up'}
+                    aria-label="Send">
                     {busy ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
                 </button>
             </form>

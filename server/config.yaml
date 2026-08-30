@@ -188,6 +188,19 @@ segmentation:
   dedupe_voxel_m: 0.05        # voxel size, only used when merge_duplicates is true
   dedupe_overlap: 0.5         # overlap fraction, only used when merge_duplicates is true
   min_instance_points: 300    # drop mask slivers below this point count (not objects)
+  mask_erosion_iterations: 0  # USER ORDER 2026-08-29: no erosion at all (was 2; ate 131k
+                              # mask-covered points on test3 — the #1 eater). Raise to 1-2
+                              # if boundary bleed between neighbours returns.
+  attach_unsegmented: false   # OFF (user 2026-08-29 night): the 3 cm nearest-instance glue
+                              # amplified the bad masks of the thresh-0.0 experiment below —
+                              # reverted together with it until segmentation is healthy again.
+  attach_dist_m: 0.03
+  propagate_output_prob_thresh: 0.5   # VENDOR DEFAULT — restored (user 2026-08-29 night).
+                              # The 0.0 experiment ("always all frames") made SAM3 emit
+                              # near-zero-confidence garbage masks on frames where the
+                              # object is not visible → the whole segmentation degraded
+                              # and the Manager became unusable. 0.5 = pre-experiment
+                              # behavior. Coverage of far frames needs a different tool.
 
 autoprompt:
   enabled: true                       # default path; false -> InternVL3 fallback
@@ -346,7 +359,10 @@ frame_selection:
 # ── Models: Segmentation (SAM 3 / SAM 3.1) ─────────────────────────
 models:
   segmentation:
-    version: "sam3.1"                  # "sam3" | "sam3.1" (Object Multiplex). 3.1 measured on
+    version: "sam3"                    # ROLLBACK A/B (user 2026-08-29 night): masklets die after
+                                       # 2-4 keyframes under 3.1 ("antes no pasaba") — testing
+                                       # whether 3.0 keeps them alive across all 12.
+                                       # "sam3" | "sam3.1" (Object Multiplex). 3.1 measured on
                                        # test3 (A100): 0.144 s/frame vs 0.884 (6.1x faster),
                                        # equivalent masks; VRAM 23.5 GB (multiplex buckets) vs 6.4.
                                        # Rollback = set "sam3" (vendor/sam3 checkout kept) + restart.
@@ -376,13 +392,16 @@ models:
 
     # Per-segment cleaning (voxel grid + local PCA + depth peeling)
     segment_cleaning:
-      enabled: true
+      enabled: false                   # USER ORDER 2026-08-29: "nada de nada" — whatever the
+                                       # mask grabs stays untouched (no DBSCAN, no layer peel,
+                                       # no SOR). The mask is the assignment, raw.
       voxel_size: 0.005                # 5mm cell — fallback for curved surfaces
       min_points_per_voxel: 5
       planarity_threshold: 0.3         # λ₃/λ₁ — below this = planar → depth peel
       layer_tolerance: 0.005           # ±5mm of densest layer
       histogram_bins: 50
-      dbscan_enabled: true
+      dbscan_enabled: false            # USER ORDER 2026-08-29: OFF — the post-cleanup was
+                                       # dropping ~98k mask-matched points on test3
       dbscan_min_samples: 10
       sor_k: 20
       sor_std: 1.5
@@ -1492,8 +1511,12 @@ coverage_engine:
 # Keys mirror reconstruction.surface_fit.runner.fit_segment kwargs (introspected —
 # see build_surface_fit_kwargs; unknown keys are ignored).
 surface_fit:
-  models: [plane, cylinder, sphere, swept_profile, bspline]  # escalation ladder, lowest DOF first;
-                              # remove entries to forbid a model (e.g. [plane] forces plane-only)
+  models: [bspline]           # USER ORDER 2026-08-29: EVERYTHING fits with bspline — the plane
+                              # deliverables of test3 came out broken/tilted ("como el orto")
+                              # while the bspline ceiling was the only good mesh. With no planes
+                              # the plane-only stages (scene regularization, contour
+                              # regularization) are inert. Previous escalation ladder:
+                              # [plane, cylinder, sphere, swept_profile, bspline]
   consolidate_method: auto    # stage-1 layer collapse before fitting: auto (WLOP, MLS if CGAL env
                               # missing) | wlop | mls | none. Residual reports ALWAYS use the
                               # original cloud — consolidation only feeds the fitter.
@@ -1509,6 +1532,11 @@ surface_fit:
   grid_cell_m: 0.05           # UV cell for residual gridding (heatmap px, Moran's I, findings).
                               # Cell means average sensor noise → the grid exposes registration/
                               # shape structure. 5 cm ≈ good balance for rooms and tunnel sections.
+  escalate_rms_gate_mm: 35.0  # STOP escalating once a model explains the surface within this rms
+                              # (construction-scale tolerance): remaining structure is a finding
+                              # for the report, not a reason to trade a plane for a free-form
+                              # spline riding layered noise. Genuinely curved surfaces fail this
+                              # gate (plane rms is decimetres / no fit) and still escalate.
   morans_z_max: 4.0           # escalate when ALL: z-score > this (statistically structured)…
   morans_i_min: 0.05          # …AND Moran's I > this (not just a huge-N artifact)…
   structure_min_mm: 1.5       # …AND the structure's amplitude exceeds this. Sub-mm systematic
@@ -1521,6 +1549,74 @@ surface_fit:
   tilt_mm_per_m: 3.0          # residual gradient above this on a wall → 'tilt' finding (desplome)
   support_radius_m: 0.08      # NO-EXTRAPOLATION radius: mesh exists only where measured points
                               # lie within this distance (holes in data stay holes in the model)
+  support_dist_m: 0.04        # a point supports the mesh ONLY if it lies within this of the fitted
+                              # surface (2026-08-29, wall3: points of an attached structure 30 cm
+                              # off the plane filled the wall's opening with fake support)
+  unexplained_dist_m: 0.10    # points beyond this of the accepted surface are the UNEXPLAINED
+                              # remainder (attached structures): exported as unexplained_idx.npy;
+                              # the mesh export Poisson-meshes them and fuses both into one GLB
+  # ── Stage-1 hole audit (USER CONCEPT 2026-08-29: "understand what we are
+  # reconstructing") — every hole in a fitted surface's point support is voted
+  # against the SAM3 masks of the scan keyframes: covered → the surface exists
+  # in the images → filled (provenance image_supported); uncovered → real
+  # opening → stays open with mask-shaped border; mixed/too-few views → stays
+  # open (never invent). Residual reports still use measured points only.
+  hole_audit: true
+  hole_fill_ratio: 0.6        # own-mask coverage ratio at/above which a hole cell is filled
+  hole_open_ratio: 0.3        # own-mask ratio at/below which (with empty views ≥ 1-this) it is
+                              # a confirmed real opening
+  hole_occluded_ratio: 0.5    # OCCLUSION REASONING (user 2026-08-29): with NO direct witness but
+                              # ANOTHER object's mask blocking the view in ≥ this fraction of
+                              # frames, surface continuity is inferred behind the occluder
+                              # (provenance occlusion_inferred — e.g. floor behind the ladder)
+  hole_min_votes: 2           # minimum observing keyframes for a verdict
+  hole_interp_max_cells: 30   # tiny ENCLOSED gaps with no image verdict, up to this many cells
+                              # (~0.075 m² at 5 cm), are interpolated across the fitted surface —
+                              # the same bounded bridging Poisson does implicitly (provenance
+                              # 'interpolated'; confirmed openings are never touched)
+  # ── Multi-primitive decomposition (USER 2026-08-29: "en el tren, donde se
+  # pueda aplicar ransac — conos, circunferencias, planos — debe aplicarse, y
+  # poisson donde no hay manera"). Objects no single model explains (and large
+  # unexplained remainders) are decomposed: iterative plane/cylinder/sphere
+  # extraction, largest support first; only the residue goes to Poisson.
+  decompose: true
+  decompose_min_points: 8000  # min points to attempt / accept a primitive
+  decompose_max_primitives: 10  # the train hit 6 with planes still extractable
+  decompose_inlier_dist_m: 0.04
+  decompose_min_frac: 0.10    # a primitive must claim ≥ this of the remaining points
+  # ── Contour regularization (USER 2026-08-29: "las formas tienden a ser
+  # perfectas — rectángulos, arcos, círculos — detectar la tendencia y
+  # perfeccionarlas"). Every boundary/opening of a fitted PLANE is tried
+  # against the 2-D shape ladder (circle → rectangle → rounded rect → arch →
+  # direction-snapped polygon → raw), lowest DOF first, accepted only within
+  # the deviation gate; the mesh is rebuilt with CAD-crisp edges.
+  contour_regularize: true
+  contour_tol_m: 0.12         # p95 boundary deviation gate for accepting a shape template
+                              # (fitted against the CLOSED support outline — the boundary's
+                              # intent — so grid raggedness doesn't force everything to 'raw')
+  # ── REGULARIZED POISSON (USER 2026-08-29: "poisson primero, y sobre poisson
+  # aplicar los ransac y rellenos"). The poisson-stage meshes get: primitive
+  # regions IRONED onto their fitted plane/cylinder/sphere (seamless — the
+  # Poisson topology is kept), a relaxed transition ring, and Poisson bridges
+  # over image-confirmed openings CUT (mask+depth audit). false = plain
+  # as-measured poisson.
+  poisson_regularize: false   # REVERTED (user 2026-08-29 night): the ironed-
+                              # poisson hybrid never satisfied visually; Mesh
+                              # goes back to the known-good duo (fitted RANSAC
+                              # + as-measured poisson). The meshes are the
+                              # EVIDENCE tier — the real deliverable is the
+                              # parametric IFC (Scan-to-BIM).
+  poisson_patch_holes: false  # legacy floating patch quads — superseded by the
+                              # stitched coherent fill below; keep off
+  poisson_fill_holes: false   # SHAPE-COHERENT stitched hole filling — OFF while the thin-sheet
+                              # base (back-shell strip) settles: on the closed double-skin base
+                              # the hole rings wrapped both shells and fills came out deformed /
+                              # volume-adding (user 2026-08-29). Re-enable to evaluate on the
+                              # thin sheet.
+  texture_objects: true       # Stage-3 (USER 2026-08-29: "siempre con textura"): bake a real
+                              # texrecon atlas from the scan frames onto every per-object mesh
+                              # (fitted surfaces incl. audited fills, Poisson meshes and fused
+                              # remainders); failure falls back to vertex colours / untextured
   mesh_resolution_m: 0.05     # output mesh quad size (m); small enough for mvs-texturing UVs
   heatmap_vmax_mm: null       # symmetric color range of heatmap/deviation PLY; null = auto (p98,
                               # floor 2 mm so near-perfect surfaces don't dramatize noise)
@@ -1528,15 +1624,30 @@ surface_fit:
                               # real curvature, physically cannot follow high-frequency noise
   section_spacing_m: 0.20     # swept-profile cross-section spacing along the axis (vaults/tunnels)
   # ── scene-level (stages 3 + 5) ──
-  fitted_roles: [wall, floor, ceiling, slab, vault, tunnel, column, beam, deck, platform, ramp]
-                              # SAM3 labels (substring match) that get fitted surfaces; every other
-                              # class keeps the existing TSDF crop path unchanged (hybrid scene)
+  # USER ORDER 2026-08-29 ("el nombre no es indicativo de geometría — puede ser
+  # un número o un código"): ALL name/role-based routing is GONE. Every instance
+  # gets the same `models` ladder above and GEOMETRY alone decides acceptance:
+  accept_p95_mm: 60.0         # p95 of residuals vs the original points must be under this,
+                              # otherwise the instance keeps the per-object TSDF/Poisson path
+                              # (a flat wall coded "W-103" passes; a valve/machine fails).
+  decompose_see_through: true # USER 2026-08-29: a decomposition plane covered wall3's access
+                              # arch — every decomposition-born face is voted against the cloud
+                              # Z-buffer: cameras consistently seeing measured geometry BEHIND
+                              # it (and never AT its depth) → phantom bridging → face cut.
+  see_through_behind_ratio: 0.5 # fraction of depth-valid views that must see PAST the face
   regularize: true            # stage 3: GlobFit-style plane snapping + clean edges
   regularize_angle_tol_deg: 1.0 # snap parallel/orthogonal/vertical within this angle ONLY — a
                               # larger real deviation is a construction finding, never forced
   coplanar_tol_mm: 10.0       # same-direction planes within this offset merge to one plane
   snap_edge_dist_m: 0.10      # boundary vertices within this of an adjacent plane slide onto the
                               # exact intersection line (clean wall/floor edges, no extrapolation)
+  export_first: true          # USER DECISION 2026-08-28: individual meshing
+                              # (/api/segmentation/tsdf/export) tries surface_fit FIRST for the
+                              # architectural instances (fitted_roles above; RANSAC + escalation,
+                              # min_inlier_frac is the coverage gate) and publishes the accepted
+                              # smooth meshes into output/tsdf/. Everything else — and every
+                              # instance the fitter rejects — falls back to the TSDF crop.
+                              # false = TSDF-only individual meshing (the 2026-08-28 morning flow).
 
 # ── MeshFlow (generative per-object meshes; replaces ShapeR) ──────────
 # ⚠ NON-METRIC: MeshFlow outputs are GENERATIVE visual assets (furniture,

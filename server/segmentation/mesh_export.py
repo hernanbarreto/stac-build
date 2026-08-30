@@ -138,12 +138,10 @@ def export_segment_plys(output_dir: Path,
 
     output_dir = Path(output_dir)
     if arch_roles is None:
-        try:
-            from config import get_param
-            arch_roles = tuple(get_param("surface_fit.fitted_roles",
-                                         list(_DEFAULT_ARCH_ROLES)))
-        except Exception:
-            arch_roles = _DEFAULT_ARCH_ROLES
+        # surface_fit.fitted_roles no longer exists (name-based routing removed
+        # 2026-08-29); this dormant gate (exclude_architectural, OFF since
+        # 2026-07-03) keeps its local fallback list only.
+        arch_roles = _DEFAULT_ARCH_ROLES
 
     cloud_path = output_dir / "cleaned_cloud.ply"
     if not cloud_path.exists():
