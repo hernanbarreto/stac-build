@@ -2589,8 +2589,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const onEraseMove = (event: MouseEvent) => {
             if (activeToolRef.current !== 'erase') {
                 eraseCursor.visible = false
+                setHighlight(null)
                 return
             }
+            // SHIFT = mark-removal mode: hide the add-cursor, light up the
+            // mark under the pointer (the one Shift+right-click will delete)
+            if (event.shiftKey) {
+                eraseCursor.visible = false
+                setHighlight(markUnderCursor(event))
+                return
+            }
+            setHighlight(null)
             const p = eraseRaycast(event)
             if (p) {
                 if (eraseCursor.userData.shape !== eraseShapeRef.current) {
@@ -2612,13 +2621,37 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const eraseMarksGroup = new THREE.Group()
         eraseMarksGroup.name = 'erase-marks'
         scene.add(eraseMarksGroup)
-        const eraseMarks: { center: THREE.Vector3; radius: number; shape: 'sphere' | 'cube' }[] = []
+        const eraseMarks: { center: THREE.Vector3; radius: number; shape: 'sphere' | 'cube'; mesh: THREE.Mesh }[] = []
         const markGeom = new THREE.SphereGeometry(1, 20, 14)
         const markCubeGeom = new THREE.BoxGeometry(2, 2, 2)
         const markMat = new THREE.MeshBasicMaterial({
             color: 0xff3333, transparent: true, opacity: 0.38, depthWrite: false,
         })
+        // SHIFT + hover highlight: the mark about to be deleted (user
+        // 2026-08-30: with 50 marks, one wrong mark must be removable alone)
+        const markHighlightMat = new THREE.MeshBasicMaterial({
+            color: 0xffffff, transparent: true, opacity: 0.6, depthWrite: false,
+        })
+        let highlightedMark: THREE.Mesh | null = null
+        const setHighlight = (mesh: THREE.Mesh | null) => {
+            if (highlightedMark === mesh) return
+            if (highlightedMark) highlightedMark.material = markMat
+            highlightedMark = mesh
+            if (highlightedMark) highlightedMark.material = markHighlightMat
+        }
+        const markUnderCursor = (event: MouseEvent): THREE.Mesh | null => {
+            if (!eraseMarksGroup.children.length) return null
+            const rect = renderer.domElement.getBoundingClientRect()
+            const mouse = new THREE.Vector2(
+                ((event.clientX - rect.left) / rect.width) * 2 - 1,
+                -((event.clientY - rect.top) / rect.height) * 2 + 1)
+            const raycaster = raycasterRef.current
+            raycaster.setFromCamera(mouse, camera)
+            const hits = raycaster.intersectObjects(eraseMarksGroup.children, false)
+            return hits.length ? (hits[0].object as THREE.Mesh) : null
+        }
         const eraseClearMarks = () => {
+            setHighlight(null)
             eraseMarks.length = 0
             while (eraseMarksGroup.children.length) {
                 eraseMarksGroup.remove(eraseMarksGroup.children[0])
@@ -2668,12 +2701,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         eraseApiRef.current = { commit: eraseCommit, clear: eraseClearMarks }
 
-        const eraseRightDown = { x: 0, y: 0, active: false }
+        const eraseRightDown = { x: 0, y: 0, active: false, shift: false }
         const onEraseMouseDown = (event: MouseEvent) => {
             if (activeToolRef.current !== 'erase' || event.button !== 2) return
             eraseRightDown.x = event.clientX
             eraseRightDown.y = event.clientY
             eraseRightDown.active = true
+            eraseRightDown.shift = event.shiftKey
         }
         const onEraseMouseUp = (event: MouseEvent) => {
             if (activeToolRef.current !== 'erase' || event.button !== 2) return
@@ -2682,6 +2716,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const moved = Math.hypot(event.clientX - eraseRightDown.x,
                                      event.clientY - eraseRightDown.y)
             if (moved > 6) return   // that was a pan, not a mark
+            if (eraseRightDown.shift || event.shiftKey) {
+                // SHIFT + right-click: remove ONLY the mark under the cursor
+                const mesh = markUnderCursor(event)
+                if (!mesh) return
+                setHighlight(null)
+                const idx = eraseMarks.findIndex(m => m.mesh === mesh)
+                if (idx >= 0) eraseMarks.splice(idx, 1)
+                eraseMarksGroup.remove(mesh)
+                onEraseMarksChangedRef.current?.(eraseMarks.length)
+                if (onStatusMessage) onStatusMessage(`🖌 mark removed — ${eraseMarks.length} zone(s) left`)
+                return
+            }
             const p = eraseRaycast(event)
             if (!p) return
             const r = eraseRadiusRef.current
@@ -2690,7 +2736,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             mark.position.copy(p)
             mark.scale.setScalar(r)
             eraseMarksGroup.add(mark)
-            eraseMarks.push({ center: p.clone(), radius: r, shape })
+            eraseMarks.push({ center: p.clone(), radius: r, shape, mesh: mark })
             onEraseMarksChangedRef.current?.(eraseMarks.length)
             if (onStatusMessage) onStatusMessage(`🖌 ${eraseMarks.length} zone(s) marked — press Erase or Assign to apply`)
         }
@@ -2728,6 +2774,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             markGeom.dispose()
             markCubeGeom.dispose()
             markMat.dispose()
+            markHighlightMat.dispose()
             eraseApiRef.current = null
             renderer.domElement.removeEventListener('webglcontextlost', handleContextLost)
             renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored)
