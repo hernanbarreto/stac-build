@@ -2219,8 +2219,8 @@ function App() {
                       tools. Visible only while the eraser is the active tool. */}
                   {activeTool === 'erase' && (
                     <div style={{
-                      position: 'absolute', top: 'calc(100% + 6px)', left: '50%',
-                      transform: 'translateX(-50%)', zIndex: 60,
+                      position: 'absolute', top: 'calc(100% + 6px)', left: 0,
+                      zIndex: 60,
                       display: 'flex', flexDirection: 'column', gap: 8,
                       background: 'rgba(24,26,31,0.97)',
                       border: '1px solid rgba(255,255,255,0.14)',
