@@ -24,6 +24,117 @@ from typing import Callable, List, Optional
 import numpy as np
 
 
+def _fill_islands_bpa(mesh, pts: np.ndarray,
+                      cam_positions: Optional[np.ndarray],
+                      spacing: float, room_center: np.ndarray, o3d,
+                      island_dist_m: float = 0.05,
+                      min_island_pts: int = 150,
+                      stitch_radius_m: float = 0.08,
+                      smooth_iters: int = 10):
+    """Weave measured point clusters the Poisson sheet does not reach
+    (user 2026-08-30, agreed design): the CLOUD decides WHERE — clusters of
+    points farther than ``island_dist_m`` from every mesh vertex — and the
+    SHEET decides HOW — each BPA patch shares the nearby Poisson vertices
+    (stitched border, no double wall) and its new interior vertices are
+    relaxed toward the local sheet-like average with the border PINNED
+    (pinned Laplacian), instead of sitting on the raw noisy points.
+
+    Returns (mesh, stats). Never invents: every new vertex starts as a
+    measured point; relaxation only smooths, bounded by its neighbours."""
+    from scipy.spatial import cKDTree
+
+    v = np.asarray(mesh.vertices)
+    vn = np.asarray(mesh.vertex_normals)
+    if not len(v):
+        return mesh, {}
+    d, _ = cKDTree(v).query(pts, k=1)
+    un_idx = np.nonzero(d > island_dist_m)[0]
+    if len(un_idx) < min_island_pts:
+        return mesh, {"bpa_islands": 0, "bpa_points_woven": 0}
+
+    sub = o3d.geometry.PointCloud(
+        o3d.utility.Vector3dVector(pts[un_idx]))
+    labels = np.asarray(sub.cluster_dbscan(
+        eps=float(max(4.0 * spacing, 0.03)), min_points=15))
+    islands = 0
+    woven = 0
+    for lab in np.unique(labels):
+        if lab < 0:
+            continue
+        cidx = un_idx[labels == lab]
+        if len(cidx) < min_island_pts:
+            continue
+        cpts = pts[cidx]
+        # nearby Poisson vertices = the stitch border the patch will share
+        db, _ = cKDTree(cpts).query(v, k=1,
+                                    distance_upper_bound=stitch_radius_m)
+        border_idx = np.nonzero(np.isfinite(db))[0]
+        patch_pts = np.vstack([cpts, v[border_idx]]) if len(border_idx) \
+            else cpts
+        ppcd = o3d.geometry.PointCloud(
+            o3d.utility.Vector3dVector(patch_pts))
+        ppcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(
+            radius=float(np.clip(3.0 * spacing, 0.02, 0.08)), max_nn=40))
+        n = np.asarray(ppcd.normals)
+        if cam_positions is not None and len(cam_positions) == len(pts):
+            to_cam = cam_positions[cidx] - cpts
+            flip = np.einsum("ij,ij->i", n[:len(cpts)], to_cam) < 0
+            n[:len(cpts)][flip] = -n[:len(cpts)][flip]
+        else:
+            to_c = room_center - cpts
+            flip = np.einsum("ij,ij->i", n[:len(cpts)], to_c) < 0
+            n[:len(cpts)][flip] = -n[:len(cpts)][flip]
+        if len(border_idx):
+            n[len(cpts):] = vn[border_idx]   # border keeps the sheet's normals
+        ppcd.normals = o3d.utility.Vector3dVector(n)
+        radii = o3d.utility.DoubleVector(
+            [2.0 * spacing, 4.0 * spacing, 8.0 * spacing])
+        patch = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+            ppcd, radii)
+        pf = np.asarray(patch.triangles)
+        if not len(pf):
+            continue
+        pv = np.asarray(patch.vertices).copy()
+        # pinned-border Laplacian: relax ONLY the new (cluster) vertices so the
+        # patch settles into the sheet instead of the raw points' noise
+        if smooth_iters > 0:
+            nbr: dict = {}
+            for a, b, c in pf:
+                nbr.setdefault(int(a), set()).update((int(b), int(c)))
+                nbr.setdefault(int(b), set()).update((int(a), int(c)))
+                nbr.setdefault(int(c), set()).update((int(a), int(b)))
+            movable = np.arange(len(pv)) < len(cpts)
+            for _ in range(int(smooth_iters)):
+                upd = pv.copy()
+                for i in np.nonzero(movable)[0]:
+                    ns = nbr.get(int(i))
+                    if not ns:
+                        continue
+                    upd[i] = 0.5 * pv[i] + 0.5 * pv[list(ns)].mean(axis=0)
+                pv = upd
+        # merge: append and weld the shared border vertices (exact duplicates)
+        base = len(v)
+        mv = np.vstack([v, pv])
+        mf = np.vstack([np.asarray(mesh.triangles), pf + base])
+        merged = o3d.geometry.TriangleMesh(
+            o3d.utility.Vector3dVector(mv),
+            o3d.utility.Vector3iVector(mf))
+        merged.merge_close_vertices(1e-6)
+        merged.remove_degenerate_triangles()
+        merged.remove_duplicated_triangles()
+        merged.remove_unreferenced_vertices()
+        merged.compute_vertex_normals()
+        mesh = merged
+        v = np.asarray(mesh.vertices)
+        vn = np.asarray(mesh.vertex_normals)
+        islands += 1
+        woven += int(len(cidx))
+    if islands:
+        print(f"[Poisson-obj] BPA wove {islands} island(s), "
+              f"{woven:,} measured points the sheet had missed")
+    return mesh, {"bpa_islands": islands, "bpa_points_woven": woven}
+
+
 def poisson_from_points(pts: np.ndarray,
                         colors: Optional[np.ndarray],
                         room_center: np.ndarray,
@@ -45,7 +156,7 @@ def poisson_from_points(pts: np.ndarray,
     from scipy.spatial import cKDTree
 
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
-    # adaptive normal radius: ~3× the median point spacing (fixed 8 cm smeared
+    # adaptive normal radius: ~3x the median point spacing (fixed 8 cm smeared
     # wheels/cables on dense captures)
     tree = cKDTree(pts)
     sample = pts[:: max(1, len(pts) // 5000)]
@@ -72,13 +183,24 @@ def poisson_from_points(pts: np.ndarray,
     mesh, dens = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
         pcd, depth=int(depth))
     dens = np.asarray(dens)
-    mesh.remove_vertices_by_mask(dens < np.quantile(dens, density_quantile))
+    # SMART TRIM (user 2026-08-30, agreed design): low density alone no longer
+    # kills a vertex — the old unconditional quantile trim deleted the sheet
+    # over sparse-but-MEASURED zones and left holes "donde hay nube pero no
+    # poisson". A vertex now dies only when low-density AND unsupported by the
+    # cloud; the support crop below still removes everything the data never
+    # touched (the balloon).
+    tree = cKDTree(pts)
+    v0 = np.asarray(mesh.vertices)
+    if not len(v0):
+        return None, {}
+    d0, _ = tree.query(v0, k=1)
+    low = dens < np.quantile(dens, density_quantile)
+    mesh.remove_vertices_by_mask(low & (d0 > support_crop_m))
     mesh.remove_degenerate_triangles()
     mesh.remove_unreferenced_vertices()
     v = np.asarray(mesh.vertices)
     if not len(v):
         return None, {}
-    tree = cKDTree(pts)
     d, _ = tree.query(v, k=1)
     mesh.remove_vertices_by_mask(d > support_crop_m)
     mesh.remove_degenerate_triangles()
@@ -93,6 +215,18 @@ def poisson_from_points(pts: np.ndarray,
     v = np.asarray(mesh.vertices)
     if not len(v):
         return None, {}
+    # BALL-PIVOTING ISLAND FILL (user 2026-08-30): measured clusters the sheet
+    # still does not reach are woven in — cloud decides WHERE, sheet decides HOW
+    mesh.compute_vertex_normals()
+    bpa_stats = {}
+    try:
+        mesh, bpa_stats = _fill_islands_bpa(
+            mesh, pts, cam_positions, spacing, room_center, o3d)
+    except Exception as e:  # noqa: BLE001
+        print(f"[Poisson-obj] BPA island fill failed (non-fatal): {e}")
+    v = np.asarray(mesh.vertices)
+    if not len(v):
+        return None, {}
     if colors is not None and len(colors) == len(pts):
         _, nn = tree.query(v, k=1)
         mesh.vertex_colors = o3d.utility.Vector3dVector(colors[nn])
@@ -100,6 +234,7 @@ def poisson_from_points(pts: np.ndarray,
     d, _ = tree.query(v, k=1)
     d2, _ = cKDTree(v).query(pts[::5], k=1)
     stats = {
+        **bpa_stats,
         "n_vertices": int(len(v)),
         "n_faces": int(len(mesh.triangles)),
         "mesh_to_points_p95_mm": round(float(np.percentile(d, 95)) * 1000, 1),
