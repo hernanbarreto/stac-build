@@ -79,7 +79,7 @@ export interface ViewportHandle {
     clearDeviationSurface: () => void
     applyRegistrationTransform: (transform: number[][]) => void
     clearMeasurements: () => void
-    commitErase: (target?: number | null, newLabel?: string, onlyInstances?: number[]) => Promise<void>
+    commitErase: (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => Promise<void>
     clearEraseMarks: () => void
     resetSectionBox: () => void
     resetCamera: () => void
@@ -545,13 +545,27 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const onEraseMarksChangedRef = useRef(onEraseMarksChanged)
     useEffect(() => { onEraseMarksChangedRef.current = onEraseMarksChanged }, [onEraseMarksChanged])
     // mark/commit API installed by the main effect (marks live in its closure)
-    const eraseApiRef = useRef<{ commit: (target?: number | null, newLabel?: string, onlyInstances?: number[]) => Promise<void>; clear: () => void } | null>(null)
+    const eraseApiRef = useRef<{ commit: (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => Promise<void>; clear: () => void } | null>(null)
     // bridge: renderOBBs is declared later in the file — the potree_ready
     // handler needs it to resync OBBs + panel after an erase/refresh rebuild
     const renderOBBsRef = useRef<((instances: Array<Record<string, unknown>>) => void) | null>(null)
     // user-chosen per-segment point visibility (user 2026-08-30: an OBB/panel
     // resync must NOT resurrect segments the user had hidden)
     const segVisRef = useRef<Map<number, boolean>>(new Map())
+    // Raycast honesty (user 2026-08-30): three.js raycasts hit EVERY point in
+    // a node's geometry, including points the shader hides — the brush/measure
+    // cursor landed on invisible points of hidden segments in MIXED nodes.
+    // A hit on a point whose class is hidden in the panel does not count.
+    const hitIsVisible = useCallback((hit: THREE.Intersection): boolean => {
+        const obj = hit.object as THREE.Points
+        if (!(obj as unknown as { isPoints?: boolean }).isPoints) return true
+        if (hit.index === undefined || hit.index === null) return true
+        const attr = (obj.geometry as THREE.BufferGeometry).getAttribute('classId')
+        if (!attr) return true
+        const cls = attr.getX(hit.index)
+        if (cls < 0) return true
+        return segVisRef.current.get(cls) !== false
+    }, [])
     useEffect(() => {
         if (activeTool !== 'erase') eraseApiRef.current?.clear()
     }, [activeTool])
@@ -792,8 +806,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // evaluation volumes are measurable like the scene (user 2026-08-29)
         if (assistantVizRef.current) targets.push(...assistantVizRef.current.pickableVolumes())
         const intersects = raycaster.intersectObjects(targets)
-        // Filter out section-box-clipped points
+        // Filter out section-box-clipped points AND shader-hidden points
         const hit = intersects.find(i => {
+            if (!hitIsVisible(i)) return false
             if (!sectionBoxActiveRef.current) return true
             const p = i.point
             const bMin = sectionBoxMinRef.current
@@ -950,8 +965,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // evaluation volumes are measurable like the scene (user 2026-08-29)
         if (assistantVizRef.current) targets.push(...assistantVizRef.current.pickableVolumes())
         const intersects = raycaster.intersectObjects(targets)
-        // Filter out section-box-clipped points
+        // Filter out section-box-clipped points AND shader-hidden points
         const hit = intersects.find(i => {
+            if (!hitIsVisible(i)) return false
             if (!sectionBoxActiveRef.current) return true
             const p = i.point
             const bMin = sectionBoxMinRef.current
@@ -2186,7 +2202,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
         },
         clearMeasurements: clearAllMeasurements,
-        commitErase: async (target?: number | null, newLabel?: string, onlyInstances?: number[]) => { await eraseApiRef.current?.commit(target, newLabel, onlyInstances) },
+        commitErase: async (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => { await eraseApiRef.current?.commit(target, newLabel, onlyInstances, includeUnsegmented) },
         clearEraseMarks: () => eraseApiRef.current?.clear(),
         resetSectionBox: destroySectionBox,
         resetCamera: () => {
@@ -2599,7 +2615,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (tsdfGroupRef.current) targets.push(tsdfGroupRef.current)
             if (shapesGroupRef.current) targets.push(shapesGroupRef.current)
             const hits = raycaster.intersectObjects(targets)
-            const hit = hits.find(h => h.object !== eraseCursor)
+            const hit = hits.find(h => h.object !== eraseCursor && hitIsVisible(h))
             return hit ? hit.point.clone() : null
         }
         const onEraseMove = (event: MouseEvent) => {
@@ -2677,7 +2693,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         // commit: no target → DELETE; target id → REASSIGN into that segment;
         // newLabel → CREATE a new segment from the zones (user 2026-08-29)
-        const eraseCommit = async (target?: number | null, newLabel?: string, onlyInstances?: number[]) => {
+        const eraseCommit = async (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => {
             const sid = activeSessionRef.current
             if (!sid || !eraseMarks.length) return
             try {
@@ -2693,6 +2709,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 }
                 // SAFETY: hidden segments cannot lose points
                 if (onlyInstances) payload.only_instances = onlyInstances
+                // unsegmented points join a reassign only when their toggle is ON
+                if (includeUnsegmented !== undefined) payload.include_unsegmented = includeUnsegmented
                 if (newLabel) {
                     payload.reassign_to = 'new'
                     payload.new_label = newLabel

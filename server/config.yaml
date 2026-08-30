@@ -1182,7 +1182,12 @@ reconstruction:
                                         # windowed mode with a fitting chunk when short.
     exclusive_gpu: true                 # stop vLLM before reconstruction (Omega gets the
                                         # whole GPU); the VLM stage auto-restarts it after
-    conf_percentile: 10.0               # RESTORED 08-11 value (the clouds of the good era).
+    conf_percentile: 25.0               # USER 2026-08-30: 10 let too much noise through
+                                        # ("deja pasar mucho ruido"); the VGGT-Omega web demo
+                                        # default is 20 — 25 is the chosen slightly-stricter cut.
+                                        # Applies at cloud BUILD: takes effect on the next
+                                        # reconstruction, not on existing sessions.
+                                        # (History: 10.0 RESTORED 08-11 value, the clouds of the good era.
                                         # (08-18 detour: 20, then 50 — both part of the noisy-mesh
                                         # hunt; the mesh recipe was the issue, not the cloud filter.
                                         # 50 was too aggressive. (Earlier same day: 50 VENDOR-STRENGTH "integrar basura no

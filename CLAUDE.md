@@ -8,7 +8,10 @@ and 08-18 was tried, judged worse by the user, and REVERTED. Never re-apply
 those reverted knobs without an explicit new decision from him.
 
     backend vggtomega_pgsr          (full PGSR precision stage)
-    simple.conf_percentile 10       (cloud filter: the 08-11 value; 20 and 50
+    simple.conf_percentile 10 → 25 SINCE 2026-08-30 (USER: "10 deja pasar
+                                     mucho ruido"; vendor demo default is 20,
+                                     he chose 25) — the rest of this block
+                                     stands. (cloud filter: the 08-11 value; 20 and 50
                                      were tried 08-18 — the mesh recipe was the
                                      problem, not the cloud filter)
     pgsr: max_abs_split_points 50000 (vendor default), use_depth_filter false,

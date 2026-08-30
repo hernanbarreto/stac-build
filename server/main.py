@@ -5132,11 +5132,13 @@ async def segmentation_erase(request: Request):
     only_instances = body.get("only_instances")
     if only_instances is not None:
         only_instances = [int(i) for i in only_instances]
+    include_unsegmented = bool(body.get("include_unsegmented", True))
     rep = await loop.run_in_executor(
         None, lambda: erase_spheres(output_dir, spheres,
                                     target_iid=reassign_to,
                                     new_label=new_label,
-                                    only_iids=only_instances))
+                                    only_iids=only_instances,
+                                    include_unsegmented=include_unsegmented))
     st = _erase_state(session_id)
     if rep.get("undo"):
         st["undo"] = (st["undo"] + [rep["undo"]])[-10:]

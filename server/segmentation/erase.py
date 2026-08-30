@@ -122,7 +122,8 @@ _NEW_SEGMENT_COLORS = ["#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
 def erase_spheres(output_dir: Path, spheres: List[dict],
                   target_iid: Optional[int] = None,
                   new_label: Optional[str] = None,
-                  only_iids: Optional[List[int]] = None) -> dict:
+                  only_iids: Optional[List[int]] = None,
+                  include_unsegmented: bool = True) -> dict:
     """Apply ONE commit over the marked spheres (user 2026-08-29: mark zones
     first, then a single button applies everything — one mask edit, one OBB
     recompute, one octree rebuild).
@@ -317,7 +318,10 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
     n_reassigned = 0
     target_pixels: List[Tuple[str, List[int], List[int]]] = []
     if target_inst is not None:
-        un_idx = np.nonzero(~assigned_before)[0]
+        # unsegmented capture honors the panel toggle (user 2026-08-30: los
+        # unsegmented solo son seleccionables cuando Unsegmented está visible)
+        un_idx = np.nonzero(~assigned_before)[0] if include_unsegmented \
+            else np.empty(0, dtype=np.int64)
         if len(un_idx):
             hit_u = _zone_hit(_to_disp(xyz[un_idx]))
             if hit_u.any():

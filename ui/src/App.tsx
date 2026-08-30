@@ -2291,9 +2291,9 @@ function App() {
                             if (eraseTarget === 'new') {
                               const name = window.prompt('New segment name:')
                               if (!name || !name.trim()) return
-                              viewportRef.current?.commitErase(null, name.trim(), visibles)
+                              viewportRef.current?.commitErase(null, name.trim(), visibles, unsegmentedVisible)
                             } else {
-                              viewportRef.current?.commitErase(Number(eraseTarget), undefined, visibles)
+                              viewportRef.current?.commitErase(Number(eraseTarget), undefined, visibles, unsegmentedVisible)
                             }
                             setEraseTarget('')
                           }}>
