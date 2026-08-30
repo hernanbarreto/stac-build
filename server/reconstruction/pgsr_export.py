@@ -213,7 +213,9 @@ ANCHOR_DIRNAME = "cloud_anchor"
 
 def export_cloud_anchor_depths(output_dir: Path, frames_dir: Path,
                                spacing_m: float = 0.006, half_res: bool = True,
-                               log=None) -> Path:
+                               log=None,
+                               point_indices=None,
+                               dst_dir: Optional[Path] = None) -> Path:
     """MAX-PRECISION anchor (user 2026-08-18: "PGSR tomando como premisa la
     nube"): z-buffer the FULL cleaned cloud into every keyframe camera and save
     the depth maps under pgsr_scene/cloud_anchor/<name>.npz. The trainer adds a
@@ -236,6 +238,16 @@ def export_cloud_anchor_depths(output_dir: Path, frames_dir: Path,
     xyz = np.asarray(o3d.io.read_point_cloud(str(cloud_path)).points, np.float64)
     if not len(xyz):
         raise RuntimeError("cloud_anchor: cleaned_cloud.ply is empty")
+    # PER-OBJECT anchor (user 2026-08-30): rasterize ONLY the instance's own
+    # points — the depth prior for masked object training (sparse-view cure)
+    _sel = None
+    if point_indices is not None:
+        _sel = np.asarray(point_indices, dtype=np.int64)
+        _sel = _sel[(_sel >= 0) & (_sel < len(xyz))]
+        if not len(_sel):
+            raise RuntimeError("cloud_anchor: point_indices selected 0 points")
+        xyz = xyz[_sel]
+        _log(f"cloud anchor: OBJECT mode — {len(xyz):,} points")
     # CONFIDENCE-WEIGHTED anchor (2026-08-18): the anchor pulls hard toward the
     # clean upper half of the cloud (weight 1.0) and only softly (0.3) toward
     # low-confidence points — where the cloud is unreliable, the photometric
@@ -243,6 +255,8 @@ def export_cloud_anchor_depths(output_dir: Path, frames_dir: Path,
     # fills only empty pixels.
     from segmentation.tsdf_export import _load_ply_confidence
     conf = _load_ply_confidence(cloud_path)
+    if conf is not None and _sel is not None and len(conf) >= (_sel.max() + 1):
+        conf = conf[_sel]
     hi_mask = None
     if conf is not None and len(conf) == len(xyz):
         hi_mask = conf >= float(np.percentile(conf, 50.0))
@@ -255,7 +269,8 @@ def export_cloud_anchor_depths(output_dir: Path, frames_dir: Path,
     K_rows = _read_intrinsics_rows(output_dir)
     Hd, Wd = _omega_grid_hw(output_dir)
 
-    dst = output_dir / SCENE_DIRNAME / ANCHOR_DIRNAME
+    dst = Path(dst_dir) if dst_dir is not None \
+        else output_dir / SCENE_DIRNAME / ANCHOR_DIRNAME
     dst.mkdir(parents=True, exist_ok=True)
     native_wh = None
     n_done = 0

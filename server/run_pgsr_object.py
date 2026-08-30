@@ -183,6 +183,21 @@ def main() -> int:
                             set(mask_arrays), mask_arrays,
                             int(args.max_seed_pts))
 
+        # OBJECT DEPTH ANCHOR (2026-08-30): the instance's OWN cloud points
+        # rasterized per view — the sparse-view depth prior (Sparse2DGS et al.)
+        # anchored to the validated truth
+        anchor_dir = None
+        try:
+            from reconstruction.pgsr_export import export_cloud_anchor_depths
+            _progress(iid, "anchor", "rasterizing object cloud")
+            anchor_dir = export_cloud_anchor_depths(
+                output_dir, frames_dir, point_indices=gi,
+                dst_dir=obj_root / "scene" / "cloud_anchor",
+                log=lambda m: print(f"[pgsr-obj] {m}", flush=True))
+        except Exception as e:  # noqa: BLE001
+            print(f"[pgsr-obj] {safe}: object anchor failed ({e}) — "
+                  "training without depth prior", flush=True)
+
         # trainer — the validated max-quality regime, masked to the object
         cmd = ["bash", str(_SERVER_DIR / "run_pgsr.sh"),
                "--scene", str(obj_root / "scene"),
@@ -201,6 +216,19 @@ def main() -> int:
             cmd.append("--use_depth_filter")
         if bool(pcfg.get("exposure_compensation", True)):
             cmd.append("--exposure_compensation")
+        # OBJECT MODE v2 (2026-08-30): background transparency + cloud-anchored
+        # depth + 3D bbox prune — the three fixes from the masked-GS research
+        sfc = ((cfg.get("surface_fit") or {}))
+        cmd += ["--object_bg_weight",
+                str(float(sfc.get("pgsr_object_bg_weight", 1.0))),
+                "--object_prune_margin",
+                str(float(sfc.get("pgsr_object_prune_margin", 0.5)))]
+        if anchor_dir is not None:
+            cmd += ["--cloud_anchor_dir", str(anchor_dir),
+                    "--cloud_anchor_weight",
+                    str(float(sfc.get("pgsr_object_anchor_weight", 1.0))),
+                    "--cloud_anchor_band",
+                    str(float(sfc.get("pgsr_object_anchor_band_m", 0.02)))]
         _progress(iid, "train", f"{args.iterations} iters")
         print(f"[pgsr-obj] {safe}: {' '.join(cmd)}", flush=True)
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,

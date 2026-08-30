@@ -8,13 +8,15 @@ and 08-18 was tried, judged worse by the user, and REVERTED. Never re-apply
 those reverted knobs without an explicit new decision from him.
 
     backend vggtomega_pgsr          (full PGSR precision stage)
-    simple.conf_percentile 10 → 35 SINCE 2026-08-30 (USER: "10 deja pasar
-                                     mucho ruido", raised 10→25→35 same day;
-                                     vendor demo default is 20) — the rest of
-                                     this block stands. (history: 10 was the
-                                     08-11 value; 20 and 50 were tried 08-18 —
-                                     the mesh recipe was the problem then, not
-                                     the cloud filter)
+    simple.conf_percentile 10 — PINNED (USER FINAL 2026-08-30 after the
+                                     full sweep 10→25→35→20 in one day: every
+                                     value above 10 hollowed weak-texture
+                                     surfaces on test3, even vendor-default 20
+                                     — VGGT confidence is systematically low on
+                                     legitimate flat/textureless surface, so
+                                     the gate trades noise for holes. Noise is
+                                     handled downstream: SOR, brush, per-mesh
+                                     steps. Do not raise without his word.)
     pgsr: max_abs_split_points 50000 (vendor default), use_depth_filter false,
           sky_mask false, cloud_anchor false, uniform seed, resolution 1
     tsdf: rasterize_cloud_depth false → integrate the PGSR renders directly,

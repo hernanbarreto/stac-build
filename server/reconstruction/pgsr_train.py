@@ -192,6 +192,13 @@ def main():
                              "cloud's noise band — the cloud is the PREMISE: "
                              "PGSR refines inside the band, never drifts")
     parser.add_argument("--cloud_anchor_weight", type=float, default=1.0)
+    # OBJECT MODE (2026-08-30, per Object-Centric 2DGS arXiv:2501.08174):
+    # masked single-object training. bg_weight forces the render to be EMPTY
+    # outside the object's mask (accumulated-alpha penalty); prune_margin
+    # periodically deletes gaussians outside the seed bbox (+margin, metres).
+    parser.add_argument("--object_bg_weight", type=float, default=0.0)
+    parser.add_argument("--object_prune_margin", type=float, default=0.0)
+    parser.add_argument("--object_prune_interval", type=int, default=500)
     parser.add_argument("--cloud_anchor_band", type=float, default=0.02,
                         help="metres of free play around the cloud surface "
                              "(noise band); only the EXCESS is penalised")
@@ -300,6 +307,17 @@ def main():
         R_d, t_d = se3_exp(pose_delta[i: i + 1])
         return PosedGaussians(g, R_d[0], t_d[0])
 
+    # ── object mode: seed bbox for the periodic 3D prune ───────────────────
+    _obj_lo = _obj_hi = None
+    if args.object_prune_margin > 0:
+        with torch.no_grad():
+            _xyz0 = gaussians.get_xyz
+            _obj_lo = _xyz0.min(dim=0).values - args.object_prune_margin
+            _obj_hi = _xyz0.max(dim=0).values + args.object_prune_margin
+        print(f"[stac-pgsr] object prune bbox: margin "
+              f"{args.object_prune_margin}m every "
+              f"{args.object_prune_interval} iters")
+
     # ── cloud-anchor depth cache (max-precision mode) ──────────────────────
     # Lazy per-camera load of the cloud-raster depth, nearest-resized once to
     # the render grid and kept on the GPU (~2 MB/view). False = no file.
@@ -371,6 +389,15 @@ def main():
         else:
             Ll1 = l1_loss(image_l, gt_l)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss
+
+        # OBJECT MODE background loss (arXiv:2501.08174): outside the object's
+        # mask the render must be EMPTY — penalise the accumulated alpha there.
+        # keep==1 on the object, 0 outside; merely excluding those pixels let
+        # boundary gaussians balloon into the background unpunished.
+        if (args.object_bg_weight > 0 and keep is not None
+                and "rendered_alpha" in render_pkg):
+            l_bg = (render_pkg["rendered_alpha"][0] * (1.0 - keep[0])).mean()
+            loss = loss + args.object_bg_weight * l_bg
 
         if visibility_filter.sum() > 0:
             scale = gaussians.get_scaling[visibility_filter]
@@ -517,6 +544,18 @@ def main():
                         opt.opacity_cull_threshold, scene.cameras_extent, size_th)
                 if iteration % opt.opacity_reset_interval == 0:
                     gaussians.reset_opacity()
+                # OBJECT MODE hard guard: gaussians outside the seed bbox
+                # (+margin) are drift, not object — delete them periodically
+                if (_obj_lo is not None
+                        and iteration % args.object_prune_interval == 0
+                        and iteration < opt.iterations - 500):
+                    xyz_now = gaussians.get_xyz
+                    out_mask = ((xyz_now < _obj_lo) | (xyz_now > _obj_hi)).any(dim=1)
+                    if out_mask.any():
+                        gaussians.prune_points(out_mask)
+                        if iteration % (args.object_prune_interval * 4) == 0:
+                            print(f"[stac-pgsr] object prune: -{int(out_mask.sum())} "
+                                  f"gaussians outside bbox @ iter {iteration}")
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 app_model.optimizer.step()

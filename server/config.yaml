@@ -1192,9 +1192,16 @@ reconstruction:
                                         # windowed mode with a fitting chunk when short.
     exclusive_gpu: true                 # stop vLLM before reconstruction (Omega gets the
                                         # whole GPU); the VLM stage auto-restarts it after
-    conf_percentile: 35.0               # USER 2026-08-30: raised 10 → 25 → 35 same day
-                                        # ("seguimos con bastante ruido"); the VGGT-Omega web
-                                        # demo default is 20 — 35 is his stricter cut.
+    conf_percentile: 10.0               # PINNED at 10 (USER FINAL, 2026-08-30) after sweeping
+                                        # 10 → 25 → 35 → 20 in one day: EVERY cut above 10
+                                        # hollowed weak-texture surfaces on test3 (ceiling/walls/
+                                        # door still "bastante hueco" even at the vendor-default
+                                        # 20). VGGT's confidence is systematically LOW on
+                                        # legitimate weak-texture surface — a percentile cut
+                                        # trades noise for holes there. 10 keeps coverage;
+                                        # floaters/noise are handled DOWNSTREAM (CloudCompy SOR,
+                                        # the brush tool, per-mesh steps) — NOT by this gate.
+                                        # Do not raise again without a new user decision.
                                         # Applies at cloud BUILD: takes effect on the next
                                         # reconstruction, not on existing sessions.
                                         # (History: 10.0 RESTORED 08-11 value, the clouds of the good era.
@@ -1650,6 +1657,13 @@ surface_fit:
                               # on the instance's SAM3 masks, published as <label>_<id>_pgsr/.
   pgsr_object_iterations: 15000  # prototype regime (~20-30 min/object); 30000 = full quality
   pgsr_object_min_frames: 3   # skip instances with fewer masked keyframes (PGSR needs views)
+  # OBJECT MODE v2 (USER 2026-08-30, after the masked-GS research — the three
+  # fixes for the "disastrous" first per-object results):
+  pgsr_object_bg_weight: 1.0  # outside-mask transparency loss (arXiv:2501.08174) —
+                              # the render must be EMPTY where the object is not
+  pgsr_object_anchor_weight: 1.0  # depth prior: the object's OWN cloud rasterized per
+  pgsr_object_anchor_band_m: 0.02 # view; penalise rendered depth beyond this band
+  pgsr_object_prune_margin: 0.5   # metres beyond the seed bbox: gaussians there = drift → pruned
   decompose_see_through: true # USER 2026-08-29: a decomposition plane covered wall3's access
                               # arch — every decomposition-born face is voted against the cloud
                               # Z-buffer: cameras consistently seeing measured geometry BEHIND
