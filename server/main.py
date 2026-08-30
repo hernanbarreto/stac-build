@@ -5154,7 +5154,8 @@ async def segmentation_erase(request: Request):
                 for sp in spheres:
                     await loop.run_in_executor(
                         None, crop_glb_sphere, p, output_dir,
-                        sp["center"], float(sp["radius"]))
+                        sp["center"], float(sp["radius"]),
+                        str(sp.get("shape") or "sphere"))
             st["touched_mesh"].add(int(iid))
     if rep.get("touched") or rep.get("reassigned"):
         if st.get("task"):

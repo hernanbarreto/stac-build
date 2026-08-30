@@ -71,6 +71,7 @@ function App() {
   const [eraseRadius, setEraseRadius] = useState(0.15)
   const [eraseMarks, setEraseMarks] = useState(0)
   const [eraseTarget, setEraseTarget] = useState<string>('')
+  const [eraseShape, setEraseShape] = useState<'sphere' | 'cube'>('sphere')
   const [connected, setConnected] = useState(false)
   const [serverAlive, setServerAlive] = useState(false)
   const [activePanel, setActivePanel] = useState<'sessions' | 'segments' | 'bim' | 'team' | 'analysis' | 'assistant' | null>('sessions')
@@ -2227,11 +2228,19 @@ function App() {
                       whiteSpace: 'nowrap',
                     }}>
                       <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-                        title="Erase sphere radius">
+                        title="Brush size (sphere radius / cube half-side)">
+                        <button className={`tool-btn ${eraseShape === 'sphere' ? 'active' : ''}`}
+                          style={{ fontSize: 12, padding: '2px 7px' }}
+                          title="Sphere brush"
+                          onClick={() => setEraseShape('sphere')}>⚪</button>
+                        <button className={`tool-btn ${eraseShape === 'cube' ? 'active' : ''}`}
+                          style={{ fontSize: 12, padding: '2px 7px' }}
+                          title="Cube brush (axis-aligned)"
+                          onClick={() => setEraseShape('cube')}>⬜</button>
                         <input type="range" min={3} max={150} step={1}
                           value={Math.round(eraseRadius * 100)}
                           onChange={e => setEraseRadius(Number(e.target.value) / 100)}
-                          style={{ width: 120, accentColor: '#ff5555' }} />
+                          style={{ width: 96, accentColor: '#ff5555' }} />
                         <span style={{ fontSize: 11, minWidth: 44, opacity: 0.85 }}>
                           {Math.round(eraseRadius * 100)} cm
                         </span>
@@ -2439,6 +2448,7 @@ function App() {
             activeSession={activeSession}
             activeTool={activeTool}
             eraseRadius={eraseRadius}
+            eraseShape={eraseShape}
             onEraseRadiusChange={setEraseRadius}
             onEraseMarksChanged={setEraseMarks}
             showAxes={showAxes}

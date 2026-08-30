@@ -142,14 +142,31 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
         raise RuntimeError("cloud has no origin fields (cannot edit masks)")
     xyz, fg, pr, pc = origins
     N = len(xyz)
-    raw_spheres = []
+    # zones live in the DISPLAY frame: a cube brush is axis-aligned in the
+    # LEVELED frame the user sees (user 2026-08-30: sphere OR cube per zone),
+    # which is NOT axis-aligned in raw — so all hit tests run on display pts
+    s_ft, R_ft, t_ft = _load_floor_transform(output_dir)
+
+    def _to_disp(p):
+        return s_ft * (np.asarray(p, np.float64) @ R_ft.T) + t_ft
+
+    zones = []
     for sp in spheres:
-        c_raw, r_raw = _display_sphere_to_raw(
-            output_dir, sp["center"], float(sp["radius"]))
-        raw_spheres.append((c_raw, r_raw * r_raw))
-    if not raw_spheres:
+        kind = str(sp.get("shape") or "sphere").lower()
+        zones.append((kind, np.asarray(sp["center"], np.float64),
+                      float(sp["radius"])))
+    if not zones:
         return {"touched": {}, "total_removed": 0, "mesh_instances": [],
                 "undo": None}
+
+    def _zone_hit(disp_pts: np.ndarray) -> np.ndarray:
+        h = np.zeros(len(disp_pts), dtype=bool)
+        for kind, c, r in zones:
+            if kind == "cube":
+                h |= (np.abs(disp_pts - c) <= r).all(axis=1)
+            else:
+                h |= ((disp_pts - c) ** 2).sum(axis=1) <= r * r
+        return h
 
     result = json.loads(res_path.read_text())
     instances = result.get("instances") or []
@@ -239,10 +256,7 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
         gi = gi[(gi >= 0) & (gi < N)]
         if not len(gi):
             continue
-        pts_i = xyz[gi]
-        hit = np.zeros(len(gi), dtype=bool)
-        for c_raw, r2 in raw_spheres:
-            hit |= ((pts_i - c_raw) ** 2).sum(axis=1) <= r2
+        hit = _zone_hit(_to_disp(xyz[gi]))
         n_hit = int(hit.sum())
         if not n_hit:
             continue
@@ -289,10 +303,7 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
     if target_inst is not None:
         un_idx = np.nonzero(~assigned_before)[0]
         if len(un_idx):
-            pts_u = xyz[un_idx]
-            hit_u = np.zeros(len(un_idx), dtype=bool)
-            for c_raw, r2 in raw_spheres:
-                hit_u |= ((pts_u - c_raw) ** 2).sum(axis=1) <= r2
+            hit_u = _zone_hit(_to_disp(xyz[un_idx]))
             if hit_u.any():
                 moved_parts.append(un_idx[hit_u])
         if moved_parts:
@@ -492,19 +503,24 @@ def undo_erase(output_dir: Path, undo: dict) -> dict:
 
 
 def crop_glb_sphere(glb_path: Path, output_dir: Path, center_display,
-                    radius: float) -> bool:
+                    radius: float, shape: str = "sphere") -> bool:
     """Best-effort INSTANT visual crop: drop the published GLB's faces whose
-    vertices fall inside the erase sphere. The definitive mesh comes from the
-    debounced re-fit; this only keeps the screen honest meanwhile. Returns
-    False (and leaves the file untouched) on any trouble."""
+    vertices fall inside the erase zone (sphere or display-axis-aligned cube).
+    The definitive mesh comes from the debounced re-fit; this only keeps the
+    screen honest meanwhile. Returns False (file untouched) on any trouble."""
     try:
         import trimesh
-        c_raw, r_raw = _display_sphere_to_raw(output_dir, center_display, radius)
+        s_ft, R_ft, t_ft = _load_floor_transform(output_dir)
+        c = np.asarray(center_display, np.float64)
+        r = float(radius)
         scene = trimesh.load(str(glb_path), force="scene")
         changed = False
         for name, geom in list(scene.geometry.items()):
-            v = np.asarray(geom.vertices)
-            inside = ((v - c_raw) ** 2).sum(axis=1) <= r_raw * r_raw
+            v = s_ft * (np.asarray(geom.vertices) @ R_ft.T) + t_ft
+            if str(shape).lower() == "cube":
+                inside = (np.abs(v - c) <= r).all(axis=1)
+            else:
+                inside = ((v - c) ** 2).sum(axis=1) <= r * r
             if not inside.any():
                 continue
             faces = np.asarray(geom.faces)

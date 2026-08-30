@@ -47,6 +47,7 @@ interface ViewportProps {
     /** Gizmo edit finished on an evaluation volume — persist + re-evaluate. */
     onVolumeChanged?: (params: { volume_id: number; center: number[]; size: number[]; yaw_deg: number }) => void
     eraseRadius?: number
+    eraseShape?: 'sphere' | 'cube'
     onEraseRadiusChange?: (r: number) => void
     onEraseMarksChanged?: (n: number) => void
     /** Volume deleted from the viewer toolbar. */
@@ -354,7 +355,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, onEraseRadiusChange, onEraseMarksChanged },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, onEraseRadiusChange, onEraseMarksChanged },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -528,6 +529,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // is owned by App (slider in the toolbar); the wheel changes it too and
     // reports back so slider and wheel stay in sync.
     const eraseRadiusRef = useRef(0.15)
+    const eraseShapeRef = useRef<'sphere' | 'cube'>('sphere')
+    useEffect(() => { eraseShapeRef.current = eraseShape === 'cube' ? 'cube' : 'sphere' }, [eraseShape])
     const eraseCursorRef = useRef<THREE.Mesh | null>(null)
     const onEraseRadiusChangeRef = useRef(onEraseRadiusChange)
     useEffect(() => { onEraseRadiusChangeRef.current = onEraseRadiusChange }, [onEraseRadiusChange])
@@ -538,6 +541,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // bridge: renderOBBs is declared later in the file — the potree_ready
     // handler needs it to resync OBBs + panel after an erase/refresh rebuild
     const renderOBBsRef = useRef<((instances: Array<Record<string, unknown>>) => void) | null>(null)
+    // user-chosen per-segment point visibility (user 2026-08-30: an OBB/panel
+    // resync must NOT resurrect segments the user had hidden)
+    const segVisRef = useRef<Map<number, boolean>>(new Map())
     useEffect(() => {
         if (activeTool !== 'erase') eraseApiRef.current?.clear()
     }, [activeTool])
@@ -1780,6 +1786,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (group) group.visible = visible
         },
         setSegmentVisibility: (segId: number, visible: boolean) => {
+            segVisRef.current.set(segId, visible)
             const mat = materialRef.current
             if (!mat) return
             const idx = Math.max(0, Math.min(segId, 255))
@@ -2541,14 +2548,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // mask pixels (deletion survives re-matching), crops the published
         // mesh instantly and debounces a re-fit; the recolored octree arrives
         // via a potree_ready broadcast and reloads in place.
-        const eraseCursor = new THREE.Mesh(
-            new THREE.SphereGeometry(1, 24, 16),
+        const eraseSphereGeom = new THREE.SphereGeometry(1, 24, 16)
+        const eraseCubeGeom = new THREE.BoxGeometry(2, 2, 2)   // half-extent 1, like the unit sphere
+        const eraseCursor: THREE.Mesh = new THREE.Mesh(
+            eraseSphereGeom as THREE.BufferGeometry,
             new THREE.MeshBasicMaterial({
                 color: 0xff4444, transparent: true, opacity: 0.28,
                 depthWrite: false,
             }))
         eraseCursor.visible = false
         eraseCursor.name = 'erase-cursor'
+        eraseCursor.userData.shape = 'sphere'
         scene.add(eraseCursor)
         eraseCursorRef.current = eraseCursor
 
@@ -2583,6 +2593,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
             const p = eraseRaycast(event)
             if (p) {
+                if (eraseCursor.userData.shape !== eraseShapeRef.current) {
+                    eraseCursor.geometry = eraseShapeRef.current === 'cube' ? eraseCubeGeom : eraseSphereGeom
+                    eraseCursor.userData.shape = eraseShapeRef.current
+                }
                 eraseCursor.position.copy(p)
                 eraseCursor.scale.setScalar(eraseRadiusRef.current)
                 eraseCursor.visible = true
@@ -2598,8 +2612,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const eraseMarksGroup = new THREE.Group()
         eraseMarksGroup.name = 'erase-marks'
         scene.add(eraseMarksGroup)
-        const eraseMarks: { center: THREE.Vector3; radius: number }[] = []
+        const eraseMarks: { center: THREE.Vector3; radius: number; shape: 'sphere' | 'cube' }[] = []
         const markGeom = new THREE.SphereGeometry(1, 20, 14)
+        const markCubeGeom = new THREE.BoxGeometry(2, 2, 2)
         const markMat = new THREE.MeshBasicMaterial({
             color: 0xff3333, transparent: true, opacity: 0.38, depthWrite: false,
         })
@@ -2622,6 +2637,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     spheres: eraseMarks.map(m => ({
                         center: [m.center.x, m.center.y, m.center.z],
                         radius: m.radius,
+                        shape: m.shape,
                     })),
                 }
                 // SAFETY: hidden segments cannot lose points
@@ -2669,11 +2685,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const p = eraseRaycast(event)
             if (!p) return
             const r = eraseRadiusRef.current
-            const mark = new THREE.Mesh(markGeom, markMat)
+            const shape = eraseShapeRef.current
+            const mark = new THREE.Mesh(shape === 'cube' ? markCubeGeom : markGeom, markMat)
             mark.position.copy(p)
             mark.scale.setScalar(r)
             eraseMarksGroup.add(mark)
-            eraseMarks.push({ center: p.clone(), radius: r })
+            eraseMarks.push({ center: p.clone(), radius: r, shape })
             onEraseMarksChangedRef.current?.(eraseMarks.length)
             if (onStatusMessage) onStatusMessage(`🖌 ${eraseMarks.length} zone(s) marked — press Erase or Assign to apply`)
         }
@@ -2703,11 +2720,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             renderer.domElement.removeEventListener('mousedown', onEraseMouseDown)
             renderer.domElement.removeEventListener('mouseup', onEraseMouseUp)
             scene.remove(eraseCursor)
-            eraseCursor.geometry.dispose()
+            eraseSphereGeom.dispose()
+            eraseCubeGeom.dispose()
             ;(eraseCursor.material as THREE.Material).dispose()
             eraseCursorRef.current = null
             scene.remove(eraseMarksGroup)
             markGeom.dispose()
+            markCubeGeom.dispose()
             markMat.dispose()
             eraseApiRef.current = null
             renderer.domElement.removeEventListener('webglcontextlost', handleContextLost)
@@ -3545,6 +3564,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const group = obbGroupRef.current
         if (!group) return
 
+        // Preserve the user's choices across re-renders (user 2026-08-30:
+        // recomputing a bbox must not bring every hidden box/segment back)
+        const prevObbVis = new Map<string, boolean>()
+        obbMapRef.current.forEach((c, k) => prevObbVis.set(k, c.visible))
+
         // Clear old OBBs (deep: containers hold LineSegments + label Sprites
         // with CanvasTextures — see disposeDeep)
         while (group.children.length > 0) {
@@ -3570,7 +3594,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 label: `${label} #${instId}`,
                 color: colorStr,
                 totalPoints,
-                visible: true,
+                visible: segVisRef.current.get(instId) ?? true,
             })
 
             if (!obb) continue
@@ -3714,6 +3738,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             labelSprite.position.set(0, halfExtents[1] + spriteH * 0.7, 0)
             obbContainer.add(labelSprite)
 
+            obbContainer.visible = prevObbVis.get(globalKey) ?? true
             group.add(obbContainer)
             obbMapRef.current.set(globalKey, obbContainer)
             geom.dispose()
