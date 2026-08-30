@@ -23,6 +23,9 @@ _POLLING_NOISE = (
     "GET /api/segmentation/shape/progress/",
     "GET /api/segmentation/reconstruct/progress/",
     "GET /api/segmentation/tsdf/progress/",
+    "GET /api/semantic/status",   # chat-model status poll (user 2026-08-30:
+                                  # "lista tremenda de warmup=false")
+    "GET /api/segmentation/erase/status",
 )
 class _HealthCheckFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:

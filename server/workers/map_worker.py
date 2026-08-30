@@ -1888,7 +1888,13 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             if len(_ctr) != len(_probe_frames):
                 pipe.send_log(f"[coverage-trim] probe poses ({len(_ctr)}) != frame list "
                               f"({len(_probe_frames)}) — trim skipped", level="warning")
-            if len(_ctr) == len(_probe_frames) and len(_ctr) >= 3:
+            if not bool(_simple_cfg.get("coverage_trim", False)):
+                # USER ORDER 2026-08-30: never drop keyframes on detected
+                # rotation/static ends — keep every selected view
+                pipe.send_log("[coverage-trim] disabled "
+                              "(simple.coverage_trim: false) — keeping all "
+                              "keyframes, rotation-only ends included")
+            elif len(_ctr) == len(_probe_frames) and len(_ctr) >= 3:
                 _plo, _phi = trim_static_ends(_ctr, fx=_fx)
                 if (_plo, _phi) != (0, len(_ctr)):
                     _pnums = [int(os.path.splitext(f)[0]) for f in _probe_frames]

@@ -1126,7 +1126,17 @@ reconstruction:
                                         # input amplifies feed-forward drift — FastVGGT / the
                                         # VGGT-Long README's own drift note); fast stretches
                                         # get more (no 9 m jumps). "fps" = plain time sampling.
-    keyframe_motion_quantum: 250.0      # BACK to 250 on 2026-08-16 (user decision) after the
+    coverage_trim: false                # USER ORDER 2026-08-30: do NOT drop keyframes on
+                                        # detected rotation/static (or zoom) ends — every
+                                        # selected view is kept. true restores the probe-informed
+                                        # static-ends trim (chunked phase 2 only).
+    keyframe_motion_quantum: 60.0       # USER 2026-08-30: "muy muy pocas" keyframes — 250 gave
+                                        # 12 views on a 300-frame scan; 60 ≈ 45. Context changed
+                                        # since the 08-16 densify-worse verdict: PGSR is out of
+                                        # the flow (Poisson meshing), conf gate now 35. WATCH for
+                                        # VGGT-Omega feed-forward drift (waves/scale wobble) on
+                                        # the next reconstructions.
+                                        # HISTORY: BACK to 250 on 2026-08-16 (user decision) after the
                                         # test3 series came out monotonically worse with denser
                                         # keyframes: 12 views (q250) good → 35 (q80) holes+waves
                                         # → 302 (q1) worst, even with a min-baseline gate on the
@@ -1182,9 +1192,9 @@ reconstruction:
                                         # windowed mode with a fitting chunk when short.
     exclusive_gpu: true                 # stop vLLM before reconstruction (Omega gets the
                                         # whole GPU); the VLM stage auto-restarts it after
-    conf_percentile: 25.0               # USER 2026-08-30: 10 let too much noise through
-                                        # ("deja pasar mucho ruido"); the VGGT-Omega web demo
-                                        # default is 20 — 25 is the chosen slightly-stricter cut.
+    conf_percentile: 35.0               # USER 2026-08-30: raised 10 → 25 → 35 same day
+                                        # ("seguimos con bastante ruido"); the VGGT-Omega web
+                                        # demo default is 20 — 35 is his stricter cut.
                                         # Applies at cloud BUILD: takes effect on the next
                                         # reconstruction, not on existing sessions.
                                         # (History: 10.0 RESTORED 08-11 value, the clouds of the good era.

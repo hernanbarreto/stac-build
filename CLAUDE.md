@@ -8,12 +8,13 @@ and 08-18 was tried, judged worse by the user, and REVERTED. Never re-apply
 those reverted knobs without an explicit new decision from him.
 
     backend vggtomega_pgsr          (full PGSR precision stage)
-    simple.conf_percentile 10 → 25 SINCE 2026-08-30 (USER: "10 deja pasar
-                                     mucho ruido"; vendor demo default is 20,
-                                     he chose 25) — the rest of this block
-                                     stands. (cloud filter: the 08-11 value; 20 and 50
-                                     were tried 08-18 — the mesh recipe was the
-                                     problem, not the cloud filter)
+    simple.conf_percentile 10 → 35 SINCE 2026-08-30 (USER: "10 deja pasar
+                                     mucho ruido", raised 10→25→35 same day;
+                                     vendor demo default is 20) — the rest of
+                                     this block stands. (history: 10 was the
+                                     08-11 value; 20 and 50 were tried 08-18 —
+                                     the mesh recipe was the problem then, not
+                                     the cloud filter)
     pgsr: max_abs_split_points 50000 (vendor default), use_depth_filter false,
           sky_mask false, cloud_anchor false, uniform seed, resolution 1
     tsdf: rasterize_cloud_depth false → integrate the PGSR renders directly,
@@ -240,7 +241,11 @@ them blindly):
   outdoor thresholds, exposure comp) in env `pgsr`; `torch.set_num_threads(8)`
   is LOAD-BEARING (without it the multi-view stage is ~10× slower on many-core
   boxes — GPU idles, CPU thrashes).
-- Keyframe quantum: 80 since 2026-08-15 (USER DECISION after a visual A/B on
+- Keyframe quantum: 60 SINCE 2026-08-30 (USER: "muy muy pocas" — 250 gave 12
+  views/300 frames; PGSR out of the flow changed the old densify-worse
+  verdict; watch for drift). Coverage trim (rotation/static ends) OFF same
+  day by user order (simple.coverage_trim: false). (History: 250 on 08-16;
+  80 on 2026-08-15 — USER DECISION after a visual A/B on
   bufferStop: markedly more complete, less ghosting; caveat — the visual
   baseline was the pre-08-12-pipeline run, so quantum and pipeline upgrades are
   confounded). Denser keyframes give PGSR ~3× more training views; the measured
