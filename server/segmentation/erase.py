@@ -57,6 +57,21 @@ def _atomic_savez(path: Path, arrays: Dict[str, np.ndarray]) -> None:
             os.unlink(tmp)
 
 
+def _cube_hit(disp_pts: np.ndarray, c: np.ndarray, r: float,
+              yaw: float = 0.0) -> np.ndarray:
+    """Points inside a cube of half-side r centred at c, rotated ``yaw``
+    radians about the vertical (Y) axis of the display frame — same
+    convention as three.js ``rotation.y`` (user 2026-08-30: the cube must
+    rotate to adapt to diagonal walls)."""
+    d = np.asarray(disp_pts, np.float64) - c
+    if abs(yaw) > 1e-9:
+        ca, sa = np.cos(yaw), np.sin(yaw)
+        x = ca * d[:, 0] - sa * d[:, 2]
+        z = sa * d[:, 0] + ca * d[:, 2]
+        d = np.column_stack([x, d[:, 1], z])
+    return (np.abs(d) <= r).all(axis=1)
+
+
 def _mask_obj_by_iid(output_dir: Path) -> Dict[int, int]:
     """instance_id → seg_masks obj id (mesh_export convention: via
     segmentation.json, label fallback)."""
@@ -154,16 +169,17 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
     for sp in spheres:
         kind = str(sp.get("shape") or "sphere").lower()
         zones.append((kind, np.asarray(sp["center"], np.float64),
-                      float(sp["radius"])))
+                      float(sp["radius"]),
+                      float(np.radians(float(sp.get("yaw_deg") or 0.0)))))
     if not zones:
         return {"touched": {}, "total_removed": 0, "mesh_instances": [],
                 "undo": None}
 
     def _zone_hit(disp_pts: np.ndarray) -> np.ndarray:
         h = np.zeros(len(disp_pts), dtype=bool)
-        for kind, c, r in zones:
+        for kind, c, r, yaw in zones:
             if kind == "cube":
-                h |= (np.abs(disp_pts - c) <= r).all(axis=1)
+                h |= _cube_hit(disp_pts, c, r, yaw)
             else:
                 h |= ((disp_pts - c) ** 2).sum(axis=1) <= r * r
         return h
@@ -503,7 +519,8 @@ def undo_erase(output_dir: Path, undo: dict) -> dict:
 
 
 def crop_glb_sphere(glb_path: Path, output_dir: Path, center_display,
-                    radius: float, shape: str = "sphere") -> bool:
+                    radius: float, shape: str = "sphere",
+                    yaw_deg: float = 0.0) -> bool:
     """Best-effort INSTANT visual crop: drop the published GLB's faces whose
     vertices fall inside the erase zone (sphere or display-axis-aligned cube).
     The definitive mesh comes from the debounced re-fit; this only keeps the
@@ -518,7 +535,7 @@ def crop_glb_sphere(glb_path: Path, output_dir: Path, center_display,
         for name, geom in list(scene.geometry.items()):
             v = s_ft * (np.asarray(geom.vertices) @ R_ft.T) + t_ft
             if str(shape).lower() == "cube":
-                inside = (np.abs(v - c) <= r).all(axis=1)
+                inside = _cube_hit(v, c, r, float(np.radians(yaw_deg)))
             else:
                 inside = ((v - c) ** 2).sum(axis=1) <= r * r
             if not inside.any():

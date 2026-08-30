@@ -48,6 +48,7 @@ interface ViewportProps {
     onVolumeChanged?: (params: { volume_id: number; center: number[]; size: number[]; yaw_deg: number }) => void
     eraseRadius?: number
     eraseShape?: 'sphere' | 'cube'
+    eraseYawDeg?: number
     onEraseRadiusChange?: (r: number) => void
     onEraseMarksChanged?: (n: number) => void
     /** Volume deleted from the viewer toolbar. */
@@ -355,7 +356,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, onEraseRadiusChange, onEraseMarksChanged },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -531,6 +532,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const eraseRadiusRef = useRef(0.15)
     const eraseShapeRef = useRef<'sphere' | 'cube'>('sphere')
     useEffect(() => { eraseShapeRef.current = eraseShape === 'cube' ? 'cube' : 'sphere' }, [eraseShape])
+    // cube yaw about the vertical axis (user 2026-08-30: adapt to diagonal walls)
+    const eraseYawRef = useRef(0)
+    useEffect(() => {
+        eraseYawRef.current = ((eraseYawDeg ?? 0) * Math.PI) / 180
+        const cur = eraseCursorRef.current
+        if (cur && cur.userData.shape === 'cube') cur.rotation.y = eraseYawRef.current
+    }, [eraseYawDeg])
     const eraseCursorRef = useRef<THREE.Mesh | null>(null)
     const onEraseRadiusChangeRef = useRef(onEraseRadiusChange)
     useEffect(() => { onEraseRadiusChangeRef.current = onEraseRadiusChange }, [onEraseRadiusChange])
@@ -2606,6 +2614,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     eraseCursor.geometry = eraseShapeRef.current === 'cube' ? eraseCubeGeom : eraseSphereGeom
                     eraseCursor.userData.shape = eraseShapeRef.current
                 }
+                eraseCursor.rotation.y = eraseShapeRef.current === 'cube' ? eraseYawRef.current : 0
                 eraseCursor.position.copy(p)
                 eraseCursor.scale.setScalar(eraseRadiusRef.current)
                 eraseCursor.visible = true
@@ -2621,7 +2630,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const eraseMarksGroup = new THREE.Group()
         eraseMarksGroup.name = 'erase-marks'
         scene.add(eraseMarksGroup)
-        const eraseMarks: { center: THREE.Vector3; radius: number; shape: 'sphere' | 'cube'; mesh: THREE.Mesh }[] = []
+        const eraseMarks: { center: THREE.Vector3; radius: number; shape: 'sphere' | 'cube'; yawDeg: number; mesh: THREE.Mesh }[] = []
         const markGeom = new THREE.SphereGeometry(1, 20, 14)
         const markCubeGeom = new THREE.BoxGeometry(2, 2, 2)
         const markMat = new THREE.MeshBasicMaterial({
@@ -2671,6 +2680,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         center: [m.center.x, m.center.y, m.center.z],
                         radius: m.radius,
                         shape: m.shape,
+                        yaw_deg: m.yawDeg,
                     })),
                 }
                 // SAFETY: hidden segments cannot lose points
@@ -2735,8 +2745,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const mark = new THREE.Mesh(shape === 'cube' ? markCubeGeom : markGeom, markMat)
             mark.position.copy(p)
             mark.scale.setScalar(r)
+            const yawDeg = shape === 'cube' ? (eraseYawRef.current * 180) / Math.PI : 0
+            if (shape === 'cube') mark.rotation.y = eraseYawRef.current
             eraseMarksGroup.add(mark)
-            eraseMarks.push({ center: p.clone(), radius: r, shape, mesh: mark })
+            eraseMarks.push({ center: p.clone(), radius: r, shape, yawDeg, mesh: mark })
             onEraseMarksChangedRef.current?.(eraseMarks.length)
             if (onStatusMessage) onStatusMessage(`🖌 ${eraseMarks.length} zone(s) marked — press Erase or Assign to apply`)
         }

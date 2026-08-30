@@ -72,6 +72,7 @@ function App() {
   const [eraseMarks, setEraseMarks] = useState(0)
   const [eraseTarget, setEraseTarget] = useState<string>('')
   const [eraseShape, setEraseShape] = useState<'sphere' | 'cube'>('sphere')
+  const [eraseYawDeg, setEraseYawDeg] = useState(0)
   const [connected, setConnected] = useState(false)
   const [serverAlive, setServerAlive] = useState(false)
   const [activePanel, setActivePanel] = useState<'sessions' | 'segments' | 'bim' | 'team' | 'analysis' | 'assistant' | null>('sessions')
@@ -2245,6 +2246,19 @@ function App() {
                           {Math.round(eraseRadius * 100)} cm
                         </span>
                       </span>
+                      {eraseShape === 'cube' && (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+                          title="Cube rotation about the vertical axis">
+                          <span style={{ fontSize: 11, opacity: 0.7 }}>↻</span>
+                          <input type="range" min={0} max={90} step={1}
+                            value={eraseYawDeg}
+                            onChange={e => setEraseYawDeg(Number(e.target.value))}
+                            style={{ width: 150, accentColor: '#ff9955' }} />
+                          <span style={{ fontSize: 11, minWidth: 30, opacity: 0.85 }}>
+                            {eraseYawDeg}°
+                          </span>
+                        </span>
+                      )}
                       <button className="tool-btn"
                         disabled={eraseMarks === 0}
                         style={{
@@ -2449,6 +2463,7 @@ function App() {
             activeTool={activeTool}
             eraseRadius={eraseRadius}
             eraseShape={eraseShape}
+            eraseYawDeg={eraseYawDeg}
             onEraseRadiusChange={setEraseRadius}
             onEraseMarksChanged={setEraseMarks}
             showAxes={showAxes}
