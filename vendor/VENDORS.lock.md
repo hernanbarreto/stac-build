@@ -40,7 +40,7 @@ commit; already-present clones at the right commit are left untouched.
 | `vendor/oneTBB-src` | `uxlfoundation/oneTBB` | `e9af1a1b` | TBB source → builds `vendor/oneTBB` |
 | `vendor/vggt-omega` | `facebookresearch/vggt-omega` | `39a0cb8a` | optional VGGT-Ω backbone (weights below) |
 | `vendor/ShapeR` | `facebookresearch/ShapeR` | `d4402f55` | legacy per-object meshing (superseded by meshflow; kept for fallback) |
-| `vendor/pgsr` | `zju3dv/PGSR` | `de24f1a3` | precision-mode trainer (Phase D, backend `vggtomega_pgsr`): planar-regularized Gaussian surface reconstruction. Local patch `server/patches/pgsr_inline_quaternion_to_matrix.patch` (applied by setup_vendors.sh) removes the pytorch3d dependency. Env `pgsr` (clone of `da3` + compiled `submodules/diff-plane-rasterization` + `simple-knn`, TORCH_CUDA_ARCH_LIST="8.0;8.6"). Inria research license (non-commercial) — see vendor/pgsr/LICENSE.md |
+| `vendor/pgsr` | `zju3dv/PGSR` | `de24f1a3` | precision-mode trainer (Phase D, backend `vggtomega_pgsr`): planar-regularized Gaussian surface reconstruction. Local patch `server/patches/pgsr_inline_quaternion_to_matrix.patch` (applied by setup_vendors.sh) removes the pytorch3d dependency. STAC patch 2026-08-30 (applied in-tree, `gaussian_renderer/__init__.py`): `rendered_alpha` added to the render return dict — required by the object-mode background loss (`pgsr_train.py --object_bg_weight`); additive, no vendor behavior change. Env `pgsr` (clone of `da3` + compiled `submodules/diff-plane-rasterization` + `simple-knn`, TORCH_CUDA_ARCH_LIST="8.0;8.6"). Inria research license (non-commercial) — see vendor/pgsr/LICENSE.md |
 
 ## 3. Non-git — weights / build trees / prebuilt (manual, documented)
 
