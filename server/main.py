@@ -4164,6 +4164,62 @@ def _fuse_unexplained_poisson(output_dir: Path, frames_dir: Path, iid: int,
     return int(len(gi))
 
 
+async def _run_pgsr_object_stage(session_id: str, frames_dir: Path,
+                                 output_dir: Path, ids: List[int]) -> List[int]:
+    """Per-object PGSR stage (USER 2026-08-30): run_pgsr_object.py trains
+    PGSR per instance on its OWN SAM3 masks and publishes the TSDF of its
+    renders as tsdf/<label>_<id>_pgsr/. GPU-serial by nature (one trainer at
+    a time inside the subprocess). Returns instance ids that produced a mesh."""
+    sfc = cfg.get("surface_fit") or {}
+    worker = Path(SERVER_DIR) / "run_pgsr_object.py"
+    cmd = [sys.executable, str(worker),
+           "--output-dir", str(output_dir),
+           "--frames-dir", str(frames_dir),
+           "--session-dir", str(frames_dir.parent),
+           "--iterations", str(int(sfc.get("pgsr_object_iterations", 15000))),
+           "--min-mask-frames", str(int(sfc.get("pgsr_object_min_frames", 3)))]
+    for i in ids:
+        cmd += ["--instance-id", str(int(i))]
+    result = None
+    try:
+        proc = _track_worker(await asyncio.create_subprocess_exec(
+            *cmd, cwd=str(SERVER_DIR),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            preexec_fn=_die_with_parent_sigkill,
+        ))
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", "ignore").rstrip()
+            if not line:
+                continue
+            if line.startswith("[PGSROBJ-RESULT]"):
+                try:
+                    result = json.loads(line[len("[PGSROBJ-RESULT]"):])
+                except Exception:  # noqa: BLE001
+                    result = None
+            else:
+                try:
+                    print(f"[PGSR-obj] {line}", flush=True)
+                except (BrokenPipeError, OSError):
+                    pass
+        await proc.wait()
+    except Exception as e:  # noqa: BLE001
+        print(f"[Mesh] PGSR object stage failed (non-fatal, poisson stands): {e}")
+        return []
+    done_ids: List[int] = []
+    for g in (result or {}).get("written") or []:
+        try:
+            stem = Path(g).stem            # <label>_<id>_pgsr
+            done_ids.append(int(stem.rsplit("_", 2)[-2]))
+        except Exception:  # noqa: BLE001
+            pass
+    for sk in (result or {}).get("skipped") or []:
+        print(f"[Mesh] pgsr skip: {sk}")
+    return sorted(set(done_ids))
+
+
 async def _surface_fit_for_export(session_id: str, session_dir: Path,
                                   output_dir: Path, ids: List[int],
                                   progress_cb) -> List[int]:
@@ -4622,22 +4678,29 @@ async def export_tsdf_endpoint(request: Request):
         try:
             selected = sorted({int(t) for t in target_ids})
             fitted_ids: set = set()
-            # ── USER ORDER 2026-08-29 (night): the 'Mesh' button generates ONE
-            # mesh per instance — POISSON from the object's own cloud points.
-            # Poisson follows the cloud unconditionally (no cleaning contract,
-            # no decomposition, no invented shape). The parametric path
-            # (surface_fit bspline/RANSAC) is PARKED — code stays on disk —
-            # after the all-bspline run collapsed on raw segments ("ni siquiera
-            # sigue la forma"; the bóveda decomposed into disjoint pieces).
+            # ── USER 2026-08-30: the 'Mesh' button generates TWO meshes per
+            # instance for comparison — POISSON from the object's own cloud
+            # points (as-is) AND a per-object PGSR-TSDF trained ONLY on the
+            # instance's SAM3 masks ("con las máscaras eh!!!"), published as
+            # <label>_<id>_poisson/ and <label>_<id>_pgsr/.
             async with _tsdf_progress_lock:
                 _tsdf_set_overall(session_id, phase="poisson")
             poisson_ids = await _run_poisson_stage(selected, set())
 
+            pgsr_ids: List[int] = []
+            if selected and bool((cfg.get("surface_fit") or {})
+                                 .get("pgsr_objects", True)):
+                async with _tsdf_progress_lock:
+                    _tsdf_set_overall(session_id, phase="pgsr")
+                pgsr_ids = await _run_pgsr_object_stage(
+                    session_id, frames_dir, output_dir, selected)
+
             async with _tsdf_progress_lock:
                 _tsdf_set_overall(session_id, phase="done",
-                                  done=len(poisson_ids),
+                                  done=len(set(poisson_ids) | set(pgsr_ids)),
                                   finished_at=time.time())
-            print(f"[Mesh] ✅ {len(poisson_ids)} poisson mesh(es)")
+            print(f"[Mesh] ✅ {len(poisson_ids)} poisson + {len(pgsr_ids)} "
+                  f"pgsr mesh(es)")
         except Exception as e:
             import traceback
             traceback.print_exc()

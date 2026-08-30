@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -1005,8 +1006,15 @@ def export_poisson_objects(output_dir: Path,
             mesh.compute_vertex_normals()
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in label) + f"_{iid}_poisson"
         obj_dir = output_dir / "tsdf" / safe
-        obj_dir.mkdir(parents=True, exist_ok=True)
-        glb = obj_dir / f"{safe}.glb"
+        # USER ORDER 2026-08-30: publish ONLY after texrecon — the viewer must
+        # never see the untextured intermediate (the train loaded textureless
+        # while the atlas was still baking). Everything is built in a staging
+        # dir and the finished folder is moved into tsdf/ at the very end.
+        stage_dir = output_dir / "poisson_stage" / safe
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir)
+        stage_dir.mkdir(parents=True)
+        glb = stage_dir / f"{safe}.glb"
         o3d.io.write_triangle_mesh(str(glb), mesh)
         meta = {
             "method": "poisson_object",
@@ -1032,7 +1040,13 @@ def export_poisson_objects(output_dir: Path,
             except Exception as e:  # noqa: BLE001
                 print(f"[Poisson-obj] {label}_{iid}: texture failed ({e}) — "
                       "vertex colours kept")
-        (obj_dir / f"{safe}.meta.json").write_text(json.dumps(meta, indent=2))
+        (stage_dir / f"{safe}.meta.json").write_text(json.dumps(meta, indent=2))
+        # publish: textured (or vertex-colored fallback) and complete, in one move
+        if obj_dir.exists():
+            shutil.rmtree(obj_dir)
+        obj_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(stage_dir), str(obj_dir))
+        glb = obj_dir / f"{safe}.glb"
         written.append(glb)
         print(f"[Poisson-obj] {label}_{iid}: {stats['n_vertices']:,} verts "
               f"p95={stats['mesh_to_points_p95_mm']}mm "
@@ -1040,6 +1054,14 @@ def export_poisson_objects(output_dir: Path,
               f"({meta['elapsed_s']}s)")
         if progress_cb:
             progress_cb(iid, "done", time.time() - t0, str(glb))
+    # no garbage left behind (user 2026-08-30): the staging root goes away
+    # entirely — including any partial dir a crashed previous run left
+    try:
+        stage_root = output_dir / "poisson_stage"
+        if stage_root.exists():
+            shutil.rmtree(stage_root)
+    except Exception as e:  # noqa: BLE001
+        print(f"[Poisson-obj] staging cleanup failed (non-fatal): {e}")
     return written
 
 

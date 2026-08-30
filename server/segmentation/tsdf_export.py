@@ -427,7 +427,7 @@ def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float
     return _load, (h, w)
 
 
-def _resolve_pgsr_render_depth(output_dir: Path
+def _resolve_pgsr_render_depth(output_dir: Path, render_dir: Optional[Path] = None
                                ) -> Optional[Tuple[Callable[[int], Optional[dict]],
                                                    Tuple[int, int]]]:
     """PRECISION MODE (Phase D): per-frame depth RENDERED by the PGSR photometric
@@ -435,7 +435,7 @@ def _resolve_pgsr_render_depth(output_dir: Path
     reconstruction/pgsr_train.py) at native resolution. K comes from
     intrinsic.txt scaled omega-grid → render grid (same math as the scene
     export). Returns (loader, (h, w)) or None when no renders exist."""
-    render_dir = output_dir / "pgsr_render"
+    render_dir = Path(render_dir) if render_dir else output_dir / "pgsr_render"
     files = sorted(render_dir.glob("frame_*.npz"))
     if not files:
         return None
@@ -1003,6 +1003,8 @@ def export_tsdf_meshes(
     depth_min: float = 0.15,            # 15 cm — drop near-camera artifacts
     dilate_radius: int = 3,             # px — seed→region for sparse traceability
     progress_cb: Optional[Callable[[int, str, Optional[float], Optional[str]], None]] = None,
+    pgsr_render_dir: Optional[Path] = None,   # per-object PGSR renders (forces this source)
+    name_suffix: str = "",                    # e.g. "_pgsr" → tsdf/<label>_<id>_pgsr/
 ) -> List[Path]:
     """Reconstruct one TSDF mesh per segmented instance.
 
@@ -1072,14 +1074,26 @@ def export_tsdf_meshes(
     # per-frame K at depth resolution.
     stray_depth = None
     from segmentation.session_io import _find_stray_dir
-    stray_dir = _find_stray_dir(session_dir)
+    if pgsr_render_dir is not None:
+        # PER-OBJECT PGSR (user 2026-08-30): this instance's own masked-trained
+        # renders are THE depth source — no fallback chain
+        forced = _resolve_pgsr_render_depth(output_dir, pgsr_render_dir)
+        if forced is None:
+            raise RuntimeError(f"no PGSR renders in {pgsr_render_dir}")
+        logger.info(f"[TSDF] depth source: per-object PGSR renders "
+                    f"({Path(pgsr_render_dir).name})")
+        stray_depth, dict_depth = None, forced
+        stray_dir = None
+    else:
+        stray_dir = _find_stray_dir(session_dir)
     if stray_dir is not None:
         stray_depth = _resolve_stray_depth(stray_dir)
         if stray_depth is not None:
             logger.info(f"[TSDF] depth source: Stray {stray_dir} "
                         f"(shape={stray_depth[1][1]}x{stray_depth[1][0]})")
-    dict_depth = None
-    if stray_depth is None:
+    if pgsr_render_dir is None:
+        dict_depth = None
+    if stray_depth is None and dict_depth is None:
         dict_depth = _resolve_pgsr_render_depth(output_dir)
         if dict_depth is not None:
             logger.info(f"[TSDF] depth source: PGSR renders "
@@ -1302,9 +1316,9 @@ def export_tsdf_meshes(
         n_v = len(mesh.vertices)
         n_t = len(mesh.triangles)
 
-        obj_dir = tsdf_root / _safe_label(label, int(inst_id))
+        obj_dir = tsdf_root / (_safe_label(label, int(inst_id)) + name_suffix)
         obj_dir.mkdir(exist_ok=True)
-        glb_path = obj_dir / f"{_safe_label(label, int(inst_id))}.glb"
+        glb_path = obj_dir / f"{_safe_label(label, int(inst_id))}{name_suffix}.glb"
         meta_path = glb_path.with_suffix(".meta.json")
 
         # Open3D 0.19 supports .glb writes natively via write_triangle_mesh

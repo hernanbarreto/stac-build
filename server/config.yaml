@@ -1645,6 +1645,11 @@ surface_fit:
   accept_p95_mm: 60.0         # p95 of residuals vs the original points must be under this,
                               # otherwise the instance keeps the per-object TSDF/Poisson path
                               # (a flat wall coded "W-103" passes; a valve/machine fails).
+  pgsr_objects: true          # USER 2026-08-30: the Mesh button fires BOTH meshes per
+                              # instance — Poisson (as-is) AND per-object PGSR trained ONLY
+                              # on the instance's SAM3 masks, published as <label>_<id>_pgsr/.
+  pgsr_object_iterations: 15000  # prototype regime (~20-30 min/object); 30000 = full quality
+  pgsr_object_min_frames: 3   # skip instances with fewer masked keyframes (PGSR needs views)
   decompose_see_through: true # USER 2026-08-29: a decomposition plane covered wall3's access
                               # arch — every decomposition-born face is voted against the cloud
                               # Z-buffer: cameras consistently seeing measured geometry BEHIND
