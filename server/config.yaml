@@ -1659,8 +1659,12 @@ surface_fit:
   pgsr_object_min_frames: 3   # skip instances with fewer masked keyframes (PGSR needs views)
   # OBJECT MODE v2 (USER 2026-08-30, after the masked-GS research — the three
   # fixes for the "disastrous" first per-object results):
-  pgsr_object_bg_weight: 1.0  # outside-mask transparency loss (arXiv:2501.08174) —
-                              # the render must be EMPTY where the object is not
+  pgsr_object_bg_weight: 0.5  # outside-mask transparency loss (arXiv:2501.08174) —
+                              # the render must be EMPTY where the object is not.
+                              # 1.0 → 0.5 (USER 2026-08-30: v2 train "un poco menos de
+                              # cobertura" — softer edge punishment)
+  pgsr_object_mask_dilate_px: 3   # dilate the SAM mask before training: cushion for its
+                              # systematic border under-coverage (same user observation)
   pgsr_object_anchor_weight: 1.0  # depth prior: the object's OWN cloud rasterized per
   pgsr_object_anchor_band_m: 0.02 # view; penalise rendered depth beyond this band
   pgsr_object_prune_margin: 0.5   # metres beyond the seed bbox: gaussians there = drift → pruned

@@ -53,7 +53,8 @@ def _progress(iid, phase, detail=""):
 
 def _build_object_scene(output_dir: Path, scene: Path, obj_scene: Path,
                         obj_pts: np.ndarray, obj_cols, masked_frames: set,
-                        mask_arrays: dict, max_seed_pts: int) -> None:
+                        mask_arrays: dict, max_seed_pts: int,
+                        dilate_px: int = 0) -> None:
     """Object scene = shared images + cameras, own seed + own inverted masks."""
     import open3d as o3d
     from PIL import Image
@@ -88,8 +89,15 @@ def _build_object_scene(output_dir: Path, scene: Path, obj_scene: Path,
         if fnum in masked_frames:
             m = mask_arrays[fnum]
             up = np.array(Image.fromarray((m > 0).astype(np.uint8) * 255)
-                          .resize((Wn, Hn), Image.NEAREST))
-            full[up > 0] = 0
+                          .resize((Wn, Hn), Image.NEAREST)) > 0
+            if dilate_px > 0:
+                # SAM masks systematically under-cover borders (measured) and
+                # the background loss then erodes legitimate edges (user
+                # 2026-08-30: v2 train lost some coverage) — a few px of
+                # dilation gives the object a supervised cushion
+                from scipy import ndimage as _ndi
+                up = _ndi.binary_dilation(up, iterations=int(dilate_px))
+            full[up] = 0
             n_sup += 1
         # vendor loader: image_name = basename.split('.')[0] → mask file must
         # be "<stem>.png" ("000123.png"); "<name>.jpg.png" loaded ZERO masks
@@ -109,6 +117,8 @@ def main() -> int:
     ap.add_argument("--iterations", type=int, default=15000)
     ap.add_argument("--min-mask-frames", type=int, default=3)
     ap.add_argument("--max-seed-pts", type=int, default=400_000)
+    ap.add_argument("--mask-dilate-px", type=int, default=-1,
+                    help="-1 = read surface_fit.pgsr_object_mask_dilate_px")
     args = ap.parse_args()
 
     output_dir = Path(args.output_dir).resolve()
@@ -178,10 +188,14 @@ def main() -> int:
 
         obj_root = output_dir / "pgsr_obj" / safe
         _progress(iid, "scene", f"{len(mask_arrays)} masked frames")
+        _dil = int(args.mask_dilate_px)
+        if _dil < 0:
+            _dil = int((cfg.get("surface_fit") or {})
+                       .get("pgsr_object_mask_dilate_px", 3))
         _build_object_scene(output_dir, scene, obj_root / "scene",
                             pts[gi], cols[gi] if cols is not None else None,
                             set(mask_arrays), mask_arrays,
-                            int(args.max_seed_pts))
+                            int(args.max_seed_pts), dilate_px=_dil)
 
         # OBJECT DEPTH ANCHOR (2026-08-30): the instance's OWN cloud points
         # rasterized per view — the sparse-view depth prior (Sparse2DGS et al.)
