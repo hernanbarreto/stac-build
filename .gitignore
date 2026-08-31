@@ -179,3 +179,4 @@ static/xr8/
 # NKSR (research eval, NVIDIA NC license) — 676MB clone, rebuild with:
 #   git clone https://github.com/nv-tlabs/NKSR.git vendor/NKSR
 vendor/NKSR/
+vendor/point2cad/

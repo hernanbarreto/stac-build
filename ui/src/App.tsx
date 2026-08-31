@@ -20,7 +20,7 @@ import {
   Search, Tag, Hammer, Plug, Upload, Settings, Crosshair,
   Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
   Move, Palette, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D,
-  Building2, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
+  Building2, Package, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
   Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
   Scale, Thermometer, Loader2, BarChart3, Home, Pencil, Camera, Plus, SlidersHorizontal,
   Sparkles, Eraser, Undo2, Brush,
@@ -78,6 +78,21 @@ function App() {
   // below the threshold in red; applying moves them to unsegmented.
   const [eraseConfThr, setEraseConfThr] = useState(0.25)
   const [eraseConfArmed, setEraseConfArmed] = useState(false)
+  // ✨ Perfect modal (user 2026-08-31): only segments that already have a
+  // poisson/pgsr GLB are eligible — that mesh family is what gets perfected.
+  // 📦 Object library (user 2026-08-31): collection + every project GLB,
+  // insertable as scene REFERENCES (delete never touches the source)
+  const [showObjectLibrary, setShowObjectLibrary] = useState(false)
+  const [objectLibrary, setObjectLibrary] = useState<Array<{ source: string; session?: string; name: string; url: string; size_mb: number }>>([])
+  const [sceneObjSel, setSceneObjSel] = useState<number | null>(null)
+  const [placedObjects, setPlacedObjects] = useState<Array<{ id: number; name: string; visible: boolean }>>([])
+  const [alignTargets, setAlignTargets] = useState<Array<{ key: string; label: string }>>([])
+  const [alignTarget, setAlignTarget] = useState('')
+  const [showPerfectModal, setShowPerfectModal] = useState(false)
+  const [perfectSelected, setPerfectSelected] = useState<Set<number>>(new Set())
+  const [perfectRunning, setPerfectRunning] = useState(false)
+  // per-segment source mesh choice when both exist: 'poisson' | 'pgsr'
+  const [perfectSource, setPerfectSource] = useState<Record<number, string>>({})
   // leaving the brush turns the red preview off
   useEffect(() => {
     if (activeTool !== 'erase') {
@@ -339,6 +354,10 @@ function App() {
     setUnsegmentedVisible(true)
     setUnsegmentedCount(null)
     refreshUnsegmentedCount(activeSession)
+    // running flags are per-job, progress is per-session: switching sessions
+    // must not leave the Mesh buttons stuck on a job from another session
+    setTsdfRunning(false)
+    setShapeRunning(false)
   }, [activeSession, refreshUnsegmentedCount])
   useEffect(() => {
     if (!activeSession) return
@@ -619,6 +638,13 @@ function App() {
           // 'done'/'error' phase from an earlier job can't re-fire every tick
           // (which reloaded scene.glb on a loop and hung the UI while another
           // job — e.g. Poisson — was the one actually running).
+          // 'idle' while we think we're running = the backend has no such job
+          // (restart wiped it, or it was another session's) — unstick the
+          // button instead of blocking Meshing forever (user 2026-08-31,
+          // observatorio: "no me deja hacer meshing").
+          if (tsdfRunning && (!data.overall || data.overall.phase === 'idle')) {
+            setTsdfRunning(false)
+          }
           if (tsdfRunning && (data.overall?.phase === 'done' || data.overall?.phase === 'error')) {
             await refreshTsdfStatus()
             if (activeSession) {
@@ -1472,6 +1498,17 @@ function App() {
                 <Move size={14} /> Align Cloud
                 <span className="menu-shortcut">G</span>
               </button>
+              <button className="menu-dropdown-item"
+                disabled={!hasSession}
+                onClick={() => menuAction(async () => {
+                  setShowObjectLibrary(true)
+                  try {
+                    const r = await fetch('/api/objects/library')
+                    if (r.ok) setObjectLibrary((await r.json()).items || [])
+                  } catch { /* silent */ }
+                })}>
+                <Package size={14} /> Add Object…
+              </button>
               <div className="menu-separator" />
               {/* ── Sectioning ── */}
               <button className="menu-dropdown-item"
@@ -2079,6 +2116,36 @@ function App() {
                           )}
                         </div>
                       </div>
+                  {/* OBJECTS section — placed library objects (references) */}
+                  {placedObjects.length > 0 && (
+                    <>
+                      <div style={{
+                        marginTop: '8px', padding: '6px 8px 4px', fontSize: '10px',
+                        fontWeight: 600, letterSpacing: '0.08em',
+                        color: 'var(--text-secondary)', textTransform: 'uppercase',
+                        borderTop: '1px solid var(--border)', opacity: 0.85,
+                      }}>
+                        📦 Objects ({placedObjects.length})
+                      </div>
+                      {placedObjects.map(o => (
+                        <div key={`pobj-${o.id}`} className="segment-item">
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%' }}>
+                            <input type="checkbox" checked={o.visible}
+                              title="Show/hide this placed object"
+                              className="segment-checkbox"
+                              onChange={e => viewportRef.current?.setSceneObjectVisible(o.id, e.target.checked)} />
+                            <span className="segment-label" style={{ flex: 1 }}>{o.name}</span>
+                            <button
+                              title="Remove from THIS scene only — the source GLB is never deleted"
+                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: 2 }}
+                              onClick={() => viewportRef.current?.removeSceneObject(o.id)}>
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </>
+                  )}
                   {/* SHAPE section — generated MeshFlow meshes (visual, non-metric) (visibility toggles) */}
                   {shapeMeshes.length > 0 && (
                     <>
@@ -2150,6 +2217,34 @@ function App() {
                               }}
                             />
                             <span className="segment-label" style={{ flex: 1 }}>{m.label}</span>
+                            <button
+                              className="segment-action-btn"
+                              title={`Delete this mesh (${m.folder}) — cannot be undone`}
+                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: 2 }}
+                              onClick={async () => {
+                                if (!activeSession) return
+                                const ok = await confirmDanger(
+                                  'Delete Mesh',
+                                  `Delete mesh "${m.label}" (${m.folder})? This cannot be undone.`
+                                )
+                                if (!ok) return
+                                try {
+                                  const r = await fetch('/api/segmentation/tsdf/delete', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ session_id: activeSession, folder: m.folder }),
+                                  })
+                                  const d = await r.json()
+                                  if (d.ok) {
+                                    setStatusMessage(`🗑 mesh "${m.label}" deleted`)
+                                    viewportRef.current?.clearTsdf()
+                                    await refreshTsdfMeshList(activeSession)
+                                    viewportRef.current?.reloadTsdf(activeSession)
+                                  } else setStatusMessage(`🗑 delete failed: ${d.detail || 'error'}`)
+                                } catch { setStatusMessage('🗑 delete failed') }
+                              }}>
+                              <Trash2 size={12} />
+                            </button>
                           </div>
                         </div>
                       ))}
@@ -2166,6 +2261,12 @@ function App() {
                     title="Per-object meshing: Object (generative) or Mesh (RANSAC + Poisson)"
                     onClick={openTsdfModal}>
                     🧩 Meshing
+                  </button>
+                  <button className="bim-action-btn upload" style={{ flex: 1 }}
+                    disabled={!activeSession}
+                    title="Perfect the meshed segments: recover planes/cylinders/spheres, snap to intent, rebuild CAD-crisp"
+                    onClick={() => { setPerfectSelected(new Set()); setShowPerfectModal(true); refreshTsdfMeshList(activeSession!) }}>
+                    ✨ Perfect
                   </button>
                 </div>
               </div>
@@ -2479,6 +2580,15 @@ function App() {
                 </span>
                 <button className={`tool-btn ${activeTool === 'align' ? 'active' : ''}`}
                   onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')} title="Align Cloud (G)"><Move size={16} /></button>
+                <button className="tool-btn"
+                  title="Add Object — insert a mesh from the collection or any project into this scene"
+                  onClick={async () => {
+                    setShowObjectLibrary(true)
+                    try {
+                      const r = await fetch('/api/objects/library')
+                      if (r.ok) setObjectLibrary((await r.json()).items || [])
+                    } catch { /* silent */ }
+                  }}><Package size={16} /></button>
               </div>
               <div className="toolbar-separator" />
               {/* ── Sectioning (clip box: hides everything outside; unlock restores) ── */}
@@ -2599,6 +2709,52 @@ function App() {
           </div>
         )}
 
+        {/* ── Placed-object alignment bar (visible while one is selected) ── */}
+        {sceneObjSel != null && (() => {
+          const objName = placedObjects.find(o => o.id === sceneObjSel)?.name || `object ${sceneObjSel}`
+          const bstyle = { fontSize: 12, padding: '4px 10px', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4, height: 'auto', width: 'auto' }
+          return (
+          <div className="toolbar" style={{ top: 52 }}>
+            <div className="toolbar-group">
+              <span style={{ fontSize: 12, fontWeight: 600, opacity: 0.9, padding: '0 8px', whiteSpace: 'nowrap' }}>📦 {objName}</span>
+              <button className="tool-btn" style={bstyle} title="Move (G)"
+                onClick={() => viewportRef.current?.setSceneObjectMode('translate')}>Move</button>
+              <button className="tool-btn" style={bstyle} title="Rotate (R)"
+                onClick={() => viewportRef.current?.setSceneObjectMode('rotate')}>Rotate</button>
+              <button className="tool-btn" style={bstyle} title="Scale"
+                onClick={() => viewportRef.current?.setSceneObjectMode('scale')}>Scale</button>
+            </div>
+            <div className="toolbar-separator" />
+            <div className="toolbar-group">
+              <button className="tool-btn" style={bstyle} title="Rest on the floor (bottom → y=0)"
+                onClick={() => viewportRef.current?.alignSceneObject('floor')}>⬇ Floor</button>
+              <select value={alignTarget}
+                onChange={e => setAlignTarget(e.target.value)}
+                style={{ fontSize: 12, background: 'var(--bg-elevated, #1d2026)', color: 'var(--text-primary, #ddd)', border: '1px solid var(--border, rgba(255,255,255,0.18))', borderRadius: 5, padding: '4px 8px', maxWidth: 170 }}>
+                <option value="">Align to…</option>
+                {alignTargets.map(t => <option key={t.key} value={t.key}>{t.label}</option>)}
+              </select>
+              <button className="tool-btn" style={bstyle} disabled={!alignTarget} title="Same base level as the target"
+                onClick={() => viewportRef.current?.alignSceneObject('same_base', alignTarget)}>⬍ Base</button>
+              <button className="tool-btn" style={bstyle} disabled={!alignTarget} title="Rest on top of the target"
+                onClick={() => viewportRef.current?.alignSceneObject('on_top', alignTarget)}>⬆ On top</button>
+              <button className="tool-btn" style={bstyle} disabled={!alignTarget} title="Center horizontally with the target (X/Z)"
+                onClick={() => viewportRef.current?.alignSceneObject('center_xz', alignTarget)}>⇔ Horizontal</button>
+              <button className="tool-btn" style={bstyle} disabled={!alignTarget} title="Center vertically with the target (Y)"
+                onClick={() => viewportRef.current?.alignSceneObject('center_y', alignTarget)}>⇕ Vertical</button>
+            </div>
+            <div className="toolbar-separator" />
+            <div className="toolbar-group">
+              <button className="tool-btn" style={{ ...bstyle, color: '#ff7777' }}
+                title="Remove from THIS scene only — the source GLB is never deleted"
+                onClick={() => viewportRef.current?.removeSelectedSceneObject()}>
+                <Trash2 size={14} /> Remove ref
+              </button>
+            </div>
+          </div>
+          )
+        })()}
+
         {/* Synced video↔3D flythrough overlay (shrinks the viewport to the right half) */}
         {flythroughOpen && (
           <SyncPlayer
@@ -2632,6 +2788,12 @@ function App() {
             onSegments={(list) => { setSegments(list); refreshUnsegmentedCount(activeSession) }}
             onEraseLedger={() => reloadSegments(activeSession)}
             onTsdfReady={(sid) => refreshTsdfMeshList(sid)}
+            onSceneObjectsChanged={setPlacedObjects}
+            onSceneObjectSelected={(id) => {
+              setSceneObjSel(id)
+              setAlignTarget('')
+              setAlignTargets(id != null ? (viewportRef.current?.getSceneAlignTargets() || []) : [])
+            }}
             onPipelineProgress={handlePipelineProgress}
             onVolumeChanged={async (params) => {
               // Gizmo edit finished: persist the volume, then re-evaluate its
@@ -3350,6 +3512,182 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* ── 📦 Object Library Modal (user 2026-08-31) ── */}
+      {showObjectLibrary && (
+        <div className="admin-overlay" style={{ zIndex: 2000 }}>
+          <div className="admin-panel" style={{ maxWidth: 560, maxHeight: '80vh', overflow: 'auto' }}>
+            <div className="admin-header">
+              <h2>📦 Add Object</h2>
+              <button className="admin-close" onClick={() => setShowObjectLibrary(false)}>✕</button>
+            </div>
+            <div style={{ padding: 16 }}>
+              <p style={{ color: 'var(--text-secondary)', marginBottom: 12, fontSize: 13 }}>
+                Insert any mesh — from the collection or from ANY project — into
+                this scene as a reference. Click one to place it, then use the
+                gizmo and alignment tools. Removing it later only removes the
+                reference, never the source.
+              </p>
+              {['collection', ...Array.from(new Set(objectLibrary.filter(o => o.source === 'project').map(o => o.session)))].map(group => {
+                const items = group === 'collection'
+                  ? objectLibrary.filter(o => o.source === 'collection')
+                  : objectLibrary.filter(o => o.session === group)
+                if (!items.length) return null
+                return (
+                  <div key={String(group)} style={{ marginBottom: 10 }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)', margin: '6px 0' }}>
+                      {group === 'collection' ? '⭐ Collection' : `🗂 ${group}`}
+                    </div>
+                    {items.map(it => (
+                      <div key={it.url} className="segment-item"
+                        style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px' }}
+                        onClick={async () => {
+                          if (!activeSession) return
+                          try {
+                            const r = await fetch('/api/objects/scene/add', {
+                              method: 'POST', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ session_id: activeSession, name: it.name, url: it.url }),
+                            })
+                            const d = await r.json()
+                            if (d.ok) {
+                              setShowObjectLibrary(false)
+                              await viewportRef.current?.placeSceneObject(d.object)
+                            }
+                          } catch { setStatusMessage('📦 add failed') }
+                        }}>
+                        <span style={{ flex: 1, fontSize: 13 }}>{it.name}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{it.size_mb} MB</span>
+                      </div>
+                    ))}
+                  </div>
+                )
+              })}
+              {objectLibrary.length === 0 && (
+                <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>No meshes published yet in any project.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── ✨ Perfect Modal (user 2026-08-31): only meshed segments ── */}
+      {showPerfectModal && (() => {
+        const meshedIds = new Set(
+          tsdfMeshes.filter(m => m.instanceId >= 0 &&
+            (m.folder.endsWith('_poisson') || m.folder.endsWith('_pgsr')))
+            .map(m => m.instanceId))
+        const eligible = segments.filter(s => meshedIds.has(s.id))
+        return (
+          <div className="admin-overlay" style={{ zIndex: 2000 }}>
+            <div className="admin-panel" style={{ maxWidth: 540, maxHeight: '80vh', overflow: 'auto' }}>
+              <div className="admin-header">
+                <h2>✨ Perfect Objects</h2>
+                <button className="admin-close" onClick={() => setShowPerfectModal(false)}>✕</button>
+              </div>
+              <div style={{ padding: 16 }}>
+                <p style={{ color: 'var(--text-secondary)', marginBottom: 12, fontSize: 13 }}>
+                  Recovers each object's geometric intent from its own points —
+                  planes, cylinders (hollow included), spheres — snaps it
+                  (vertical/horizontal, parallel/perpendicular, equal radii),
+                  rebuilds CAD-crisp surfaces trimmed to the evidence, and keeps
+                  the unexplained leftover as measured. Publishes
+                  <code> *_perfect</code> next to the existing meshes.
+                  Only segments with a Poisson/PGSR mesh are listed.
+                </p>
+                {eligible.length === 0 && (
+                  <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
+                    No meshed segments yet — run 🧩 Meshing first.
+                  </p>
+                )}
+                {eligible.map(seg => {
+                  const checked = perfectSelected.has(seg.id)
+                  return (
+                    <div key={seg.key} style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '10px 12px', marginBottom: 8,
+                      background: checked ? 'var(--bg-secondary)' : 'var(--bg-tertiary)',
+                      borderRadius: 8,
+                      border: `2px solid ${checked ? seg.color + '55' : 'transparent'}`,
+                      opacity: checked ? 1 : 0.6,
+                    }}>
+                      <input type="checkbox" checked={checked}
+                        disabled={perfectRunning}
+                        onChange={() => setPerfectSelected(prev => {
+                          const next = new Set(prev)
+                          if (next.has(seg.id)) next.delete(seg.id)
+                          else next.add(seg.id)
+                          return next
+                        })} />
+                      <span style={{ width: 12, height: 12, borderRadius: '50%', background: seg.color, flexShrink: 0 }} />
+                      <strong style={{ flex: 1, color: 'var(--text-primary)', fontSize: 13 }}>{seg.label}</strong>
+                      <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                        {seg.totalPoints.toLocaleString()} pts
+                      </span>
+                      {(() => {
+                        const hasP = tsdfMeshes.some(m => m.instanceId === seg.id && m.folder.endsWith('_poisson'))
+                        const hasG = tsdfMeshes.some(m => m.instanceId === seg.id && m.folder.endsWith('_pgsr'))
+                        const cur = perfectSource[seg.id] || (hasP ? 'poisson' : 'pgsr')
+                        // both sources → user picks which mesh gets perfected
+                        if (hasP && hasG) return (
+                          <span style={{ display: 'flex', gap: 4 }}>
+                            <button className="tool-btn"
+                              style={{ fontSize: 11, padding: '1px 6px', opacity: cur === 'poisson' ? 1 : 0.4 }}
+                              title="Perfect the Poisson mesh"
+                              onClick={() => setPerfectSource(p => ({ ...p, [seg.id]: 'poisson' }))}>🟣</button>
+                            <button className="tool-btn"
+                              style={{ fontSize: 11, padding: '1px 6px', opacity: cur === 'pgsr' ? 1 : 0.4 }}
+                              title="Perfect the PGSR mesh"
+                              onClick={() => setPerfectSource(p => ({ ...p, [seg.id]: 'pgsr' }))}>🔷</button>
+                          </span>
+                        )
+                        return (
+                          <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                            {hasP ? '🟣' : ''}{hasG ? '🔷' : ''}
+                            {tsdfMeshes.some(m => m.instanceId === seg.id && m.folder.endsWith('_perfect')) ? '✨' : ''}
+                          </span>
+                        )
+                      })()}
+                    </div>
+                  )
+                })}
+                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                  <button className="bim-action-btn upload" style={{ flex: 1 }}
+                    disabled={perfectRunning || perfectSelected.size === 0}
+                    onClick={async () => {
+                      if (!activeSession) return
+                      setPerfectRunning(true)
+                      try {
+                        const r = await fetch('/api/segmentation/perfect/export', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            session_id: activeSession,
+                            instance_ids: Array.from(perfectSelected),
+                            sources: Object.fromEntries(
+                              Array.from(perfectSelected).map(id => [
+                                id,
+                                perfectSource[id]
+                                || (tsdfMeshes.some(m => m.instanceId === id && m.folder.endsWith('_poisson'))
+                                    ? 'poisson' : 'pgsr'),
+                              ])),
+                          }),
+                        })
+                        const d = await r.json()
+                        setStatusMessage(d.ok
+                          ? `✨ perfecting ${perfectSelected.size} object(s) — meshes will appear when ready`
+                          : `✨ perfect failed: ${d.detail || 'error'}`)
+                        setShowPerfectModal(false)
+                      } catch { setStatusMessage('✨ perfect request failed') }
+                      setPerfectRunning(false)
+                    }}>
+                    {perfectRunning ? '⏳ launching…' : `✨ Perfect (${perfectSelected.size})`}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* ── TSDF Reconstruction Modal ── */}
       {showTsdfModal && (

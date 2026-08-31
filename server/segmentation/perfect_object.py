@@ -1,0 +1,926 @@
+"""
+Per-object geometric UNDERSTANDING and PERFECTION (user 2026-08-31).
+
+Two deliverables share one detection engine:
+
+``diagnose_object`` — the PARTS VIEW ("que el sistema muestre qué entendió"):
+    hierarchical connected-region split-and-fit (plane/cylinder/sphere with
+    acceptance gates), intent snapping, MIRROR-SYMMETRY detection verified
+    against the cloud, published as a flat-colored mesh (one color per part,
+    kind-coded) + a parts inventory in the meta. The user critiques the
+    UNDERSTANDING here before any rebuild.
+
+``perfect_object`` — mesh IRONING v2: same detection, then a screened-
+    Laplacian displacement solve that irons the existing mesh onto the
+    perfected surfaces (topology preserved, analytic crease snapping,
+    freeform untouched, displacement capped).
+
+Research base: GlobFit '11, Mitra '06/'07 (symmetry), Split-and-Fit '24
+(hierarchical partition), CAD-journal 2024 regularity enhancement.
+Everything deterministic — provenance ``tool_measured``. The cloud and the
+source meshes are never modified.
+
+Hernán Barreto - Ingerop IN3 Session IV - STAC
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+
+_UP = np.array([0.0, 1.0, 0.0])   # display (leveled) frame is three.js Y-up
+
+
+# ── frame helpers ────────────────────────────────────────────────────────
+
+def _floor_transform(output_dir: Path):
+    p = Path(output_dir) / "floor_transform.npz"
+    if not p.exists():
+        return 1.0, np.eye(3), np.zeros(3)
+    d = np.load(p)
+    return float(d["s"]), np.asarray(d["R"], float), np.asarray(d["t"], float)
+
+
+def _to_display(output_dir: Path, pts: np.ndarray) -> np.ndarray:
+    s, R, t = _floor_transform(output_dir)
+    return s * (np.asarray(pts, np.float64) @ R.T) + t
+
+
+def _to_raw(output_dir: Path, pts: np.ndarray) -> np.ndarray:
+    s, R, t = _floor_transform(output_dir)
+    return ((np.asarray(pts, np.float64) - t) / s) @ R
+
+
+# ── constrained re-fits (snap mechanics — validated gates) ───────────────
+
+def _rebuild_plane(P: np.ndarray, n_new: np.ndarray, old_normal: np.ndarray):
+    from reconstruction.surface_fit.plane import PlaneModel, _plane_basis
+    n = np.asarray(n_new, np.float64)
+    n = n / max(np.linalg.norm(n), 1e-12)
+    if float(n @ np.asarray(old_normal)) < 0:
+        n = -n
+    d = -float(np.mean(P @ n))
+    centroid = P.mean(axis=0)
+    origin = centroid - (float(centroid @ n) + d) * n
+    u, v = _plane_basis(n, _UP)
+    res = P @ n + d
+    return PlaneModel(normal=n, d=d, origin=origin, u=u, v=v,
+                      rms=float(np.sqrt(np.mean(res ** 2))),
+                      inlier_frac=1.0, n_points=len(P))
+
+
+def _rebuild_cylinder(P: np.ndarray, w_new: np.ndarray,
+                      radius_override: Optional[float] = None):
+    from reconstruction.surface_fit.quadric import CylinderModel
+    w = np.asarray(w_new, np.float64)
+    w = w / max(np.linalg.norm(w), 1e-12)
+    ref = np.array([1.0, 0.0, 0.0]) if abs(w[0]) < 0.9 else np.array([0.0, 0.0, 1.0])
+    e1 = np.cross(w, ref); e1 /= max(np.linalg.norm(e1), 1e-12)
+    e2 = np.cross(w, e1)
+    c0 = P.mean(axis=0)
+    q = P - c0
+    x, y = q @ e1, q @ e2
+    A = np.column_stack([2 * x, 2 * y, np.ones(len(x))])
+    sol, *_ = np.linalg.lstsq(A, x * x + y * y, rcond=None)
+    a, b, c = sol
+    R_fit = float(np.sqrt(max(c + a * a + b * b, 1e-12)))
+    if radius_override is not None:
+        R_fit = float(radius_override)
+    axis_point = c0 + a * e1 + b * e2
+    theta = np.arctan2(y - b, x - a)
+    ts = np.sort(theta)
+    gaps = np.diff(np.concatenate([ts, ts[:1] + 2 * np.pi]))
+    k = int(np.argmax(gaps))
+    theta0 = float(ts[(k + 1) % len(ts)]) if len(ts) > 1 else 0.0
+    span = float(2 * np.pi - gaps[k]) if len(ts) > 1 else 2 * np.pi
+    rho = np.hypot(x - a, y - b)
+    return CylinderModel(axis_point=axis_point, axis_dir=w, radius=R_fit,
+                         theta_ref=e1, theta0=theta0,
+                         theta_span=max(span, 0.1),
+                         rms=float(np.sqrt(np.mean((rho - R_fit) ** 2))),
+                         inlier_frac=1.0, n_points=len(P))
+
+
+def _snap_direction(v: np.ndarray, tol_deg: float) -> Tuple[Optional[np.ndarray], Optional[str]]:
+    v = np.asarray(v, np.float64)
+    v = v / max(np.linalg.norm(v), 1e-12)
+    c = float(abs(v @ _UP))
+    if c >= np.cos(np.deg2rad(tol_deg)):
+        return (_UP if v @ _UP >= 0 else -_UP), "vertical"
+    if c <= np.sin(np.deg2rad(tol_deg)):
+        h = v - (v @ _UP) * _UP
+        n = np.linalg.norm(h)
+        if n > 1e-9:
+            return h / n, "horizontal"
+    return None, None
+
+
+def _project_onto(kind: str, model, P: np.ndarray) -> np.ndarray:
+    P = np.asarray(P, np.float64)
+    if kind == "plane":
+        return P - np.outer(P @ model.normal + model.d, model.normal)
+    if kind == "cylinder":
+        w = model.axis_dir
+        q = P - model.axis_point
+        s = q @ w
+        radial = q - np.outer(s, w)
+        rho = np.maximum(np.linalg.norm(radial, axis=1), 1e-9)
+        return model.axis_point + np.outer(s, w) \
+            + radial * (model.radius / rho)[:, None]
+    if kind == "sphere":
+        q = P - model.center
+        r = np.maximum(np.linalg.norm(q, axis=1), 1e-9)
+        return model.center + q * (model.radius / r)[:, None]
+    return P
+
+
+# ── shared detection engine ──────────────────────────────────────────────
+
+def _load_source_mesh(out: Path, safe: str, source: Optional[str]):
+    import trimesh
+    order = ("_pgsr", "_poisson") if source == "pgsr" else ("_poisson", "_pgsr")
+    src = None
+    for suf in order:
+        p = out / "tsdf" / f"{safe}{suf}" / f"{safe}{suf}.glb"
+        if p.exists():
+            src = p
+            break
+    if src is None:
+        raise FileNotFoundError(f"{safe}: no poisson/pgsr GLB")
+    tm = trimesh.load(str(src), force="mesh")
+    tm.merge_vertices()
+    return tm, src
+
+
+def _detect_and_snap(tm, F: np.ndarray, Vd: np.ndarray, cfg: dict,
+                     safe: str, log) -> Tuple[List[dict], int]:
+    """Hierarchical connected split-and-fit + intent snapping.
+    Returns (regions, min_faces_eff); each region:
+    {kind, model, f_idx, v_idx, notes}."""
+    import scipy.sparse as sp
+    from reconstruction.surface_fit.escalate import FITTERS, FitContext
+
+    crease0 = float(cfg.get("perfect_crease_deg", 30.0))
+    min_region_faces = int(cfg.get("perfect_min_region_faces", 300))
+    accept_p95_mm = float(cfg.get("perfect_accept_p95_mm", 40.0))
+    tol_deg = float(cfg.get("perfect_snap_deg", 4.0))
+    rel_tol_deg = float(cfg.get("perfect_relation_deg", 3.0))
+    radius_tol = float(cfg.get("perfect_radius_tol", 0.02))
+    max_fit_pts = int(cfg.get("perfect_max_fit_pts", 120_000))
+
+    adj = tm.face_adjacency
+    # coarse→fine smoothing levels: a failing region is re-partitioned at the
+    # next finer level and each connected piece retried (one threshold either
+    # shatters noisy TSDF meshes or merges everything — both observed)
+    levels = [(6, crease0), (3, 22.0), (1, 15.0), (0, 10.0)]
+    keep_by_level: List[np.ndarray] = []
+    FN0 = np.asarray(tm.face_normals, np.float64).copy()
+    for n_smooth, cr_deg in levels:
+        FN = FN0.copy()
+        for _ in range(n_smooth):
+            acc = FN.copy()
+            np.add.at(acc, adj[:, 0], FN[adj[:, 1]])
+            np.add.at(acc, adj[:, 1], FN[adj[:, 0]])
+            FN = acc / np.maximum(
+                np.linalg.norm(acc, axis=1, keepdims=True), 1e-12)
+        cosang = np.clip((FN[adj[:, 0]] * FN[adj[:, 1]]).sum(axis=1), -1, 1)
+        keep_by_level.append(np.arccos(cosang) < np.deg2rad(cr_deg))
+
+    min_faces_eff = min(min_region_faces, max(100, len(F) // 300))
+    ctx = FitContext(world_up=_UP, dist_thresh=0.02, min_inlier_frac=0.02)
+    rng = np.random.default_rng(0)
+
+    def _try_ladder(f_idx: np.ndarray):
+        v_idx = np.unique(F[f_idx].ravel())
+        Pr = Vd[v_idx]
+        fit_pts = Pr if len(Pr) <= max_fit_pts else \
+            Pr[rng.choice(len(Pr), max_fit_pts, replace=False)]
+        for kind in ("plane", "cylinder", "sphere"):
+            fitter = FITTERS.get(kind)
+            if fitter is None:
+                continue
+            try:
+                model = fitter(fit_pts, ctx)
+            except Exception:  # noqa: BLE001
+                model = None
+            if model is None:
+                continue
+            d = np.abs(np.asarray(model.signed_distance(Pr)))
+            if float(np.percentile(d, 95)) * 1000.0 <= accept_p95_mm:
+                return kind, model, v_idx
+        return None
+
+    regions: List[dict] = []
+
+    def _components(f_idx: np.ndarray, level: int) -> List[np.ndarray]:
+        loc = np.full(len(F), -1, dtype=np.int64)
+        loc[f_idx] = np.arange(len(f_idx))
+        e = adj[keep_by_level[level]]
+        m = (loc[e[:, 0]] >= 0) & (loc[e[:, 1]] >= 0)
+        e = e[m]
+        gsub = sp.coo_matrix(
+            (np.ones(len(e)), (loc[e[:, 0]], loc[e[:, 1]])),
+            shape=(len(f_idx), len(f_idx)))
+        _, lab = sp.csgraph.connected_components(gsub, directed=False)
+        return [f_idx[lab == c] for c in range(lab.max() + 1)
+                if (lab == c).sum() >= min_faces_eff]
+
+    def _segment(f_idx: np.ndarray, level: int):
+        hit = _try_ladder(f_idx)
+        if hit is not None:
+            kind, model, v_idx = hit
+            regions.append({"kind": kind, "model": model,
+                            "f_idx": f_idx, "v_idx": v_idx, "notes": []})
+            return
+        if level + 1 >= len(levels):
+            return
+        pieces = _components(f_idx, level + 1)
+        if len(pieces) == 1 and len(pieces[0]) == len(f_idx):
+            return
+        for piece in pieces:
+            _segment(piece, level + 1)
+
+    for root in _components(np.arange(len(F)), 0):
+        _segment(root, 0)
+    log(f"[perfect:{safe}] hierarchical split-and-fit: "
+        f"{len(regions)} region(s) accepted (min {min_faces_eff} faces)")
+
+    # intent snapping with honesty gates (revert if degrading)
+    dominant_n = None
+    plane_regs = [r for r in regions if r["kind"] == "plane"]
+    if plane_regs:
+        dominant_n = max(plane_regs,
+                         key=lambda r: len(r["v_idx"]))["model"].normal.copy()
+    for r in regions:
+        Pm = Vd[r["v_idx"]]
+        model, kind = r["model"], r["kind"]
+        d_pre = np.abs(np.asarray(model.signed_distance(Pm)))
+        rms_pre = float(np.sqrt(np.mean(d_pre ** 2)))
+        model_pre, notes = model, []
+        try:
+            if kind == "plane":
+                n_new, tag = _snap_direction(model.normal, tol_deg)
+                if n_new is None and dominant_n is not None \
+                        and not np.allclose(model.normal, dominant_n):
+                    a = np.rad2deg(np.arccos(np.clip(
+                        abs(float(model.normal @ dominant_n)), 0, 1)))
+                    if a <= rel_tol_deg:
+                        n_new, tag = dominant_n, "parallel-to-dominant"
+                    elif abs(a - 90.0) <= rel_tol_deg:
+                        h = model.normal - float(model.normal @ dominant_n) * dominant_n
+                        if np.linalg.norm(h) > 1e-9:
+                            n_new, tag = h / np.linalg.norm(h), "perpendicular-to-dominant"
+                if n_new is not None:
+                    model = _rebuild_plane(Pm, n_new, model.normal)
+                    notes.append(f"normal snapped {tag}")
+            elif kind == "cylinder":
+                w_new, tag = _snap_direction(model.axis_dir, tol_deg)
+                if w_new is not None:
+                    model = _rebuild_cylinder(Pm, w_new)
+                    notes.append(f"axis snapped {tag}")
+        except Exception as e:  # noqa: BLE001
+            log(f"[perfect:{safe}] snap failed ({e}) — raw fit kept")
+        if notes:
+            d_post = np.abs(np.asarray(model.signed_distance(Pm)))
+            if float(np.sqrt(np.mean(d_post ** 2))) > max(1.5 * rms_pre,
+                                                          rms_pre + 0.005):
+                model, notes = model_pre, []
+        r["model"], r["notes"] = model, notes
+
+    cyls = [r for r in regions if r["kind"] == "cylinder"]
+    if len(cyls) >= 2:
+        radii = np.array([r["model"].radius for r in cyls])
+        mean_r = float(radii.mean())
+        if mean_r > 0 and float(np.max(np.abs(radii - mean_r))) <= radius_tol * mean_r:
+            for r in cyls:
+                r["model"] = _rebuild_cylinder(Vd[r["v_idx"]],
+                                               r["model"].axis_dir,
+                                               radius_override=mean_r)
+                r["notes"].append(f"radius equalized to {mean_r:.4f} m")
+    return regions, min_faces_eff
+
+
+# ── mirror-symmetry detection (Mitra '06 lifted to the fitted object) ────
+
+def _detect_mirror_symmetry(Pcloud: np.ndarray, regions: List[dict],
+                            log, safe: str,
+                            accept_med_mm: float = 20.0) -> Optional[dict]:
+    """Vertical mirror-plane candidates from cloud PCA + dominant plane
+    normals; each scored by reflecting a cloud subsample and measuring the
+    median distance to the nearest original point. Deterministic."""
+    from scipy.spatial import cKDTree
+    sub = Pcloud[:: max(1, len(Pcloud) // 30000)]
+    kd = cKDTree(sub)
+    ctr = sub.mean(axis=0)
+
+    cands: List[np.ndarray] = []
+    h = sub[:, [0, 2]] - ctr[[0, 2]]
+    cov = h.T @ h
+    w_, v_ = np.linalg.eigh(cov)
+    for k in range(2):
+        n = np.array([v_[0, k], 0.0, v_[1, k]])
+        cands.append(n / np.linalg.norm(n))
+    for r in regions:
+        if r["kind"] == "plane":
+            nh = r["model"].normal - float(r["model"].normal @ _UP) * _UP
+            ln = np.linalg.norm(nh)
+            if ln > 0.5:
+                cands.append(nh / ln)
+    # dedupe by direction
+    uniq: List[np.ndarray] = []
+    for n in cands:
+        if not any(abs(float(n @ u)) > 0.985 for u in uniq):
+            uniq.append(n)
+
+    probe = sub[:: max(1, len(sub) // 8000)]
+    best = None
+    for n in uniq:
+        d0 = float(np.median(sub @ n))
+        for delta in np.linspace(-0.15, 0.15, 13):
+            d = d0 + delta
+            refl = probe - 2.0 * ((probe @ n) - d)[:, None] * n[None]
+            dist, _ = kd.query(refl, k=1)
+            score = float(np.median(dist))
+            if best is None or score < best["median_m"]:
+                best = {"normal": n.tolist(), "offset": d,
+                        "median_m": score}
+    if best is None:
+        return None
+    best["median_mm"] = round(best["median_m"] * 1000, 1)
+    best["accepted"] = best["median_m"] * 1000 <= accept_med_mm
+    log(f"[perfect:{safe}] symmetry: mirror "
+        f"{'FOUND' if best['accepted'] else 'not confirmed'} "
+        f"(median reflection error {best['median_mm']} mm, "
+        f"normal {np.round(best['normal'], 3).tolist()})")
+    return best
+
+
+def _region_meta(regions: List[dict]) -> List[dict]:
+    out = []
+    for r in regions:
+        e = {"kind": r["kind"], "n_faces": int(len(r["f_idx"])),
+             "n_vertices": int(len(r["v_idx"])), "snapped": r["notes"],
+             "params": r["model"].params_dict(),
+             "provenance": "tool_measured"}
+        if r["kind"] == "cylinder":
+            e["radius_m"] = round(float(r["model"].radius), 4)
+        if r["kind"] == "sphere":
+            e["radius_m"] = round(float(r["model"].radius), 4)
+        out.append(e)
+    return out
+
+
+# ── PARTS VIEW: show what the system understood ──────────────────────────
+
+def diagnose_object(output_dir: Path, instance_id: int,
+                    cfg: Optional[dict] = None,
+                    source: Optional[str] = None,
+                    log=print) -> Optional[Path]:
+    """Flat-colored parts view + inventory + symmetry verdict, published as
+    ``tsdf/<label>_<id>_parts/`` — the user validates the UNDERSTANDING."""
+    import open3d as o3d
+    from segmentation.tsdf_export import _safe_label
+
+    t0 = time.time()
+    cfg = cfg or {}
+    out = Path(output_dir)
+    result = json.loads((out / "segmentation_result.json").read_text())
+    inst = next((i for i in result.get("instances", [])
+                 if int(i.get("instance_id", i.get("id"))) == int(instance_id)),
+                None)
+    if inst is None:
+        raise ValueError(f"instance {instance_id} not found")
+    label = str(inst.get("label", "segment"))
+    safe = _safe_label(label, int(instance_id))
+
+    tm, src = _load_source_mesh(out, safe, source)
+    V_raw = np.asarray(tm.vertices, np.float64)
+    F = np.asarray(tm.faces, np.int64)
+    Vd = _to_display(out, V_raw)
+    log(f"[perfect:{safe}] parts view from {src.parent.name}: "
+        f"{len(Vd):,} verts / {len(F):,} faces")
+
+    regions, _ = _detect_and_snap(tm, F, Vd, cfg, safe, log)
+
+    pc = o3d.io.read_point_cloud(str(out / "cleaned_cloud.ply"))
+    gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+    xyz = np.asarray(pc.points)
+    gi = gi[(gi >= 0) & (gi < len(xyz))]
+    Pcloud = _to_display(out, xyz[gi])
+    sym = _detect_mirror_symmetry(Pcloud, regions, log, safe)
+
+    # flat color per part: kind-coded base + per-region shade so borders read
+    base = {"plane": np.array([0.42, 0.58, 0.85]),
+            "cylinder": np.array([0.95, 0.55, 0.15]),
+            "sphere": np.array([0.25, 0.75, 0.40])}
+    colors = np.full((len(Vd), 3), 0.22)              # freeform = dark gray
+    rng = np.random.default_rng(7)
+    for ri, r in enumerate(regions):
+        tint = base[r["kind"]] * (0.75 + 0.5 * rng.random())
+        colors[r["v_idx"]] = np.clip(tint, 0, 1)
+        log(f"[perfect:{safe}]   part {ri}: {r['kind']}"
+            + (f" r={r['model'].radius:.3f} m" if r["kind"] in ("cylinder", "sphere") else "")
+            + f" · {len(r['f_idx']):,} faces"
+            + (f" [{'; '.join(r['notes'])}]" if r["notes"] else ""))
+
+    mesh = o3d.geometry.TriangleMesh(
+        o3d.utility.Vector3dVector(V_raw),
+        o3d.utility.Vector3iVector(F))
+    mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
+    mesh.compute_vertex_normals()
+    dst = out / "tsdf" / f"{safe}_parts"
+    dst.mkdir(parents=True, exist_ok=True)
+    glb = dst / f"{safe}_parts.glb"
+    o3d.io.write_triangle_mesh(str(glb), mesh)
+    kinds: Dict[str, int] = {}
+    for r in regions:
+        kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
+    meta = {
+        "method": "parts",
+        "instance_id": int(instance_id),
+        "label": f"{label} (parts)",
+        "glb_file": glb.name,
+        "source_mesh": src.parent.name,
+        "inventory": kinds,
+        "n_regions": len(regions),
+        "parts": _region_meta(regions),
+        "symmetry_mirror": sym,
+        "freeform_vertices": int((colors[:, 0] == 0.22).sum()),
+        "n_vertices": int(len(Vd)),
+        "n_triangles": int(len(F)),
+        "vertex_colors": True,
+        "textured": False,
+        "elapsed_s": round(time.time() - t0, 1),
+        "provenance": "tool_measured",
+    }
+    (dst / f"{safe}_parts.meta.json").write_text(json.dumps(meta, indent=2))
+    log(f"[perfect:{safe}] ✅ parts view: {kinds} · symmetry "
+        f"{'FOUND' if (sym or {}).get('accepted') else 'not confirmed'} → "
+        f"{glb.name} ({meta['elapsed_s']}s)")
+    return glb
+
+
+# ── PERFECT: iron the mesh onto the perfected surfaces ───────────────────
+
+def perfect_object(output_dir: Path, instance_id: int,
+                   cfg: Optional[dict] = None,
+                   source: Optional[str] = None,
+                   log=print) -> Optional[Path]:
+    """Iron ONE segment's chosen mesh onto its perfected primitive regions.
+    Publishes ``tsdf/<label>_<id>_perfect/``; returns the GLB path."""
+    import open3d as o3d
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import splu
+    from scipy.spatial import cKDTree
+    from segmentation.tsdf_export import _safe_label
+
+    t0 = time.time()
+    cfg = cfg or {}
+    blend_rings = int(cfg.get("perfect_blend_rings", 4))
+    stiffness = float(cfg.get("perfect_iron_lambda", 5.0))
+
+    out = Path(output_dir)
+    result = json.loads((out / "segmentation_result.json").read_text())
+    inst = next((i for i in result.get("instances", [])
+                 if int(i.get("instance_id", i.get("id"))) == int(instance_id)),
+                None)
+    if inst is None:
+        raise ValueError(f"instance {instance_id} not found")
+    label = str(inst.get("label", "segment"))
+    safe = _safe_label(label, int(instance_id))
+
+    tm, src = _load_source_mesh(out, safe, source)
+    V_raw = np.asarray(tm.vertices, np.float64)
+    F = np.asarray(tm.faces, np.int64)
+    if len(V_raw) < 1000 or len(F) < 1000:
+        raise ValueError(f"{safe}: source mesh too small to perfect")
+    Vd = _to_display(out, V_raw)
+    log(f"[perfect:{safe}] source {src.parent.name}: "
+        f"{len(Vd):,} verts / {len(F):,} faces")
+
+    pc = o3d.io.read_point_cloud(str(out / "cleaned_cloud.ply"))
+    xyz = np.asarray(pc.points)
+    cols = np.asarray(pc.colors) if pc.has_colors() else None
+    gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+    gi = gi[(gi >= 0) & (gi < len(xyz))]
+    Pcloud = _to_display(out, xyz[gi])
+    Pcols = cols[gi] if cols is not None else None
+
+    regions, _ = _detect_and_snap(tm, F, Vd, cfg, safe, log)
+    if not regions:
+        raise RuntimeError(f"{safe}: no primitive region passed the gates — "
+                           "nothing to perfect")
+
+    # ── displacement-field ironing
+    n_v = len(Vd)
+    vert_region = np.full(n_v, -1, dtype=np.int64)
+    for ri, r in enumerate(regions):
+        vert_region[r["v_idx"]] = ri
+    e_all = tm.edges_unique
+    Wg = sp.coo_matrix(
+        (np.ones(len(e_all)), (e_all[:, 0], e_all[:, 1])),
+        shape=(n_v, n_v))
+    Wg = (Wg + Wg.T).tocsr()
+    diff = np.zeros(n_v, dtype=bool)
+    for v0, v1 in e_all:
+        if vert_region[v0] != vert_region[v1]:
+            if vert_region[v0] >= 0:
+                diff[v0] = True
+            if vert_region[v1] >= 0:
+                diff[v1] = True
+    ring = np.full(n_v, blend_rings, dtype=np.int64)
+    ring[vert_region < 0] = 0
+    frontier = np.nonzero(diff)[0]
+    ring[frontier] = 0
+    for depth in range(1, blend_rings):
+        nxt = np.unique(Wg[frontier].indices)
+        nxt = nxt[(ring[nxt] > depth) & (vert_region[nxt] >= 0)]
+        if not len(nxt):
+            break
+        ring[nxt] = depth
+        frontier = nxt
+    w_v = np.zeros(n_v)
+    in_reg = vert_region >= 0
+    w_v[in_reg] = ring[in_reg] / float(blend_rings)
+
+    targets = Vd.copy()
+    region_cap = np.zeros(len(regions))
+    for ri, r in enumerate(regions):
+        idx = r["v_idx"]
+        proj = _project_onto(r["kind"], r["model"], Vd[idx])
+        disp = proj - Vd[idx]
+        d_reg = np.abs(np.asarray(r["model"].signed_distance(Vd[idx])))
+        cap = max(3.0 * float(np.sqrt(np.mean(d_reg ** 2))), 0.01)
+        region_cap[ri] = cap
+        mag = np.linalg.norm(disp, axis=1)
+        over = mag > cap
+        if over.any():
+            disp[over] *= (cap / mag[over])[:, None]
+        targets[idx] = Vd[idx] + disp
+
+    # sharp creases: boundary verts between two regions → analytic
+    # intersection via alternating projections
+    crease_v: Dict[int, Tuple[int, int]] = {}
+    for v0, v1 in e_all:
+        r0, r1 = vert_region[v0], vert_region[v1]
+        if r0 >= 0 and r1 >= 0 and r0 != r1:
+            crease_v[int(v0)] = (int(min(r0, r1)), int(max(r0, r1)))
+            crease_v[int(v1)] = (int(min(r0, r1)), int(max(r0, r1)))
+    n_sharp = 0
+    for v, (ra, rb) in crease_v.items():
+        x = Vd[v].copy()
+        A, B = regions[ra], regions[rb]
+        for _ in range(6):
+            x = _project_onto(A["kind"], A["model"], x[None])[0]
+            x = _project_onto(B["kind"], B["model"], x[None])[0]
+        cap = max(region_cap[ra], region_cap[rb])
+        if np.linalg.norm(x - Vd[v]) <= cap:
+            targets[v] = x
+            w_v[v] = 1.0
+            n_sharp += 1
+    log(f"[perfect:{safe}] creases: {n_sharp:,}/{len(crease_v):,} boundary "
+        f"verts snapped to analytic intersections")
+
+    deg = np.asarray(Wg.sum(axis=1)).ravel()
+    L = sp.diags(deg) - Wg
+    Wd = sp.diags(stiffness * w_v)
+    Asys = (L + Wd + 1e-6 * sp.identity(n_v)).tocsc()
+    rhs = stiffness * w_v[:, None] * (targets - Vd)
+    lu = splu(Asys)
+    D = np.column_stack([lu.solve(rhs[:, k]) for k in range(3)])
+    V_new = Vd + D
+    moved = np.linalg.norm(D, axis=1)
+    log(f"[perfect:{safe}] ironed: {int((moved > 1e-4).sum()):,} verts moved, "
+        f"max {moved.max()*1000:.1f} mm, mean(region) "
+        f"{moved[in_reg].mean()*1000:.1f} mm")
+
+    # residuals vs the CLOUD, per region
+    kd_cloud = cKDTree(Vd)
+    cloud_sub = Pcloud[::max(1, len(Pcloud) // 400_000)]
+    _, near_v = kd_cloud.query(cloud_sub, k=1)
+    parts_meta = _region_meta(regions)
+    for ri, r in enumerate(regions):
+        sel = vert_region[near_v] == ri
+        if sel.sum() >= 100:
+            dc = np.abs(np.asarray(r["model"].signed_distance(cloud_sub[sel])))
+            parts_meta[ri]["cloud_residuals"] = {
+                "rms_mm": round(float(np.sqrt(np.mean(dc ** 2))) * 1000, 2),
+                "p95_mm": round(float(np.percentile(dc, 95)) * 1000, 2),
+                "n_cloud_pts": int(sel.sum())}
+
+    mesh = o3d.geometry.TriangleMesh(
+        o3d.utility.Vector3dVector(_to_raw(out, V_new)),
+        o3d.utility.Vector3iVector(F))
+    if Pcols is not None:
+        _, nn = cKDTree(Pcloud).query(V_new, k=1)
+        mesh.vertex_colors = o3d.utility.Vector3dVector(Pcols[nn])
+    mesh.compute_vertex_normals()
+    dst = out / "tsdf" / f"{safe}_perfect"
+    dst.mkdir(parents=True, exist_ok=True)
+    glb = dst / f"{safe}_perfect.glb"
+    o3d.io.write_triangle_mesh(str(glb), mesh)
+    meta = {
+        "method": "perfect",
+        "version": 2,
+        "instance_id": int(instance_id),
+        "label": f"{label} (perfect)",
+        "glb_file": glb.name,
+        "source_mesh": src.parent.name,
+        "n_regions": len(regions),
+        "parts": parts_meta,
+        "freeform_vertices": int((~in_reg).sum()),
+        "n_vertices": int(len(V_new)),
+        "n_triangles": int(len(F)),
+        "vertex_colors": bool(Pcols is not None),
+        "textured": False,
+        "elapsed_s": round(time.time() - t0, 1),
+        "provenance": "tool_measured",
+    }
+    (dst / f"{safe}_perfect.meta.json").write_text(json.dumps(meta, indent=2))
+    log(f"[perfect:{safe}] ✅ v2 ironed {len(regions)} region(s) → {glb.name} "
+        f"({meta['elapsed_s']}s)")
+    return glb
+
+
+# ── MODEL REBUILD: clean CAD-like model from the validated understanding ──
+
+def _reflect_pts(P: np.ndarray, n: np.ndarray, d: float) -> np.ndarray:
+    return P - 2.0 * ((P @ n) - d)[:, None] * n[None]
+
+
+def _reflect_dir(v: np.ndarray, n: np.ndarray) -> np.ndarray:
+    return v - 2.0 * float(v @ n) * n
+
+
+def build_model_object(output_dir: Path, instance_id: int,
+                       cfg: Optional[dict] = None,
+                       source: Optional[str] = None,
+                       log=print) -> Optional[Path]:
+    """CLEAN MODEL from the validated parts (user 2026-08-31: 'veamos qué
+    sale de lo que detectó — que reconstruya'): every detected part is
+    re-meshed from its perfect surface with a REGULARIZED outline
+    (rectangle/polygon ladder from contours.py — CAD-crisp edges), mirror
+    pairs share symmetrized parameters AND color, self-symmetric parts are
+    symmetrized against their own reflection, and parts with no scanned
+    twin are COMPLETED by mirroring (tagged + tinted — provenance visible).
+    Freeform stays OUT of the model: this is the intent, not the scan.
+    Published as ``tsdf/<label>_<id>_model/``."""
+    import open3d as o3d
+    from segmentation.tsdf_export import _safe_label
+    from reconstruction.surface_fit.support import support_grid, mesh_on_surface
+    from reconstruction.surface_fit.contours import regularize_mesh
+
+    t0 = time.time()
+    cfg = cfg or {}
+    cell = float(cfg.get("perfect_model_res_m", 0.02))
+    sup_r = float(cfg.get("perfect_support_radius_m", 0.06))
+    out = Path(output_dir)
+    result = json.loads((out / "segmentation_result.json").read_text())
+    inst = next((i for i in result.get("instances", [])
+                 if int(i.get("instance_id", i.get("id"))) == int(instance_id)),
+                None)
+    if inst is None:
+        raise ValueError(f"instance {instance_id} not found")
+    label = str(inst.get("label", "segment"))
+    safe = _safe_label(label, int(instance_id))
+
+    tm, src = _load_source_mesh(out, safe, source)
+    V_raw = np.asarray(tm.vertices, np.float64)
+    F = np.asarray(tm.faces, np.int64)
+    Vd = _to_display(out, V_raw)
+    regions, _ = _detect_and_snap(tm, F, Vd, cfg, safe, log)
+    if not regions:
+        raise RuntimeError(f"{safe}: nothing detected to model")
+
+    pc = o3d.io.read_point_cloud(str(out / "cleaned_cloud.ply"))
+    xyz = np.asarray(pc.points)
+    gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+    gi = gi[(gi >= 0) & (gi < len(xyz))]
+    Pcloud = _to_display(out, xyz[gi])
+    sym = _detect_mirror_symmetry(Pcloud, regions, log, safe)
+
+    # ── symmetry pairing + symmetrization
+    pair_of = {}
+    self_sym = set()
+    if sym and sym.get("accepted"):
+        n_s = np.asarray(sym["normal"], np.float64)
+        d_s = float(sym["offset"])
+        cent = [Vd[r["v_idx"]].mean(axis=0) for r in regions]
+        diag = [float(np.linalg.norm(Vd[r["v_idx"]].ptp(axis=0)))
+                for r in regions]
+        used = set()
+        for i, r in enumerate(regions):
+            if i in used:
+                continue
+            ci_r = _reflect_pts(cent[i][None], n_s, d_s)[0]
+            if np.linalg.norm(ci_r - cent[i]) < max(0.10, 0.15 * diag[i]):
+                self_sym.add(i)
+                used.add(i)
+                continue
+            best = None
+            for j, q in enumerate(regions):
+                if j == i or j in used or q["kind"] != r["kind"]:
+                    continue
+                dctr = float(np.linalg.norm(cent[j] - ci_r))
+                if dctr > max(0.15, 0.25 * diag[i]):
+                    continue
+                okp = True
+                if r["kind"] == "plane":
+                    okp = abs(float(_reflect_dir(r["model"].normal, n_s)
+                                    @ q["model"].normal)) > np.cos(np.deg2rad(12))
+                elif r["kind"] == "cylinder":
+                    okp = (abs(float(_reflect_dir(r["model"].axis_dir, n_s)
+                                     @ q["model"].axis_dir)) > np.cos(np.deg2rad(12))
+                           and abs(r["model"].radius - q["model"].radius)
+                           < 0.15 * max(r["model"].radius, q["model"].radius))
+                elif r["kind"] == "sphere":
+                    okp = abs(r["model"].radius - q["model"].radius) \
+                        < 0.2 * max(r["model"].radius, q["model"].radius)
+                if okp and (best is None or dctr < best[1]):
+                    best = (j, dctr)
+            if best is not None:
+                j = best[0]
+                pair_of[i], pair_of[j] = j, i
+                used.add(i); used.add(j)
+
+        # symmetrize: refit each side on OWN + reflected-partner points
+        done = set()
+        for i, j in list(pair_of.items()):
+            if i in done:
+                continue
+            done.add(i); done.add(j)
+            A, B = regions[i], regions[j]
+            Pa, Pb = Vd[A["v_idx"]], Vd[B["v_idx"]]
+            comb_a = np.vstack([Pa, _reflect_pts(Pb, n_s, d_s)])
+            comb_b = np.vstack([Pb, _reflect_pts(Pa, n_s, d_s)])
+            try:
+                if A["kind"] == "plane":
+                    na = A["model"].normal
+                    nb_r = _reflect_dir(B["model"].normal, n_s)
+                    if float(nb_r @ na) < 0:
+                        nb_r = -nb_r
+                    n_avg = (na + nb_r)
+                    n_avg /= max(np.linalg.norm(n_avg), 1e-12)
+                    A["model"] = _rebuild_plane(comb_a, n_avg, na)
+                    B["model"] = _rebuild_plane(
+                        comb_b, _reflect_dir(n_avg, n_s), B["model"].normal)
+                elif A["kind"] == "cylinder":
+                    wa = A["model"].axis_dir
+                    wb_r = _reflect_dir(B["model"].axis_dir, n_s)
+                    if float(wb_r @ wa) < 0:
+                        wb_r = -wb_r
+                    w_avg = (wa + wb_r)
+                    w_avg /= max(np.linalg.norm(w_avg), 1e-12)
+                    A["model"] = _rebuild_cylinder(comb_a, w_avg)
+                    B["model"] = _rebuild_cylinder(
+                        comb_b, _reflect_dir(w_avg, n_s),
+                        radius_override=A["model"].radius)
+                A["notes"].append(f"symmetrized with part {j}")
+                B["notes"].append(f"symmetrized with part {i}")
+            except Exception as e:  # noqa: BLE001
+                log(f"[perfect:{safe}] symmetrize {i}↔{j} failed ({e})")
+        for i in self_sym:
+            r = regions[i]
+            P0 = Vd[r["v_idx"]]
+            comb = np.vstack([P0, _reflect_pts(P0, n_s, d_s)])
+            try:
+                if r["kind"] == "plane":
+                    r["model"] = _rebuild_plane(comb, r["model"].normal,
+                                                r["model"].normal)
+                elif r["kind"] == "cylinder":
+                    r["model"] = _rebuild_cylinder(comb, r["model"].axis_dir)
+                r["notes"].append("self-symmetrized")
+            except Exception:  # noqa: BLE001
+                pass
+        log(f"[perfect:{safe}] symmetry: {len(pair_of)//2} mirror pair(s), "
+            f"{len(self_sym)} self-symmetric, "
+            f"{len(regions) - len(pair_of) - len(self_sym)} unpaired")
+
+    # ── clean re-mesh per part (regularized outlines: CAD-crisp)
+    final = o3d.geometry.TriangleMesh()
+    parts_meta: List[dict] = []
+    rng = np.random.default_rng(11)
+    pair_color: Dict[int, np.ndarray] = {}
+    completed = 0
+    for i, r in enumerate(regions):
+        Pm = Vd[r["v_idx"]]
+        model = r["model"]
+        uv = np.asarray(model.to_uv(Pm))
+        V_part = F_part = None
+        contour_shape = None
+        try:
+            grid, u0, v0 = support_grid(uv, cell, sup_r)
+            rm = regularize_mesh(model, grid, None, u0, v0, cell)
+            if rm is not None:
+                verts_uv, faces_uv, reports = rm
+                if len(verts_uv) >= 3 and len(faces_uv) >= 1:
+                    V_part = np.asarray(model.uv_to_world(verts_uv))
+                    F_part = np.asarray(faces_uv, np.int64)
+                    if reports:
+                        contour_shape = reports[0].get("shape")
+        except Exception as e:  # noqa: BLE001
+            log(f"[perfect:{safe}] contour regularization failed on part {i} "
+                f"({e}) — trimmed grid kept")
+        if V_part is None:
+            Vt, Ft, _, _ = mesh_on_surface(uv, model.uv_to_world, cell, sup_r)
+            if len(Vt) == 0:
+                continue
+            V_part, F_part = np.asarray(Vt), np.asarray(Ft, np.int64)
+
+        j = pair_of.get(i)
+        if j is not None and j in pair_color:
+            color = pair_color[j]
+        else:
+            base = {"plane": np.array([0.72, 0.74, 0.78]),
+                    "cylinder": np.array([0.85, 0.62, 0.35]),
+                    "sphere": np.array([0.55, 0.75, 0.55])}[r["kind"]]
+            color = np.clip(base * (0.8 + 0.4 * rng.random()), 0, 1)
+        pair_color[i] = color
+
+        m = o3d.geometry.TriangleMesh(
+            o3d.utility.Vector3dVector(_to_raw(out, V_part)),
+            o3d.utility.Vector3iVector(F_part))
+        m.paint_uniform_color(color)
+        m.compute_vertex_normals()
+        final += m
+
+        # mirror-complete parts with no scanned twin (not self-symmetric) —
+        # ONLY into genuinely UNSCANNED space: if the cloud already covers
+        # the mirrored location, the real thing is there (even if detection
+        # missed it) and a ghost copy would duplicate geometry
+        if sym and sym.get("accepted") and j is None and i not in self_sym:
+            from scipy.spatial import cKDTree as _KD
+            if "_kd_cloud" not in dir():
+                _kd_cloud = _KD(Pcloud[:: max(1, len(Pcloud) // 200_000)])
+            probe = _reflect_pts(
+                Pm[:: max(1, len(Pm) // 2000)],
+                np.asarray(sym["normal"]), float(sym["offset"]))
+            dnn, _ = _kd_cloud.query(probe, k=1)
+            covered = float((dnn < 0.05).mean())
+            if covered > 0.5:
+                parts_meta_note = f"twin location already scanned ({covered:.0%}) — not completed"
+                d = np.abs(np.asarray(model.signed_distance(Pm)))
+                e = {"kind": r["kind"], "n_faces_src": int(len(r["f_idx"])),
+                     "contour": contour_shape, "snapped": r["notes"] + [parts_meta_note],
+                     "mirror_pair": None, "self_symmetric": False,
+                     "rms_mm": round(float(np.sqrt(np.mean(d ** 2))) * 1000, 2),
+                     "p95_mm": round(float(np.percentile(d, 95)) * 1000, 2),
+                     "params": model.params_dict(),
+                     "provenance": "tool_measured"}
+                if r["kind"] in ("cylinder", "sphere"):
+                    e["radius_m"] = round(float(model.radius), 4)
+                parts_meta.append(e)
+                continue
+            Vm = _reflect_pts(V_part, np.asarray(sym["normal"]),
+                              float(sym["offset"]))
+            mc = o3d.geometry.TriangleMesh(
+                o3d.utility.Vector3dVector(_to_raw(out, Vm)),
+                o3d.utility.Vector3iVector(F_part[:, ::-1].copy()))
+            mc.paint_uniform_color(np.clip(color * 0.7 + np.array([0.05, 0.15, 0.35]), 0, 1))
+            mc.compute_vertex_normals()
+            final += mc
+            completed += 1
+
+        d = np.abs(np.asarray(model.signed_distance(Pm)))
+        e = {"kind": r["kind"], "n_faces_src": int(len(r["f_idx"])),
+             "contour": contour_shape, "snapped": r["notes"],
+             "mirror_pair": j, "self_symmetric": bool(i in self_sym),
+             "rms_mm": round(float(np.sqrt(np.mean(d ** 2))) * 1000, 2),
+             "p95_mm": round(float(np.percentile(d, 95)) * 1000, 2),
+             "params": model.params_dict(), "provenance": "tool_measured"}
+        if r["kind"] in ("cylinder", "sphere"):
+            e["radius_m"] = round(float(model.radius), 4)
+        parts_meta.append(e)
+
+    if len(final.vertices) == 0:
+        raise RuntimeError(f"{safe}: model rebuild produced nothing")
+
+    dst = out / "tsdf" / f"{safe}_model"
+    dst.mkdir(parents=True, exist_ok=True)
+    glb = dst / f"{safe}_model.glb"
+    o3d.io.write_triangle_mesh(str(glb), final)
+    meta = {
+        "method": "model",
+        "instance_id": int(instance_id),
+        "label": f"{label} (model)",
+        "glb_file": glb.name,
+        "source_mesh": src.parent.name,
+        "n_parts": len(parts_meta),
+        "parts": parts_meta,
+        "symmetry_mirror": sym,
+        "mirror_completed_parts": completed,
+        "n_vertices": int(len(final.vertices)),
+        "n_triangles": int(len(final.triangles)),
+        "vertex_colors": True,
+        "textured": False,
+        "elapsed_s": round(time.time() - t0, 1),
+        "provenance": "tool_measured",
+    }
+    (dst / f"{safe}_model.meta.json").write_text(json.dumps(meta, indent=2))
+    log(f"[perfect:{safe}] ✅ model: {len(parts_meta)} clean part(s), "
+        f"{completed} mirror-completed → {glb.name} ({meta['elapsed_s']}s)")
+    return glb

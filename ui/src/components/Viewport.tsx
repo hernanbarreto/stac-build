@@ -52,6 +52,11 @@ interface ViewportProps {
     onEraseRadiusChange?: (r: number) => void
     onEraseMarksChanged?: (n: number) => void
     onEraseBoxSelected?: (selected: boolean) => void
+    /** A placed library object was selected/deselected (id | null). */
+    onSceneObjectSelected?: (id: number | null) => void
+    /** The placed-objects list changed (load/add/remove/visibility) — App
+        mirrors it in the panel's Objects section. */
+    onSceneObjectsChanged?: (objs: Array<{ id: number; name: string; visible: boolean }>) => void
     /** Brush transaction committed — App refreshes panel counters (ledger
         may be null when the backend predates the trace protocol). */
     onEraseLedger?: (ledger: unknown) => void
@@ -87,6 +92,15 @@ export interface ViewportHandle {
     applyRegistrationTransform: (transform: number[][]) => void
     clearMeasurements: () => void
     commitErase: (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => Promise<void>
+    /** Placed library objects (references only — sources never touched). */
+    placeSceneObject: (entry: { id: number; name: string; url: string; matrix?: number[] }) => Promise<void>
+    reloadSceneObjects: (sessionId: string) => Promise<void>
+    setSceneObjectMode: (m: 'translate' | 'rotate' | 'scale') => void
+    removeSelectedSceneObject: () => Promise<void>
+    removeSceneObject: (id: number) => Promise<void>
+    setSceneObjectVisible: (id: number, visible: boolean) => void
+    getSceneAlignTargets: () => Array<{ key: string; label: string }>
+    alignSceneObject: (op: 'floor' | 'same_base' | 'on_top' | 'center_xz' | 'center_y', targetKey?: string) => void
     /** Preview the brush confidence filter: points below thr light up red. null = off. */
     setConfHighlight: (thr: number | null) => void
     /** Apply the brush confidence filter: visible segments' points below thr → unsegmented. */
@@ -387,7 +401,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -525,6 +539,205 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             window.removeEventListener('keydown', onKey)
         }
     }, [])
+
+    // ── Placed library objects (USER 2026-08-31): GLBs from the collection /
+    // any project inserted into THIS scene as references — gizmo-alignable,
+    // persisted per session (matrix), removable without ever touching the
+    // source GLB. ─────────────────────────────────────────────────────────
+    const sceneObjectsGroupRef = useRef<THREE.Group | null>(null)
+    const sceneObjByIdRef = useRef<Map<number, THREE.Group>>(new Map())
+    const [selSceneObj, setSelSceneObj] = useState<number | null>(null)
+    const [sceneObjMode, setSceneObjMode] = useState<'translate' | 'rotate' | 'scale'>('translate')
+    const sceneTcRef = useRef<TransformControls | null>(null)
+    const selSceneObjRef = useRef<number | null>(null)
+    useEffect(() => { selSceneObjRef.current = selSceneObj }, [selSceneObj])
+    const onSceneObjectSelectedRef = useRef(onSceneObjectSelected)
+    useEffect(() => { onSceneObjectSelectedRef.current = onSceneObjectSelected }, [onSceneObjectSelected])
+    useEffect(() => { onSceneObjectSelectedRef.current?.(selSceneObj) }, [selSceneObj])
+
+    const onSceneObjectsChangedRef = useRef(onSceneObjectsChanged)
+    useEffect(() => { onSceneObjectsChangedRef.current = onSceneObjectsChanged }, [onSceneObjectsChanged])
+    const _emitSceneObjects = () => {
+        const out: Array<{ id: number; name: string; visible: boolean }> = []
+        sceneObjByIdRef.current.forEach((g, id) => out.push({
+            id, name: String(g.userData.sceneObjectName || `object ${id}`),
+            visible: g.visible }))
+        out.sort((a, b) => a.id - b.id)
+        onSceneObjectsChangedRef.current?.(out)
+    }
+    const _removeSceneObject = async (id: number) => {
+        const sid = activeSessionRef.current
+        if (sid == null) return
+        const g = sceneObjByIdRef.current.get(id)
+        if (selSceneObjRef.current === id) setSelSceneObj(null)
+        if (g) { g.parent?.remove(g); sceneObjByIdRef.current.delete(id) }
+        _emitSceneObjects()
+        try {
+            await fetch('/api/objects/scene/remove', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: sid, id }),
+            })
+            if (onStatusMessage) onStatusMessage('📦 reference removed from the scene (source GLB untouched)')
+        } catch { /* silent */ }
+    }
+    const _sceneObjectsGroup = () => {
+        const scene = sceneRef.current
+        if (!scene) return null
+        let g = sceneObjectsGroupRef.current
+        if (!g || g.parent !== scene) {
+            g = new THREE.Group()
+            g.name = 'scene-objects'
+            scene.add(g)
+            sceneObjectsGroupRef.current = g
+        }
+        return g
+    }
+
+    const _persistSceneObj = async (id: number) => {
+        const sid = activeSessionRef.current
+        const g = sceneObjByIdRef.current.get(id)
+        if (!sid || !g) return
+        g.updateMatrixWorld(true)
+        try {
+            await fetch('/api/objects/scene/update', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: sid, id, matrix: g.matrixWorld.toArray() }),
+            })
+        } catch { /* silent */ }
+    }
+
+    const _loadPlacedObject = async (entry: { id: number; name: string; url: string; matrix?: number[] }, select = false) => {
+        const parent = _sceneObjectsGroup()
+        if (!parent) return
+        if (!gltfLoaderRef.current) gltfLoaderRef.current = makeGltfLoader()
+        try {
+            const gltf = await gltfLoaderRef.current.loadAsync(entry.url)
+            const g = new THREE.Group()
+            g.name = `placed-${entry.id}`
+            g.userData.sceneObjectId = entry.id
+            g.userData.sceneObjectName = entry.name
+            // pivot AT THE OBJECT'S CENTER (user 2026-08-31): GLB geometry
+            // lives in its source-session coordinates, so the group origin
+            // landed far from the mesh and the gizmo was unusable. The child
+            // is shifted so the group origin == geometric center; the saved
+            // matrix maps that CENTERED object into this scene.
+            const inner = gltf.scene
+            const bb = new THREE.Box3().setFromObject(inner)
+            const ctr = bb.getCenter(new THREE.Vector3())
+            inner.position.sub(ctr)
+            g.add(inner)
+            if (entry.matrix && entry.matrix.length === 16) {
+                const M = new THREE.Matrix4().fromArray(entry.matrix)
+                M.decompose(g.position, g.quaternion, g.scale)
+            } else {
+                g.position.copy(ctr)   // fresh insert: same world pose as the source
+            }
+            parent.add(g)
+            sceneObjByIdRef.current.set(entry.id, g)
+            _emitSceneObjects()
+            if (select) {
+                // fresh insert with identity matrix → drop it at the orbit target
+                if (!entry.matrix) {
+                    const tgt = controlsRef.current?.target
+                    if (tgt) { g.position.copy(tgt); _persistSceneObj(entry.id) }
+                }
+                setSelSceneObj(entry.id)
+            }
+            if (onStatusMessage && select) onStatusMessage(`📦 "${entry.name}" placed — drag the gizmo to align (G/R keys, Del removes the reference)`)
+        } catch (e) {
+            console.warn('[Viewport] placed object load failed', entry.url, e)
+            if (onStatusMessage) onStatusMessage(`📦 failed to load "${entry.name}"`)
+        }
+    }
+
+    const reloadSceneObjectsRef = useRef<(sid: string) => Promise<void>>(async () => { /* set below */ })
+    reloadSceneObjectsRef.current = async (sid: string) => {
+        const parent = _sceneObjectsGroup()
+        if (!parent) return
+        setSelSceneObj(null)
+        for (const g of [...parent.children]) parent.remove(g)
+        sceneObjByIdRef.current.clear()
+        _emitSceneObjects()
+        try {
+            const r = await fetch(`/api/objects/scene/${sid}`)
+            if (!r.ok) return
+            const d = await r.json()
+            for (const o of (d.objects || [])) await _loadPlacedObject(o, false)
+            if ((d.objects || []).length && onStatusMessage)
+                onStatusMessage(`📦 ${(d.objects || []).length} placed object(s) restored`)
+        } catch { /* silent */ }
+    }
+
+    // gizmo lifecycle for the selected placed object (mirror of volumes)
+    useEffect(() => {
+        const scene = sceneRef.current, camera = cameraRef.current
+        const renderer = rendererRef.current, controls = controlsRef.current
+        if (!scene || !camera || !renderer || !controls || selSceneObj == null) return
+        const g = sceneObjByIdRef.current.get(selSceneObj)
+        if (!g) { setSelSceneObj(null); return }
+        const tc = new TransformControls(camera, renderer.domElement)
+        tc.setMode(sceneObjMode)
+        tc.setSize(0.9)
+        tc.attach(g)
+        scene.add(tc.getHelper())
+        tc.addEventListener('dragging-changed', (e) => {
+            const dragging = !!(e as unknown as { value?: boolean }).value
+            controls.enabled = !dragging
+            if (!dragging && selSceneObj != null) _persistSceneObj(selSceneObj)
+        })
+        sceneTcRef.current = tc
+        return () => {
+            scene.remove(tc.getHelper())
+            tc.detach()
+            tc.dispose()
+            sceneTcRef.current = null
+            controls.enabled = true
+        }
+    }, [selSceneObj, sceneObjMode])
+
+    // click-select placed objects (navigate tool; drag never selects)
+    useEffect(() => {
+        const container = containerRef.current
+        if (!container) return
+        let down: [number, number] | null = null
+        const onDown = (e: MouseEvent) => { if (e.button === 0) down = [e.clientX, e.clientY] }
+        const onClick = (e: MouseEvent) => {
+            if (activeToolRef.current !== 'navigate') return
+            if (down && (Math.abs(e.clientX - down[0]) > 4 || Math.abs(e.clientY - down[1]) > 4)) return
+            const camera = cameraRef.current, renderer = rendererRef.current
+            const parent = sceneObjectsGroupRef.current
+            if (!camera || !renderer || !parent || !parent.children.length) return
+            const rect = renderer.domElement.getBoundingClientRect()
+            const mouse = new THREE.Vector2(
+                ((e.clientX - rect.left) / rect.width) * 2 - 1,
+                -((e.clientY - rect.top) / rect.height) * 2 + 1)
+            const rc = new THREE.Raycaster()
+            rc.setFromCamera(mouse, camera)
+            const hits = rc.intersectObjects(parent.children, true)
+            if (hits.length) {
+                let o: THREE.Object3D | null = hits[0].object
+                while (o && o.userData.sceneObjectId === undefined) o = o.parent
+                if (o) { setSelSceneObj(o.userData.sceneObjectId as number); return }
+            } else if (selSceneObj != null
+                       && !(sceneTcRef.current as unknown as { axis?: string } | null)?.axis) {
+                setSelSceneObj(null)
+            }
+        }
+        const onKey = (e: KeyboardEvent) => {
+            if (selSceneObj == null) return
+            if (e.key === 'Escape') setSelSceneObj(null)
+            if (e.key === 'g' || e.key === 'G') setSceneObjMode('translate')
+            if (e.key === 'r' || e.key === 'R') setSceneObjMode('rotate')
+        }
+        container.addEventListener('mousedown', onDown)
+        container.addEventListener('click', onClick)
+        window.addEventListener('keydown', onKey)
+        return () => {
+            container.removeEventListener('mousedown', onDown)
+            container.removeEventListener('click', onClick)
+            window.removeEventListener('keydown', onKey)
+        }
+    }, [selSceneObj])
 
     // Smooth camera flight (assistant measurements / frameBox): ease-in-out the
     // orbit target and camera position toward the goal instead of snapping.
@@ -2241,6 +2454,70 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         },
         clearMeasurements: clearAllMeasurements,
         commitErase: async (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => { await eraseApiRef.current?.commit(target, newLabel, onlyInstances, includeUnsegmented) },
+        // ── placed library objects ──
+        placeSceneObject: async (entry: { id: number; name: string; url: string; matrix?: number[] }) => {
+            await _loadPlacedObject(entry, true)
+        },
+        reloadSceneObjects: async (sessionId: string) => {
+            await reloadSceneObjectsRef.current(sessionId)
+        },
+        setSceneObjectMode: (m: 'translate' | 'rotate' | 'scale') => setSceneObjMode(m),
+        removeSelectedSceneObject: async () => {
+            if (selSceneObjRef.current != null) await _removeSceneObject(selSceneObjRef.current)
+        },
+        removeSceneObject: async (id: number) => { await _removeSceneObject(id) },
+        setSceneObjectVisible: (id: number, visible: boolean) => {
+            const g = sceneObjByIdRef.current.get(id)
+            if (!g) return
+            g.visible = visible
+            if (!visible && selSceneObjRef.current === id) setSelSceneObj(null)
+            _emitSceneObjects()
+        },
+        getSceneAlignTargets: () => {
+            const out: Array<{ key: string; label: string }> = []
+            sceneObjByIdRef.current.forEach((g, id) => {
+                if (id !== selSceneObjRef.current)
+                    out.push({ key: `obj:${id}`, label: String(g.userData.sceneObjectName || `object ${id}`) })
+            })
+            const tg = tsdfGroupRef.current
+            if (tg) for (const c of tg.children)
+                if (c.visible && c.name.startsWith('tsdf-'))
+                    out.push({ key: `mesh:${c.name.slice(5)}`, label: c.name.slice(5) })
+            return out
+        },
+        alignSceneObject: (op: 'floor' | 'same_base' | 'on_top' | 'center_xz' | 'center_y', targetKey?: string) => {
+            const id = selSceneObjRef.current
+            if (id == null) return
+            const g = sceneObjByIdRef.current.get(id)
+            if (!g) return
+            g.updateMatrixWorld(true)
+            const box = new THREE.Box3().setFromObject(g)
+            let tbox: THREE.Box3 | null = null
+            if (targetKey) {
+                let t: THREE.Object3D | undefined
+                if (targetKey.startsWith('obj:'))
+                    t = sceneObjByIdRef.current.get(Number(targetKey.slice(4)))
+                else if (targetKey.startsWith('mesh:'))
+                    t = tsdfGroupRef.current?.children.find(c => c.name === `tsdf-${targetKey.slice(5)}`)
+                if (t) { t.updateMatrixWorld(true); tbox = new THREE.Box3().setFromObject(t) }
+            }
+            if (op === 'floor') g.position.y += -box.min.y
+            else if (tbox) {
+                if (op === 'same_base') g.position.y += tbox.min.y - box.min.y
+                else if (op === 'on_top') g.position.y += tbox.max.y - box.min.y
+                else if (op === 'center_xz') {
+                    const c = box.getCenter(new THREE.Vector3())
+                    const tc2 = tbox.getCenter(new THREE.Vector3())
+                    g.position.x += tc2.x - c.x
+                    g.position.z += tc2.z - c.z
+                } else if (op === 'center_y') {
+                    const c = box.getCenter(new THREE.Vector3())
+                    const tc2 = tbox.getCenter(new THREE.Vector3())
+                    g.position.y += tc2.y - c.y
+                }
+            }
+            _persistSceneObj(id)
+        },
         setConfHighlight: (thr: number | null) => {
             const mat = materialRef.current
             if (mat) mat.uniforms.uConfHl.value = thr === null ? -1.0 : thr
@@ -3607,6 +3884,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const newOctree = scene.getObjectByName('potree-octree')
                 for (const g of survivingGroups) (newOctree ?? scene).add(g)
             }
+            // restore this session's placed library objects
+            if (msg.session_id) reloadSceneObjectsRef.current(msg.session_id as string)
             // carry the user's hidden segments into the fresh loader
             {
                 const hidden = new Set<number>()
@@ -3619,7 +3898,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 if (potreeLoaderRef.current !== loader) return
                 if (onStatusMessage) onStatusMessage(`LOD octree loaded — ${pts?.toLocaleString()} total points`)
                 onPointCount(loadedPts)
-                if (onHasConfidence) onHasConfidence(!!serverHasConfidence)
+                // undefined = the sender didn't say (older erase-rebuild
+                // broadcasts) — never DROP a known-true confidence over that
+                if (onHasConfidence && serverHasConfidence !== undefined) onHasConfidence(!!serverHasConfidence)
 
                 // resync OBBs + side panel: an erase/refresh may have changed
                 // the instances behind this reload (user 2026-08-30: bbox

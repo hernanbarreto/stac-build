@@ -4563,6 +4563,103 @@ def _tsdf_set_overall(session_id: str, **kw):
     overall.update(kw)
 
 
+@app.post("/api/segmentation/tsdf/delete")
+async def delete_tsdf_mesh(request: Request):
+    """Delete ONE published per-object mesh folder (user 2026-08-31: every
+    generated mesh — poisson, pgsr, perfect — gets a delete button).
+    Body: session_id, folder (the tsdf/ subfolder name, e.g. 'floor_3_perfect').
+    """
+    body = await request.json()
+    session_id = body.get("session_id")
+    folder = str(body.get("folder") or "")
+    if not session_id or not folder:
+        raise HTTPException(status_code=400, detail="need session_id and folder")
+    # the folder is a NAME, never a path — reject anything that could escape
+    if "/" in folder or "\\" in folder or folder.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid folder name")
+    ctx = _ctx(session_id)
+    target = ctx.output_dir / "tsdf" / folder
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail=f"no mesh folder '{folder}'")
+    import shutil
+    await asyncio.get_event_loop().run_in_executor(
+        None, shutil.rmtree, str(target))
+    print(f"[Mesh] 🗑 deleted tsdf/{folder} ({session_id})")
+    return {"ok": True, "deleted": folder}
+
+
+@app.post("/api/segmentation/perfect/export")
+async def export_perfect_endpoint(request: Request):
+    """PERFECT the selected segments (user 2026-08-31): recover each object's
+    geometric intent (planes, cylinders — hollow included —, spheres) from its
+    own cloud points, snap it to intent (vertical/horizontal, parallel/
+    perpendicular, equal radii), re-mesh from the perfect surfaces trimmed to
+    the measured support, keep the unexplained leftover as measured, and
+    publish tsdf/<label>_<id>_perfect/ next to the poisson/pgsr meshes.
+    Only segments that ALREADY have a poisson/pgsr GLB are eligible.
+
+    Body: session_id: str, instance_ids: list[int]
+    """
+    body = await request.json()
+    session_id = body.get("session_id")
+    instance_ids = body.get("instance_ids")
+    sources = body.get("sources") or {}   # {iid: 'poisson'|'pgsr'} — which
+    #                                       mesh of the segment gets perfected
+    if not session_id or not instance_ids:
+        raise HTTPException(status_code=400,
+                            detail="need session_id and instance_ids[]")
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
+
+    async def _bg():
+        try:
+            worker = Path(SERVER_DIR) / "run_perfect_objects.py"
+            cmd = [sys.executable, str(worker),
+                   "--output-dir", str(output_dir)]
+            for i in instance_ids:
+                cmd += ["--instance-id", str(int(i))]
+                src = str(sources.get(str(i), sources.get(int(i), "")) or "")
+                if src in ("poisson", "pgsr"):
+                    cmd += ["--source", f"{int(i)}:{src}"]
+            proc = _track_worker(await asyncio.create_subprocess_exec(
+                *cmd, cwd=str(SERVER_DIR),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                preexec_fn=_die_with_parent_sigkill,
+            ))
+            result = None
+            assert proc.stdout is not None
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", "ignore").rstrip()
+                if not line:
+                    continue
+                if line.startswith("[PERF-RESULT]"):
+                    try:
+                        result = json.loads(line[len("[PERF-RESULT]"):])
+                    except Exception:  # noqa: BLE001
+                        result = None
+                else:
+                    try:
+                        print(f"[Perfect] {line}", flush=True)
+                    except (BrokenPipeError, OSError):
+                        pass
+            await proc.wait()
+            written = (result or {}).get("written") or []
+            for sk in (result or {}).get("skipped") or []:
+                print(f"[Perfect] skip: {sk}")
+            print(f"[Perfect] ✅ {len(written)} perfected mesh(es)")
+            if written:
+                await _notify_tsdf_ready(session_id, "perfect", len(written))
+        except Exception as e:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            print(f"[Perfect] failed: {e}")
+
+    asyncio.create_task(_bg())
+    return {"ok": True, "queued": [int(i) for i in instance_ids]}
+
+
 @app.post("/api/segmentation/tsdf/export")
 async def export_tsdf_endpoint(request: Request):
     """Mesh the selected instances — RANSAC + Poisson, both (user decision
@@ -5051,6 +5148,136 @@ async def tsdf_status(session_id: str):
     return {"ok": True, "instances": statuses}
 
 
+# ── Object library + placed scene objects (USER 2026-08-31): a global
+# collection folder plus EVERY published GLB across ALL projects, insertable
+# into any scene (compare an object from another scan, etc.). Placement is a
+# REFERENCE: deleting a placed object only removes its entry/position here —
+# never the source GLB, its project, or the collection. ─────────────────────
+_COLLECTION_DIR = Path(SERVER_DIR) / "collection"
+
+
+@app.get("/api/objects/library")
+async def objects_library():
+    """Every insertable GLB: the collection folder + all projects' published
+    meshes (tsdf + shape), grouped for the picker."""
+    items = []
+    _COLLECTION_DIR.mkdir(exist_ok=True)
+    for f in sorted(_COLLECTION_DIR.glob("*.glb")):
+        items.append({"source": "collection", "name": f.stem,
+                      "url": f"/api/objects/collection/{f.name}",
+                      "size_mb": round(f.stat().st_size / 1e6, 1)})
+    proj_root = Path(SERVER_DIR) / "projects"
+    for glb in sorted(proj_root.glob("*/scans/*/*/output/tsdf/*/*.glb")):
+        try:
+            sid = glb.parts[len(proj_root.parts)]
+            folder = glb.parent.name
+            label = folder
+            mp = glb.parent / f"{glb.stem}.meta.json"
+            if mp.exists():
+                try:
+                    label = json.loads(mp.read_text()).get("label") or folder
+                except Exception:  # noqa: BLE001
+                    pass
+            items.append({
+                "source": "project", "session": sid, "folder": folder,
+                "name": label,
+                "url": f"/api/segmentation/tsdf/file/{sid}/{folder}/{glb.name}",
+                "size_mb": round(glb.stat().st_size / 1e6, 1)})
+        except Exception:  # noqa: BLE001
+            continue
+    return {"items": items}
+
+
+@app.get("/api/objects/collection/{filename}")
+async def objects_collection_file(filename: str):
+    from fastapi.responses import FileResponse
+    if "/" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="invalid name")
+    p = _COLLECTION_DIR / filename
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="not in collection")
+    return FileResponse(str(p), media_type="model/gltf-binary",
+                        headers={"Cache-Control": "no-cache"})
+
+
+def _scene_objects_path(session_id: str) -> Path:
+    return _ctx(session_id).output_dir / "scene_objects.json"
+
+
+def _load_scene_objects(session_id: str) -> list:
+    p = _scene_objects_path(session_id)
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text()).get("objects", [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _save_scene_objects(session_id: str, objs: list) -> None:
+    _scene_objects_path(session_id).write_text(
+        json.dumps({"objects": objs}, indent=1))
+
+
+@app.get("/api/objects/scene/{session_id}")
+async def scene_objects_list(session_id: str):
+    return {"objects": _load_scene_objects(session_id)}
+
+
+@app.post("/api/objects/scene/add")
+async def scene_objects_add(request: Request):
+    body = await request.json()
+    session_id = body.get("session_id")
+    if not session_id or not body.get("url"):
+        raise HTTPException(status_code=400, detail="need session_id and url")
+    objs = _load_scene_objects(session_id)
+    oid = 1 + max([int(o.get("id", 0)) for o in objs], default=0)
+    entry = {"id": oid, "name": str(body.get("name") or f"object_{oid}"),
+             "url": str(body["url"]),
+             "matrix": body.get("matrix") or list(np.eye(4).T.flatten())}
+    objs.append(entry)
+    _save_scene_objects(session_id, objs)
+    print(f"[Objects] + '{entry['name']}' → scene {session_id} (id {oid})")
+    return {"ok": True, "object": entry}
+
+
+@app.post("/api/objects/scene/update")
+async def scene_objects_update(request: Request):
+    body = await request.json()
+    session_id = body.get("session_id")
+    oid = body.get("id")
+    if not session_id or oid is None:
+        raise HTTPException(status_code=400, detail="need session_id and id")
+    objs = _load_scene_objects(session_id)
+    for o in objs:
+        if int(o.get("id")) == int(oid):
+            if body.get("matrix"):
+                o["matrix"] = body["matrix"]
+            if body.get("name"):
+                o["name"] = str(body["name"])
+            _save_scene_objects(session_id, objs)
+            return {"ok": True}
+    raise HTTPException(status_code=404, detail=f"no placed object {oid}")
+
+
+@app.post("/api/objects/scene/remove")
+async def scene_objects_remove(request: Request):
+    """Removes ONLY the scene reference (placement) — the source GLB stays
+    untouched wherever it lives."""
+    body = await request.json()
+    session_id = body.get("session_id")
+    oid = body.get("id")
+    if not session_id or oid is None:
+        raise HTTPException(status_code=400, detail="need session_id and id")
+    objs = _load_scene_objects(session_id)
+    n0 = len(objs)
+    objs = [o for o in objs if int(o.get("id")) != int(oid)]
+    _save_scene_objects(session_id, objs)
+    print(f"[Objects] − placed object {oid} from {session_id} "
+          f"(reference only; source untouched)")
+    return {"ok": True, "removed": n0 - len(objs)}
+
+
 @app.get("/api/segmentation/tsdf/list/{session_id}")
 async def tsdf_list(session_id: str):
     """List all TSDF meshes for a session (viewer auto-load)."""
@@ -5180,9 +5407,22 @@ async def _erase_finalize(session_id: str, delay: float = 2.5):
         try:
             meta_path = output_dir / "potree" / "metadata.json"
             if meta_path.exists():
+                # hasConfidence must ride EVERY potree_ready — the erase-rebuild
+                # reload silently dropped the confidence UI without it
+                # (user 2026-08-31, observatorio: "no tiene confianza los puntos")
+                _has_conf = False
+                _cp = output_dir / "cleaned_cloud.ply"
+                if _cp.exists():
+                    with open(_cp, "rb") as _fp:
+                        for _hl in _fp:
+                            if b"confidence" in _hl:
+                                _has_conf = True
+                            if _hl.startswith(b"end_header"):
+                                break
                 msg = {"type": "potree_ready", "session_id": session_id,
                        "url": f"/potree/{session_id}/",
-                       "points": json.loads(meta_path.read_text()).get("points", 0)}
+                       "points": json.loads(meta_path.read_text()).get("points", 0),
+                       "hasConfidence": _has_conf}
                 tp = output_dir / "floor_transform.npz"
                 if tp.exists():
                     d = np.load(tp)
