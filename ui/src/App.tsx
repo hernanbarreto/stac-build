@@ -74,6 +74,17 @@ function App() {
   const [eraseShape, setEraseShape] = useState<'sphere' | 'cube' | 'box'>('sphere')
   const [eraseBoxSel, setEraseBoxSel] = useState(false)
   const [eraseYawDeg, setEraseYawDeg] = useState(0)
+  // Brush confidence filter (user 2026-08-31): preview lights up the points
+  // below the threshold in red; applying moves them to unsegmented.
+  const [eraseConfThr, setEraseConfThr] = useState(0.25)
+  const [eraseConfArmed, setEraseConfArmed] = useState(false)
+  // leaving the brush turns the red preview off
+  useEffect(() => {
+    if (activeTool !== 'erase') {
+      setEraseConfArmed(false)
+      viewportRef.current?.setConfHighlight(null)
+    }
+  }, [activeTool])
   const [connected, setConnected] = useState(false)
   const [serverAlive, setServerAlive] = useState(false)
   const [activePanel, setActivePanel] = useState<'sessions' | 'segments' | 'bim' | 'team' | 'analysis' | 'assistant' | null>('sessions')
@@ -2342,6 +2353,47 @@ function App() {
                           <span style={{ fontSize: 11, minWidth: 30, opacity: 0.85 }}>
                             {eraseYawDeg}°
                           </span>
+                        </span>
+                      )}
+                      {hasConfidence && (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+                          title="Confidence filter: points below the threshold light up red; Apply moves them to unsegmented (visible segments only)">
+                          <span style={{ fontSize: 11, opacity: 0.7 }}>🎚</span>
+                          <input type="range" min={0} max={100} step={1}
+                            value={Math.round(eraseConfThr * 100)}
+                            onChange={e => {
+                              const v = Number(e.target.value) / 100
+                              setEraseConfThr(v)
+                              setEraseConfArmed(true)
+                              viewportRef.current?.setConfHighlight(v)
+                            }}
+                            style={{ width: 96, accentColor: '#ff4444' }} />
+                          <span style={{ fontSize: 11, minWidth: 34, opacity: 0.85 }}>
+                            {Math.round(eraseConfThr * 100)}%
+                          </span>
+                          <button className="tool-btn"
+                            disabled={!eraseConfArmed}
+                            style={{ fontSize: 11, padding: '2px 8px',
+                              background: eraseConfArmed ? '#a83232' : undefined,
+                              opacity: eraseConfArmed ? 1 : 0.5 }}
+                            title={unsegmentedVisible
+                              ? "Apply: visible segments' low-confidence points → unsegmented; UNSEGMENTED low-confidence points are DELETED from the cloud (irreversible)"
+                              : "Apply: move the highlighted low-confidence points of the VISIBLE segments to unsegmented"}
+                            onClick={async () => {
+                              await viewportRef.current?.applyConfidenceFilter(
+                                eraseConfThr,
+                                segments.filter(s => s.visible).map(s => s.id),
+                                unsegmentedVisible)
+                              setEraseConfArmed(false)
+                            }}>Apply</button>
+                          {eraseConfArmed && (
+                            <button className="tool-btn" style={{ fontSize: 11, padding: '2px 6px' }}
+                              title="Turn off the preview without applying"
+                              onClick={() => {
+                                setEraseConfArmed(false)
+                                viewportRef.current?.setConfHighlight(null)
+                              }}><X size={12} /></button>
+                          )}
                         </span>
                       )}
                       {eraseBoxSel && (

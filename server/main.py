@@ -5234,9 +5234,15 @@ async def segmentation_erase(request: Request):
         radius = float(body.get("radius") or 0)
         if center and len(center) == 3 and radius > 0:
             spheres = [{"center": center, "radius": radius}]
-    if not session_id or not spheres:
+    # brush confidence filter (user 2026-08-31): no zones needed — points of
+    # the visible segments below this normalized confidence go to unsegmented
+    conf_below = body.get("conf_below")
+    if conf_below is not None:
+        conf_below = float(conf_below)
+    if not session_id or (not spheres and conf_below is None):
         raise HTTPException(status_code=400,
-                            detail="need session_id and spheres[]")
+                            detail="need session_id and spheres[] or conf_below")
+    spheres = spheres or []
     # reassign_to: the zones move INTO this instance instead of being deleted;
     # "new" + new_label creates a brand-new segment from the zones
     reassign_to = body.get("reassign_to")
@@ -5262,8 +5268,15 @@ async def segmentation_erase(request: Request):
                                     target_iid=reassign_to,
                                     new_label=new_label,
                                     only_iids=only_instances,
-                                    include_unsegmented=include_unsegmented))
+                                    include_unsegmented=include_unsegmented,
+                                    conf_below=conf_below))
     st = _erase_state(session_id)
+    if (rep.get("ledger") or {}).get("deleted_points"):
+        # physical deletion re-indexed the cloud — every stored undo's indices
+        # now point at the wrong rows; the whole stack is void
+        st["undo"] = []
+        print("[Erase] undo stack cleared (physical deletion re-indexed "
+              "the cloud)")
     if rep.get("undo"):
         st["undo"] = (st["undo"] + [rep["undo"]])[-10:]
     if rep.get("mesh_instances"):

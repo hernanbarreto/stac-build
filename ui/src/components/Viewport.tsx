@@ -87,6 +87,10 @@ export interface ViewportHandle {
     applyRegistrationTransform: (transform: number[][]) => void
     clearMeasurements: () => void
     commitErase: (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => Promise<void>
+    /** Preview the brush confidence filter: points below thr light up red. null = off. */
+    setConfHighlight: (thr: number | null) => void
+    /** Apply the brush confidence filter: visible segments' points below thr → unsegmented. */
+    applyConfidenceFilter: (thr: number, onlyInstances?: number[], includeUnsegmented?: boolean) => Promise<void>
     setEraseBoxMode: (m: 'translate' | 'rotate' | 'scale') => void
     removeSelectedEraseBox: () => void
     clearEraseMarks: () => void
@@ -207,6 +211,9 @@ const fragmentShader = `
   // edited light up golden so the selection is visible BEFORE applying
   uniform bool uSelBoxOn;
   uniform mat4 uSelBoxInv;
+  // confidence-filter preview (brush): points BELOW this threshold light up
+  // red — they would move to unsegmented on apply. -1.0 = off.
+  uniform float uConfHl;
 
   void main() {
     // Segment visibility filter (computed in vertex shader for precision)
@@ -240,6 +247,10 @@ const fragmentShader = `
       if (abs(lp.x) <= 1.0 && abs(lp.y) <= 1.0 && abs(lp.z) <= 1.0) {
         finalColor = mix(finalColor, vec3(1.0, 0.82, 0.2), 0.65);
       }
+    }
+
+    if (uConfHl >= 0.0 && vConfidence < uConfHl) {
+      finalColor = mix(finalColor, vec3(1.0, 0.25, 0.2), 0.7);
     }
 
     gl_FragColor = vec4(finalColor, alpha * uOpacity);
@@ -565,7 +576,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const onEraseMarksChangedRef = useRef(onEraseMarksChanged)
     useEffect(() => { onEraseMarksChangedRef.current = onEraseMarksChanged }, [onEraseMarksChanged])
     // mark/commit API installed by the main effect (marks live in its closure)
-    const eraseApiRef = useRef<{ commit: (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => Promise<void>; clear: () => void } | null>(null)
+    const eraseApiRef = useRef<{ commit: (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => Promise<void>; clear: () => void; confApply: (thr: number, onlyInstances?: number[], includeUnsegmented?: boolean) => Promise<void> } | null>(null)
     const eraseBoxApiRef = useRef<{ setMode: (m: 'translate' | 'rotate' | 'scale') => void; remove: () => void } | null>(null)
     const onEraseBoxSelectedRef = useRef(onEraseBoxSelected)
     useEffect(() => { onEraseBoxSelectedRef.current = onEraseBoxSelected }, [onEraseBoxSelected])
@@ -2230,6 +2241,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         },
         clearMeasurements: clearAllMeasurements,
         commitErase: async (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => { await eraseApiRef.current?.commit(target, newLabel, onlyInstances, includeUnsegmented) },
+        setConfHighlight: (thr: number | null) => {
+            const mat = materialRef.current
+            if (mat) mat.uniforms.uConfHl.value = thr === null ? -1.0 : thr
+        },
+        applyConfidenceFilter: async (thr: number, onlyInstances?: number[], includeUnsegmented?: boolean) => {
+            await eraseApiRef.current?.confApply(thr, onlyInstances, includeUnsegmented)
+            const mat = materialRef.current
+            if (mat) mat.uniforms.uConfHl.value = -1.0
+        },
         setEraseBoxMode: (m: 'translate' | 'rotate' | 'scale') => eraseBoxApiRef.current?.setMode(m),
         removeSelectedEraseBox: () => eraseBoxApiRef.current?.remove(),
         clearEraseMarks: () => eraseApiRef.current?.clear(),
@@ -2494,6 +2514,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 highlightIntensity: { value: 0.5 },
                 uOpacity: { value: 1.0 },
                 uConfidenceThreshold: { value: 0.0 },
+                uConfHl: { value: -1.0 },
                 // 256-slot visibility lookup texture (see vertex shader)
                 uSegVisTex: { value: makeSegVisTexture() },
                 time: { value: 0 },
@@ -2827,36 +2848,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         // commit: no target → DELETE; target id → REASSIGN into that segment;
         // newLabel → CREATE a new segment from the zones (user 2026-08-29)
-        const eraseCommit = async (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => {
-            const sid = activeSessionRef.current
-            if (!sid || !eraseMarks.length) return
-            try {
-                if (onStatusMessage) onStatusMessage(`🖌 applying ${eraseMarks.length} zone(s)...`)
-                const payload: Record<string, unknown> = {
-                    session_id: sid,
-                    spheres: eraseMarks.map(m => {
-                        if (m.shape === 'box') {
-                            m.mesh.updateMatrixWorld(true)
-                            return { shape: 'box', matrix: m.mesh.matrixWorld.toArray() }
-                        }
-                        return {
-                            center: [m.center!.x, m.center!.y, m.center!.z],
-                            radius: m.radius,
-                            shape: m.shape,
-                            yaw_deg: m.yawDeg,
-                        }
-                    }),
-                }
-                // SAFETY: hidden segments cannot lose points
-                if (onlyInstances) payload.only_instances = onlyInstances
-                // unsegmented points join a reassign only when their toggle is ON
-                if (includeUnsegmented !== undefined) payload.include_unsegmented = includeUnsegmented
-                if (newLabel) {
-                    payload.reassign_to = 'new'
-                    payload.new_label = newLabel
-                } else if (target !== undefined && target !== null) {
-                    payload.reassign_to = target
-                }
+        // shared POST + transaction-trace reporting for every brush apply
+        // (zones commit AND confidence filter)
+        const postErase = async (payload: Record<string, unknown>, newLabel?: string) => {
                 const res = await fetch('/api/segmentation/erase', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2887,6 +2881,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         if (led.exclusive !== undefined)
                             parts.push(led.exclusive ? 'exclusive ✓'
                                 : `✗ ${(led.overlap_points || 0).toLocaleString()} pts owned by >1 segment`)
+                        if (led.deleted_points) parts.push(`🗑 ${led.deleted_points.toLocaleString()} unsegmented pts DELETED from the cloud (irreversible)`)
                         const prot = Object.entries(led.protected_hidden || {})
                         if (prot.length) {
                             const nProt = prot.reduce((a, [, n]) => a + (n as number), 0)
@@ -2899,12 +2894,64 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     else onStatusMessage('🖌 the marked zones had no applicable points')
                 }
                 onEraseLedgerRef.current?.(data.ledger ?? null)
+        }
+        const eraseCommit = async (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => {
+            const sid = activeSessionRef.current
+            if (!sid || !eraseMarks.length) return
+            try {
+                if (onStatusMessage) onStatusMessage(`🖌 applying ${eraseMarks.length} zone(s)...`)
+                const payload: Record<string, unknown> = {
+                    session_id: sid,
+                    spheres: eraseMarks.map(m => {
+                        if (m.shape === 'box') {
+                            m.mesh.updateMatrixWorld(true)
+                            return { shape: 'box', matrix: m.mesh.matrixWorld.toArray() }
+                        }
+                        return {
+                            center: [m.center!.x, m.center!.y, m.center!.z],
+                            radius: m.radius,
+                            shape: m.shape,
+                            yaw_deg: m.yawDeg,
+                        }
+                    }),
+                }
+                // SAFETY: hidden segments cannot lose points
+                if (onlyInstances) payload.only_instances = onlyInstances
+                // unsegmented points join a reassign only when their toggle is ON
+                if (includeUnsegmented !== undefined) payload.include_unsegmented = includeUnsegmented
+                if (newLabel) {
+                    payload.reassign_to = 'new'
+                    payload.new_label = newLabel
+                } else if (target !== undefined && target !== null) {
+                    payload.reassign_to = target
+                }
+                await postErase(payload, newLabel)
                 eraseClearMarks()
             } catch {
                 if (onStatusMessage) onStatusMessage('🖌 apply failed')
             }
         }
-        eraseApiRef.current = { commit: eraseCommit, clear: eraseClearMarks }
+        // confidence filter (user 2026-08-31): points below the threshold go
+        // to unsegmented — no zones needed, same safety and same ledger
+        const eraseConfApply = async (thr: number, onlyInstances?: number[], includeUnsegmented?: boolean) => {
+            const sid = activeSessionRef.current
+            if (!sid) return
+            try {
+                if (onStatusMessage) onStatusMessage(`🎚 applying confidence filter < ${(thr * 100).toFixed(0)}%...`)
+                await postErase({
+                    session_id: sid,
+                    spheres: [],
+                    conf_below: thr,
+                    only_instances: onlyInstances,
+                    // Unsegmented toggle ON → its low-confidence points are
+                    // PHYSICALLY DELETED from the cloud (user 2026-08-31)
+                    include_unsegmented: includeUnsegmented ?? false,
+                })
+            } catch {
+                if (onStatusMessage) onStatusMessage('🎚 confidence filter failed')
+            }
+        }
+        eraseApiRef.current = { commit: eraseCommit, clear: eraseClearMarks, confApply: eraseConfApply }
 
         const eraseRightDown = { x: 0, y: 0, active: false, shift: false }
         const onEraseMouseDown = (event: MouseEvent) => {

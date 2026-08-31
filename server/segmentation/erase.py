@@ -72,6 +72,97 @@ def _cube_hit(disp_pts: np.ndarray, c: np.ndarray, r: float,
     return (np.abs(d) <= r).all(axis=1)
 
 
+def _rewrite_ply_keep(ply_path: Path, keep: np.ndarray) -> bool:
+    """Rewrite a binary-little-endian PLY keeping only ``keep`` rows —
+    physical point deletion (user 2026-08-31: low-confidence unsegmented
+    points must actually LEAVE the cloud). Header preserved verbatim except
+    the vertex count. Atomic (tmp + replace). Returns False (untouched file)
+    when any property type is unknown — never corrupt the cloud."""
+    _ply_type = {
+        'float': '<f4', 'float32': '<f4', 'double': '<f8', 'float64': '<f8',
+        'uchar': 'u1', 'uint8': 'u1', 'char': 'i1', 'int8': 'i1',
+        'ushort': '<u2', 'uint16': '<u2', 'short': '<i2', 'int16': '<i2',
+        'uint': '<u4', 'uint32': '<u4', 'int': '<i4', 'int32': '<i4',
+    }
+    try:
+        header: List[bytes] = []
+        props = []
+        n_pts = 0
+        with open(ply_path, 'rb') as f:
+            while True:
+                line = f.readline()
+                header.append(line)
+                s = line.decode('ascii', 'ignore').strip()
+                if s.startswith('element vertex'):
+                    n_pts = int(s.split()[-1])
+                elif s.startswith('property'):
+                    parts = s.split()
+                    if len(parts) < 3 or parts[1] not in _ply_type:
+                        print(f"[Erase] delete aborted: unsupported PLY "
+                              f"property '{s}'")
+                        return False
+                    props.append((parts[2], _ply_type[parts[1]]))
+                elif s == 'end_header':
+                    break
+            if n_pts != len(keep):
+                print(f"[Erase] delete aborted: keep mask {len(keep)} vs "
+                      f"{n_pts} pts")
+                return False
+            data = np.frombuffer(f.read(), dtype=np.dtype(props), count=n_pts)
+        kept = data[keep]
+        fd, tmp = tempfile.mkstemp(dir=str(ply_path.parent), suffix=".ply")
+        os.close(fd)
+        with open(tmp, 'wb') as f:
+            for line in header:
+                s = line.decode('ascii', 'ignore').strip()
+                if s.startswith('element vertex'):
+                    f.write(f"element vertex {len(kept)}\n".encode('ascii'))
+                else:
+                    f.write(line)
+            f.write(kept.tobytes())
+        os.replace(tmp, ply_path)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[Erase] PLY rewrite failed ({e}) — cloud untouched")
+        return False
+
+
+def _load_confidence_norm(ply_path: Path) -> Optional[np.ndarray]:
+    """Per-point confidence from the binary PLY, normalized to [0,1] with the
+    array's own min/max — the SAME normalization the viewer applies (Potree
+    metadata min/max come from these values), so a UI threshold means the
+    same thing here. None when the cloud has no confidence field."""
+    _ply_type = {
+        'float': '<f4', 'float32': '<f4', 'double': '<f8', 'float64': '<f8',
+        'uchar': 'u1', 'uint8': 'u1', 'char': 'i1', 'int8': 'i1',
+        'ushort': '<u2', 'uint16': '<u2', 'short': '<i2', 'int16': '<i2',
+        'uint': '<u4', 'uint32': '<u4', 'int': '<i4', 'int32': '<i4',
+    }
+    try:
+        with open(ply_path, 'rb') as f:
+            n_pts = 0
+            props = []
+            while True:
+                line = f.readline().decode('ascii').strip()
+                if line.startswith('element vertex'):
+                    n_pts = int(line.split()[-1])
+                elif line.startswith('property') and n_pts > 0:
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[1] in _ply_type:
+                        props.append((parts[2], _ply_type[parts[1]]))
+                elif line == 'end_header':
+                    break
+            if n_pts == 0 or 'confidence' not in {p[0] for p in props}:
+                return None
+            data = np.frombuffer(f.read(), dtype=np.dtype(props), count=n_pts)
+            c = np.asarray(data['confidence'], dtype=np.float64)
+            lo, hi = float(c.min()), float(c.max())
+            return ((c - lo) / max(hi - lo, 1e-9)).astype(np.float32)
+    except Exception as e:  # noqa: BLE001
+        print(f"[Erase] confidence read failed ({e})")
+        return None
+
+
 def _mask_obj_by_iid(output_dir: Path) -> Dict[int, int]:
     """instance_id → seg_masks obj id (mesh_export convention: via
     segmentation.json, label fallback)."""
@@ -198,7 +289,8 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
                   target_iid: Optional[int] = None,
                   new_label: Optional[str] = None,
                   only_iids: Optional[List[int]] = None,
-                  include_unsegmented: bool = True) -> dict:
+                  include_unsegmented: bool = True,
+                  conf_below: Optional[float] = None) -> dict:
     """Apply ONE commit over the marked spheres (user 2026-08-29: mark zones
     first, then a single button applies everything — one mask edit, one OBB
     recompute, one octree rebuild).
@@ -217,6 +309,10 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
     instance_ids can LOSE points — the UI sends the currently VISIBLE
     segments, so hidden ones are untouchable. The reassign target is exempt
     (chosen explicitly).
+    ``conf_below`` (user 2026-08-31: brush confidence filter): points with
+    normalized confidence BELOW this value are selected too — with no zones
+    it selects globally. Delete-mode use: low-confidence points of the
+    visible segments move to unsegmented. Same safety, ledger and undo.
 
     Returns {"touched": {iid: n_removed}, "total_removed": n, "reassigned": n,
     "mesh_instances": [...], "undo": {...}}."""
@@ -233,6 +329,12 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
         raise RuntimeError("cloud has no origin fields (cannot edit masks)")
     xyz, fg, pr, pc = origins
     N = len(xyz)
+    conf_norm = None
+    if conf_below is not None:
+        conf_norm = _load_confidence_norm(ply)
+        if conf_norm is None or len(conf_norm) != N:
+            raise ValueError("cloud has no usable confidence field")
+        conf_below = float(conf_below)
     # zones live in the DISPLAY frame: a cube brush is axis-aligned in the
     # LEVELED frame the user sees (user 2026-08-30: sphere OR cube per zone),
     # which is NOT axis-aligned in raw — so all hit tests run on display pts
@@ -263,7 +365,7 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
                           "c": np.asarray(sp["center"], np.float64),
                           "r": float(sp["radius"]),
                           "yaw": float(np.radians(float(sp.get("yaw_deg") or 0.0)))})
-    if not zones:
+    if not zones and conf_below is None:
         return {"touched": {}, "total_removed": 0, "mesh_instances": [],
                 "undo": None}
 
@@ -307,6 +409,20 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
             masks = {}
     orig_h = float(pr.max() + 1)
     orig_w = float(pc.max() + 1)
+
+    # user 2026-08-31: when the Unsegmented toggle is ON, its low-confidence
+    # points have no "more unsegmented" to fall to — they are DELETED from
+    # the cloud itself (irreversible; the ledger says so). Computed on the
+    # PRE-commit ownership so points moved to unsegmented by THIS commit are
+    # not swept along.
+    pending_delete = None
+    if conf_norm is not None and target_iid is None and include_unsegmented:
+        _assigned_any = np.zeros(N, dtype=bool)
+        for _inst in instances:
+            _g = np.asarray(_inst.get("globalIndices") or [], dtype=np.int64)
+            _assigned_any[_g[(_g >= 0) & (_g < N)]] = True
+        pending_delete = np.nonzero((~_assigned_any)
+                                    & (conf_norm < conf_below))[0]
 
     touched: Dict[int, int] = {}
     mesh_instances: List[int] = []
@@ -390,6 +506,8 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
         if not len(gi):
             continue
         hit = _zone_hit(_to_disp(xyz[gi]))
+        if conf_norm is not None:
+            hit |= conf_norm[gi] < conf_below
         n_hit = int(hit.sum())
         if not n_hit:
             continue
@@ -495,7 +613,8 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
                 except Exception as e:  # noqa: BLE001
                     print(f"[Erase] target mask paint failed (non-fatal): {e}")
 
-    if not touched and not n_reassigned:
+    if not touched and not n_reassigned \
+            and not (pending_delete is not None and len(pending_delete)):
         if created_iid is not None:
             # nothing landed in the new segment — roll its registration back
             try:
@@ -523,6 +642,39 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
 
     if (undo_pixels or target_pixels) and masks_path.exists():
         _atomic_savez(masks_path, masks)
+
+    # ── PHYSICAL DELETION of low-confidence unsegmented points ──
+    n_deleted = 0
+    if pending_delete is not None and len(pending_delete):
+        keep = np.ones(N, dtype=bool)
+        keep[pending_delete] = False
+        ok_del = _rewrite_ply_keep(output_dir / "cleaned_cloud.ply", keep)
+        corr = output_dir / "corrected_cloud.ply"
+        if ok_del and corr.exists():
+            ok_del = _rewrite_ply_keep(corr, keep)
+        if ok_del:
+            # every stored index shifts — remap all instances onto the new
+            # cloud (deleted points were unsegmented, so instances only shift)
+            new_idx = np.full(N, -1, dtype=np.int64)
+            new_idx[keep] = np.arange(int(keep.sum()), dtype=np.int64)
+            for inst in instances:
+                _g = np.asarray(inst.get("globalIndices") or [],
+                                dtype=np.int64)
+                _g = new_idx[_g[(_g >= 0) & (_g < N)]]
+                _g = _g[_g >= 0]
+                inst["globalIndices"] = _g.tolist()
+                inst["total_points"] = int(len(_g))
+            n_deleted = int(len(pending_delete))
+            N = int(keep.sum())
+            result["total_points"] = N
+            xyz = xyz[keep]
+            # index remap invalidates this commit's undo — it is irreversible
+            undo_indices.clear()
+            undo_pixels.clear()
+            print(f"[Erase] 🗑 {n_deleted:,} low-confidence unsegmented "
+                  f"point(s) permanently removed from the cloud "
+                  f"({N:,} remain)")
+
     result["segmented_points"] = sum(
         int(i.get("total_points") or 0) for i in instances)
     result["coverage"] = round(
@@ -589,6 +741,9 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
         "files_verified": files_verified,
         "exclusive": overlap_points == 0,
         "overlap_points": overlap_points,
+        "conf_below": conf_below,
+        "deleted_points": n_deleted,
+        "irreversible": n_deleted > 0,
     }
     print(f"[Erase] ledger: {json.dumps(ledger)}")
 
@@ -597,6 +752,16 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
         rebuild_instance_store(output_dir)
     except Exception as e:  # noqa: BLE001
         print(f"[Erase] store rebuild failed (non-fatal): {e}")
+
+    if n_deleted:
+        # physical deletion shifted every index — this commit cannot be undone
+        undo = None
+        return {"touched": {int(k): v for k, v in touched.items()},
+                "total_removed": int(sum(touched.values())),
+                "reassigned": int(n_reassigned),
+                "mesh_instances": sorted(set(mesh_instances)),
+                "undo": None,
+                "ledger": ledger}
 
     undo = {"indices": undo_indices, "pixels": undo_pixels}
     if target_inst is not None and n_reassigned:
