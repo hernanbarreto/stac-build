@@ -4184,6 +4184,18 @@ def _fuse_unexplained_poisson(output_dir: Path, frames_dir: Path, iid: int,
     return int(len(gi))
 
 
+async def _notify_tsdf_ready(session_id: str, stage: str, count: int) -> None:
+    """Tell every open viewer that freshly-published meshes are ready
+    (USER 2026-08-31: poisson and pgsr must appear the moment they finish)."""
+    try:
+        await viewer_manager.broadcast_text(json.dumps(
+            {"type": "tsdf_ready", "session_id": session_id,
+             "stage": stage, "count": int(count)}))
+        print(f"[Mesh] tsdf_ready broadcast ({stage}: {count} mesh(es))")
+    except Exception as e:  # noqa: BLE001
+        print(f"[Mesh] viewer notify failed (non-fatal): {e}")
+
+
 async def _run_pgsr_object_stage(session_id: str, frames_dir: Path,
                                  output_dir: Path, ids: List[int]) -> List[int]:
     """Per-object PGSR stage (USER 2026-08-30): run_pgsr_object.py trains
@@ -4706,6 +4718,11 @@ async def export_tsdf_endpoint(request: Request):
             async with _tsdf_progress_lock:
                 _tsdf_set_overall(session_id, phase="poisson")
             poisson_ids = await _run_poisson_stage(selected, set())
+            # USER 2026-08-31: each stage's meshes go to the UI the moment
+            # they are published — no more waiting for a manual reload
+            if poisson_ids:
+                await _notify_tsdf_ready(session_id, "poisson",
+                                         len(poisson_ids))
 
             pgsr_ids: List[int] = []
             if selected and bool((cfg.get("surface_fit") or {})
@@ -4714,6 +4731,9 @@ async def export_tsdf_endpoint(request: Request):
                     _tsdf_set_overall(session_id, phase="pgsr")
                 pgsr_ids = await _run_pgsr_object_stage(
                     session_id, frames_dir, output_dir, selected)
+                if pgsr_ids:
+                    await _notify_tsdf_ready(session_id, "pgsr",
+                                             len(pgsr_ids))
 
             async with _tsdf_progress_lock:
                 _tsdf_set_overall(session_id, phase="done",

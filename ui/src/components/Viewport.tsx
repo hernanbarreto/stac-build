@@ -55,6 +55,9 @@ interface ViewportProps {
     /** Brush transaction committed — App refreshes panel counters (ledger
         may be null when the backend predates the trace protocol). */
     onEraseLedger?: (ledger: unknown) => void
+    /** Freshly-published meshes (poisson/pgsr stage done) — App refreshes
+        the mesh panel list. */
+    onTsdfReady?: (sessionId: string, stage: string) => void
     /** Volume deleted from the viewer toolbar. */
     onVolumeDeleted?: (volumeId: number) => void
 }
@@ -373,7 +376,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -568,6 +571,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => { onEraseBoxSelectedRef.current = onEraseBoxSelected }, [onEraseBoxSelected])
     const onEraseLedgerRef = useRef(onEraseLedger)
     useEffect(() => { onEraseLedgerRef.current = onEraseLedger }, [onEraseLedger])
+    const onTsdfReadyRef = useRef(onTsdfReady)
+    useEffect(() => { onTsdfReadyRef.current = onTsdfReady }, [onTsdfReady])
     // bridge: renderOBBs is declared later in the file — the potree_ready
     // handler needs it to resync OBBs + panel after an erase/refresh rebuild
     const renderOBBsRef = useRef<((instances: Array<Record<string, unknown>>) => void) | null>(null)
@@ -3491,6 +3496,20 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // Handle JSON messages from server (segmentation, status, potree_ready, etc)
     const handleJsonMessage = useCallback((msg: Record<string, unknown>) => {
         // ── Potree LOD: load octree via HTTP ──
+        if (msg.type === 'tsdf_ready') {
+            // freshly-published meshes (poisson / pgsr stage finished) — load
+            // them into the scene and let App refresh the panel list
+            // (user 2026-08-31: meshes must appear the moment they finish)
+            const sid = msg.session_id as string
+            if (sid && sid === activeSessionRef.current) {
+                const parent = potreeLoaderRef.current?.getOctreeGroup() || sceneRef.current
+                if (parent) loadTsdfIntoGroup(sid, parent)
+                onTsdfReadyRef.current?.(sid, msg.stage as string)
+                if (onStatusMessage) onStatusMessage(
+                    `🧩 ${msg.count} ${msg.stage} mesh(es) ready — list updated`)
+            }
+            return
+        }
         if (msg.type === 'erase_verified') {
             // backend sampled the rebuilt octree against classification.npy —
             // the last leg of the brush-transaction trace (user 2026-08-31)

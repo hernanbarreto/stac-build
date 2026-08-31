@@ -2579,6 +2579,7 @@ function App() {
             onStatusMessage={setStatusMessage}
             onSegments={(list) => { setSegments(list); refreshUnsegmentedCount(activeSession) }}
             onEraseLedger={() => reloadSegments(activeSession)}
+            onTsdfReady={(sid) => refreshTsdfMeshList(sid)}
             onPipelineProgress={handlePipelineProgress}
             onVolumeChanged={async (params) => {
               // Gizmo edit finished: persist the volume, then re-evaluate its
