@@ -1637,6 +1637,35 @@ def _attach_unsegmented(instances, xyz_display: np.ndarray,
     return int(hit.sum()), grown
 
 
+def _enforce_exclusive_ownership(instances: list, n_pts: int) -> int:
+    """INVARIANT (USER 2026-08-31): each cloud point is owned by exactly one
+    instance (or unsegmented). Walks instances smallest-first so specific
+    objects keep contested points and big surfaces lose them; also drops
+    internal duplicates. Mutates ``instances`` in place; returns how many
+    double-ownerships were resolved."""
+    owner = np.full(int(n_pts), -1, dtype=np.int64)
+    order = sorted(range(len(instances)),
+                   key=lambda k: len(instances[k].get("globalIndices") or []))
+    resolved = 0
+    for k in order:
+        inst = instances[k]
+        raw = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+        gi = np.unique(raw[(raw >= 0) & (raw < n_pts)])
+        free = owner[gi] < 0
+        n_lost = int((~free).sum())
+        if n_lost:
+            resolved += n_lost
+            print(f"[SegPipeline]   ⚠ exclusivity: '{inst.get('label')}' "
+                  f"#{inst.get('instance_id', inst.get('id'))} released "
+                  f"{n_lost:,} point(s) already owned by another instance")
+        kept = gi[free]
+        owner[kept] = k
+        if len(kept) != len(raw):
+            inst["globalIndices"] = kept.tolist()
+            inst["total_points"] = int(len(kept))
+    return resolved
+
+
 def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_obj_ids=None) -> dict:
     """
     Core processing: match SAM3 masks against PLY cloud with erosion,
@@ -2192,6 +2221,19 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         except Exception as e:
             print(f"[SegPipeline] attach step failed (non-fatal): {e}")
 
+    # ── EXCLUSIVITY INVARIANT (USER 2026-08-31): every point belongs to ONE
+    # instance or none — never two. Masks can claim the same points for
+    # different segments; merges/attach/incremental unions could double-own.
+    # Conflicts resolve to the SMALLEST instance (a point on a small object
+    # belongs to the object, not the big surface behind it) and are reported.
+    try:
+        _n_dup = _enforce_exclusive_ownership(instances, n_pts)
+        if _n_dup:
+            print(f"[SegPipeline]   ⚠ exclusivity enforced: {_n_dup:,} "
+                  f"double-owned point(s) resolved")
+    except Exception as e:
+        print(f"[SegPipeline] exclusivity enforcement failed (non-fatal): {e}")
+
     # ── Canonical instance store (scene_r.db) — THE single source of objects
     # for spatial Q&A (phase5), classification (phase2), findings (phase3) and
     # reports (phase6). Rebuilt from scratch on every segmentation, straight
@@ -2460,9 +2502,20 @@ def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
         # Merge: keep old instances (not replaced by new), add new
         merged = [inst for inst in prev_instances if inst["id"] not in new_ids]
         merged.extend(new_instances)
-        
-        # Recompute coverage from merged set
+
         total_pts = result.get("total_points", prev_result.get("total_points", 0))
+        # EXCLUSIVITY INVARIANT (USER 2026-08-31): a new category's masks can
+        # claim points already owned by old instances (this merge was THE
+        # double-ownership source). Smallest instance keeps contested points.
+        try:
+            _n_dup = _enforce_exclusive_ownership(merged, int(total_pts))
+            if _n_dup:
+                print(f"[SegPipeline]   ⚠ exclusivity (incremental merge): "
+                      f"{_n_dup:,} double-owned point(s) resolved")
+        except Exception as e:
+            print(f"[SegPipeline] exclusivity enforcement failed (non-fatal): {e}")
+
+        # Recompute coverage from merged set
         total_segmented = sum(inst.get("total_points", 0) for inst in merged)
         coverage = round(total_segmented / max(1, total_pts), 4)
         

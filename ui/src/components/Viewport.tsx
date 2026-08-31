@@ -47,10 +47,14 @@ interface ViewportProps {
     /** Gizmo edit finished on an evaluation volume — persist + re-evaluate. */
     onVolumeChanged?: (params: { volume_id: number; center: number[]; size: number[]; yaw_deg: number }) => void
     eraseRadius?: number
-    eraseShape?: 'sphere' | 'cube'
+    eraseShape?: 'sphere' | 'cube' | 'box'
     eraseYawDeg?: number
     onEraseRadiusChange?: (r: number) => void
     onEraseMarksChanged?: (n: number) => void
+    onEraseBoxSelected?: (selected: boolean) => void
+    /** Brush transaction committed — App refreshes panel counters (ledger
+        may be null when the backend predates the trace protocol). */
+    onEraseLedger?: (ledger: unknown) => void
     /** Volume deleted from the viewer toolbar. */
     onVolumeDeleted?: (volumeId: number) => void
 }
@@ -80,6 +84,8 @@ export interface ViewportHandle {
     applyRegistrationTransform: (transform: number[][]) => void
     clearMeasurements: () => void
     commitErase: (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => Promise<void>
+    setEraseBoxMode: (m: 'translate' | 'rotate' | 'scale') => void
+    removeSelectedEraseBox: () => void
     clearEraseMarks: () => void
     resetSectionBox: () => void
     resetCamera: () => void
@@ -194,6 +200,10 @@ const fragmentShader = `
   uniform bool sectionBoxEnabled;
   uniform vec3 sectionBoxMin;
   uniform vec3 sectionBoxMax;
+  // selection-box highlight (brush box tool): points inside the box being
+  // edited light up golden so the selection is visible BEFORE applying
+  uniform bool uSelBoxOn;
+  uniform mat4 uSelBoxInv;
 
   void main() {
     // Segment visibility filter (computed in vertex shader for precision)
@@ -221,7 +231,14 @@ const fragmentShader = `
     float alpha = 1.0 - smoothstep(0.35, 0.5, dist);
     
     vec3 finalColor = vColor * 0.85;
-    
+
+    if (uSelBoxOn) {
+      vec3 lp = (uSelBoxInv * vec4(vWorldPos, 1.0)).xyz;
+      if (abs(lp.x) <= 1.0 && abs(lp.y) <= 1.0 && abs(lp.z) <= 1.0) {
+        finalColor = mix(finalColor, vec3(1.0, 0.82, 0.2), 0.65);
+      }
+    }
+
     gl_FragColor = vec4(finalColor, alpha * uOpacity);
   }
 `
@@ -356,7 +373,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -530,8 +547,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // is owned by App (slider in the toolbar); the wheel changes it too and
     // reports back so slider and wheel stay in sync.
     const eraseRadiusRef = useRef(0.15)
-    const eraseShapeRef = useRef<'sphere' | 'cube'>('sphere')
-    useEffect(() => { eraseShapeRef.current = eraseShape === 'cube' ? 'cube' : 'sphere' }, [eraseShape])
+    const eraseShapeRef = useRef<'sphere' | 'cube' | 'box'>('sphere')
+    useEffect(() => { eraseShapeRef.current = (eraseShape === 'cube' || eraseShape === 'box') ? eraseShape : 'sphere' }, [eraseShape])
     // cube yaw about the vertical axis (user 2026-08-30: adapt to diagonal walls)
     const eraseYawRef = useRef(0)
     useEffect(() => {
@@ -546,6 +563,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => { onEraseMarksChangedRef.current = onEraseMarksChanged }, [onEraseMarksChanged])
     // mark/commit API installed by the main effect (marks live in its closure)
     const eraseApiRef = useRef<{ commit: (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => Promise<void>; clear: () => void } | null>(null)
+    const eraseBoxApiRef = useRef<{ setMode: (m: 'translate' | 'rotate' | 'scale') => void; remove: () => void } | null>(null)
+    const onEraseBoxSelectedRef = useRef(onEraseBoxSelected)
+    useEffect(() => { onEraseBoxSelectedRef.current = onEraseBoxSelected }, [onEraseBoxSelected])
+    const onEraseLedgerRef = useRef(onEraseLedger)
+    useEffect(() => { onEraseLedgerRef.current = onEraseLedger }, [onEraseLedger])
     // bridge: renderOBBs is declared later in the file — the potree_ready
     // handler needs it to resync OBBs + panel after an erase/refresh rebuild
     const renderOBBsRef = useRef<((instances: Array<Record<string, unknown>>) => void) | null>(null)
@@ -2203,6 +2225,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         },
         clearMeasurements: clearAllMeasurements,
         commitErase: async (target?: number | null, newLabel?: string, onlyInstances?: number[], includeUnsegmented?: boolean) => { await eraseApiRef.current?.commit(target, newLabel, onlyInstances, includeUnsegmented) },
+        setEraseBoxMode: (m: 'translate' | 'rotate' | 'scale') => eraseBoxApiRef.current?.setMode(m),
+        removeSelectedEraseBox: () => eraseBoxApiRef.current?.remove(),
         clearEraseMarks: () => eraseApiRef.current?.clear(),
         resetSectionBox: destroySectionBox,
         resetCamera: () => {
@@ -2471,6 +2495,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 sectionBoxEnabled: { value: false },
                 sectionBoxMin: { value: new THREE.Vector3(-100, -100, -100) },
                 sectionBoxMax: { value: new THREE.Vector3(100, 100, 100) },
+                uSelBoxOn: { value: false },
+                uSelBoxInv: { value: new THREE.Matrix4() },
             },
             vertexColors: true,
             transparent: true,
@@ -2632,6 +2658,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 return
             }
             setHighlight(null)
+            if (eraseShapeRef.current === 'box') {
+                eraseCursor.visible = false
+                return
+            }
             const p = eraseRaycast(event)
             if (p) {
                 if (eraseCursor.userData.shape !== eraseShapeRef.current) {
@@ -2654,7 +2684,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const eraseMarksGroup = new THREE.Group()
         eraseMarksGroup.name = 'erase-marks'
         scene.add(eraseMarksGroup)
-        const eraseMarks: { center: THREE.Vector3; radius: number; shape: 'sphere' | 'cube'; yawDeg: number; mesh: THREE.Mesh }[] = []
+        type EraseMark = { shape: 'sphere' | 'cube' | 'box'; center?: THREE.Vector3; radius?: number; yawDeg?: number; mesh: THREE.Mesh }
+        const eraseMarks: EraseMark[] = []
         const markGeom = new THREE.SphereGeometry(1, 20, 14)
         const markCubeGeom = new THREE.BoxGeometry(2, 2, 2)
         const markMat = new THREE.MeshBasicMaterial({
@@ -2683,8 +2714,106 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const hits = raycaster.intersectObjects(eraseMarksGroup.children, false)
             return hits.length ? (hits[0].object as THREE.Mesh) : null
         }
+        // ── BOX SELECTION (user 2026-08-30: "debe ser una caja, punto"):
+        // right-click in box mode drops a box ANYWHERE (surface hit, or 3 m in
+        // front of the camera). Left-click selects it → gizmo (Move default;
+        // panel buttons or G/R/S; Esc done; Del removes). While selected,
+        // every point INSIDE lights up golden (shader highlight).
+        let boxTc: TransformControls | null = null
+        let selBox: THREE.Mesh | null = null
+        const _selBoxInv = new THREE.Matrix4()
+        const _updateSelBoxUniform = () => {
+            const m = materialRef.current
+            if (!m) return
+            if (selBox) {
+                selBox.updateMatrixWorld(true)
+                _selBoxInv.copy(selBox.matrixWorld).invert()
+                ;(m.uniforms.uSelBoxInv.value as THREE.Matrix4).copy(_selBoxInv)
+                m.uniforms.uSelBoxOn.value = true
+            } else {
+                m.uniforms.uSelBoxOn.value = false
+            }
+        }
+        const boxDeselect = () => {
+            if (boxTc) {
+                scene.remove(boxTc.getHelper())
+                boxTc.detach()
+                boxTc.dispose()
+                boxTc = null
+            }
+            selBox = null
+            _updateSelBoxUniform()
+            onEraseBoxSelectedRef.current?.(false)
+            const ctrl = controlsRef.current
+            if (ctrl) ctrl.enabled = true
+        }
+        const boxSelect = (mesh: THREE.Mesh) => {
+            boxDeselect()
+            selBox = mesh
+            const tc = new TransformControls(camera, renderer.domElement)
+            tc.setMode('translate')
+            tc.setSize(0.7)
+            tc.attach(mesh)
+            scene.add(tc.getHelper())
+            tc.addEventListener('dragging-changed', (e) => {
+                const ctrl = controlsRef.current
+                if (ctrl) ctrl.enabled = !(e as unknown as { value?: boolean }).value
+            })
+            tc.addEventListener('objectChange', _updateSelBoxUniform)
+            boxTc = tc
+            _updateSelBoxUniform()
+            onEraseBoxSelectedRef.current?.(true)
+            if (onStatusMessage) onStatusMessage('🔳 box selected — Move/Rotate/Stretch (panel or G/R/S) · Esc done · Del remove')
+        }
+        eraseBoxApiRef.current = {
+            setMode: (m: 'translate' | 'rotate' | 'scale') => boxTc?.setMode(m),
+            remove: () => {
+                if (!selBox) return
+                const mesh = selBox
+                boxDeselect()
+                const idx = eraseMarks.findIndex(mk => mk.mesh === mesh)
+                if (idx >= 0) eraseMarks.splice(idx, 1)
+                eraseMarksGroup.remove(mesh)
+                onEraseMarksChangedRef.current?.(eraseMarks.length)
+            },
+        }
+        const onEraseKey = (e: KeyboardEvent) => {
+            if (activeToolRef.current !== 'erase') return
+            if (e.key === 'Escape' && selBox) { boxDeselect(); return }
+            if (!selBox || !boxTc) return
+            const k = e.key.toLowerCase()
+            if (k === 'g') boxTc.setMode('translate')
+            else if (k === 'r') boxTc.setMode('rotate')
+            else if (k === 's') boxTc.setMode('scale')
+            else if (e.key === 'Delete') eraseBoxApiRef.current?.remove()
+        }
+        const eraseLeftDown = { x: 0, y: 0, active: false }
+        const onEraseLeftDown = (e: MouseEvent) => {
+            if (activeToolRef.current !== 'erase' || e.button !== 0) return
+            eraseLeftDown.x = e.clientX
+            eraseLeftDown.y = e.clientY
+            eraseLeftDown.active = true
+        }
+        const onEraseLeftUp = (e: MouseEvent) => {
+            if (activeToolRef.current !== 'erase' || e.button !== 0) return
+            if (!eraseLeftDown.active) return
+            eraseLeftDown.active = false
+            if (Math.hypot(e.clientX - eraseLeftDown.x, e.clientY - eraseLeftDown.y) > 4) return
+            const rect = renderer.domElement.getBoundingClientRect()
+            const mouse = new THREE.Vector2(
+                ((e.clientX - rect.left) / rect.width) * 2 - 1,
+                -((e.clientY - rect.top) / rect.height) * 2 + 1)
+            const raycaster = raycasterRef.current
+            raycaster.setFromCamera(mouse, camera)
+            const hits = raycaster.intersectObjects(eraseMarksGroup.children, false)
+            const hit = hits.find(h => (h.object as THREE.Mesh).userData.gizmoBox)
+            if (hit) boxSelect(hit.object as THREE.Mesh)
+            else if (selBox) boxDeselect()
+        }
+
         const eraseClearMarks = () => {
             setHighlight(null)
+            boxDeselect()
             eraseMarks.length = 0
             while (eraseMarksGroup.children.length) {
                 eraseMarksGroup.remove(eraseMarksGroup.children[0])
@@ -2700,12 +2829,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 if (onStatusMessage) onStatusMessage(`🖌 applying ${eraseMarks.length} zone(s)...`)
                 const payload: Record<string, unknown> = {
                     session_id: sid,
-                    spheres: eraseMarks.map(m => ({
-                        center: [m.center.x, m.center.y, m.center.z],
-                        radius: m.radius,
-                        shape: m.shape,
-                        yaw_deg: m.yawDeg,
-                    })),
+                    spheres: eraseMarks.map(m => {
+                        if (m.shape === 'box') {
+                            m.mesh.updateMatrixWorld(true)
+                            return { shape: 'box', matrix: m.mesh.matrixWorld.toArray() }
+                        }
+                        return {
+                            center: [m.center!.x, m.center!.y, m.center!.z],
+                            radius: m.radius,
+                            shape: m.shape,
+                            yaw_deg: m.yawDeg,
+                        }
+                    }),
                 }
                 // SAFETY: hidden segments cannot lose points
                 if (onlyInstances) payload.only_instances = onlyInstances
@@ -2724,12 +2859,41 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 })
                 const data = await res.json()
                 if (onStatusMessage) {
+                    // Transaction trace (user 2026-08-31): show EXACTLY what the
+                    // backend did — target, per-source breakdown, protected
+                    // hidden points, balance and file verification.
+                    const led = data.ledger
                     const nDel = data.total_removed || 0
                     const nRe = data.reassigned || 0
-                    if (nRe) onStatusMessage(`🖌 ${nRe.toLocaleString()} points ${newLabel ? `→ new segment "${newLabel}"` : 'reassigned'} — recoloring...`)
+                    if (led) {
+                        const parts: string[] = []
+                        const from = Object.entries(led.moved_from || {})
+                            .map(([k, n]) => `${k}: ${(n as number).toLocaleString()}`)
+                        if (led.unsegmented_taken) from.push(`unsegmented: ${led.unsegmented_taken.toLocaleString()}`)
+                        if (led.mode === 'reassign' && led.target) {
+                            parts.push(`🖌 ${(led.total_moved || 0).toLocaleString()} pts → ${led.target.label}_${led.target.instance_id}`)
+                        } else if (led.mode === 'delete') {
+                            parts.push(`🧽 ${(led.total_moved || 0).toLocaleString()} pts erased`)
+                        }
+                        if (from.length) parts.push(`from ${from.join(', ')}`)
+                        if (led.balance) parts.push(`balance ${led.balance.consistent ? '✓' : '✗ MISMATCH'}`)
+                        if (led.files_verified !== null && led.files_verified !== undefined)
+                            parts.push(`files ${led.files_verified ? '✓' : '✗ MISMATCH'}`)
+                        if (led.exclusive !== undefined)
+                            parts.push(led.exclusive ? 'exclusive ✓'
+                                : `✗ ${(led.overlap_points || 0).toLocaleString()} pts owned by >1 segment`)
+                        const prot = Object.entries(led.protected_hidden || {})
+                        if (prot.length) {
+                            const nProt = prot.reduce((a, [, n]) => a + (n as number), 0)
+                            parts.push(`⚠ ${nProt.toLocaleString()} pts in HIDDEN segments untouched (${prot.map(([k]) => k).join(', ')})`)
+                        }
+                        if (!led.total_moved && !prot.length) parts.push('no applicable points in the zones')
+                        onStatusMessage(parts.join(' · '))
+                    } else if (nRe) onStatusMessage(`🖌 ${nRe.toLocaleString()} points ${newLabel ? `→ new segment "${newLabel}"` : 'reassigned'} — recoloring...`)
                     else if (nDel) onStatusMessage(`🧽 ${nDel.toLocaleString()} points erased from ${Object.keys(data.touched || {}).length} object(s) — recoloring...`)
                     else onStatusMessage('🖌 the marked zones had no applicable points')
                 }
+                onEraseLedgerRef.current?.(data.ledger ?? null)
                 eraseClearMarks()
             } catch {
                 if (onStatusMessage) onStatusMessage('🖌 apply failed')
@@ -2757,11 +2921,28 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const mesh = markUnderCursor(event)
                 if (!mesh) return
                 setHighlight(null)
+                if (mesh === selBox) boxDeselect()
                 const idx = eraseMarks.findIndex(m => m.mesh === mesh)
                 if (idx >= 0) eraseMarks.splice(idx, 1)
                 eraseMarksGroup.remove(mesh)
                 onEraseMarksChangedRef.current?.(eraseMarks.length)
                 if (onStatusMessage) onStatusMessage(`🖌 mark removed — ${eraseMarks.length} zone(s) left`)
+                return
+            }
+            if (eraseShapeRef.current === 'box') {
+                // drop a selection box ANYWHERE: at the surface hit, or 3 m in
+                // front of the camera when the click hits nothing
+                const hitP = eraseRaycast(event)
+                const fwd = camera.getWorldDirection(new THREE.Vector3())
+                const pos = hitP ?? camera.getWorldPosition(new THREE.Vector3()).addScaledVector(fwd, 3)
+                const box = new THREE.Mesh(markCubeGeom, markMat)
+                box.userData.gizmoBox = true
+                box.position.copy(pos)
+                box.scale.set(0.75, 0.75, 0.75)   // 1.5 m default box
+                eraseMarksGroup.add(box)
+                eraseMarks.push({ shape: 'box', mesh: box })
+                onEraseMarksChangedRef.current?.(eraseMarks.length)
+                boxSelect(box)
                 return
             }
             const p = eraseRaycast(event)
@@ -2774,7 +2955,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const yawDeg = shape === 'cube' ? (eraseYawRef.current * 180) / Math.PI : 0
             if (shape === 'cube') mark.rotation.y = eraseYawRef.current
             eraseMarksGroup.add(mark)
-            eraseMarks.push({ center: p.clone(), radius: r, shape, yawDeg, mesh: mark })
+            eraseMarks.push({ shape, center: p.clone(), radius: r, yawDeg, mesh: mark })
             onEraseMarksChangedRef.current?.(eraseMarks.length)
             if (onStatusMessage) onStatusMessage(`🖌 ${eraseMarks.length} zone(s) marked — press Erase or Assign to apply`)
         }
@@ -2788,6 +2969,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         renderer.domElement.addEventListener('mousemove', onEraseMove)
         renderer.domElement.addEventListener('mousedown', onEraseMouseDown)
         renderer.domElement.addEventListener('mouseup', onEraseMouseUp)
+        renderer.domElement.addEventListener('mousedown', onEraseLeftDown)
+        renderer.domElement.addEventListener('mouseup', onEraseLeftUp)
+        window.addEventListener('keydown', onEraseKey)
         window.addEventListener('keydown', onKeyDown)
 
         // Cleanup
@@ -2803,6 +2987,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             renderer.domElement.removeEventListener('mousemove', onEraseMove)
             renderer.domElement.removeEventListener('mousedown', onEraseMouseDown)
             renderer.domElement.removeEventListener('mouseup', onEraseMouseUp)
+            renderer.domElement.removeEventListener('mousedown', onEraseLeftDown)
+            renderer.domElement.removeEventListener('mouseup', onEraseLeftUp)
+            window.removeEventListener('keydown', onEraseKey)
+            boxDeselect()
+            eraseBoxApiRef.current = null
             scene.remove(eraseCursor)
             eraseSphereGeom.dispose()
             eraseCubeGeom.dispose()
@@ -3302,6 +3491,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // Handle JSON messages from server (segmentation, status, potree_ready, etc)
     const handleJsonMessage = useCallback((msg: Record<string, unknown>) => {
         // ── Potree LOD: load octree via HTTP ──
+        if (msg.type === 'erase_verified') {
+            // backend sampled the rebuilt octree against classification.npy —
+            // the last leg of the brush-transaction trace (user 2026-08-31)
+            if (onStatusMessage) {
+                const pct = ((msg.agreement as number) * 100).toFixed(2)
+                onStatusMessage(msg.ok
+                    ? `octree verified ✓ ${msg.matched}/${msg.checked} (${pct}%)`
+                    : `⚠ OCTREE MISMATCH: ${msg.matched}/${msg.checked} (${pct}%) ${msg.error || ''} — viewer may show stale classes`)
+            }
+            return
+        }
         if (msg.type === 'potree_ready') {
             const url = msg.url as string
             const pts = msg.points as number

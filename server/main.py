@@ -2924,6 +2924,7 @@ async def get_segmentation_instances(session_id: str):
         raw_instances = seg_data.get("instances", [])
 
         enriched_by_id: Dict[int, Dict[str, Any]] = {}
+        result_data: Optional[Dict[str, Any]] = None
         if result_path.exists():
             try:
                 with open(result_path) as f:
@@ -2952,10 +2953,29 @@ async def get_segmentation_instances(session_id: str):
             else:
                 merged.append(inst)
 
+        # Cloud totals so the panel can show the unsegmented count too
+        # (user 2026-08-31: every segment shows its points except Unsegmented)
+        total_pts = segmented_pts = None
+        if result_data:
+            try:
+                total_pts = int(result_data.get("total_points") or 0) or None
+                segmented_pts = result_data.get("segmented_points")
+                if segmented_pts is None:
+                    segmented_pts = sum(
+                        int(i.get("total_points") or 0)
+                        for i in result_data.get("instances", []))
+                segmented_pts = int(segmented_pts)
+            except Exception:
+                total_pts = segmented_pts = None
+
         return {
             "instances": merged,
             "prompts": prompts,
             "resolution": resolution,
+            "total_points": total_pts,
+            "unsegmented_points": (max(0, total_pts - segmented_pts)
+                                   if total_pts is not None
+                                   and segmented_pts is not None else None),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -5154,6 +5174,24 @@ async def _erase_finalize(session_id: str, delay: float = 2.5):
                 print("[Erase] potree_ready broadcast (viewer reloads octree)")
         except Exception as e:  # noqa: BLE001
             print(f"[Erase] viewer notify failed (non-fatal): {e}")
+        # ── OCTREE VERIFICATION (user 2026-08-31: full transaction control):
+        # sample the freshly-built octree against classification.npy and tell
+        # the viewer, so every commit closes the loop files → octree → screen.
+        try:
+            from segmentation.erase import verify_octree_classification
+            ver = await asyncio.get_event_loop().run_in_executor(
+                None, verify_octree_classification, output_dir)
+            if ver is not None:
+                ok = "error" not in ver and ver.get("agreement", 0) >= 0.995
+                print(f"[Erase] octree verified: {ver.get('matched', 0)}/"
+                      f"{ver.get('checked', 0)} "
+                      f"({100 * ver.get('agreement', 0):.2f}%)"
+                      + ("" if ok else f" ⚠ {ver.get('error', 'LOW AGREEMENT')}"))
+                await viewer_manager.broadcast_text(json.dumps(
+                    {"type": "erase_verified", "session_id": session_id,
+                     "ok": bool(ok), **ver}))
+        except Exception as e:  # noqa: BLE001
+            print(f"[Erase] octree verification failed (non-fatal): {e}")
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001
@@ -5220,6 +5258,8 @@ async def segmentation_erase(request: Request):
             p = published_mesh_path(output_dir, labels.get(iid, ""), iid)
             if p:   # instant visual crop; the re-fit delivers the real mesh
                 for sp in spheres:
+                    if str(sp.get("shape") or "sphere").lower() not in ("sphere", "cube"):
+                        continue   # prism zones: the re-fit covers the mesh
                     await loop.run_in_executor(
                         None, crop_glb_sphere, p, output_dir,
                         sp["center"], float(sp["radius"]),
@@ -5234,7 +5274,10 @@ async def segmentation_erase(request: Request):
     return {"ok": True, "touched": rep.get("touched", {}),
             "total_removed": rep.get("total_removed", 0),
             "reassigned": rep.get("reassigned", 0),
-            "mesh_instances": rep.get("mesh_instances", [])}
+            "mesh_instances": rep.get("mesh_instances", []),
+            # full transaction trace (user 2026-08-31): target, per-source
+            # breakdown, protected-hidden points, balance, file verification
+            "ledger": rep.get("ledger")}
 
 
 @app.post("/api/segmentation/erase/undo")

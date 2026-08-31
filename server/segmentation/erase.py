@@ -96,8 +96,8 @@ def published_mesh_path(output_dir: Path, label: str, iid: int) -> Optional[Path
 
 
 def _write_classification(output_dir: Path, instances: List[dict],
-                          n_points: int) -> None:
-    """Rebuild classification.npy (per-point mask-obj id; 0 = unsegmented) —
+                          n_points: int) -> np.ndarray:
+    """Rebuild classification.npy (per-point INSTANCE id; 0 = unsegmented) —
     it is THE color source the Potree converter bakes into the octree. Without
     this, an erase updated the indices but the rebuilt octree kept painting
     the removed points with their old segment color (user 2026-08-30)."""
@@ -105,8 +105,83 @@ def _write_classification(output_dir: Path, instances: List[dict],
     for inst in instances:
         gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
         gi = gi[(gi >= 0) & (gi < n_points)]
-        classification[gi] = min(int(inst.get("id", 0)), 255)
+        # INSTANCE id, never the mask obj id: brush-created segments carry
+        # id = mask oid (instance_id − 1), and writing THAT painted their
+        # points with the PREVIOUS segment's class in the octree — the
+        # "reassigned points answer to another segment's toggle" bug
+        # (user 2026-08-31).
+        classification[gi] = min(
+            int(inst.get("instance_id", inst.get("id", 0))), 255)
     np.save(output_dir / "classification.npy", classification)
+    return classification
+
+
+def verify_octree_classification(output_dir: Path,
+                                 sample: int = 5000) -> Optional[dict]:
+    """Sample the ROOT node of the freshly-built Potree octree and check its
+    per-point classification byte against classification.npy (matched by
+    position on the conversion-source cloud). Closes the trace loop of a
+    brush transaction: files → octree → what the viewer culls by
+    (user 2026-08-31: 'cada transacción trazada y controlada').
+    Returns {checked, matched, agreement} or None when unverifiable."""
+    import struct
+    output_dir = Path(output_dir)
+    potree = output_dir / "potree" \
+        if (output_dir / "potree").exists() else output_dir.parent / "potree"
+    meta_p = potree / "metadata.json"
+    cls_p = output_dir / "classification.npy"
+    src = output_dir / "corrected_cloud.ply"
+    if not src.exists():
+        src = output_dir / "cleaned_cloud.ply"
+    if not (meta_p.exists() and cls_p.exists() and src.exists()):
+        return None
+    try:
+        meta = json.loads(meta_p.read_text())
+        scale, offs = meta["scale"], meta["offset"]
+        bpp = cls_off = 0
+        cls_found = False
+        for a in meta["attributes"]:
+            if a["name"] == "classification":
+                cls_off = bpp
+                cls_found = True
+            bpp += int(a["size"])
+        if not cls_found or bpp <= 0:
+            return None
+        t, cm, npts, boff, bsz = struct.unpack(
+            "<BBIQQ", (potree / "hierarchy.bin").read_bytes()[:22])
+        with open(potree / "octree.bin", "rb") as f:
+            f.seek(boff)
+            buf = f.read(min(bsz, npts * bpp))
+        n = min(int(npts), int(sample), len(buf) // bpp)
+        if n < 100:
+            return None
+        rec = np.frombuffer(buf[:n * bpp], dtype=np.uint8).reshape(n, bpp)
+        ixyz = rec[:, :12].copy().view("<i4").reshape(n, 3).astype(np.float64)
+        pts = ixyz * np.asarray(scale) + np.asarray(offs)
+        cls_oct = rec[:, cls_off].astype(np.int64)
+
+        from segmentation.pipeline import _load_ply_origins
+        origins = _load_ply_origins(src)
+        if not origins:
+            return None
+        cloud = origins[0]
+        gt = np.load(cls_p)
+        if len(gt) != len(cloud):
+            return {"checked": 0, "matched": 0, "agreement": 0.0,
+                    "error": "classification/cloud size mismatch"}
+        from scipy.spatial import cKDTree
+        d, idx = cKDTree(cloud).query(pts, k=1)
+        ok = d < 0.002    # 1 mm quantization → 2 mm tolerance
+        if not ok.any():
+            return {"checked": int(n), "matched": 0, "agreement": 0.0,
+                    "error": "no positional matches — octree/cloud frames differ"}
+        agree = float((cls_oct[ok] == gt[idx[ok]]).mean())
+        return {"checked": int(ok.sum()),
+                "matched": int((cls_oct[ok] == gt[idx[ok]]).sum()),
+                "agreement": round(agree, 4)}
+    except Exception as e:  # noqa: BLE001
+        print(f"[Erase] octree verification failed (non-fatal): {e}")
+        return None
 
 
 def erase_sphere(output_dir: Path, center_display, radius: float) -> dict:
@@ -169,20 +244,50 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
     zones = []
     for sp in spheres:
         kind = str(sp.get("shape") or "sphere").lower()
-        zones.append((kind, np.asarray(sp["center"], np.float64),
-                      float(sp["radius"]),
-                      float(np.radians(float(sp.get("yaw_deg") or 0.0)))))
+        if kind == "box":
+            # GIZMO BOX (user 2026-08-30: "debe ser una caja, punto"): the
+            # mesh is a 2x2x2 cube, so scale/rotation/position all live in the
+            # matrix and the local test is simply |xyz| <= 1
+            M = np.asarray(sp["matrix"], np.float64).reshape(4, 4, order="F")
+            zones.append({"kind": "box", "inv": np.linalg.inv(M)})
+        elif kind == "prism":
+            # LASSO PRISM (user 2026-08-30): polygon (local XY) extruded along
+            # local +Z by ``depth``; ``matrix`` maps local→display (three.js
+            # toArray = column-major), gizmo edits (move/rotate/stretch) baked in
+            M = np.asarray(sp["matrix"], np.float64).reshape(4, 4, order="F")
+            zones.append({"kind": "prism", "inv": np.linalg.inv(M),
+                          "poly": np.asarray(sp["polygon"], np.float64),
+                          "depth": float(sp.get("depth") or 0.0)})
+        else:
+            zones.append({"kind": kind,
+                          "c": np.asarray(sp["center"], np.float64),
+                          "r": float(sp["radius"]),
+                          "yaw": float(np.radians(float(sp.get("yaw_deg") or 0.0)))})
     if not zones:
         return {"touched": {}, "total_removed": 0, "mesh_instances": [],
                 "undo": None}
 
     def _zone_hit(disp_pts: np.ndarray) -> np.ndarray:
         h = np.zeros(len(disp_pts), dtype=bool)
-        for kind, c, r, yaw in zones:
-            if kind == "cube":
-                h |= _cube_hit(disp_pts, c, r, yaw)
+        for z in zones:
+            if z["kind"] == "box":
+                ph = np.hstack([disp_pts, np.ones((len(disp_pts), 1))])
+                local = (z["inv"] @ ph.T).T
+                h |= (np.abs(local[:, :3]) <= 1.0).all(axis=1)
+            elif z["kind"] == "prism":
+                ph = np.hstack([disp_pts, np.ones((len(disp_pts), 1))])
+                local = (z["inv"] @ ph.T).T
+                zin = (local[:, 2] >= 0.0) & (local[:, 2] <= z["depth"])
+                if zin.any():
+                    from matplotlib.path import Path as _MplPath
+                    inpoly = np.zeros(len(disp_pts), dtype=bool)
+                    inpoly[zin] = _MplPath(z["poly"]).contains_points(
+                        local[zin, :2])
+                    h |= inpoly
+            elif z["kind"] == "cube":
+                h |= _cube_hit(disp_pts, z["c"], z["r"], z["yaw"])
             else:
-                h |= ((disp_pts - c) ** 2).sum(axis=1) <= r * r
+                h |= ((disp_pts - z["c"]) ** 2).sum(axis=1) <= z["r"] * z["r"]
         return h
 
     result = json.loads(res_path.read_text())
@@ -225,8 +330,12 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
         meta_insts = meta.get("instances") or []
         new_oid = 1 + max([int(e.get("id", 0)) for e in meta_insts], default=0)
         color = _NEW_SEGMENT_COLORS[(new_iid - 1) % len(_NEW_SEGMENT_COLORS)]
+        # result-file convention is id == instance_id (1-based); the mask obj
+        # id (new_oid) lives ONLY in segmentation.json. Writing new_oid here
+        # made every downstream .get("id")-first consumer (classification,
+        # exports) treat the new segment as the PREVIOUS one.
         instances.append({
-            "id": int(new_oid), "label": str(new_label),
+            "id": int(new_iid), "label": str(new_label),
             "instance_id": int(new_iid), "color": color,
             "total_points": 0, "globalIndices": [],
         })
@@ -263,12 +372,19 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
             assigned_before[gi0[(gi0 >= 0) & (gi0 < N)]] = True
 
     only_set = set(int(i) for i in only_iids) if only_iids is not None else None
+    # Transaction ledger (user 2026-08-31: every brush transaction traced and
+    # controlled): per-source breakdown, silently-protected hidden points,
+    # conservation balance, post-write file verification.
+    labels_by_iid = {
+        int(i.get("instance_id", i.get("id"))): str(i.get("label", "segment"))
+        for i in instances}
+    assigned_points_before = sum(
+        len(i.get("globalIndices") or []) for i in instances)
+    protected_hidden: Dict[int, int] = {}
     for inst in instances:
         if target_inst is not None and inst is target_inst:
             continue   # the target only GAINS points in a reassign
         iid = int(inst.get("instance_id", inst.get("id")))
-        if only_set is not None and iid not in only_set:
-            continue   # hidden in the viewer → untouchable (safety)
         gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
         gi = gi[(gi >= 0) & (gi < N)]
         if not len(gi):
@@ -276,6 +392,11 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
         hit = _zone_hit(_to_disp(xyz[gi]))
         n_hit = int(hit.sum())
         if not n_hit:
+            continue
+        if only_set is not None and iid not in only_set:
+            # hidden in the viewer → untouchable (safety), but never silent:
+            # the ledger reports what stayed put inside the zones
+            protected_hidden[iid] = n_hit
             continue
         removed = gi[hit]
         keep = gi[~hit]
@@ -316,6 +437,7 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
     # ── REASSIGN: the target gains every point in the zones — the ones taken
     # from other instances plus the previously-unsegmented ones
     n_reassigned = 0
+    n_unseg_taken = 0
     target_pixels: List[Tuple[str, List[int], List[int]]] = []
     if target_inst is not None:
         # unsegmented capture honors the panel toggle (user 2026-08-30: los
@@ -326,6 +448,7 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
             hit_u = _zone_hit(_to_disp(xyz[un_idx]))
             if hit_u.any():
                 moved_parts.append(un_idx[hit_u])
+                n_unseg_taken = int(hit_u.sum())
         if moved_parts:
             added = np.unique(np.concatenate(moved_parts))
             tgi = np.asarray(target_inst.get("globalIndices") or [],
@@ -384,7 +507,19 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
             except Exception:  # noqa: BLE001
                 pass
         return {"touched": {}, "total_removed": 0, "reassigned": 0,
-                "mesh_instances": [], "undo": None}
+                "mesh_instances": [], "undo": None,
+                "ledger": {
+                    "mode": "reassign" if target_iid is not None else "delete",
+                    "target": ({"instance_id": int(target_iid),
+                                "label": labels_by_iid.get(int(target_iid), "?")}
+                               if target_iid is not None else None),
+                    "moved_from": {}, "unsegmented_taken": 0,
+                    "total_moved": 0,
+                    "protected_hidden": {
+                        f"{labels_by_iid.get(i, 'segment')}_{i}": n
+                        for i, n in protected_hidden.items()},
+                    "balance": None, "files_verified": None,
+                }}
 
     if (undo_pixels or target_pixels) and masks_path.exists():
         _atomic_savez(masks_path, masks)
@@ -393,7 +528,69 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
     result["coverage"] = round(
         result["segmented_points"] / max(1, int(result.get("total_points") or N)), 4)
     res_path.write_text(json.dumps(result))
-    _write_classification(output_dir, instances, N)
+    classification = _write_classification(output_dir, instances, N)
+
+    # ── FILE VERIFICATION: what we just wrote must balance exactly —
+    # classification.npy per-class counts == each instance's index count, and
+    # points are conserved (assigned_after − assigned_before == what left /
+    # entered unsegmented). Any mismatch is reported, never swallowed.
+    counts = np.bincount(classification, minlength=256)
+    files_verified = True
+    for inst in instances:
+        iid = int(inst.get("instance_id", inst.get("id")))
+        if iid > 255:
+            continue
+        if int(counts[iid]) != len(inst.get("globalIndices") or []):
+            files_verified = False
+            print(f"[Erase] ⚠ VERIFY FAILED: class {iid} has "
+                  f"{int(counts[iid])} pts in classification.npy vs "
+                  f"{len(inst.get('globalIndices') or [])} in result json")
+    assigned_points_after = sum(
+        len(i.get("globalIndices") or []) for i in instances)
+    # EXCLUSIVITY INVARIANT (user 2026-08-31): every point owned by exactly
+    # one segment — verified on EVERY transaction, mismatches never silent.
+    _all_gi = [np.asarray(i.get("globalIndices") or [], dtype=np.int64)
+               for i in instances if i.get("globalIndices")]
+    _cat = np.concatenate(_all_gi) if _all_gi else np.empty(0, dtype=np.int64)
+    overlap_points = int(len(_cat) - len(np.unique(_cat)))
+    if overlap_points:
+        print(f"[Erase] ⚠ EXCLUSIVITY VIOLATION: {overlap_points:,} point(s) "
+              f"owned by more than one segment")
+    if target_inst is not None:
+        expected_delta = n_unseg_taken          # net gain = unsegmented drawn in
+    else:
+        expected_delta = -int(sum(touched.values()))   # deletions leave the set
+    balance = {
+        "cloud_points": int(N),
+        "assigned_before": int(assigned_points_before),
+        "assigned_after": int(assigned_points_after),
+        "expected_delta": int(expected_delta),
+        "consistent": (assigned_points_after - assigned_points_before
+                       == expected_delta),
+    }
+    if not balance["consistent"]:
+        print(f"[Erase] ⚠ BALANCE MISMATCH: {balance}")
+
+    t_id_led = (int(target_inst.get("instance_id", target_inst.get("id")))
+                if target_inst is not None else None)
+    ledger = {
+        "mode": "reassign" if target_inst is not None else "delete",
+        "target": ({"instance_id": t_id_led,
+                    "label": str(target_inst.get("label", "segment"))}
+                   if target_inst is not None else None),
+        "moved_from": {f"{labels_by_iid.get(i, 'segment')}_{i}": int(n)
+                       for i, n in touched.items()},
+        "unsegmented_taken": int(n_unseg_taken),
+        "total_moved": int(n_reassigned) if target_inst is not None
+                       else int(sum(touched.values())),
+        "protected_hidden": {f"{labels_by_iid.get(i, 'segment')}_{i}": int(n)
+                             for i, n in protected_hidden.items()},
+        "balance": balance,
+        "files_verified": files_verified,
+        "exclusive": overlap_points == 0,
+        "overlap_points": overlap_points,
+    }
+    print(f"[Erase] ledger: {json.dumps(ledger)}")
 
     try:
         from segmentation.pipeline import rebuild_instance_store
@@ -415,7 +612,8 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
             "total_removed": int(sum(touched.values())),
             "reassigned": int(n_reassigned),
             "mesh_instances": sorted(set(mesh_instances)),
-            "undo": undo}
+            "undo": undo,
+            "ledger": ledger}
 
 
 def undo_erase(output_dir: Path, undo: dict) -> dict:

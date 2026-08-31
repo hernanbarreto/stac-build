@@ -71,7 +71,8 @@ function App() {
   const [eraseRadius, setEraseRadius] = useState(0.15)
   const [eraseMarks, setEraseMarks] = useState(0)
   const [eraseTarget, setEraseTarget] = useState<string>('')
-  const [eraseShape, setEraseShape] = useState<'sphere' | 'cube'>('sphere')
+  const [eraseShape, setEraseShape] = useState<'sphere' | 'cube' | 'box'>('sphere')
+  const [eraseBoxSel, setEraseBoxSel] = useState(false)
   const [eraseYawDeg, setEraseYawDeg] = useState(0)
   const [connected, setConnected] = useState(false)
   const [serverAlive, setServerAlive] = useState(false)
@@ -269,6 +270,46 @@ function App() {
 
   const [statusMessage, setStatusMessage] = useState('')
   const [segments, setSegments] = useState<SegmentInstance[]>([])
+  // Unsegmented point count for the panel (user 2026-08-31: every segment
+  // shows its count except Unsegmented). null = unknown → hidden.
+  const [unsegmentedCount, setUnsegmentedCount] = useState<number | null>(null)
+  const refreshUnsegmentedCount = useCallback(async (sid: string | null) => {
+    if (!sid) { setUnsegmentedCount(null); return }
+    try {
+      const r = await fetch(`/api/sessions/${sid}/segmentation`)
+      if (r.ok) {
+        const d = await r.json()
+        setUnsegmentedCount(typeof d.unsegmented_points === 'number' ? d.unsegmented_points : null)
+      }
+    } catch { /* silent */ }
+  }, [])
+  // Reload the segment list from the server PRESERVING the user's visibility
+  // choices (user 2026-08-31: refreshes that reset everything to visible
+  // desynced the panel from the viewer — and the panel's visible-list is the
+  // brush's protection list, so the desync corrupted transactions).
+  const reloadSegments = useCallback(async (sid: string | null) => {
+    if (!sid) return
+    try {
+      const r = await fetch(`/api/sessions/${sid}/segmentation`)
+      if (!r.ok) return
+      const d = await r.json()
+      if (typeof d.unsegmented_points === 'number') setUnsegmentedCount(d.unsegmented_points)
+      if (Array.isArray(d.instances)) {
+        setSegments(prev => {
+          const vis = new Map(prev.map(s => [s.id, s.visible]))
+          return d.instances.map((inst: any) => ({
+            key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
+            id: inst.instance_id || inst.id,
+            label: `${inst.label}`,
+            color: inst.color || '#4fd1ff',
+            totalPoints: inst.total_points || 0,
+            visible: vis.get(inst.instance_id || inst.id) ?? true,
+            excluded: inst.excluded || false,
+          }))
+        })
+      }
+    } catch { /* silent */ }
+  }, [])
   // Floor→y=0 leveling: candidates + which floor instance sits at y=0.
   // Changing the combobox re-levels instantly (no confirm); the manager
   // close and session load call the auto modes.
@@ -283,7 +324,11 @@ function App() {
   // scene (true) or pull it out (false → frees GPU, the Potree LOD self-gates,
   // and the raycaster skips it so measurements land on meshes).
   const [unsegmentedVisible, setUnsegmentedVisible] = useState(true)
-  useEffect(() => { setUnsegmentedVisible(true) }, [activeSession])
+  useEffect(() => {
+    setUnsegmentedVisible(true)
+    setUnsegmentedCount(null)
+    refreshUnsegmentedCount(activeSession)
+  }, [activeSession, refreshUnsegmentedCount])
   useEffect(() => {
     if (!activeSession) return
     const anyVisible = unsegmentedVisible || segments.some(s => s.visible)
@@ -825,21 +870,7 @@ function App() {
             setSessionLoading(null)
             // Refresh segments in case segmentation tasks finished
             try {
-              const segRes = await fetch(`/api/sessions/${activeSession}/segmentation`)
-              if (segRes.ok) {
-                const segData = await segRes.json()
-                if (Array.isArray(segData.instances)) {
-                  setSegments(segData.instances.map((inst: any) => ({
-                    key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
-                    id: inst.instance_id || inst.id,
-                    label: `${inst.label}`,
-                    color: inst.color || '#4fd1ff',
-                    totalPoints: inst.total_points || 0,
-                    visible: true,
-                    excluded: inst.excluded || false,
-                  })))
-                }
-              }
+              await reloadSegments(activeSession)
               viewportRef.current?.refreshSegmentOBBs(activeSession)
             } catch { /* silent */ }
           }
@@ -1373,11 +1404,20 @@ function App() {
             onClick={() => toggleMenu('tools')} disabled={!hasSession}>Tools</button>
           {openMenu === 'tools' && hasSession && (
             <div className="menu-dropdown">
+              {/* Same grouping/order as the viewport toolbar (user 2026-08-30) */}
+              {/* ── Navigation ── */}
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setActiveTool('navigate'))}>
                 <RotateCcw size={14} /> Navigate
                 <span className="menu-shortcut">V</span>
               </button>
+              <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => viewportRef.current?.resetCamera())}>
+                <Home size={14} /> Reset View
+                <span className="menu-shortcut">Home</span>
+              </button>
+              <div className="menu-separator" />
+              {/* ── Measurement ── */}
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setActiveTool('measure-distance'))}>
                 <Ruler size={14} /> Measure Distance
@@ -1389,13 +1429,14 @@ function App() {
                 <span className="menu-shortcut">A</span>
               </button>
               <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => setActiveTool('section-box'))}>
-                <Scissors size={14} /> Section Box
-                <span className="menu-shortcut">X</span>
+                onClick={() => menuAction(() => viewportRef.current?.clearMeasurements())}>
+                <Trash2 size={14} /> Clear Measurements
               </button>
+              <div className="menu-separator" />
+              {/* ── Editing ── */}
               <button className="menu-dropdown-item"
                 onClick={() => menuAction(() => setActiveTool(activeTool === 'erase' ? 'navigate' : 'erase'))}>
-                <Eraser size={14} /> Erase Points
+                <Brush size={14} /> Segment Brush
                 {activeTool === 'erase' && <span className="menu-shortcut">ON</span>}
               </button>
               <button className="menu-dropdown-item"
@@ -1411,7 +1452,7 @@ function App() {
                     setStatusMessage(d.ok ? `↩ erase undone (${(d.restored || 0).toLocaleString()} pts restored)` : '↩ nothing to undo')
                   } catch { setStatusMessage('↩ undo failed') }
                 })}>
-                <Undo2 size={14} /> Undo Erase
+                <Undo2 size={14} /> Undo Brush Edit
               </button>
               <button className="menu-dropdown-item"
                 disabled={sabanaVisible}
@@ -1421,6 +1462,18 @@ function App() {
                 <span className="menu-shortcut">G</span>
               </button>
               <div className="menu-separator" />
+              {/* ── Sectioning ── */}
+              <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => setActiveTool('section-box'))}>
+                <Scissors size={14} /> Section Box
+                <span className="menu-shortcut">X</span>
+              </button>
+              <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') })}>
+                <Unlock size={14} /> Reset Section Box
+              </button>
+              <div className="menu-separator" />
+              {/* ── View / display ── */}
               <div className="menu-dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <Palette size={14} /> Point Size
                 <input type="range" min="0.01" max="5" step="0.01" value={pointSize}
@@ -1429,6 +1482,20 @@ function App() {
                   style={{ width: 80, accentColor: 'var(--accent)' }} />
                 <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 24 }}>{pointSize.toFixed(2)}</span>
               </div>
+              {hasCameraPoses && (
+                <button className="menu-dropdown-item"
+                  onClick={() => menuAction(() => setShowCameraPoses(prev => !prev))}>
+                  {showCameraPoses ? <><Camera size={14} /> Camera Poses <Check size={12} /></> : <><Camera size={14} /> Camera Poses</>}
+                </button>
+              )}
+              <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => setShowGrid(prev => !prev))}>
+                {showGrid ? <><Grid3X3 size={14} /> Grid <Check size={12} /></> : <><Grid3X3 size={14} /> Grid</>}
+              </button>
+              <button className="menu-dropdown-item"
+                onClick={() => menuAction(() => setShowAxes(prev => !prev))}>
+                {showAxes ? <><Axis3D size={14} /> Axes <Check size={12} /></> : <><Axis3D size={14} /> Axes</>}
+              </button>
             </div>
           )}
         </div>
@@ -1994,6 +2061,11 @@ function App() {
                             style={{ background: 'var(--text-muted)' }}
                           />
                           <span className="segment-label" style={{ flex: 1, fontStyle: 'italic', opacity: 0.7 }}>Unsegmented</span>
+                          {unsegmentedCount !== null && (
+                            <span className="segment-count">
+                              ({unsegmentedCount.toLocaleString()})
+                            </span>
+                          )}
                         </div>
                       </div>
                   {/* SHAPE section — generated MeshFlow meshes (visual, non-metric) (visibility toggles) */}
@@ -2199,17 +2271,26 @@ function App() {
           <div className="toolbar">
             {!sabanaVisible && (
               <>
+              {/* ── Navigation ── */}
               <div className="toolbar-group">
                 <button className={`tool-btn ${activeTool === 'navigate' ? 'active' : ''}`}
-                  onClick={() => setActiveTool('navigate')} title="Navigate"><RotateCcw size={16} /></button>
+                  onClick={() => setActiveTool('navigate')} title="Navigate (V)"><RotateCcw size={16} /></button>
+                <button className="tool-btn" onClick={() => viewportRef.current?.resetCamera()}
+                  title="Reset View (Home)"><Home size={16} /></button>
+              </div>
+              <div className="toolbar-separator" />
+              {/* ── Measurement ── */}
+              <div className="toolbar-group">
                 <button className={`tool-btn ${activeTool === 'measure-distance' ? 'active' : ''}`}
-                  onClick={() => setActiveTool('measure-distance')} title="Measure Distance"><Ruler size={16} /></button>
+                  onClick={() => setActiveTool('measure-distance')} title="Measure Distance (M)"><Ruler size={16} /></button>
                 <button className={`tool-btn ${activeTool === 'measure-angle' ? 'active' : ''}`}
-                  onClick={() => setActiveTool('measure-angle')} title="Measure Angle"><TriangleRight size={16} /></button>
-                <button className={`tool-btn ${activeTool === 'section-box' ? 'active' : ''}`}
-                  onClick={() => setActiveTool('section-box')} title="Section Box"><Scissors size={16} /></button>
-                <button className={`tool-btn ${activeTool === 'align' ? 'active' : ''}`}
-                  onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')} title="Align Cloud"><Move size={16} /></button>
+                  onClick={() => setActiveTool('measure-angle')} title="Measure Angle (A)"><TriangleRight size={16} /></button>
+                <button className="tool-btn" onClick={() => viewportRef.current?.clearMeasurements()}
+                  title="Clear Measurements"><Trash2 size={16} /></button>
+              </div>
+              <div className="toolbar-separator" />
+              {/* ── Editing (brush + cloud alignment gizmo) ── */}
+              <div className="toolbar-group">
                 <span style={{ position: 'relative', display: 'inline-block' }}>
                   <button className={`tool-btn ${activeTool === 'erase' ? 'active' : ''}`}
                     onClick={() => setActiveTool(activeTool === 'erase' ? 'navigate' : 'erase')}
@@ -2238,6 +2319,10 @@ function App() {
                           style={{ fontSize: 12, padding: '2px 7px' }}
                           title="Cube brush (axis-aligned)"
                           onClick={() => setEraseShape('cube')}>⬜</button>
+                        <button className={`tool-btn ${eraseShape === 'box' ? 'active' : ''}`}
+                          style={{ fontSize: 12, padding: '2px 7px' }}
+                          title="Big selection box: right-click drops it anywhere; left-click it for the gizmo (points inside light up)"
+                          onClick={() => setEraseShape('box')}>🔳</button>
                         <input type="range" min={3} max={150} step={1}
                           value={Math.round(eraseRadius * 100)}
                           onChange={e => setEraseRadius(Number(e.target.value) / 100)}
@@ -2258,6 +2343,18 @@ function App() {
                             {eraseYawDeg}°
                           </span>
                         </span>
+                      )}
+                      {eraseBoxSel && (
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button className="tool-btn" style={{ flex: 1, fontSize: 11 }}
+                            title="Move (G)" onClick={() => viewportRef.current?.setEraseBoxMode('translate')}>Move</button>
+                          <button className="tool-btn" style={{ flex: 1, fontSize: 11 }}
+                            title="Rotate (R)" onClick={() => viewportRef.current?.setEraseBoxMode('rotate')}>Rotate</button>
+                          <button className="tool-btn" style={{ flex: 1, fontSize: 11 }}
+                            title="Stretch faces (S)" onClick={() => viewportRef.current?.setEraseBoxMode('scale')}>Stretch</button>
+                          <button className="tool-btn" style={{ flex: 1, fontSize: 11, color: '#ff7777' }}
+                            title="Remove this box (Del)" onClick={() => viewportRef.current?.removeSelectedEraseBox()}>Del</button>
+                        </div>
                       )}
                       <button className="tool-btn"
                         disabled={eraseMarks === 0}
@@ -2328,14 +2425,19 @@ function App() {
                     </div>
                   )}
                 </span>
-                <button className="tool-btn" onClick={() => viewportRef.current?.clearMeasurements()}
-                  title="Clear Measurements"><Trash2 size={16} /></button>
-                <button className="tool-btn" onClick={() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') }}
-                  title="Reset Section Box"><Unlock size={16} /></button>
-                <button className="tool-btn" onClick={() => viewportRef.current?.resetCamera()}
-                  title="Reset View (Home)"><Home size={16} /></button>
+                <button className={`tool-btn ${activeTool === 'align' ? 'active' : ''}`}
+                  onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')} title="Align Cloud (G)"><Move size={16} /></button>
               </div>
               <div className="toolbar-separator" />
+              {/* ── Sectioning (clip box: hides everything outside; unlock restores) ── */}
+              <div className="toolbar-group">
+                <button className={`tool-btn ${activeTool === 'section-box' ? 'active' : ''}`}
+                  onClick={() => setActiveTool('section-box')} title="Section Box (X) — isolate a region, hide everything outside"><Scissors size={16} /></button>
+                <button className="tool-btn" onClick={() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') }}
+                  title="Reset Section Box — show the full scene again"><Unlock size={16} /></button>
+              </div>
+              <div className="toolbar-separator" />
+              {/* ── Display settings ── */}
               <div className="toolbar-group" style={{ position: 'relative' }}>
                 <button className="tool-btn"
                   title="Display settings — Point Size, Detail (LOD budget), Confidence"
@@ -2384,22 +2486,16 @@ function App() {
               </div>
               </>
             )}
-            {/* ── Camera Poses Toggle (only in NUBE mode) ── */}
-            {!sabanaVisible && hasCameraPoses && (
-              <>
-                <div className="toolbar-separator" />
-                <div className="toolbar-group">
-                  <button className={`tool-btn ${showCameraPoses ? 'active' : ''}`}
-                    onClick={() => setShowCameraPoses(v => !v)}
-                    title={showCameraPoses ? 'Hide Camera Poses' : 'Show Camera Poses'}>
-                    <Camera size={16} />
-                  </button>
-                </div>
-              </>
-            )}
-            {/* ── Grid & Axes (visible in both sábana and nube) ── */}
+            {/* ── View helpers: camera poses (nube only) + grid + axes + fullscreen ── */}
             <div className="toolbar-separator" />
             <div className="toolbar-group">
+              {!sabanaVisible && hasCameraPoses && (
+                <button className={`tool-btn ${showCameraPoses ? 'active' : ''}`}
+                  onClick={() => setShowCameraPoses(v => !v)}
+                  title={showCameraPoses ? 'Hide Camera Poses' : 'Show Camera Poses'}>
+                  <Camera size={16} />
+                </button>
+              )}
               <button className={`tool-btn ${showGrid ? 'active' : ''}`}
                 onClick={() => setShowGrid(v => !v)}
                 title={showGrid ? 'Hide Grid' : 'Show Grid'}>
@@ -2409,6 +2505,14 @@ function App() {
                 onClick={() => setShowAxes(v => !v)}
                 title={showAxes ? 'Hide Axes' : 'Show Axes'}>
                 <Axis3D size={16} />
+              </button>
+              <button className="tool-btn"
+                onClick={() => {
+                  if (document.fullscreenElement) document.exitFullscreen()
+                  else document.documentElement.requestFullscreen()
+                }}
+                title="Fullscreen (F11)">
+                <Maximize size={16} />
               </button>
             </div>
             {/* ── Sábana / BIM Comparison ── */}
@@ -2466,13 +2570,15 @@ function App() {
             eraseYawDeg={eraseYawDeg}
             onEraseRadiusChange={setEraseRadius}
             onEraseMarksChanged={setEraseMarks}
+            onEraseBoxSelected={setEraseBoxSel}
             showAxes={showAxes}
             showGrid={showGrid}
             pipelineRunning={!!pipelineRunning && pipelineRunning.status === 'running'}
             onPointCount={(n) => { setPointCount(n); if (n > 0) lastCloudLoadAtRef.current = Date.now() }}
             onFps={setFps}
             onStatusMessage={setStatusMessage}
-            onSegments={setSegments}
+            onSegments={(list) => { setSegments(list); refreshUnsegmentedCount(activeSession) }}
+            onEraseLedger={() => reloadSegments(activeSession)}
             onPipelineProgress={handlePipelineProgress}
             onVolumeChanged={async (params) => {
               // Gizmo edit finished: persist the volume, then re-evaluate its
@@ -2834,26 +2940,10 @@ function App() {
                 // Nothing changed — just reload cached segmentation for sidebar
                 setStatusMessage('Segmentation closed (no changes)')
                 try {
-                  const segRes = await fetch(`/api/sessions/${sid}/segmentation`)
-                  if (segRes.ok) {
-                    const data = await segRes.json()
-                    if (Array.isArray(data.instances)) {
-                      setSegments(data.instances.map((inst: any) => ({
-                        key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
-                        id: inst.instance_id || inst.id,
-                        label: `${inst.label}`,
-                        color: inst.color || '#4fd1ff',
-                        totalPoints: inst.total_points || 0,
-                        visible: true,
-                        excluded: inst.excluded || false,
-                        confThreshold: inst.conf_threshold || 0,
-                        instanceId: inst.instance_id || inst.id,
-                      })))
-                    }
-                    viewportRef.current?.refreshSegmentOBBs(sid)
-                    // Reload Potree so new classification data (classId per point) takes effect
-                    viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid })
-                  }
+                  await reloadSegments(sid)
+                  viewportRef.current?.refreshSegmentOBBs(sid)
+                  // Reload Potree so new classification data (classId per point) takes effect
+                  viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid })
                 } catch { /* silent */ }
                 return
               }
@@ -2882,6 +2972,7 @@ function App() {
                     })))
                   }
                   viewportRef.current?.refreshSegmentOBBs(sid)
+                  refreshUnsegmentedCount(sid)
                   // Floor→y=0 after finalize: level the selected floor (or the
                   // lowest when several) — the manager may have created/edited
                   // floor segments (applies instantly, no confirmation).
@@ -2896,21 +2987,7 @@ function App() {
             onUpdate={async () => {
               if (!activeSession) return
               try {
-                const res = await fetch(`/api/sessions/${activeSession}/segmentation`)
-                if (res.ok) {
-                  const data = await res.json()
-                  if (Array.isArray(data.instances)) {
-                    setSegments(data.instances.map((inst: any) => ({
-                      key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
-                      id: inst.instance_id || inst.id,
-                      label: `${inst.label}`,
-                      color: inst.color || '#4fd1ff',
-                      totalPoints: inst.total_points || 0,
-                      visible: true,
-                      excluded: inst.excluded || false,
-                    })))
-                  }
-                }
+                await reloadSegments(activeSession)
                 // Also refresh 3D OBBs in the viewport
                 viewportRef.current?.refreshSegmentOBBs(activeSession)
               } catch { /* silent */ }
