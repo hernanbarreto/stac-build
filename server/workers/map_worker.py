@@ -410,14 +410,28 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # on disk). FAILURES ARE FATAL — "nada falla en silencio": a crash or
     # missing inputs STOPS the pipeline. ──
     from config import cfg as _full_cfg
-    _fm = ((_full_cfg.get("dino_features") or {})
-           .get("pose_refine_fm") or {})
-    if bool(_fm.get("enabled", False)):
+    _df = _full_cfg.get("dino_features") or {}
+    _sa = _df.get("scene_anchor") or {}
+    _fm = _df.get("pose_refine_fm") or {}
+    if bool(_sa.get("enabled", False)):
+        # FASE 5 (USER DESIGN 2026-09-04): global surface-consensus
+        # anchoring — landmarks by appearance (the end-of-walk door),
+        # joint SE(3)+depth-curve solve, double held-out + DA3 gates.
+        # Supersedes/absorbs pose_refine_fm.
+        pipe.send_progress(
+            70, "Fase 5: global surface-consensus anchoring (DINOv3)...",
+            stage="reconstruction")
+        _fm_cmd = [sys.executable, "-m", "reconstruction.scene_anchor",
+                   "--output-dir", str(output_dir)]
+    elif bool(_fm.get("enabled", False)):
         pipe.send_progress(
             70, "Feature-metric pose refinement (DINOv3)...",
             stage="reconstruction")
         _fm_cmd = [sys.executable, "-m", "reconstruction.pose_refine_fm",
                    "--output-dir", str(output_dir)]
+    else:
+        _fm_cmd = None
+    if _fm_cmd is not None:
         _fm_proc = subprocess.run(
             _fm_cmd, cwd=str(Path(__file__).resolve().parent.parent),
             capture_output=True, text=True, timeout=7200)

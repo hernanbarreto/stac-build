@@ -1533,8 +1533,20 @@ dino_features:
                               #   meant to run with the Ω write gate opened
     score_keep: 0.55          #   (low/zero conf_percentile — HIS word needed,
     conf_keep_pct: 60.0       #   it is pinned). Backup cleaned_cloud.prefeature.ply
-  pose_refine_fm:             # FASE 3 — feature-metric pose refinement — THE
-    enabled: true             #   pose refinement since USER ORDER 2026-09-04
+  scene_anchor:               # FASE 5 (USER DESIGN 2026-09-04) — GLOBAL
+    enabled: true             #   SURFACE-CONSENSUS ANCHORING: landmarks by
+    min_global_sim: 0.60      #   APPEARANCE (the end-of-walk door — pose-
+    match_min_cos: 0.60       #   independent revisits), tracks with the
+    track_max_spread_m: 1.5   #   semantic+spatial double lock, landmark
+    min_track_obs: 2          #   registry (landmarks.json — the session's
+    max_pairs: 12000          #   memory), staged solve: SE(3) (proven pose-
+    min_gain: 0.10            #   graph) + per-frame 2-DOF depth curves along
+    holdout_frac: 0.2         #   each ray. Double gate: held-out tracks must
+    max_depth_corr: 0.05      #   improve AND the DA3 metric agreement must
+    max_t_m: 0.5              #   not degrade — else IDENTITY. Failures are
+                              #   FATAL. Supersedes pose_refine_fm (below).
+  pose_refine_fm:             # FASE 3 — ABSORBED by scene_anchor (its SE(3)
+    enabled: false            #   core is stage D1 there). Kept selectable
                               #   ("todo el pose refinement debe ser con dinov3
                               #   en gpu"): GPU matching, self-gated (identity
                               #   unless held-out improves), non-fatal hook.
