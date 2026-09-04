@@ -973,7 +973,23 @@ reconstruction:
                                         # mixed, s moves ≤0.5% — so it stays OFF per the
                                         # evidence rule (implemented, flag-gated, documented).
     scale_anchor_topup_max: 8           # cap on extra DA3 extractions for depth coverage
-    scale_drift: true                   # per-chunk LINEAR scale drift — KEEP ON. A3
+    # ── USER ORDER 2026-09-04 (after pccr_v1): "deja omegalong como
+    # corresponde, sin agregados adicionales de ajustes; la escala de DA3
+    # queda; si se detecta zoom se corrige la escala". Every adjustment stage
+    # below is OFF by default (code kept, selectable). What remains active:
+    # vendor baseline (chunked align + loop closure), DA3 metric_lock + seam
+    # scale graph, zoom_scale_fix (zoomed chunk: DA3 anchors excluded, scale
+    # from the seam graph), health flags DIAGNOSTIC-ONLY (chunks always
+    # write — no declared holes). Context: on pccr_v1 the stack compounded on
+    # an unstable-scale capture — 3 declared holes, 33.7% of far points
+    # dropped as "contradictions", 189 elastic fits capped at 30 cm.
+    zoom_scale_fix: true                # zoom chunk → correct the scale, keep the chunk
+    health_gate: false                  # true = sick chunks write nothing (pre-2026-09-04)
+    exact_seam_align: true              # rigid seams from exact pixel correspondences
+    frame_ownership: true               # one frame → one writer in overlaps
+    depth_graph: true                   # cross-frame depth agreement stage
+    blend_copies: true                  # two-copy consensus on overlap frames
+    scale_drift: true                   # per-chunk LINEAR scale drift. (Pre-order note: A3
                                         # 2026-07-11 tested false on test4: serpenteado
                                         # unchanged and duplicates got MUCH worse (spread
                                         # ×1.63→×1.72, held-out anchor gain lost). The drift
@@ -1028,7 +1044,7 @@ reconstruction:
                                         # this is scaled down as a whole twist — bounded
                                         # authority, not faked closure (seam 7->8 fitted up
                                         # to 1.59 m to close an 8 cm gap). 0/null = no cap.
-    intra_chunk: true                   # KEEP ON — A4 2026-07-11 tested false on test4:
+    intra_chunk: true                   # (KEEP ON) A4 2026-07-11 tested false on test4:
                                         # serpenteado unchanged (it is intrinsic to omega's
                                         # feed-forward output, not our stages) and duplicates
                                         # slightly worse without it.
@@ -1175,8 +1191,27 @@ reconstruction:
                                         # drifts ~1.3 cm/m past its comfort range — measured).
                                         # 25→15 (2026-07-09): test6 (29 m walk) was still bad
                                         # single-pass — the comfort proven so far is test2 ~10 m.
-    chunk_walk_m: 12.0                  # chunked-metric: walked meters per chunk (50% overlap).
-                                        # Small chunks = the regime where Omega is excellent.
+    chunk_frames: 0                     # USER FINAL 2026-09-04 NIGHT: back to 60/30 (0 = legacy
+                                      # sizing). The 450-chunk clean run was judged MUCH worse
+                                      # by eye (intra-chunk drift over the long horizon); the
+                                      # full-stack 60/30 run was good except the depth-duplicate
+                                      # door/floor defect (open, targeted investigation).
+                                      # (History of the 450 order below, kept for the record.)
+  # chunk_frames: 450                 # USER ORDER 2026-09-04: ONE FIXED chunk size for every
+                                        # scene — the largest with real VRAM headroom on the
+                                        # A6000 48 GB (measured ~0.086 GB/frame + ~4 GB base:
+                                        # 500 ≈ 47 GB = at the limit; 450 ≈ 42.7 GB, ~5 GB
+                                        # free). Overlap ALWAYS 50%. Small scene → one chunk
+                                        # (maybe with room to spare); large → several chunks —
+                                        # same capacity for both, identical run to run. While
+                                        # set (>0) it supersedes the free-VRAM fit probe, the
+                                        # 60-frame chunked cap, and phase 2's walk-based
+                                        # plan_chunks + 45-kf re-densify (code kept; 0 = legacy
+                                        # dynamic sizing). Context: pccr_v1 ran 44 chunks of 60
+                                        # frames — 43 seams for the scale to derail across.
+    chunk_walk_m: 12.0                  # LEGACY (chunk_frames: 0 only): walked meters per chunk
+                                        # (50% overlap). Small chunks = the regime where Omega
+                                        # was excellent on test4 WITH the adjustment stack.
     chunk_anchors: 3                    # DA3 metric anchors per chunk (metric lock BEFORE the
                                         # SE(3) gluing — scale is never a degree of freedom).
     # densify: REMOVED (2026-07-10). DA3 fill glued by frame-to-keyframe ICP was
@@ -1192,7 +1227,10 @@ reconstruction:
                                         # windowed mode with a fitting chunk when short.
     exclusive_gpu: true                 # stop vLLM before reconstruction (Omega gets the
                                         # whole GPU); the VLM stage auto-restarts it after
-    conf_percentile: 10.0               # PINNED at 10 (USER FINAL, 2026-08-30) after sweeping
+    conf_percentile: 20.0               # USER 2026-09-04: 10 → 20 (his word — the same voice
+                                        # that pinned 10). Context: DINOv3 fase-2 filter now
+                                        # active downstream (two witnesses).
+                                        # (Previous: PINNED at 10, USER FINAL 2026-08-30, after sweeping
                                         # 10 → 25 → 35 → 20 in one day: EVERY cut above 10
                                         # hollowed weak-texture surfaces on test3 (ceiling/walls/
                                         # door still "bastante hueco" even at the vendor-default
@@ -1240,7 +1278,14 @@ reconstruction:
   # poses. Applies to ALL chunked backbones — da3, mapanything AND vggtomega (for omega
   # the order is Omega → scale_align → BA, so the BA refines already-metric poses).
   pose_refine:                          # E-full 2026-07-11: JOINT point-to-plane optimization of
-    enabled: true                       # ON 2026-08-11 (user, bufferStop): jerky close-range
+    enabled: false                      # ⛔ USER ORDER 2026-09-04: ALL pose refinement moves to
+                                        # the DINOv3 feature-metric stage ON GPU
+                                        # (dino_features.pose_refine_fm) — this pure-numpy CPU
+                                        # stage stalled pccr_v1 for 2h+ at 1,328 keyframes
+                                        # ("tarda más esto que toda la reconstrucción") and was
+                                        # killed mid-run on his word. Do not re-enable without
+                                        # a GPU port. (Previous: ON 2026-08-11, bufferStop —
+                                        # jerky close-range
                                         # capture shows exactly the layering/ghosting this stage
                                         # attacks (F1 measured −52% layering). This is the
                                         # "future scene" the opt-in was kept for. Self-gated:
@@ -1461,9 +1506,63 @@ reconstruction:
 
 
 # ── Post-Processing (CloudCompPy) ──────────────────────────────────
+# ── DINOv3 feature plan (USER 2026-09-04: 4 fases; ALL CODE IN, ALL OFF —
+# enable ONE at a time, each gated on its harness metrics + his visual OK).
+# One DINOv3 ViT-L/16 pass per session (vendor/dinov3 + weights/dinov3),
+# PCA-compressed cache in output/dino_features/ shared by every fase.
+# Doctrine: features SCORE and MATCH measured data, never generate geometry.
+dino_features:
+  model: "dinov3_vitl16"
+  hub_dir: null               # null = vendor/dinov3
+  weights: null               # null = weights/dinov3/dinov3_vitl16_pretrain_…
+  pca_dim: 64                 # feature compression (var. kept logged at fit)
+  batch: 6                    # frames per encoder batch
+  score:                      # FASE 1 — multi-view consistency score, wired
+    enabled: true             #   USER ORDER 2026-09-04: RUNNING in-pipeline,
+                              #   failures FATAL ("nada falla en silencio").
+                              #   after CloudCompy consolidation, before the
+    views: 6                  #   Potree build. Adds feature_score/feature_views
+    min_views: 2              #   channels to cleaned_cloud.ply; geometry
+    zbuf_scale: 0.25          #   untouched. Offline: run_dino_score.py
+    occlusion_tol_m: 0.15
+  filter:                     # FASE 2 — two-witness filter (score OR conf):
+    enabled: true             #   USER ORDER 2026-09-04: RUNNING in-pipeline.
+                              #   NOTE: conf_percentile 10 stays PINNED — the
+                              #   filter cleans ON TOP of it; opening the Ω
+                              #   gate is a separate decision (his word).
+                              #   meant to run with the Ω write gate opened
+    score_keep: 0.55          #   (low/zero conf_percentile — HIS word needed,
+    conf_keep_pct: 60.0       #   it is pinned). Backup cleaned_cloud.prefeature.ply
+  pose_refine_fm:             # FASE 3 — feature-metric pose refinement — THE
+    enabled: true             #   pose refinement since USER ORDER 2026-09-04
+                              #   ("todo el pose refinement debe ser con dinov3
+                              #   en gpu"): GPU matching, self-gated (identity
+                              #   unless held-out improves), non-fatal hook.
+                              #   Replaces the CPU point-to-plane
+                              #   (reconstruction.pose_refine: OFF same day).
+                              #   (sequential + measured-revisit pairs, same
+    min_gain: 0.10            #   pose-graph solver + held-out gate as
+    match_min_cos: 0.60       #   pose_refine; identity when it does not earn
+    revisit_radius_m: 2.5     #   its keep). python -m reconstruction.pose_refine_fm
+    revisit_min_gap: 30
+  instance_refine:            # FASE 4 — object/background separation after
+    enabled: true             #   USER ORDER 2026-09-04: RUNNING at every
+                              #   segmentation refresh; failures FATAL.
+                              #   segmentation: background-bled points flagged
+    modes: 3                  #   by feature affinity; reversible sidecar in
+    margin: 0.05              #   output/feature_refine/. run_feature_refine.py
+    bg_radius_m: 0.5
+
 postprocessing:
   enabled: true
   conda_env: "CloudComPy310"
+  gpu_clean: true             # USER ORDER 2026-09-04 ("porta ahora cloudcompy
+                              # a gpu"): torch/CUDA cleaning (env da3) — voxel
+                              # keeps the REAL point nearest each cell centre
+                              # (provenance survives, never averages), SOR via
+                              # grid-hash kNN. false = CloudComPy CPU path
+                              # (single-core; ~1h at 521M pts on pccr_v1).
+                              # Noise filter stays CPU-only (production skips it).
 
   # ── Scene-level consolidation (surface_fit stage 1 at scene scale) ──
   # After CloudComPy writes cleaned_cloud.ply, a normal-aware robust MLS
@@ -1625,6 +1724,18 @@ surface_fit:
   p2c_trim_m: 0.06            # evidence clip: B-rep kept within this of cloud
   p2c_parallel: 4             # CUDA workers (8 OOM'd next to the chat vLLM)
   p2c_max_pts_region: 4000    # per-surface point cap for the .xyzc
+  # USER 2026-09-04: the CAD path labels CLOUD points, never mesh vertices —
+  # "p2c necesita la nube con puntos etiquetados; el mesh ya tiene errores".
+  # Regions come from RANSAC-first labeling (decompose.extract_primitives,
+  # noise-robust — the crease-graph analog covered only ~10% of the raw
+  # cloud) + connectivity split; big unexplained residues go in as 'freeform'
+  # labels for point2cad's INR. propose and p2c share these regions.
+  p2c_from_cloud: true        # false = legacy mesh-vertex source (poisson/pgsr)
+  p2c_conf_trim_pct: 20.0     # drop this % of lowest-confidence points first
+  p2c_detect_max_pts: 150000  # detection subsample (labels/xyzc drawn from it)
+  p2c_inlier_dist_m: 0.02     # RANSAC membership distance (cloud noise scale)
+  p2c_max_primitives: 24      # extraction budget (labeling, not modeling)
+  p2c_freeform_min_pts: 2000  # residue clusters at least this big get a label
   # ── Contour regularization (USER 2026-08-29: "las formas tienden a ser
   # perfectas — rectángulos, arcos, círculos — detectar la tendencia y
   # perfeccionarlas"). Every boundary/opening of a fitted PLANE is tried

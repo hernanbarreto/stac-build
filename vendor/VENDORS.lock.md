@@ -40,7 +40,7 @@ commit; already-present clones at the right commit are left untouched.
 | `vendor/oneTBB-src` | `uxlfoundation/oneTBB` | `e9af1a1b` | TBB source → builds `vendor/oneTBB` |
 | `vendor/vggt-omega` | `facebookresearch/vggt-omega` | `39a0cb8a` | optional VGGT-Ω backbone (weights below) |
 | `vendor/ShapeR` | `facebookresearch/ShapeR` | `d4402f55` | legacy per-object meshing (superseded by meshflow; kept for fallback) |
-| `vendor/point2cad` | `prs-eth/point2cad` | `81e15bfa` | Perfect-pipeline EXPERIMENT (2026-08-31, user-validated "podría andar"): fit+trim/sew a labeled cloud (our regions → `.xyzc`) into a B-rep. **License CC-BY-NC** (research/internal use — user-approved). Env `point2cad` (py3.9, torch GPU, PyMesh compiled from source **with gcc-9** — `build_env.sh` + `build_resume.sh` in the clone; needs apt gcc-9/g++-9/unzip/libgmp/mpfr/boost). STAC patches in-tree: per-PID tmp files in `fitting_one_surface.py` (the shared `tmp.obj` raced under parallelism) + `out=None` default (UnboundLocalError on failed fits). Run: `python -m point2cad.main --path_in <xyzc> --path_out <dir> --max_parallel_surfaces 4` (each worker holds a CUDA context — 8 workers OOM'd next to the chat vLLM). Output is NORMALIZED (centered/PCA-rotated/extent-scaled) — invert with mean/R/scale recomputed from the same input. |
+| `vendor/point2cad` | `prs-eth/point2cad` | `81e15bfa` | Perfect-pipeline EXPERIMENT (2026-08-31, user-validated "podría andar"): fit+trim/sew a labeled cloud (our regions → `.xyzc`) into a B-rep. **License CC-BY-NC** (research/internal use — user-approved). Env `point2cad` (py3.9, torch GPU, PyMesh compiled from source **with gcc-9** — `build_env.sh` + `build_resume.sh` in the clone; needs apt gcc-9/g++-9/unzip/libgmp/mpfr/boost). STAC patches in-tree: per-PID tmp files in `fitting_one_surface.py` (the shared `tmp.obj` raced under parallelism) + `out=None` default (UnboundLocalError on failed fits) + modulo palette indexing in `io_utils.py` (2026-09-04: the 64-color `make_colormap_optimal` palette raised IndexError with >64 surfaces — a poisson-source run shattered into 114 regions and crashed the save stage). Run: `python -m point2cad.main --path_in <xyzc> --path_out <dir> --max_parallel_surfaces 4` (each worker holds a CUDA context — 8 workers OOM'd next to the chat vLLM). Output is NORMALIZED (centered/PCA-rotated/extent-scaled) — invert with mean/R/scale recomputed from the same input. |
 | `vendor/pgsr` | `zju3dv/PGSR` | `de24f1a3` | precision-mode trainer (Phase D, backend `vggtomega_pgsr`): planar-regularized Gaussian surface reconstruction. Local patch `server/patches/pgsr_inline_quaternion_to_matrix.patch` (applied by setup_vendors.sh) removes the pytorch3d dependency. STAC patch 2026-08-30 (applied in-tree, `gaussian_renderer/__init__.py`): `rendered_alpha` added to the render return dict — required by the object-mode background loss (`pgsr_train.py --object_bg_weight`); additive, no vendor behavior change. Env `pgsr` (clone of `da3` + compiled `submodules/diff-plane-rasterization` + `simple-knn`, TORCH_CUDA_ARCH_LIST="8.0;8.6"). Inria research license (non-commercial) — see vendor/pgsr/LICENSE.md |
 
 ## 3. Non-git — weights / build trees / prebuilt (manual, documented)
@@ -59,7 +59,12 @@ Not clonable. Provision as noted; none is fetched by `git`.
 
 ## 4. Removed / do-not-track
 
-- `vendor/dinov3`, `vendor/easy3d` — were **orphan gitlinks** (tracked mode
+- `vendor/dinov3` — REAL CHECKOUT since 2026-09-04 (`facebookresearch/dinov3`,
+  shallow clone): the dir was an EMPTY orphan gitlink; the 4-phase DINOv3 plan
+  (feature scorer / pose_refine_fm / instance refine — server/reconstruction/
+  dino_features.py) loads `dinov3.hub.backbones` DIRECTLY from it (hubconf
+  drags torchmetrics deps the da3 env lacks). Weights: `weights/dinov3/`.
+- `vendor/easy3d` — was an **orphan gitlink** (tracked mode
   160000 with no `.gitmodules` URL, empty on disk) that broke
   `git clone --recursive`. Untracked. DINOv3 weights (for meshflow reference
   conditioning) live under `weights/dinov3/`, not here.

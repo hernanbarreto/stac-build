@@ -328,9 +328,6 @@ def _detect_and_snap(tm, F: np.ndarray, Vd: np.ndarray, cfg: dict,
     crease0 = float(cfg.get("perfect_crease_deg", 30.0))
     min_region_faces = int(cfg.get("perfect_min_region_faces", 300))
     accept_p95_mm = float(cfg.get("perfect_accept_p95_mm", 40.0))
-    tol_deg = float(cfg.get("perfect_snap_deg", 4.0))
-    rel_tol_deg = float(cfg.get("perfect_relation_deg", 3.0))
-    radius_tol = float(cfg.get("perfect_radius_tol", 0.02))
     max_fit_pts = int(cfg.get("perfect_max_fit_pts", 120_000))
 
     adj = tm.face_adjacency
@@ -410,13 +407,26 @@ def _detect_and_snap(tm, F: np.ndarray, Vd: np.ndarray, cfg: dict,
     log(f"[perfect:{safe}] hierarchical split-and-fit: "
         f"{len(regions)} region(s) accepted (min {min_faces_eff} faces)")
 
-    # intent snapping with honesty gates (revert if degrading)
+    _snap_regions(regions, Vd, cfg, safe, log)
+    return regions, min_faces_eff
+
+
+def _snap_regions(regions: List[dict], Vd: np.ndarray, cfg: dict,
+                  safe: str, log) -> None:
+    """Intent snapping with honesty gates (revert if degrading) — shared by
+    the mesh and cloud detection paths; mutates ``regions`` in place."""
+    tol_deg = float(cfg.get("perfect_snap_deg", 4.0))
+    rel_tol_deg = float(cfg.get("perfect_relation_deg", 3.0))
+    radius_tol = float(cfg.get("perfect_radius_tol", 0.02))
+
     dominant_n = None
     plane_regs = [r for r in regions if r["kind"] == "plane"]
     if plane_regs:
         dominant_n = max(plane_regs,
                          key=lambda r: len(r["v_idx"]))["model"].normal.copy()
     for r in regions:
+        if r.get("model") is None:   # freeform cloud residue — nothing to snap
+            continue
         Pm = Vd[r["v_idx"]]
         model, kind = r["model"], r["kind"]
         d_pre = np.abs(np.asarray(model.signed_distance(Pm)))
@@ -462,7 +472,304 @@ def _detect_and_snap(tm, F: np.ndarray, Vd: np.ndarray, cfg: dict,
                                                r["model"].axis_dir,
                                                radius_override=mean_r)
                 r["notes"].append(f"radius equalized to {mean_r:.4f} m")
-    return regions, min_faces_eff
+
+
+# ── cloud-native detection (USER 2026-09-04: "p2c necesita la nube con
+# puntos etiquetados, no el mesh — el mesh ya tiene errores") ─────────────
+
+_PLY_TYPES = {"float": "<f4", "float32": "<f4", "double": "<f8",
+              "float64": "<f8", "uchar": "u1", "uint8": "u1",
+              "char": "i1", "int8": "i1", "short": "<i2", "int16": "<i2",
+              "ushort": "<u2", "uint16": "<u2", "int": "<i4",
+              "int32": "<i4", "uint": "<u4", "uint32": "<u4"}
+
+
+def _read_ply_fields(path: Path) -> Dict[str, np.ndarray]:
+    """Minimal binary-little-endian PLY vertex reader that PRESERVES custom
+    per-point properties (Open3D drops them — ``confidence`` is the point)."""
+    with open(path, "rb") as f:
+        if f.readline().strip() != b"ply":
+            raise ValueError(f"{path}: not a PLY")
+        n_vertex, props, fmt = 0, [], None
+        while True:
+            line = f.readline().decode("ascii", "replace").strip()
+            if line.startswith("format"):
+                fmt = line.split()[1]
+            elif line.startswith("element vertex"):
+                n_vertex = int(line.split()[-1])
+            elif line.startswith("element") and n_vertex and props:
+                raise ValueError(f"{path}: non-vertex elements after vertex "
+                                 "not supported")
+            elif line.startswith("property") and n_vertex:
+                _, typ, name = line.split()[:3]
+                props.append((name, _PLY_TYPES[typ]))
+            elif line == "end_header":
+                break
+        if fmt != "binary_little_endian":
+            raise ValueError(f"{path}: format {fmt} not supported")
+        data = np.fromfile(f, dtype=np.dtype(props), count=n_vertex)
+    return {name: data[name] for name, _t in props}
+
+
+def _load_instance_cloud(out: Path, inst: dict, cfg: dict, safe: str,
+                         log) -> np.ndarray:
+    """The instance's OWN cleaned-cloud points (raw frame), with the
+    lowest-confidence ``p2c_conf_trim_pct`` % dropped. The cloud is the
+    validated truth — meshes never enter the CAD path."""
+    trim_pct = float(cfg.get("p2c_conf_trim_pct", 20.0))
+    fields = _read_ply_fields(out / "cleaned_cloud.ply")
+    xyz = np.column_stack([fields["x"], fields["y"], fields["z"]]).astype(
+        np.float64)
+    gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+    gi = gi[(gi >= 0) & (gi < len(xyz))]
+    if len(gi) == 0:
+        raise RuntimeError(f"{safe}: instance has no globalIndices into "
+                           "cleaned_cloud.ply")
+    P = xyz[gi]
+    conf = fields.get("confidence")
+    if conf is not None and trim_pct > 0:
+        c = np.asarray(conf, np.float64)[gi]
+        thr = float(np.percentile(c, trim_pct))
+        keep = c >= thr
+        log(f"[cloud:{safe}] {len(P):,} pts → {int(keep.sum()):,} after "
+            f"dropping the {trim_pct:.0f}% lowest-confidence "
+            f"(thr {thr:.3f})")
+        P = P[keep]
+    elif conf is None:
+        log(f"[cloud:{safe}] cleaned_cloud.ply has no confidence field — "
+            f"no trim applied ({len(P):,} pts)")
+    return P
+
+
+def _detect_and_snap_cloud(Pd: np.ndarray, cfg: dict, safe: str,
+                           log) -> Tuple[List[dict], int]:
+    """Cloud-native region labeling: RANSAC-first (the validated
+    ``decompose.extract_primitives`` machinery — noise-robust where crease
+    graphs on raw-point normals are not), each primitive split into connected
+    components; large freeform residues become labeled regions of their own
+    (kind ``freeform``, no analytic model) so point2cad's INR can fit them.
+    ``v_idx`` indexes into ``Pd``. Same snap gates as the mesh detector."""
+    import open3d as o3d
+    import scipy.sparse as sp
+    from scipy.spatial import cKDTree
+    from reconstruction.surface_fit.escalate import FITTERS, FitContext
+
+    min_region_pts = int(cfg.get("perfect_min_region_faces", 300))
+    inlier_dist = float(cfg.get("p2c_inlier_dist_m", 0.02))
+    max_prims = int(cfg.get("p2c_max_primitives", 24))
+    freeform_min = int(cfg.get("p2c_freeform_min_pts", 2000))
+    max_fit_pts = int(cfg.get("perfect_max_fit_pts", 120_000))
+    rng = np.random.default_rng(0)
+
+    ctx = FitContext(world_up=_UP, dist_thresh=inlier_dist,
+                     min_inlier_frac=0.02)
+
+    # iterative largest-support extraction. Membership is DISTANCE-only —
+    # the VGGT cloud's normals are too noisy to veto points (measured on a
+    # true plane, rms 11 mm: only 55% pass a 30° gate). Normals instead
+    # SCORE the winner (voxel-denoised, orientation-agnostic), so a
+    # cylinder's coherent radial field can beat a tangent plane slicing it.
+    pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(Pd))
+    pv = pc.voxel_down_sample(0.03)
+    pv.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=24))
+    Nv = np.asarray(pv.normals, np.float64)
+    _, nn_v = cKDTree(np.asarray(pv.points)).query(Pd, k=1, workers=8)
+    N = Nv[nn_v]
+
+    def _members(kind, model, P, Np):
+        """(distance-membership mask, mean normal agreement of members)."""
+        d = np.abs(np.asarray(model.signed_distance(P)))
+        m = d <= inlier_dist
+        if not m.any():
+            return m, 0.0
+        try:
+            if kind == "plane":
+                ncos = np.abs(Np[m] @ model.normal)
+            elif kind == "cylinder":
+                q = P[m] - model.axis_point
+                q -= np.outer(q @ model.axis_dir, model.axis_dir)
+                q /= np.maximum(np.linalg.norm(q, axis=1, keepdims=True),
+                                1e-12)
+                ncos = np.abs((Np[m] * q).sum(axis=1))
+            elif kind == "sphere":
+                q = P[m] - model.center
+                q /= np.maximum(np.linalg.norm(q, axis=1, keepdims=True),
+                                1e-12)
+                ncos = np.abs((Np[m] * q).sum(axis=1))
+            else:
+                return m, 0.5
+            return m, float(ncos.mean())
+        except Exception:  # noqa: BLE001 — distance-only fallback
+            return m, 0.5
+
+    remaining = np.ones(len(Pd), dtype=bool)
+    parts: List[tuple] = []
+    min_claim = max(min_region_pts, len(Pd) // 500)
+    for it in range(max_prims):
+        idx = np.nonzero(remaining)[0]
+        if len(idx) < min_claim:
+            break
+        sub_p, sub_n = Pd[idx], N[idx]
+        fit_pts = sub_p if len(sub_p) <= max_fit_pts else \
+            sub_p[np.random.default_rng(it).choice(
+                len(sub_p), max_fit_pts, replace=False)]
+        best = None
+        for kind in ("plane", "cylinder", "sphere"):
+            fitter = FITTERS.get(kind)
+            if fitter is None:
+                continue
+            try:
+                model = fitter(fit_pts, ctx)
+            except Exception:  # noqa: BLE001
+                model = None
+            if model is None:
+                continue
+            mm, agree = _members(kind, model, sub_p, sub_n)
+            n_in = int(mm.sum())
+            score = n_in * (0.25 + 0.75 * agree)
+            if best is None or score > best[4]:
+                best = (kind, model, mm, n_in, score)
+        if best is None:
+            break
+        kind, model, mm, n_in, _score = best
+        if n_in < max(min_claim, 0.02 * len(idx)):
+            break
+        mask = np.zeros(len(Pd), dtype=bool)
+        mask[idx[mm]] = True
+        parts.append((kind, model, mask))
+        remaining &= ~mask
+
+    # connectivity graph: k-NN edges capped at ~3× the median point spacing
+    kd = cKDTree(Pd)
+    dnn = kd.query(Pd[:: max(1, len(Pd) // 5000)], k=2, workers=8)[0][:, 1]
+    radius = max(3.0 * float(np.median(dnn)), 0.01)
+    k_conn = 8
+    dist, nbr = kd.query(Pd, k=k_conn + 1, workers=8)
+    src = np.repeat(np.arange(len(Pd)), k_conn)
+    dst = nbr[:, 1:].ravel()
+    ok = dist[:, 1:].ravel() <= radius
+    E = np.column_stack([src[ok], dst[ok]])
+
+    def _components(mask: np.ndarray) -> List[np.ndarray]:
+        idx = np.nonzero(mask)[0]
+        if len(idx) == 0:
+            return []
+        loc = np.full(len(Pd), -1, dtype=np.int64)
+        loc[idx] = np.arange(len(idx))
+        m = (loc[E[:, 0]] >= 0) & (loc[E[:, 1]] >= 0)
+        e = E[m]
+        g = sp.coo_matrix((np.ones(len(e)), (loc[e[:, 0]], loc[e[:, 1]])),
+                          shape=(len(idx), len(idx)))
+        _, lab = sp.csgraph.connected_components(g, directed=False)
+        return [idx[lab == c] for c in range(int(lab.max()) + 1)]
+
+    regions: List[dict] = []
+    for kind, model, mask in parts:
+        for piece in _components(mask):
+            if len(piece) < min_region_pts:
+                continue
+            P = Pd[piece]
+            fit_pts = P if len(P) <= max_fit_pts else \
+                P[rng.choice(len(P), max_fit_pts, replace=False)]
+            refit = None
+            try:
+                refit = FITTERS[kind](fit_pts, ctx)
+            except Exception:  # noqa: BLE001 — the shared model still stands
+                refit = None
+            regions.append({"kind": kind, "model": refit or model,
+                            "f_idx": piece, "v_idx": piece, "notes": []})
+    # merge fragments of ONE physical surface (greedy extraction slices a
+    # surface into strips): same kind, compatible models, actually adjacent
+    # in the point graph — then refit the union
+    cos_tol = float(np.cos(np.deg2rad(3.0)))
+
+    def _compatible(a: dict, b: dict) -> bool:
+        if a["kind"] != b["kind"] or a["model"] is None or b["model"] is None:
+            return False
+        ma, mb = a["model"], b["model"]
+        try:
+            if a["kind"] == "plane":
+                if abs(float(ma.normal @ mb.normal)) < cos_tol:
+                    return False
+                off = float((Pd[b["v_idx"]].mean(0)
+                             - Pd[a["v_idx"]].mean(0)) @ ma.normal)
+                return abs(off) <= 1.5 * inlier_dist
+            if a["kind"] == "cylinder":
+                return (abs(float(ma.axis_dir @ mb.axis_dir)) >= cos_tol
+                        and abs(ma.radius - mb.radius)
+                        <= 0.05 * max(ma.radius, mb.radius))
+            if a["kind"] == "sphere":
+                return (float(np.linalg.norm(ma.center - mb.center))
+                        <= 2.0 * inlier_dist
+                        and abs(ma.radius - mb.radius)
+                        <= 0.05 * max(ma.radius, mb.radius))
+        except Exception:  # noqa: BLE001
+            return False
+        return False
+
+    if regions:
+        lab = np.full(len(Pd), -1, dtype=np.int64)
+        for ri, r in enumerate(regions):
+            lab[r["v_idx"]] = ri
+        la, lb = lab[E[:, 0]], lab[E[:, 1]]
+        m = (la >= 0) & (lb >= 0) & (la != lb)
+        pairs, counts = np.unique(
+            np.sort(np.column_stack([la[m], lb[m]]), axis=1),
+            axis=0, return_counts=True)
+        parent = list(range(len(regions)))
+
+        def _find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for (i, j), c in zip(pairs, counts):
+            if c < 10:
+                continue
+            ri, rj = _find(int(i)), _find(int(j))
+            if ri != rj and _compatible(regions[ri], regions[rj]):
+                parent[rj] = ri
+        groups: Dict[int, List[int]] = {}
+        for i in range(len(regions)):
+            groups.setdefault(_find(i), []).append(i)
+        if len(groups) < len(regions):
+            merged: List[dict] = []
+            for root, members in groups.items():
+                if len(members) == 1:
+                    merged.append(regions[members[0]])
+                    continue
+                piece = np.concatenate(
+                    [regions[i]["v_idx"] for i in members])
+                kind = regions[root]["kind"]
+                P = Pd[piece]
+                fit_pts = P if len(P) <= max_fit_pts else \
+                    P[rng.choice(len(P), max_fit_pts, replace=False)]
+                refit = None
+                try:
+                    refit = FITTERS[kind](fit_pts, ctx)
+                except Exception:  # noqa: BLE001
+                    refit = None
+                merged.append({"kind": kind,
+                               "model": refit or regions[root]["model"],
+                               "f_idx": piece, "v_idx": piece, "notes": []})
+            log(f"[perfect:{safe}] merged {len(regions)} fragments → "
+                f"{len(merged)} surfaces")
+            regions = merged
+
+    n_prim = len(regions)
+    for piece in _components(remaining):
+        if len(piece) >= freeform_min:
+            regions.append({"kind": "freeform", "model": None,
+                            "f_idx": piece, "v_idx": piece, "notes": []})
+    regions.sort(key=lambda r: len(r["v_idx"]), reverse=True)
+    covered = sum(len(r["v_idx"]) for r in regions)
+    log(f"[perfect:{safe}] cloud RANSAC labeling: {len(regions)} region(s) "
+        f"({n_prim} primitive, {len(regions) - n_prim} freeform), coverage "
+        f"{covered / max(len(Pd), 1):.0%} of {len(Pd):,} pts")
+
+    _snap_regions(regions, Pd, cfg, safe, log)
+    return regions, min_region_pts
 
 
 # ── mirror-symmetry detection (Mitra '06 lifted to the fitted object) ────

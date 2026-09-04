@@ -54,10 +54,26 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         pipe.send_progress(0, f"Cleaning {len(chunks)} clouds (voxel={voxel_size*1000:.1f}mm)",
                            stage="cloudcompy")
 
-        cmd = [
-            "bash", str(script_path),
-            "--input-dir", str(output_dir),
-            "--output", str(output_ply),
+        # USER ORDER 2026-09-04 ("porta ahora cloudcompy a gpu"): the cleaning
+        # stage runs on GPU by default (torch grid-hash voxel+SOR, minutes vs
+        # the single-core CloudComPy hour on 521M pts). Same args, same
+        # "[Step X/6]" stdout protocol, same PLY layout. gpu_clean: false
+        # returns to the CloudComPy path; GPU failure FAILS the stage loudly
+        # (no silent fallback — flip the flag to choose the CPU path).
+        if bool(postproc.get("gpu_clean", True)):
+            _da3_py = "/workspace/miniforge3/envs/da3/bin/python"
+            cmd = [
+                _da3_py, "-m", "reconstruction.gpu_cloud_clean",
+                "--input-dir", str(output_dir),
+                "--output", str(output_ply),
+            ]
+        else:
+            cmd = [
+                "bash", str(script_path),
+                "--input-dir", str(output_dir),
+                "--output", str(output_ply),
+            ]
+        cmd += [
             "--voxel-size", str(voxel_size),
             "--sor-knn", str(postproc.get("sor_knn", 6)),
             "--sor-sigma", str(postproc.get("sor_sigma", 1.0)),
@@ -79,6 +95,7 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            cwd=str(server_dir),   # the GPU path runs `-m reconstruction.…`
         )
 
         # Parse progress from CloudCompy stdout
@@ -209,6 +226,31 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
             except Exception as e:
                 pipe.send_log(f"[consolidate] scene consolidation failed "
                               f"(non-fatal, cloud kept raw): {e}", level="warning")
+
+        # ── DINOv3 multi-view feature score (fases 1/2, USER ORDER
+        # 2026-09-04: implemented AND RUNNING; failures are FATAL — "nada
+        # falla en silencio"). After consolidation, BEFORE floor/Potree/
+        # segmentation mapping — so the (fase-2 filtered) cloud is what
+        # everything downstream (globalIndices included) is built on.
+        # Config read FRESH from disk (the manager's boot-time dict may
+        # predate a config change).
+        import sys
+        server_dir_str = str(Path(__file__).resolve().parent.parent)
+        if server_dir_str not in sys.path:
+            sys.path.insert(0, server_dir_str)
+        from config import cfg as _fresh_cfg
+        _dcfg = _fresh_cfg.get("dino_features", {}) or {}
+        if bool((_dcfg.get("score") or {}).get("enabled", False)) \
+                and not light_resume:
+            pipe.send_progress(94, "DINOv3 feature-consistency score...",
+                               stage="cloudcompy")
+            from reconstruction.cloud_feature_score import run as _dscore
+            _rep = _dscore(output_dir, session_path / "frames", cfg=_dcfg,
+                           log=lambda m: pipe.send_log(m))
+            if _rep is None:
+                raise RuntimeError(
+                    "[dino-score] produced no report — inputs missing; "
+                    "refusing to continue (nothing fails silently)")
 
         # Compute and save floor alignment transform (kept as-is on light
         # resume — it may carry the user's gizmo edits)

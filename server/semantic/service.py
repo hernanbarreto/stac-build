@@ -69,10 +69,25 @@ def ensure_service(config: Optional[dict] = None,
         return False
 
     _log("Semantic service down — starting vLLM (Qwen3-VL)...")
+
+    def _die_with_parent():
+        # USER ORDER 2026-09-04: the chat must DIE with the backend — twice
+        # today orphaned vLLMs (start_new_session) kept 20-45 GB of VRAM after
+        # the backend was killed and OOM'd the GPU stages. PR_SET_PDEATHSIG
+        # delivers SIGTERM to the (exec-chained bash→python→vllm) child the
+        # moment its parent exits, however the parent died; vLLM shuts its
+        # EngineCore down on SIGTERM.
+        try:
+            import ctypes
+            import signal as _sig
+            ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, _sig.SIGTERM)
+        except Exception:  # noqa: BLE001 — best effort, non-Linux fallback
+            pass
+
     try:
         subprocess.Popen(["bash", str(_LAUNCHER)], cwd=str(_STAC_ROOT),
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+                         preexec_fn=_die_with_parent)
     except Exception as e:  # noqa: BLE001
         _log(f"Could not launch semantic service: {e}")
         return False

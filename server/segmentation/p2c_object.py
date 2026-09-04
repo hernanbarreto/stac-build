@@ -132,6 +132,8 @@ def build_p2c_object(output_dir: Path, instance_id: int,
     import trimesh
     from segmentation.tsdf_export import _safe_label
     from segmentation.perfect_object import (_detect_and_snap,
+                                             _detect_and_snap_cloud,
+                                             _load_instance_cloud,
                                              _load_source_mesh,
                                              _load_shape_proposal,
                                              _match_proposal,
@@ -142,6 +144,8 @@ def build_p2c_object(output_dir: Path, instance_id: int,
     trim_m = float(cfg.get("p2c_trim_m", 0.06))
     parallel = int(cfg.get("p2c_parallel", 4))
     max_pts_region = int(cfg.get("p2c_max_pts_region", 4000))
+    from_cloud = bool(cfg.get("p2c_from_cloud", True))
+    detect_max_pts = int(cfg.get("p2c_detect_max_pts", 150_000))
     out = Path(output_dir)
 
     result = json.loads((out / "segmentation_result.json").read_text())
@@ -153,11 +157,25 @@ def build_p2c_object(output_dir: Path, instance_id: int,
     label = str(inst.get("label", "segment"))
     safe = _safe_label(label, int(instance_id))
 
-    tm, src = _load_source_mesh(out, safe, source)
-    V_raw = np.asarray(tm.vertices, np.float64)
-    F = np.asarray(tm.faces, np.int64)
-    Vd = _to_display(out, V_raw)
-    regions, _ = _detect_and_snap(tm, F, Vd, cfg, safe, log)
+    if from_cloud:
+        # USER 2026-09-04: the cloud with labeled points is the CAD input —
+        # the mesh already carries its own errors and never enters this path
+        P_raw_full = _load_instance_cloud(out, inst, cfg, safe, log)
+        rng0 = np.random.default_rng(11)
+        sub = (np.arange(len(P_raw_full)) if len(P_raw_full) <= detect_max_pts
+               else np.sort(rng0.choice(len(P_raw_full), detect_max_pts,
+                                        replace=False)))
+        Vd = _to_display(out, P_raw_full[sub])
+        src_name = (f"cloud (conf-trimmed, {len(P_raw_full):,} pts, "
+                    f"detect on {len(sub):,})")
+        regions, _ = _detect_and_snap_cloud(Vd, cfg, safe, log)
+    else:
+        tm, src = _load_source_mesh(out, safe, source)
+        V_raw = np.asarray(tm.vertices, np.float64)
+        F = np.asarray(tm.faces, np.int64)
+        Vd = _to_display(out, V_raw)
+        src_name = src.parent.name
+        regions, _ = _detect_and_snap(tm, F, Vd, cfg, safe, log)
     if not regions:
         raise RuntimeError(f"{safe}: no regions for point2cad")
 
@@ -224,8 +242,13 @@ def build_p2c_object(output_dir: Path, instance_id: int,
     except Exception:  # noqa: BLE001
         pass
 
-    evidence = Vd[np.unique(np.concatenate(
-        [r["v_idx"] for i, r in enumerate(regions) if i not in drop_open]))]
+    if from_cloud:
+        # the FULL confidence-filtered instance cloud testifies, not only
+        # the detection subsample
+        evidence = _to_display(out, P_raw_full)
+    else:
+        evidence = Vd[np.unique(np.concatenate(
+            [r["v_idx"] for i, r in enumerate(regions) if i not in drop_open]))]
     keep = _evidence_trim(Vb, Fb, evidence, trim_m, log)
     n_untrimmed = len(Fb)
     Fk = Fb[keep]
@@ -250,7 +273,7 @@ def build_p2c_object(output_dir: Path, instance_id: int,
         "label": f"{label} (p2c)",
         "glb_file": glb.name,
         "source": "point2cad clipped B-rep",
-        "source_mesh": src.parent.name,
+        "source_mesh": src_name,
         "evidence_trim_m": trim_m,
         "n_surfaces_in": len(regions) - len(drop_open),
         "openings_excluded": sorted(int(i) for i in drop_open),

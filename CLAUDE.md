@@ -8,7 +8,10 @@ and 08-18 was tried, judged worse by the user, and REVERTED. Never re-apply
 those reverted knobs without an explicit new decision from him.
 
     backend vggtomega_pgsr          (full PGSR precision stage)
-    simple.conf_percentile 10 — PINNED (USER FINAL 2026-08-30 after the
+    simple.conf_percentile 20 — USER 2026-09-04 (10→20, his word, with the
+                                     DINOv3 fase-2 two-witness filter now
+                                     active downstream). (Previous: 10 —
+                                     PINNED USER FINAL 2026-08-30 after the
                                      full sweep 10→25→35→20 in one day: every
                                      value above 10 hollowed weak-texture
                                      surfaces on test3, even vendor-default 20

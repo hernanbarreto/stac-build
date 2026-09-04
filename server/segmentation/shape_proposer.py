@@ -127,20 +127,22 @@ def _interior_void_ratio(r: dict, Vd: np.ndarray) -> Optional[float]:
 
 
 def _region_facts(idx: int, r: dict, P_disp: np.ndarray) -> dict:
-    d = np.abs(np.asarray(r["model"].signed_distance(P_disp)))
     ext = P_disp.ptp(axis=0)
     e = {
         "region": idx,
         "detected_kind": r["kind"],
-        "orientation": _orientation(r["kind"], r["model"]),
+        "orientation": _orientation(r["kind"], r["model"])
+        if r.get("model") is not None else None,
         "size_m": [round(float(x), 3) for x in ext],
         # display-frame centroid: lets a later rebuild MATCH these proposals
         # to its own re-detected regions (RANSAC seeds drift the indices)
         "centroid_m": [round(float(x), 4) for x in P_disp.mean(axis=0)],
         "n_vertices": int(len(r["v_idx"])),
-        "fit_rms_mm": round(float(np.sqrt(np.mean(d ** 2))) * 1000, 1),
         "provenance": "tool_measured",
     }
+    if r.get("model") is not None:
+        d = np.abs(np.asarray(r["model"].signed_distance(P_disp)))
+        e["fit_rms_mm"] = round(float(np.sqrt(np.mean(d ** 2))) * 1000, 1)
     if r["kind"] in ("cylinder", "sphere"):
         e["radius_m"] = round(float(r["model"].radius), 4)
     return e
@@ -572,15 +574,32 @@ def propose_object(output_dir: Path, instance_id: int,
     safe = _safe_label(label, int(instance_id))
 
     # 1) detection engine — the same regions the model rebuild / p2c use
-    from segmentation.perfect_object import _load_source_mesh
-    tm, src = _load_source_mesh(out, safe, source)
-    V_raw = np.asarray(tm.vertices, np.float64)
-    F = np.asarray(tm.faces, np.int64)
-    Vd = _to_display(out, V_raw)
-    regions, _ = _detect_and_snap(tm, F, Vd, cfg, safe, log)
+    if bool(cfg.get("p2c_from_cloud", True)):
+        # USER 2026-09-04: label CLOUD points, never mesh vertices — the
+        # mesh already carries its own errors
+        from segmentation.perfect_object import (_detect_and_snap_cloud,
+                                                 _load_instance_cloud)
+        P_raw_full = _load_instance_cloud(out, inst, cfg, safe, log)
+        detect_max_pts = int(cfg.get("p2c_detect_max_pts", 150_000))
+        rng0 = np.random.default_rng(11)
+        sub = (np.arange(len(P_raw_full)) if len(P_raw_full) <= detect_max_pts
+               else np.sort(rng0.choice(len(P_raw_full), detect_max_pts,
+                                        replace=False)))
+        V_raw = P_raw_full[sub]
+        Vd = _to_display(out, V_raw)
+        src_name = f"cloud (conf-trimmed, detect on {len(sub):,} pts)"
+        regions, _ = _detect_and_snap_cloud(Vd, cfg, safe, log)
+    else:
+        from segmentation.perfect_object import _load_source_mesh
+        tm, src = _load_source_mesh(out, safe, source)
+        V_raw = np.asarray(tm.vertices, np.float64)
+        F = np.asarray(tm.faces, np.int64)
+        Vd = _to_display(out, V_raw)
+        src_name = src.parent.name
+        regions, _ = _detect_and_snap(tm, F, Vd, cfg, safe, log)
     if not regions:
         raise RuntimeError(f"{safe}: no regions detected — nothing to propose")
-    log(f"[propose:{safe}] {len(regions)} region(s) from {src.parent.name}")
+    log(f"[propose:{safe}] {len(regions)} region(s) from {src_name}")
 
     import open3d as o3d
     pc = o3d.io.read_point_cloud(str(out / "cleaned_cloud.ply"))
@@ -919,7 +938,7 @@ def propose_object(output_dir: Path, instance_id: int,
         "method": "shape_proposal",
         "instance_id": int(instance_id),
         "label": label,
-        "source_mesh": src.parent.name,
+        "source_mesh": src_name,
         "object": ({**obj_prop, "provenance": "vlm_proposed"}
                    if obj_prop else None),
         "object_analysis": analysis or None,

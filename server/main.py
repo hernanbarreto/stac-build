@@ -204,7 +204,12 @@ async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, we
 
     ctx = _ctx(session_id)
     scans_dir = ctx.output_dir
-    output_ply = ctx.merged_cloud
+    # UNIFIED PATH (USER 2026-09-04, after this legacy path built a cloud
+    # BYPASSING the pipeline's GPU clean + DINOv3 fases): the canonical
+    # artifact is output/cleaned_cloud.ply — same target, same machinery
+    # (GPU clean, consolidate, fase-2/3 score+filter) as the pipeline stage;
+    # merged_cloud becomes a symlink to it, exactly like the worker does.
+    output_ply = scans_dir / "cleaned_cloud.ply"
     script_path = Path(__file__).parent / "run_cloudcompy.sh"
 
     voxel_size = postproc_config.get("voxel_size", 0.001)
@@ -232,8 +237,13 @@ async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, we
         except:
             pass
     
-    cmd = [
-        "bash", str(script_path),
+    # same builder selection as the pipeline stage (GPU by default)
+    if bool(postproc_config.get("gpu_clean", True)):
+        cmd = ["/workspace/miniforge3/envs/da3/bin/python", "-m",
+               "reconstruction.gpu_cloud_clean"]
+    else:
+        cmd = ["bash", str(script_path)]
+    cmd += [
         "--input-dir", str(scans_dir),
         "--output", str(output_ply),
         "--voxel-size", str(voxel_size),
@@ -241,6 +251,7 @@ async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, we
         "--sor-sigma", str(postproc_config.get("sor_sigma", 1.0)),
         "--noise-radius", str(postproc_config.get("noise_radius", 0.01)),
         "--noise-sigma", str(postproc_config.get("noise_sigma", 1.0)),
+        "--conf-min-norm", str(postproc_config.get("conf_min_norm", 0.0)),
     ]
     if max_points > 0:
         cmd.extend(["--max-points", str(max_points)])
@@ -260,6 +271,7 @@ async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, we
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             preexec_fn=_die_with_parent_sigkill,
+            cwd=str(Path(__file__).parent),   # `-m reconstruction.…` needs it
         ))
         
         # Read output line by line
@@ -289,13 +301,59 @@ async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, we
                         pass
             if _removed:
                 print(f"[PostProc] [cleanup] removed {_removed} chunk files (baked into cleaned_cloud)")
+
+            # ── SAME machinery as the pipeline stage (USER 2026-09-04: one
+            # single builder path): consolidate + DINOv3 fase-2/3 score and
+            # filter, config fresh from disk, heavy work OFF the event loop.
+            def _finish_canonical():
+                import yaml as _y
+                _pc = (_y.safe_load((Path(__file__).parent / "config.yaml")
+                                    .read_text()) or {})
+                _sc = (_pc.get("postprocessing") or {}).get(
+                    "scene_consolidate", {}) or {}
+                if _sc.get("enabled", True):
+                    from reconstruction.surface_fit.consolidate import \
+                        scene_consolidate
+                    _st = scene_consolidate(
+                        scans_dir, radius_m=_sc.get("radius_m"),
+                        min_radius_m=float(_sc.get("min_radius_m", 0.02)),
+                        max_radius_m=float(_sc.get("max_radius_m", 0.06)),
+                        iterations=int(_sc.get("iterations", 2)),
+                        normal_gate=float(_sc.get("normal_gate", 0.25)))
+                    print(f"[PostProc] [consolidate] {_st}")
+                _dcfg = _pc.get("dino_features") or {}
+                if bool((_dcfg.get("score") or {}).get("enabled", False)):
+                    from reconstruction.cloud_feature_score import \
+                        run as _dscore
+                    _rep = _dscore(scans_dir, scans_dir.parent / "frames",
+                                   cfg=_dcfg, log=lambda m: print(
+                                       f"[PostProc] {m}"))
+                    if _rep is None:
+                        raise RuntimeError("[dino-score] no report — "
+                                           "nothing fails silently")
+            await asyncio.get_event_loop().run_in_executor(
+                None, _finish_canonical)
+            # merged_cloud → symlink to the canonical cloud (worker parity)
+            try:
+                _mc = ctx.merged_cloud
+                _mc.parent.mkdir(parents=True, exist_ok=True)
+                if _mc.exists() or _mc.is_symlink():
+                    _mc.unlink()
+                os.symlink(os.path.relpath(str(output_ply),
+                                           str(_mc.parent)), str(_mc))
+                print(f"[PostProc] merged_cloud.ply → {output_ply.name}")
+            except Exception as _se:  # noqa: BLE001 — link, not data
+                print(f"[PostProc] merged symlink failed: {_se}")
         else:
-            print(f"[PostProc] ❌ CloudCompPy failed (exit code: {process.returncode})")
-    
+            raise RuntimeError(f"[PostProc] cloud build FAILED (exit "
+                               f"{process.returncode}) — nothing fails "
+                               f"silently")
+
     except Exception as e:
         print(f"[PostProc] ❌ Error: {e}")
         import traceback
         traceback.print_exc()
+        raise
 
 def _align_cloud_to_floor(output_data: np.ndarray, session_dir: Path = None) -> np.ndarray:
     """
@@ -5654,6 +5712,12 @@ async def refresh_segmentation(body: dict):
             task_manager.update(tid, pct=10, detail="Running DBSCAN + cloud matching...")
             print(f"[SegRefresh] Regenerating segmentation_result.json...")
             result = _match_and_save_result(output_dir)
+            # DINOv3 fase 4 runs INSIDE _match_and_save_result (the single
+            # instance-building point, every caller covered). An error-dict
+            # here must not pass as an empty success (nothing fails silently).
+            if result.get("error"):
+                raise RuntimeError(f"segmentation matching failed: "
+                                   f"{result['error']}")
             instances = result.get("instances", [])
             print(f"[SegRefresh] ✅ Done: {len(instances)} instances")
 
