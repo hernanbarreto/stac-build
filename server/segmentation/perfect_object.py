@@ -105,6 +105,167 @@ def _rebuild_cylinder(P: np.ndarray, w_new: np.ndarray,
                          inlier_frac=1.0, n_points=len(P))
 
 
+def _rebuild_sphere_at(P: np.ndarray, center: np.ndarray):
+    """Sphere with a FIXED centre (proposal-driven recentre onto a coaxial
+    axis): radius = mean radial distance, chart rebuilt as fit_sphere does."""
+    from reconstruction.surface_fit.quadric import SphereModel, _orthobasis
+    c = np.asarray(center, np.float64)
+    q = np.asarray(P, np.float64) - c
+    rho = np.linalg.norm(q, axis=1)
+    r = float(np.mean(rho))
+    mean_dir = P.mean(axis=0) - c
+    ln = np.linalg.norm(mean_dir)
+    pole = mean_dir / ln if ln > 1e-12 else np.array([0.0, 0.0, 1.0])
+    u, _v = _orthobasis(pole)
+    phi = np.arccos(np.clip((q @ pole) / np.maximum(rho, 1e-12), -1, 1))
+    theta = np.arctan2(q @ np.cross(pole, u), q @ u)
+    return SphereModel(center=c, radius=r, pole=pole, theta_ref=u,
+                       phi_c=float(np.median(phi)),
+                       theta_c=float(np.median(theta)),
+                       rms=float(np.sqrt(np.mean((rho - r) ** 2))),
+                       inlier_frac=1.0, n_points=len(P))
+
+
+# ── VLM shape-proposal consumption (proposals NEVER override the gates) ──
+
+def _load_shape_proposal(out: Path, safe: str) -> Optional[dict]:
+    p = Path(out) / "shape_proposals" / f"{safe}_proposal.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _match_proposal(regions: List[dict], Vd: np.ndarray,
+                    prop: Optional[dict]) -> Dict[int, dict]:
+    """Detected region index → proposal entry, matched by display-frame
+    centroid + detected kind (region indices drift between RANSAC runs)."""
+    entries = [e for e in (prop or {}).get("regions", [])
+               if e.get("proposal") and e.get("centroid_m")]
+    match: Dict[int, dict] = {}
+    used: set = set()
+    for i, r in enumerate(regions):
+        P = Vd[r["v_idx"]]
+        c = P.mean(axis=0)
+        diag = float(np.linalg.norm(P.ptp(axis=0)))
+        best = None
+        for j, e in enumerate(entries):
+            if j in used or e.get("detected_kind") != r["kind"]:
+                continue
+            d = float(np.linalg.norm(np.asarray(e["centroid_m"]) - c))
+            if d < max(0.10, 0.25 * diag) and (best is None or d < best[1]):
+                best = (j, d)
+        if best is not None:
+            match[i] = entries[best[0]]
+            used.add(best[0])
+    return match
+
+
+def _apply_proposal_intents(regions: List[dict], Vd: np.ndarray,
+                            match: Dict[int, dict], log, safe: str) -> int:
+    """Relation-driven snaps from the VLM proposal, each guarded by the same
+    revert-if-degrading rms gate as the deterministic snaps: parallel plane
+    groups share a size-weighted normal; coaxial cylinders share an axis and
+    coaxial spheres are recentred onto it."""
+    p2d: Dict[int, int] = {}
+    for i, e in match.items():
+        try:
+            p2d[int(e["region"])] = i
+        except Exception:  # noqa: BLE001
+            continue
+    par: set = set()
+    coax: set = set()
+    for i, e in match.items():
+        for t in (e.get("proposal") or {}).get("relations") or []:
+            if ":" not in t:
+                continue
+            k, v = t.split(":", 1)
+            try:
+                j = p2d.get(int(v))
+            except ValueError:
+                continue
+            if j is None or j == i:
+                continue
+            pair = (min(i, j), max(i, j))
+            if k == "parallel_to":
+                par.add(pair)
+            elif k in ("coaxial_with", "same_radius_as", "concentric_with"):
+                coax.add(pair)
+
+    def _clusters(pairs: set, pred) -> List[List[int]]:
+        parent: Dict[int, int] = {}
+
+        def find(x: int) -> int:
+            parent.setdefault(x, x)
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for a, b in pairs:
+            if pred(a) and pred(b):
+                parent[find(a)] = find(b)
+        groups: Dict[int, List[int]] = {}
+        for x in list(parent):
+            groups.setdefault(find(x), []).append(x)
+        return [g for g in groups.values() if len(g) > 1]
+
+    def _rms(model, P) -> float:
+        d = np.asarray(model.signed_distance(P))
+        return float(np.sqrt(np.mean(d ** 2)))
+
+    applied = 0
+    for g in _clusters(par, lambda i: regions[i]["kind"] == "plane"):
+        w = np.zeros(3)
+        ref = regions[g[0]]["model"].normal
+        for i in g:
+            n = regions[i]["model"].normal
+            if float(n @ ref) < 0:
+                n = -n
+            w += len(regions[i]["v_idx"]) * n
+        w /= max(np.linalg.norm(w), 1e-12)
+        for i in g:
+            r = regions[i]
+            Pm = Vd[r["v_idx"]]
+            pre = _rms(r["model"], Pm)
+            m2 = _rebuild_plane(Pm, w, r["model"].normal)
+            if _rms(m2, Pm) <= max(1.5 * pre, pre + 0.005):
+                r["model"] = m2
+                r["notes"].append("normal shared with proposed-parallel group")
+                applied += 1
+
+    for g in _clusters(coax,
+                       lambda i: regions[i]["kind"] in ("cylinder", "sphere")):
+        cyls = [i for i in g if regions[i]["kind"] == "cylinder"]
+        if not cyls:
+            continue
+        w = np.zeros(3)
+        ref = regions[cyls[0]]["model"].axis_dir
+        for i in cyls:
+            a = regions[i]["model"].axis_dir
+            if float(a @ ref) < 0:
+                a = -a
+            w += len(regions[i]["v_idx"]) * a
+        w /= max(np.linalg.norm(w), 1e-12)
+        for i in cyls:
+            r = regions[i]
+            Pm = Vd[r["v_idx"]]
+            pre = _rms(r["model"], Pm)
+            m2 = _rebuild_cylinder(Pm, w)
+            if _rms(m2, Pm) <= max(1.5 * pre, pre + 0.005):
+                r["model"] = m2
+                r["notes"].append("axis shared with proposed-coaxial group")
+                applied += 1
+        # NOTE (user 2026-09-03): sphere recentring onto the proposed axis was
+        # REMOVED — it displaced parts, and the 'spheres' were hole rims.
+    if applied:
+        log(f"[perfect:{safe}] proposal intents: {applied} snap(s) applied "
+            f"(gated), {len(par)} parallel + {len(coax)} coaxial relation(s)")
+    return applied
+
+
 def _snap_direction(v: np.ndarray, tol_deg: float) -> Tuple[Optional[np.ndarray], Optional[str]]:
     v = np.asarray(v, np.float64)
     v = v / max(np.linalg.norm(v), 1e-12)
@@ -800,6 +961,40 @@ def build_model_object(output_dir: Path, instance_id: int,
             f"{len(self_sym)} self-symmetric, "
             f"{len(regions) - len(pair_of) - len(self_sym)} unpaired")
 
+    # ── VLM shape proposal (if one was generated): relation-driven snaps
+    # (gated) + part roles into the inventory. The proposal only ever
+    # SUGGESTS; every applied snap must survive the same rms gate.
+    proposal = _load_shape_proposal(out, safe)
+    prop_match: Dict[int, dict] = {}
+    intents_applied = 0
+    drop_open: set = set()
+    if proposal:
+        prop_match = _match_proposal(regions, Vd, proposal)
+        log(f"[perfect:{safe}] shape proposal found: "
+            f"{len(prop_match)}/{len(regions)} region(s) matched "
+            f"(object: {(proposal.get('object') or {}).get('identity')})")
+        # regions the VLM says are OPENINGS (holes, not material — e.g. a
+        # sphere fitted on a hole's rim) are DROPPED from the rebuild; the
+        # hole stays a hole in its host plate (user 2026-09-03)
+        # drop requires BOTH: the VLM proposes 'opening' AND the measured
+        # void evidence agrees (interior_void_ratio ≥ 0.5 — the region is a
+        # ring of support around enclosed emptiness). Without the measurement
+        # the VLM's guess dropped real plates (observed 2026-09-03) —
+        # measurement decides, the VLM only proposes.
+        for i, e in prop_match.items():
+            pr = e.get("proposal") or {}
+            if (pr.get("proposed_kind") == "opening"
+                    and float(pr.get("confidence", 0.0)) >= 0.5
+                    and float(e.get("interior_void_ratio") or 0.0) >= 0.5):
+                drop_open.add(i)
+        if drop_open:
+            log(f"[perfect:{safe}] {len(drop_open)} region(s) proposed as "
+                f"OPENINGS — excluded from the model: {sorted(drop_open)}")
+        intent_match = {i: e for i, e in prop_match.items()
+                        if i not in drop_open}
+        intents_applied = _apply_proposal_intents(regions, Vd, intent_match,
+                                                  log, safe)
+
     # ── clean re-mesh per part (regularized outlines: CAD-crisp)
     final = o3d.geometry.TriangleMesh()
     parts_meta: List[dict] = []
@@ -809,6 +1004,17 @@ def build_model_object(output_dir: Path, instance_id: int,
     for i, r in enumerate(regions):
         Pm = Vd[r["v_idx"]]
         model = r["model"]
+        prop_e = (prop_match.get(i) or {}).get("proposal") or {}
+        role = str(prop_e.get("part_role") or "") or None
+        location = str(prop_e.get("location") or "") or None
+        if i in drop_open:
+            parts_meta.append({
+                "kind": r["kind"], "n_faces_src": int(len(r["f_idx"])),
+                "role": role, "location": location,
+                "role_provenance": "vlm_proposed",
+                "dropped_as_opening": True,
+                "provenance": "vlm_proposed"})
+            continue
         uv = np.asarray(model.to_uv(Pm))
         V_part = F_part = None
         contour_shape = None
@@ -865,6 +1071,8 @@ def build_model_object(output_dir: Path, instance_id: int,
                 parts_meta_note = f"twin location already scanned ({covered:.0%}) — not completed"
                 d = np.abs(np.asarray(model.signed_distance(Pm)))
                 e = {"kind": r["kind"], "n_faces_src": int(len(r["f_idx"])),
+                     "role": role, "location": location,
+                     "role_provenance": "vlm_proposed" if role else None,
                      "contour": contour_shape, "snapped": r["notes"] + [parts_meta_note],
                      "mirror_pair": None, "self_symmetric": False,
                      "rms_mm": round(float(np.sqrt(np.mean(d ** 2))) * 1000, 2),
@@ -887,6 +1095,8 @@ def build_model_object(output_dir: Path, instance_id: int,
 
         d = np.abs(np.asarray(model.signed_distance(Pm)))
         e = {"kind": r["kind"], "n_faces_src": int(len(r["f_idx"])),
+             "role": role, "location": location,
+             "role_provenance": "vlm_proposed" if role else None,
              "contour": contour_shape, "snapped": r["notes"],
              "mirror_pair": j, "self_symmetric": bool(i in self_sym),
              "rms_mm": round(float(np.sqrt(np.mean(d ** 2))) * 1000, 2),
@@ -912,6 +1122,12 @@ def build_model_object(output_dir: Path, instance_id: int,
         "n_parts": len(parts_meta),
         "parts": parts_meta,
         "symmetry_mirror": sym,
+        "shape_proposal": ({
+            "object": proposal.get("object"),
+            "matched_regions": len(prop_match),
+            "intents_applied": intents_applied,
+            "openings_dropped": sorted(int(i) for i in drop_open),
+        } if proposal else None),
         "mirror_completed_parts": completed,
         "n_vertices": int(len(final.vertices)),
         "n_triangles": int(len(final.triangles)),

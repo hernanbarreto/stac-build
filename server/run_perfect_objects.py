@@ -42,8 +42,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--instance-id", type=int, action="append", required=True)
-    ap.add_argument("--mode", default="perfect", choices=["perfect", "parts", "model"],
-                    help="'parts' = flat-colored diagnosis view + inventory")
+    ap.add_argument("--mode", default="perfect",
+                    choices=["perfect", "parts", "model", "propose", "cad",
+                             "p2c"],
+                    help="'parts' = flat-colored diagnosis view + inventory; "
+                         "'propose' = VLM shape proposer (Qwen3-VL describes "
+                         "the object + per-region design intent); "
+                         "'cad' = propose + model rebuild in one pass; "
+                         "'p2c' = propose (if missing) + Point2CAD sewn "
+                         "B-rep with intent trim")
     ap.add_argument("--source", action="append", default=[],
                     help="'<iid>:poisson' or '<iid>:pgsr' — which mesh of the "
                          "segment to perfect (default: poisson, else pgsr)")
@@ -62,8 +69,32 @@ def main() -> int:
 
     from segmentation.perfect_object import (build_model_object,
                                              diagnose_object, perfect_object)
+    from segmentation.shape_proposer import propose_object
+
+    def _cad(output_dir, iid, cfg=None, source=None, log=print):
+        propose_object(output_dir, iid, cfg=cfg, source=source, log=log)
+        return build_model_object(output_dir, iid, cfg=cfg, source=source,
+                                  log=log)
+
+    def _p2c(output_dir, iid, cfg=None, source=None, log=print):
+        from segmentation.tsdf_export import _safe_label
+        from segmentation.p2c_object import build_p2c_object
+        import json as _json
+        res = _json.loads((Path(output_dir) /
+                           "segmentation_result.json").read_text())
+        inst = next((i for i in res.get("instances", [])
+                     if int(i.get("instance_id", i.get("id"))) == int(iid)),
+                    {})
+        safe = _safe_label(str(inst.get("label", "segment")), int(iid))
+        if not (Path(output_dir) / "shape_proposals"
+                / f"{safe}_proposal.json").exists():
+            propose_object(output_dir, iid, cfg=cfg, source=source, log=log)
+        return build_p2c_object(output_dir, iid, cfg=cfg, source=source,
+                                log=log)
+
     fn = {"parts": diagnose_object, "model": build_model_object,
-          "perfect": perfect_object}[args.mode]
+          "perfect": perfect_object, "propose": propose_object,
+          "cad": _cad, "p2c": _p2c}[args.mode]
     written, skipped = [], []
     for iid in args.instance_id:
         t0 = time.time()

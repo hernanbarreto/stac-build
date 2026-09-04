@@ -1606,6 +1606,25 @@ surface_fit:
   decompose_max_primitives: 10  # the train hit 6 with planes still extractable
   decompose_inlier_dist_m: 0.04
   decompose_min_frac: 0.10    # a primitive must claim ≥ this of the remaining points
+  # ── VLM shape proposer (USER 2026-09-03: "describir correctamente el
+  # objeto, lo más perfecto posible"). Qwen3-VL sees annotated scan-frame
+  # crops (each detected region tinted+numbered, Z-buffer-verified projection)
+  # plus the tool-measured inventory, and PROPOSES: object identity/description
+  # and per-region design intent (kind, role, outline, relations). Everything
+  # it returns is vlm_proposed; it never measures. Worker mode 'propose'.
+  propose_views: 4            # annotated region views sent to the VLM
+  propose_object_views: 3     # isolated (masked) crops for the identity call
+  propose_regions_per_call: 14  # regions asked per VLM call (chunked)
+  propose_max_regions: 40     # propose on the N largest regions only (a noisy
+                              # source mesh can shatter into 100+ slivers)
+  propose_extra_views: 4      # targeted views for regions the main views miss
+  # ── Point2CAD B-rep (worker mode 'p2c', user "vía 2" 2026-09-03): the
+  # perfect-engine regions (openings excluded by intent+measurement) go to
+  # vendor point2cad (env point2cad) for fit+sew; result is denormalized,
+  # evidence-trimmed and published as tsdf/<safe>_p2c/.
+  p2c_trim_m: 0.06            # evidence clip: B-rep kept within this of cloud
+  p2c_parallel: 4             # CUDA workers (8 OOM'd next to the chat vLLM)
+  p2c_max_pts_region: 4000    # per-surface point cap for the .xyzc
   # ── Contour regularization (USER 2026-08-29: "las formas tienden a ser
   # perfectas — rectángulos, arcos, círculos — detectar la tendencia y
   # perfeccionarlas"). Every boundary/opening of a fitted PLANE is tried

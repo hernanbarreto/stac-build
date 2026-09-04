@@ -875,6 +875,35 @@ def _semantic_reload_if_idle(reason: str = "") -> None:
 
 
 
+def _session_intel_when_chat_up(session_id: str, objects: bool,
+                                wait_s: float = 900.0) -> None:
+    """Background (executor thread): wait for the semantic service, then
+    generate what the chat must ALWAYS know (USER 2026-09-04), respecting
+    the session's real state:
+      * pipeline finished (objects=False): only cloud + scene exist — the
+        SCENE description is generated, no instance dossiers (there are no
+        segments yet);
+      * segmentation finished (objects=True): instances now exist — every
+        segment gets its dossier as it appears.
+    Cached entries are skipped, so re-runs are cheap."""
+    try:
+        from semantic.service import is_alive
+        t0 = time.time()
+        while time.time() - t0 < wait_s:
+            if is_alive():
+                break
+            time.sleep(10.0)
+        else:
+            print(f"[analysis] {session_id}: chat service never came up — "
+                  "the chat generates dossiers on demand instead")
+            return
+        ctx = _ctx(session_id)
+        from segmentation.object_analysis import ensure_session_analyses
+        ensure_session_analyses(ctx.output_dir, objects=objects, log=print)
+    except Exception as e:  # noqa: BLE001 — intel is best-effort, never fatal
+        print(f"[analysis] {session_id}: session intel failed: {e}")
+
+
 def _resolve_segmentation_prompt(prompt: str, frames_dir: str) -> tuple:
     """
     Resolve segmentation prompt: if 'auto' or empty, run the Phase 1 Qwen3-VL
@@ -4605,6 +4634,9 @@ async def export_perfect_endpoint(request: Request):
     instance_ids = body.get("instance_ids")
     sources = body.get("sources") or {}   # {iid: 'poisson'|'pgsr'} — which
     #                                       mesh of the segment gets perfected
+    mode = str(body.get("mode") or "perfect")  # perfect|parts|model|propose|cad|p2c
+    if mode not in ("perfect", "parts", "model", "propose", "cad", "p2c"):
+        raise HTTPException(status_code=400, detail=f"unknown mode '{mode}'")
     if not session_id or not instance_ids:
         raise HTTPException(status_code=400,
                             detail="need session_id and instance_ids[]")
@@ -4615,7 +4647,7 @@ async def export_perfect_endpoint(request: Request):
         try:
             worker = Path(SERVER_DIR) / "run_perfect_objects.py"
             cmd = [sys.executable, str(worker),
-                   "--output-dir", str(output_dir)]
+                   "--output-dir", str(output_dir), "--mode", mode]
             for i in instance_ids:
                 cmd += ["--instance-id", str(int(i))]
                 src = str(sources.get(str(i), sources.get(int(i), "")) or "")
@@ -4648,8 +4680,8 @@ async def export_perfect_endpoint(request: Request):
             written = (result or {}).get("written") or []
             for sk in (result or {}).get("skipped") or []:
                 print(f"[Perfect] skip: {sk}")
-            print(f"[Perfect] ✅ {len(written)} perfected mesh(es)")
-            if written:
+            print(f"[Perfect] ✅ {len(written)} output(s) ({mode})")
+            if written and mode != "propose":   # propose writes JSON, no mesh
                 await _notify_tsdf_ready(session_id, "perfect", len(written))
         except Exception as e:  # noqa: BLE001
             import traceback
@@ -5637,6 +5669,12 @@ async def refresh_segmentation(body: dict):
     # Segmentation Manager must only re-run DBSCAN + matching and produce the
     # instances/OBBs. Per-object meshes are built EXCLUSIVELY on demand via
     # /api/segmentation/tsdf/export (TSDF + texrecon).
+
+    # USER 2026-09-04: the segments exist NOW — this is where the chat's
+    # per-segment dossiers are generated (background; cached ones skipped).
+    if result.get("instances"):
+        asyncio.get_event_loop().run_in_executor(
+            None, _session_intel_when_chat_up, session_id, True)
     return {"ok": True, **result}
 
 
@@ -6803,6 +6841,14 @@ async def viewer_websocket(websocket: WebSocket):
                     if restart_chat:
                         asyncio.get_running_loop().run_in_executor(
                             None, _semantic_reload_if_idle, "pipeline finished")
+                        # USER 2026-09-04: at pipeline end there are NO
+                        # segments (only scene + cloud) — generate ONLY the
+                        # scene description. Per-segment dossiers happen when
+                        # the SEGMENTATION finishes (see /api/segmentation/
+                        # refresh).
+                        if success:
+                            asyncio.get_running_loop().run_in_executor(
+                                None, _session_intel_when_chat_up, sid, False)
 
                     if not success:
                         _tm.fail(_pipeline_tid, "Pipeline failed")

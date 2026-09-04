@@ -124,6 +124,22 @@ def _session_block(store: InstanceStore) -> str:
     else:
         lines.append("scene description: not generated yet — call describe_scene "
                      "when asked what the scene is")
+    # per-object deep analyses (shape proposer's dossier): one line each so
+    # the assistant KNOWS what every element is; full text via describe_object
+    import json as _json
+    for i in store.list_instances():
+        iid = i["instance_id"]
+        raw = store.get_meta(f"object_analysis_{iid}")
+        if not raw:
+            continue
+        try:
+            a = _json.loads(raw)
+        except Exception:  # noqa: BLE001
+            continue
+        mats = ", ".join((a.get("materiales") or [])[:3])
+        lines.append(f"object {iid} ({i['label']}) — {a.get('que_es', '?')}"
+                     + (f" · materiales: {mats}" if mats else "")
+                     + " (dossier completo: describe_object)")
     return "\n".join(lines)
 
 

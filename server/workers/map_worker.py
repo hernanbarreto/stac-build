@@ -1845,6 +1845,19 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             pipe.send_log(f"[chunk-plan] could not measure walk length ({_e})", level="warning")
             _walk = 0.0
         pipe.send_log(f"[chunk-plan] measured walk: {_walk:.1f} m ({tag})")
+        # streaming clean (user 2026-09-03, fixed 09-04): the aligned chunk
+        # npys' LAST consumer is the omega-depth/scale step that just
+        # succeeded — delete them NOW (tens of GB) instead of keeping them
+        # for the optional TSDF depth fallback. Runs only on scale SUCCESS
+        # (the fail path raises above); a phase-2 chunked re-run regenerates
+        # the dir from scratch.
+        _aligned = Path(vggt_save_dir) / "_tmp_results_aligned"
+        if _aligned.exists():
+            _mb = sum(f.stat().st_size for f in _aligned.rglob("*")
+                      if f.is_file()) / 1048576
+            shutil.rmtree(_aligned, ignore_errors=True)
+            pipe.send_log(f"[cleanup] _tmp_results_aligned deleted after scale "
+                          f"({_mb:.0f} MB freed)")
         return _walk
 
     _walk_m = _metricize_and_orient(vggt_config, "chunked-metric" if _chunked_already
@@ -2460,6 +2473,15 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                         json.dump({"chunk_id": i, "source_chunk": int(K),
                                    "n_points": n, "chunk_step": int(chunk_step)}, f)
                     pipe.send_log(f"Saved origins chunk_{i:03d} (src {K}, inline 1:1): {n} pts")
+                    # streaming clean (user 2026-09-03: minimize expansion):
+                    # this chunk is now fully mirrored in output/ — its pcd/
+                    # source ply + inline npz are dead; end-of-stage cleanup
+                    # used to keep the 2x copy alive for the whole post-process
+                    for _dead in (Path(pcd_files[i]), inline):
+                        try:
+                            _dead.unlink()
+                        except OSError:
+                            pass
                     continue
 
                 npy_path = chunks_dir / f"chunk_{K}.npy"
