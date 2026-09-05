@@ -411,9 +411,20 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # missing inputs STOPS the pipeline. ──
     from config import cfg as _full_cfg
     _df = _full_cfg.get("dino_features") or {}
+    _oa = _df.get("object_anchor") or {}
     _sa = _df.get("scene_anchor") or {}
     _fm = _df.get("pose_refine_fm") or {}
-    if bool(_sa.get("enabled", False)):
+    if bool(_oa.get("enabled", False)):
+        # FASE 5 v2 (USER DESIGN 2026-09-05): OBJECT-LEVEL semantic
+        # anchoring — VLM prompts → SAM3.1 all keyframes → identity by RAY
+        # convergence (never by measured position) → per-chunk depth-scale
+        # graph, cross-validated BY OBJECTS + DA3 gate. Chunks REBUILT.
+        pipe.send_progress(
+            70, "Fase 5v2: object-level semantic anchoring...",
+            stage="reconstruction")
+        _fm_cmd = [sys.executable, "-m", "reconstruction.object_anchor",
+                   "--output-dir", str(output_dir)]
+    elif bool(_sa.get("enabled", False)):
         # FASE 5 (USER DESIGN 2026-09-04): global surface-consensus
         # anchoring — landmarks by appearance (the end-of-walk door),
         # joint SE(3)+depth-curve solve, double held-out + DA3 gates.

@@ -57,7 +57,9 @@ from reconstruction.pose_refine import (edge_errors, normal_grid,
                                         robust_rigid, solve_pose_graph)
 from reconstruction.dino_features import (FeatureCache,
                                           extract_session_features,
-                                          load_session_cameras)
+                                          layout_ransac,
+                                          load_session_cameras,
+                                          sequence_coherent)
 from reconstruction.pose_refine_fm import _mutual_matches
 
 logger = logging.getLogger(__name__)
@@ -165,7 +167,8 @@ def _revisit_pairs(fc: FeatureCache, frames: List[int], world: dict,
     for i in range(n):
         js = np.flatnonzero(S[i] >= min_global_sim)
         for j in js:
-            if j - i >= min_gap and i in world and int(j) in world:
+            if j - i >= min_gap and i in world and int(j) in world \
+                    and sequence_coherent(S, i, int(j)):
                 rev.append((i, int(j), float(S[i, j])))
     rev.sort(key=lambda t: -t[2])
     seen = set()
@@ -218,6 +221,14 @@ def _build_tracks(fc: FeatureCache, frames, world, valid, pairs,
                                        match_min_cos)
         if len(ia) == 0:
             continue
+        # aliasing killer (USER 2026-09-04): keep only the matches that
+        # follow ONE coherent layout transform between the two images
+        rc_a = np.column_stack([ia_v[ia] // wp, ia_v[ia] % wp])
+        rc_b = np.column_stack([ib_v[ib] // wp, ib_v[ib] % wp])
+        inl = layout_ransac(rc_a, rc_b)
+        if inl.sum() < 12:
+            continue
+        ia, ib = ia[inl], ib[inl]
         Pa = world[a].reshape(-1, 3)[ia_v[ia]]
         Pb = world[b].reshape(-1, 3)[ib_v[ib]]
         # spatial sanity: same physical point → displaced copies live within

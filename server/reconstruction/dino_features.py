@@ -85,7 +85,9 @@ def _patch_tokens(model, x):
 
 def extract_session_features(output_dir: Path, frames_dir: Path,
                              cfg: Optional[dict] = None,
-                             log=logger.info) -> Path:
+                             log=logger.info,
+                             cache_dir: Optional[Path] = None,
+                             frame_list_path: Optional[Path] = None) -> Path:
     """Run DINOv3 over every keyframe in frame_list.json; cache the
     L2-normalized, PCA-compressed patch grids. Returns the cache dir.
     Idempotent: an existing complete cache is reused."""
@@ -97,7 +99,7 @@ def extract_session_features(output_dir: Path, frames_dir: Path,
     batch = int(cfg.get("batch", 6))
     output_dir = Path(output_dir)
     frames_dir = Path(frames_dir)
-    cache = _cache_dir(output_dir)
+    cache = Path(cache_dir) if cache_dir else _cache_dir(output_dir)
     meta_p = cache / "meta.json"
     feats_p = cache / "features_f16.npy"
     if meta_p.exists() and feats_p.exists():
@@ -111,7 +113,8 @@ def extract_session_features(output_dir: Path, frames_dir: Path,
             pass
 
     frame_files: List[str] = json.loads(
-        (output_dir / "frame_list.json").read_text())
+        (Path(frame_list_path) if frame_list_path
+         else output_dir / "frame_list.json").read_text())
     if not frame_files:
         raise RuntimeError("frame_list.json is empty — no keyframes to encode")
     # target size: full keyframe resolution snapped to the patch grid
@@ -218,8 +221,8 @@ def extract_session_features(output_dir: Path, frames_dir: Path,
 class FeatureCache:
     """Lazy reader over the per-session feature cache."""
 
-    def __init__(self, output_dir: Path):
-        cache = _cache_dir(output_dir)
+    def __init__(self, output_dir: Path, cache_dir: Optional[Path] = None):
+        cache = Path(cache_dir) if cache_dir else _cache_dir(output_dir)
         self.meta = json.loads((cache / "meta.json").read_text())
         self.feats = np.load(cache / "features_f16.npy", mmap_mode="r")
         self.hp, self.wp = int(self.meta["hp"]), int(self.meta["wp"])
@@ -324,3 +327,63 @@ def calibrate_provenance_grid(xyz: np.ndarray, frame_global: np.ndarray,
     log(f"[dino] provenance grid {best[0]}x{best[1]} "
         f"(median reprojection {best[2]:.2f} px on {len(sel):,} samples)")
     return best
+
+
+def layout_ransac(rc_a: np.ndarray, rc_b: np.ndarray,
+                  tol_cells: float = 2.5, iters: int = 120,
+                  seed: int = 0) -> np.ndarray:
+    """PERCEPTUAL-ALIASING KILLER (USER FINDING 2026-09-04: the tunnel's
+    repeating segments made appearance-only pairs 'parecidos pero no lo
+    mismo'). A TRUE same-place pair's patch matches follow one coherent
+    similarity transform between the two images; look-alike DIFFERENT
+    places match scattered. RANSAC similarity fit over matched patch
+    coords (r,c); returns the boolean inlier mask (empty coherence → all
+    False)."""
+    n = len(rc_a)
+    if n < 6:
+        return np.zeros(n, bool)
+    A = np.asarray(rc_a, np.float64)
+    B = np.asarray(rc_b, np.float64)
+    rng = np.random.default_rng(seed)
+    best = np.zeros(n, bool)
+    for _ in range(iters):
+        idx = rng.choice(n, 2, replace=False)
+        a0, a1 = A[idx]
+        b0, b1 = B[idx]
+        va, vb = a1 - a0, b1 - b0
+        na, nb = np.linalg.norm(va), np.linalg.norm(vb)
+        if na < 1e-6 or nb < 1e-6:
+            continue
+        s = nb / na
+        if not (0.5 <= s <= 2.0):        # same place → similar scale
+            continue
+        ca, sa = va / na, np.array([-va[1], va[0]]) / na
+        cb_ = vb / nb
+        cosr = float(ca @ cb_)
+        sinr = float(sa @ cb_)
+        R = np.array([[cosr, -sinr], [sinr, cosr]])
+        pred = (A - a0) @ R.T * s + b0
+        inl = np.linalg.norm(pred - B, axis=1) <= tol_cells
+        if inl.sum() > best.sum():
+            best = inl
+    return best if best.sum() >= 12 else np.zeros(n, bool)
+
+
+def sequence_coherent(S: np.ndarray, i: int, j: int,
+                      radius: int = 2, drop: float = 0.06,
+                      min_run: int = 3) -> bool:
+    """A TRUE revisit matches in a RUN of neighbours — in EITHER direction:
+    (i+δ, j+δ) when the walk repeats the same way, (i+δ, j−δ) when it
+    RETURNS (the user's door reappearing on the way back). Aliased
+    singletons pass neither. S = global-descriptor similarity."""
+    n = len(S)
+    base = S[i, j]
+    best = 0
+    for sign in (1, -1):
+        run = 0
+        for d in range(-radius, radius + 1):
+            a, b = i + d, j + sign * d
+            if 0 <= a < n and 0 <= b < n and S[a, b] >= base - drop:
+                run += 1
+        best = max(best, run)
+    return best >= min_run
