@@ -403,57 +403,8 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # with itself less, else it applies nothing. Best-effort like finereg. ──
     if (recon_cfg.get("pose_refine", {}) or {}).get("enabled", True):
         _run_pose_refine_step(pipe, output_dir, recon_cfg)
-    # ── FASE 3 (DINOv3, USER ORDER 2026-09-04): FEATURE-METRIC pose
-    # refinement — sequential + measured-revisit DINOv3 correspondences into
-    # the same pose-graph solver, self-gated on held-out edges (identity is a
-    # valid RESULT). Runs after the pose_refine slot, same stage (chunk PLYs
-    # on disk). FAILURES ARE FATAL — "nada falla en silencio": a crash or
-    # missing inputs STOPS the pipeline. ──
-    from config import cfg as _full_cfg
-    _df = _full_cfg.get("dino_features") or {}
-    _oa = _df.get("object_anchor") or {}
-    _sa = _df.get("scene_anchor") or {}
-    _fm = _df.get("pose_refine_fm") or {}
-    if bool(_oa.get("enabled", False)):
-        # FASE 5 v2 (USER DESIGN 2026-09-05): OBJECT-LEVEL semantic
-        # anchoring — VLM prompts → SAM3.1 all keyframes → identity by RAY
-        # convergence (never by measured position) → per-chunk depth-scale
-        # graph, cross-validated BY OBJECTS + DA3 gate. Chunks REBUILT.
-        pipe.send_progress(
-            70, "Fase 5v2: object-level semantic anchoring...",
-            stage="reconstruction")
-        _fm_cmd = [sys.executable, "-m", "reconstruction.object_anchor",
-                   "--output-dir", str(output_dir)]
-    elif bool(_sa.get("enabled", False)):
-        # FASE 5 (USER DESIGN 2026-09-04): global surface-consensus
-        # anchoring — landmarks by appearance (the end-of-walk door),
-        # joint SE(3)+depth-curve solve, double held-out + DA3 gates.
-        # Supersedes/absorbs pose_refine_fm.
-        pipe.send_progress(
-            70, "Fase 5: global surface-consensus anchoring (DINOv3)...",
-            stage="reconstruction")
-        _fm_cmd = [sys.executable, "-m", "reconstruction.scene_anchor",
-                   "--output-dir", str(output_dir)]
-    elif bool(_fm.get("enabled", False)):
-        pipe.send_progress(
-            70, "Feature-metric pose refinement (DINOv3)...",
-            stage="reconstruction")
-        _fm_cmd = [sys.executable, "-m", "reconstruction.pose_refine_fm",
-                   "--output-dir", str(output_dir)]
-    else:
-        _fm_cmd = None
-    if _fm_cmd is not None:
-        _fm_proc = subprocess.run(
-            _fm_cmd, cwd=str(Path(__file__).resolve().parent.parent),
-            capture_output=True, text=True, timeout=7200)
-        for _ln in (_fm_proc.stdout or "").splitlines()[-60:]:
-            if _ln.strip():
-                pipe.send_log(f"[pose-fm] {_ln.strip()}")
-        if _fm_proc.returncode != 0:
-            raise RuntimeError(
-                f"[pose-fm] FAILED rc={_fm_proc.returncode} — pipeline "
-                f"stopped (nothing fails silently): "
-                f"{(_fm_proc.stderr or '')[-800:]}")
+    # (DINOv3 fases 3/5 — feature-metric refine, scene/object anchor —
+    # DELETED by USER ORDER 2026-09-05: "eliminá todo lo de dinov3 y fase 5")
 
 
 def _run_pose_refine_step(pipe: WorkerPipe, output_dir: Path, recon_cfg: dict):

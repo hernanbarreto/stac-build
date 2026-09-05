@@ -2455,34 +2455,7 @@ def rebuild_instance_store(output_dir) -> bool:
         return False
 
 
-class _Fase4Error(RuntimeError):
-    """DINOv3 fase-4 failure — must PROPAGATE (USER 2026-09-04: nothing
-    fails silently), never be swallowed into an error-dict."""
-
-
-def _dino_fase4_refine(output_dir, instances, log=print):
-    """FASE 4 (DINOv3, USER 2026-09-04): runs at THE single point where
-    instances are built, so every caller (SAM3 direct, deferred cloudcompy
-    mapping, manual refresh) gets it. Config read fresh from disk — no
-    backend restart needed. Failures raise _Fase4Error."""
-    import yaml as _yaml
-    from pathlib import Path as _P
-    _cfg_path = _P(__file__).resolve().parents[1] / "config.yaml"
-    _dcfg = (_yaml.safe_load(_cfg_path.read_text())
-             or {}).get("dino_features") or {}
-    if not bool((_dcfg.get("instance_refine") or {}).get("enabled", False)):
-        return
-    try:
-        from segmentation.instance_feature_refine import refine_instance
-        _icfg = {**_dcfg, **(_dcfg.get("instance_refine") or {})}
-        for _inst in instances:
-            _iid = int(_inst.get("instance_id", _inst.get("id")))
-            refine_instance(output_dir, _iid, cfg=_icfg,
-                            log=lambda m: log(f"[SegPipeline] {m}"))
-        log(f"[SegPipeline] ✅ DINOv3 fase-4 refine: "
-            f"{len(instances)} instance(s)")
-    except Exception as e:
-        raise _Fase4Error(f"DINOv3 fase-4 refine FAILED: {e}") from e
+# (DINOv3 fase-4 refine DELETED by USER ORDER 2026-09-05)
 
 
 def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
@@ -2566,10 +2539,7 @@ def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
             json.dump(merged_result, f)
         print(f"[SegPipeline] 💾 Saved segmentation_result.json "
               f"({len(merged)} instances, {coverage*100:.1f}% coverage)")
-        _dino_fase4_refine(output_dir, merged)
         return merged_result
-    except _Fase4Error:
-        raise                       # LOUD by order — never an error-dict
     except Exception as e:
         print(f"[SegPipeline] ⚠️ Match-and-save failed: {e}")
         import traceback

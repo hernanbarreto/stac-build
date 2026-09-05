@@ -196,12 +196,27 @@ def load_ply_to_numpy(ply_path: Path) -> Optional[np.ndarray]:
         return None
 
 # --- CloudCompPy Post-Processing ---
+# Sessions whose on-load rebuild chain is running — while set, any incoming
+# run_pipeline for that session is REJECTED (USER 2026-09-05: one and only one)
+_onload_busy: dict = {}
+
+
 async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, websocket=None):
     """Run CloudCompPy post-processing on reconstruction chunk PLYs as subprocess."""
     import subprocess
     import logging as _logging
     _olog = _logging.getLogger("onload-cloudcompy")  # → server.log (root RotatingFileHandler)
+    _onload_busy[session_id] = True
+    try:
+        return await _run_cloudcompy_postprocess_inner(
+            session_id, postproc_config, websocket, _olog)
+    finally:
+        _onload_busy.pop(session_id, None)
 
+
+async def _run_cloudcompy_postprocess_inner(session_id: str, postproc_config: dict,
+                                            websocket, _olog):
+    import subprocess
     ctx = _ctx(session_id)
     scans_dir = ctx.output_dir
     # UNIFIED PATH (USER 2026-09-04, after this legacy path built a cloud
@@ -321,16 +336,7 @@ async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, we
                         iterations=int(_sc.get("iterations", 2)),
                         normal_gate=float(_sc.get("normal_gate", 0.25)))
                     print(f"[PostProc] [consolidate] {_st}")
-                _dcfg = _pc.get("dino_features") or {}
-                if bool((_dcfg.get("score") or {}).get("enabled", False)):
-                    from reconstruction.cloud_feature_score import \
-                        run as _dscore
-                    _rep = _dscore(scans_dir, scans_dir.parent / "frames",
-                                   cfg=_dcfg, log=lambda m: print(
-                                       f"[PostProc] {m}"))
-                    if _rep is None:
-                        raise RuntimeError("[dino-score] no report — "
-                                           "nothing fails silently")
+                # (DINOv3 score DELETED by USER ORDER 2026-09-05)
             await asyncio.get_event_loop().run_in_executor(
                 None, _finish_canonical)
             # merged_cloud → symlink to the canonical cloud (worker parity)
@@ -6782,6 +6788,30 @@ async def viewer_websocket(websocket: WebSocket):
             elif cmd.get("type") in ("reconstruct_geometry", "run_pipeline"):
                 # Pipeline-based reconstruction (subprocess workers)
                 session_id = cmd.get("session_id")
+
+                # ONE AND ONLY ONE (USER ORDER 2026-09-05: "para reconstruccion
+                # no debe haber cola de comandos, hay uno y solo uno"): a
+                # run_pipeline that arrives while ANY reconstruction work is
+                # active — a pipeline job, or the on-load rebuild chain — is
+                # REJECTED, never queued, never cancel-and-replaced. This also
+                # kills the 17:14 incident class: a stale command sitting in
+                # the socket buffer behind a long stage executed late and
+                # wiped output/. A command must act NOW or not at all.
+                _active = pipeline_manager._jobs.get(session_id) if session_id else None
+                _busy = bool(_active and getattr(_active, "status", None) is not None
+                             and str(getattr(_active.status, "value", _active.status))
+                             in ("queued", "running"))
+                if _busy or _onload_busy.get(session_id):
+                    _why = ("a pipeline is already running"
+                            if _busy else "the on-load rebuild chain is running")
+                    print(f"[Pipeline] ✋ run_pipeline REJECTED for "
+                          f"{session_id}: {_why} (one and only one)")
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": f"Reconstruction command rejected: {_why}. "
+                                   f"One and only one — resend it yourself "
+                                   f"when the current work finishes."}))
+                    continue
                 print(f"[Pipeline] 🔧 Starting pipeline for session {session_id}")
 
                 # The pipeline runs reconstruction → cloudcompy and ends at the

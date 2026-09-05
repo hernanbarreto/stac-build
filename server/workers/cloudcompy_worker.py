@@ -238,19 +238,7 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         server_dir_str = str(Path(__file__).resolve().parent.parent)
         if server_dir_str not in sys.path:
             sys.path.insert(0, server_dir_str)
-        from config import cfg as _fresh_cfg
-        _dcfg = _fresh_cfg.get("dino_features", {}) or {}
-        if bool((_dcfg.get("score") or {}).get("enabled", False)) \
-                and not light_resume:
-            pipe.send_progress(94, "DINOv3 feature-consistency score...",
-                               stage="cloudcompy")
-            from reconstruction.cloud_feature_score import run as _dscore
-            _rep = _dscore(output_dir, session_path / "frames", cfg=_dcfg,
-                           log=lambda m: pipe.send_log(m))
-            if _rep is None:
-                raise RuntimeError(
-                    "[dino-score] produced no report — inputs missing; "
-                    "refusing to continue (nothing fails silently)")
+        # (DINOv3 score/filter DELETED by USER ORDER 2026-09-05)
 
         # Compute and save floor alignment transform (kept as-is on light
         # resume — it may carry the user's gizmo edits)

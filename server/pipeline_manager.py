@@ -176,9 +176,15 @@ class PipelineManager:
             scan_key: Optional "date/source" key (e.g. "2026-03-07/legacy") to target
                       a specific scan. If None, resolves to latest scan/first source.
         """
-        # Cancel existing job for this session if any
-        if session_id in self._jobs:
-            await self.cancel_pipeline(session_id)
+        # ONE AND ONLY ONE (USER ORDER 2026-09-05): a reconstruction command
+        # never queues and never cancel-and-replaces a running one — if a job
+        # for this session is active, the new request is REFUSED loudly.
+        _existing = self._jobs.get(session_id)
+        if _existing and _existing.status in (JobStatus.QUEUED,
+                                              JobStatus.RUNNING):
+            raise RuntimeError(
+                f"[Pipeline] a pipeline for {session_id} is already "
+                f"{_existing.status.value} — one and only one; command refused")
 
         # Build job
         stage_states = [StageState(stage=s) for s in stages]
