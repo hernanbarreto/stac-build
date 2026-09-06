@@ -71,7 +71,7 @@ def main() -> int:
         print(f"✗ target project {args.into} not found"); return 2
 
     busy = _busy()
-    if busy and not args.force:
+    if busy and not args.force and not args.dry_run:   # a dry run moves nothing
         print("✗ REFUSED — processes alive that could be using these folders: "
               f"{busy}. Stop the backend/pipeline first (or --force).")
         return 3
@@ -133,6 +133,20 @@ def main() -> int:
     ref = args.reference or meta["composition"].get("reference")
     if ref:
         set_reference(into, ref)
+    # project-level merged/ links (legacy single-scan entry points) must
+    # follow the reference scan — after renames/moves they dangle otherwise
+    # (pccr showed "nothing" after the merge, 2026-09-06)
+    if ref:
+        rdate, rsrc = ref.split("/", 1)
+        out_rel = Path("..") / "scans" / rdate / f"src_{rsrc}" / "output"
+        into.merged_dir.mkdir(parents=True, exist_ok=True)
+        for name, target in (("merged_cloud.ply", out_rel / "cleaned_cloud.ply"),
+                             ("potree", out_rel / "potree")):
+            link = into.merged_dir / name
+            if link.is_symlink() or link.exists():
+                link.unlink() if link.is_symlink() else shutil.rmtree(link)
+            link.symlink_to(target)
+        print(f"  ↪ merged/ links → {ref}")
 
     # anything under the moved scans still naming the old slug (chat notes,
     # prefs, reports) is reported, never rewritten blindly

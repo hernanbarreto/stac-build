@@ -264,13 +264,19 @@ class SourceContext:
     def merged_dir(self) -> Path:
         return self.paths.merged_dir
 
+    # Multi-scan (USER 2026-09-06): every scan's cloud/octree is ITS OWN
+    # output/. The project-level merged/ links are a legacy single-scan
+    # entry point — they can only follow one scan, so they are used only
+    # as a fallback when this scan has no output of its own.
     @property
     def merged_cloud(self) -> Path:
-        return self.paths.merged_cloud
+        own = self.output_dir / "cleaned_cloud.ply"
+        return own if own.exists() else self.paths.merged_cloud
 
     @property
     def merged_potree(self) -> Path:
-        return self.paths.merged_potree
+        own = self.output_dir / "potree"
+        return own if (own / "metadata.json").exists() else self.paths.merged_potree
 
     @property
     def floor_transform(self) -> Path:

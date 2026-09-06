@@ -1133,10 +1133,12 @@ async def serve_potree_files(session_id: str, file_path: str):
     """Serve Potree octree files for a session."""
     from fastapi.responses import FileResponse
     ctx = _ctx(session_id)
-    full_path = ctx.merged_potree / file_path
+    # Multi-scan (USER 2026-09-06): the main cloud is the ACTIVE scan's own
+    # octree — the project-level merged/ link is a legacy single-scan
+    # entry point and only a fallback now.
+    full_path = ctx.output_dir / "potree" / file_path
     if not full_path.exists():
-        # Fallback: check output/potree/ (for data not yet in merged/)
-        full_path = ctx.output_dir / "potree" / file_path
+        full_path = ctx.merged_potree / file_path
     if not full_path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
     # Set proper content type for binary files
@@ -1510,7 +1512,8 @@ async def get_sessions(
                 
                 # Check output
                 output_dir = ctx.output_dir
-                has_cloud = ctx.merged_cloud.exists()
+                # active scan's own cloud first (multi-scan); merged/ link = legacy fallback
+                has_cloud = (ctx.output_dir / "cleaned_cloud.ply").exists() or ctx.merged_cloud.exists()
                 has_segments = (ctx.segmentation_dir / "segmentation.json").exists() if hasattr(ctx, 'segmentation_dir') else (output_dir / "segmentation.json").exists()
                 
                 # Count PLY chunks
