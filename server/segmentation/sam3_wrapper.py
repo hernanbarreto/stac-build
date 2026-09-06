@@ -1145,6 +1145,10 @@ class SAM3Wrapper:
             logger.error(f"[SAM3-Interactive] Propagation failed: {e}")
             import traceback
             traceback.print_exc()
+            # RE-RAISE (2026-09-06): swallowing the error made a mid-way
+            # OOM look like a normal end — partial masks were then saved
+            # and flagged fully propagated. Callers decide what to keep.
+            raise
         finally:
             pass  # No internal state manipulation needed (notebook pattern)
 
@@ -1175,14 +1179,34 @@ class SAM3Wrapper:
             logger.info(f"[SAM3-Interactive] ── object batch {bi + 1}/"
                         f"{len(batches)}: obj_ids {batch} ──")
             self.clear_interactive_prompts(state_id)
+            # REAL GPU cleanup before every batch: a reset alone left 47 GB
+            # resident after a failed pass and the next batch hung on its
+            # first prompt (2026-09-06).
+            try:
+                import gc, torch
+                gc.collect()
+                torch.cuda.empty_cache()
+                logger.info(f"[SAM3-Interactive] GPU after cleanup: "
+                            f"{torch.cuda.memory_allocated()/2**30:.1f} GB "
+                            f"allocated")
+            except Exception:  # noqa: BLE001
+                pass
             bset = set(batch)
+            n_fail = 0
             for pr in plog:
                 if int(pr["obj_id"]) in bset:
-                    self.add_interactive_prompt(
+                    res = self.add_interactive_prompt(
                         state_id, pr["frame_idx"], pr["obj_id"],
                         np.asarray(pr["points"], dtype=np.float32),
                         np.asarray(pr["labels"], dtype=np.int32),
                         _replay=True)
+                    if isinstance(res, dict) and res.get("error"):
+                        n_fail += 1
+                        if n_fail >= 3:
+                            raise RuntimeError(
+                                f"batch {bi + 1}: prompts failing "
+                                f"({res.get('error')}) — aborting instead "
+                                f"of propagating garbage")
             for frame_idx, num_frames, outputs in                     self.propagate_interactive_stream(
                         state_id, output_prob_thresh=output_prob_thresh):
                 m = merged.get(frame_idx)

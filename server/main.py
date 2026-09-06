@@ -2975,6 +2975,8 @@ async def propagate_interactive_segmentation(request: Request):
             print(f"[Segmentation] Error during propagation: {e}")
             import traceback
             traceback.print_exc()
+            # keep whatever frames were reached — but NEVER flagged complete
+            _save_results(mark_complete=False)
             task_manager.fail(tid, str(e))
             yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
     
@@ -6013,16 +6015,24 @@ async def resume_run(body: dict):
         else:
             _sx = _sy = 1.0
         n_seeded = 0
-        sam3.clear_interactive_prompts(state_id)   # fresh prompt_log
+        # LOG-ONLY seeding: no inference here (128 up-front add_prompt calls
+        # OOM'd the GPU). The batched propagation replays these prompts
+        # <=10 objects at a time, with a real GPU cleanup between batches.
+        sam3.clear_interactive_prompts(state_id)
+        meta = sam3._interactive_sessions.get(state_id)
+        if meta is None:
+            raise RuntimeError("SAM3 session metadata missing")
+        plog = meta.setdefault("prompt_log", [])
+        plog.clear()
         for oid, fseeds in seeds.items():
             for rf, pts in fseeds.items():
                 seq = real_to_seq.get(int(rf))
                 if seq is None:
                     continue
-                P = _np.array([(x * _sx, y * _sy) for x, y in pts],
-                              dtype=_np.float32)
-                L = _np.ones(len(pts), dtype=_np.int32)
-                sam3.add_interactive_prompt(state_id, seq, int(oid), P, L)
+                plog.append({
+                    "frame_idx": int(seq), "obj_id": int(oid),
+                    "points": [[float(x * _sx), float(y * _sy)] for x, y in pts],
+                    "labels": [1] * len(pts)})
                 n_seeded += len(pts)
         task_manager.update(tid, pct=10,
                             detail=f"seeded {n_seeded} points; propagating")
