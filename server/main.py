@@ -6014,50 +6014,84 @@ async def resume_run(body: dict):
             _sx, _sy = _orig[1] / _sc[1], _orig[0] / _sc[0]
         else:
             _sx = _sy = 1.0
-        n_seeded = 0
-        # LOG-ONLY seeding: no inference here (128 up-front add_prompt calls
-        # OOM'd the GPU). The batched propagation replays these prompts
-        # <=10 objects at a time, with a real GPU cleanup between batches.
-        sam3.clear_interactive_prompts(state_id)
-        meta = sam3._interactive_sessions.get(state_id)
-        if meta is None:
-            raise RuntimeError("SAM3 session metadata missing")
-        plog = meta.setdefault("prompt_log", [])
-        plog.clear()
-        for oid, fseeds in seeds.items():
-            for rf, pts in fseeds.items():
-                seq = real_to_seq.get(int(rf))
-                if seq is None:
-                    continue
-                plog.append({
-                    "frame_idx": int(seq), "obj_id": int(oid),
-                    "points": [[float(x * _sx), float(y * _sy)] for x, y in pts],
-                    "labels": [1] * len(pts)})
-                n_seeded += len(pts)
-        task_manager.update(tid, pct=10,
-                            detail=f"seeded {n_seeded} points; propagating")
         _thresh = float((cfg.get("segmentation") or {})
                         .get("propagate_output_prob_thresh", 0.0))
         _batch = int((cfg.get("segmentation") or {})
                      .get("propagate_obj_batch", 10))
+        # FRESH SESSION PER BATCH (USER 2026-09-06 fix): reset+reseed on the
+        # SAME session desynced SAM3's detector feature buffer on the 3rd
+        # cycle ("Image features for frame 621 not cached"). A brand-new
+        # session per batch reproduces the exact known-good conditions of a
+        # clean propagation. The keyframe list is the same, so real→seq is
+        # stable. VRAM is bounded because only one batch's objects are ever
+        # tracked at once.
+        keyframes = [kf_mapping[k] for k in
+                     sorted(kf_mapping, key=lambda x: int(x))]
+        frames_dir = str(ctx.frames_dir)
+        obj_ids = sorted(seeds.keys())
+        batches = [obj_ids[i:i + _batch]
+                   for i in range(0, len(obj_ids), _batch)]
+        nb = len(batches)
+        import numpy as _np2
         all_masks = {}
-        for frame_idx, num_frames, outputs in \
-                sam3.propagate_interactive_batched(
-                    state_id, output_prob_thresh=_thresh, obj_batch=_batch):
-            all_masks[frame_idx] = outputs
-            # GLOBAL progress: (batches done * frames + frames in this
-            # batch) / (batches * frames) — the merged dict alone stalls
-            # after batch 1 (USER 2026-09-06: "por dónde va y cuánto falta")
-            bp = getattr(sam3, "batch_progress", {}).get(state_id) or {}
-            nb = max(1, int(bp.get("n_batches", 1)))
-            b = max(1, int(bp.get("batch", 1)))
-            nf = max(1, int(bp.get("num_frames") or num_frames or 1))
-            fr = int(bp.get("frame") or len(all_masks))
-            frac = ((b - 1) * nf + min(fr, nf)) / (nb * nf)
-            pct = 10 + min(88, round(frac * 88))
-            task_manager.update(
-                tid, pct=pct,
-                detail=f"batch {b}/{nb} — frame {min(fr, nf)}/{nf}")
+        for bi, batch in enumerate(batches):
+            task_manager.update(tid, pct=10 + round(bi / nb * 5),
+                                detail=f"batch {bi+1}/{nb}: opening session")
+            bstate = sam3.init_interactive_session(frames_dir, keyframes=keyframes)
+            try:
+                for oid in batch:
+                    for rf, pts in seeds[oid].items():
+                        seq = real_to_seq.get(int(rf))
+                        if seq is None:
+                            continue
+                        P = _np2.array([(x * _sx, y * _sy) for x, y in pts],
+                                       dtype=_np2.float32)
+                        L = _np2.ones(len(pts), dtype=_np2.int32)
+                        sam3.add_interactive_prompt(bstate, int(seq), int(oid), P, L)
+                seen = 0
+                for frame_idx, num_frames, outputs in \
+                        sam3.propagate_interactive_stream(
+                            bstate, output_prob_thresh=_thresh):
+                    seen += 1
+                    prev = all_masks.get(frame_idx)
+                    if prev is None:
+                        all_masks[frame_idx] = outputs
+                    else:
+                        bm = outputs.get("out_binary_masks")
+                        oi = outputs.get("out_obj_ids")
+                        if bm is not None and len(bm):
+                            try:
+                                prev["out_binary_masks"] = _np2.concatenate(
+                                    [prev["out_binary_masks"], bm]) \
+                                    if prev.get("out_binary_masks") is not None \
+                                    and len(prev["out_binary_masks"]) else bm
+                                prev["out_obj_ids"] = _np2.concatenate(
+                                    [_np2.asarray(prev["out_obj_ids"]),
+                                     _np2.asarray(oi)]) \
+                                    if prev.get("out_obj_ids") is not None else oi
+                            except Exception:  # noqa: BLE001
+                                pass
+                    frac = (bi * max(1, num_frames) + seen) / (nb * max(1, num_frames))
+                    task_manager.update(
+                        tid, pct=10 + min(85, round(frac * 85)),
+                        detail=f"batch {bi+1}/{nb} — frame {seen}/{num_frames}")
+            finally:
+                # free this batch's frames + VRAM before the next session
+                try:
+                    sam3.clear_interactive_prompts(bstate)
+                    sam3.predictor.handle_request(
+                        request=dict(type="close_session", session_id=bstate))
+                    _bmeta = sam3._interactive_sessions.pop(bstate, None)
+                    if _bmeta and _bmeta.get("keyframe_temp_dir"):
+                        import shutil as _sh
+                        _sh.rmtree(_bmeta["keyframe_temp_dir"], ignore_errors=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    import gc as _gc, torch as _t
+                    _gc.collect(); _t.cuda.empty_cache()
+                except Exception:  # noqa: BLE001
+                    pass
         if not all_masks:
             raise RuntimeError("resume produced no masks")
         # save + mark complete via the shared pipeline helpers
