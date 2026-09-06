@@ -1175,9 +1175,15 @@ class SAM3Wrapper:
         logger.info(f"[SAM3-Interactive] BATCHED propagation: {len(obj_ids)} "
                     f"objects in {len(batches)} batch(es) of <= {obj_batch}")
         merged: Dict[int, dict] = {}
+        if not hasattr(self, "batch_progress"):
+            self.batch_progress = {}
         for bi, batch in enumerate(batches):
             logger.info(f"[SAM3-Interactive] ── object batch {bi + 1}/"
                         f"{len(batches)}: obj_ids {batch} ──")
+            self.batch_progress[state_id] = {
+                "batch": bi + 1, "n_batches": len(batches),
+                "phase": "seeding", "frame": 0, "num_frames": 0,
+                "objects": list(batch)}
             self.clear_interactive_prompts(state_id)
             # REAL GPU cleanup before every batch: a reset alone left 47 GB
             # resident after a failed pass and the next batch hung on its
@@ -1207,8 +1213,13 @@ class SAM3Wrapper:
                                 f"batch {bi + 1}: prompts failing "
                                 f"({res.get('error')}) — aborting instead "
                                 f"of propagating garbage")
-            for frame_idx, num_frames, outputs in                     self.propagate_interactive_stream(
+            _seen = 0
+            for frame_idx, num_frames, outputs in \
+                    self.propagate_interactive_stream(
                         state_id, output_prob_thresh=output_prob_thresh):
+                _seen += 1
+                self.batch_progress[state_id].update(
+                    phase="propagating", frame=_seen, num_frames=num_frames)
                 m = merged.get(frame_idx)
                 bm = outputs.get("out_binary_masks")
                 oi = outputs.get("out_obj_ids")
@@ -1236,6 +1247,7 @@ class SAM3Wrapper:
                 torch.cuda.empty_cache()
             except Exception:  # noqa: BLE001
                 pass
+        self.batch_progress.pop(state_id, None)
         logger.info(f"[SAM3-Interactive] BATCHED propagation complete "
                     f"({len(batches)} batches, {len(merged)} frames)")
 

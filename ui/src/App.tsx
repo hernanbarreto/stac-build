@@ -181,6 +181,21 @@ function App() {
   // propagated (a prior pass OOM'd), ask before opening.
   const [resumeDialog, setResumeDialog] = useState<{ session: string; incomplete: any[]; complete: number } | null>(null)
   const [resumeBusy, setResumeBusy] = useState(false)
+  // live progress of the resume task (USER 2026-09-06: "por dónde va y
+  // cuánto falta" — the modal stays open until the task finishes)
+  const [resumeProgress, setResumeProgress] = useState<{ pct: number; detail: string; elapsed_s: number } | null>(null)
+  useEffect(() => {
+    if (!resumeBusy || !resumeDialog) return
+    const sid = resumeDialog.session
+    const iv = setInterval(async () => {
+      try {
+        const d = await fetch(`/api/tasks/${sid}`).then(r => r.json())
+        const t = (d.tasks || []).find((x: any) => x.task_type === 'resume')
+        if (t) setResumeProgress({ pct: t.pct || 0, detail: t.detail || '', elapsed_s: t.elapsed_s || 0 })
+      } catch { /* keep last */ }
+    }, 2000)
+    return () => clearInterval(iv)
+  }, [resumeBusy, resumeDialog])
   // Open the manager directly (it loads SAM3). The Resume/Cancel dialog is
   // raised AFTER SAM3 reaches "ready" (USER 2026-09-06: Cancel just clears
   // the incomplete ones and you keep segmenting; Resume finds SAM3 already
@@ -3318,12 +3333,28 @@ function App() {
                 them from their saved masks and finishes propagating (in
                 batches, so it won't run out of memory).
               </p>
+              {resumeBusy && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-primary)', marginBottom: 4 }}>
+                    ⏳ {resumeProgress?.detail || 'starting…'}
+                    {resumeProgress ? ` — ${resumeProgress.pct}%` : ''}
+                    {resumeProgress ? ` (${Math.round(resumeProgress.elapsed_s / 60)} min elapsed)` : ''}
+                  </div>
+                  <div style={{ height: 8, background: 'var(--bg-tertiary)', borderRadius: 4, overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${resumeProgress?.pct || 0}%`, background: '#e0a632', transition: 'width .4s' }} />
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
+                    Objects are propagated in batches; this dialog closes when all batches are saved.
+                  </div>
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 8 }}>
                 <button className="bim-action-btn upload" style={{ flex: 1 }}
                   disabled={resumeBusy}
                   onClick={async () => {
                     const sid = resumeDialog.session
                     setResumeBusy(true)
+                    setResumeProgress(null)
                     // SAM3 is already ready (the dialog was raised on ready)
                     setStatusMessage('▶ resuming propagation (seed + batched propagate)…')
                     try {
@@ -3334,7 +3365,17 @@ function App() {
                       const d = await r.json().catch(() => ({}))
                       setStatusMessage(r.ok ? '▶ propagation resumed — instances completed'
                         : `▶ resume failed: ${d.detail || 'error'}`)
-                    } catch (e: any) { setStatusMessage(`▶ resume failed: ${e?.message || 'error'}`) }
+                    } catch (e: any) {
+                      // the browser may drop a very long POST while the backend
+                      // keeps working — wait for the backend task itself
+                      setStatusMessage('▶ connection dropped — waiting for the backend task to finish…')
+                      for (let i = 0; i < 2400; i++) {
+                        await new Promise(r => setTimeout(r, 3000))
+                        const d = await fetch(`/api/tasks/${sid}`).then(r => r.json()).catch(() => null)
+                        if (d && !(d.tasks || []).some((x: any) => x.task_type === 'resume')) break
+                      }
+                      setStatusMessage('▶ resume task finished (check the segments)')
+                    }
                     setResumeBusy(false)
                     setResumeDialog(null)
                   }}>

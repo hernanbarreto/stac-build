@@ -6045,9 +6045,19 @@ async def resume_run(body: dict):
                 sam3.propagate_interactive_batched(
                     state_id, output_prob_thresh=_thresh, obj_batch=_batch):
             all_masks[frame_idx] = outputs
-            pct = 10 + min(85, round(len(all_masks) / max(1, num_frames) * 85))
-            task_manager.update(tid, pct=pct,
-                                detail=f"Frame {len(all_masks)}/{num_frames}")
+            # GLOBAL progress: (batches done * frames + frames in this
+            # batch) / (batches * frames) — the merged dict alone stalls
+            # after batch 1 (USER 2026-09-06: "por dónde va y cuánto falta")
+            bp = getattr(sam3, "batch_progress", {}).get(state_id) or {}
+            nb = max(1, int(bp.get("n_batches", 1)))
+            b = max(1, int(bp.get("batch", 1)))
+            nf = max(1, int(bp.get("num_frames") or num_frames or 1))
+            fr = int(bp.get("frame") or len(all_masks))
+            frac = ((b - 1) * nf + min(fr, nf)) / (nb * nf)
+            pct = 10 + min(88, round(frac * 88))
+            task_manager.update(
+                tid, pct=pct,
+                detail=f"batch {b}/{nb} — frame {min(fr, nf)}/{nf}")
         if not all_masks:
             raise RuntimeError("resume produced no masks")
         # save + mark complete via the shared pipeline helpers
