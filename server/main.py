@@ -4818,6 +4818,90 @@ async def correction_approve(request: Request):
     return {"ok": True, **res, "status": "approved"}
 
 
+@app.get("/api/segmentation/chunks/boxes/{session_id}")
+async def chunk_boxes(session_id: str):
+    """Floor-aligned OBB of every chunk (USER 2026-09-06: boxes for all 44
+    chunks, all deselected by default — the user picks which to show and
+    probes errors with a rotate/translate gizmo)."""
+    ctx = _ctx(session_id)
+    from segmentation.correction_analysis import compute_chunk_boxes
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, compute_chunk_boxes, ctx.output_dir)
+
+
+@app.post("/api/segmentation/chunks/apply_transform")
+async def chunk_apply_transform(request: Request):
+    """Bake the user's gizmo adjustment of one chunk: points + cameras
+    move together, cleaned_cloud + Potree are recalculated; same
+    Approve/Undo flow as the automatic correction."""
+    from task_manager import task_manager
+    body = await request.json()
+    session_id = body.get("session_id")
+    chunk_id = body.get("chunk")
+    matrix = body.get("matrix")
+    if not session_id or chunk_id is None or not matrix \
+            or len(matrix) != 16:
+        raise HTTPException(400, "session_id, chunk and matrix[16] "
+                            "required")
+    ctx = _ctx(session_id)
+    from segmentation.correction_analysis import apply_manual_chunk
+    tid = task_manager.start(session_id, "correction",
+                             f"Manual chunk {chunk_id} correction")
+    loop = asyncio.get_event_loop()
+
+    def _progress(pct, msg):
+        task_manager.update(tid, pct=pct, detail=msg)
+
+    try:
+        st = await loop.run_in_executor(
+            None, lambda: apply_manual_chunk(
+                ctx.output_dir, int(chunk_id), matrix,
+                log=lambda m: print(f"[Correction] {m}"),
+                progress=_progress))
+        task_manager.finish(tid)
+    except Exception as e:
+        task_manager.fail(tid, str(e))
+        raise HTTPException(500, f"manual correction failed: {e}")
+    await _correction_notify_viewer(session_id, ctx.output_dir)
+    return {"ok": True, **st}
+
+
+@app.post("/api/segmentation/chunks/align_floor")
+async def chunk_align_floor(request: Request):
+    """USER DESIGN 2026-09-06: RANSAC each selected chunk's floor plane and
+    put it at Y=0 (tilt correction included); unselected chunks accompany
+    their neighbours via interpolated corrections. One pending correction
+    → Approve/Undo."""
+    from task_manager import task_manager
+    body = await request.json()
+    session_id = body.get("session_id")
+    chunks = body.get("chunks") or []
+    if not session_id or not chunks:
+        raise HTTPException(400, "session_id and chunks required")
+    ctx = _ctx(session_id)
+    from segmentation.correction_analysis import align_floor_y0
+    tid = task_manager.start(session_id, "correction",
+                             "Floor alignment to Y=0")
+    loop = asyncio.get_event_loop()
+
+    def _progress(pct, msg):
+        task_manager.update(tid, pct=pct, detail=msg)
+
+    try:
+        st = await loop.run_in_executor(
+            None, lambda: align_floor_y0(
+                ctx.output_dir, [int(c) for c in chunks],
+                log=lambda m: print(f"[Correction] {m}"),
+                progress=_progress))
+        task_manager.finish(tid)
+    except Exception as e:
+        task_manager.fail(tid, str(e))
+        raise HTTPException(500, f"floor alignment failed: {e}")
+    await _correction_notify_viewer(session_id, ctx.output_dir)
+    return {"ok": True, **st}
+
+
 @app.get("/api/segmentation/correction/status/{session_id}")
 async def correction_status(session_id: str):
     ctx = _ctx(session_id)

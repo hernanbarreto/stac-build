@@ -65,6 +65,11 @@ interface ViewportProps {
     onTsdfReady?: (sessionId: string, stage: string) => void
     /** Volume deleted from the viewer toolbar. */
     onVolumeDeleted?: (volumeId: number) => void
+    /** Chunk box selected (null = deselected) — App shows the Save panel. */
+    onChunkSelected?: (chunk: number | null) => void
+    /** Chunk box dragged: delta transform in the cloud FILE frame
+        (row-major 4x4). null = box back at its origin. */
+    onChunkDelta?: (chunk: number, matrixRowMajor: number[] | null) => void
 }
 
 export interface SegmentInstance {
@@ -141,6 +146,14 @@ export interface ViewportHandle {
     setVolumeStatus: (volumeId: number, status: 'free' | 'touching' | 'colliding') => void
     setVolumeSolid: (volumeId: number, solid: boolean) => void
     frameBox: (min: number[], max: number[]) => void
+    // Chunk boxes (USER 2026-09-06): floor-aligned OBB per chunk, all
+    // deselected by default; selected box gets a translate/rotate gizmo
+    // centered on the chunk. Delta is reported in the CLOUD FILE frame
+    // (row-major 4x4) for /api/segmentation/chunks/apply_transform.
+    setChunkBoxes: (boxes: Array<{ chunk: number; center: number[]; size: number[]; yaw: number }>) => void
+    setChunkGizmoMode: (m: 'translate' | 'rotate') => void
+    resetChunkBox: (chunk: number) => void
+    clearChunkSelection: () => void
 }
 
 // One item of /api/segmentation/tsdf/list — per-instance entries carry
@@ -401,7 +414,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onChunkSelected, onChunkDelta },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -457,6 +470,107 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // Immersive assistant visualization (animated measurements + user volumes)
     const assistantVizRef = useRef<AssistantViz | null>(null)
     const camTweenRef = useRef<number | null>(null)
+
+    // ── chunk boxes (USER 2026-09-06): one floor-aligned OBB per chunk, all
+    // deselected by default; the selected box carries a translate/rotate
+    // gizmo (NO scale) centered on the chunk. Boxes live under the potree
+    // octreeGroup so the floor transform applies — gizmo deltas measured in
+    // the group's LOCAL frame are therefore in the cloud FILE frame.
+    const chunkBoxRootRef = useRef<THREE.Group | null>(null)
+    const chunkBoxByIdRef = useRef<Map<number, THREE.Group>>(new Map())
+    const chunkOrigRef = useRef<Map<number, THREE.Matrix4>>(new Map())
+    const [selChunk, setSelChunk] = useState<number | null>(null)
+    const [chunkMode, setChunkMode] = useState<'translate' | 'rotate'>('translate')
+    const chunkTcRef = useRef<TransformControls | null>(null)
+    const onChunkSelectedRef = useRef(onChunkSelected)
+    const onChunkDeltaRef = useRef(onChunkDelta)
+    useEffect(() => { onChunkSelectedRef.current = onChunkSelected }, [onChunkSelected])
+    useEffect(() => { onChunkDeltaRef.current = onChunkDelta }, [onChunkDelta])
+    useEffect(() => { onChunkSelectedRef.current?.(selChunk) }, [selChunk])
+
+    const chunkColor = (c: number) => new THREE.Color().setHSL((c * 0.618034) % 1, 0.75, 0.55)
+
+    const emitChunkDelta = (chunk: number) => {
+        const g = chunkBoxByIdRef.current.get(chunk)
+        const orig = chunkOrigRef.current.get(chunk)
+        if (!g || !orig) return
+        g.updateMatrix()
+        const delta = g.matrix.clone().multiply(orig.clone().invert())
+        const identity = delta.elements.every((v, i) =>
+            Math.abs(v - (i % 5 === 0 ? 1 : 0)) < 1e-6)
+        if (identity) { onChunkDeltaRef.current?.(chunk, null); return }
+        const e = delta.elements   // column-major → row-major for the API
+        onChunkDeltaRef.current?.(chunk, [
+            e[0], e[4], e[8], e[12],
+            e[1], e[5], e[9], e[13],
+            e[2], e[6], e[10], e[14],
+            e[3], e[7], e[11], e[15],
+        ])
+    }
+
+    // gizmo lifecycle for the selected chunk box
+    useEffect(() => {
+        const scene = sceneRef.current, camera = cameraRef.current
+        const renderer = rendererRef.current, controls = controlsRef.current
+        if (!scene || !camera || !renderer || !controls || selChunk == null) return
+        const g = chunkBoxByIdRef.current.get(selChunk)
+        if (!g) { setSelChunk(null); return }
+        const tc = new TransformControls(camera, renderer.domElement)
+        tc.setMode(chunkMode)          // translate | rotate ONLY — no scale
+        tc.setSize(0.9)
+        tc.attach(g)
+        scene.add(tc.getHelper())
+        tc.addEventListener('dragging-changed', (e) => {
+            const dragging = !!(e as unknown as { value?: boolean }).value
+            controls.enabled = !dragging
+            if (!dragging && selChunk != null) emitChunkDelta(selChunk)
+        })
+        chunkTcRef.current = tc
+        return () => {
+            scene.remove(tc.getHelper())
+            tc.detach()
+            tc.dispose()
+            chunkTcRef.current = null
+            controls.enabled = true
+        }
+    }, [selChunk, chunkMode])
+
+    // click-select chunk boxes (navigate tool only; drags never select)
+    useEffect(() => {
+        const container = containerRef.current
+        if (!container) return
+        let down: [number, number] | null = null
+        const onDown = (e: MouseEvent) => { if (e.button === 0) down = [e.clientX, e.clientY] }
+        const onClick = (e: MouseEvent) => {
+            if (activeToolRef.current !== 'navigate') return
+            if (down && (Math.abs(e.clientX - down[0]) > 4 || Math.abs(e.clientY - down[1]) > 4)) return
+            const camera = cameraRef.current, renderer = rendererRef.current
+            const root = chunkBoxRootRef.current
+            if (!camera || !renderer || !root || !root.children.length) return
+            const rect = renderer.domElement.getBoundingClientRect()
+            const mouse = new THREE.Vector2(
+                ((e.clientX - rect.left) / rect.width) * 2 - 1,
+                -((e.clientY - rect.top) / rect.height) * 2 + 1)
+            const rc = new THREE.Raycaster()
+            rc.setFromCamera(mouse, camera)
+            const pickables: THREE.Object3D[] = []
+            root.children.forEach(g => g.children.forEach(ch => {
+                if (ch.userData.chunkPick) pickables.push(ch)
+            }))
+            const hits = rc.intersectObjects(pickables, false)
+            if (hits.length) {
+                setSelChunk(hits[0].object.userData.chunkId as number)
+            } else if (!(chunkTcRef.current as unknown as { axis?: string } | null)?.axis) {
+                setSelChunk(null)
+            }
+        }
+        container.addEventListener('mousedown', onDown)
+        container.addEventListener('click', onClick)
+        return () => {
+            container.removeEventListener('mousedown', onDown)
+            container.removeEventListener('click', onClick)
+        }
+    }, [])
 
     // ── evaluation-volume gizmo (select → move/rotate/resize, user 2026-08-29)
     const [selVolume, setSelVolume] = useState<number | null>(null)
@@ -2025,6 +2139,64 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             assistantVizRef.current?.setVolumeStatus(volumeId, status),
         setVolumeSolid: (volumeId: number, solid: boolean) =>
             assistantVizRef.current?.setVolumeSolid(volumeId, solid),
+        setChunkBoxes: (boxes) => {
+            const scene = sceneRef.current
+            if (!scene) return
+            const octree = scene.getObjectByName('potree-octree') as THREE.Group | null
+            const parent = octree || scene
+            if (!chunkBoxRootRef.current) {
+                const root = new THREE.Group()
+                root.name = 'chunk-boxes'
+                parent.add(root)
+                chunkBoxRootRef.current = root
+            } else if (chunkBoxRootRef.current.parent !== parent) {
+                chunkBoxRootRef.current.parent?.remove(chunkBoxRootRef.current)
+                parent.add(chunkBoxRootRef.current)
+            }
+            const root = chunkBoxRootRef.current
+            const want = new Set(boxes.map(b => b.chunk))
+            // remove boxes no longer selected
+            for (const [cid, g] of chunkBoxByIdRef.current) {
+                if (!want.has(cid)) {
+                    root.remove(g)
+                    chunkBoxByIdRef.current.delete(cid)
+                    chunkOrigRef.current.delete(cid)
+                    if (selChunk === cid) setSelChunk(null)
+                }
+            }
+            for (const b of boxes) {
+                if (chunkBoxByIdRef.current.has(b.chunk)) continue
+                const g = new THREE.Group()
+                g.position.set(b.center[0], b.center[1], b.center[2])
+                g.rotation.y = -b.yaw
+                const geo = new THREE.BoxGeometry(b.size[0], b.size[1], b.size[2])
+                const col = chunkColor(b.chunk)
+                const edges = new THREE.LineSegments(
+                    new THREE.EdgesGeometry(geo),
+                    new THREE.LineBasicMaterial({ color: col }))
+                const fill = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+                    color: col, transparent: true, opacity: 0.05,
+                    depthWrite: false, side: THREE.DoubleSide }))
+                fill.userData.chunkPick = true
+                fill.userData.chunkId = b.chunk
+                g.add(edges)
+                g.add(fill)
+                root.add(g)
+                g.updateMatrix()
+                chunkBoxByIdRef.current.set(b.chunk, g)
+                chunkOrigRef.current.set(b.chunk, g.matrix.clone())
+            }
+        },
+        setChunkGizmoMode: (m) => setChunkMode(m),
+        resetChunkBox: (chunk) => {
+            const g = chunkBoxByIdRef.current.get(chunk)
+            const orig = chunkOrigRef.current.get(chunk)
+            if (!g || !orig) return
+            orig.decompose(g.position, g.quaternion, g.scale)
+            g.updateMatrix()
+            onChunkDeltaRef.current?.(chunk, null)
+        },
+        clearChunkSelection: () => setSelChunk(null),
         frameBox: (min: number[], max: number[]) => {
             const camera = cameraRef.current, controls = controlsRef.current
             if (!camera || !controls) return

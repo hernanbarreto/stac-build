@@ -537,6 +537,9 @@ def undo_correction(output_dir: Path, log=_log_default) -> dict:
     log("undo: restoring cleaned_cloud.ply + camera_poses.txt...")
     shutil.copy2(undo / "cleaned_cloud.ply", output_dir / "cleaned_cloud.ply")
     shutil.copy2(undo / "camera_poses.txt", output_dir / "camera_poses.txt")
+    if (undo / "floor_transform.npz").exists():
+        shutil.copy2(undo / "floor_transform.npz",
+                     output_dir / "floor_transform.npz")
     shutil.rmtree(undo)
     potree = output_dir / "potree"
     if potree.exists():
@@ -580,3 +583,392 @@ def approve_correction(output_dir: Path, log=_log_default) -> dict:
     log(f"correction APPROVED — it is now the cloud "
         f"({len(hist)} approved so far)")
     return {"ok": True, "approved": len(hist)}
+
+
+# ── chunk boxes + manual gizmo correction (USER 2026-09-06) ──────────────
+def compute_chunk_boxes(output_dir: Path) -> dict:
+    """Floor-aligned OBB per chunk (center, size, yaw) from provenance —
+    the viewer draws them (all deselected by default) so the user can SEE
+    where each chunk lies and probe errors with a gizmo. Cached by cloud
+    mtime in chunk_boxes.json."""
+    output_dir = Path(output_dir)
+    ply_path = output_dir / "cleaned_cloud.ply"
+    cache_p = output_dir / "chunk_boxes.json"
+    mtime = ply_path.stat().st_mtime
+    if cache_p.exists():
+        try:
+            cached = json.loads(cache_p.read_text())
+            if cached.get("cloud_mtime") == mtime:
+                return cached
+        except Exception:  # noqa: BLE001
+            pass
+    _, data = _read_ply(ply_path)
+    xyz = np.stack([data["x"], data["y"], data["z"]],
+                   axis=1).astype(np.float64)
+    fg = data["frame_global"].astype(np.int64)
+    frames = [int(x) for x in
+              (output_dir / "camera_frames.txt").read_text().split()]
+    fmax = int(fg.max())
+    kf_arr = np.full(fmax + 1, -1, dtype=np.int64)
+    for k, f in enumerate(frames):
+        if f <= fmax:
+            kf_arr[f] = k
+    ks = kf_arr[np.clip(fg, 0, fmax)]
+    n_chunks = (len(frames) + 29) // 30
+    chunk = np.where(ks >= 0, np.minimum(ks // 30, n_chunks - 1), -1)
+    boxes = []
+    rng = np.random.default_rng(0)
+    for c in range(n_chunks):
+        idx = np.where(chunk == c)[0]
+        if len(idx) < 100:
+            continue
+        if len(idx) > 200000:
+            idx = idx[rng.choice(len(idx), 200000, replace=False)]
+        P = xyz[idx]
+        cen = P.mean(0)
+        # yaw from XZ covariance (floor-aligned box)
+        Q = P[:, [0, 2]] - cen[[0, 2]]
+        w, V = np.linalg.eigh(Q.T @ Q)
+        ax = V[:, np.argmax(w)]
+        yaw = float(np.arctan2(ax[1], ax[0]))
+        ca, sa = np.cos(-yaw), np.sin(-yaw)
+        u = ca * Q[:, 0] - sa * Q[:, 1]
+        v = sa * Q[:, 0] + ca * Q[:, 1]
+        y = P[:, 1] - cen[1]
+        lo = np.percentile(np.stack([u, y, v], 1), 1, axis=0)
+        hi = np.percentile(np.stack([u, y, v], 1), 99, axis=0)
+        boxes.append({
+            "chunk": int(c),
+            "center": [round(float(x), 4) for x in
+                       (cen + [(lo[0] + hi[0]) / 2 * np.cos(yaw)
+                               - (lo[2] + hi[2]) / 2 * np.sin(yaw),
+                               (lo[1] + hi[1]) / 2,
+                               (lo[0] + hi[0]) / 2 * np.sin(yaw)
+                               + (lo[2] + hi[2]) / 2 * np.cos(yaw)])],
+            "size": [round(float(hi[i] - lo[i]), 4) for i in range(3)],
+            "yaw": round(yaw, 5),
+            "n_points": int(len(np.where(chunk == c)[0])),
+        })
+    out = {"cloud_mtime": mtime, "n_chunks": n_chunks, "boxes": boxes,
+           "provenance": "tool_measured"}
+    cache_p.write_text(json.dumps(out))
+    return out
+
+
+def apply_manual_chunk(output_dir: Path, chunk_id: int, matrix16: list,
+                       log=_log_default, progress=None) -> dict:
+    """Bake the user's gizmo adjustment of ONE chunk (USER 2026-09-06:
+    'el gizmo permite mover y si pone guardar queda ajustado y se debe
+    recalcular cleaned cloud y potree'). p' = R p + t for every point of
+    the chunk, cameras move with it; one-level undo backup; Potree
+    deleted and rebuilt. Same Approve/Undo flow as the automatic
+    correction."""
+    output_dir = Path(output_dir)
+    state = load_state(output_dir)
+    if state.get("status") == "pending":
+        raise RuntimeError("a correction is pending approval — approve or "
+                           "undo it before saving a manual one")
+    M = np.array(matrix16, dtype=np.float64).reshape(4, 4)
+    R, t = M[:3, :3], M[:3, 3]
+    # guard: rotation must be orthonormal (no scale — the gizmo has none)
+    if abs(abs(np.linalg.det(R)) - 1.0) > 1e-3:
+        raise RuntimeError("transform carries scale/shear — only rotation "
+                           "+ translation are allowed")
+
+    def _p(pct, msg):
+        log(msg)
+        if progress:
+            progress(pct, msg)
+
+    _p(5, f"manual correction of chunk {chunk_id}: rot "
+          f"{_rot_deg(R):.2f}°, |t| {float(np.linalg.norm(t)):.3f} m")
+    ply_path = output_dir / "cleaned_cloud.ply"
+    header, data = _read_ply(ply_path)
+    xyz = np.stack([data["x"], data["y"], data["z"]],
+                   axis=1).astype(np.float64)
+    fg = data["frame_global"].astype(np.int64)
+    frames = [int(x) for x in
+              (output_dir / "camera_frames.txt").read_text().split()]
+    kf_index = {f: k for k, f in enumerate(frames)}
+    fmax = int(fg.max())
+    kf_arr = np.full(fmax + 1, -1, dtype=np.int64)
+    for f, k in kf_index.items():
+        if f <= fmax:
+            kf_arr[f] = k
+    ks = kf_arr[np.clip(fg, 0, fmax)]
+    n_chunks = (len(frames) + 29) // 30
+    chunk = np.where(ks >= 0, np.minimum(ks // 30, n_chunks - 1), -1)
+    mc = chunk == int(chunk_id)
+    if not mc.any():
+        raise RuntimeError(f"chunk {chunk_id} has no points")
+
+    _p(30, "backup (one-level undo) + rewriting cloud & poses...")
+    undo = output_dir / UNDO_DIR
+    if undo.exists():
+        shutil.rmtree(undo)
+    undo.mkdir()
+    shutil.copy2(ply_path, undo / "cleaned_cloud.ply")
+    shutil.copy2(output_dir / "camera_poses.txt",
+                 undo / "camera_poses.txt")
+    xyz[mc] = xyz[mc] @ R.T + t
+    data["x"] = xyz[:, 0].astype(data.dtype["x"])
+    data["y"] = xyz[:, 1].astype(data.dtype["y"])
+    data["z"] = xyz[:, 2].astype(data.dtype["z"])
+    _write_ply(ply_path, header, data)
+    poses = []
+    for ln in (output_dir / "camera_poses.txt").read_text().splitlines():
+        vals = [float(x) for x in ln.split()]
+        if len(vals) == 16:
+            poses.append(np.array(vals).reshape(4, 4))
+    n_cam = 0
+    for f, k in kf_index.items():
+        if min(k // 30, n_chunks - 1) == int(chunk_id):
+            poses[k][:3, :3] = R @ poses[k][:3, :3]
+            poses[k][:3, 3] = R @ poses[k][:3, 3] + t
+            n_cam += 1
+    (output_dir / "camera_poses.txt").write_text("\n".join(
+        " ".join(f"{x:.9f}" for x in P.reshape(-1)) for P in poses) + "\n")
+    log(f"  {int(mc.sum()):,} pts + {n_cam} cameras moved")
+
+    _p(60, "deleting Potree and rebuilding from the corrected cloud...")
+    potree = output_dir / "potree"
+    if potree.exists():
+        shutil.rmtree(potree)
+    import sys
+    server_dir = str(Path(__file__).resolve().parents[1])
+    if server_dir not in sys.path:
+        sys.path.insert(0, server_dir)
+    from potree_converter import convert_ply_to_potree
+    ok = convert_ply_to_potree(output_dir.parent, force=True)
+    if not ok:
+        raise RuntimeError("Potree rebuild FAILED — undo is available "
+                           "(correction_undo/)")
+    _save_state(output_dir, {
+        "status": "pending", "mode": "manual",
+        "applied_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "chunks": [int(chunk_id)],
+        "points_moved": int(mc.sum()),
+        "rigid": {"rot_deg": round(_rot_deg(R), 3),
+                  "t_m": round(float(np.linalg.norm(t)), 4)},
+    })
+    _p(100, f"✅ manual chunk correction applied — awaiting your verdict "
+            f"(Approve or Undo)")
+    return load_state(output_dir)
+
+
+def align_floor_y0(output_dir: Path, chunk_ids: List[int],
+                   log=_log_default, progress=None) -> dict:
+    """USER DESIGN 2026-09-06: RANSAC each SELECTED chunk's floor plane and
+    put it at Y=0 — tilt correction included (the floor normal is
+    straightened to vertical, pivoting on the chunk's floor centroid) plus
+    the vertical translation. UNSELECTED chunks accompany their neighbours:
+    drift is smooth along the walk, so selected chunks act as ANCHORS and
+    every other chunk gets the interpolated correction (slerp rotation +
+    lerp Δy by chunk index; constant extension past the first/last anchor).
+    A real step between two anchors is PRESERVED — its chunk moves like its
+    neighbours and keeps the relative relation, losing only the drift.
+    A selected chunk whose floor RANSAC fails the guards (near-vertical
+    normal, enough inliers) is DEMOTED to interpolated and loudly reported.
+    One pending correction → Approve/Undo, like everything else."""
+    from scipy.spatial.transform import Rotation, Slerp
+    output_dir = Path(output_dir)
+    state = load_state(output_dir)
+    if state.get("status") == "pending":
+        raise RuntimeError("a correction is pending approval — approve or "
+                           "undo it before running floor alignment")
+    rng = np.random.default_rng(0)
+
+    def _p(pct, msg):
+        log(msg)
+        if progress:
+            progress(pct, msg)
+
+    _p(2, "loading cloud + provenance...")
+    ply_path = output_dir / "cleaned_cloud.ply"
+    header, data = _read_ply(ply_path)
+    xyz = np.stack([data["x"], data["y"], data["z"]],
+                   axis=1).astype(np.float64)
+    fg = data["frame_global"].astype(np.int64)
+    frames = [int(x) for x in
+              (output_dir / "camera_frames.txt").read_text().split()]
+    kf_index = {f: k for k, f in enumerate(frames)}
+    fmax = int(fg.max())
+    kf_arr = np.full(fmax + 1, -1, dtype=np.int64)
+    for f, k in kf_index.items():
+        if f <= fmax:
+            kf_arr[f] = k
+    ks = kf_arr[np.clip(fg, 0, fmax)]
+    n_chunks = (len(frames) + 29) // 30
+    chunk = np.where(ks >= 0, np.minimum(ks // 30, n_chunks - 1), -1)
+
+    # 1) floor RANSAC per SELECTED chunk → anchor transforms ---------------
+    UP = np.array([0.0, 1.0, 0.0])
+    MAX_TILT_DEG = 10.0
+    MIN_INLIERS = 5000
+    anchors = {}          # chunk → (R 3x3, t 3)
+    per_chunk_report = []
+    for c in sorted(set(int(x) for x in chunk_ids)):
+        idx = np.where(chunk == c)[0]
+        if len(idx) < MIN_INLIERS:
+            per_chunk_report.append({"chunk": c, "role": "demoted",
+                                     "why": f"only {len(idx)} points"})
+            log(f"  ch{c:02d}: DEMOTED to interpolated — only "
+                f"{len(idx)} points")
+            continue
+        P = xyz[idx]
+        # lowest band: floor candidates
+        y0 = np.percentile(P[:, 1], 5)
+        band = P[(P[:, 1] < y0 + 0.5)]
+        if len(band) < MIN_INLIERS:
+            per_chunk_report.append({"chunk": c, "role": "demoted",
+                                     "why": "no low band"})
+            log(f"  ch{c:02d}: DEMOTED — no low horizontal band")
+            continue
+        S = band if len(band) <= 120000 else band[
+            rng.choice(len(band), 120000, replace=False)]
+        best, bn = None, -1
+        cos_max = np.cos(np.radians(MAX_TILT_DEG))
+        for _ in range(400):
+            a, b_, c_ = S[rng.choice(len(S), 3, replace=False)]
+            nrm = np.cross(b_ - a, c_ - a)
+            ln = np.linalg.norm(nrm)
+            if ln < 1e-9:
+                continue
+            nrm /= ln
+            if nrm[1] < 0:
+                nrm = -nrm
+            if nrm @ UP < cos_max:
+                continue                     # not near-horizontal plane
+            cnt = int((np.abs((S - a) @ nrm) < 0.02).sum())
+            if cnt > bn:
+                bn, best = cnt, (nrm, a)
+        if best is None or bn < MIN_INLIERS * 0.5:
+            per_chunk_report.append({"chunk": c, "role": "demoted",
+                                     "why": f"floor RANSAC failed "
+                                            f"({bn} inliers)"})
+            log(f"  ch{c:02d}: DEMOTED — floor RANSAC failed "
+                f"({bn} inliers)")
+            continue
+        nrm, a = best
+        inl = np.abs((S - a) @ nrm) < 0.03
+        c_f = S[inl].mean(0)
+        nrm = np.linalg.svd(S[inl] - c_f, full_matrices=False)[2][2]
+        if nrm[1] < 0:
+            nrm = -nrm
+        tilt = float(np.degrees(np.arccos(np.clip(nrm @ UP, -1, 1))))
+        # rotation that takes the floor normal to vertical (pivot c_f)
+        axis = np.cross(nrm, UP)
+        s_ = np.linalg.norm(axis)
+        if s_ > 1e-9:
+            R = Rotation.from_rotvec(
+                axis / s_ * np.arctan2(s_, nrm @ UP)).as_matrix()
+        else:
+            R = np.eye(3)
+        t = c_f - R @ c_f
+        t[1] -= float(c_f[1])          # floor plane → y = 0
+        anchors[c] = (R, t)
+        per_chunk_report.append({
+            "chunk": c, "role": "anchor",
+            "tilt_deg": round(tilt, 3),
+            "dy_m": round(-float(c_f[1]), 4),
+            "floor_inliers": int(inl.sum())})
+        log(f"  ch{c:02d}: ANCHOR — tilt {tilt:.2f}°, floor at "
+            f"{c_f[1]*100:+.1f} cm → Δy {-c_f[1]*100:+.1f} cm "
+            f"({int(inl.sum()):,} inliers)")
+
+    if not anchors:
+        raise RuntimeError("no selected chunk produced a trustworthy floor "
+                           "plane — nothing to align")
+
+    # 2) interpolate every chunk between/past the anchors ------------------
+    _p(30, f"interpolating {n_chunks - len(anchors)} unselected chunk(s) "
+           f"between {len(anchors)} anchor(s)...")
+    a_ids = sorted(anchors.keys())
+    rots = Rotation.from_matrix(np.stack([anchors[c][0] for c in a_ids]))
+    slerp = Slerp(a_ids, rots) if len(a_ids) > 1 else None
+    per_chunk = {}
+    for c in range(n_chunks):
+        if c in anchors:
+            per_chunk[c] = anchors[c]
+            continue
+        if c <= a_ids[0]:
+            per_chunk[c] = anchors[a_ids[0]]
+            role = f"extended from ch{a_ids[0]:02d}"
+        elif c >= a_ids[-1]:
+            per_chunk[c] = anchors[a_ids[-1]]
+            role = f"extended from ch{a_ids[-1]:02d}"
+        else:
+            lo = max(a for a in a_ids if a < c)
+            hi = min(a for a in a_ids if a > c)
+            w = (c - lo) / (hi - lo)
+            R = slerp([c]).as_matrix()[0]
+            t = (1 - w) * anchors[lo][1] + w * anchors[hi][1]
+            per_chunk[c] = (R, t)
+            role = f"interpolated ch{lo:02d}..ch{hi:02d} (w={w:.2f})"
+        per_chunk_report.append({"chunk": c, "role": role})
+
+    # 3) apply everything as ONE pending correction ------------------------
+    _p(45, "applying: backup (one-level undo) + rewrite cloud & poses...")
+    undo = output_dir / UNDO_DIR
+    if undo.exists():
+        shutil.rmtree(undo)
+    undo.mkdir()
+    shutil.copy2(ply_path, undo / "cleaned_cloud.ply")
+    shutil.copy2(output_dir / "camera_poses.txt",
+                 undo / "camera_poses.txt")
+    for c, (R, t) in per_chunk.items():
+        mc = chunk == c
+        if not mc.any():
+            continue
+        xyz[mc] = xyz[mc] @ R.T + t
+    data["x"] = xyz[:, 0].astype(data.dtype["x"])
+    data["y"] = xyz[:, 1].astype(data.dtype["y"])
+    data["z"] = xyz[:, 2].astype(data.dtype["z"])
+    _write_ply(ply_path, header, data)
+    poses = []
+    for ln in (output_dir / "camera_poses.txt").read_text().splitlines():
+        vals = [float(x) for x in ln.split()]
+        if len(vals) == 16:
+            poses.append(np.array(vals).reshape(4, 4))
+    for f, k in kf_index.items():
+        c = min(k // 30, n_chunks - 1)
+        R, t = per_chunk[c]
+        poses[k][:3, :3] = R @ poses[k][:3, :3]
+        poses[k][:3, 3] = R @ poses[k][:3, 3] + t
+    (output_dir / "camera_poses.txt").write_text("\n".join(
+        " ".join(f"{x:.9f}" for x in P.reshape(-1)) for P in poses) + "\n")
+    log(f"  cloud + {len(poses)} cameras rewritten (every chunk moved: "
+        f"{len(anchors)} anchored, {n_chunks - len(anchors)} accompanying)")
+
+    _p(60, "deleting Potree and rebuilding from the corrected cloud...")
+    potree = output_dir / "potree"
+    if potree.exists():
+        shutil.rmtree(potree)
+    import sys
+    server_dir = str(Path(__file__).resolve().parents[1])
+    if server_dir not in sys.path:
+        sys.path.insert(0, server_dir)
+    from potree_converter import convert_ply_to_potree
+    if not convert_ply_to_potree(output_dir.parent, force=True):
+        raise RuntimeError("Potree rebuild FAILED — undo is available "
+                           "(correction_undo/)")
+    # the cloud's floor now sits at Y=0 BY CONSTRUCTION — a stale display
+    # floor transform (computed on the drifted cloud) would shift the whole
+    # scene off the grid (USER 2026-09-06: grid floating 52 cm above the
+    # floor). Reset it to identity; the previous one rides the undo backup.
+    ft = output_dir / "floor_transform.npz"
+    if ft.exists():
+        shutil.copy2(ft, undo / "floor_transform.npz")
+    np.savez(ft, s=np.float64(1.0), R=np.eye(3), t=np.zeros(3))
+    log("  floor_transform reset to identity (floor is at Y=0 by "
+        "construction)")
+    _save_state(output_dir, {
+        "status": "pending", "mode": "floor_align",
+        "applied_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "chunks": a_ids,
+        "points_moved": int((chunk >= 0).sum()),
+        "detail": per_chunk_report,
+    })
+    _p(100, "✅ floor alignment applied — awaiting your verdict "
+            "(Approve or Undo)")
+    return load_state(output_dir)

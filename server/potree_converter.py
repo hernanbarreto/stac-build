@@ -227,14 +227,25 @@ def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
     return True
 
 
+# One Potree build per session at a time (USER 2026-09-06, after an Undo
+# raced the session-load rebuild and both wrote output/potree: "ver si se
+# está regenerando... pero no con un lock"). This is an IN-MEMORY registry —
+# it dies with the process, so it can never go stale on disk. A caller that
+# finds a build running for its session WAITS for it; if the finished build
+# already came from the same cloud state, the result is reused.
+import threading as _threading
+_potree_active: dict = {}      # session key → {"since", "ply", "ply_mtime"}
+_potree_reg = _threading.Lock()  # guards the dict only (microseconds)
+
+
 def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: Path = None) -> bool:
     """Full pipeline: PLY → LAS → Potree octree.
-    
+
     Args:
         session_dir: Path to session dir (e.g. server/scans/live_xxx)
         force: If True, skip mtime cache check and always reconvert.
         ply_override: Optional path to use instead of cleaned_cloud.ply
-    
+
     Returns:
         True if potree/ directory was created successfully.
     """
@@ -245,6 +256,46 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
     if not ply_path.exists():
         logger.warning(f"[Potree] No {ply_path.name} found in {output_dir}")
         return False
+
+    # ── serialize builds per session: check-and-wait, no disk locks ──
+    key = str(output_dir.resolve())
+    import time as _time
+    waited = False
+    while True:
+        with _potree_reg:
+            active = _potree_active.get(key)
+            if active is None:
+                _potree_active[key] = {
+                    "since": _time.time(),
+                    "ply": str(ply_path),
+                    "ply_mtime": ply_path.stat().st_mtime,
+                }
+                break
+        if not waited:
+            logger.info(f"[Potree] another build is running for this "
+                        f"session (since {_time.time()-active['since']:.0f}s)"
+                        f" — waiting for it to finish")
+            waited = True
+        _time.sleep(3)
+    try:
+        if waited:
+            # the build we waited for may have produced exactly what we
+            # need: same source PLY, octree newer than it → reuse
+            meta = potree_dir / "metadata.json"
+            if meta.exists() and ply_path.exists() \
+                    and meta.stat().st_mtime > ply_path.stat().st_mtime:
+                logger.info("[Potree] finished build already covers the "
+                            "current cloud — reusing it")
+                return True
+        return _convert_ply_to_potree_inner(
+            output_dir, ply_path, potree_dir, force)
+    finally:
+        with _potree_reg:
+            _potree_active.pop(key, None)
+
+
+def _convert_ply_to_potree_inner(output_dir: Path, ply_path: Path,
+                                 potree_dir: Path, force: bool) -> bool:
 
     # Skip if already converted and PLY hasn't changed (unless forced)
     if not force and potree_dir.exists() and (potree_dir / "metadata.json").exists():
