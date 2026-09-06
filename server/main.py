@@ -6111,7 +6111,23 @@ async def resume_run(body: dict):
         for inst in seg.get("instances", []):
             inst["propagated"] = True
         (output_dir / "segmentation.json").write_text(json.dumps(seg, indent=2))
-        return {"resumed": len(seeds), "frames": len(all_masks)}
+        # resume is a mutation → leave everything consistent: match the new
+        # masks to the cloud so every resumed instance gets its points +
+        # OBBs (USER 2026-09-06: instances showed 0 points because matching
+        # never ran after resume). Frees GPU first — matching is CPU/cloud.
+        try:
+            import gc as _gc, torch as _t
+            _gc.collect(); _t.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+        task_manager.update(tid, pct=96,
+                            detail="matching masks to the cloud…")
+        from segmentation_pipeline import _match_and_save_result
+        _mres = _match_and_save_result(output_dir)
+        _n = len(_mres.get("instances", [])) if isinstance(_mres, dict) else 0
+        print(f"[Resume] matched {_n} instance(s) to the cloud")
+        return {"resumed": len(seeds), "frames": len(all_masks),
+                "matched": _n}
 
     try:
         res = await loop.run_in_executor(None, _run)
