@@ -154,6 +154,13 @@ export interface ViewportHandle {
     setChunkGizmoMode: (m: 'translate' | 'rotate') => void
     resetChunkBox: (chunk: number) => void
     clearChunkSelection: () => void
+    // Multi-scan layers (USER 2026-09-06): every NON-reference scan of the
+    // project is an extra octree layer with its own floor transform ×
+    // composition transform; toggled like segments. The reference scan is
+    // the main octree (potree_ready) — untouched.
+    setScanLayers: (layers: Array<{ key: string; url: string; floorTransform?: number[] | null; composition?: number[] | null; visible: boolean }>) => void
+    setScanLayerVisible: (key: string, visible: boolean) => void
+    clearScanLayers: () => void
 }
 
 // One item of /api/segmentation/tsdf/list — per-instance entries carry
@@ -470,6 +477,20 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // Immersive assistant visualization (animated measurements + user volumes)
     const assistantVizRef = useRef<AssistantViz | null>(null)
     const camTweenRef = useRef<number | null>(null)
+
+    // ── multi-scan layers (USER 2026-09-06): one extra octree loader per
+    // NON-reference scan, display-only (forceClassId -1 → not affected by
+    // the reference's segment toggles), placed by floor × composition.
+    const scanLayersRef = useRef<Map<string, { loader: PotreeOctreeLoader; visible: boolean }>>(new Map())
+    const composeScanMatrix = (floor?: number[] | null, comp?: number[] | null): number[] => {
+        // both 16-length; floor is column-major (potree_ready convention),
+        // composition is ROW-major (API) → transpose it; world = C · F
+        const F = new THREE.Matrix4()
+        if (floor && floor.length === 16) F.fromArray(floor)
+        const C = new THREE.Matrix4()
+        if (comp && comp.length === 16) C.fromArray(comp).transpose()
+        return C.multiply(F).toArray()
+    }
 
     // ── chunk boxes (USER 2026-09-06): one floor-aligned OBB per chunk, all
     // deselected by default; the selected box carries a translate/rotate
@@ -2197,6 +2218,47 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             onChunkDeltaRef.current?.(chunk, null)
         },
         clearChunkSelection: () => setSelChunk(null),
+        setScanLayers: (layers) => {
+            const scene = sceneRef.current, camera = cameraRef.current
+            const mat = materialRef.current
+            if (!scene || !camera || !mat) return
+            const want = new Set(layers.map(l => l.key))
+            for (const [key, entry] of scanLayersRef.current) {
+                if (!want.has(key)) {
+                    entry.loader.dispose()
+                    scanLayersRef.current.delete(key)
+                }
+            }
+            for (const l of layers) {
+                let entry = scanLayersRef.current.get(l.key)
+                if (!entry) {
+                    const loader = new PotreeOctreeLoader(scene, camera, mat, pointBudget, -1)
+                    loader.getOctreeGroup().name = `potree-octree-scan-${l.key}`
+                    entry = { loader, visible: l.visible }
+                    scanLayersRef.current.set(l.key, entry)
+                    loader.load(l.url).then(() => {
+                        loader.setTransform(composeScanMatrix(l.floorTransform, l.composition))
+                        loader.getOctreeGroup().visible = entry!.visible
+                    }).catch(() => {
+                        if (onStatusMessage) onStatusMessage(`scan layer ${l.key} failed to load`)
+                    })
+                } else {
+                    entry.loader.setTransform(composeScanMatrix(l.floorTransform, l.composition))
+                }
+                entry.visible = l.visible
+                entry.loader.getOctreeGroup().visible = l.visible
+            }
+        },
+        setScanLayerVisible: (key, visible) => {
+            const entry = scanLayersRef.current.get(key)
+            if (!entry) return
+            entry.visible = visible
+            entry.loader.getOctreeGroup().visible = visible
+        },
+        clearScanLayers: () => {
+            for (const [, entry] of scanLayersRef.current) entry.loader.dispose()
+            scanLayersRef.current.clear()
+        },
         frameBox: (min: number[], max: number[]) => {
             const camera = cameraRef.current, controls = controlsRef.current
             if (!camera || !controls) return
@@ -3025,6 +3087,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 // Skip Potree's LOD/node-loading work when the cloud is hidden.
                 // We can't check octreeGroup.visible: setCloudObjectVisible
                 // hides only the potree-node-* children so the mesh groups
+                // multi-scan layers stream their own nodes every frame
+                for (const [, entry] of scanLayersRef.current) {
+                    if (entry.visible) entry.loader.updateVisibility()
+                }
                 // under octreeGroup stay visible. cloudHiddenRef is the truth.
                 if (cloudHiddenRef.current) {
                     if (totalPointsRef.current !== 0) {

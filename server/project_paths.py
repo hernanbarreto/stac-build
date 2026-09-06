@@ -393,13 +393,19 @@ class LegacySourceContext:
         return self._root.parent
 
 
-def resolve_session(server_dir: str, session_id: str) -> "SourceContext | LegacySourceContext":
+def resolve_session(server_dir: str, session_id: str,
+                    scan_key: Optional[str] = None) -> "SourceContext | LegacySourceContext":
     """
     Factory: resolve a session_id to the correct path context.
-    
+
     1. Check if it's a new-style project in projects/ dir
     2. Fall back to legacy flat layout in scans/ dir
-    
+
+    Multi-scan projects (USER 2026-09-06): ``scan_key`` ("date/source")
+    selects the scan EXPLICITLY. Without it, the project's composition
+    REFERENCE scan is used when one is set (project.json), else the latest
+    scan day — the old implicit behaviour, kept for legacy callers only.
+
     Usage:
         ctx = resolve_session("/path/to/server", "pccr-10022026")
         ctx.output_dir    # works regardless of old/new layout
@@ -407,13 +413,28 @@ def resolve_session(server_dir: str, session_id: str) -> "SourceContext | Legacy
         ctx.merged_potree
     """
     server = Path(server_dir)
-    
+
     # ── New-style project? ──
     from config import PROJECTS_DIR
     projects_dir = PROJECTS_DIR
     project_json = projects_dir / session_id / "project.json"
     if project_json.exists():
         paths = ProjectPaths(str(projects_dir), session_id)
+        if scan_key:
+            parts = scan_key.split("/", 1)
+            return paths.for_source(parts[0],
+                                    parts[1] if len(parts) > 1 else "default")
+        try:
+            ref = (paths.load_project_meta().get("composition") or {}
+                   ).get("reference")
+        except Exception:  # noqa: BLE001
+            ref = None
+        if ref:
+            parts = ref.split("/", 1)
+            ctx = paths.for_source(parts[0],
+                                   parts[1] if len(parts) > 1 else "default")
+            if ctx.source_dir.exists():
+                return ctx
         # Find the latest scan day + first source
         scan_days = paths.list_scan_days()
         if scan_days:

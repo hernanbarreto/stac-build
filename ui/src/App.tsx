@@ -176,6 +176,37 @@ function App() {
     return () => clearInterval(iv)
   }, [activeSession, refreshCorrectionStatus])
   const [chunkBoxesLoading, setChunkBoxesLoading] = useState(false)
+  // ── Multi-scan project (USER 2026-09-06): scans of the active project,
+  // reference = main cloud, others = viewer layers (hidden by default).
+  const [projectScans, setProjectScans] = useState<any[]>([])
+  const [scanVisible, setScanVisible] = useState<Record<string, boolean>>({})
+  const scanVisibleRef = useRef(scanVisible)
+  useEffect(() => { scanVisibleRef.current = scanVisible }, [scanVisible])
+  const loadProjectScans = useCallback(async (sid: string) => {
+    try {
+      const r = await fetch(`/sessions/${sid}/scans`)
+      if (!r.ok) return
+      const d = await r.json()
+      const scans: any[] = d.scans || []
+      setProjectScans(scans)
+      const layers = scans
+        .filter(s => !s.is_reference && s.has_potree && s.potree_url)
+        .map(s => ({
+          key: s.key, url: s.potree_url,
+          floorTransform: s.floor_transform || null,
+          composition: s.composition?.matrix || null,
+          visible: !!scanVisibleRef.current[s.key],
+        }))
+      viewportRef.current?.setScanLayers(layers)
+    } catch { /* non-fatal */ }
+  }, [])
+  useEffect(() => {
+    viewportRef.current?.clearScanLayers()
+    setProjectScans([])
+    setScanVisible({})
+    if (activeSession) loadProjectScans(activeSession)
+  }, [activeSession, loadProjectScans])
+
   // Resume/Cancel dialog for incomplete propagation (USER 2026-09-06): on
   // opening the Segmentation Manager, if any instance was not fully
   // propagated (a prior pass OOM'd), ask before opening.
@@ -2072,6 +2103,47 @@ function App() {
             {/* Segments Panel */}
             {activePanel === 'segments' && activeSession && (
               <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+                {/* ── Scans of this project (USER 2026-09-06): the reference
+                     scan is the main cloud; every other scan is a layer the
+                     user shows/hides; the reference is picked by radio. ── */}
+                {projectScans.length > 1 && (
+                  <div style={{ padding: '6px 10px', borderBottom: '1px solid var(--border-color)' }}>
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>
+                      Scans ({projectScans.length}) — radio = reference, checkbox = visible
+                    </div>
+                    {projectScans.map(sc => (
+                      <div key={sc.key} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '2px 0', color: 'var(--text-primary)' }}>
+                        <input type="radio" name="scan-ref" checked={!!sc.is_reference}
+                          title="Set as composition reference (reloads the session)"
+                          onChange={async () => {
+                            try {
+                              await fetch(`/api/project/${activeSession}/composition/reference`, {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ scan_key: sc.key }),
+                              })
+                              setStatusMessage(`reference scan → ${sc.label}; reloading…`)
+                              viewportRef.current?.clearScanLayers()
+                              viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: activeSession })
+                              loadProjectScans(activeSession)
+                            } catch { setStatusMessage('setting reference failed') }
+                          }} />
+                        <input type="checkbox"
+                          checked={sc.is_reference ? true : !!scanVisible[sc.key]}
+                          disabled={!!sc.is_reference || !sc.has_potree}
+                          title={sc.is_reference ? 'reference scan (main cloud)' : (sc.has_potree ? 'show/hide this scan' : 'no Potree yet')}
+                          onChange={(e) => {
+                            const v = e.target.checked
+                            setScanVisible(prev => ({ ...prev, [sc.key]: v }))
+                            viewportRef.current?.setScanLayerVisible(sc.key, v)
+                          }} />
+                        <span style={{ flex: 1 }}>{sc.label}{sc.is_reference ? ' ★' : ''}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                          {sc.points ? `${(sc.points / 1e6).toFixed(1)}M` : (sc.recon_state || '')}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="panel-header">
                   Segments
                   {segments.length > 0 && (

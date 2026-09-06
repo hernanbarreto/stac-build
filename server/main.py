@@ -64,9 +64,11 @@ from project_paths import resolve_session
 # --- Centralized path resolution ---
 SERVER_DIR = str(Path(__file__).parent)
 
-def _ctx(session_id: str):
-    """Resolve a session_id to a path context (new-style or legacy)."""
-    return resolve_session(SERVER_DIR, session_id)
+def _ctx(session_id: str, scan_key: str = None):
+    """Resolve a session_id to a path context (new-style or legacy).
+    ``scan_key`` ("date/source") targets one scan of a multi-scan project
+    explicitly; without it the composition reference (or latest) is used."""
+    return resolve_session(SERVER_DIR, session_id, scan_key=scan_key)
 
 def _audit_log(action: str, session_id: str, user: str = "system", role: str = "", detail: str = ""):
     """Append an entry to the project audit log (survives project deletion)."""
@@ -1093,6 +1095,21 @@ from potree_converter import convert_ply_to_potree, convert_ply_to_potree_async
 
 # SCANS_DIR removed — use _ctx(session_id) for all path resolution
 
+@app.get("/potree_scan/{project}/{date}/{source}/{file_path:path}")
+async def serve_scan_potree_files(project: str, date: str, source: str,
+                                  file_path: str):
+    """Serve ONE scan's Potree octree (multi-scan projects, USER 2026-09-06:
+    every scan is a layer with its own octree)."""
+    from fastapi.responses import FileResponse
+    ctx = _ctx(project, scan_key=f"{date}/{source}")
+    full_path = ctx.output_dir / "potree" / file_path
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+    content_type = "application/json" if file_path.endswith(".json") else "application/octet-stream"
+    return FileResponse(str(full_path), media_type=content_type,
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/potree/{session_id}/{file_path:path}")
 async def serve_potree_files(session_id: str, file_path: str):
     """Serve Potree octree files for a session."""
@@ -1858,22 +1875,104 @@ async def get_session_scans(session_id: str):
         }
 
     paths = ProjectPaths(str(projects_dir), session_id)
+    # multi-scan projects (USER 2026-09-06): labels, reference, composition
+    # transforms and a per-scan Potree URL ride along with the scan list
+    from project_scans import sync_scans, scan_potree_url
+    meta = sync_scans(paths)
+    labels = {s["key"]: s.get("label") for s in meta.get("scans", [])}
+    comp = meta.get("composition") or {}
     scans = []
     for date in paths.list_scan_days():
         for source in paths.list_sources(date):
             ctx = paths.for_source(date, source)
+            key = f"{date}/{source}"
             frame_count = len(list(ctx.frames_dir.glob("*.jpg"))) if ctx.frames_dir.exists() else 0
             has_output = ctx.output_dir.exists() and any(ctx.output_dir.glob("chunk_*.ply"))
+            potree_ok = (ctx.output_dir / "potree" / "metadata.json").exists()
+            n_pts = None
+            if potree_ok:
+                try:
+                    n_pts = json.loads((ctx.output_dir / "potree" / "metadata.json")
+                                       .read_text()).get("points")
+                except Exception:  # noqa: BLE001
+                    pass
+            # per-scan display floor transform (same column-major 16 the
+            # potree_ready message carries) — layers compose it with the
+            # project composition transform in the viewer
+            floor16 = None
+            tp = ctx.output_dir / "floor_transform.npz"
+            if tp.exists():
+                try:
+                    d = np.load(tp)
+                    M = np.eye(4)
+                    M[:3, :3] = float(d["s"]) * d["R"]
+                    M[:3, 3] = d["t"]
+                    floor16 = M.T.flatten().tolist()
+                except Exception:  # noqa: BLE001
+                    pass
             scans.append({
                 "date": date,
                 "source": source,
-                "key": f"{date}/{source}",
+                "key": key,
+                "label": labels.get(key) or f"scan {date}",
                 "frame_count": frame_count,
                 "has_output": has_output,
+                "has_potree": potree_ok,
+                "points": n_pts,
+                "is_reference": key == comp.get("reference"),
+                "potree_url": scan_potree_url(session_id, key) if potree_ok else None,
+                "floor_transform": floor16,
+                "composition": (comp.get("transforms") or {}).get(key),
                 **_detect_recon_state(ctx.output_dir),
             })
 
-    return {"session_id": session_id, "scans": scans}
+    return {"session_id": session_id, "scans": scans,
+            "composition": {"reference": comp.get("reference")}}
+
+
+@app.post("/api/project/{project}/composition/reference")
+async def project_set_reference(project: str, body: dict):
+    """Set the composition reference scan (chosen by the user). Stored
+    transforms are re-expressed in the new reference's frame."""
+    from project_paths import ProjectPaths
+    from project_scans import set_reference, sync_scans
+    key = body.get("scan_key")
+    if not key:
+        raise HTTPException(400, "scan_key required")
+    paths = ProjectPaths(str(PROJECTS_DIR), project)
+    if not paths.project_json.exists():
+        raise HTTPException(404, "not a project")
+    sync_scans(paths)
+    try:
+        meta = set_reference(paths, key)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "composition": meta["composition"]}
+
+
+@app.post("/api/project/{project}/composition/transform")
+async def project_set_transform(project: str, body: dict):
+    """Store a scan's composition transform (row-major 4x4 in the reference
+    frame). method: 'manual' (gizmo) | 'objects' (registration) | 'none'."""
+    from project_paths import ProjectPaths
+    from project_scans import set_transform, sync_scans
+    key = body.get("scan_key")
+    matrix = body.get("matrix")
+    method = str(body.get("method") or "manual")
+    if not key or not matrix or len(matrix) != 16:
+        raise HTTPException(400, "scan_key and matrix[16] required")
+    paths = ProjectPaths(str(PROJECTS_DIR), project)
+    if not paths.project_json.exists():
+        raise HTTPException(404, "not a project")
+    sync_scans(paths)
+    M = np.array(matrix, dtype=np.float64).reshape(4, 4)
+    try:
+        entry = set_transform(paths, key, M, method,
+                              extra={k: v for k, v in body.items()
+                                     if k in ("pairs", "rms_cm", "scale")})
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "transform": entry}
 
 
 @app.get("/api/sessions/{session_id}/available_backends")

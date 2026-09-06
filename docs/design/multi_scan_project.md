@@ -160,6 +160,29 @@ pairing in a small dialog: `door1 ↔ door1`, `box1 ↔ box1`).
 5. Complementary scans (no pairs): registration refused by design; the user
    composes manually (gizmo) or leaves identity.
 
+## 6b. Engine for §6–§7: CloudComPy (USER 2026-09-06)
+
+The geometry runs on CloudCompare's own tools (env `CloudComPy310`, already
+used by the on-load path), as subprocess jobs exchanging PLY/npy files:
+
+- **Registration**: `cc.ICP(data, model, finalOverlapRatio, adjustScale=True)`
+  → transform + scale factor + RMS, fed ONLY with the invariant objects'
+  points of both scans (derived from `classification.npy`, exported as
+  temporary PLYs). The symmetric scale split (√s / 1/√s) is applied on the
+  result by us.
+- **Dominant planes**: `cc.RansacSD` (RANSAC Shape Detection) per object
+  copy → size/position fingerprint and held-out checks, replacing the
+  home-grown RANSAC.
+- **Comparison**: `computeCloud2CloudDistances` (C2C scalar field →
+  common / only-A / only-B by threshold) and **M3C2** (signed distances
+  along normals with statistical significance — the standard tool for
+  multi-temporal change detection) for the per-region layer; per-object
+  deltas from the `RansacSD` planes of each copy.
+- **Ours**: which objects are invariant, the symmetric scale, the guards
+  (≥2 objects, plausibility, held-out on unused surfaces), the pending →
+  Approve/Undo flow, and camera COVERAGE so "absent" is never reported
+  where a scan simply did not look (M3C2 cannot know that).
+
 ## 7. Comparison — similarities and differences
 
 Inputs: reference scan R, composed scan S (transform applied), both floor-
