@@ -10,6 +10,8 @@ import { BIMAnalysisPanel } from './components/BIMAnalysisPanel'
 import TeamPanel from './components/TeamPanel'
 import WebRTCCall from './components/WebRTCCall'
 import BIMNavigator from './components/BIMNavigator'
+import FuseScansModal from './components/FuseScansModal'
+import CorrectionVerdictDialog from './components/CorrectionVerdictDialog'
 import type { IFCLoadResult } from './components/IFCLoader'
 import { useAuth } from './context/AuthContext'
 import LoginPage from './pages/LoginPage'
@@ -176,38 +178,113 @@ function App() {
     return () => clearInterval(iv)
   }, [activeSession, refreshCorrectionStatus])
   const [chunkBoxesLoading, setChunkBoxesLoading] = useState(false)
-  // ── Multi-scan project (USER 2026-09-06): scans of the active project,
-  // reference = main cloud, others = viewer layers (hidden by default).
+  // ── Multi-scan project, VS-Code-style TABS (USER 2026-09-06): one tab
+  // per open scan; the ACTIVE tab is the scan being viewed AND worked on
+  // (segmentation, brush, corrections, meshing, chat). Closing a tab loses
+  // nothing; the scans list reopens it (double-click). The composition
+  // reference is a ★ on the list row (one per project).
+  type ScanTab = { key: string; label: string; date: string; kind: 'scan' | 'fused' }
   const [projectScans, setProjectScans] = useState<any[]>([])
-  const [scanVisible, setScanVisible] = useState<Record<string, boolean>>({})
-  const scanVisibleRef = useRef(scanVisible)
-  useEffect(() => { scanVisibleRef.current = scanVisible }, [scanVisible])
-  const loadProjectScans = useCallback(async (sid: string) => {
+  // scans of EVERY project (tree children in the Projects list); the
+  // loaded project's entry is refreshed together with projectScans
+  const [allProjectScans, setAllProjectScans] = useState<Record<string, any[]>>({})
+  const [scanTabs, setScanTabs] = useState<ScanTab[]>([])
+  const [activeScanTab, setActiveScanTab] = useState<string | null>(null)
+  const [showFuseModal, setShowFuseModal] = useState(false)
+  // scan requested for the NEXT project open (tree double-click on a
+  // not-loaded project); null → the composition reference opens
+  const [openScanKey, setOpenScanKey] = useState<string | null>(null)
+  const openScanKeyRef = useRef<string | null>(null)
+  useEffect(() => { openScanKeyRef.current = openScanKey }, [openScanKey])
+  const activeScanTabRef = useRef<string | null>(null)
+  useEffect(() => { activeScanTabRef.current = activeScanTab }, [activeScanTab])
+  const loadProjectScans = useCallback(async (sid: string): Promise<any[]> => {
     try {
       const r = await fetch(`/sessions/${sid}/scans`)
-      if (!r.ok) return
+      if (!r.ok) return []
       const d = await r.json()
       const scans: any[] = d.scans || []
       setProjectScans(scans)
-      // layers = every scan EXCEPT the active one (the active scan is the
-      // main cloud, where the user works; USER 2026-09-06)
-      const layers = scans
-        .filter(s => !s.is_active && s.has_potree && s.potree_url)
-        .map(s => ({
-          key: s.key, url: s.potree_url,
-          floorTransform: s.floor_transform || null,
-          composition: s.composition?.matrix || null,
-          visible: !!scanVisibleRef.current[s.key],
-        }))
-      viewportRef.current?.setScanLayers(layers)
-    } catch { /* non-fatal */ }
+      setAllProjectScans(prev => ({ ...prev, [sid]: scans }))
+      return scans
+    } catch { return [] }
   }, [])
+  // tree children for projects that are NOT loaded (best effort, parallel)
+  const loadAllProjectScans = useCallback(async (ids: string[]) => {
+    const entries: Array<[string, any[]]> = await Promise.all(ids.map(async (id): Promise<[string, any[]]> => {
+      try {
+        const r = await fetch(`/sessions/${id}/scans`)
+        if (!r.ok) return [id, []]
+        const d = await r.json()
+        const scans: any[] = (d.scans || []).filter((sc: any) => sc.key !== 'legacy/default')
+        return [id, scans]
+      } catch { return [id, []] }
+    }))
+    setAllProjectScans(prev => {
+      const next = { ...prev }
+      for (const [id, scans] of entries) next[id] = scans
+      return next
+    })
+  }, [])
+  // switch the backend's active scan and reload the main cloud from it
+  const activateScan = useCallback(async (sid: string, sc: { key: string; label: string; date: string; kind: 'scan' | 'fused' }, reload = true) => {
+    setScanTabs(prev => prev.some(t => t.key === sc.key) ? prev : [...prev, { key: sc.key, label: sc.label, date: sc.date, kind: sc.kind }])
+    setActiveScanTab(sc.key)
+    try {
+      await fetch(`/api/project/${sid}/active_scan`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scan_key: sc.key }),
+      })
+    } catch { /* legacy single-scan sessions have no project */ }
+    if (reload) {
+      viewportRef.current?.clearScanLayers()
+      viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid, scan_key: sc.key })
+      setStatusMessage(`working on ${sc.label}`)
+    }
+  }, [])
+  const closeScanTab = useCallback((key: string) => {
+    setScanTabs(prev => {
+      const idx = prev.findIndex(t => t.key === key)
+      const next = prev.filter(t => t.key !== key)
+      if (activeScanTabRef.current === key && activeSession) {
+        const neighbour = next[Math.max(0, idx - 1)]
+        if (neighbour) activateScan(activeSession, neighbour)
+        else setActiveScanTab(null)
+      }
+      return next
+    })
+  }, [activeSession, activateScan])
+  // on session load: fetch the scans and open the active (or first) one as a tab
   useEffect(() => {
     viewportRef.current?.clearScanLayers()
-    setProjectScans([])
-    setScanVisible({})
-    if (activeSession) loadProjectScans(activeSession)
-  }, [activeSession, loadProjectScans])
+    setProjectScans([]); setScanTabs([]); setActiveScanTab(null)
+    if (!activeSession) return
+    loadProjectScans(activeSession).then(scans => {
+      if (!scans.length) return
+      // opening a project shows the composition REFERENCE (★) — the
+      // backend resets the active scan to it on the open load — unless a
+      // scan was asked for explicitly from the tree
+      const want = openScanKeyRef.current
+      openScanKeyRef.current = null
+      setOpenScanKey(null)
+      const cur = (want && scans.find(s => s.key === want))
+        || scans.find(s => s.is_reference) || scans.find(s => s.is_active) || scans[0]
+      // the session load already showed this scan — register the tab only
+      activateScan(activeSession, { key: cur.key, label: cur.label, date: cur.date, kind: cur.kind || 'scan' }, false)
+    })
+  }, [activeSession, loadProjectScans, activateScan])
+  // Ctrl+Tab cycles tabs
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey && e.key === 'Tab') || scanTabs.length < 2 || !activeSession) return
+      e.preventDefault()
+      const i = scanTabs.findIndex(t => t.key === activeScanTabRef.current)
+      const nxt = scanTabs[(i + (e.shiftKey ? scanTabs.length - 1 : 1)) % scanTabs.length]
+      activateScan(activeSession, nxt)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [scanTabs, activeSession, activateScan])
 
   // Resume/Cancel dialog for incomplete propagation (USER 2026-09-06): on
   // opening the Segmentation Manager, if any instance was not fully
@@ -928,13 +1005,14 @@ function App() {
       }))
       setSessions(sessionList)
       setConnected(true)
+      loadAllProjectScans(sessionList.map(s => s.id))
       // console.log(`[STAC] Connected. ${sessionList.length} sessions found.`)
     } catch (err) {
       console.error('[STAC] Failed to connect:', err)
       setConnected(false)
       setActivePanel('sessions')
     }
-  }, [token])
+  }, [token, loadAllProjectScans])
 
   // Recover active pipeline state after page load/refresh
   useEffect(() => {
@@ -969,6 +1047,23 @@ function App() {
   const handleSessionSelect = useCallback((sessionId: string) => {
     setSelectedSession(sessionId)
   }, [])
+
+  // Projects-tree double-click on a scan: on the loaded project it opens the
+  // tab; on another project it makes that scan the active one and loads the
+  // project (the load then registers the tab).
+  const openScanFromTree = useCallback(async (sid: string, sc: any) => {
+    const tab = { key: sc.key, label: sc.label, date: sc.date, kind: (sc.kind || 'scan') as 'scan' | 'fused' }
+    if (sid === activeSession) { activateScan(sid, tab); return }
+    try {
+      await fetch(`/api/project/${sid}/active_scan`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scan_key: sc.key }),
+      })
+    } catch { /* legacy */ }
+    openScanKeyRef.current = sc.key
+    setOpenScanKey(sc.key)     // the open load asks for this scan explicitly
+    handleSessionLoad(sid)
+  }, [activeSession, activateScan]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load session — actually loads the cloud in the viewport
   const handleSessionLoad = useCallback((sessionId: string) => {
@@ -2029,6 +2124,47 @@ function App() {
                               ><Trash2 size={14} /></button>
                             )}
                           </div>
+                          {/* ── Scans as CHILDREN of their project (USER
+                               2026-09-06): date + label + points; ★ =
+                               composition reference; double-click opens the
+                               scan as a tab (loading the project first when
+                               it is not the loaded one). ── */}
+                          {(() => {
+                            const kids: any[] = s.id === activeSession && projectScans.length ? projectScans : (allProjectScans[s.id] || [])
+                            if (kids.length < 1) return null
+                            return (
+                              <div className="scan-tree" onClick={e => e.stopPropagation()}>
+                                {kids.map((sc, i) => (
+                                  <div key={sc.key}
+                                    className={`scan-tree-row ${activeSession === s.id && activeScanTab === sc.key ? 'active' : ''}`}
+                                    title={sc.kind === 'fused' ? 'merged cloud — double-click: open as a tab' : 'double-click: open as a tab'}
+                                    onDoubleClick={() => openScanFromTree(s.id, sc)}>
+                                    <span className="scan-tree-branch">{i === kids.length - 1 ? '└' : '├'}</span>
+                                    <span title={sc.kind === 'fused' ? 'merged product' : (sc.is_reference ? 'composition reference' : 'set as composition reference')}
+                                      style={{ cursor: sc.kind === 'fused' ? 'default' : 'pointer', color: sc.is_reference ? '#e0a632' : 'var(--text-secondary)' }}
+                                      onClick={async (e) => {
+                                        e.stopPropagation()
+                                        if (sc.is_reference || sc.kind === 'fused') return
+                                        try {
+                                          await fetch(`/api/project/${s.id}/composition/reference`, {
+                                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ scan_key: sc.key }),
+                                          })
+                                          setStatusMessage(`reference → ${sc.label}`)
+                                          loadProjectScans(s.id)
+                                        } catch { setStatusMessage('setting reference failed') }
+                                      }}>{sc.kind === 'fused' ? '⛶' : (sc.is_reference ? '★' : '☆')}</span>
+                                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {sc.kind !== 'fused' && <span style={{ color: 'var(--text-secondary)' }}>{sc.date} </span>}{sc.label}
+                                    </span>
+                                    <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                                      {sc.points ? `${(sc.points / 1e6).toFixed(1)}M` : (sc.recon_state || '—')}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )
+                          })()}
                         </div>
                       ))}
                     </div>
@@ -2105,62 +2241,6 @@ function App() {
             {/* Segments Panel */}
             {activePanel === 'segments' && activeSession && (
               <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-                {/* ── Scans of this project (USER 2026-09-06): the reference
-                     scan is the main cloud; every other scan is a layer the
-                     user shows/hides; the reference is picked by radio. ── */}
-                {projectScans.length > 1 && (
-                  <div style={{ padding: '6px 10px', borderBottom: '1px solid var(--border-color)' }}>
-                    <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4, display: 'grid', gridTemplateColumns: '28px 28px 22px 1fr auto', gap: 4 }}>
-                      <span title="work on this scan">work</span><span title="composition reference">ref</span><span title="visible">👁</span>
-                      <span>Scans ({projectScans.length})</span><span />
-                    </div>
-                    {projectScans.map(sc => (
-                      <div key={sc.key} style={{ display: 'grid', gridTemplateColumns: '28px 28px 22px 1fr auto', alignItems: 'center', gap: 4, fontSize: 12, padding: '2px 0', color: 'var(--text-primary)' }}>
-                        <input type="radio" name="scan-active" checked={!!sc.is_active}
-                          title="Work on this scan: segmentation, brush, corrections, meshing, chat target it (reloads the session)"
-                          onChange={async () => {
-                            try {
-                              await fetch(`/api/project/${activeSession}/active_scan`, {
-                                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ scan_key: sc.key }),
-                              })
-                              setStatusMessage(`working on ${sc.label}; reloading…`)
-                              viewportRef.current?.clearScanLayers()
-                              viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: activeSession })
-                              loadProjectScans(activeSession)
-                            } catch { setStatusMessage('switching scan failed') }
-                          }} />
-                        <input type="radio" name="scan-ref" checked={!!sc.is_reference}
-                          title="Set as composition reference (the frame every scan is composed into)"
-                          onChange={async () => {
-                            try {
-                              await fetch(`/api/project/${activeSession}/composition/reference`, {
-                                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ scan_key: sc.key }),
-                              })
-                              setStatusMessage(`reference scan → ${sc.label}; reloading…`)
-                              viewportRef.current?.clearScanLayers()
-                              viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: activeSession })
-                              loadProjectScans(activeSession)
-                            } catch { setStatusMessage('setting reference failed') }
-                          }} />
-                        <input type="checkbox"
-                          checked={sc.is_active ? true : !!scanVisible[sc.key]}
-                          disabled={!!sc.is_active || !sc.has_potree}
-                          title={sc.is_active ? 'active scan (main cloud)' : (sc.has_potree ? 'show/hide this scan' : 'no Potree yet')}
-                          onChange={(e) => {
-                            const v = e.target.checked
-                            setScanVisible(prev => ({ ...prev, [sc.key]: v }))
-                            viewportRef.current?.setScanLayerVisible(sc.key, v)
-                          }} />
-                        <span style={{ flex: 1 }}>{sc.label}{sc.is_reference ? ' ★' : ''}</span>
-                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                          {sc.points ? `${(sc.points / 1e6).toFixed(1)}M` : (sc.recon_state || '')}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
                 <div className="panel-header">
                   Segments
                   {segments.length > 0 && (
@@ -2523,6 +2603,14 @@ function App() {
                       else { setChunkChecked(new Set()); viewportRef.current?.clearChunkSelection() }
                     }}>
                     📦 Chunks
+                  </button>
+                  <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
+                    disabled={!activeSession || projectScans.filter(sc => sc.kind !== 'fused').length < 2}
+                    title={projectScans.filter(sc => sc.kind !== 'fused').length < 2
+                      ? 'Fuse needs a project with at least two scans'
+                      : 'Fuse scans: register on shared invariant segments (same label in both scans, ≥2) and build the merged cloud'}
+                    onClick={() => setShowFuseModal(true)}>
+                    ⛶ Fuse
                   </button>
                 </div>
               </div>
@@ -3020,10 +3108,42 @@ function App() {
           />
         )}
 
+        {/* ── Scan tabs (USER 2026-09-06, VS-Code style): active tab = the scan
+             being viewed and worked on. ★ reference · ⚠ correction pending. ── */}
+        {activeSession && scanTabs.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'stretch', gap: 2, padding: '0 6px', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)', height: 30, flexShrink: 0 }}>
+            {scanTabs.map(t => {
+              const sc = projectScans.find(s => s.key === t.key)
+              const isActive = t.key === activeScanTab
+              return (
+                <div key={t.key}
+                  onClick={() => { if (!isActive) activateScan(activeSession, t) }}
+                  title={`${t.date} · ${t.label}${sc?.is_reference ? ' · reference' : ''}`}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6, padding: '0 10px', cursor: 'pointer', fontSize: 12,
+                    color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    background: isActive ? 'var(--bg-primary)' : 'transparent',
+                    borderBottom: isActive ? '2px solid #e0a632' : '2px solid transparent',
+                  }}>
+                  {sc?.is_reference && <span style={{ color: '#e0a632' }}>★</span>}
+                  {t.kind === 'fused' && <span>⛶</span>}
+                  <span>{t.date}</span>
+                  <span style={{ opacity: 0.8 }}>{t.label}</span>
+                  {isActive && correctionState?.status === 'pending' && <span title="correction pending" style={{ color: '#e0a632' }}>⚠</span>}
+                  <span onClick={(e) => { e.stopPropagation(); closeScanTab(t.key) }}
+                    title="close tab (reopen from the scans list)"
+                    style={{ marginLeft: 4, opacity: 0.6 }}>✕</span>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
         {/* 3D Viewport — don't hide during pipeline runs (pipeline panel shows progress) */}
         <div className={`viewport-container${sessionLoading && !(pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession) ? ' viewport-hidden' : ''}${flythroughOpen ? ' viewport-flythrough' : ''}`}>
           <Viewport
             ref={viewportRef}
+            openScanKey={openScanKey}
             pointSize={pointSize}
             pointBudget={pointBudget}
             confidenceThreshold={sabanaVisible ? 0.0 : confidenceThreshold}
@@ -3398,6 +3518,23 @@ function App() {
           />
         )
       }
+
+      {/* ── Fuse scans modal (USER 2026-09-06): pick the scans, see the
+           segment pairs found by label (≥2 required), register on them
+           (CloudComPy) and build the merged cloud, which opens as a tab. ── */}
+      {showFuseModal && activeSession && (
+        <FuseScansModal
+          project={activeSession}
+          scans={projectScans}
+          onClose={() => setShowFuseModal(false)}
+          onStatus={setStatusMessage}
+          onFused={async () => {
+            const scans = await loadProjectScans(activeSession)
+            const fused = scans.filter(s => s.kind === 'fused').slice(-1)[0]
+            if (fused) activateScan(activeSession, { key: fused.key, label: fused.label, date: fused.date, kind: 'fused' })
+          }}
+        />
+      )}
 
       {/* Resume / Cancel incomplete propagation (USER 2026-09-06) */}
       {resumeDialog && (
@@ -3929,23 +4066,14 @@ function App() {
       {/* ── pending-correction banner (USER 2026-09-06: "eso debe
            aparecer") — always visible while a correction awaits verdict ── */}
       {(correctionState?.status === 'pending' || (pendingSession && pendingSession !== activeSession)) && (
-        <div style={{
-          position: 'fixed', top: 12, left: '50%', transform: 'translateX(-50%)',
-          zIndex: 1600, display: 'flex', alignItems: 'center', gap: 10,
-          background: 'var(--bg-secondary)', border: '1px solid #e0a63255',
-          borderRadius: 10, padding: '8px 14px',
-        }}>
-          <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>
-            ⚠ Correction pending{pendingSession && pendingSession !== activeSession ? ` in ${pendingSession}` : ''}
-            {correctionState?.mode ? ` (${correctionState.mode}` : ' ('}
-            {correctionState?.chunks ? ` — chunks ${correctionState.chunks.join(', ')})` : ')'}
-            {' '}— inspect the cloud and decide:
-          </span>
-          <button className="bim-action-btn upload" disabled={correctionRunning}
-            onClick={approveCorrection}>✓ Approve</button>
-          <button className="bim-action-btn upload" disabled={correctionRunning}
-            onClick={undoCorrection}>↩ Undo</button>
-        </div>
+        <CorrectionVerdictDialog
+          state={correctionState}
+          session={activeSession}
+          otherSession={pendingSession && pendingSession !== activeSession ? pendingSession : null}
+          busy={correctionRunning}
+          onApprove={approveCorrection}
+          onUndo={undoCorrection}
+        />
       )}
 
       {/* ── 📦 Chunk boxes panel (USER 2026-09-06): all chunks listed,

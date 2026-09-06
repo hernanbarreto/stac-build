@@ -1898,7 +1898,7 @@ async def get_session_scans(session_id: str):
     paths = ProjectPaths(str(projects_dir), session_id)
     # multi-scan projects (USER 2026-09-06): labels, reference, composition
     # transforms and a per-scan Potree URL ride along with the scan list
-    from project_scans import sync_scans, scan_potree_url
+    from project_scans import sync_scans, scan_potree_url, FUSED_DAY
     meta = sync_scans(paths)
     labels = {s["key"]: s.get("label") for s in meta.get("scans", [])}
     comp = meta.get("composition") or {}
@@ -1908,7 +1908,9 @@ async def get_session_scans(session_id: str):
             ctx = paths.for_source(date, source)
             key = f"{date}/{source}"
             frame_count = len(list(ctx.frames_dir.glob("*.jpg"))) if ctx.frames_dir.exists() else 0
-            has_output = ctx.output_dir.exists() and any(ctx.output_dir.glob("chunk_*.ply"))
+            has_output = ctx.output_dir.exists() and (
+                any(ctx.output_dir.glob("chunk_*.ply"))
+                or (ctx.output_dir / "cleaned_cloud.ply").exists())
             potree_ok = (ctx.output_dir / "potree" / "metadata.json").exists()
             n_pts = None
             if potree_ok:
@@ -1935,6 +1937,7 @@ async def get_session_scans(session_id: str):
                 "date": date,
                 "source": source,
                 "key": key,
+                "kind": "fused" if date == FUSED_DAY else "scan",
                 "label": labels.get(key) or f"scan {date}",
                 "frame_count": frame_count,
                 "has_output": has_output,
@@ -2017,6 +2020,63 @@ async def project_set_transform(project: str, body: dict):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "transform": entry}
+
+
+@app.post("/api/project/{project}/fuse/pairs")
+async def project_fuse_pairs(project: str, body: dict):
+    """Segment pairs shared (same label) between the reference and each
+    chosen scan — what the Fuse modal shows before running."""
+    from project_paths import ProjectPaths
+    from project_scans import sync_scans
+    from fuse_scans import find_pairs
+    scans = body.get("scans") or []
+    paths = ProjectPaths(str(PROJECTS_DIR), project)
+    if not paths.project_json.exists():
+        raise HTTPException(404, "not a project")
+    sync_scans(paths)
+    try:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: find_pairs(paths, scans))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/project/{project}/fuse/run")
+async def project_fuse_run(project: str, body: dict):
+    """Register the chosen scans onto the reference on their shared
+    invariant segments (CloudComPy: planes + ICP with scale, guards,
+    held-out) and build the merged cloud as a new FUSED scan entry
+    (USER DESIGN 2026-09-06). Rejections write nothing."""
+    from project_paths import ProjectPaths
+    from project_scans import sync_scans
+    from fuse_scans import run_fuse
+    from task_manager import task_manager
+    scans = body.get("scans") or []
+    exclude = body.get("exclude") or {}
+    if not scans:
+        raise HTTPException(400, "scans required")
+    paths = ProjectPaths(str(PROJECTS_DIR), project)
+    if not paths.project_json.exists():
+        raise HTTPException(404, "not a project")
+    if any(t.get("task_type") == "fuse" for t in task_manager.get_active(project)):
+        raise HTTPException(409, "a fuse is already running for this project")
+    sync_scans(paths)
+    tid = task_manager.start(project, "fuse", f"Fusing {len(scans)} scan(s)")
+
+    def _progress(pct, msg):
+        task_manager.update(tid, pct=pct, detail=msg)
+
+    def _run():
+        return run_fuse(paths, scans, exclude=exclude,
+                        log=lambda m: print(f"[Fuse] {m}"), progress=_progress)
+    try:
+        report = await asyncio.get_event_loop().run_in_executor(None, _run)
+        task_manager.finish(tid)
+    except Exception as e:
+        task_manager.fail(tid, str(e))
+        print(f"[Fuse] ❌ {e}")
+        raise HTTPException(500, f"fuse failed: {e}")
+    return {"ok": bool(report.get("accepted")), "report": report}
 
 
 @app.get("/api/sessions/{session_id}/available_backends")
@@ -7071,7 +7131,28 @@ async def viewer_websocket(websocket: WebSocket):
                 
                 # Stream saved point clouds
                 try:
-                    _load_ctx = _ctx(session_id)
+                    # Multi-scan (USER 2026-09-06): OPENING a project shows
+                    # the composition REFERENCE scan (★, first scan unless
+                    # he chose another) — a persisted active_scan from an
+                    # earlier working session must not win over it. Tabs
+                    # opened afterwards change the active scan as usual
+                    # (`open` is sent only by the project-open load; tab
+                    # switches send an explicit scan_key; reloads send
+                    # neither and keep the active scan).
+                    if cmd.get("open") and not cmd.get("scan_key"):
+                        try:
+                            from project_paths import ProjectPaths
+                            from project_scans import (get_reference,
+                                                       set_active, sync_scans)
+                            _pp = ProjectPaths(str(PROJECTS_DIR), session_id)
+                            if _pp.project_json.exists():
+                                sync_scans(_pp)
+                                _ref = get_reference(_pp)
+                                if _ref:
+                                    set_active(_pp, _ref)
+                        except Exception as _e:  # noqa: BLE001
+                            print(f"[Viewer] reference-on-open skipped: {_e}")
+                    _load_ctx = _ctx(session_id, cmd.get("scan_key"))
                     output_dir = _load_ctx.output_dir
 
                     # Auto-cleanup: stale display-space data from previous code version

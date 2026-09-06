@@ -39,8 +39,9 @@ UNDO_DIR = "correction_undo"
 STATE_FILE = "correction_state.json"
 REPORT_FILE = "correction_report.json"
 DEPTH_COMPRESS_TOL = 0.03  # |k-1| beyond this → depth (scale) correction
-ICP_ITERS = 30
+ICP_ITERS = 100   # 30 stopped short (4.5° of a 6° yaw on a synthetic pair)
 ICP_TRIM = 0.7
+MAX_RESIDUAL_M = 0.15   # object copies must end within this (median NN)
 
 
 def _log_default(msg: str) -> None:
@@ -127,8 +128,12 @@ def _fit_plane(P: np.ndarray, rng, tol: float = 0.02):
 
 
 def _icp(src: np.ndarray, tree, target: np.ndarray, rng,
-         iters: int = ICP_ITERS, trim: float = ICP_TRIM):
-    """Trimmed point-to-point ICP src→target. Returns R, t, trimmed rms."""
+         iters: int = ICP_ITERS, trim: float = ICP_TRIM,
+         planar: bool = True):
+    """Trimmed point-to-point ICP src→target. Returns R, t, trimmed rms.
+    planar=True (default, USER 2026-09-06): the rotation is a YAW about the
+    vertical axis only, translation is free in 3-D — a full 3-D rotation
+    solved on two objects tilted chunk 6 and lifted its floor 11 cm."""
     R = np.eye(3)
     t = np.zeros(3)
     S = src.copy()
@@ -139,16 +144,31 @@ def _icp(src: np.ndarray, tree, target: np.ndarray, rng,
         sel = np.argsort(d)[:k]
         P, Q = S[sel], target[j[sel]]
         mp, mq = P.mean(0), Q.mean(0)
-        H = (P - mp).T @ (Q - mq)
-        U, _sv, Vt = np.linalg.svd(H)
-        D = np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))])
-        Ri = Vt.T @ D @ U.T
+        if planar:
+            # 2-D Kabsch in the XZ plane → yaw
+            P2 = (P - mp)[:, [0, 2]]
+            Q2 = (Q - mq)[:, [0, 2]]
+            H2 = P2.T @ Q2
+            U2, _s2, Vt2 = np.linalg.svd(H2)
+            D2 = np.diag([1, np.sign(np.linalg.det(Vt2.T @ U2.T))])
+            R2 = Vt2.T @ D2 @ U2.T          # maps XZ → XZ
+            Ri = np.eye(3)
+            Ri[0, 0], Ri[0, 2] = R2[0, 0], R2[0, 1]
+            Ri[2, 0], Ri[2, 2] = R2[1, 0], R2[1, 1]
+        else:
+            H = (P - mp).T @ (Q - mq)
+            U, _sv, Vt = np.linalg.svd(H)
+            D = np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))])
+            Ri = Vt.T @ D @ U.T
         ti = mq - Ri @ mp
         S = S @ Ri.T + ti
         R = Ri @ R
         t = Ri @ t + ti
         rms = float(np.sqrt(
             (np.linalg.norm(S[sel] - Q, axis=1) ** 2).mean()))
+        # converged: this step barely moved anything
+        if _rot_deg(Ri) < 1e-3 and np.linalg.norm(ti) < 1e-5:
+            break
     return R, t, rms
 
 
@@ -266,10 +286,17 @@ def run_correction(output_dir: Path, instance_ids: List[int],
             vframes = sorted(set(int(f) for f in fg[idx]))
             dists = [float(np.linalg.norm(cam_center[f] - cen))
                      for f in vframes if f in cam_center]
+            # the object's OWN curated points in this visit = the matching
+            # evidence (the bbox also holds floor/neighbours: on ccc1 68%
+            # of the bbox points were floor, the ICP matched floor to floor
+            # and the copies stayed 40-75 cm apart — 2026-09-06)
+            seg_idx = np.intersect1d(idx, gidx)
             copies.append({
                 "iid": iid, "label": label_by_iid.get(iid, str(iid)),
                 "visit": vi, "frames": vframes, "chunks": run,
-                "idx": idx, "centroid": cen,
+                "idx": idx, "seg_idx": seg_idx,
+                "centroid": (np.median(xyz[seg_idx], axis=0)
+                             if len(seg_idx) else cen),
                 "kf_range": [kf_index.get(vframes[0], -1),
                              kf_index.get(vframes[-1], -1)],
                 "shoot_dist_m": (float(np.median(dists))
@@ -283,12 +310,60 @@ def run_correction(output_dir: Path, instance_ids: List[int],
     if not copies:
         raise RuntimeError("no copies extracted — empty bboxes")
 
-    # 3) reference per instance = the copy with most points ---------------
+    # 3) ONE reference visit for the whole run ------------------------------
+    # The reference must be a single, consistent group of chunks: picking
+    # "most points" per instance independently could name visit 1 (chunks
+    # 6-7) for one object and visit 0 (chunk 0) for another, which made
+    # EVERY chunk a reference chunk and left nothing to correct (bug seen
+    # on pccr ccc1/ccc2, 2026-09-06). The reference is the EARLIEST visit
+    # group (USER 2026-09-06: "el que habría que corregir es el último, el
+    # que viene acumulando deriva fuerte") — drift accumulates along the
+    # trajectory, so the first sighting is the anchor and the late
+    # revisit is what moves. Each object's reference copy is its copy
+    # inside that group (objects never seen in that group have no
+    # reference and only act as displaced copies).
+    groups: List[set] = []
+    for cp in copies:
+        s = set(cp["chunks"])
+        merged = None
+        for g in groups:
+            if g & s:
+                g |= s
+                merged = g
+                break
+        if merged is None:
+            groups.append(s)
+    # union of overlapping groups (transitive)
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(groups)):
+            for j in range(i + 1, len(groups)):
+                if groups[i] & groups[j]:
+                    groups[i] |= groups.pop(j)
+                    changed = True
+                    break
+            if changed:
+                break
+
+    def _score(g):
+        return sum(len(cp["idx"]) for cp in copies if set(cp["chunks"]) & g)
+
+    ref_group = min(groups, key=lambda g: min(g))
+    log(f"  reference visit group (earliest): chunks {sorted(ref_group)} "
+        f"({_score(ref_group):,} pts over {len(instance_ids)} object(s); "
+        f"candidates {[sorted(g) for g in groups]})")
     ref = {}
     for iid in instance_ids:
-        cands = [c for c in copies if c["iid"] == iid]
+        cands = [c for c in copies if c["iid"] == iid
+                 and set(c["chunks"]) & ref_group]
         if cands:
             ref[iid] = max(cands, key=lambda c: len(c["idx"]))
+        else:
+            log(f"  {label_by_iid.get(iid)}: not seen in the reference "
+                f"visit — no reference copy, its copies are displaced only")
+    if not ref:
+        raise RuntimeError("no reference copy in the reference visit")
     for iid, r in ref.items():
         log(f"  reference for {r['label']}: visit {r['visit']} "
             f"({len(r['idx']):,} pts, chunks {r['chunks']})")
@@ -303,8 +378,10 @@ def run_correction(output_dir: Path, instance_ids: List[int],
         raise RuntimeError("every copy belongs to the reference chunks — "
                            "nothing to correct")
 
-    # target cloud for ICP: all reference copies together
-    tgt_idx = np.unique(np.concatenate([r["idx"] for r in ref.values()]))
+    # target cloud for ICP: the reference copies' OWN object points
+    tgt_idx = np.unique(np.concatenate([r["seg_idx"] for r in ref.values()]))
+    if len(tgt_idx) < 300:
+        raise RuntimeError("reference copies have too few object points")
     target = xyz[tgt_idx]
     from scipy.spatial import cKDTree
     tree = cKDTree(target)
@@ -332,7 +409,7 @@ def run_correction(output_dir: Path, instance_ids: List[int],
         entry = {"chunk": int(c)}
         cp_here = [cp for cp in displaced if c in cp["chunks"]]
         src_idx = np.unique(np.concatenate(
-            [cp["idx"][chunk[cp["idx"]] == c] for cp in cp_here]))
+            [cp["seg_idx"][chunk[cp["seg_idx"]] == c] for cp in cp_here]))
         if len(src_idx) < 300:
             deferred.append((c, len(src_idx)))
             continue
@@ -350,8 +427,8 @@ def run_correction(output_dir: Path, instance_ids: List[int],
         k_scale = 1.0
         seen = {}
         for cp in cp_here:
-            ii = cp["idx"][chunk[cp["idx"]] == c]
-            if len(ii) >= 2000:
+            ii = cp["seg_idx"][chunk[cp["seg_idx"]] == c]
+            if len(ii) >= 500:
                 seen[cp["iid"]] = np.median(xyz[ii], axis=0)
         fps = []
         for (a, b), dref in ref_fp.items():
@@ -376,11 +453,21 @@ def run_correction(output_dir: Path, instance_ids: List[int],
             entry["depth_scale"] = round(k_scale, 4)
             log(f"  ch{c:02d}: depth expansion x{k_scale:.4f} applied "
                 f"along shooting rays")
-        # rigid: init along the dominant object plane, then trimmed ICP ---
-        big = max(cp_here, key=lambda cp: len(cp["idx"]))
-        n_pl, c_pl = _fit_plane(xyz[ref[big["iid"]]["idx"]], rng)
-        off = float(np.median((S - c_pl) @ n_pl))
-        init_t = -off * n_pl
+        # rigid: init from the object copies' centroid offsets (the copies
+        # sit ~1 m apart — a plane-offset init + trimmed ICP converged to
+        # a local minimum 25 cm along the way), then trimmed ICP on the
+        # object points only
+        offs = []
+        for cp in cp_here:
+            if cp["iid"] in ref and cp["iid"] in seen:
+                offs.append(ref[cp["iid"]]["centroid"] - seen[cp["iid"]])
+        if not offs:
+            big = max(cp_here, key=lambda cp: len(cp["idx"]))
+            n_pl, c_pl = _fit_plane(xyz[ref[big["iid"]]["seg_idx"]], rng)
+            off = float(np.median((S - c_pl) @ n_pl))
+            init_t = -off * n_pl
+        else:
+            init_t = np.mean(offs, axis=0)
         sub = S[rng.choice(len(S), min(50000, len(S)), replace=False)] \
             + init_t
         R, t, rms = _icp(sub, tree, target, rng)
@@ -401,6 +488,18 @@ def run_correction(output_dir: Path, instance_ids: List[int],
         entry["object_residual_cm"] = {
             "before": round(float(np.median(d_before)) * 100, 1),
             "after": round(float(np.median(d_after)) * 100, 1)}
+        # GUARD (docs/MEJORAS_OBLIGATORIAS.md): the copies must COLLAPSE.
+        # A solve that leaves the object copies apart is not a correction —
+        # nothing is applied, the user gets the numbers instead.
+        res_after = float(np.median(d_after))
+        res_before = float(np.median(d_before))
+        if res_after > MAX_RESIDUAL_M or res_after > 0.5 * res_before:
+            raise RuntimeError(
+                f"ch{c:02d}: the copies did NOT collapse — object residual "
+                f"{res_before*100:.1f} → {res_after*100:.1f} cm (limit "
+                f"{MAX_RESIDUAL_M*100:.0f} cm and half of before); rigid "
+                f"{_rot_deg(R):.2f}° / {np.linalg.norm(t_full):.2f} m. "
+                f"Nothing was applied.")
         mc = chunk == c
         pch = xyz[mc]
         if depth_needed:
@@ -433,7 +532,7 @@ def run_correction(output_dir: Path, instance_ids: List[int],
         entry = {"chunk": int(c),
                  "inherited_from": int(nearest),
                  "n_own_points": int(n_pts),
-                 "diagnosis": f"inherited (only {n_pts} bbox pts of its "
+                 "diagnosis": f"inherited (only {n_pts} object pts of its "
                               f"own — takes ch{nearest:02d}'s solution)",
                  "rigid": src_e["rigid"],
                  "_R": src_e["_R"], "_t": src_e["_t"],
@@ -441,6 +540,67 @@ def run_correction(output_dir: Path, instance_ids: List[int],
         per_chunk[c] = entry
         log(f"  ch{c:02d}: only {n_pts} bbox pts — INHERITS ch{nearest:02d}"
             f"'s transform (nothing inside the bbox is skipped)")
+
+    # 4b) LOOP-CLOSURE DISTRIBUTION PER KEYFRAME (USER 2026-09-06, after
+    # two failed variants: per-chunk interpolation multiplied the seam —
+    # ~18 cm between every pair of neighbouring chunks — and moving only
+    # the displaced chunks duplicated everything chunk 5 and 6 both saw).
+    # The revisit's error accumulated along the trajectory (VGGT-Long
+    # aligns chunk after chunk), so the correction is spread over
+    # KEYFRAMES: identity up to the last keyframe of the reference visit,
+    # the solved transform at each solved chunk's evidence keyframes
+    # (anchor at the first of its copy frames), slerp(yaw)+lerp(t)
+    # in between, the last anchor's transform from there on. Neighbouring
+    # keyframes differ by millimetres — no seam anywhere; the copies still
+    # land exactly on the reference. Every point/camera is warped by ITS
+    # keyframe (provenance).
+    from scipy.spatial.transform import Rotation, Slerp
+    kf_ref_end = max(kf_index.get(f, -1) for r in ref.values()
+                     for f in r["frames"])
+    anchors = {kf_ref_end: (np.eye(3), np.zeros(3))}
+    for c, e in per_chunk.items():
+        if e.get("kf"):
+            # anchor at the FIRST evidence keyframe: every frame that saw
+            # the copy gets the full solved transform (copies land exact)
+            a_kf = int(e["kf"][0])
+        else:                                   # inherited: chunk middle
+            a_kf = int(min(c * 30 + 15, len(frames) - 1))
+        if a_kf <= kf_ref_end:
+            continue
+        anchors[a_kf] = (e["_R"], e["_t"])
+    a_kfs = sorted(anchors)
+    if len(a_kfs) < 2:
+        raise RuntimeError("no anchor keyframe after the reference visit")
+    rots = Rotation.from_matrix(np.stack([anchors[k][0] for k in a_kfs]))
+    slerp = Slerp(a_kfs, rots)
+    n_kf = len(frames)
+    R_kf = np.tile(np.eye(3), (n_kf, 1, 1))
+    t_kf = np.zeros((n_kf, 3))
+    for k in range(n_kf):
+        if k <= a_kfs[0]:
+            continue
+        if k >= a_kfs[-1]:
+            R_kf[k], t_kf[k] = anchors[a_kfs[-1]]
+            continue
+        lo = max(a for a in a_kfs if a <= k)
+        hi = min(a for a in a_kfs if a > k)
+        w = (k - lo) / (hi - lo)
+        R_kf[k] = slerp([k]).as_matrix()[0]
+        t_kf[k] = (1 - w) * anchors[lo][1] + w * anchors[hi][1]
+    step = [float(np.linalg.norm(t_kf[k] - t_kf[k - 1]))
+            for k in range(1, n_kf)]
+    distribution = {
+        "identity_until_kf": int(kf_ref_end),
+        "anchors": [{"kf": int(k), "rot_deg": round(_rot_deg(anchors[k][0]), 3),
+                     "t_m": round(float(np.linalg.norm(anchors[k][1])), 4)}
+                    for k in a_kfs],
+        "keyframes_warped": int(n_kf - 1 - a_kfs[0]),
+        "max_step_between_keyframes_mm": round(max(step) * 1000, 1),
+    }
+    log(f"  loop closure spread over keyframes {a_kfs[0]+1}..{n_kf-1}: "
+        f"anchors {[(k, round(_rot_deg(anchors[k][0]), 2), round(float(np.linalg.norm(anchors[k][1])), 3)) for k in a_kfs]}, "
+        f"max step between neighbouring keyframes "
+        f"{max(step)*1000:.1f} mm — no seam")
 
     # 5) APPLY: one-level undo backup, then bake --------------------------
     _p(55, "applying: backup (one-level undo) + rewrite cloud & poses...")
@@ -455,33 +615,42 @@ def run_correction(output_dir: Path, instance_ids: List[int],
                      undo / "segmentation_result.json")
 
     xyz_new = xyz
-    n_moved = 0
+    # depth expansion stays per chunk (along each point's own ray)
     for c, e in per_chunk.items():
-        mc = chunk == c
-        p = xyz_new[mc]
         if e["_k"] != 1.0:
+            mc = chunk == c
             cams = np.stack([cam_center.get(int(f), np.zeros(3))
                              for f in fg[mc]])
-            p = cams + (p - cams) * e["_k"]
-        xyz_new[mc] = p @ e["_R"].T + e["_t"]
-        n_moved += int(mc.sum())
+            xyz_new[mc] = cams + (xyz_new[mc] - cams) * e["_k"]
+    # rigid warp per KEYFRAME: points grouped by their keyframe index
+    n_moved = 0
+    order = np.argsort(ks, kind="stable")
+    bounds = np.searchsorted(ks[order], np.arange(-1, n_kf + 1))
+    for k in range(n_kf):
+        if k <= a_kfs[0]:
+            continue
+        sel = order[bounds[k + 1]:bounds[k + 2]]
+        if not len(sel):
+            continue
+        xyz_new[sel] = xyz_new[sel] @ R_kf[k].T + t_kf[k]
+        n_moved += len(sel)
     data["x"] = xyz_new[:, 0].astype(data.dtype["x"])
     data["y"] = xyz_new[:, 1].astype(data.dtype["y"])
     data["z"] = xyz_new[:, 2].astype(data.dtype["z"])
     _write_ply(ply_path, header, data)
-    log(f"  cleaned_cloud.ply rewritten: {n_moved:,} pts moved "
-        f"({len(per_chunk)} chunk(s))")
+    log(f"  cleaned_cloud.ply rewritten: {n_moved:,} pts warped "
+        f"(keyframes {a_kfs[0]+1}..{n_kf-1})")
     _update_result_obbs(output_dir, xyz_new, log)
 
-    # cameras move with their chunk (rigid only — depth doesn't move them)
+    # cameras follow their keyframe's transform
     n_cam = 0
-    for f, k in kf_index.items():
-        c = min(k // 30, n_chunks - 1)
-        if c in per_chunk:
-            R, t = per_chunk[c]["_R"], per_chunk[c]["_t"]
-            poses[k][:3, :3] = R @ poses[k][:3, :3]
-            poses[k][:3, 3] = R @ poses[k][:3, 3] + t
-            n_cam += 1
+    for k in range(n_kf):
+        if k <= a_kfs[0]:
+            continue
+        R, t = R_kf[k], t_kf[k]
+        poses[k][:3, :3] = R @ poses[k][:3, :3]
+        poses[k][:3, 3] = R @ poses[k][:3, 3] + t
+        n_cam += 1
     (output_dir / "camera_poses.txt").write_text("\n".join(
         " ".join(f"{x:.9f}" for x in P.reshape(-1)) for P in poses) + "\n")
     log(f"  camera_poses.txt rewritten: {n_cam} cameras moved")
@@ -506,14 +675,16 @@ def run_correction(output_dir: Path, instance_ids: List[int],
     report = {
         "instance_ids": instance_ids,
         "copies": [{k: v for k, v in cp.items()
-                    if k not in ("idx", "centroid", "frames")} | {
+                    if k not in ("idx", "seg_idx", "centroid", "frames")} | {
                         "n_points": len(cp["idx"]),
+                        "n_object_points": len(cp["seg_idx"]),
                         "n_frames": len(cp["frames"]),
                         "is_reference": cp is ref.get(cp["iid"])}
                    for cp in copies],
         "chunks": [{k: v for k, v in e.items()
                     if not k.startswith("_")}
                    for e in per_chunk.values()],
+        "distribution": distribution,
         "points_moved": n_moved,
         "cameras_moved": n_cam,
         "elapsed_s": round(time.time() - t0, 1),
@@ -524,6 +695,7 @@ def run_correction(output_dir: Path, instance_ids: List[int],
         "status": "pending",
         "applied_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "chunks": sorted(per_chunk.keys()),
+        "keyframes_warped": distribution["keyframes_warped"],
         "points_moved": n_moved,
     })
     _p(100, f"✅ correction applied ({report['elapsed_s']}s) — awaiting "

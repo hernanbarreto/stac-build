@@ -435,6 +435,40 @@
   padding-left: 16px;
 }
 
+/* scans as tree children of their project (USER 2026-09-06) */
+.scan-tree {
+  padding-left: 14px;
+  padding-top: 2px;
+  cursor: default;
+}
+
+.scan-tree-row {
+  display: grid;
+  grid-template-columns: 10px 16px 1fr auto;
+  gap: 5px;
+  align-items: center;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.scan-tree-row:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.scan-tree-row.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.scan-tree-branch {
+  color: var(--text-muted);
+  font-family: monospace;
+}
+
 .sidebar-pipeline-badge {
   color: var(--accent);
   font-size: 10px;

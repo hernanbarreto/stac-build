@@ -44,13 +44,20 @@ def split_key(key: str):
     return parts[0], (parts[1] if len(parts) > 1 else "default")
 
 
+FUSED_DAY = "fused"   # merged products live under scans/fused/src_<stamp>/
+#                       so every per-scan code path (Potree route, load,
+#                       meshing, chat) works on them unchanged; "fused" sorts
+#                       after any date, so it is never "the first scan".
+
+
 def discover_scans(paths: ProjectPaths) -> List[Dict]:
-    """Every scan present on disk, oldest first."""
+    """Every scan present on disk, oldest first; fused products last."""
     out = []
     for date in paths.list_scan_days():
         for source in paths.list_sources(date):
             out.append({"key": scan_key(date, source), "date": date,
-                        "source": source})
+                        "source": source,
+                        "kind": "fused" if date == FUSED_DAY else "scan"})
     return out
 
 
