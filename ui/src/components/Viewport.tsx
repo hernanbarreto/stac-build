@@ -30,6 +30,9 @@ interface ViewportProps {
     pointBudget: number
     confidenceThreshold: number
     activeSession: string | null
+    // multi-scan: scan to show when the project OPENS (double-click on a
+    // scan of a not-loaded project); undefined → the composition reference
+    openScanKey?: string | null
     activeTool: Tool
     showAxes?: boolean
     showGrid?: boolean
@@ -421,7 +424,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onChunkSelected, onChunkDelta },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onChunkSelected, onChunkDelta },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -3630,6 +3633,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
     // Track activeSession in a ref for the WS onopen handler
     const activeSessionRef = useRef(activeSession)
+    const openScanKeyRef = useRef<string | null | undefined>(openScanKey)
+    useEffect(() => { openScanKeyRef.current = openScanKey }, [openScanKey])
     // Guards the two AUTOMATIC load_session triggers (WS onopen + the
     // activeSession effect) against firing twice for the same session on one
     // connection — that double-fire made the backend reload the cloud AND
@@ -3898,11 +3903,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // Clear existing scene before loading
         clearScene()
 
+        // project OPEN: the backend shows the composition reference unless
+        // a scan was asked for explicitly (USER 2026-09-06)
         ws.send(JSON.stringify({
             type: 'load_session',
             session_id: activeSession,
+            open: true,
+            scan_key: openScanKeyRef.current || undefined,
         }))
-    }, [activeSession])
+    }, [activeSession]) // eslint-disable-line react-hooks/exhaustive-deps
 
     // Clear geometry and OBBs
     const clearScene = useCallback(() => {
