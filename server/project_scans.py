@@ -94,6 +94,38 @@ def get_reference(paths: ProjectPaths) -> Optional[str]:
     return load_meta(paths)["composition"].get("reference")
 
 
+# ── ACTIVE scan (USER 2026-09-06): every scan-scoped operation —
+# segmentation, brush, corrections, meshing, chat — works on ONE scan at a
+# time, independently of the others and of the composition reference.
+# Resolution precedence for implicit contexts: active → reference → latest.
+def get_active(paths: ProjectPaths) -> Optional[str]:
+    meta = load_meta(paths)
+    keys = {s["key"] for s in meta.get("scans", [])}
+    a = meta.get("active_scan")
+    return a if a in keys else None
+
+
+def set_active(paths: ProjectPaths, key: str) -> dict:
+    meta = load_meta(paths)
+    keys = {s["key"] for s in meta.get("scans", [])}
+    if key not in keys:
+        raise ValueError(f"unknown scan {key}")
+    meta["active_scan"] = key
+    paths.save_project_meta(meta)
+    return meta
+
+
+def display_matrix(paths: ProjectPaths, key: Optional[str],
+                   floor_M: np.ndarray) -> np.ndarray:
+    """Display transform of a scan's main cloud in the REFERENCE frame:
+    composition(key) @ floor. Identity composition for the reference itself
+    (or when the key is unknown)."""
+    if not key:
+        return floor_M
+    C = get_transform(paths, key)
+    return C @ floor_M
+
+
 def get_transform(paths: ProjectPaths, key: str) -> np.ndarray:
     """4x4 composition transform of a scan in the reference frame
     (identity for the reference itself and for never-composed scans)."""

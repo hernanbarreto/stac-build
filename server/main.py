@@ -67,8 +67,26 @@ SERVER_DIR = str(Path(__file__).parent)
 def _ctx(session_id: str, scan_key: str = None):
     """Resolve a session_id to a path context (new-style or legacy).
     ``scan_key`` ("date/source") targets one scan of a multi-scan project
-    explicitly; without it the composition reference (or latest) is used."""
+    explicitly; without it the ACTIVE scan, else the composition reference,
+    else the latest scan is used (USER 2026-09-06: work is per scan)."""
     return resolve_session(SERVER_DIR, session_id, scan_key=scan_key)
+
+
+def _display_matrix(session_id: str, M):
+    """Main-cloud display transform sent to the viewer (column-major 16):
+    the ACTIVE scan's floor transform composed with its project composition
+    transform, so a non-reference active scan still shows in the reference
+    frame next to the other scans' layers."""
+    try:
+        from project_paths import ProjectPaths
+        from project_scans import get_active, get_reference, display_matrix
+        paths = ProjectPaths(str(PROJECTS_DIR), session_id)
+        if paths.project_json.exists():
+            key = get_active(paths) or get_reference(paths)
+            M = display_matrix(paths, key, np.asarray(M, dtype=np.float64))
+    except Exception:  # noqa: BLE001 — never break the load over composition
+        pass
+    return np.asarray(M).T.flatten().tolist()
 
 def _audit_log(action: str, session_id: str, user: str = "system", role: str = "", detail: str = ""):
     """Append an entry to the project audit log (survives project deletion)."""
@@ -1920,6 +1938,7 @@ async def get_session_scans(session_id: str):
                 "has_potree": potree_ok,
                 "points": n_pts,
                 "is_reference": key == comp.get("reference"),
+                "is_active": key == (meta.get("active_scan") or comp.get("reference")),
                 "potree_url": scan_potree_url(session_id, key) if potree_ok else None,
                 "floor_transform": floor16,
                 "composition": (comp.get("transforms") or {}).get(key),
@@ -1927,7 +1946,29 @@ async def get_session_scans(session_id: str):
             })
 
     return {"session_id": session_id, "scans": scans,
-            "composition": {"reference": comp.get("reference")}}
+            "composition": {"reference": comp.get("reference")},
+            "active_scan": meta.get("active_scan") or comp.get("reference")}
+
+
+@app.post("/api/project/{project}/active_scan")
+async def project_set_active_scan(project: str, body: dict):
+    """Choose the scan being WORKED ON (segmentation, brush, corrections,
+    meshing, chat all target it). Independent of the composition
+    reference (USER 2026-09-06)."""
+    from project_paths import ProjectPaths
+    from project_scans import set_active, sync_scans
+    key = body.get("scan_key")
+    if not key:
+        raise HTTPException(400, "scan_key required")
+    paths = ProjectPaths(str(PROJECTS_DIR), project)
+    if not paths.project_json.exists():
+        raise HTTPException(404, "not a project")
+    sync_scans(paths)
+    try:
+        set_active(paths, key)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "active_scan": key}
 
 
 @app.post("/api/project/{project}/composition/reference")
@@ -4856,7 +4897,7 @@ async def _correction_notify_viewer(session_id: str, output_dir: Path):
             M = np.eye(4)
             M[:3, :3] = float(d["s"]) * d["R"]
             M[:3, 3] = d["t"]
-            msg["floorTransform"] = M.T.flatten().tolist()
+            msg["floorTransform"] = _display_matrix(session_id, M)
         await viewer_manager.broadcast_text(json.dumps(msg))
         print("[Correction] potree_ready broadcast (viewer reloads octree)")
     except Exception as e:  # noqa: BLE001
@@ -5882,7 +5923,7 @@ async def _erase_finalize(session_id: str, delay: float = 2.5):
                     M = np.eye(4)
                     M[:3, :3] = float(d["s"]) * d["R"]
                     M[:3, 3] = d["t"]
-                    msg["floorTransform"] = M.T.flatten().tolist()
+                    msg["floorTransform"] = _display_matrix(session_id, M)
                 await viewer_manager.broadcast_text(json.dumps(msg))
                 print("[Erase] potree_ready broadcast (viewer reloads octree)")
         except Exception as e:  # noqa: BLE001
@@ -7115,7 +7156,7 @@ async def viewer_websocket(websocket: WebSocket):
                                     M = np.eye(4)
                                     M[:3, :3] = s_val * R
                                     M[:3, 3] = t
-                                    floor_transform_4x4 = M.T.flatten().tolist()
+                                    floor_transform_4x4 = _display_matrix(session_id, M)
                                     print(f"[Viewer] Floor transform loaded for Potree cloud")
                                 except Exception as e:
                                     print(f"[Viewer] ⚠️ Could not load floor_transform: {e}")
@@ -7140,7 +7181,7 @@ async def viewer_websocket(websocket: WebSocket):
                                             M = np.eye(4)
                                             M[:3, :3] = s_val * R
                                             M[:3, 3] = t
-                                            floor_transform_4x4 = M.T.flatten().tolist()
+                                            floor_transform_4x4 = _display_matrix(session_id, M)
                                             print(f"[Viewer] Floor transform computed and saved")
                                         else:
                                             print(f"[Viewer] No floor plane detected")
@@ -7460,7 +7501,7 @@ async def viewer_websocket(websocket: WebSocket):
                                         M = np.eye(4)
                                         M[:3, :3] = s_val * R
                                         M[:3, 3] = t
-                                        floor_transform_4x4 = M.T.flatten().tolist()
+                                        floor_transform_4x4 = _display_matrix(sid, M)
                                     except Exception:
                                         pass
                                 # Check confidence in PLY

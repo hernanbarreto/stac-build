@@ -425,8 +425,12 @@ def resolve_session(server_dir: str, session_id: str,
             return paths.for_source(parts[0],
                                     parts[1] if len(parts) > 1 else "default")
         try:
-            ref = (paths.load_project_meta().get("composition") or {}
-                   ).get("reference")
+            _meta = paths.load_project_meta()
+            # ACTIVE scan first (the one being worked on), then the
+            # composition reference (USER 2026-09-06: work is always per
+            # scan; the reference is only the composition frame)
+            ref = _meta.get("active_scan") or (
+                _meta.get("composition") or {}).get("reference")
         except Exception:  # noqa: BLE001
             ref = None
         if ref:
@@ -435,13 +439,15 @@ def resolve_session(server_dir: str, session_id: str,
                                    parts[1] if len(parts) > 1 else "default")
             if ctx.source_dir.exists():
                 return ctx
-        # Find the latest scan day + first source
+        # No active/reference set: the FIRST scan (oldest day) is the main
+        # cloud unless the user picks another (USER 2026-09-06 — "la nube
+        # principal es la primera, salvo que el usuario elija").
         scan_days = paths.list_scan_days()
         if scan_days:
-            latest = scan_days[-1]
-            sources = paths.list_sources(latest)
+            first = scan_days[0]
+            sources = paths.list_sources(first)
             source = sources[0] if sources else "default"
-            return paths.for_source(latest, source)
+            return paths.for_source(first, source)
         else:
             return paths.for_source("default", "default")
     

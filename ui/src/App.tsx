@@ -189,8 +189,10 @@ function App() {
       const d = await r.json()
       const scans: any[] = d.scans || []
       setProjectScans(scans)
+      // layers = every scan EXCEPT the active one (the active scan is the
+      // main cloud, where the user works; USER 2026-09-06)
       const layers = scans
-        .filter(s => !s.is_reference && s.has_potree && s.potree_url)
+        .filter(s => !s.is_active && s.has_potree && s.potree_url)
         .map(s => ({
           key: s.key, url: s.potree_url,
           floorTransform: s.floor_transform || null,
@@ -2108,13 +2110,28 @@ function App() {
                      user shows/hides; the reference is picked by radio. ── */}
                 {projectScans.length > 1 && (
                   <div style={{ padding: '6px 10px', borderBottom: '1px solid var(--border-color)' }}>
-                    <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>
-                      Scans ({projectScans.length}) — radio = reference, checkbox = visible
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4, display: 'grid', gridTemplateColumns: '28px 28px 22px 1fr auto', gap: 4 }}>
+                      <span title="work on this scan">work</span><span title="composition reference">ref</span><span title="visible">👁</span>
+                      <span>Scans ({projectScans.length})</span><span />
                     </div>
                     {projectScans.map(sc => (
-                      <div key={sc.key} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '2px 0', color: 'var(--text-primary)' }}>
+                      <div key={sc.key} style={{ display: 'grid', gridTemplateColumns: '28px 28px 22px 1fr auto', alignItems: 'center', gap: 4, fontSize: 12, padding: '2px 0', color: 'var(--text-primary)' }}>
+                        <input type="radio" name="scan-active" checked={!!sc.is_active}
+                          title="Work on this scan: segmentation, brush, corrections, meshing, chat target it (reloads the session)"
+                          onChange={async () => {
+                            try {
+                              await fetch(`/api/project/${activeSession}/active_scan`, {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ scan_key: sc.key }),
+                              })
+                              setStatusMessage(`working on ${sc.label}; reloading…`)
+                              viewportRef.current?.clearScanLayers()
+                              viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: activeSession })
+                              loadProjectScans(activeSession)
+                            } catch { setStatusMessage('switching scan failed') }
+                          }} />
                         <input type="radio" name="scan-ref" checked={!!sc.is_reference}
-                          title="Set as composition reference (reloads the session)"
+                          title="Set as composition reference (the frame every scan is composed into)"
                           onChange={async () => {
                             try {
                               await fetch(`/api/project/${activeSession}/composition/reference`, {
@@ -2128,9 +2145,9 @@ function App() {
                             } catch { setStatusMessage('setting reference failed') }
                           }} />
                         <input type="checkbox"
-                          checked={sc.is_reference ? true : !!scanVisible[sc.key]}
-                          disabled={!!sc.is_reference || !sc.has_potree}
-                          title={sc.is_reference ? 'reference scan (main cloud)' : (sc.has_potree ? 'show/hide this scan' : 'no Potree yet')}
+                          checked={sc.is_active ? true : !!scanVisible[sc.key]}
+                          disabled={!!sc.is_active || !sc.has_potree}
+                          title={sc.is_active ? 'active scan (main cloud)' : (sc.has_potree ? 'show/hide this scan' : 'no Potree yet')}
                           onChange={(e) => {
                             const v = e.target.checked
                             setScanVisible(prev => ({ ...prev, [sc.key]: v }))
