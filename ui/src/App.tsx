@@ -176,6 +176,20 @@ function App() {
     return () => clearInterval(iv)
   }, [activeSession, refreshCorrectionStatus])
   const [chunkBoxesLoading, setChunkBoxesLoading] = useState(false)
+  // Resume/Cancel dialog for incomplete propagation (USER 2026-09-06): on
+  // opening the Segmentation Manager, if any instance was not fully
+  // propagated (a prior pass OOM'd), ask before opening.
+  const [resumeDialog, setResumeDialog] = useState<{ session: string; incomplete: any[]; complete: number } | null>(null)
+  const [resumeBusy, setResumeBusy] = useState(false)
+  // Open the manager directly (it loads SAM3). The Resume/Cancel dialog is
+  // raised AFTER SAM3 reaches "ready" (USER 2026-09-06: Cancel just clears
+  // the incomplete ones and you keep segmenting; Resume finds SAM3 already
+  // loaded). The check-on-ready lives in a dedicated effect below.
+  const [resumeCheckedFor, setResumeCheckedFor] = useState<string | null>(null)
+  const openSegmentationManager = useCallback((sid: string) => {
+    setResumeCheckedFor(null)
+    setInteractiveSessionId(sid)
+  }, [])
   const loadChunkBoxes = useCallback(async (sid: string) => {
     setChunkBoxesLoading(true)
     try {
@@ -317,6 +331,32 @@ function App() {
   useEffect(() => {
     interactiveSessionRef.current = interactiveSessionId
   }, [interactiveSessionId])
+  // Raise the Resume/Cancel dialog AFTER SAM3 reaches "ready" for the just-
+  // opened manager (USER 2026-09-06): Cancel clears the incomplete ones and
+  // you keep segmenting; Resume finds SAM3 already loaded.
+  useEffect(() => {
+    const sid = interactiveSessionId
+    if (!sid || resumeCheckedFor === sid) return
+    let cancelled = false
+    const check = async () => {
+      for (let i = 0; i < 150 && !cancelled; i++) {
+        const s = await fetch(`/api/segmentation/init_status/${sid}`).then(r => r.json()).catch(() => ({}))
+        if (s.status === 'ready') break
+        if (s.status === 'error') return
+        await new Promise(r => setTimeout(r, 2000))
+      }
+      if (cancelled) return
+      try {
+        const st = await fetch(`/api/segmentation/resume/status/${sid}`).then(r => r.json())
+        if (!cancelled && st.needs_resume) {
+          setResumeDialog({ session: sid, incomplete: st.incomplete || [], complete: st.complete || 0 })
+        }
+      } catch { /* silent */ }
+      if (!cancelled) setResumeCheckedFor(sid)
+    }
+    check()
+    return () => { cancelled = true }
+  }, [interactiveSessionId, resumeCheckedFor])
   useEffect(() => {
     let intervalMs = 5000
     let timerId: ReturnType<typeof setTimeout> | null = null
@@ -1897,7 +1937,7 @@ function App() {
                             {activeSession === s.id && (
                               <button className="session-action-btn segment"
                                 title="Manual Interactive Segmentation"
-                                onClick={(e) => { e.stopPropagation(); setInteractiveSessionId(s.id) }}
+                                onClick={(e) => { e.stopPropagation(); openSegmentationManager(s.id) }}
                               ><Crosshair size={14} /></button>
                             )}
                             {activeSession === s.id && (
@@ -2354,7 +2394,7 @@ function App() {
                     panel shrinks (USER 2026-09-06). */}
                 <div className="bim-actions" style={{ marginTop: 'auto', display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                   <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
-                    onClick={() => setInteractiveSessionId(activeSession)}>
+                    onClick={() => openSegmentationManager(activeSession!)}>
                     <Crosshair size={14} style={{ marginRight: '6px', verticalAlign: 'middle' }} /> Segmentation
                   </button>
                   <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
@@ -3254,6 +3294,78 @@ function App() {
           />
         )
       }
+
+      {/* Resume / Cancel incomplete propagation (USER 2026-09-06) */}
+      {resumeDialog && (
+        <div className="admin-overlay" style={{ zIndex: 2100 }}>
+          <div className="admin-panel" style={{ maxWidth: 520 }}>
+            <div className="admin-header"><h2>⚠ Incomplete segmentation</h2></div>
+            <div style={{ padding: 16 }}>
+              <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
+                {resumeDialog.incomplete.length} instance(s) were not fully
+                propagated (a previous propagation was interrupted).
+                {resumeDialog.complete > 0 ? ` ${resumeDialog.complete} complete instance(s) are unaffected.` : ''}
+              </p>
+              <ul style={{ maxHeight: 160, overflow: 'auto', fontSize: 12, color: 'var(--text-primary)', margin: '0 0 12px', paddingLeft: 18 }}>
+                {resumeDialog.incomplete.map((i: any) => (
+                  <li key={i.instance_id}>{i.label} <span style={{ color: 'var(--text-secondary)' }}>({i.frames} frames)</span></li>
+                ))}
+              </ul>
+              <p style={{ color: '#e0a632', fontSize: 12.5, marginBottom: 14 }}>
+                <strong>Cancel</strong> deletes every incomplete instance
+                permanently — from the list, the masks, and every file
+                (they will no longer exist). <strong>Resume</strong> re-seeds
+                them from their saved masks and finishes propagating (in
+                batches, so it won't run out of memory).
+              </p>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="bim-action-btn upload" style={{ flex: 1 }}
+                  disabled={resumeBusy}
+                  onClick={async () => {
+                    const sid = resumeDialog.session
+                    setResumeBusy(true)
+                    // SAM3 is already ready (the dialog was raised on ready)
+                    setStatusMessage('▶ resuming propagation (seed + batched propagate)…')
+                    try {
+                      const r = await fetch('/api/segmentation/resume/run', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: sid }),
+                      })
+                      const d = await r.json().catch(() => ({}))
+                      setStatusMessage(r.ok ? '▶ propagation resumed — instances completed'
+                        : `▶ resume failed: ${d.detail || 'error'}`)
+                    } catch (e: any) { setStatusMessage(`▶ resume failed: ${e?.message || 'error'}`) }
+                    setResumeBusy(false)
+                    setResumeDialog(null)
+                  }}>
+                  {resumeBusy ? '⏳ resuming…' : '▶ Resume'}
+                </button>
+                <button className="bim-action-btn" style={{ flex: 1 }}
+                  disabled={resumeBusy}
+                  onClick={async () => {
+                    const sid = resumeDialog.session
+                    setResumeBusy(true)
+                    setStatusMessage('🗑 deleting incomplete instances…')
+                    try {
+                      const r = await fetch('/api/segmentation/resume/cancel', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: sid }),
+                      })
+                      const d = await r.json().catch(() => ({}))
+                      setStatusMessage(r.ok ? `🗑 ${d.deleted || 0} incomplete instance(s) deleted — keep segmenting`
+                        : '🗑 cancel failed')
+                    } catch { setStatusMessage('🗑 cancel failed') }
+                    setResumeBusy(false)
+                    setResumeDialog(null)
+                    // stay in the manager: Cancel just clears the incomplete ones
+                  }}>
+                  {resumeBusy ? '⏳…' : '🗑 Cancel (delete incomplete)'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Segmentation Manager Overlay */}
       {

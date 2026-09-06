@@ -196,6 +196,10 @@ segmentation:
                               # reverted together with it until segmentation is healthy again.
   attach_dist_m: 0.03
   propagate_output_prob_thresh: 0.5   # VENDOR DEFAULT — restored (user 2026-08-29 night).
+  propagate_obj_batch: 10             # USER 2026-09-06: interactive propagation ALWAYS
+                                      #   runs in batches of at most this many objects —
+                                      #   the tracker state grows with objects x frames and
+                                      #   31 objects x 1329 frames OOMd the whole 47 GB.
                               # The 0.0 experiment ("always all frames") made SAM3 emit
                               # near-zero-confidence garbage masks on frames where the
                               # object is not visible → the whole segmentation degraded

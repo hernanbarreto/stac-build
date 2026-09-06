@@ -2825,8 +2825,12 @@ async def propagate_interactive_segmentation(request: Request):
     _all_masks = {}
     _save_done = False
     
-    def _save_results():
-        """Save masks + 3D matching. Called from finally if propagation produced masks."""
+    def _save_results(mark_complete: bool = False):
+        """Save masks + 3D matching. Called from finally if propagation
+        produced masks. mark_complete=True (only on a propagation that ran
+        to the end) flags every saved instance ``propagated: true`` in
+        segmentation.json — the Resume/Cancel dialog keys off that flag
+        (USER 2026-09-06)."""
         nonlocal _save_done
         if _save_done or not _all_masks:
             return
@@ -2877,6 +2881,18 @@ async def propagate_interactive_segmentation(request: Request):
             saved_seg = _save_masks(output_dir, translated_masks, categories, obj_labels, cfg)
             print(f"[Segmentation] Saved {len(all_obj_ids)} object(s): "
                   f"{', '.join(f'{oid}={obj_labels[oid]}' for oid in sorted(all_obj_ids))}")
+            # mark fully-propagated (ONLY on a run that reached the end)
+            if mark_complete:
+                try:
+                    _seg_p = output_dir / "segmentation.json"
+                    _seg = json.loads(_seg_p.read_text())
+                    _done_iids = {oid + 1 for oid in all_obj_ids}
+                    for _inst in _seg.get("instances", []):
+                        if int(_inst.get("instance_id", -1)) in _done_iids:
+                            _inst["propagated"] = True
+                    _seg_p.write_text(json.dumps(_seg, indent=2))
+                except Exception as _e:  # noqa: BLE001
+                    print(f"[Segmentation] propagated-flag update failed: {_e}")
             
             # NOTE: We intentionally do NOT run _match_and_save_result here.
             # Cloud matching + Potree rebuild is expensive (~minutes) and should
@@ -2901,9 +2917,14 @@ async def propagate_interactive_segmentation(request: Request):
                         .get("propagate_output_prob_thresh", 0.0))
 
         try:
-            for frame_idx, num_frames, outputs in sam3.propagate_interactive_stream(
-                    state_id, selected_frames=selected_frames,
-                    output_prob_thresh=_thresh):
+            # USER 2026-09-06: objects are ALWAYS propagated in batches —
+            # 31 objects x 1329 frames filled the whole GPU. The batched
+            # generator merges per-frame outputs across batches on CPU.
+            _obj_batch = int((cfg.get("segmentation") or {})
+                             .get("propagate_obj_batch", 10))
+            for frame_idx, num_frames, outputs in sam3.propagate_interactive_batched(
+                    state_id, output_prob_thresh=_thresh,
+                    obj_batch=_obj_batch):
                 _all_masks[frame_idx] = outputs
                 effective_total = actual_total if actual_total else num_frames
                 pct = min(99, round((len(_all_masks) / max(1, effective_total)) * 100))
@@ -2939,8 +2960,8 @@ async def propagate_interactive_segmentation(request: Request):
 
             task_manager.update(tid, pct=100, detail="Saving masks...")
             yield f"event: saving\ndata: {{\"status\": \"Saving masks & matching to 3D cloud...\"}}\n\n"
-            
-            _save_results()
+
+            _save_results(mark_complete=True)   # ran to the end → complete
             
             done_event = json.dumps({"ok": True})
             yield f"event: done\ndata: {done_event}\n\n"
@@ -5914,6 +5935,127 @@ async def segmentation_erase_status(session_id: str):
     return {"busy": bool(st["busy"] or st["task"] is not None),
             "done_ts": st["done_ts"],
             "can_undo": bool(st["undo"])}
+
+
+@app.get("/api/segmentation/resume/status/{session_id}")
+async def resume_status(session_id: str):
+    """On Segmentation Manager open: are there instances that were not fully
+    propagated (a prior propagation OOM'd mid-way)? Drives the Resume/Cancel
+    dialog (USER 2026-09-06)."""
+    ctx = _ctx(session_id)
+    from segmentation.propagation_resume import status as _st
+    return _st(ctx.output_dir)
+
+
+@app.post("/api/segmentation/resume/cancel")
+async def resume_cancel(body: dict):
+    """CANCEL: delete every not-fully-propagated instance EVERYWHERE — list,
+    segmentation.json, seg_masks.npz, segmentation_result.json,
+    classification, store. They no longer exist (USER 2026-09-06)."""
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(400, "session_id required")
+    ctx = _ctx(session_id)
+    from segmentation.propagation_resume import cancel as _cancel
+    loop = asyncio.get_event_loop()
+    res = await loop.run_in_executor(
+        None, lambda: _cancel(ctx.output_dir, log=print))
+    return {"ok": True, **res}
+
+
+@app.post("/api/segmentation/resume/run")
+async def resume_run(body: dict):
+    """RESUME: re-seed each incomplete instance with MANY interior points
+    from its own saved masks across MANY frames (the floor gets the most),
+    then re-propagate in OBJECT BATCHES (bounded VRAM) and save — completing
+    them (USER 2026-09-06)."""
+    from task_manager import task_manager
+    import numpy as _np
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(400, "session_id required")
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
+    from segmentation.propagation_resume import build_resume_seeds, status
+    if not status(output_dir).get("needs_resume"):
+        return {"ok": True, "nothing_to_resume": True}
+
+    # the manager-open flow already started the SAM3 interactive session
+    init = _sam3_init_status.get(session_id, {})
+    state_id = init.get("state_id")
+    kf_mapping = init.get("kf_mapping", {})
+    if not state_id or not kf_mapping:
+        raise HTTPException(409, "SAM3 interactive session not ready — open "
+                            "the Segmentation Manager first")
+    # real frame number → SAM3 sequential index
+    real_to_seq = {}
+    for seq, name in kf_mapping.items():
+        m = re.search(r"(\d+)", str(name))
+        if m:
+            real_to_seq[int(m.group(1))] = int(seq)
+
+    tid = task_manager.start(session_id, "resume", "Resuming propagation")
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        from segmentation.sam3_wrapper import get_sam3_wrapper
+        sam3 = get_sam3_wrapper()
+        seeds = build_resume_seeds(output_dir, log=print)
+        # map scaled mask pixels → the resolution SAM3 expects: seeds are in
+        # mask space (scaled_res); SAM3 point prompts are in that same grid.
+        n_seeded = 0
+        sam3.clear_interactive_prompts(state_id)   # fresh prompt_log
+        for oid, fseeds in seeds.items():
+            for rf, pts in fseeds.items():
+                seq = real_to_seq.get(int(rf))
+                if seq is None:
+                    continue
+                P = _np.array(pts, dtype=_np.float32)
+                L = _np.ones(len(pts), dtype=_np.int32)
+                sam3.add_interactive_prompt(state_id, seq, int(oid), P, L)
+                n_seeded += len(pts)
+        task_manager.update(tid, pct=10,
+                            detail=f"seeded {n_seeded} points; propagating")
+        _thresh = float((cfg.get("segmentation") or {})
+                        .get("propagate_output_prob_thresh", 0.0))
+        _batch = int((cfg.get("segmentation") or {})
+                     .get("propagate_obj_batch", 10))
+        all_masks = {}
+        for frame_idx, num_frames, outputs in \
+                sam3.propagate_interactive_batched(
+                    state_id, output_prob_thresh=_thresh, obj_batch=_batch):
+            all_masks[frame_idx] = outputs
+            pct = 10 + min(85, round(len(all_masks) / max(1, num_frames) * 85))
+            task_manager.update(tid, pct=pct,
+                                detail=f"Frame {len(all_masks)}/{num_frames}")
+        if not all_masks:
+            raise RuntimeError("resume produced no masks")
+        # save + mark complete via the shared pipeline helpers
+        from segmentation_pipeline import _save_masks, _parse_raw_masks
+        structured = _parse_raw_masks(all_masks)
+        translated = {}
+        for f_idx, fm in structured.items():
+            nm = kf_mapping.get(f_idx, kf_mapping.get(str(f_idx)))
+            rf = int(re.search(r"(\d+)", nm).group(1)) if nm else f_idx
+            translated[rf] = fm
+        seg = json.loads((output_dir / "segmentation.json").read_text())
+        obj_labels = {int(i["instance_id"]) - 1:
+                      (i.get("label") or str(i["instance_id"]))
+                      for i in seg.get("instances", [])}
+        cats = list({v for v in obj_labels.values()})
+        _save_masks(output_dir, translated, cats, obj_labels, cfg)
+        for inst in seg.get("instances", []):
+            inst["propagated"] = True
+        (output_dir / "segmentation.json").write_text(json.dumps(seg, indent=2))
+        return {"resumed": len(seeds), "frames": len(all_masks)}
+
+    try:
+        res = await loop.run_in_executor(None, _run)
+        task_manager.finish(tid)
+    except Exception as e:
+        task_manager.fail(tid, str(e))
+        raise HTTPException(500, f"resume failed: {e}")
+    return {"ok": True, **res}
 
 
 @app.post("/api/segmentation/refresh")

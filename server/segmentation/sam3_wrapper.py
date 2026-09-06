@@ -793,9 +793,16 @@ class SAM3Wrapper:
         obj_id: int,
         points: np.ndarray,
         labels: np.ndarray,
+        _replay: bool = False,
     ) -> dict:
         """
         Add a point-based prompt (positive or negative click) to a specific frame.
+
+        Every prompt is recorded in the session's prompt_log (unless it is a
+        _replay of the log itself) so batched propagation can re-add SUBSETS
+        of objects (USER 2026-09-06: 31 objects x 1329 frames OOM'd the
+        whole 47 GB — objects must be processed in batches no matter how
+        many the user marked).
 
         Args:
             state_id: Session ID from init_interactive_session
@@ -807,6 +814,13 @@ class SAM3Wrapper:
         Returns:
             Dict with 'success' and optionally 'mask' (binary mask as [H, W] numpy)
         """
+        if not _replay:
+            _meta = self._interactive_sessions.get(state_id)
+            if _meta is not None:
+                _meta.setdefault("prompt_log", []).append({
+                    "frame_idx": int(frame_idx), "obj_id": int(obj_id),
+                    "points": np.asarray(points).tolist(),
+                    "labels": np.asarray(labels).tolist()})
         if not self.is_loaded or self.predictor is None:
             raise RuntimeError("SAM3 model not loaded")
 
@@ -1117,6 +1131,73 @@ class SAM3Wrapper:
             traceback.print_exc()
         finally:
             pass  # No internal state manipulation needed (notebook pattern)
+
+    def propagate_interactive_batched(self, state_id: str,
+                                      output_prob_thresh: Optional[float] = None,
+                                      obj_batch: int = 10):
+        """Propagate in BATCHES of objects (USER 2026-09-06): the tracker's
+        propagation state grows with objects x frames and 31 objects x 1329
+        frames filled the whole 47 GB. No matter how many objects the user
+        marked, at most ``obj_batch`` are propagated per pass: prompts are
+        cleared, the batch's prompts re-added from the session prompt_log,
+        the pass streamed, and per-frame outputs MERGED on CPU. Yields the
+        same (frame_idx, num_frames, outputs) tuples as the plain stream —
+        outputs carry the merged masks accumulated so far for that frame."""
+        sess_meta = self._interactive_sessions.get(state_id, {})
+        plog = sess_meta.get("prompt_log") or []
+        obj_ids = sorted({int(p["obj_id"]) for p in plog})
+        if not plog or len(obj_ids) <= obj_batch:
+            yield from self.propagate_interactive_stream(
+                state_id, output_prob_thresh=output_prob_thresh)
+            return
+        batches = [obj_ids[i:i + obj_batch]
+                   for i in range(0, len(obj_ids), obj_batch)]
+        logger.info(f"[SAM3-Interactive] BATCHED propagation: {len(obj_ids)} "
+                    f"objects in {len(batches)} batch(es) of <= {obj_batch}")
+        merged: Dict[int, dict] = {}
+        for bi, batch in enumerate(batches):
+            logger.info(f"[SAM3-Interactive] ── object batch {bi + 1}/"
+                        f"{len(batches)}: obj_ids {batch} ──")
+            self.clear_interactive_prompts(state_id)
+            bset = set(batch)
+            for pr in plog:
+                if int(pr["obj_id"]) in bset:
+                    self.add_interactive_prompt(
+                        state_id, pr["frame_idx"], pr["obj_id"],
+                        np.asarray(pr["points"], dtype=np.float32),
+                        np.asarray(pr["labels"], dtype=np.int32),
+                        _replay=True)
+            for frame_idx, num_frames, outputs in                     self.propagate_interactive_stream(
+                        state_id, output_prob_thresh=output_prob_thresh):
+                m = merged.get(frame_idx)
+                bm = outputs.get("out_binary_masks")
+                oi = outputs.get("out_obj_ids")
+                if m is None:
+                    merged[frame_idx] = {
+                        "out_binary_masks": bm, "out_obj_ids": oi,
+                        **{k: v for k, v in outputs.items()
+                           if k not in ("out_binary_masks", "out_obj_ids")}}
+                elif bm is not None and len(bm):
+                    try:
+                        m["out_binary_masks"] = (
+                            np.concatenate([m["out_binary_masks"], bm])
+                            if m.get("out_binary_masks") is not None
+                            and len(m["out_binary_masks"]) else bm)
+                        m["out_obj_ids"] = (
+                            np.concatenate([np.asarray(m["out_obj_ids"]),
+                                            np.asarray(oi)])
+                            if m.get("out_obj_ids") is not None else oi)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"[SAM3-Interactive] merge failed on "
+                                       f"frame {frame_idx}: {e}")
+                yield frame_idx, num_frames, merged[frame_idx]
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:  # noqa: BLE001
+                pass
+        logger.info(f"[SAM3-Interactive] BATCHED propagation complete "
+                    f"({len(batches)} batches, {len(merged)} frames)")
 
     def load_cached_masks(self, session_dir: Path, frame_indices: List[int] = None) -> Dict[int, Any]:
         """
