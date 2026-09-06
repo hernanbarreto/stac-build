@@ -914,6 +914,28 @@ alignment_manager = None
 pipeline_manager = PipelineManager()  # Pipeline orchestrator (subprocess workers)
 
 
+def _semantic_unload_for_gpu(reason: str = "") -> None:
+    """Kill the vLLM chat service for GPU-heavy interactive work (USER ORDER
+    2026-09-06 after SAM3 OOM'd with Qwen's 24 GB resident: "debe matarse el
+    chat cuando se segmenta y volver a levantarse al cerrar el segmentation
+    manager"). Blocking — call via run_in_executor from async code."""
+    import subprocess as _sp
+    try:
+        if _sp.run(["pgrep", "-f", "vllm serve"],
+                   capture_output=True).returncode != 0:
+            return
+        print(f"[Semantic] chat UNLOADED ({reason or 'gpu-heavy work'}) — "
+              "SAM3 gets the GPU")
+        _sp.run(["pkill", "-f", "vllm serve"], capture_output=True)
+        for _ in range(30):
+            time.sleep(2)
+            if _sp.run(["pgrep", "-f", "vllm serve"],
+                       capture_output=True).returncode != 0:
+                break
+    except Exception as e:  # noqa: BLE001 — never break the caller over the chat
+        print(f"[Semantic] chat unload failed (non-fatal): {e}")
+
+
 def _semantic_reload_if_idle(reason: str = "") -> None:
     """Bring the vLLM chat service back up after GPU-heavy work (USER DECISION
     2026-08-28: the chat is ALWAYS available; a reconstruction unloads it to free
@@ -2032,6 +2054,11 @@ async def start_interactive_segmentation(session_id: str):
 
     async def _background_init():
         try:
+            # USER ORDER 2026-09-06: the chat dies when segmentation starts
+            # (SAM3 OOM'd at 79 MiB free with Qwen holding 24 GB); it comes
+            # back when the Segmentation Manager closes (/refresh).
+            await asyncio.get_event_loop().run_in_executor(
+                None, _semantic_unload_for_gpu, "segmentation manager opened")
             sam3 = get_sam3_wrapper()
             # Clean up existing sessions
             for sid in list(sam3._interactive_sessions.keys()):
@@ -5734,6 +5761,19 @@ async def refresh_segmentation(body: dict):
             raise
 
     result = await loop.run_in_executor(None, _refresh)
+
+    # USER ORDER 2026-09-06: closing the Segmentation Manager (this refresh)
+    # brings the chat back up — SAM3's exclusive-GPU window is over.
+    try:
+        from segmentation.sam3_wrapper import get_sam3_wrapper as _gsw
+        _sw = _gsw()
+        if getattr(_sw, "predictor", None) is not None:
+            await loop.run_in_executor(None, _sw.unload_model)
+            print("[SegRefresh] SAM3 unloaded — GPU freed for the chat")
+    except Exception as _e:  # noqa: BLE001
+        print(f"[SegRefresh] SAM3 unload skipped: {_e}")
+    loop.run_in_executor(None, _semantic_reload_if_idle,
+                         "segmentation manager closed")
 
     # NO automatic meshing here (user decision 2026-08-28): closing the
     # Segmentation Manager must only re-run DBSCAN + matching and produce the
