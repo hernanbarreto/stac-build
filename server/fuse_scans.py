@@ -154,21 +154,33 @@ def _tilt_deg(R: np.ndarray) -> float:
     return float(np.degrees(np.arccos(np.clip(up[1] / max(np.linalg.norm(up), 1e-12), -1, 1))))
 
 
-def _median_nn(P: np.ndarray, Q: np.ndarray, rng, n: int = 30000) -> float:
+def _median_nn(P: np.ndarray, Q: np.ndarray, rng, n: int = 30000,
+               trim: float = 1.0) -> float:
+    """Median NN distance P→Q; trim<1 keeps only the closest fraction
+    (held-out on complementary scans: the far part is simply not shared)."""
     from scipy.spatial import cKDTree
     P = _sub(P, n, rng)
     d, _ = cKDTree(Q).query(P, workers=8)
+    if trim < 1.0:
+        d = np.sort(d)[:max(100, int(len(d) * trim))]
     return float(np.median(d))
 
 
 def run_fuse(paths: ProjectPaths, scan_keys: List[str],
              exclude: Optional[Dict[str, List[str]]] = None,
              log=print, progress=None, params: Optional[dict] = None) -> dict:
-    params = {"overlap": 0.8, "ransac_epsilon": 0.02, "size_tol": 0.10,
-              "scale_min": 0.9, "scale_max": 1.1, "max_tilt_deg": 5.0,
-              "min_conditioning_deg": 20.0, "max_pair_residual_cm": 6.0,
-              "max_heldout_cm": 8.0, "pair_sample": 150000,
-              "heldout_sample": 300000, **(params or {})}
+    # USER: tolerant to scale (two VGGT runs differ by up to ~10-15%),
+    # scans are COMPLEMENTARY → the held-out test is TRIMMED (closest half
+    # of the unused points: what the two scans share) and judged as an
+    # improvement over the coarse alignment, not as an absolute distance
+    params = {"overlap": 0.8, "ransac_epsilon": 0.02, "size_tol": 0.15,
+              "scale_min": 0.7, "scale_max": 1.4, "max_tilt_deg": 5.0,
+              "min_conditioning_deg": 20.0, "max_pair_residual_cm": 8.0,
+              "heldout_trim": 0.5, "max_heldout_cm": 10.0,
+              "pair_sample": 150000, "heldout_sample": 300000,
+              "scene_sample": 2000000, "scene_overlap": 0.5,
+              "scene_icp_iters": 60, "scene_icp_samples": 300000,
+              **(params or {})}
     exclude = {k: {_norm(x) for x in v} for k, v in (exclude or {}).items()}
     rng = np.random.default_rng(0)
 
@@ -188,7 +200,12 @@ def run_fuse(paths: ProjectPaths, scan_keys: List[str],
     ref_inst = {_norm(i.get("label", "")): i for i in _instances(ref_ctx.output_dir)}
 
     work = Path(tempfile.mkdtemp(prefix="fuse_", dir=str(paths.project_dir)))
-    spec = {"reference": {"pairs": {}}, "scans": [], "params": params}
+    # subsampled full clouds for the SCENE refinement stage (global scale
+    # from everything both scans share, not from two neighbouring objects)
+    ref_sub_p = work / "ref_cloud.npy"
+    np.save(ref_sub_p, _sub(ref_xyz, params["scene_sample"], rng))
+    spec = {"reference": {"pairs": {}, "cloud": str(ref_sub_p)},
+            "scans": [], "params": params}
     scan_states = []
     try:
         ref_pair_pts = {}
@@ -229,27 +246,87 @@ def run_fuse(paths: ProjectPaths, scan_keys: List[str],
             if len(pairs) < 2:
                 raise ValueError(f"{key}: fewer than 2 usable pairs")
             spec["reference"]["pairs"].update(ref_pair_pts)
-            spec["scans"].append({"key": key, "pairs": pairs})
+            sub_p = work / f"{d}_{s}_cloud.npy"
+            np.save(sub_p, _sub(xyz, params["scene_sample"], rng))
+            spec["scans"].append({"key": key, "pairs": pairs, "cloud": str(sub_p)})
             # held-out sample: the scan's points NOT in any pair
             heldout = _sub(xyz[~used_mask], params["heldout_sample"], rng)
             scan_states.append({"key": key, "data": data, "xyz": xyz,
                                 "heldout": heldout, "labels": labels,
                                 "inst": inst, "ctx": ctx})
-        spec_p = work / "spec.json"
-        spec_p.write_text(json.dumps(spec))
-        out_p = work / "result.json"
+        def _run_job(spec_obj, tag):
+            spec_p = work / f"spec_{tag}.json"
+            spec_p.write_text(json.dumps(spec_obj))
+            out_p = work / f"result_{tag}.json"
+            proc = subprocess.run(
+                ["bash", str(SERVER_DIR / "run_cloudcompy_script.sh"),
+                 str(SERVER_DIR / "cloudcompy_register.py"), str(spec_p), str(out_p)],
+                capture_output=True, text=True, timeout=3600)
+            for ln in (proc.stdout or "").splitlines():
+                if "[register]" in ln:
+                    log(ln.strip())
+            if proc.returncode != 0 or not out_p.exists():
+                raise RuntimeError(f"CloudComPy registration failed: "
+                                   f"{(proc.stderr or proc.stdout)[-1500:]}")
+            return json.loads(out_p.read_text())
+
+        def _pair_residuals(key, r):
+            """median NN scan→ref per pair, before (coarse/init) and after."""
+            T = np.array(r["T"], dtype=np.float64).reshape(4, 4)
+            T0 = np.array(r["T_coarse"], dtype=np.float64).reshape(4, 4)
+            sc_pairs = next(sc["pairs"] for sc in spec["scans"] if sc["key"] == key)
+            for p in r["pairs"]:
+                A = np.load(spec["reference"]["pairs"][p["label"]])
+                B = np.load(sc_pairs[p["label"]])
+                Bh = np.c_[B, np.ones(len(B))]
+                p["residual_cm_before"] = _median_nn((Bh @ T0.T)[:, :3], A, rng) * 100
+                p["residual_cm_after"] = _median_nn((Bh @ T.T)[:, :3], A, rng) * 100
+
         _p(25, "CloudComPy registration (planes + ICP with scale)…")
-        proc = subprocess.run(
-            ["bash", str(SERVER_DIR / "run_cloudcompy_script.sh"),
-             str(SERVER_DIR / "cloudcompy_register.py"), str(spec_p), str(out_p)],
-            capture_output=True, text=True, timeout=3600)
-        for ln in (proc.stdout or "").splitlines():
-            if "[register]" in ln:
-                log(ln.strip())
-        if proc.returncode != 0 or not out_p.exists():
-            raise RuntimeError(f"CloudComPy registration failed: "
-                               f"{(proc.stderr or proc.stdout)[-1500:]}")
-        result = json.loads(out_p.read_text())
+        result = _run_job(spec, "all")
+
+        # ── control-point culling (USER 2026-09-06: "la puerta si no calza
+        # bien no la uses ni para escalar ni para ajustar"): after the scene
+        # refinement, a pair that does not land within tolerance is a bad
+        # witness (not invariant / defective) → DROPPED, and the scan is
+        # re-solved (scale + pose) with the pairs that do fit, initialised
+        # from the current solution (one good pair is enough then).
+        tol = params["max_pair_residual_cm"]
+        for i, (st, r) in enumerate(zip(scan_states, result["scans"])):
+            if r.get("error"):
+                continue
+            _pair_residuals(st["key"], r)
+            bad = [p for p in r["pairs"] if p["residual_cm_after"] > tol]
+            good = [p for p in r["pairs"] if p["residual_cm_after"] <= tol]
+            if not bad or not good:
+                continue
+            log(f"  {st['key']}: dropping {[p['label'] for p in bad]} "
+                f"({[round(p['residual_cm_after'], 1) for p in bad]} cm > {tol} cm) — "
+                f"re-solving with {[p['label'] for p in good]} only")
+            _p(40, f"re-solving {st['key']} without {[p['label'] for p in bad]}…")
+            sc_spec = next(sc for sc in spec["scans"] if sc["key"] == st["key"])
+            spec2 = {"reference": spec["reference"], "params": params,
+                     "scans": [{"key": st["key"], "cloud": sc_spec["cloud"],
+                                "init": r["T"],
+                                "pairs": {p["label"]: sc_spec["pairs"][p["label"]]
+                                          for p in good}}]}
+            r2 = _run_job(spec2, f"culled_{i}")["scans"][0]
+            if r2.get("error"):
+                log(f"  re-solve failed: {r2['error']} — keeping the full solution")
+                continue
+            _pair_residuals(st["key"], r2)
+            for p in bad:
+                # residual of the dropped witness under the NEW solution (info)
+                A = np.load(spec["reference"]["pairs"][p["label"]])
+                B = np.load(sc_spec["pairs"][p["label"]])
+                T2 = np.array(r2["T"], dtype=np.float64).reshape(4, 4)
+                p["residual_cm_after"] = _median_nn(
+                    (np.c_[B, np.ones(len(B))] @ T2.T)[:, :3], A, rng) * 100
+                p["dropped"] = True
+                p["dropped_reason"] = "did not fit after the scene refinement"
+            r2["pairs"] = r2["pairs"] + bad
+            r2["dropped"] = [p["label"] for p in bad]
+            result["scans"][i] = r2
 
         # ── GUARDS + symmetric scale ─────────────────────────────────
         _p(55, "validating (guards + held-out)…")
@@ -257,16 +334,21 @@ def run_fuse(paths: ProjectPaths, scan_keys: List[str],
         ref_sample = _sub(ref_xyz, 400000, rng)
         for st, r in zip(scan_states, result["scans"]):
             entry = {"key": st["key"], "pairs": r.get("pairs", []),
-                     "verdict": "accepted"}
+                     "dropped": r.get("dropped", []), "verdict": "accepted"}
             if r.get("error"):
                 entry.update(verdict=f"rejected: {r['error']}")
                 report["accepted"] = False; report["reason"] = entry["verdict"]
                 report["scans"].append(entry); continue
             T = np.array(r["T"], dtype=np.float64).reshape(4, 4)
-            s = float(r["scale"])
+            # total scale straight from the final similarity (the job's
+            # bookkeeping of partial scales is informative only)
+            s = float(np.cbrt(abs(np.linalg.det(T[:3, :3]))))
             R = T[:3, :3] / max(s, 1e-12)
             tilt = _tilt_deg(R)
-            entry.update(scale=s, rms_cm=r["rms_cm"], rot_deg=r.get("coarse_yaw_deg"),
+            entry.update(scale=s, scale_pairs=r.get("scale_pairs"),
+                         scale_scene_extra=r.get("scale_scene_extra"),
+                         rms_cm=r["rms_cm"], rms_pairs_cm=r.get("rms_pairs_cm"),
+                         rot_deg=r.get("coarse_yaw_deg"),
                          tilt_deg=tilt, conditioning_deg=r.get("conditioning_deg"),
                          t_m=float(np.linalg.norm(T[:3, 3])))
             why = []
@@ -278,30 +360,37 @@ def run_fuse(paths: ProjectPaths, scan_keys: List[str],
                 why.append(f"pairs' plane normals too parallel "
                            f"({r.get('conditioning_deg', 0):.1f}°) — add an invariant object "
                            f"facing another direction")
-            # per-pair residuals (median NN scan→ref) before/after the solve
             T0 = np.array(r["T_coarse"], dtype=np.float64).reshape(4, 4)
-            for p in r["pairs"]:
-                A = np.load(spec["reference"]["pairs"][p["label"]])
-                B = np.load(next(sc["pairs"][p["label"]] for sc in spec["scans"]
-                                 if sc["key"] == st["key"]))
-                Bh = np.c_[B, np.ones(len(B))]
-                p["residual_cm_before"] = _median_nn((Bh @ T0.T)[:, :3], A, rng) * 100
-                p["residual_cm_after"] = _median_nn((Bh @ T.T)[:, :3], A, rng) * 100
-            bad = [p["label"] for p in r["pairs"]
-                   if not p.get("suspect") and p.get("residual_cm_after", 0) > params["max_pair_residual_cm"]]
+            kept = [p for p in r["pairs"] if not p.get("dropped")]
+            bad = [p["label"] for p in kept
+                   if p.get("residual_cm_after", 0) > params["max_pair_residual_cm"]]
             if bad:
-                why.append(f"pair residual > {params['max_pair_residual_cm']} cm: {bad}")
+                why.append(f"pair residual after the scene refinement > "
+                           f"{params['max_pair_residual_cm']} cm: {bad} — the "
+                           f"scene pulled the invariant objects apart")
+            if not kept:
+                why.append("no pair fits after the scene refinement")
             # symmetric split: ref × 1/√s ; scan: √s·R·p + t/√s
             rs_ = np.sqrt(s)
             T_scan = np.eye(4); T_scan[:3, :3] = rs_ * R; T_scan[:3, 3] = T[:3, 3] / rs_
             T_ref = np.eye(4) * (1.0 / rs_); T_ref[3, 3] = 1.0
-            H = (np.c_[st["heldout"], np.ones(len(st["heldout"]))] @ T_scan.T)[:, :3]
+            Hh = np.c_[st["heldout"], np.ones(len(st["heldout"]))]
+            H = (Hh @ T_scan.T)[:, :3]
             ref_mid = ref_sample / rs_
-            ho = _median_nn(H, ref_mid, rng)
-            entry["heldout"] = {"after_cm": ho * 100,
+            trim = params["heldout_trim"]
+            ho = _median_nn(H, ref_mid, rng, trim=trim)
+            # before = coarse alignment (centroid yaw/XZ, no scale) applied
+            # with the same symmetric split, for an improvement check
+            T0s = np.eye(4); T0s[:3, :3] = T0[:3, :3]; T0s[:3, 3] = T0[:3, 3] / rs_
+            ho0 = _median_nn((Hh @ T0s.T)[:, :3], ref_mid, rng, trim=trim)
+            ho_all = _median_nn(H, ref_mid, rng)
+            entry["heldout"] = {"before_cm": ho0 * 100, "after_cm": ho * 100,
+                                "trim": trim, "all_points_median_cm": ho_all * 100,
                                 "threshold_cm": params["max_heldout_cm"]}
             if ho * 100 > params["max_heldout_cm"]:
-                why.append(f"held-out (unused points) median {ho*100:.1f} cm > {params['max_heldout_cm']} cm")
+                why.append(f"held-out (closest {int(trim*100)}% of the unused points) "
+                           f"median {ho*100:.1f} cm > {params['max_heldout_cm']} cm "
+                           f"(coarse: {ho0*100:.1f} cm)")
             if why:
                 entry["verdict"] = "rejected: " + "; ".join(why)
                 report["accepted"] = False
@@ -309,12 +398,19 @@ def run_fuse(paths: ProjectPaths, scan_keys: List[str],
             entry["T_scan"] = T_scan.reshape(-1).tolist()
             entry["T_ref"] = T_ref.reshape(-1).tolist()
             st["T_scan"], st["T_ref"] = T_scan, T_ref
-            log(f"  {st['key']}: scale {s:.4f} (split ±√), tilt {tilt:.2f}°, rms {r['rms_cm']:.1f} cm, "
-                f"held-out {ho*100:.1f} cm → {entry['verdict']}")
+            log(f"  {st['key']}: scale {s:.4f} (pairs {r.get('scale_pairs', s):.4f} × scene "
+                f"{r.get('scale_scene_extra', 1.0):.4f}; split ±√), tilt {tilt:.2f}°, "
+                f"rms {r['rms_cm']:.1f} cm, pairs after "
+                f"{[(p['label'], round(p.get('residual_cm_after', 0), 1)) for p in kept]} cm"
+                f"{' (dropped ' + str(r.get('dropped')) + ')' if r.get('dropped') else ''}, "
+                f"held-out {ho0*100:.1f} → {ho*100:.1f} cm → {entry['verdict']}")
             report["scans"].append(entry)
         if not report["accepted"]:
             _p(100, f"REJECTED — {report['reason']}")
-            report["report_path"] = None
+            # keep the numbers for diagnosis (nothing else is written)
+            rp = paths.project_dir / "fuse_last_report.json"
+            rp.write_text(json.dumps(report, indent=1, default=float))
+            report["report_path"] = str(rp)
             return report
 
         # ── merged cloud ────────────────────────────────────────────

@@ -179,8 +179,8 @@ export default function FuseScansModal({ project, scans, onClose, onStatus, onFu
                 <div key={s.key} style={{ marginTop: 6 }}>
                   <div><strong>{s.key}</strong> — scale {s.scale?.toFixed?.(4)} (split ±√), rot {s.rot_deg?.toFixed?.(2)}°, |t| {s.t_m?.toFixed?.(3)} m, rms {s.rms_cm?.toFixed?.(1)} cm — {s.verdict}</div>
                   {(s.pairs || []).map((p: any) => (
-                    <div key={p.label} style={{ paddingLeft: 12, color: p.suspect ? '#e0a632' : 'var(--text-secondary)' }}>
-                      {p.label}: residual {p.residual_cm_before?.toFixed?.(1)} → {p.residual_cm_after?.toFixed?.(1)} cm · size ratio {p.size_ratio?.toFixed?.(3)}{p.suspect ? ' · inconsistent (excluded from scale)' : ''}
+                    <div key={p.label} style={{ paddingLeft: 12, color: p.dropped ? '#e05a5a' : p.suspect ? '#e0a632' : 'var(--text-secondary)', textDecoration: p.dropped ? 'line-through' : undefined }}>
+                      {p.label}: residual {p.residual_cm_before?.toFixed?.(1)} → {p.residual_cm_after?.toFixed?.(1)} cm · size ratio {p.size_ratio?.toFixed?.(3)}{p.dropped ? ' · DROPPED (did not fit — not used for scale or pose)' : p.suspect ? ' · inconsistent (excluded from scale)' : ''}
                     </div>
                   ))}
                   {s.heldout && <div style={{ paddingLeft: 12, color: 'var(--text-secondary)' }}>held-out (unused surfaces): {s.heldout.before_cm?.toFixed?.(1)} → {s.heldout.after_cm?.toFixed?.(1)} cm</div>}
