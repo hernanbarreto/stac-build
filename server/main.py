@@ -4708,6 +4708,130 @@ async def delete_tsdf_mesh(request: Request):
     return {"ok": True, "deleted": folder}
 
 
+async def _correction_notify_viewer(session_id: str, output_dir: Path):
+    """potree_ready broadcast after a correction/undo rebuild — same message
+    the session-open flow sends, so the viewport reloads the octree."""
+    try:
+        meta_path = output_dir / "potree" / "metadata.json"
+        if not meta_path.exists():
+            return
+        _has_conf = False
+        _cp = output_dir / "cleaned_cloud.ply"
+        if _cp.exists():
+            with open(_cp, "rb") as _fp:
+                for _hl in _fp:
+                    if b"confidence" in _hl:
+                        _has_conf = True
+                    if _hl.startswith(b"end_header"):
+                        break
+        msg = {"type": "potree_ready", "session_id": session_id,
+               "url": f"/potree/{session_id}/",
+               "points": json.loads(meta_path.read_text()).get("points", 0),
+               "hasConfidence": _has_conf}
+        tp = output_dir / "floor_transform.npz"
+        if tp.exists():
+            d = np.load(tp)
+            M = np.eye(4)
+            M[:3, :3] = float(d["s"]) * d["R"]
+            M[:3, 3] = d["t"]
+            msg["floorTransform"] = M.T.flatten().tolist()
+        await viewer_manager.broadcast_text(json.dumps(msg))
+        print("[Correction] potree_ready broadcast (viewer reloads octree)")
+    except Exception as e:  # noqa: BLE001
+        print(f"[Correction] viewer notify failed (non-fatal): {e}")
+
+
+@app.post("/api/segmentation/correction/run")
+async def correction_run(request: Request):
+    """USER DESIGN 2026-09-06 — 'Correction Analysis' button (replaces
+    Perfect): the user marks WHICH segments show the parallel-copies error;
+    the algorithm determines the relations (which copies with which, in
+    which chunks/frames), diagnoses depth vs pose per HIS matrix, solves
+    per chunk, validates on the rest of the scene, and APPLIES to
+    cleaned_cloud.ply + camera_poses.txt + a fresh Potree. One-level undo;
+    the user then Approves (it IS the cloud) or Undoes."""
+    from task_manager import task_manager
+    body = await request.json()
+    session_id = body.get("session_id")
+    instance_ids = [int(i) for i in (body.get("instance_ids") or [])]
+    if not session_id or not instance_ids:
+        raise HTTPException(400, "session_id and instance_ids required")
+    ctx = _ctx(session_id)
+    output_dir = ctx.output_dir
+    from segmentation.correction_analysis import run_correction, load_state
+    if load_state(output_dir).get("status") == "pending":
+        raise HTTPException(409, "a correction is pending — approve or "
+                            "undo it first")
+    tid = task_manager.start(session_id, "correction",
+                             "Correction analysis")
+    loop = asyncio.get_event_loop()
+
+    def _progress(pct, msg):
+        task_manager.update(tid, pct=pct, detail=msg)
+
+    def _run():
+        return run_correction(output_dir, instance_ids,
+                              log=lambda m: print(f"[Correction] {m}"),
+                              progress=_progress)
+    try:
+        report = await loop.run_in_executor(None, _run)
+        task_manager.finish(tid)
+    except Exception as e:
+        task_manager.fail(tid, str(e))
+        raise HTTPException(500, f"correction failed: {e}")
+    await _correction_notify_viewer(session_id, output_dir)
+    return {"ok": True, "report": report, "status": "pending"}
+
+
+@app.post("/api/segmentation/correction/undo")
+async def correction_undo(request: Request):
+    body = await request.json()
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(400, "session_id required")
+    ctx = _ctx(session_id)
+    from segmentation.correction_analysis import undo_correction
+    loop = asyncio.get_event_loop()
+    try:
+        res = await loop.run_in_executor(
+            None, lambda: undo_correction(
+                ctx.output_dir, log=lambda m: print(f"[Correction] {m}")))
+    except Exception as e:
+        raise HTTPException(500, f"undo failed: {e}")
+    await _correction_notify_viewer(session_id, ctx.output_dir)
+    return {"ok": True, **res, "status": "none"}
+
+
+@app.post("/api/segmentation/correction/approve")
+async def correction_approve(request: Request):
+    body = await request.json()
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(400, "session_id required")
+    ctx = _ctx(session_id)
+    from segmentation.correction_analysis import approve_correction
+    try:
+        res = approve_correction(
+            ctx.output_dir, log=lambda m: print(f"[Correction] {m}"))
+    except Exception as e:
+        raise HTTPException(500, f"approve failed: {e}")
+    return {"ok": True, **res, "status": "approved"}
+
+
+@app.get("/api/segmentation/correction/status/{session_id}")
+async def correction_status(session_id: str):
+    ctx = _ctx(session_id)
+    from segmentation.correction_analysis import load_state, REPORT_FILE
+    st = load_state(ctx.output_dir)
+    rep = ctx.output_dir / REPORT_FILE
+    if rep.exists():
+        try:
+            st["report"] = json.loads(rep.read_text())
+        except Exception:  # noqa: BLE001
+            pass
+    return st
+
+
 @app.post("/api/segmentation/perfect/export")
 async def export_perfect_endpoint(request: Request):
     """PERFECT the selected segments (user 2026-08-31): recover each object's

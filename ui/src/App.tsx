@@ -91,6 +91,19 @@ function App() {
   const [showPerfectModal, setShowPerfectModal] = useState(false)
   const [perfectSelected, setPerfectSelected] = useState<Set<number>>(new Set())
   const [perfectRunning, setPerfectRunning] = useState(false)
+  // 🔧 Correction Analysis (USER 2026-09-06, replaces Perfect in the
+  // toolbar): user marks the segments with the parallel-copies error; the
+  // algorithm does the rest. One pending correction at a time → Approve/Undo.
+  const [showCorrectionModal, setShowCorrectionModal] = useState(false)
+  const [correctionSelected, setCorrectionSelected] = useState<Set<number>>(new Set())
+  const [correctionRunning, setCorrectionRunning] = useState(false)
+  const [correctionState, setCorrectionState] = useState<any>(null)
+  const refreshCorrectionStatus = useCallback(async (sid: string) => {
+    try {
+      const r = await fetch(`/api/segmentation/correction/status/${sid}`)
+      if (r.ok) setCorrectionState(await r.json())
+    } catch { /* non-fatal */ }
+  }, [])
   // per-segment source mesh choice when both exist: 'poisson' | 'pgsr'
   const [perfectSource, setPerfectSource] = useState<Record<number, string>>({})
   // leaving the brush turns the red preview off
@@ -2264,9 +2277,9 @@ function App() {
                   </button>
                   <button className="bim-action-btn upload" style={{ flex: 1 }}
                     disabled={!activeSession}
-                    title="Perfect the meshed segments: recover planes/cylinders/spheres, snap to intent, rebuild CAD-crisp"
-                    onClick={() => { setPerfectSelected(new Set()); setShowPerfectModal(true); refreshTsdfMeshList(activeSession!) }}>
-                    ✨ Perfect
+                    title="Correction analysis: mark the segments showing the parallel-copies error; the algorithm diagnoses (pose/depth), corrects cloud+poses+Potree, then you approve or undo"
+                    onClick={() => { setCorrectionSelected(new Set()); setShowCorrectionModal(true); refreshCorrectionStatus(activeSession!) }}>
+                    🔧 Correction
                   </button>
                 </div>
               </div>
@@ -3564,6 +3577,133 @@ function App() {
               })}
               {objectLibrary.length === 0 && (
                 <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>No meshes published yet in any project.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 🔧 Correction Analysis (USER 2026-09-06): the user marks the
+           segments with the parallel-copies error; the algorithm finds the
+           relations, diagnoses depth vs pose, corrects cloud+poses+Potree.
+           One pending correction → Approve (it IS the cloud) or Undo. ── */}
+      {showCorrectionModal && (
+        <div className="admin-overlay" style={{ zIndex: 2000 }}>
+          <div className="admin-panel" style={{ maxWidth: 560, maxHeight: '80vh', overflow: 'auto' }}>
+            <div className="admin-header">
+              <h2>🔧 Correction Analysis</h2>
+              <button className="admin-close" onClick={() => setShowCorrectionModal(false)}>✕</button>
+            </div>
+            <div style={{ padding: 16 }}>
+              {correctionState?.status === 'pending' ? (
+                <>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
+                    A correction is APPLIED and awaiting your verdict
+                    (chunks {String((correctionState.chunks || []).join(', '))},
+                    {' '}{(correctionState.points_moved || 0).toLocaleString()} points moved).
+                    Inspect it in the viewer and decide:
+                  </p>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="bim-action-btn upload" style={{ flex: 1 }}
+                      disabled={correctionRunning}
+                      onClick={async () => {
+                        setCorrectionRunning(true)
+                        try {
+                          const r = await fetch('/api/segmentation/correction/approve', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ session_id: activeSession }),
+                          })
+                          setStatusMessage(r.ok ? '🔧 correction APPROVED — it is now the cloud'
+                            : '🔧 approve failed')
+                        } catch { setStatusMessage('🔧 approve failed') }
+                        setCorrectionRunning(false)
+                        refreshCorrectionStatus(activeSession!)
+                      }}>
+                      ✓ Approve
+                    </button>
+                    <button className="bim-action-btn" style={{ flex: 1 }}
+                      disabled={correctionRunning}
+                      onClick={async () => {
+                        setCorrectionRunning(true)
+                        setStatusMessage('🔧 undoing (restores cloud+poses, rebuilds Potree)...')
+                        try {
+                          const r = await fetch('/api/segmentation/correction/undo', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ session_id: activeSession }),
+                          })
+                          setStatusMessage(r.ok ? '🔧 correction UNDONE — cloud restored'
+                            : '🔧 undo failed')
+                        } catch { setStatusMessage('🔧 undo failed') }
+                        setCorrectionRunning(false)
+                        refreshCorrectionStatus(activeSession!)
+                      }}>
+                      ↩ Undo
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
+                    Mark the segments showing the parallel-copies error (the
+                    same object displaced across chunks). The algorithm works
+                    out the relations on its own — which copies match which,
+                    in which chunks/frames —, diagnoses pose vs depth,
+                    corrects the cloud + poses and rebuilds the Potree. Then
+                    you approve or undo.
+                  </p>
+                  {segments.length === 0 && (
+                    <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
+                      No segments yet — segment the faulty objects first.
+                    </p>
+                  )}
+                  {segments.map(seg => {
+                    const checked = correctionSelected.has(seg.id)
+                    return (
+                      <div key={seg.key} style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        padding: '10px 12px', marginBottom: 8,
+                        background: checked ? 'var(--bg-secondary)' : 'var(--bg-tertiary)',
+                        borderRadius: 8,
+                        border: `2px solid ${checked ? seg.color + '55' : 'transparent'}`,
+                        opacity: checked ? 1 : 0.6,
+                      }}>
+                        <input type="checkbox" checked={checked}
+                          disabled={correctionRunning}
+                          onChange={() => setCorrectionSelected(prev => {
+                            const next = new Set(prev)
+                            if (next.has(seg.id)) next.delete(seg.id)
+                            else next.add(seg.id)
+                            return next
+                          })} />
+                        <span style={{ width: 12, height: 12, borderRadius: '50%', background: seg.color, flexShrink: 0 }} />
+                        <strong style={{ flex: 1, color: 'var(--text-primary)', fontSize: 13 }}>{seg.label}</strong>
+                      </div>
+                    )
+                  })}
+                  <button className="bim-action-btn upload" style={{ width: '100%', marginTop: 8 }}
+                    disabled={correctionRunning || correctionSelected.size === 0}
+                    onClick={async () => {
+                      setCorrectionRunning(true)
+                      setStatusMessage('🔧 analyzing and correcting (cloud + poses + Potree — this can take several minutes)...')
+                      try {
+                        const r = await fetch('/api/segmentation/correction/run', {
+                          method: 'POST', headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            session_id: activeSession,
+                            instance_ids: Array.from(correctionSelected),
+                          }),
+                        })
+                        const d = await r.json().catch(() => ({}))
+                        setStatusMessage(r.ok
+                          ? '🔧 correction applied — inspect it in the viewer, then Approve or Undo'
+                          : `🔧 correction failed: ${d.detail || 'error'}`)
+                      } catch { setStatusMessage('🔧 correction failed') }
+                      setCorrectionRunning(false)
+                      refreshCorrectionStatus(activeSession!)
+                    }}>
+                    {correctionRunning ? '⏳ correcting…' : '🔧 Analyze & Correct'}
+                  </button>
+                </>
               )}
             </div>
           </div>
