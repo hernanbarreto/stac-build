@@ -2319,32 +2319,49 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             pts_raw = pts_display
         xyz_corrected[global_indices] = pts_raw
     
-    # Save classification sidecar
+    # Save classification sidecar — and remember whether it actually CHANGED
+    # (USER 2026-09-06 "ajustá todo lo que sobra": a re-match after a chunk
+    # correction produces the IDENTICAL classification, and the 5-minute
+    # Potree rebuild that always ran here was pure waste).
     class_path = output_dir / "classification.npy"
+    classification_changed = True
+    if class_path.exists():
+        try:
+            old_cls = np.load(class_path, mmap_mode="r")
+            classification_changed = not (
+                len(old_cls) == len(classification)
+                and np.array_equal(old_cls, classification))
+        except Exception:  # noqa: BLE001
+            pass
     np.save(class_path, classification)
-    
+
     if n_projected > 0:
         corrected_path = output_dir / "corrected_cloud.ply"
         _write_corrected_ply(ply_path, corrected_path, xyz_corrected)
         print(f"[SegPipeline] ✏️ Projected {n_projected:,} points → {corrected_path.name} (raw space)")
         ply_override = corrected_path
     else:
-        # Always rebuild Potree even if no planes were projected (so classification color updates apply)
         corrected_path = output_dir / "corrected_cloud.ply"
         ply_override = corrected_path if corrected_path.exists() else ply_path
-        
-    # Rebuild Potree so cloud visually matches voxel projections AND classification updates
-    try:
-        from potree_converter import convert_ply_to_potree
-        session_dir = output_dir.parent
-        success = convert_ply_to_potree(session_dir, force=True, ply_override=ply_override)
-        if success:
-            print(f"[SegPipeline] 🌲 Potree octree rebuilt from {ply_override.name}")
-            result["reload_potree"] = True
-        else:
-            print(f"[SegPipeline] ⚠️ Potree rebuild failed")
-    except Exception as e:
-        print(f"[SegPipeline] ⚠️ Potree rebuild error: {e}")
+
+    # Rebuild Potree ONLY when something the octree carries actually changed:
+    # projected geometry, a different classification, or no octree at all.
+    potree_missing = not (output_dir / "potree" / "metadata.json").exists()
+    if n_projected > 0 or classification_changed or potree_missing:
+        try:
+            from potree_converter import convert_ply_to_potree
+            session_dir = output_dir.parent
+            success = convert_ply_to_potree(session_dir, force=True, ply_override=ply_override)
+            if success:
+                print(f"[SegPipeline] 🌲 Potree octree rebuilt from {ply_override.name}")
+                result["reload_potree"] = True
+            else:
+                print(f"[SegPipeline] ⚠️ Potree rebuild failed")
+        except Exception as e:
+            print(f"[SegPipeline] ⚠️ Potree rebuild error: {e}")
+    else:
+        print("[SegPipeline] Potree untouched — classification identical, "
+              "no projections (nothing to rebuild)")
     
     return result
 
@@ -2575,26 +2592,14 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
     # ── Fast path (no lock needed): cached result from segmentation time ──
     result_path = output_dir / "segmentation_result.json"
     transform_path = output_dir / "floor_transform.npz"
-    # Invalidate cache if floor_transform.npz is newer (alignment changed or pipeline re-ran).
-    # Note: gizmo alignment save deletes segmentation_result.json to force
-    # OBB recomputation with the new transform.
-    #
-    # Watch EVERY input, not just the transform. Watching floor_transform.npz alone
-    # meant a result computed from stale masks — or by an older version of the
-    # matching code — was served forever: a session kept reporting "3 instances,
-    # 16.8% coverage" while a fresh match over the same data found a hundred.
-    if result_path.exists():
-        _res_mt = result_path.stat().st_mtime
-        _deps = [transform_path,
-                 output_dir / "seg_masks.npz",
-                 output_dir / "segmentation.json",
-                 output_dir / "cleaned_cloud.ply",
-                 Path(__file__)]                      # the matching code itself
-        _stale = next((p for p in _deps if p.exists() and p.stat().st_mtime > _res_mt), None)
-        if _stale is not None:
-            print(f"[SegPipeline] ⚠️ {_stale.name} is newer than the cached result — "
-                  f"invalidating segmentation_result.json")
-            result_path.unlink()
+    # USER DOCTRINE 2026-09-06 ("cada modificación recalcula; si es solo
+    # carga, no se recalcula NADA"): loading NEVER invalidates and NEVER
+    # recomputes. Every mutating action (segmenting, brush cleaning, gizmo
+    # corrections, floor leveling) leaves ALL derived artifacts consistent
+    # on disk before it finishes — so the load trusts the cached result
+    # blindly. The staleness checks that used to live here (cloud/
+    # transform/masks/code mtimes) WERE the bug: they made every session
+    # load re-run matching+DBSCAN after any change.
     if result_path.exists():
         try:
             with open(result_path) as f:

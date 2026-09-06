@@ -450,6 +450,9 @@ def run_correction(output_dir: Path, instance_ids: List[int],
     undo.mkdir()
     shutil.copy2(ply_path, undo / "cleaned_cloud.ply")
     shutil.copy2(output_dir / "camera_poses.txt", undo / "camera_poses.txt")
+    if (output_dir / "segmentation_result.json").exists():
+        shutil.copy2(output_dir / "segmentation_result.json",
+                     undo / "segmentation_result.json")
 
     xyz_new = xyz
     n_moved = 0
@@ -468,6 +471,7 @@ def run_correction(output_dir: Path, instance_ids: List[int],
     _write_ply(ply_path, header, data)
     log(f"  cleaned_cloud.ply rewritten: {n_moved:,} pts moved "
         f"({len(per_chunk)} chunk(s))")
+    _update_result_obbs(output_dir, xyz_new, log)
 
     # cameras move with their chunk (rigid only — depth doesn't move them)
     n_cam = 0
@@ -540,6 +544,9 @@ def undo_correction(output_dir: Path, log=_log_default) -> dict:
     if (undo / "floor_transform.npz").exists():
         shutil.copy2(undo / "floor_transform.npz",
                      output_dir / "floor_transform.npz")
+    if (undo / "segmentation_result.json").exists():
+        shutil.copy2(undo / "segmentation_result.json",
+                     output_dir / "segmentation_result.json")
     shutil.rmtree(undo)
     potree = output_dir / "potree"
     if potree.exists():
@@ -710,6 +717,9 @@ def apply_manual_chunk(output_dir: Path, chunk_id: int, matrix16: list,
     shutil.copy2(ply_path, undo / "cleaned_cloud.ply")
     shutil.copy2(output_dir / "camera_poses.txt",
                  undo / "camera_poses.txt")
+    if (output_dir / "segmentation_result.json").exists():
+        shutil.copy2(output_dir / "segmentation_result.json",
+                     undo / "segmentation_result.json")
     xyz[mc] = xyz[mc] @ R.T + t
     data["x"] = xyz[:, 0].astype(data.dtype["x"])
     data["y"] = xyz[:, 1].astype(data.dtype["y"])
@@ -729,6 +739,7 @@ def apply_manual_chunk(output_dir: Path, chunk_id: int, matrix16: list,
     (output_dir / "camera_poses.txt").write_text("\n".join(
         " ".join(f"{x:.9f}" for x in P.reshape(-1)) for P in poses) + "\n")
     log(f"  {int(mc.sum()):,} pts + {n_cam} cameras moved")
+    _update_result_obbs(output_dir, xyz, log)
 
     _p(60, "deleting Potree and rebuilding from the corrected cloud...")
     potree = output_dir / "potree"
@@ -916,6 +927,9 @@ def align_floor_y0(output_dir: Path, chunk_ids: List[int],
     shutil.copy2(ply_path, undo / "cleaned_cloud.ply")
     shutil.copy2(output_dir / "camera_poses.txt",
                  undo / "camera_poses.txt")
+    if (output_dir / "segmentation_result.json").exists():
+        shutil.copy2(output_dir / "segmentation_result.json",
+                     undo / "segmentation_result.json")
     for c, (R, t) in per_chunk.items():
         mc = chunk == c
         if not mc.any():
@@ -939,6 +953,7 @@ def align_floor_y0(output_dir: Path, chunk_ids: List[int],
         " ".join(f"{x:.9f}" for x in P.reshape(-1)) for P in poses) + "\n")
     log(f"  cloud + {len(poses)} cameras rewritten (every chunk moved: "
         f"{len(anchors)} anchored, {n_chunks - len(anchors)} accompanying)")
+    _update_result_obbs(output_dir, xyz, log)
 
     _p(60, "deleting Potree and rebuilding from the corrected cloud...")
     potree = output_dir / "potree"
@@ -972,3 +987,39 @@ def align_floor_y0(output_dir: Path, chunk_ids: List[int],
     _p(100, "✅ floor alignment applied — awaiting your verdict "
             "(Approve or Undo)")
     return load_state(output_dir)
+
+
+def _update_result_obbs(output_dir: Path, xyz: np.ndarray,
+                        log=_log_default) -> None:
+    """After a correction moved the cloud's COORDINATES: segment membership
+    (globalIndices) is untouched, so the cached segmentation_result.json
+    stays valid — only its OBBs are stale. Recompute them in place from the
+    moved points (in display space via the session's floor transform) so a
+    session load NEVER re-runs matching/DBSCAN (USER 2026-09-06: that runs
+    when segmenting, and nowhere else)."""
+    res_path = output_dir / "segmentation_result.json"
+    if not res_path.exists():
+        return
+    try:
+        result = json.loads(res_path.read_text())
+        ft = output_dir / "floor_transform.npz"
+        if ft.exists():
+            d = np.load(ft)
+            s_, R_, t_ = float(d["s"]), d["R"], d["t"]
+        else:
+            s_, R_, t_ = 1.0, np.eye(3), np.zeros(3)
+        from segmentation.pipeline import _compute_obb
+        n_done = 0
+        for inst in result.get("instances", []):
+            g = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+            g = g[(g >= 0) & (g < len(xyz))]
+            if len(g) < 10:
+                continue
+            disp = (s_ * (xyz[g] @ R_.T)) + t_
+            inst["obb"] = _compute_obb(disp)
+            n_done += 1
+        res_path.write_text(json.dumps(result))
+        log(f"  segmentation_result.json OBBs updated in place "
+            f"({n_done} instance(s)) — no re-matching needed")
+    except Exception as e:  # noqa: BLE001
+        log(f"  OBB update failed (non-fatal): {e}")
