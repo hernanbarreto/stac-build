@@ -777,6 +777,22 @@ class SAM3Wrapper:
                         session_id=state_id,
                     )
                 )
+                # Re-seed the tracker cache the point-prompt pathway needs
+                # (same seeding as session init — a reset may wipe it, and
+                # batched propagation / resume re-add point prompts right
+                # after a reset).
+                try:
+                    session = self._session_store().get(state_id, {})
+                    inference_state = session.get("state", {})
+                    num_frames = inference_state.get("num_frames", 0)
+                    if "cached_frame_outputs" not in inference_state:
+                        inference_state["cached_frame_outputs"] = {}
+                    for fidx in range(num_frames):
+                        if fidx not in inference_state["cached_frame_outputs"]:
+                            inference_state["cached_frame_outputs"][fidx] = {}
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[SAM3-Interactive] cache re-seed after "
+                                   f"reset failed: {e}")
 
             logger.info(f"[SAM3-Interactive] Reset session {state_id} (prompts cleared)")
             return True

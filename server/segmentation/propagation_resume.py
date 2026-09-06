@@ -178,13 +178,18 @@ def seed_points_from_mask(mask: np.ndarray, grid: int = 4,
     m = (mask > 0).astype(np.uint8)
     if m.sum() < 20:
         return []
+    # The image border must count as a boundary: erosion/distance transform
+    # otherwise treat off-image as "inside" and pick border pixels as the
+    # most interior ones (seeds landed on x=W-1). Pad with zeros.
+    mp = np.pad(m, 1, mode="constant", constant_values=0)
     if erode_px > 0:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                       (erode_px * 2 + 1, erode_px * 2 + 1))
-        e = cv2.erode(m, k)
+        e = cv2.erode(mp, k, borderType=cv2.BORDER_CONSTANT, borderValue=0)
         if e.sum() >= 20:
-            m = e
-    dist = cv2.distanceTransform(m, cv2.DIST_L2, 3)
+            mp = e
+    dist = cv2.distanceTransform(mp, cv2.DIST_L2, 3)[1:-1, 1:-1]
+    m = mp[1:-1, 1:-1]
     ys, xs = np.where(m > 0)
     y0, y1, x0, x1 = ys.min(), ys.max(), xs.min(), xs.max()
     pts = []
@@ -201,7 +206,9 @@ def seed_points_from_mask(mask: np.ndarray, grid: int = 4,
                 continue
             ly, lx = np.unravel_index(int(sub.argmax()), sub.shape)
             pts.append((int(rx0 + lx), int(ry0 + ly)))
-    # cap, keeping the most-interior ones
+    # dedupe (thin masks make neighbouring cells pick the same pixel), then
+    # cap keeping the most-interior ones
+    pts = list(dict.fromkeys(pts))
     if len(pts) > max_pts:
         pts.sort(key=lambda p: -float(dist[p[1], p[0]]))
         pts = pts[:max_pts]

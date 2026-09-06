@@ -5971,6 +5971,7 @@ async def resume_run(body: dict):
     them (USER 2026-09-06)."""
     from task_manager import task_manager
     import numpy as _np
+    import re
     session_id = body.get("session_id")
     if not session_id:
         raise HTTPException(400, "session_id required")
@@ -6001,8 +6002,16 @@ async def resume_run(body: dict):
         from segmentation.sam3_wrapper import get_sam3_wrapper
         sam3 = get_sam3_wrapper()
         seeds = build_resume_seeds(output_dir, log=print)
-        # map scaled mask pixels → the resolution SAM3 expects: seeds are in
-        # mask space (scaled_res); SAM3 point prompts are in that same grid.
+        # seeds are in MASK pixel space (scaled_res); SAM3 point prompts are
+        # in the ORIGINAL frame pixel space (what the UI clicks send) — scale
+        # when they differ (identical on pccr_v1: 832x464 both).
+        _seg0 = json.loads((output_dir / "segmentation.json").read_text())
+        _res = _seg0.get("resolution") or {}
+        _sc, _orig = _res.get("scaled"), _res.get("original")
+        if _sc and _orig:
+            _sx, _sy = _orig[1] / _sc[1], _orig[0] / _sc[0]
+        else:
+            _sx = _sy = 1.0
         n_seeded = 0
         sam3.clear_interactive_prompts(state_id)   # fresh prompt_log
         for oid, fseeds in seeds.items():
@@ -6010,7 +6019,8 @@ async def resume_run(body: dict):
                 seq = real_to_seq.get(int(rf))
                 if seq is None:
                     continue
-                P = _np.array(pts, dtype=_np.float32)
+                P = _np.array([(x * _sx, y * _sy) for x, y in pts],
+                              dtype=_np.float32)
                 L = _np.ones(len(pts), dtype=_np.int32)
                 sam3.add_interactive_prompt(state_id, seq, int(oid), P, L)
                 n_seeded += len(pts)
