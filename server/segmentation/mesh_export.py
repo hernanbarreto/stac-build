@@ -242,6 +242,8 @@ def export_segment_plys(output_dir: Path,
             "ref_image": (Path(ref["path"]).name if ref else None),
             "ref_frame": (ref["frame"] if ref else None),
         }
+        from correction.epoch import stamp_nearest as _stamp_epoch
+        _stamp_epoch(meta, obj_dir)
         (obj_dir / "meta.json").write_text(json.dumps(meta, indent=2))
         exported.append(ply_path)
         logger.info("export: %s → %s (%s pts, %.2f m)", folder, ply_path.name,

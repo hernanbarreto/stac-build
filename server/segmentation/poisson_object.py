@@ -1040,6 +1040,8 @@ def export_poisson_objects(output_dir: Path,
             except Exception as e:  # noqa: BLE001
                 print(f"[Poisson-obj] {label}_{iid}: texture failed ({e}) — "
                       "vertex colours kept")
+        from correction.epoch import stamp_nearest as _stamp_epoch
+        _stamp_epoch(meta, output_dir)
         (stage_dir / f"{safe}.meta.json").write_text(json.dumps(meta, indent=2))
         # publish: textured (or vertex-colored fallback) and complete, in one move
         if obj_dir.exists():

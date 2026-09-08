@@ -199,7 +199,9 @@ class AutoPrompter:
             try:
                 arr = np.load(p)
                 key = "depth" if "depth" in arr else list(arr.keys())[0]
-                return (arr[key].astype(np.float32), None)
+                from segmentation.session_io import correct_depth
+                return (correct_depth(arr[key].astype(np.float32), fid,
+                                      self.output_dir), None)
             except Exception:
                 return None
 

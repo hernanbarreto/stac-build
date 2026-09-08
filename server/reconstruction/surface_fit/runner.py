@@ -248,9 +248,14 @@ def export_artifacts(fitted: FittedSurface, orig_pts: np.ndarray, out_dir: Path,
         findings=fitted.report.findings, findings_uv=f_uv)
 
     rj = out_dir / "residuals.json"
-    rj.write_text(json.dumps(fitted.report.to_dict(), indent=2))
+    from correction.epoch import stamp_nearest as _stamp_epoch
+    _rep = fitted.report.to_dict()
+    _stamp_epoch(_rep, out_dir)
+    rj.write_text(json.dumps(_rep, indent=2))
     fitted.report.json_path = str(rj)
-    (out_dir / "meta.json").write_text(json.dumps(fitted.to_meta(), indent=2))
+    _meta = fitted.to_meta()
+    _stamp_epoch(_meta, out_dir)
+    (out_dir / "meta.json").write_text(json.dumps(_meta, indent=2))
     logger.info("%s: artifacts → %s", name, out_dir)
 
 

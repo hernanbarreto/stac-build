@@ -843,6 +843,8 @@ def save_sabana(
         "elements": metrics,
     }
     meta_path = os.path.join(sabana_dir, "sabana_meta.json")
+    from correction.epoch import stamp_nearest as _stamp_epoch
+    _stamp_epoch(meta, sabana_dir)
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     

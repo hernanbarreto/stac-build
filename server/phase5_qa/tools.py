@@ -1002,6 +1002,26 @@ class SpatialTools:
 
     # ── tool-calling schemas for the orchestrator ───────────────────
     def impls(self) -> dict:
+        """Tool implementations. Every returned measurement is stamped with
+        the session's geometry epoch + human-directed-corrections count
+        (USER 2026-09-08: a supervision measurement never hides that the
+        geometry was corrected by a person)."""
+        from pathlib import Path as _Path
+        from correction.epoch import stamp as _stamp_epoch
+        _out_dir = _Path(self.store.path).parent
+
+        def _wrap(fn):
+            def _inner(*a, **k):
+                res = fn(*a, **k)
+                if isinstance(res, dict):
+                    _stamp_epoch(res, _out_dir)
+                return res
+            return _inner
+
+        raw = self._impls_raw()
+        return {name: _wrap(fn) for name, fn in raw.items()}
+
+    def _impls_raw(self) -> dict:
         return {
             "list_objects": self.list_objects, "count_objects": self.count_objects,
             "get_position": self.get_position, "get_object_size": self.get_object_size,

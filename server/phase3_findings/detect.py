@@ -151,7 +151,11 @@ class FindingDetector:
                     if not p.exists():
                         return None
                     arr = np.load(p)
-                    return arr["depth"].astype(np.float32) if "depth" in arr else None
+                    if "depth" not in arr:
+                        return None
+                    from segmentation.session_io import correct_depth
+                    return correct_depth(arr["depth"].astype(np.float32),
+                                         fid, self.output_dir)
                 return prov
         return lambda fid: None
 

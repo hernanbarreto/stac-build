@@ -389,9 +389,20 @@ class CoverageStore:
     ):
         """Add a timeline entry for this scan + element combination."""
         timeline = self._load_timeline()
+        # geometry-epoch provenance of the scan this entry was measured on
+        # (USER 2026-09-08); epoch 0 when the session has no corrections
+        _epoch = 0
+        try:
+            from correction.epoch import current_epoch
+            _out = self.dir.parent / "output"
+            if _out.exists():
+                _epoch = current_epoch(_out)
+        except RuntimeError:
+            _epoch = -1     # unreadable epoch file — declared, not hidden
         timeline.append({
             "scan_id": scan_id,
             "date": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "geometry_epoch": _epoch,
             "element_key": element_key,
             "coverage_current": ec.coverage_current,
             "coverage_cumulative": ec.coverage_cumulative,

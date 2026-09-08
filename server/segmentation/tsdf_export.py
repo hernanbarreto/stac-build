@@ -48,7 +48,30 @@ logger.propagate = False  # avoid double-logging via root
 
 # ── Depth source resolution ────────────────────────────────────────
 
-def _resolve_stray_depth(stray_dir: Path, conf_min: int = 1
+def _with_depth_correction(loader: Callable, output_dir: Path) -> Callable:
+    """Wrap a depth loader with the session's per-keyframe depth correction
+    (``output/depth_correction.json``, written by the correction module —
+    USER 2026-09-08). Every depth that INTEGRATES geometry must match the
+    corrected cloud, whatever its source. No sidecar → the loader is
+    returned untouched (zero overhead on uncorrected sessions)."""
+    from segmentation.session_io import correct_depth, load_depth_correction
+    if not load_depth_correction(output_dir):
+        return loader
+
+    def _wrapped(frame_idx: int):
+        out = loader(frame_idx)
+        if out is None:
+            return None
+        if isinstance(out, tuple):
+            d, *rest = out
+            return (correct_depth(d, frame_idx, output_dir), *rest)
+        return correct_depth(out, frame_idx, output_dir)
+
+    return _wrapped
+
+
+def _resolve_stray_depth(stray_dir: Path, conf_min: int = 1,
+                         output_dir: Optional[Path] = None
                          ) -> Optional[Tuple[Callable[[int], Optional[Tuple[np.ndarray, np.ndarray]]],
                                              Tuple[int, int]]]:
     """Stray/ARKit native depth: ``depth/<idx>.png`` uint16 mm at 256x192.
@@ -88,7 +111,9 @@ def _resolve_stray_depth(stray_dir: Path, conf_min: int = 1
             valid = np.ones_like(depth_m, dtype=bool)
         return depth_m, valid
 
-    return _load, (h, w)
+    if output_dir is not None:
+        _load = _with_depth_correction(_load, output_dir)
+    return _load, (h, w)  # stray
 
 
 def _resolve_da3_depth(output_dir: Path, conf_percentile: Optional[float] = None
@@ -161,7 +186,7 @@ def _resolve_da3_depth(output_dir: Path, conf_percentile: Optional[float] = None
                     return d, conf >= thr
             return d, np.ones_like(d, dtype=bool)
 
-        return _load_npz, (h, w)
+        return _with_depth_correction(_load_npz, output_dir), (h, w)
 
     # Probe shape from any sample
     sample = next(iter(depth_dir.glob("*_depth.npy")))
@@ -205,7 +230,7 @@ def _resolve_da3_depth(output_dir: Path, conf_percentile: Optional[float] = None
                     return d, conf >= thr
         return d, np.ones_like(d, dtype=bool)
 
-    return _load, (h, w)
+    return _with_depth_correction(_load, output_dir), (h, w)
 
 
 def _resolve_da3_frame_source(output_dir: Path, conf_percentile: Optional[float] = None
@@ -266,7 +291,7 @@ def _resolve_da3_frame_source(output_dir: Path, conf_percentile: Optional[float]
                 rgb = img.astype(np.uint8)
         return {"depth": d, "valid": valid, "K": K, "rgb": rgb, "hw": d.shape}
 
-    return _load, (h, w)
+    return _with_depth_correction(_load, output_dir), (h, w)
 
 
 def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float] = None,
@@ -424,7 +449,7 @@ def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float
                 d = mv["depth"].astype(np.float32)
         return {"depth": d, "valid": valid, "K": K_intr, "rgb": None, "hw": d.shape}
 
-    return _load, (h, w)
+    return _with_depth_correction(_load, output_dir), (h, w)
 
 
 def _resolve_pgsr_render_depth(output_dir: Path, render_dir: Optional[Path] = None
@@ -470,7 +495,7 @@ def _resolve_pgsr_render_depth(output_dir: Path, render_dir: Optional[Path] = No
         return {"depth": depth, "valid": valid.astype(bool),
                 "K": K_map.get(int(frame_idx)), "rgb": None, "hw": depth.shape}
 
-    return _load, (int(h), int(w))
+    return _with_depth_correction(_load, output_dir), (int(h), int(w))
 
 
 def _dilate_mask(mask: np.ndarray, radius: int) -> np.ndarray:
@@ -1087,7 +1112,7 @@ def export_tsdf_meshes(
     else:
         stray_dir = _find_stray_dir(session_dir)
     if stray_dir is not None:
-        stray_depth = _resolve_stray_depth(stray_dir)
+        stray_depth = _resolve_stray_depth(stray_dir, output_dir=output_dir)
         if stray_depth is not None:
             logger.info(f"[TSDF] depth source: Stray {stray_dir} "
                         f"(shape={stray_depth[1][1]}x{stray_depth[1][0]})")
@@ -1352,6 +1377,8 @@ def export_tsdf_meshes(
             "rgb_resolution": [int(rgb_w), int(rgb_h)],
             "backend": cam.backend,
         }
+        from correction.epoch import stamp_nearest as _stamp_epoch
+        _stamp_epoch(meta, Path(meta_path).parent)
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
 
@@ -1903,7 +1930,8 @@ def export_tsdf_scene(
     backend = _read_recon_backend(output_dir)
     from segmentation.session_io import _find_stray_dir
     stray_dir = _find_stray_dir(session_dir)
-    stray_depth = (_resolve_stray_depth(stray_dir, conf_min=conf_min)
+    stray_depth = (_resolve_stray_depth(stray_dir, conf_min=conf_min,
+                                        output_dir=output_dir)
                    if stray_dir is not None else None)
     da3_depth = _resolve_da3_depth(
         output_dir,
@@ -3507,6 +3535,8 @@ def export_tsdf_scene(
         "poses_source": poses_src,
         "icp_snap_to_cloud": icp_snap,
     }
+    from correction.epoch import stamp_nearest as _stamp_epoch
+    _stamp_epoch(meta, Path(meta_path).parent)
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
 
@@ -3740,6 +3770,8 @@ def export_poisson_scene(
         "n_triangles": n_t,
         "elapsed_s": float(elapsed),
     }
+    from correction.epoch import stamp_nearest as _stamp_epoch
+    _stamp_epoch(meta, Path(meta_path).parent)
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
 
@@ -4066,6 +4098,8 @@ def crop_scene_mesh_to_instances(
             "bbox_extent": [round(float(v), 4) for v in ext],
             "elapsed_s": round(float(elapsed), 2),
         }
+        from correction.epoch import stamp_nearest as _stamp_epoch
+        _stamp_epoch(meta, obj_dir)
         with open(obj_dir / f"{safe}.meta.json", "w") as f:
             json.dump(meta, f, indent=2)
 

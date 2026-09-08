@@ -558,6 +558,8 @@ def fit_scene(session_dir: Path,
         "elapsed_s": round(time.time() - t0, 1),
     })
     out_base.mkdir(parents=True, exist_ok=True)
+    from correction.epoch import stamp_nearest as _stamp_epoch
+    _stamp_epoch(scene_report, out_base)
     (out_base / "scene_report.json").write_text(json.dumps(scene_report, indent=2))
     logger.info("scene: %d fitted, %d → TSDF path, report → %s",
                 len(results), len(skipped), out_base / "scene_report.json")

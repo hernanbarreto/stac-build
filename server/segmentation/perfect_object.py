@@ -32,6 +32,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from correction.epoch import stamp_nearest as _stamp_epoch
+
 _UP = np.array([0.0, 1.0, 0.0])   # display (leveled) frame is three.js Y-up
 
 
@@ -925,7 +927,7 @@ def diagnose_object(output_dir: Path, instance_id: int,
         "elapsed_s": round(time.time() - t0, 1),
         "provenance": "tool_measured",
     }
-    (dst / f"{safe}_parts.meta.json").write_text(json.dumps(meta, indent=2))
+    (dst / f"{safe}_parts.meta.json").write_text(json.dumps(_stamp_epoch(meta, dst), indent=2))
     log(f"[perfect:{safe}] ✅ parts view: {kinds} · symmetry "
         f"{'FOUND' if (sym or {}).get('accepted') else 'not confirmed'} → "
         f"{glb.name} ({meta['elapsed_s']}s)")
@@ -1108,7 +1110,7 @@ def perfect_object(output_dir: Path, instance_id: int,
         "elapsed_s": round(time.time() - t0, 1),
         "provenance": "tool_measured",
     }
-    (dst / f"{safe}_perfect.meta.json").write_text(json.dumps(meta, indent=2))
+    (dst / f"{safe}_perfect.meta.json").write_text(json.dumps(_stamp_epoch(meta, dst), indent=2))
     log(f"[perfect:{safe}] ✅ v2 ironed {len(regions)} region(s) → {glb.name} "
         f"({meta['elapsed_s']}s)")
     return glb
@@ -1443,7 +1445,7 @@ def build_model_object(output_dir: Path, instance_id: int,
         "elapsed_s": round(time.time() - t0, 1),
         "provenance": "tool_measured",
     }
-    (dst / f"{safe}_model.meta.json").write_text(json.dumps(meta, indent=2))
+    (dst / f"{safe}_model.meta.json").write_text(json.dumps(_stamp_epoch(meta, dst), indent=2))
     log(f"[perfect:{safe}] ✅ model: {len(parts_meta)} clean part(s), "
         f"{completed} mirror-completed → {glb.name} ({meta['elapsed_s']}s)")
     return glb

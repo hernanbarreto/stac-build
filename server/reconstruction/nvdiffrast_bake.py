@@ -150,7 +150,9 @@ def bake_vertex_colors_gpu(
             cam_c = torch.tensor(c2w4[:3, 3], device=dev, dtype=torch.float32)
 
             z = np.load(str(npz_dir / f"frame_{fi}.npz"))
-            depth_np = z["depth"].astype(np.float32)
+            from segmentation.session_io import correct_depth
+            depth_np = correct_depth(z["depth"].astype(np.float32), fi,
+                                     output_dir)
             Hd, Wd = depth_np.shape
             K = intrinsics_map.get(fi)
             if K is None and "intrinsics" in z:
@@ -379,7 +381,9 @@ def bake_texture_gpu(
             cam_c = torch.tensor(c2w4[:3, 3], device=dev, dtype=torch.float32)
 
             z = np.load(str(npz_dir / f"frame_{fi}.npz"))
-            depth_np = z["depth"].astype(np.float32)           # (Hd,Wd)
+            from segmentation.session_io import correct_depth
+            depth_np = correct_depth(z["depth"].astype(np.float32), fi,
+                                     output_dir)           # (Hd,Wd)
             Hd, Wd = depth_np.shape
             K = intrinsics_map.get(fi)
             if K is None and "intrinsics" in z:

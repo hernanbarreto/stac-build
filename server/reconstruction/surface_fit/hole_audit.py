@@ -538,6 +538,8 @@ def _cells_grid(shape, jj, ii) -> np.ndarray:
 
 def save_report(out_dir: Path, report: dict) -> None:
     try:
+        from correction.epoch import stamp_nearest as _stamp_epoch
+        _stamp_epoch(report, out_dir)
         (Path(out_dir) / "hole_audit.json").write_text(json.dumps(report, indent=2))
     except Exception as e:  # noqa: BLE001
         logger.warning("hole_audit: report write failed: %s", e)

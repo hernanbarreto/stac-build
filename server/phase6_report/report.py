@@ -267,6 +267,20 @@ class ReportBuilder:
               f"- **{S['lang_name']}**",
               "",
               f"> {S['provenance_note']}", ""]
+        # Geometry-epoch provenance (USER 2026-09-08): a supervision report
+        # never hides that a human-directed correction changed the geometry.
+        try:
+            from correction.epoch import corrections_summary, current_epoch
+            _out = Path(self.store.path).parent
+            _cs = corrections_summary(_out)
+            md += [f"- **geometry_epoch**: {current_epoch(_out)}",
+                   f"- **human_directed_corrections**: {_cs['approved']}"]
+            if _cs["overridden"]:
+                md += [f"- **corrections_overridden**: "
+                       f"{', '.join(_cs['overridden'])}"]
+            md += [""]
+        except RuntimeError as _e:
+            md += [f"- **geometry_epoch**: UNREADABLE ({_e})", ""]
         md += self._inventory()
         md += self._findings()
         md += self._measurements()
