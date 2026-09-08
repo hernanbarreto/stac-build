@@ -110,7 +110,7 @@ instance (surface_fit scene, BIM comparison, store rebuild) use
 | `segmentation/pipeline.py` `_match_masks_to_cloud` (~1998-2040, 2285) | already builds `classification`; drop `globalIndices` from the instance dict, keep `total_points` (bincount) + `obb` |
 | `pipeline.py` merge/dedupe (1605-1665) | operate on classification (`assign_points`) |
 | `segmentation/erase.py` (20 sites) | mutate classification directly: reassign → `assign_points`, delete-mode → `assign_points(idx, 0)`, physical delete → `remap_after_physical_delete(keep)`; `_write_classification` disappears (classification IS the state); the ledger/verify code keeps working (it already reads classification) |
-| `correction_analysis._update_result_obbs` | `instance_indices` instead of `inst["globalIndices"]` |
+| `correction/apply._recompute_obbs` + `correction/invalidate.py` (replaced `correction_analysis` on 2026-09-08) | `instance_indices` instead of `inst["globalIndices"]` |
 | `main.py` level_floor `_recompute_result_obbs` (2432-2544) | same |
 | `main.py` rename/delete/clean_instance/paint_mask | delete → `delete_instance`; others unaffected (metadata) |
 | `propagation_resume.cancel` | already `cls[cls == iid] = 0` ✓ |
@@ -247,24 +247,34 @@ nube+poses, antes del Potree.
 ---
 
 ## 3. Corrección automática: guardias que faltan (caso box1, 2026-09-06)
+### ✅ RESUELTO — 2026-09-08, rediseño del módulo (`server/correction/`)
 
 Con 464 puntos de un solo objeto a 7,3 m, el rígido devolvió **92° y 9 m**
 (rms 0,9 cm — sobreajuste degenerado) y se aplicó pese a que el testigo del
 piso empeoró de +0,1 a −22,7 cm. 5,4 M puntos y 60 cámaras rotos hasta el Undo.
 
-1. **El gate held-out BLOQUEA**: si un testigo (piso u otro objeto) empeora
-   más del umbral, la corrección se rechaza y NO se aplica.
-2. **Tope de plausibilidad**: rot > 10° o |t| > 3 m ⇒ anclas rotas ⇒ rechazo
-   (configurable; la deriva real medida es ~1–2°, ~1,5 m).
-3. **Evidencia mínima**: un solo objeto con pocos puntos / disparo lejano ⇒
-   solo traslación, o rechazo por evidencia insuficiente.
-4. **El bbox no infla el objeto**: box1 curado = 37 k puntos, el OBB con
-   margen tomó 282 k. Referencia = puntos del segmento curado; el bbox solo
-   para encontrar copias, filtradas por cercanía a la superficie del segmento.
+1. **El gate held-out BLOQUEA** ✅ — `gates.gate_scene_exam` (piso vs plano de
+   referencia + TODAS las instancias no marcadas que abarcan ambas visitas)
+   veta la aplicación (`tests/test_correction_gates.py::
+   test_scene_exam_vetoes_and_touches_nothing`).
+2. **Tope de plausibilidad** ✅ — `gates.max_rot_deg: 10` / `max_translation_m:
+   3` en config (`test_plausibility_caps` reproduce el caso box1 y se
+   RECHAZA sin tocar un byte).
+3. **Evidencia mínima** ✅ — análisis de observabilidad de DOF: un objeto plano
+   solo, traslación por su normal; un cilindro solo, sin componente axial;
+   evidencia insuficiente → rechazo con "marcá además …"
+   (`test_correction_observability.py`).
+4. **El bbox no infla el objeto** ✅ — la evidencia de matching es SIEMPRE el
+   segmento curado (`seg_idx`); el bbox solo localiza copias. Además el gate
+   de colapso exige el CENTROIDE por objeto (una pared deslizando sobre sí
+   misma ya no engaña a la mediana NN).
 
-**Criterio de cierre.** Reproducir box1: la corrección se RECHAZA con el
-motivo en pantalla; las correcciones válidas (rack ch29/30, piso) siguen
-pasando.
+Gates nuevos también obligatorios desde 2026-09-08: **continuidad** (paso
+máximo entre keyframes vecinos), **escala vs anclas DA3** (analítico sobre
+scale_diagnostics.json, override registrado en el ledger), **integridad**
+(provenance resoluble para todo punto) y **transaccionalidad** (swap atómico:
+no existe "la nube cambió pero Potree falló"; estado pendiente ANTES del
+Potree — cierra también el punto 2.7).
 
 ---
 

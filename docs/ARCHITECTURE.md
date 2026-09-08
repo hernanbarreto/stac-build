@@ -344,6 +344,54 @@ projects/<project-slug>/
 
 ---
 
+## Correction module — `server/correction/` (USER 2026-09-08)
+
+User-directed loop closure for revisit duplicates (pose drift + scale ambiguity
++ depth error). Replaces `segmentation/correction_analysis.py` and the chunk
+gizmo. One responsibility per module:
+
+| Module | Responsibility |
+|---|---|
+| `config.py` | typed/validated load of `config.yaml correction:` (missing key → load error naming it) |
+| `epoch.py` | geometry epoch: read/bump/stamp/check (`geometry_epoch.json`); dependency-free |
+| `session.py` | immutable session snapshot (cloud+raw, provenance, keyframes, poses, pose copies) |
+| `units.py` | keyframe = atomic unit; visits = keyframe runs; chunks ONLY from `output/chunk_plan.json` |
+| `evidence.py` | copies per marked instance (curated OBB), visits, reference = earliest visit |
+| `observability.py` | PCA shape classes + baselines → observable DOF per visit |
+| `diagnose.py` | internal fingerprint → pose \| depth+pose; analytic DA3 anchor cross-check |
+| `solve.py` | trimmed yaw-planar ICP (translation-only under constraints), per-ray depth expansion, DOF projection |
+| `distribute.py` | per-keyframe R,t (slerp+lerp between anchors), k step over the visit span |
+| `gates.py` | collapse, plausibility, continuity, integrity, scene exam — all veto |
+| `floor.py` | floor alignment vs an explicit model (level/plane/profile), step-demotion |
+| `apply.py` | transactional apply: stage `_tx_epoch_<N>/` (incl. Potree) → verify → journaled atomic swap; undo/approve |
+| `invalidate.py` | in-place instance-store refresh, finding re-anchoring, derived-artifact staleness |
+| `ledger.py` | append-only `corrections.jsonl` + `corrections/epoch_<N>.npz` + store mirror |
+| `replay.py` | `python -m correction.replay` — bit-faithful epoch reproduction (keyed by frame_global) |
+| `report.py` / `api.py` | per-run persistent reports / FastAPI router (`main.py` only mounts it) |
+
+```
+mark instances (UI) → evidence → observability → diagnose → solve
+  → gates (object + scene exam + scale) → distribute → apply (tx)
+  → invalidate/regenerate → report → "pending" → approve | undo
+```
+
+### Consumer → action matrix on apply
+
+| Artifact / consumer | Action |
+|---|---|
+| `cleaned_cloud.ply`, `cleaned_cloud_raw.ply` | transform per keyframe (k along own ray, then R,t) — same transform, order preserved |
+| `camera_poses.txt` + copies (`maplong_run/`, `omega_run/`, `da3_run/`) | transform per keyframe (row-count-matched copies; mismatches declared) |
+| per-keyframe depth (omega/maplong/da3 npy/pgsr/hires) | `depth_correction.json` sidecar; served ONLY via `session_io.correct_depth` (DA3-anchor/Stray witness depth never corrected) |
+| `segmentation_result.json` | OBBs recomputed in the tx; `globalIndices` untouched (order preserved, asserted by test) |
+| SAM3 masks | unchanged (2-D) |
+| instance store `scene_r.db` | geometry updated in place; findings re-anchored per `frame_id`; user volumes NEVER move; epoch in `scene_meta` |
+| Potree | rebuilt inside the tx, atomically swapped |
+| `output/tsdf/*`, `surface_fit/*`, poisson, perfect, meshes, `pgsr_render/` | invalidated (epoch badge + Regenerate; never auto) |
+| BIM registration/comparison, coverage | invalidated; entries stamped with their epoch |
+| `phase3_findings` | 3-D anchors re-transformed via their origin keyframe |
+| `scale_diagnostics.json` | regenerated per epoch (analytic `s_f → s_f/k` history) |
+| phase-5 tools / phase-6 report | every measurement carries `geometry_epoch` + `human_directed_corrections` (+ overrides) |
+
 ## Key Design Decisions
 
 1. **Model caching**: Reconstruction model is loaded once and reused across zoom segments via `preloaded_model` in `RealtimeReconstruction.__init__` (fast path skips `super().__init__()`)

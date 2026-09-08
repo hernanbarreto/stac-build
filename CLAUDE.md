@@ -39,6 +39,55 @@ mejor ni cerca que vggt"; the vendor single-chunk crash IS fixed in
 vendor/depth-anything-3, keep the patch). The code for all of these stays in
 the repo, selectable, OFF by default.
 
+## ⭐ CORRECTION MODULE — USER DECISION 2026-09-08 (redesign, supersedes the
+## 2026-09-06 chunk-gizmo corrector)
+"El gizmo se elimina; queda solo la corrección por objetos marcados; el sistema
+resuelve de forma consistente con toda la escena; nada hardcodeado; época
+geométrica obligatoria en todo artefacto derivado."
+- `server/correction/` replaces `segmentation/correction_analysis.py` (deleted,
+  with `apply_manual_chunk`, `compute_chunk_boxes`, `align_floor_y0`, the
+  `/api/segmentation/chunks/*` + `/api/segmentation/correction/*` endpoints and
+  the UI chunk gizmo — the evaluation-VOLUMES gizmo stays, it is another
+  feature). New API: `/api/correction/*` (run/floor/approve/undo/state/ledger/
+  artifacts), per-session lock (second op → 409 + blocking task id).
+- The atomic unit is the KEYFRAME (per-point provenance `frame_global`); the
+  fake `// 30` chunk bucket is gone. Real chunks only from
+  `output/chunk_plan.json`, now persisted by map_worker on every chunked run.
+- The flow: mark → evidence (visits = keyframe runs in the curated OBB;
+  reference = earliest visit) → DOF observability (PCA: a lone plane/column
+  never gets DOF it cannot observe; rejection says what else to mark) →
+  diagnose pose|depth+pose (internal fingerprint) → solve (trimmed yaw-planar
+  ICP; depth k along each point's own ray) → GATES (ALL veto: object collapse
+  incl. per-object centroids, plausibility rot≤10°/|t|≤3 m, scene exam =
+  floor + unmarked witnesses, continuity per keyframe, scale vs DA3 anchors —
+  analytic over scale_diagnostics.json, override recorded in the ledger) →
+  distribute (identity to ref end, slerp+lerp anchors) → TRANSACTIONAL apply
+  (everything staged in `_tx_epoch_<N>/` incl. the Potree build, verified,
+  journaled atomic swap; previous epoch in `_epoch_<N-1>/` until
+  Approve/Undo) → in-place instance-store refresh (findings re-anchored per
+  keyframe; user volumes NEVER move).
+- Geometry epoch (`geometry_epoch.json`, epoch 0 = original reconstruction):
+  every derived artifact (tsdf/surface_fit/poisson/perfect/mesh_export/
+  hole_audit/sábana/coverage/phase-5 measurements/phase-6 report) is stamped
+  `geometry_epoch` + `human_directed_corrections` + `corrections_overridden`;
+  stale ones get a UI badge + Regenerate (never auto-regenerated). Depth
+  corrections live in the `depth_correction.json` sidecar served ONLY through
+  `segmentation/session_io.correct_depth` (DA3-anchor/Stray witness depth is
+  never corrected). Ledger `corrections.jsonl` is append-only (undone runs
+  keep their verdict; a new reconstruction resets the epoch but NEVER deletes
+  the ledger); `corrections/epoch_<N>.npz` + `python -m correction.replay`
+  reproduce any epoch bit-faithfully (keyed by frame_global → re-appliable to
+  a re-reconstruction).
+- Floor alignment is the same flow (kind=floor): per-keyframe anchors vs an
+  explicit model — level | plane (default; real slopes survive) | profile —
+  with step-demotion (real level changes preserved), anchor-normal smoothing
+  (patch-noise rotations at 15 m lever arms became 75 mm steps) and
+  `min_tilt_deg` (below it only the height lands).
+- ALL parameters in `config.yaml` `correction:` (typed dataclasses; a missing
+  key fails at load naming it; zero decision literals in the package —
+  enforced by test). Tests: `server/tests/test_correction_*.py` + shared
+  generator `tests/synth_correction.py` (30 tests, no GPU).
+
 ## ⭐ FLOW CHANGE — USER DECISION 2026-08-28 (supersedes auto-mesh mandate)
 The automatic end-of-pipeline mesh worked on some scenes and not others, so:
 - **Reconstruction ends at the CLEANED CLOUD** (`pipeline.auto_tsdf: false`);

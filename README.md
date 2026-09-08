@@ -232,7 +232,65 @@ integration (the "dust" — superseded by the full-frustum raster).
 `cleaned_cloud_raw.ply` (+ `potree/`), `tsdf/scene/scene.glb` (+ `.orig`),
 `camera_poses.txt`, `scale_diagnostics.json`, `pose_refine_report.json`,
 `scene_consolidate_report.json` — plus, under backend `vggtomega_pgsr`:
-`pgsr_render/` + `pgsr_model/`, `pgsr_cloud.ply` (+ rebuilt `potree/`).
+`pgsr_render/` + `pgsr_model/`, `pgsr_cloud.ply` (+ rebuilt `potree/`), and on
+chunked runs `chunk_plan.json` (the REAL chunk ranges/overlap, persisted for the
+correction module).
+
+## User-directed correction (`server/correction/`, USER 2026-09-08 redesign)
+
+Long walks accumulate three coupled errors the automatic loop closure cannot
+remove — pose drift, scale ambiguity, depth error — whose visible symptom is a
+revisited object appearing DUPLICATED (parallel copies). The correction module
+turns that symptom into a human-directed loop closure. It replaced the retired
+chunk gizmo (`apply_manual_chunk` + 30-keyframe buckets — deleted): the atomic
+unit is now the **keyframe**, reached from every point through its provenance
+(`frame_global`).
+
+- **Flow**: the user marks the duplicated segments (never which copy goes with
+  which — "eso lo debe determinar el algoritmo"). The system extracts every
+  copy per VISIT (contiguous keyframe runs inside the curated OBB), takes the
+  earliest visit as the reference, diagnoses **pose vs depth** through the
+  internal fingerprint (inter-object distance ratios), solves a trimmed
+  yaw-planar ICP per displaced visit (depth k expands along each point's own
+  camera ray first) and distributes the correction over keyframes
+  (identity until the reference visit ends, slerp+lerp between anchors — no
+  seam).
+- **Observability**: DOF are solved only where the evidence observes them
+  (PCA classes: a lone plane only constrains its normal, a lone column never
+  constrains its axis; rejections tell the user what else to mark).
+- **Gates — every one VETOES the apply**: object collapse (median NN +
+  per-object centroid), plausibility caps (rot ≤ 10°, |t| ≤ 3 m — the box1
+  lesson), scene exam (the floor + every UNMARKED instance spanning both
+  visits must land right on their own), continuity (max inter-keyframe step),
+  and the **DA3 scale rule**: a depth k is a local correction, never a session
+  re-scale — the anchor agreements in `scale_diagnostics.json` are recomputed
+  analytically (`s_f → s_f/k`) and a contradiction blocks unless the operator
+  overrides (recorded in the ledger with name and numbers).
+- **Transactional apply**: everything for the new epoch (cloud, raw cloud,
+  poses + copies, OBBs, `depth_correction.json` sidecar, regenerated scale
+  diagnostics, the Potree octree) is staged under `output/_tx_epoch_<N>/`,
+  verified, then atomically swapped; the previous epoch lives in
+  `output/_epoch_<N-1>/` until **Approve** (which removes it — the corrected
+  cloud IS the cloud) or **Undo** (exact inverse swap).
+- **Geometry epoch + ledger**: `output/geometry_epoch.json` versions the
+  geometry; every derived artifact (meshes, surface_fit, hole_audit, sábana,
+  coverage, chat measurements, phase-6 reports) is stamped with its epoch and
+  the UI badges stale ones. `output/corrections.jsonl` is append-only (runs,
+  verdicts, overrides, operator); `corrections/epoch_<N>.npz` holds the exact
+  per-keyframe transform, and `python -m correction.replay` reproduces any
+  epoch bit-faithfully (re-keyed by `frame_global`, so approved corrections
+  can be re-applied to a re-reconstruction).
+- **Depth sidecar**: consumers of reconstruction-derived per-keyframe depth
+  (TSDF export, findings, texture bake occlusion, autoprompt…) load it through
+  `segmentation.session_io.correct_depth` — never a raw `.npy` on their own.
+  DA3 anchor depth and Stray LiDAR used as *witnesses* are never corrected.
+- **Floor alignment** joined the same flow: per-keyframe anchors against an
+  explicit model — `level` (y=0, flattens by design), `plane` (a real slope
+  survives), `profile` (longitudinal slope) — with step-demotion so real level
+  changes are preserved. Same gates, same transaction, same ledger.
+- Everything is configured under `correction:` in `server/config.yaml`
+  (typed + validated; a missing key fails at load); zero decision literals in
+  the package (enforced by `tests/test_correction_config.py`).
 
 ### Keyframe density
 
