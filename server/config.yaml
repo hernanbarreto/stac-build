@@ -25,6 +25,9 @@
 #   segmentation/scene_analyzer.py→ scene_analysis (parts)
 #   bim/comparison.py             → bim.deviation
 #   stray_da3_streaming.py        → reconstruction.lidar.trust_range
+#   correction/*                  → correction (user-directed correction module;
+#                                   EVERY key is mandatory — correction/config.py
+#                                   fails at load naming any missing key)
 # ============================================================================
 
 
@@ -1805,3 +1808,82 @@ meshflow:
                               # the object bbox and saves <folder>_ref.jpg; instances with
                               # no usable view are SKIPPED, never generated blind.
                               # Needs the DINOv3 checkpoint (weights/dinov3 — installed).
+
+# ── Correction (user-directed loop closure, USER 2026-09-08 redesign) ──────
+# Consumed ONLY by server/correction/config.py (typed dataclasses, validated at
+# load). EVERY key below is MANDATORY: there are no hidden code defaults — a
+# missing or out-of-range key aborts the module load naming the key. Values
+# carried over from the retired segmentation/correction_analysis.py keep the
+# user-validated behaviour; new gates were calibrated on the synthetic suite
+# (server/tests/synth_correction.py).
+correction:
+  evidence:
+    obb_margin_m: 0.03            # curated-OBB margin when collecting copy evidence
+    min_object_points_solve: 300  # a visit with fewer own points inherits its neighbour
+    min_object_points_fingerprint: 500  # min points for a copy to enter the fingerprint
+    min_baseline_m: 0.30          # min inter-object centroid distance for depth evidence
+    min_objects_for_depth: 2      # depth (k) needs at least this many baseline pairs' objects
+    visit_gap_kf: 2               # keyframe gaps ≤ this stay one visit (sparse evidence)
+  observability:
+    pca_ratio_planar: 0.05        # λ3/λ1 below this → planar object (no in-plane DOF)
+    pca_ratio_cylindrical: 0.15   # λ2/λ1 below this → elongated object (no along-axis DOF)
+  solve:
+    icp_iters: 100                # 30 stopped short (4.5° of a 6° yaw, 2026-09-06)
+    icp_trim: 0.7                 # trimmed-ICP keep fraction
+    icp_sample: 50000             # ICP source sample
+    eval_sample: 20000            # residual evaluation sample
+    icp_min_corr: 100             # min trimmed correspondences per iteration
+    icp_converge_deg: 0.001       # per-step rotation below this → converged
+    icp_converge_m: 0.00001       # per-step translation below this → converged
+    plane_ransac_tol_m: 0.02      # plane fit for the no-offset init
+    plane_ransac_iters: 300
+    plane_ransac_sample: 60000
+    depth_compress_tol: 0.03      # |k-1| beyond this → depth correction diagnosed
+    seed: 0                       # determinism (all RNG in the module)
+  gates:
+    max_object_residual_m: 0.15   # copies must end within this (median NN)
+    residual_improvement_ratio: 0.5   # after ≤ ratio × before, or rejection
+    collapse_floor_m: 0.03        # median NN below this IS collapsed (cloud noise +
+                                  # sampling floor) — the improvement ratio only
+                                  # applies when the copies started truly apart
+    max_rot_deg: 10.0             # plausibility cap (box1 2026-09-06: 92° applied)
+    max_translation_m: 3.0        # plausibility cap (box1: 9 m applied)
+    heldout_floor_tol_m: 0.05     # floor witness may not worsen beyond this
+    heldout_floor_abs_m: 0.08     # ...and must END within this of the reference plane
+    heldout_object_tol_m: 0.10    # unmarked witnesses must improve or stay within this
+    max_step_mm: 25.0             # max translation step between neighbouring keyframes
+    max_step_deg: 0.5             # max rotation step between neighbouring keyframes
+    scale_agree_tol: 0.05         # max |log| worsening of a DA3 anchor agreement ratio
+    scale_mad_tol: 0.03           # max growth of the anchors' MAD
+  floor:
+    model_default: plane          # level | plane | profile (user picks in the UI;
+                                  # plane keeps real slopes, level is y=0 everywhere)
+    band_m: 0.5                   # floor band half-height around the low percentile
+    low_band_pct: 5.0             # per-keyframe low percentile that seeds the band
+    min_tilt_deg: 1.0             # tilt below this is normal-estimation noise on a
+                                  # per-keyframe patch: only the height lands on the
+                                  # model, the normal stays (a noisy 0.3° rotation at a
+                                  # 15 m lever arm produced 75 mm inter-keyframe steps)
+    max_tilt_deg: 10.0            # anchor guard: floor normal tilt beyond this → demoted
+    min_inliers: 5000             # anchor guard: RANSAC inliers below this → demoted
+    min_inlier_ratio: 0.5         # accepted plane must hold ≥ ratio × min_inliers
+    ransac_tol_m: 0.02            # floor RANSAC inlier distance
+    ransac_refit_band_m: 0.03     # SVD refit band around the RANSAC plane
+    ransac_iters: 400
+    ransac_sample: 120000
+    normal_smooth_kf: 5           # anchor floor normals averaged over ±this many
+                                  # keyframes before building transforms — drift is
+                                  # smooth along the walk; per-patch normal noise at a
+                                  # long lever arm becomes inter-keyframe steps
+    step_demote_m: 0.15           # plane/profile models: an anchor whose local floor
+                                  # sits farther than this from the reference model is
+                                  # a REAL step/level change → demoted to interpolated
+                                  # (the step is preserved, only drift is removed)
+  apply:
+    depth_correction_mode: sidecar  # sidecar (output/depth_correction.json served
+                                    # via segmentation/session_io.correct_depth) |
+                                    # rewrite (NOT implemented — selecting it fails loudly)
+    potree_rebuild: true          # build the octree inside the transaction
+  runtime:
+    workers: auto                 # auto = min(8, affinity) — NEVER a fixed count
+                                  # (252-core box lesson, CLAUDE.md); or an integer

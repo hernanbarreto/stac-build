@@ -238,20 +238,24 @@ _potree_active: dict = {}      # session key → {"since", "ply", "ply_mtime"}
 _potree_reg = _threading.Lock()  # guards the dict only (microseconds)
 
 
-def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: Path = None) -> bool:
+def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: Path = None,
+                          potree_dir_override: Path = None) -> bool:
     """Full pipeline: PLY → LAS → Potree octree.
 
     Args:
         session_dir: Path to session dir (e.g. server/scans/live_xxx)
         force: If True, skip mtime cache check and always reconvert.
         ply_override: Optional path to use instead of cleaned_cloud.ply
+        potree_dir_override: Optional target directory instead of
+            output/potree — used by the correction module to build the octree
+            INSIDE its transaction directory before the atomic swap.
 
     Returns:
         True if potree/ directory was created successfully.
     """
     output_dir = session_dir / "output"
     ply_path = Path(ply_override) if ply_override else output_dir / "cleaned_cloud.ply"
-    potree_dir = output_dir / "potree"
+    potree_dir = Path(potree_dir_override) if potree_dir_override else output_dir / "potree"
 
     if not ply_path.exists():
         logger.warning(f"[Potree] No {ply_path.name} found in {output_dir}")

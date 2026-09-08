@@ -311,7 +311,16 @@ class PipelineManager:
                       "vggt_long_config.yaml", "vggt_omega_config.yaml", "da3_streaming_config.yaml",
                       "camera_poses_mapanything.json", "camera_poses.txt", "camera_frames.txt",
                       "intrinsic.txt", "lidar_complement.ply", "omega_run",
-                      ".metric_scale_applied", ".orientation_applied"],
+                      ".metric_scale_applied", ".orientation_applied",
+                      # a NEW reconstruction is geometry epoch 0 again: the
+                      # epoch marker, the depth-correction sidecar, the exact
+                      # per-epoch transforms and any pending tx/prev dirs are
+                      # cleared. corrections.jsonl (the ledger) is NEVER
+                      # deleted — history survives; replay re-keys by
+                      # frame_global (USER 2026-09-08).
+                      "geometry_epoch.json", "depth_correction.json",
+                      "corrections/epoch_*.npz", "chunk_plan.json",
+                      "_tx_epoch_*", "_epoch_*", "scale_diagnostics.json"],
                       # ↑ idempotency markers: MUST be cleared on Replace, else scale_align /
                       # orient skip on every re-run → cloud not metric, scene upside down.
         StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "cleaned_cloud_raw.ply",
