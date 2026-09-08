@@ -1585,7 +1585,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # to DA3 anchors BEFORE alignment, glued SE(3) (scale is not negotiable — the Sim3
     # scale freedom is what produced the onion), SALAD loop closure + pose graph on.
     from reconstruction.chunk_plan import (walk_length_m, plan_chunks,
-                                           plan_anchor_indices, trim_static_ends)
+                                           plan_anchor_indices, trim_static_ends,
+                                           chunk_ranges)
     vggt_config = _build_vggtomega_config(config)
     _va_cfg = recon_cfg.get("vggtomega", {}) or {}
     _max_walk = float(_simple_cfg.get("max_walk_single_pass_m", 25.0))
@@ -1610,6 +1611,27 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             else:
                 _ps["conf_threshold_coef"] = float(_coef)
                 pipe.send_log(f"SIMPLE: point confidence filter conf >= mean*{float(_coef):g}")
+
+    def _persist_chunk_plan(_chunk, _ov, _n_kf, _phase, _walk=None):
+        """Persist the REAL chunk plan (USER 2026-09-08: the correction module
+        may group evidence only by the reconstruction's actual chunks, never by
+        a fixed divisor). Written whenever a chunked run is configured; a
+        single-pass session has no plan (the corrector then works purely per
+        keyframe)."""
+        plan = {
+            "version": 1,
+            "phase": _phase,
+            "n_keyframes": int(_n_kf),
+            "chunk_size": int(_chunk),
+            "overlap": int(_ov),
+            "chunk_ranges": [[int(a), int(b)] for a, b in
+                             chunk_ranges(int(_n_kf), int(_chunk), int(_ov))],
+            "walk_m": (round(float(_walk), 2) if _walk is not None else None),
+        }
+        (output_dir / "chunk_plan.json").write_text(json.dumps(plan, indent=1))
+        pipe.send_log(f"[chunk-plan] persisted output/chunk_plan.json: "
+                      f"{len(plan['chunk_ranges'])} chunk(s), size {_chunk}, "
+                      f"overlap {_ov}")
 
     def _apply_chunked_metric(cfg_v, _chunk, _ov):
         cfg_v["Model"]["chunk_size"] = int(_chunk)
@@ -1750,6 +1772,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             vggt_config["Model"]["chunk_size"] = max(_n_selected, 2)
             vggt_config["Model"]["overlap"] = 0
             vggt_config["Model"]["loop_enable"] = False
+            # single pass = no chunks: a stale plan from a previous chunked run
+            # would lie to the correction module
+            (output_dir / "chunk_plan.json").unlink(missing_ok=True)
             pipe.send_log(f"SIMPLE single-pass: {_n_selected} frames ≤ chunk "
                           f"capacity {_single_cap} → ONE chunk (no windows → no "
                           f"seams). Walk length measured after — a walk over "
@@ -1773,6 +1798,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                                   _anch_per_chunk)
                 _ensure_anchors([_sel_files[i] for i in _anchor_idx])
             _apply_chunked_metric(vggt_config, _chunk, _ov)
+            _persist_chunk_plan(_chunk, _ov, _n_selected, "direct-chunked")
         else:
             _chunk = _chunk_cfg if _chunk_cfg else max(
                 min(int(vggt_config["Model"]["chunk_size"]), _fits), 50)
@@ -2035,6 +2061,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                     _t.unlink()
             vggt_config = _build_vggtomega_config(config)
             _apply_chunked_metric(vggt_config, _chunk, _ov)
+            _persist_chunk_plan(_chunk, _ov, _n_selected, "chunked-metric",
+                                _walk=_walk_m)
             _apply_conf_filter(vggt_config)
             _chunked_already = True
             if not _omega_pass(vggt_config, "chunked-metric"):
