@@ -76,6 +76,58 @@ def _detect_world_up(cam_positions: np.ndarray, points: np.ndarray) -> str:
     return f"{sign}{'xyz'[up_idx]}"
 
 
+# ── Depth-correction sidecar (human-directed corrections) ───────────
+#
+# USER 2026-09-08: a depth correction solved by the correction module is a
+# per-keyframe scalar k applied along each point's own camera ray. Rewriting
+# every vendor depth artifact would be unaffordable and unauditable, so the
+# correction is persisted once in ``output/depth_correction.json`` and EVERY
+# consumer of this session's reconstruction-derived per-keyframe depth loads
+# it through this accessor. External metric witnesses (DA3 anchor depth used
+# by scale_align's cross-check, raw Stray LiDAR) must NOT be corrected — they
+# are what the scale gate checks against.
+
+DEPTH_CORRECTION_NAME = "depth_correction.json"
+_depth_corr_cache: Dict[str, Tuple[float, Dict[int, float]]] = {}
+
+
+def load_depth_correction(output_dir) -> Optional[Dict[int, float]]:
+    """Per-keyframe depth-correction factors {frame_global: k}, or None when
+    the session has no depth correction. Cached by file mtime. A corrupt
+    sidecar is an error (fail-fast doctrine), never silently ignored."""
+    path = Path(output_dir) / DEPTH_CORRECTION_NAME
+    if not path.exists():
+        return None
+    mtime = path.stat().st_mtime
+    key = str(path)
+    cached = _depth_corr_cache.get(key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
+        data = json.loads(path.read_text())
+        k_map = {int(f): float(k) for f, k in (data.get("k") or {}).items()}
+    except (ValueError, KeyError, TypeError) as e:
+        raise RuntimeError(
+            f"corrupt {DEPTH_CORRECTION_NAME} at {path}: {e} — restore it "
+            f"from the last correction epoch or delete it if the session "
+            f"has no approved depth correction") from e
+    _depth_corr_cache[key] = (mtime, k_map)
+    return k_map
+
+
+def correct_depth(depth: np.ndarray, frame_global: int, output_dir):
+    """Return ``depth`` with the session's per-keyframe depth correction
+    applied (a fresh array when k != 1; the input untouched otherwise, so
+    memory-mapped sources stay read-only)."""
+    k_map = load_depth_correction(output_dir)
+    if not k_map:
+        return depth
+    k = k_map.get(int(frame_global), 1.0)
+    if k == 1.0:
+        return depth
+    return depth * np.float32(k)
+
+
 # ── Camera data loader ──────────────────────────────────────────────
 
 @dataclass
