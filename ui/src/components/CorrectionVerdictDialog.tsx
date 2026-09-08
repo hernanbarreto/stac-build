@@ -18,9 +18,10 @@ export default function CorrectionVerdictDialog({ state, session, otherSession, 
 }) {
   const [collapsed, setCollapsed] = useState(false)
   const report = state?.report
-  const chunks: any[] = report?.chunks || []
-  const solved = chunks.filter(c => c.object_residual_cm)
-  const mode = state?.mode || (report?.instance_ids ? 'correction analysis' : 'correction')
+  const solutions: any[] = report?.solutions || []
+  const gates: any[] = report?.gates || []
+  const kind = state?.kind || report?.kind || 'correction'
+  const epoch = report?.epoch_to ?? state?.epoch
   const title = otherSession ? `Correction pending in ${otherSession}` : `Correction applied${session ? ` on ${session}` : ''} — your verdict`
 
   if (collapsed) {
@@ -44,32 +45,34 @@ export default function CorrectionVerdictDialog({ state, session, otherSession, 
           <div className="cd-content">
             <div className="cd-title">{title}</div>
             <div className="cd-message">
-              <div>{mode}{state?.chunks?.length ? ` · chunk${state.chunks.length > 1 ? 's' : ''} ${state.chunks.join(', ')}` : ''}{state?.points_moved ? ` · ${(state.points_moved / 1e6).toFixed(2)}M points moved` : ''}</div>
-              {solved.length > 0 && (
+              <div>{kind}{epoch != null ? ` · epoch ${epoch}` : ''}{report?.points_moved ? ` · ${(report.points_moved / 1e6).toFixed(2)}M points moved` : ''}{report?.operator ? ` · by ${report.operator}` : ''}</div>
+              {solutions.length > 0 && (
                 <table className="cvd-table">
-                  <thead><tr><th>chunk</th><th>diagnosis</th><th>rigid</th><th>copies before → after</th><th>floor</th></tr></thead>
+                  <thead><tr><th>visit (kf)</th><th>rigid</th><th>k</th><th>copies before → after</th><th>DOF</th></tr></thead>
                   <tbody>
-                    {solved.map(c => (
-                      <tr key={c.chunk}>
-                        <td>ch{String(c.chunk).padStart(2, '0')}</td>
-                        <td>{c.diagnosis}</td>
-                        <td>{c.rigid ? `${c.rigid.rot_deg}° / ${c.rigid.t_m} m` : '—'}</td>
-                        <td>{c.object_residual_cm.before} → <b>{c.object_residual_cm.after}</b> cm</td>
-                        <td>{c.floor_heldout_cm ? `${c.floor_heldout_cm.before} → ${c.floor_heldout_cm.after} cm` : '—'}</td>
+                    {solutions.map((c, i) => (
+                      <tr key={i}>
+                        <td>{c.kf_span ? `${c.kf_span[0]}..${c.kf_span[1]}` : (c.anchors ? `${c.anchors.length} anchors` : '—')}</td>
+                        <td>{c.rot_deg != null ? `${c.rot_deg}° / ${c.t_m} m` : '—'}</td>
+                        <td>{c.k && c.k !== 1 ? c.k : '—'}</td>
+                        <td>{c.residual_cm ? <>{c.residual_cm.before} → <b>{c.residual_cm.after}</b> cm</> : '—'}</td>
+                        <td>{c.dof ? c.dof.join(',') : '—'}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               )}
-              {chunks.length > solved.length && (
-                <div style={{ marginTop: 6, opacity: 0.8 }}>
-                  + {chunks.length - solved.length} chunk(s) inherited
+              {gates.length > 0 && (
+                <div style={{ marginTop: 6, opacity: 0.85 }}>
+                  {gates.map((g: any) => (
+                    <div key={g.name + String(g.group ?? '')}>{g.passed ? '✅' : '❌'} {g.name} — {g.detail}</div>
+                  ))}
                 </div>
               )}
               {report?.distribution && (
                 <div style={{ marginTop: 6, opacity: 0.85 }}>
-                  Loop closure spread over {report.distribution.keyframes_warped} keyframes after kf {report.distribution.identity_until_kf}
-                  {' '}· max step between neighbouring keyframes {report.distribution.max_step_between_keyframes_mm} mm (no seam)
+                  Spread over {report.distribution.keyframes_warped} keyframes after kf {report.distribution.identity_until_kf}
+                  {' '}· max step {report.distribution.max_step_between_keyframes_mm} mm / {report.distribution.max_step_between_keyframes_deg}° (no seam)
                 </div>
               )}
               <div style={{ marginTop: 8 }}>

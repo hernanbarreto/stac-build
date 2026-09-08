@@ -65,6 +65,8 @@ interface PipelineState {
 type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align' | 'erase'
 
 function App() {
+  // auth first: token feeds the correction handlers' deps below (TDZ)
+  const { user, token, loading: authLoading, logout } = useAuth()
   const { confirmDanger, dialogElement: appDialog } = useConfirmDialog()
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSession, setActiveSession] = useState<string | null>(null)
@@ -103,7 +105,7 @@ function App() {
   const [pendingSession, setPendingSession] = useState<string | null>(null)
   const refreshCorrectionStatus = useCallback(async (sid: string) => {
     try {
-      const r = await fetch(`/api/segmentation/correction/status/${sid}`)
+      const r = await fetch(`/api/correction/state/${sid}`)
       if (r.ok) {
         const st = await r.json()
         setCorrectionState(st)
@@ -121,16 +123,15 @@ function App() {
     const iv = setInterval(() => refreshCorrectionStatus(pendingSession), 15000)
     return () => clearInterval(iv)
   }, [pendingSession, activeSession, refreshCorrectionStatus])
-  // 📦 Chunk boxes (USER 2026-09-06): all 44 chunk OBBs, all unchecked by
-  // default; checked → visible in the viewer; selected box → gizmo
-  // (translate/rotate, no scale) → Save bakes cloud+poses+Potree.
-  const [showChunkPanel, setShowChunkPanel] = useState(false)
-  const [chunkBoxList, setChunkBoxList] = useState<Array<{ chunk: number; center: number[]; size: number[]; yaw: number; n_points: number }>>([])
-  const [chunkChecked, setChunkChecked] = useState<Set<number>>(new Set())
-  const [chunkSelectedId, setChunkSelectedId] = useState<number | null>(null)
-  const [chunkDelta, setChunkDelta] = useState<{ chunk: number; matrix: number[] } | null>(null)
-  const [chunkSaving, setChunkSaving] = useState(false)
-  const [chunkGizmoMode, setChunkGizmoModeState] = useState<'translate' | 'rotate'>('translate')
+  // Correction panel state (USER 2026-09-08 redesign: keyframe-based flow,
+  // no chunk gizmo). The last run's full report (also when rejected), the
+  // live stage progress, the floor model, the ledger and the stale badges.
+  const [correctionReport, setCorrectionReport] = useState<any>(null)
+  const [correctionProgress, setCorrectionProgress] = useState<{ pct: number; detail: string } | null>(null)
+  const [correctionOverrideScale, setCorrectionOverrideScale] = useState(false)
+  const [floorModel, setFloorModel] = useState<'level' | 'plane' | 'profile'>('plane')
+  const [correctionLedger, setCorrectionLedger] = useState<any[] | null>(null)
+  const [correctionArtifacts, setCorrectionArtifacts] = useState<any[] | null>(null)
   // shared Approve/Undo handlers — used by the 🔧 modal AND the pending
   // banner (USER 2026-09-06: a pending correction MUST be visible).
   const approveCorrection = useCallback(async () => {
@@ -139,8 +140,10 @@ function App() {
     setCorrectionRunning(true)
     setCorrectionState({ status: 'working' })   // banner hides immediately
     try {
-      const r = await fetch('/api/segmentation/correction/approve', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+      const headers: HeadersInit = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const r = await fetch('/api/correction/approve', {
+        method: 'POST', headers,
         body: JSON.stringify({ session_id: sid }),
       })
       setStatusMessage(r.ok ? '🔧 correction APPROVED — it is now the cloud'
@@ -148,7 +151,7 @@ function App() {
     } catch { setStatusMessage('🔧 approve failed') }
     setCorrectionRunning(false)
     refreshCorrectionStatus(pendingSessionRef.current || activeSession!)
-  }, [activeSession, refreshCorrectionStatus])
+  }, [activeSession, refreshCorrectionStatus, token])
   const undoCorrection = useCallback(async () => {
     const sid = pendingSessionRef.current || activeSession
     if (!sid) return
@@ -156,8 +159,10 @@ function App() {
     setCorrectionState({ status: 'working' })   // banner hides immediately
     setStatusMessage('🔧 undoing (restores cloud+poses, rebuilds Potree)...')
     try {
-      const r = await fetch('/api/segmentation/correction/undo', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+      const headers: HeadersInit = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const r = await fetch('/api/correction/undo', {
+        method: 'POST', headers,
         body: JSON.stringify({ session_id: sid }),
       })
       setStatusMessage(r.ok ? '🔧 correction UNDONE — cloud restored'
@@ -165,7 +170,7 @@ function App() {
     } catch { setStatusMessage('🔧 undo failed') }
     setCorrectionRunning(false)
     refreshCorrectionStatus(pendingSessionRef.current || activeSession!)
-  }, [activeSession, refreshCorrectionStatus])
+  }, [activeSession, refreshCorrectionStatus, token])
   // pending state must surface ALWAYS (USER 2026-09-06: the banner appears
   // as soon as the potree loads and stays — across session switches too —
   // until the correction is approved or rejected). A long-running
@@ -176,8 +181,7 @@ function App() {
     refreshCorrectionStatus(activeSession)
     const iv = setInterval(() => refreshCorrectionStatus(activeSession), 15000)
     return () => clearInterval(iv)
-  }, [activeSession, refreshCorrectionStatus])
-  const [chunkBoxesLoading, setChunkBoxesLoading] = useState(false)
+  }, [activeSession, refreshCorrectionStatus, token])
   // ── Multi-scan project, VS-Code-style TABS (USER 2026-09-06): one tab
   // per open scan; the ACTIVE tab is the scan being viewed AND worked on
   // (segmentation, brush, corrections, meshing, chat). Closing a tab loses
@@ -315,19 +319,30 @@ function App() {
     setResumeCheckedFor(null)
     setInteractiveSessionId(sid)
   }, [])
-  const loadChunkBoxes = useCallback(async (sid: string) => {
-    setChunkBoxesLoading(true)
+  const loadCorrectionLedger = useCallback(async (sid: string) => {
     try {
-      const r = await fetch(`/api/segmentation/chunks/boxes/${sid}`)
-      if (r.ok) setChunkBoxList((await r.json()).boxes || [])
-    } catch { setStatusMessage('📦 chunk boxes failed to load') }
-    setChunkBoxesLoading(false)
+      const r = await fetch(`/api/correction/ledger/${sid}`)
+      if (r.ok) setCorrectionLedger((await r.json()).entries || [])
+    } catch { /* non-fatal */ }
   }, [])
+  const loadCorrectionArtifacts = useCallback(async (sid: string) => {
+    try {
+      const r = await fetch(`/api/correction/artifacts/${sid}`)
+      if (r.ok) setCorrectionArtifacts((await r.json()).artifacts || [])
+    } catch { /* non-fatal */ }
+  }, [])
+  // per-stage progress while a correction runs (task_type "correction")
   useEffect(() => {
-    // push the checked subset to the viewer
-    viewportRef.current?.setChunkBoxes(
-      chunkBoxList.filter(b => chunkChecked.has(b.chunk)))
-  }, [chunkChecked, chunkBoxList])
+    if (!correctionRunning || !activeSession) { setCorrectionProgress(null); return }
+    const iv = setInterval(async () => {
+      try {
+        const d = await fetch(`/api/tasks/${activeSession}`).then(r => r.json())
+        const t = (d.tasks || []).find((x: any) => x.task_type === 'correction')
+        if (t) setCorrectionProgress({ pct: t.pct || 0, detail: t.detail || t.label || '' })
+      } catch { /* keep last */ }
+    }, 2000)
+    return () => clearInterval(iv)
+  }, [correctionRunning, activeSession])
   // per-segment source mesh choice when both exist: 'poisson' | 'pgsr'
   const [perfectSource, setPerfectSource] = useState<Record<number, string>>({})
   // leaving the brush turns the red preview off
@@ -443,7 +458,6 @@ function App() {
   const [selectedScans, setSelectedScans] = useState<string[]>([])
   const [projectFilter, setProjectFilter] = useState('')
 
-  const { user, token, loading: authLoading, logout } = useAuth()
 
 
 
@@ -2590,19 +2604,8 @@ function App() {
                   <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
                     disabled={!activeSession}
                     title="Correction analysis: mark the segments showing the parallel-copies error; the algorithm diagnoses (pose/depth), corrects cloud+poses+Potree, then you approve or undo"
-                    onClick={() => { setCorrectionSelected(new Set()); setShowCorrectionModal(true); refreshCorrectionStatus(activeSession!) }}>
+                    onClick={() => { setCorrectionSelected(new Set()); setCorrectionReport(null); setShowCorrectionModal(true); refreshCorrectionStatus(activeSession!); loadCorrectionLedger(activeSession!); loadCorrectionArtifacts(activeSession!) }}>
                     🔧 Correction
-                  </button>
-                  <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
-                    disabled={!activeSession}
-                    title="Chunk boxes: show any chunk's OBB, probe its position with a translate/rotate gizmo, Save bakes cloud+poses+Potree"
-                    onClick={() => {
-                      const next = !showChunkPanel
-                      setShowChunkPanel(next)
-                      if (next) loadChunkBoxes(activeSession!)
-                      else { setChunkChecked(new Set()); viewportRef.current?.clearChunkSelection() }
-                    }}>
-                    📦 Chunks
                   </button>
                   <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
                     disabled={!activeSession || projectScans.filter(sc => sc.kind !== 'fused').length < 2}
@@ -3199,8 +3202,6 @@ function App() {
                 })
               } catch { /* ignore */ }
             }}
-            onChunkSelected={(c) => setChunkSelectedId(c)}
-            onChunkDelta={(c, m) => setChunkDelta(m ? { chunk: c, matrix: m } : null)}
             onHasConfidence={(has) => {
               setHasConfidence(has)
             }}
@@ -4076,163 +4077,11 @@ function App() {
         />
       )}
 
-      {/* ── 📦 Chunk boxes panel (USER 2026-09-06): all chunks listed,
-           all unchecked; check → box appears in the viewer; click a box →
-           gizmo (translate/rotate, NO scale, centered on the chunk);
-           Save bakes the adjustment into cloud+poses+Potree with the same
-           Approve/Undo flow as the automatic correction. ── */}
-      {showChunkPanel && (
-        <div style={{
-          position: 'fixed', right: 16, top: 70, zIndex: 1500, width: 250,
-          maxHeight: '70vh', overflow: 'auto', background: 'var(--bg-secondary)',
-          border: '1px solid var(--border-color)', borderRadius: 10, padding: 12,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
-            <strong style={{ flex: 1, color: 'var(--text-primary)', fontSize: 13 }}>📦 Chunk boxes</strong>
-            <button className="admin-close" onClick={() => {
-              setShowChunkPanel(false); setChunkChecked(new Set())
-              viewportRef.current?.clearChunkSelection()
-            }}>✕</button>
-          </div>
-          <label style={{
-            display: 'flex', alignItems: 'center', gap: 8, padding: '4px 6px',
-            marginBottom: 6, fontSize: 12, color: 'var(--text-primary)',
-            cursor: 'pointer', borderBottom: '1px solid var(--border-color)',
-          }}>
-            <input type="checkbox"
-              checked={chunkBoxList.length > 0 && chunkChecked.size === chunkBoxList.length}
-              onChange={() => setChunkChecked(
-                chunkChecked.size === chunkBoxList.length
-                  ? new Set()
-                  : new Set(chunkBoxList.map(b => b.chunk)))} />
-            <em>{chunkChecked.size === chunkBoxList.length && chunkBoxList.length > 0
-              ? 'Deselect all' : 'Select all'} ({chunkChecked.size}/{chunkBoxList.length})</em>
-          </label>
-          {chunkBoxesLoading && (
-            <div style={{ padding: '10px 6px', fontSize: 12, color: 'var(--text-secondary)' }}>
-              ⏳ Loading chunks… (first time takes ~1 min)
-            </div>
-          )}
-          {chunkChecked.size >= 1 && (
-            <button className="bim-action-btn upload" style={{ width: '100%', marginBottom: 8 }}
-              disabled={chunkSaving}
-              title="RANSAC each checked chunk's floor plane → put it at Y=0 (tilt corrected); unchecked chunks follow their neighbours via interpolation"
-              onClick={async () => {
-                setChunkSaving(true)
-                setStatusMessage('⇩ aligning floors to Y=0 (cloud + poses + Potree — several minutes)...')
-                try {
-                  const r = await fetch('/api/segmentation/chunks/align_floor', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      session_id: activeSession,
-                      chunks: Array.from(chunkChecked),
-                    }),
-                  })
-                  const d = await r.json().catch(() => ({}))
-                  setStatusMessage(r.ok
-                    ? '⇩ floor alignment applied — inspect it, then Approve or Undo in 🔧 Correction'
-                    : `⇩ floor alignment failed: ${d.detail || 'error'}`)
-                  if (r.ok) {
-                    setChunkChecked(new Set())
-                    viewportRef.current?.clearChunkSelection()
-                    loadChunkBoxes(activeSession!)
-                    refreshCorrectionStatus(activeSession!)
-                  }
-                } catch { setStatusMessage('⇩ floor alignment failed') }
-                setChunkSaving(false)
-              }}>
-              {chunkSaving ? '⏳ aligning…' : `⇩ Floor → Y=0 (${chunkChecked.size} anchor${chunkChecked.size > 1 ? 's' : ''})`}
-            </button>
-          )}
-          {chunkSelectedId != null && (
-            <div style={{ marginBottom: 10, padding: 8, background: 'var(--bg-tertiary)', borderRadius: 8 }}>
-              <div style={{ fontSize: 12, color: 'var(--text-primary)', marginBottom: 6 }}>
-                chunk {String(chunkSelectedId).padStart(2, '0')} selected
-              </div>
-              <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-                <button className="bim-action-btn" style={{ flex: 1, opacity: chunkGizmoMode === 'translate' ? 1 : 0.5 }}
-                  onClick={() => { setChunkGizmoModeState('translate'); viewportRef.current?.setChunkGizmoMode('translate') }}>
-                  ✥ Move
-                </button>
-                <button className="bim-action-btn" style={{ flex: 1, opacity: chunkGizmoMode === 'rotate' ? 1 : 0.5 }}
-                  onClick={() => { setChunkGizmoModeState('rotate'); viewportRef.current?.setChunkGizmoMode('rotate') }}>
-                  ↻ Rotate
-                </button>
-              </div>
-              {chunkDelta && chunkDelta.chunk === chunkSelectedId && (
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <button className="bim-action-btn upload" style={{ flex: 1 }}
-                    disabled={chunkSaving}
-                    onClick={async () => {
-                      setChunkSaving(true)
-                      setStatusMessage('📦 baking chunk adjustment (cloud + poses + Potree — several minutes)...')
-                      try {
-                        const r = await fetch('/api/segmentation/chunks/apply_transform', {
-                          method: 'POST', headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({
-                            session_id: activeSession,
-                            chunk: chunkDelta.chunk,
-                            matrix: chunkDelta.matrix,
-                          }),
-                        })
-                        const d = await r.json().catch(() => ({}))
-                        setStatusMessage(r.ok
-                          ? '📦 chunk adjustment applied — inspect it, then Approve or Undo in 🔧 Correction'
-                          : `📦 save failed: ${d.detail || 'error'}`)
-                        if (r.ok) {
-                          setChunkDelta(null)
-                          setChunkChecked(new Set())
-                          viewportRef.current?.clearChunkSelection()
-                          loadChunkBoxes(activeSession!)
-                          refreshCorrectionStatus(activeSession!)
-                        }
-                      } catch { setStatusMessage('📦 save failed') }
-                      setChunkSaving(false)
-                    }}>
-                    {chunkSaving ? '⏳ saving…' : '💾 Save'}
-                  </button>
-                  <button className="bim-action-btn" style={{ flex: 1 }}
-                    disabled={chunkSaving}
-                    onClick={() => { viewportRef.current?.resetChunkBox(chunkDelta.chunk); setChunkDelta(null) }}>
-                    ⟲ Reset
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-          {chunkBoxList.map(b => {
-            const on = chunkChecked.has(b.chunk)
-            return (
-              <label key={b.chunk} style={{
-                display: 'flex', alignItems: 'center', gap: 8, padding: '4px 6px',
-                fontSize: 12, color: 'var(--text-primary)', cursor: 'pointer',
-                opacity: on ? 1 : 0.6,
-              }}>
-                <input type="checkbox" checked={on}
-                  onChange={() => setChunkChecked(prev => {
-                    const next = new Set(prev)
-                    if (next.has(b.chunk)) next.delete(b.chunk)
-                    else next.add(b.chunk)
-                    return next
-                  })} />
-                <span style={{
-                  width: 10, height: 10, borderRadius: 2, flexShrink: 0,
-                  background: `hsl(${((b.chunk * 0.618034) % 1) * 360}deg 75% 55%)`,
-                }} />
-                ch{String(b.chunk).padStart(2, '0')}
-                <span style={{ marginLeft: 'auto', color: 'var(--text-secondary)', fontSize: 11 }}>
-                  {(b.n_points / 1e6).toFixed(1)}M
-                </span>
-              </label>
-            )
-          })}
-        </div>
-      )}
-
-      {/* ── 🔧 Correction Analysis (USER 2026-09-06): the user marks the
-           segments with the parallel-copies error; the algorithm finds the
-           relations, diagnoses depth vs pose, corrects cloud+poses+Potree.
-           One pending correction → Approve (it IS the cloud) or Undo. ── */}
+      {/* ── 🔧 Correction (USER 2026-09-08 redesign): keyframe-based,
+           gated, transactional, epoch-tracked. The user marks duplicated
+           segments (or launches a floor alignment with an explicit model);
+           the system resolves per keyframe, validates on the rest of the
+           scene and applies atomically. Approve (it IS the cloud) or Undo. ── */}
       {showCorrectionModal && (
         <div className="admin-overlay" style={{ zIndex: 2000 }}>
           <div className="admin-panel" style={{ maxWidth: 560, maxHeight: '80vh', overflow: 'auto' }}>
@@ -4241,15 +4090,22 @@ function App() {
               <button className="admin-close" onClick={() => setShowCorrectionModal(false)}>✕</button>
             </div>
             <div style={{ padding: 16 }}>
+              {/* gates renderer shared by pending + rejected panels */}
+              {(() => null)()}
               {correctionState?.status === 'pending' ? (
                 <>
-                  <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
-                    A correction is APPLIED and awaiting your verdict
-                    (chunks {String((correctionState.chunks || []).join(', '))},
-                    {' '}{(correctionState.points_moved || 0).toLocaleString()} points moved).
-                    Inspect it in the viewer and decide:
+                  <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 8 }}>
+                    A correction is APPLIED (epoch {correctionState.report?.epoch_to ?? correctionState.epoch},
+                    {' '}kind: {correctionState.kind || correctionState.report?.kind || 'objects'},
+                    {' '}{(correctionState.report?.points_moved || 0).toLocaleString()} points moved)
+                    and awaits your verdict. Inspect it in the viewer and decide.
                   </p>
-                  <div style={{ display: 'flex', gap: 8 }}>
+                  {(correctionState.report?.gates || []).map((g: any) => (
+                    <div key={g.name} style={{ fontSize: 12, marginBottom: 4, color: 'var(--text-primary)' }}>
+                      {g.passed ? '✅' : '❌'} <b>{g.name}</b> — <span style={{ color: 'var(--text-secondary)' }}>{g.detail}</span>
+                    </div>
+                  ))}
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                     <button className="bim-action-btn upload" style={{ flex: 1 }}
                       disabled={correctionRunning}
                       onClick={approveCorrection}>
@@ -4265,13 +4121,50 @@ function App() {
               ) : (
                 <>
                   <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
-                    Mark the segments showing the parallel-copies error (the
-                    same object displaced across chunks). The algorithm works
-                    out the relations on its own — which copies match which,
-                    in which chunks/frames —, diagnoses pose vs depth,
-                    corrects the cloud + poses and rebuilds the Potree. Then
-                    you approve or undo.
+                    Mark the segments showing the parallel-copies error (the same
+                    object duplicated by a revisit). The system resolves which
+                    copies match which — per KEYFRAME —, diagnoses pose vs depth,
+                    validates against the rest of the scene (floor + unmarked
+                    objects + DA3 scale + continuity) and applies transactionally.
+                    Nothing is applied if any gate fails; you always get the numbers.
                   </p>
+                  {correctionRunning && correctionProgress && (
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 12, color: 'var(--text-primary)', marginBottom: 4 }}>
+                        ⏳ {correctionProgress.detail}
+                      </div>
+                      <div style={{ height: 6, background: 'var(--bg-tertiary)', borderRadius: 3 }}>
+                        <div style={{ height: 6, width: `${correctionProgress.pct}%`, background: 'var(--accent-color, #4a9eff)', borderRadius: 3, transition: 'width .5s' }} />
+                      </div>
+                    </div>
+                  )}
+                  {correctionReport?.status === 'rejected' && (
+                    <div style={{ marginBottom: 12, padding: 10, background: 'var(--bg-tertiary)', borderRadius: 8, border: '1px solid #a4433355' }}>
+                      <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>
+                        ❌ <b>Rejected — nothing was applied.</b>
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>
+                        {correctionReport.rejection_reason}
+                      </div>
+                      {correctionReport.suggestion && (
+                        <div style={{ fontSize: 12, color: 'var(--text-primary)', marginBottom: 6 }}>
+                          💡 {correctionReport.suggestion}
+                        </div>
+                      )}
+                      {(correctionReport.gates || []).map((g: any) => (
+                        <div key={g.name + String(g.group ?? '')} style={{ fontSize: 11, marginBottom: 2, color: 'var(--text-secondary)' }}>
+                          {g.passed ? '✅' : '❌'} {g.name} — {g.detail}
+                        </div>
+                      ))}
+                      {(correctionReport.gates || []).some((g: any) => g.name === 'scale_vs_da3' && !g.passed) && (
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-primary)', marginTop: 6, cursor: 'pointer' }}>
+                          <input type="checkbox" checked={correctionOverrideScale}
+                            onChange={() => setCorrectionOverrideScale(v => !v)} />
+                          Override the DA3 scale gate on the next run (recorded in the ledger with your name and the numbers)
+                        </label>
+                      )}
+                    </div>
+                  )}
                   {segments.length === 0 && (
                     <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
                       No segments yet — segment the faulty objects first.
@@ -4305,25 +4198,112 @@ function App() {
                     disabled={correctionRunning || correctionSelected.size === 0}
                     onClick={async () => {
                       setCorrectionRunning(true)
-                      setStatusMessage('🔧 analyzing and correcting (cloud + poses + Potree — this can take several minutes)...')
+                      setCorrectionReport(null)
+                      setStatusMessage('🔧 analyzing and correcting (transactional — the cloud only changes if every gate passes)...')
                       try {
-                        const r = await fetch('/api/segmentation/correction/run', {
-                          method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        const headers: HeadersInit = { 'Content-Type': 'application/json' }
+                        if (token) headers['Authorization'] = `Bearer ${token}`
+                        const r = await fetch('/api/correction/run', {
+                          method: 'POST', headers,
                           body: JSON.stringify({
                             session_id: activeSession,
                             instance_ids: Array.from(correctionSelected),
+                            override_scale_check: correctionOverrideScale,
                           }),
                         })
                         const d = await r.json().catch(() => ({}))
-                        setStatusMessage(r.ok
-                          ? '🔧 correction applied — inspect it in the viewer, then Approve or Undo'
-                          : `🔧 correction failed: ${d.detail || 'error'}`)
+                        setCorrectionReport(d.report || null)
+                        if (r.status === 409) {
+                          setStatusMessage('🔧 busy: another correction operation is running on this session')
+                        } else {
+                          setStatusMessage(r.ok
+                            ? (d.status === 'pending'
+                              ? '🔧 correction applied — inspect it in the viewer, then Approve or Undo'
+                              : `🔧 correction rejected: ${d.report?.rejection_reason || 'see the report'}`)
+                            : `🔧 correction failed: ${typeof d.detail === 'string' ? d.detail : 'error'}`)
+                        }
                       } catch { setStatusMessage('🔧 correction failed') }
                       setCorrectionRunning(false)
+                      setCorrectionOverrideScale(false)
                       refreshCorrectionStatus(activeSession!)
+                      loadCorrectionLedger(activeSession!)
+                      loadCorrectionArtifacts(activeSession!)
                     }}>
                     {correctionRunning ? '⏳ correcting…' : '🔧 Analyze & Correct'}
                   </button>
+
+                  {/* ── floor alignment (per keyframe, explicit reference model) ── */}
+                  <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border-color)' }}>
+                    <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>
+                      <b>⇩ Floor alignment</b> — anchors are the keyframes whose
+                      floor plane passes the guards; the rest interpolate.
+                    </div>
+                    <select value={floorModel} disabled={correctionRunning}
+                      onChange={e => setFloorModel(e.target.value as any)}
+                      style={{ width: '100%', marginBottom: 4, padding: 6, background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderRadius: 6, fontSize: 12 }}>
+                      <option value="plane">plane — one fitted reference plane (a real slope survives; only drift is removed)</option>
+                      <option value="level">level — horizontal plane at y=0 (flattens slopes by design)</option>
+                      <option value="profile">profile — longitudinal slope along the walk (ramps / platform drainage)</option>
+                    </select>
+                    <button className="bim-action-btn upload" style={{ width: '100%' }}
+                      disabled={correctionRunning}
+                      onClick={async () => {
+                        setCorrectionRunning(true)
+                        setCorrectionReport(null)
+                        setStatusMessage(`⇩ aligning the floor (${floorModel}, all qualifying keyframes)...`)
+                        try {
+                          const headers: HeadersInit = { 'Content-Type': 'application/json' }
+                          if (token) headers['Authorization'] = `Bearer ${token}`
+                          const r = await fetch('/api/correction/floor', {
+                            method: 'POST', headers,
+                            body: JSON.stringify({ session_id: activeSession, model: floorModel, keyframes: 'auto' }),
+                          })
+                          const d = await r.json().catch(() => ({}))
+                          setCorrectionReport(d.report || null)
+                          setStatusMessage(r.ok
+                            ? (d.status === 'pending'
+                              ? '⇩ floor alignment applied — Approve or Undo'
+                              : `⇩ floor alignment rejected: ${d.report?.rejection_reason || 'see the report'}`)
+                            : `⇩ floor alignment failed: ${typeof d.detail === 'string' ? d.detail : 'error'}`)
+                        } catch { setStatusMessage('⇩ floor alignment failed') }
+                        setCorrectionRunning(false)
+                        refreshCorrectionStatus(activeSession!)
+                        loadCorrectionLedger(activeSession!)
+                        loadCorrectionArtifacts(activeSession!)
+                      }}>
+                      {correctionRunning ? '⏳ aligning…' : `⇩ Align floor (${floorModel})`}
+                    </button>
+                  </div>
+
+                  {/* ── derived artifacts vs the current geometry epoch ── */}
+                  {correctionArtifacts && correctionArtifacts.length > 0 && (
+                    <div style={{ marginTop: 14 }}>
+                      <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 4 }}><b>Derived artifacts</b></div>
+                      {correctionArtifacts.map((a: any) => (
+                        <div key={a.path} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)', padding: '2px 0' }}>
+                          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.kind}: {a.name}</span>
+                          {a.stale
+                            ? <span title={`built on epoch ${a.geometry_epoch}, current is newer — regenerate it (🧩 Meshing / surface fit / BIM compare)`} style={{ color: '#e0a030' }}>⚠ stale (epoch {a.geometry_epoch})</span>
+                            : <span style={{ color: '#4caf7d' }}>✓ epoch {a.geometry_epoch}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* ── correction history (append-only ledger) ── */}
+                  {correctionLedger && correctionLedger.length > 0 && (
+                    <div style={{ marginTop: 14 }}>
+                      <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 4 }}><b>History</b></div>
+                      {correctionLedger.slice().reverse().map((e: any) => (
+                        <div key={e.correction_id} style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '3px 0', borderBottom: '1px solid var(--border-color)' }}>
+                          <b style={{ color: 'var(--text-primary)' }}>{e.kind}</b>
+                          {' '}epoch {e.epoch_from}→{e.epoch_to} · {e.operator} · {e.created_at}
+                          {' '}· <span style={{ color: e.verdict === 'approved' ? '#4caf7d' : e.verdict === 'pending' ? '#e0a030' : '#c05555' }}>{e.verdict}</span>
+                          {e.overrides && Object.keys(e.overrides).length > 0 && <span> · ⚠ override</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </>
               )}
             </div>
