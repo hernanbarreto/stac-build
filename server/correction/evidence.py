@@ -40,7 +40,7 @@ class Copy:
     kfs: List[int]                # keyframes of this visit (sorted)
     idx: np.ndarray               # bbox cloud indices in this visit
     seg_idx: np.ndarray           # curated instance indices in this visit
-    centroid: np.ndarray          # median of curated points (bbox fallback)
+    centroid: np.ndarray          # median of the segment's points
     shoot_dist_m: Optional[float]
     is_reference: bool = False
 
@@ -103,25 +103,34 @@ def extract_evidence(session: CorrectionSession, instance_ids: List[int],
                 f"instance {iid} ({labels.get(int(iid))}) has no points — "
                 f"it cannot anchor a correction")
         P = xyz[gidx]
-        c_obb = P.mean(0)
+        # USER 2026-09-09: the box follows where the segment's points
+        # CONCENTRATE, never its extremes — one floater stretched the door's
+        # box to 2.8 M points. Per axis: the range holding obb_core_pct of
+        # the points (+ margin). Points outside that core are not the object.
+        c_obb = np.median(P, axis=0)
         axes = np.linalg.svd(P - c_obb, full_matrices=False)[2]
         loc = (P - c_obb) @ axes.T
-        lo = loc.min(0) - margin
-        hi = loc.max(0) + margin
+        tail = (100.0 - cfg.evidence.obb_core_pct) / 2.0
+        lo = np.percentile(loc, tail, axis=0) - margin
+        hi = np.percentile(loc, 100.0 - tail, axis=0) + margin
         rel = (xyz - c_obb) @ axes.T
         inside = np.all((rel >= lo) & (rel <= hi), axis=1)
         idx_all = np.where(inside)[0]
-        log(f"  {labels.get(int(iid))}: bbox holds {len(idx_all):,} cloud pts "
-            f"(curated segment: {len(gidx):,})")
+        core = gidx[np.all((loc >= lo) & (loc <= hi), axis=1)]
+        log(f"  {labels.get(int(iid))}: core box holds {len(idx_all):,} cloud "
+            f"pts (segment: {len(gidx):,}, {len(core):,} in the core)")
 
-        visits = visits_from_keyframes(ks[idx_all], cfg.evidence.visit_gap_kf)
-        gidx_set = gidx
+        # visits come from the SEGMENT's own keyframes; the box only attaches
+        # the surrounding points of each visit
+        visits = visits_from_keyframes(ks[core], cfg.evidence.visit_gap_kf)
+        gidx_set = core
         for vi, vk in enumerate(visits):
             in_visit = np.isin(ks[idx_all], vk)
             idx = idx_all[in_visit]
             seg_idx = np.intersect1d(idx, gidx_set)
-            base = seg_idx if len(seg_idx) else idx
-            cen = np.median(xyz[base], axis=0)
+            if not len(seg_idx):
+                continue
+            cen = np.median(xyz[seg_idx], axis=0)
             vframes = sorted(set(int(f) for f in session.fg[idx]))
             dists = [float(np.linalg.norm(session.cam_center[f] - cen))
                      for f in vframes if f in session.cam_center]

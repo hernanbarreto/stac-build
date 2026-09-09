@@ -36,7 +36,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
     Every mandatory key present; overrides go per dotted path."""
     raw = {"correction": {
         "evidence": {
-            "obb_margin_m": 0.05, "min_object_points_solve": 30,
+            "obb_margin_m": 0.05, "obb_core_pct": 98.0, "min_object_points_solve": 30,
             "min_object_points_fingerprint": 30, "min_baseline_m": 0.30,
             "min_objects_for_depth": 2, "visit_gap_kf": 2,
         },

@@ -1818,7 +1818,11 @@ meshflow:
 # (server/tests/synth_correction.py).
 correction:
   evidence:
-    obb_margin_m: 0.03            # curated-OBB margin when collecting copy evidence
+    obb_core_pct: 98.0            # USER 2026-09-09: the box follows where the segment's
+                                  # points CONCENTRATE — the per-axis range holding this
+                                  # percentage of them — never its extremes (one floater
+                                  # stretched the door's box to 2.8 M points)
+    obb_margin_m: 0.03            # margin around that core when collecting copy evidence
     min_object_points_solve: 300  # a visit with fewer own points inherits its neighbour
     min_object_points_fingerprint: 500  # min points for a copy to enter the fingerprint
     min_baseline_m: 0.30          # min inter-object centroid distance for depth evidence

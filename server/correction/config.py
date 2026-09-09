@@ -26,6 +26,7 @@ _DEPTH_MODES = ("sidecar", "rewrite")
 @dataclass(frozen=True)
 class EvidenceConfig:
     obb_margin_m: float
+    obb_core_pct: float
     min_object_points_solve: int
     min_object_points_fingerprint: int
     min_baseline_m: float
@@ -180,6 +181,7 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
     ev = section.get("evidence")
     evidence = EvidenceConfig(
         obb_margin_m=_num(ev, "obb_margin_m", "evidence", lo=0.0, hi=1.0),
+        obb_core_pct=_num(ev, "obb_core_pct", "evidence", lo=50.0, hi=100.0),
         min_object_points_solve=_num(ev, "min_object_points_solve", "evidence",
                                      lo=10, integer=True),
         min_object_points_fingerprint=_num(ev, "min_object_points_fingerprint",
