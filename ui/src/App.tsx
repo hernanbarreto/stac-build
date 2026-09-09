@@ -4212,6 +4212,9 @@ function App() {
                         })
                         const d = await r.json().catch(() => ({}))
                         setCorrectionReport(d.report || null)
+                        // applied → close the blocking modal so the viewer and the
+                        // collapsible verdict box are free for visual inspection
+                        if (r.ok && d.status === 'pending') setShowCorrectionModal(false)
                         if (r.status === 409) {
                           setStatusMessage('🔧 busy: another correction operation is running on this session')
                         } else {
@@ -4253,6 +4256,7 @@ function App() {
                           })
                           const d = await r.json().catch(() => ({}))
                           setCorrectionReport(d.report || null)
+                          if (r.ok && d.status === 'pending') setShowCorrectionModal(false)
                           setStatusMessage(r.ok
                             ? (d.status === 'pending'
                               ? '⇩ floor alignment applied — Approve or Undo'
