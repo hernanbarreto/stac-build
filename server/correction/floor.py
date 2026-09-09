@@ -107,22 +107,53 @@ def _rot_between(a: np.ndarray, b: np.ndarray) -> np.ndarray:
                                 ).as_matrix()
 
 
+def _moving_median(values: np.ndarray, keys: np.ndarray, window: int
+                   ) -> np.ndarray:
+    """Per-key moving median of ``values`` over keys within ±window."""
+    out = np.empty_like(values, dtype=np.float64)
+    for i, k in enumerate(keys):
+        m = np.abs(keys - k) <= window
+        out[i] = float(np.median(values[m]))
+    return out
+
+
 def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
                 model: str, keyframes: Optional[List[int]],
-                rng: np.random.Generator, log=print) -> dict:
+                rng: np.random.Generator, log=print,
+                fixed_plane: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+                identity_until: int = -1) -> dict:
     """Solve the per-keyframe floor alignment. Returns
     {R_kf, t_kf, k_kf, anchors, per_kf_report, model, model_params,
     floor_npz, exam} — the caller runs the gates and the transactional
-    apply."""
+    apply.
+
+    ``fixed_plane`` (normal, point): use this reference plane instead of
+    fitting one (the object correction passes the plane of its identity
+    region — the floor is then a CONSTRAINT of the loop closure, prompt
+    §5.4 "1 objeto + plano de piso"). ``identity_until``: keyframes up to
+    this index stay identity (the reference visit); anchors only after it.
+
+    Real-data lesson (pccr 2026-09-08: 197 mm / 2.7° steps between
+    neighbouring keyframes → continuity veto in every model): a per-keyframe
+    floor patch is NOISY — furniture caught in the low band, unstable
+    normals on a 2 m patch, long lever arms from the origin. The drift is
+    SMOOTH along the walk, so every anchor uses the TREND: heights and
+    normals are moving medians/means over ±``smooth_window_kf``, and an
+    anchor whose raw height sits farther than ``step_demote_m`` from the
+    local trend is demoted (a table top is not the floor).
+    """
     if model not in FLOOR_MODELS:
         raise RuntimeError(f"unknown floor model {model!r} — valid: "
                            f"{FLOOR_MODELS}")
     n_kf = session.n_kf
     candidates = (sorted(set(int(k) for k in keyframes))
                   if keyframes else list(range(n_kf)))
+    candidates = [k for k in candidates if k > identity_until]
     for k in candidates:
         if not (0 <= k < n_kf):
             raise RuntimeError(f"keyframe {k} out of range 0..{n_kf - 1}")
+    if not candidates:
+        raise RuntimeError("no candidate keyframe after the identity region")
 
     # 1) local floor per candidate keyframe --------------------------------
     locals_: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
@@ -140,24 +171,26 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
     log(f"  {len(locals_)} anchor candidate(s) of {len(candidates)} "
         f"keyframes")
 
-    # smooth the anchor normals along the walk (drift is smooth; per-patch
-    # normal noise at a long lever arm becomes inter-keyframe steps the
-    # continuity gate would veto)
-    if cfg.floor.normal_smooth_kf > 0 and len(locals_) > 1:
-        ks_sorted = sorted(locals_)
-        smoothed = {}
-        for k in ks_sorted:
-            nbrs = [locals_[j][0] for j in ks_sorted
-                    if abs(j - k) <= cfg.floor.normal_smooth_kf]
-            n_avg = np.mean(nbrs, axis=0)
-            n_avg /= np.linalg.norm(n_avg)
-            smoothed[k] = (n_avg, locals_[k][1])
-        locals_ = smoothed
-
     # 2) reference model ---------------------------------------------------
     model_params: dict = {"model": model}
     chain = _chainage(session)
-    if model == "level":
+    if fixed_plane is not None:
+        n_ref = np.asarray(fixed_plane[0], dtype=np.float64)
+        n_ref = n_ref / np.linalg.norm(n_ref)
+        if n_ref[1] < 0:
+            n_ref = -n_ref
+        c0 = np.asarray(fixed_plane[1], dtype=np.float64)
+        model = "plane"
+        model_params = {"model": "plane", "fixed": True, "plane": {
+            "normal": [round(float(x), 6) for x in n_ref],
+            "point": [round(float(x), 4) for x in c0]}}
+
+        def ref_normal(k):
+            return n_ref
+
+        def ref_signed_dist(k, c):
+            return float((c - c0) @ n_ref)
+    elif model == "level":
         def ref_normal(k):
             return UP
 
@@ -246,20 +279,45 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
         def ref_signed_dist(k, c):
             return float(c[1] - (a_c + b_c * chain[k]))
 
-    # 3) anchors: straighten local normal onto the model normal, land the
-    #    local floor centroid on the model surface; step-demote for
-    #    plane/profile (a real level change is preserved, H6) -------------
+    # 3) TREND along the walk: raw per-keyframe distances to the model and
+    #    normals → moving median / mean over ±smooth_window_kf; anchors off
+    #    the local trend (furniture caught as floor) are demoted, and for
+    #    plane/profile an anchor off the MODEL by more than step_demote_m
+    #    is a real level change (preserved by interpolation, H6) ----------
+    ks_sorted = np.array(sorted(locals_), dtype=np.int64)
+    raw_dist = np.array([ref_signed_dist(int(k), locals_[int(k)][1])
+                         for k in ks_sorted])
+    W = cfg.floor.smooth_window_kf
+    trend_dist = _moving_median(raw_dist, ks_sorted, W) if W > 0 \
+        else raw_dist.copy()
+    trend_norm: Dict[int, np.ndarray] = {}
+    for k in ks_sorted:
+        nbrs = [locals_[int(j)][0] for j in ks_sorted if abs(j - k) <= W]
+        n_avg = np.mean(nbrs, axis=0)
+        trend_norm[int(k)] = n_avg / np.linalg.norm(n_avg)
+
     anchors: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
-    for k, (nrm, c_f) in sorted(locals_.items()):
-        dist = ref_signed_dist(k, c_f)
-        if model != "level" and abs(dist) > cfg.floor.step_demote_m:
+    for i, k in enumerate(ks_sorted):
+        k = int(k)
+        nrm_raw, c_f = locals_[k]
+        why = None
+        if abs(raw_dist[i] - trend_dist[i]) > cfg.floor.step_demote_m:
+            why = (f"local floor {raw_dist[i]:+.3f} m vs trend "
+                   f"{trend_dist[i]:+.3f} m — not the floor (furniture / "
+                   f"outlier patch), interpolated")
+        elif model != "level" and abs(trend_dist[i]) > cfg.floor.step_demote_m \
+                and fixed_plane is None:
+            why = (f"floor sits {trend_dist[i]:+.3f} m off the reference "
+                   f"model — real step/level change, preserved by "
+                   f"interpolation")
+        if why:
             for info in per_kf_report:
                 if info.get("kf") == k:
                     info["role"] = "demoted"
-                    info["why"] = (f"floor sits {dist:+.3f} m off the "
-                                  f"reference model — real step/level "
-                                  f"change, preserved by interpolation")
+                    info["why"] = why
             continue
+        dist = float(trend_dist[i])
+        nrm = trend_norm[k]
         n_t = ref_normal(k)
         tilt_off = float(np.degrees(np.arccos(
             np.clip(float(nrm @ n_t), -1, 1))))
@@ -267,23 +325,26 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
             R = _rot_between(nrm, n_t)
             t = c_f - R @ c_f        # rotate about the local floor centroid
         else:
-            # below min_tilt_deg the measured tilt is patch noise: a noisy
-            # rotation at a long lever arm turns into inter-keyframe steps
-            # the continuity gate would (rightly) veto — height only
+            # below min_tilt_deg the trend tilt is noise: height only
             R = np.eye(3)
             t = np.zeros(3)
-        t = t - dist * n_t           # land the centroid on the model
+        t = t - dist * n_t           # land the trend height on the model
         anchors[k] = (R, t)
         for info in per_kf_report:
             if info.get("kf") == k and info.get("role") == "anchor":
                 info["dy_m"] = round(-dist, 4)
+                info["tilt_trend_deg"] = round(tilt_off, 3)
     if not anchors:
         raise RuntimeError(
             "every candidate keyframe was demoted (steps/guards) — nothing "
             "to anchor; pick keyframes on the reference floor level")
 
-    # 4) interpolate every keyframe between/past the anchors ---------------
+    # 4) interpolate every keyframe between/past the anchors (identity up to
+    #    identity_until when an identity region exists) -------------------
     a_kfs = sorted(anchors)
+    if identity_until >= 0:
+        anchors[identity_until] = (np.eye(3), np.zeros(3))
+        a_kfs = sorted(anchors)
     R_kf = np.tile(np.eye(3), (n_kf, 1, 1))
     t_kf = np.zeros((n_kf, 3))
     slerp = None
@@ -303,6 +364,9 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
             w = (k - lo) / (hi - lo)
             R_kf[k] = slerp([k]).as_matrix()[0]
             t_kf[k] = (1 - w) * anchors[lo][1] + w * anchors[hi][1]
+    if identity_until >= 0:
+        del anchors[identity_until]
+        a_kfs = sorted(anchors)
 
     # 5) exam: post-alignment residual of every anchor floor vs the model --
     exam: List[dict] = []
@@ -328,6 +392,8 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
                                      -1, 1)))), 3),
                          "t_m": round(float(np.linalg.norm(anchors[k][1])), 4)}
                         for k in a_kfs],
+            "n_demoted": int(sum(1 for i in per_kf_report
+                                 if i.get("role") == "demoted")),
             "per_kf_report": per_kf_report, "model": model,
             "model_params": model_params,
             "exam": {"anchor_floor_residuals": exam,

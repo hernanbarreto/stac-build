@@ -20,8 +20,10 @@ def test_planar_only_solves_normal_translation(tmp_path):
     # explains the copies
     scene = build_scene(tmp_path, drift_yaw_deg=0.0,
                         drift_t=(0.0, 0.0, 0.12))
+    # bounded rule disabled (tolerance ~0): the strict planar DOF applies
     rep = run_objects(scene.output_dir, [1], "test",
-                      cfg=make_correction_cfg())
+                      cfg=make_correction_cfg(
+                          **{"observability.bounded_extent_tol": 1e-9}))
     assert rep["status"] == "pending", rep.get("rejection_reason")
     obs = rep["observability"][0]
     assert obs["dof"] == ["t_normal"]
@@ -47,7 +49,8 @@ def test_cylinder_only_no_along_axis(tmp_path):
     scene = build_scene(tmp_path, drift_yaw_deg=0.0,
                         drift_t=(0.10, 0.04, 0.05))
     rep = run_objects(scene.output_dir, [3], "test",
-                      cfg=make_correction_cfg())
+                      cfg=make_correction_cfg(
+                          **{"observability.bounded_extent_tol": 1e-9}))
     assert rep["status"] == "pending", rep.get("rejection_reason")
     obs = rep["observability"][0]
     assert obs["dof"] == ["t_perp_axis(2)"]
@@ -69,3 +72,20 @@ def test_no_depth_without_evidence(tmp_path):
         assert not d["depth_needed"], d
     if rep["status"] == "pending":
         assert rep["distribution"]["depth_keyframes"] == 0
+
+
+def test_bounded_planar_object_observes_full_translation(tmp_path):
+    """USER 2026-09-08 (pccr desk1): a lone desk was solved along its
+    normal only. Two copies with the SAME supported extents are a bounded,
+    equally-covered object → full translation (yaw stays free)."""
+    scene = build_scene(tmp_path, drift_yaw_deg=0.0,
+                        drift_t=(0.30, 0.0, 0.12))
+    rep = run_objects(scene.output_dir, [1], "test",
+                      cfg=make_correction_cfg())
+    assert rep["status"] == "pending", rep.get("rejection_reason")
+    obs = rep["observability"][0]
+    assert obs["dof"] == ["tx", "ty", "tz"] and obs["unrestrained"] == ["yaw"]
+    npz = load_epoch_npz(scene.output_dir, 1)
+    t = npz["t_kf"][scene.gt["revisit_kfs"][-1]]
+    # the IN-PLANE (x) drift is recovered too, not only the normal (z)
+    assert abs(t[0] + 0.30) < 0.04 and abs(t[2] + 0.12) < 0.04, t

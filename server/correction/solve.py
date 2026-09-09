@@ -114,6 +114,8 @@ def project_solution(R: np.ndarray, t: np.ndarray,
     mode = projection.get("mode")
     if mode == "full":
         return R, t
+    if mode == "translation":
+        return np.eye(3), t
     if mode == "normal":
         n = np.asarray(projection["normal"], dtype=np.float64)
         n = n / np.linalg.norm(n)

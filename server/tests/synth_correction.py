@@ -42,6 +42,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
         },
         "observability": {
             "pca_ratio_planar": 0.05, "pca_ratio_cylindrical": 0.15,
+            "bounded_extent_tol": 0.20,
         },
         "solve": {
             "icp_iters": 60, "icp_trim": 0.7, "icp_sample": 6000,
@@ -52,6 +53,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
             "seed": 0,
         },
         "gates": {
+            "mode": "veto",
             "max_object_residual_m": 0.15, "residual_improvement_ratio": 0.5,
             "collapse_floor_m": 0.03,
             "max_rot_deg": 10.0, "max_translation_m": 3.0,
@@ -66,7 +68,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
             "max_tilt_deg": 10.0, "min_inliers": 60,
             "min_inlier_ratio": 0.5, "ransac_tol_m": 0.02,
             "ransac_refit_band_m": 0.03, "ransac_iters": 200,
-            "ransac_sample": 20000, "normal_smooth_kf": 5,
+            "ransac_sample": 20000, "smooth_window_kf": 5,
             "step_demote_m": 0.15,
         },
         "apply": {"depth_correction_mode": "sidecar",

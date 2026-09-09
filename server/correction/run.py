@@ -149,11 +149,13 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
     diag_reports: List[dict] = []
     visit_summaries = [cp.summary() for cp in ev.copies]
     gate_results: List[dict] = [g_int]
+    advisory = cfg.gates.mode == "advisory"
 
+    # ── pass 1: evidence, observability, diagnosis (k) per group ─────────
+    prepared: List[dict] = []
     for gi, grp in enumerate(groups):
         members = grp["members"]
         label = f"visit kf {grp['kf_span'][0]}..{grp['kf_span'][1]}"
-        # per-object curated evidence inside this group
         shapes = []
         centroids: Dict[int, np.ndarray] = {}
         seg_parts = []
@@ -180,8 +182,14 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
                 members[0].label + " (pooled)", cfg)]
             centroids[members[0].iid] = np.median(session.xyz[src_idx],
                                                   axis=0)
-
-        visit_obs = obs_mod.analyze_visit(shapes, centroids, cfg)
+        bounded = {}
+        for cp in members:
+            if cp.iid in ev.ref and len(cp.seg_idx) \
+                    and len(ev.ref[cp.iid].seg_idx):
+                bounded[cp.iid] = obs_mod.bounded_copies(
+                    session.xyz[ev.ref[cp.iid].seg_idx],
+                    session.xyz[cp.seg_idx], cfg)
+        visit_obs = obs_mod.analyze_visit(shapes, centroids, cfg, bounded)
         obs_reports.append({"group": gi, "kf_span": grp["kf_span"],
                             **visit_obs.summary()})
         if not visit_obs.ok:
@@ -189,7 +197,6 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
                 f"{label}: the evidence observes no degree of freedom",
                 gates_list=gate_results, visits=visit_summaries,
                 observability=obs_reports, suggestion=visit_obs.suggestion)
-
         k, ratio, n_pairs = diagnose.fingerprint_k(
             centroids, ev.ref_fingerprint, cfg)
         diag = diagnose.diagnose_visit(k, ratio, n_pairs,
@@ -197,13 +204,73 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
         diag_reports.append({"group": gi, "kf_span": grp["kf_span"], **diag})
         log(f"  {label}: {diag['diagnosis']}"
             + (f" (k={diag['k']})" if diag["depth_needed"] else ""))
+        prepared.append({"gi": gi, "grp": grp, "label": label,
+                         "members": members, "src_idx": src_idx,
+                         "visit_obs": visit_obs, "diag": diag})
 
-        # solve --------------------------------------------------------------
-        S = session.xyz[src_idx].copy()
-        if diag["depth_needed"]:
-            cams = np.stack([session.cam_center[int(f)]
-                             for f in session.fg[src_idx]])
-            S = solve.expand_depth(S, cams, diag["k"])
+    # ── depth k FIRST: a compressed visit also lifts its own floor, so the
+    #    floor constraint must be measured on the k-expanded geometry ─────
+    k_pre = np.ones(session.n_kf)
+    for pr in prepared:
+        if pr["diag"]["depth_needed"]:
+            a_, b_ = pr["grp"]["kf_span"]
+            k_pre[int(a_):int(b_) + 1] = pr["diag"]["k"]
+    xyz_k = session.xyz
+    if (k_pre != 1.0).any():
+        xyz_k = session.xyz.copy()
+        for kf in np.where(k_pre != 1.0)[0]:
+            sel = np.where(session.ks == kf)[0]
+            if len(sel):
+                cam = session.cam_center[session.frames[int(kf)]]
+                xyz_k[sel] = cam + (xyz_k[sel] - cam) * k_pre[kf]
+    import dataclasses as _dc
+    session_k = _dc.replace(session, xyz=xyz_k)
+
+    # ── FLOOR AS A CONSTRAINT (prompt §5.4 "1 objeto + plano de piso"; pccr
+    # 2026-09-08: a lone desk fixed its own copies while the revisit floor
+    # stayed 41 cm off). The identity region's floor plane is the reference;
+    # every later keyframe's floor drift (height + tilt, trend-smoothed)
+    # becomes a per-keyframe pre-correction; the objects then solve the
+    # horizontal/yaw part on floor-corrected evidence. ──────────────────
+    floor_pre = None
+    floor_report: dict = {"used": False}
+    pt_identity = (session.ks >= 0) & (session.ks <= ev.ref_kf_end)
+    _band, ref_plane = gates._floor_band(xyz_k, pt_identity, cfg, rng)
+    if ref_plane is None:
+        floor_report["why"] = ("no trustworthy floor plane in the reference "
+                               "visit — floor constraint unavailable")
+        log(f"  {floor_report['why']}")
+    else:
+        try:
+            _p(25, "floor constraint: per-keyframe floor drift vs the "
+                   "reference visit's floor plane...")
+            floor_pre = floor_mod.solve_floor(
+                session_k, cfg, "plane", None, rng, log=log,
+                fixed_plane=ref_plane, identity_until=ev.ref_kf_end)
+            floor_report = {"used": True,
+                            "anchors": len(floor_pre["anchors"]),
+                            "demoted": floor_pre["n_demoted"],
+                            "worst_anchor_residual_mm":
+                                floor_pre["exam"]["worst_residual_mm"]}
+        except RuntimeError as e:
+            floor_report["why"] = f"floor constraint unavailable: {e}"
+            log(f"  {floor_report['why']}")
+    R_f = floor_pre["R_kf"] if floor_pre else \
+        np.tile(np.eye(3), (session.n_kf, 1, 1))
+    t_f = floor_pre["t_kf"] if floor_pre else np.zeros((session.n_kf, 3))
+
+    def _floor_warp(pts: np.ndarray, idx: np.ndarray) -> np.ndarray:
+        """Apply the per-keyframe floor pre-correction to a point subset."""
+        kk = session.ks[idx]
+        return np.einsum('nij,nj->ni', R_f[kk], pts) + t_f[kk]
+
+    # ── pass 2: solve each group on k-expanded, floor-corrected evidence ─
+    _p(30, "solving the object evidence (trimmed ICP per visit)...")
+    for pr in prepared:
+        gi, grp, label = pr["gi"], pr["grp"], pr["label"]
+        members, src_idx = pr["members"], pr["src_idx"]
+        visit_obs, diag = pr["visit_obs"], pr["diag"]
+        S = _floor_warp(xyz_k[src_idx], src_idx)
         # ICP init from the EXPANDED evidence: depth expansion can move a
         # copy by metres (compression pulls objects toward far revisit
         # cameras) — an offset computed on the raw centroids lands the ICP
@@ -271,7 +338,7 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
         log(f"  {label}: rot {solve.rot_deg(R):.2f}° |t| "
             f"{np.linalg.norm(t_full):.3f} m, rms {rms*100:.1f} cm, "
             f"residual {res_before*100:.1f} → {res_after*100:.1f} cm")
-        if not g_col["passed"]:
+        if not g_col["passed"] and not advisory:
             return _reject(
                 f"{label}: the copies did NOT collapse — {g_col['detail']}",
                 gates_list=gate_results, visits=visit_summaries,
@@ -309,8 +376,13 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
 
     # distribute ----------------------------------------------------------
     _p(40, "distributing the correction over keyframes (slerp+lerp)...")
-    R_kf, t_kf, k_kf, dist_report = distribute.distribute(
+    R_o, t_o, k_kf, dist_report = distribute.distribute(
         session.n_kf, ev.ref_kf_end, solutions)
+    # final per-keyframe rigid = object(kf) ∘ floor(kf)
+    R_kf = np.einsum('nij,njk->nik', R_o, R_f)
+    t_kf = np.einsum('nij,nj->ni', R_o, t_f) + t_o
+    dist_report.update(distribute.steps_report(R_kf, t_kf))
+    dist_report["floor_constraint"] = floor_report
 
     # global gates --------------------------------------------------------
     g_plaus = gates.gate_plausibility(solutions, cfg)
@@ -339,17 +411,28 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
     gate_results.append(g_scale)
 
     failed = [g for g in gate_results if not g["passed"]]
+    warnings: List[str] = []
     if failed:
         names = [g["name"] for g in failed]
-        return _reject(
-            f"gate(s) failed: {names} — {failed[0]['detail']}",
-            gates_list=gate_results, visits=visit_summaries,
-            observability=obs_reports, diagnosis=diag_reports,
-            solutions=[{k: v for k, v in s.items()
-                        if k not in ("R", "t")} for s in solutions],
-            distribution=dist_report,
-            suggestion=(g_scene.get("floor", {}).get("detail")
-                        if "scene_exam" in names else None))
+        if not advisory:
+            return _reject(
+                f"gate(s) failed: {names} — {failed[0]['detail']}",
+                gates_list=gate_results, visits=visit_summaries,
+                observability=obs_reports, diagnosis=diag_reports,
+                solutions=[{k: v for k, v in s.items()
+                            if k not in ("R", "t")} for s in solutions],
+                distribution=dist_report,
+                suggestion=(g_scene.get("floor", {}).get("detail")
+                            if "scene_exam" in names else None))
+        # USER 2026-09-09: "no debes rechazar correcciones por umbrales
+        # arbitrarios ... siempre debe aplicarse" — gates are ADVISORY: the
+        # numbers go to the report as warnings, the correction is applied
+        # and the visual Approve/Undo is the verdict.
+        for g in failed:
+            g["advisory"] = True
+            warnings.append(f"{g['name']}: {g['detail']}")
+        log(f"  ⚠ advisory gate(s) failed (applied anyway, USER 2026-09-09): "
+            f"{names}")
 
     # apply (transaction) -------------------------------------------------
     _p(50, "all gates passed — staging the transaction...")
@@ -376,7 +459,9 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
         epoch_to=tx_info["epoch_to"],
         extra={"points_moved": tx_info["points_moved"],
                "pose_copies_skipped": tx_info["pose_copies_skipped"],
-               "instance_store": store_summary},
+               "instance_store": store_summary,
+               "floor_constraint": floor_report,
+               "warnings": warnings},
         elapsed_s=time.time() - t0)
     path = save_report(output_dir, report)
     ledger.record_run(
@@ -474,9 +559,16 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
                         f"{cfg.gates.heldout_floor_abs_m*1000:.0f} mm)"}
     gate_results = [g_int, g_plaus, g_cont, g_exam]
     failed = [g for g in gate_results if not g["passed"]]
+    warnings: List[str] = []
     if failed:
-        return _reject(f"gate(s) failed: {[g['name'] for g in failed]} — "
-                       f"{failed[0]['detail']}", gate_results, sol)
+        if cfg.gates.mode != "advisory":
+            return _reject(f"gate(s) failed: {[g['name'] for g in failed]} — "
+                           f"{failed[0]['detail']}", gate_results, sol)
+        for g in failed:
+            g["advisory"] = True
+            warnings.append(f"{g['name']}: {g['detail']}")
+        log(f"  ⚠ advisory gate(s) failed (applied anyway, USER 2026-09-09): "
+            f"{[g['name'] for g in failed]}")
 
     _p(50, "all gates passed — staging the transaction...")
     tx_info = stage_transaction(
@@ -502,7 +594,8 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
         epoch_from=epoch_from, epoch_to=tx_info["epoch_to"],
         extra={"points_moved": tx_info["points_moved"],
                "pose_copies_skipped": tx_info["pose_copies_skipped"],
-               "instance_store": store_summary},
+               "instance_store": store_summary,
+               "warnings": warnings},
         elapsed_s=time.time() - t0)
     path = save_report(output_dir, report)
     ledger.record_run(

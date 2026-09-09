@@ -74,19 +74,18 @@ def _ctx(session_id: str, scan_key: str = None):
 
 def _display_matrix(session_id: str, M):
     """Main-cloud display transform sent to the viewer (column-major 16):
-    the ACTIVE scan's floor transform composed with its project composition
-    transform, so a non-reference active scan still shows in the reference
-    frame next to the other scans' layers."""
-    try:
-        from project_paths import ProjectPaths
-        from project_scans import get_active, get_reference, display_matrix
-        paths = ProjectPaths(str(PROJECTS_DIR), session_id)
-        if paths.project_json.exists():
-            key = get_active(paths) or get_reference(paths)
-            M = display_matrix(paths, key, np.asarray(M, dtype=np.float64))
-    except Exception:  # noqa: BLE001 — never break the load over composition
-        pass
-    return np.asarray(M).T.flatten().tolist()
+    the ACTIVE scan's floor transform ONLY.
+
+    USER 2026-09-09 (bug: segment OBBs appeared ROTATED against the cloud):
+    the project composition transform was being composed into the main
+    cloud's display matrix while every scan-scoped product (OBBs, store,
+    measurements, corrections) lives in the scan's own floor frame — a
+    non-reference active scan therefore showed its cloud in the reference
+    frame and its boxes in its own. Work is always per scan in the scan's
+    own frame (project_scans doctrine); the composition transform is a
+    FUSION concern and is applied only when building the fused product.
+    """
+    return np.asarray(M, dtype=np.float64).T.flatten().tolist()
 
 def _audit_log(action: str, session_id: str, user: str = "system", role: str = "", detail: str = ""):
     """Append an entry to the project audit log (survives project deletion)."""

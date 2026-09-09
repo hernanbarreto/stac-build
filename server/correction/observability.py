@@ -89,11 +89,39 @@ def classify_object(P: np.ndarray, iid: int, label: str,
     return ObjectShape(iid, label, SHAPE_COMPACT, [r21, r31], None, None)
 
 
+def bounded_copies(P_ref: np.ndarray, P_disp: np.ndarray,
+                   cfg: CorrectionConfig) -> bool:
+    """True when the two copies of an object have the SAME supported extents
+    (p5..p95 along the displaced copy's PCA axes, within
+    ``bounded_extent_tol``): a bounded, equally-covered object observes the
+    full translation through its edges even when its surface is planar or
+    elongated (an infinite plane would not — a real desk does)."""
+    if len(P_ref) < 3 or len(P_disp) < 3:
+        return False
+    c = P_disp.mean(0)
+    axes = np.linalg.svd(P_disp - c, full_matrices=False)[2]
+    ed = (P_disp - c) @ axes.T
+    er = (P_ref - P_ref.mean(0)) @ axes.T
+    for i in range(3):
+        a = float(np.percentile(ed[:, i], 95) - np.percentile(ed[:, i], 5))
+        b = float(np.percentile(er[:, i], 95) - np.percentile(er[:, i], 5))
+        big = max(a, b)
+        if big <= 0:
+            continue
+        if abs(a - b) / big > cfg.observability.bounded_extent_tol:
+            return False
+    return True
+
+
 def analyze_visit(shapes: List[ObjectShape],
                   centroids: Dict[int, np.ndarray],
-                  cfg: CorrectionConfig) -> VisitObservability:
+                  cfg: CorrectionConfig,
+                  bounded: Optional[Dict[int, bool]] = None
+                  ) -> VisitObservability:
     """Observable DOF of one displaced visit from its objects' shapes and
-    pairwise baselines."""
+    pairwise baselines. ``bounded``: per object, whether its two copies
+    share the same supported extents (see ``bounded_copies``)."""
+    bounded = bounded or {}
     iids = sorted(centroids.keys())
     baselines: Dict[str, float] = {}
     n_baseline_ok = 0
@@ -121,8 +149,20 @@ def analyze_visit(shapes: List[ObjectShape],
                         f"{cfg.evidence.min_baseline_m:g} m away to enable a "
                         f"depth (scale) diagnosis"))
 
-    # Single planar object: only translation along its normal is observed.
     s0 = shapes[0]
+    # Single BOUNDED object (planar or elongated) with equal coverage in
+    # both copies: its edges observe the full translation; yaw stays free
+    # (a rectangle can flip, a column is symmetric).
+    if s0.shape in (SHAPE_PLANAR, SHAPE_LINEAR) and bounded.get(s0.iid):
+        return VisitObservability(
+            ok=True, dof=["tx", "ty", "tz"], unrestrained=["yaw"],
+            projection={"mode": "translation"}, depth_allowed=False,
+            objects=shapes, baselines=baselines,
+            suggestion=("mark also a second object (≥ "
+                        f"{cfg.evidence.min_baseline_m:g} m away) to observe "
+                        "yaw and enable a depth diagnosis"))
+
+    # Single planar object: only translation along its normal is observed.
     if s0.shape == SHAPE_PLANAR:
         return VisitObservability(
             ok=True, dof=["t_normal"],

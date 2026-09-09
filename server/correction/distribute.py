@@ -85,6 +85,21 @@ def distribute(n_kf: int, ref_kf_end: int,
     return R_kf, t_kf, k_kf, report
 
 
+def steps_report(R_kf: np.ndarray, t_kf: np.ndarray) -> dict:
+    """Continuity numbers of a final per-keyframe transform set (used after
+    composing the floor pre-correction with the object transform)."""
+    from correction.solve import rot_deg
+    n_kf = len(R_kf)
+    steps_t = np.linalg.norm(np.diff(t_kf, axis=0), axis=1)
+    steps_r = [rot_deg(R_kf[i + 1] @ R_kf[i].T) for i in range(n_kf - 1)]
+    return {
+        "max_step_between_keyframes_mm":
+            round(float(steps_t.max()) * 1000, 2) if len(steps_t) else 0.0,
+        "max_step_between_keyframes_deg":
+            round(float(max(steps_r)), 4) if steps_r else 0.0,
+    }
+
+
 def warp_subset(xyz: np.ndarray, fg: np.ndarray, ks: np.ndarray,
                 cam_center: Dict[int, np.ndarray], idx: np.ndarray,
                 R_kf: np.ndarray, t_kf: np.ndarray,

@@ -1827,6 +1827,11 @@ correction:
   observability:
     pca_ratio_planar: 0.05        # λ3/λ1 below this → planar object (no in-plane DOF)
     pca_ratio_cylindrical: 0.15   # λ2/λ1 below this → elongated object (no along-axis DOF)
+    bounded_extent_tol: 0.20      # a planar/elongated object whose two copies have the
+                                  # same supported extents (p5..p95, within this ratio)
+                                  # is BOUNDED and equally covered → its edges observe
+                                  # the full translation (pccr desk1 2026-09-08: a lone
+                                  # desk was solved along its normal only and rejected)
   solve:
     icp_iters: 100                # 30 stopped short (4.5° of a 6° yaw, 2026-09-06)
     icp_trim: 0.7                 # trimmed-ICP keep fraction
@@ -1841,6 +1846,13 @@ correction:
     depth_compress_tol: 0.03      # |k-1| beyond this → depth correction diagnosed
     seed: 0                       # determinism (all RNG in the module)
   gates:
+    mode: advisory                # USER 2026-09-09: "no debes rechazar correcciones por
+                                  # umbrales arbitrarios ... siempre debe aplicarse la
+                                  # corrección de piso y de duplicados, no importa lo mucho
+                                  # que haya que corregir". advisory = every gate below is
+                                  # MEASURED and reported as a warning, the correction is
+                                  # applied and the visual Approve/Undo is the verdict;
+                                  # veto = a failed gate blocks the apply (evaluation mode).
     max_object_residual_m: 0.15   # copies must end within this (median NN)
     residual_improvement_ratio: 0.5   # after ≤ ratio × before, or rejection
     collapse_floor_m: 0.03        # median NN below this IS collapsed (cloud noise +
@@ -1871,10 +1883,11 @@ correction:
     ransac_refit_band_m: 0.03     # SVD refit band around the RANSAC plane
     ransac_iters: 400
     ransac_sample: 120000
-    normal_smooth_kf: 5           # anchor floor normals averaged over ±this many
-                                  # keyframes before building transforms — drift is
-                                  # smooth along the walk; per-patch normal noise at a
-                                  # long lever arm becomes inter-keyframe steps
+    smooth_window_kf: 12          # anchor heights (moving median) and normals (mean)
+                                  # follow the TREND over ±this many keyframes — drift
+                                  # is smooth along the walk; per-patch noise at a long
+                                  # lever arm becomes inter-keyframe steps (pccr
+                                  # 2026-09-08: 197 mm / 2.7° → continuity veto)
     step_demote_m: 0.15           # plane/profile models: an anchor whose local floor
                                   # sits farther than this from the reference model is
                                   # a REAL step/level change → demoted to interpolated
@@ -1887,3 +1900,78 @@ correction:
   runtime:
     workers: auto                 # auto = min(8, affinity) — NEVER a fixed count
                                   # (252-core box lesson, CLAUDE.md); or an integer
+
+# ── Metric validation (USER 2026-09-08: the scale has an OWNER) ────────────
+# Consumed ONLY by server/fusion/config.py (typed dataclasses, validated at
+# load; a missing/out-of-range key aborts naming the key). One user-validated
+# measurement on a known-dimension element fixes each scan's physical scale;
+# a second one checks uniformity. Measures are ALWAYS taken between fitted
+# primitives (surface_fit), never between two raw clicks or bbox extremes.
+metric_validation:
+  min_measure_length_m: 1.0       # a short measure amplifies the scale error
+  max_sigma_s: 0.02               # σ_s beyond this: the measurement is not trustworthy
+  max_metric_correction: 0.20     # |s-1| beyond this points at intrinsics/DA3 anchors,
+                                  # not at scale — requires a recorded override
+  uniformity_tol: 0.01            # |s2/s1 - 1| ≤ σ1+σ2+this → scale declared uniform
+  fx_mismatch_warn: 0.03          # estimated fx vs device intrinsics: warn beyond this
+                                  # (likely cause of scale differences between runs)
+  consensus:
+    min_scans: 2                  # N scans needed before the multi-scan consensus runs
+    min_objects: 2                # invariant objects seen in ≥2 scans
+    huber_delta: 0.02             # robust loss width in log-size residuals
+    residual_outlier_sigma: 3.0   # |ε_ij| beyond this × σ → bad segmentation / movable
+    nonuniform_corr_min: 0.7      # |corr(ε_ij, chainage)| ≥ this → non-uniform scale
+  primitives:
+    floater_sor_k: 16             # SOR neighbours for the pre-clean
+    floater_sor_sigma: 2.0        # SOR sigma
+    keep_main_component: true     # keep only the main connected component
+    component_radius_m: 0.05      # connectivity radius for the main component
+    min_points: 300               # an instance below this cannot carry a primitive
+
+# ── Fusion (USER 2026-09-08 redesign: the reference is NEVER rescaled) ─────
+# Consumed ONLY by server/fusion/config.py. The symmetric √s split is GONE:
+# the product frame is the reference scan's frame, the residual inter-scan
+# scale is a CONTROL number under a profile-dependent gate, never a free
+# parameter. Alignment solves on fitted primitives, never on raw subclouds.
+fusion:
+  pairs:
+    min_pairs: 2                  # hard minimum of invariant pairs per scan
+    recommended_pairs: 3          # below this the UI warns
+    min_pair_spread_ratio: 0.4    # pairs must cover ≥ this fraction of the walk
+    pair_spread_mode: warn        # warn | veto
+    movable_labels: [door, chair, table, box, cart, person, puerta, silla,
+                     mesa, caja, carro]
+    shoot_dist_ratio_max: 3.0     # pair shot from very different distances → down-weighted
+    auto_exclude_outlier_pairs: false   # a bad pair is DIAGNOSED, not silently culled
+    pair_outlier_sigma: 3.0
+    min_pair_points: 500          # a copy below this cannot carry a primitive
+  scale:
+    scale_tol: 0.03               # profile validated_both: |s_fusion-1| gate (±3 %)
+    scale_tol_unvalidated: 0.10   # profiles validated_reference / unvalidated
+    allow_reference_correction: false  # diagnosis blames the reference → reject,
+                                       # never touch it from the fusion
+  align:
+    max_tilt_deg: 5.0             # pitch/roll cap (yaw is free between days)
+    min_nonparallel_normals: 2    # + the vertical constraint → full SE(3)
+    min_normal_angle_deg: 20.0    # two normals count as non-parallel above this
+  refine:
+    overlap_radius_m: 0.10        # scan points with a reference NN within this = overlap
+    icp_trim: 0.7
+    icp_max_iters: 100
+    icp_convergence_m: 0.0005     # convergence by step, not by a blind iteration count
+    icp_samples: 300000
+  gates:
+    pair_residual_max_m: 0.03     # per-pair median NN on the PRIMITIVE supports
+    heldout_nn_max_m: 0.05        # unpaired overlap points vs the reference
+    heldout_floor_tol_m: 0.02     # scan floor vs the reference floor plane
+    heldout_object_tol_m: 0.03    # common unpaired instances (same label, not evidence)
+    heldout_trim: 0.5             # complementary scans: judge the closest fraction
+  crosscorrect:
+    enabled: true
+    trigger_pair_residual_m: 0.03 # residual pair beyond this + non-uniform diagnosis
+                                  # → per-keyframe correction via server/correction/
+  build:
+    potree: true                  # build the octree inside the fusion transaction
+  runtime:
+    workers: auto                 # never a fixed count (sched_setaffinity lesson)
+    seed: 0

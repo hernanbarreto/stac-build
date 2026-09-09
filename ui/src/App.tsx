@@ -4101,8 +4101,8 @@ function App() {
                     and awaits your verdict. Inspect it in the viewer and decide.
                   </p>
                   {(correctionState.report?.gates || []).map((g: any) => (
-                    <div key={g.name} style={{ fontSize: 12, marginBottom: 4, color: 'var(--text-primary)' }}>
-                      {g.passed ? '✅' : '❌'} <b>{g.name}</b> — <span style={{ color: 'var(--text-secondary)' }}>{g.detail}</span>
+                    <div key={g.name + String(g.group ?? '')} style={{ fontSize: 12, marginBottom: 4, color: 'var(--text-primary)' }}>
+                      {g.advisory ? '⚠' : g.passed ? '✅' : '❌'} <b>{g.name}</b> — <span style={{ color: 'var(--text-secondary)' }}>{g.detail}{g.advisory ? ' (advisory — applied anyway, judge it visually)' : ''}</span>
                     </div>
                   ))}
                   <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>

@@ -65,7 +65,7 @@ export default function CorrectionVerdictDialog({ state, session, otherSession, 
               {gates.length > 0 && (
                 <div style={{ marginTop: 6, opacity: 0.85 }}>
                   {gates.map((g: any) => (
-                    <div key={g.name + String(g.group ?? '')}>{g.passed ? '✅' : '❌'} {g.name} — {g.detail}</div>
+                    <div key={g.name + String(g.group ?? '')}>{g.advisory ? '⚠' : g.passed ? '✅' : '❌'} {g.name} — {g.detail}{g.advisory ? ' (advisory)' : ''}</div>
                   ))}
                 </div>
               )}

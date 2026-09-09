@@ -83,6 +83,27 @@ geométrica obligatoria en todo artefacto derivado."
   with step-demotion (real level changes preserved), anchor-normal smoothing
   (patch-noise rotations at 15 m lever arms became 75 mm steps) and
   `min_tilt_deg` (below it only the height lands).
+- **USER 2026-09-09 (first real run, pccr): "no debes rechazar correcciones
+  por umbrales arbitrarios... siempre debe aplicarse la corrección de piso y
+  de duplicados, no importa lo mucho que haya que corregir."** →
+  `correction.gates.mode: advisory` (default): every gate is still MEASURED
+  and lands in the report as a ⚠ warning, the correction is APPLIED and the
+  visual Approve/Undo is the verdict (`veto` keeps the blocking behaviour for
+  evaluation). Same run also fixed: (1) the FLOOR IS A CONSTRAINT of the
+  object correction (per-keyframe floor drift vs the reference visit's floor
+  plane, trend-smoothed, composed with the object transform — a lone desk
+  used to fix its copies while the revisit floor stayed 41 cm off); (2)
+  depth k is expanded BEFORE the floor drift is measured (a compressed visit
+  lifts its own floor); (3) a BOUNDED object whose two copies share extents
+  observes the full translation (`observability.bounded_extent_tol`) —
+  desk1 was solved along its normal only; (4) floor anchors follow the
+  TREND (moving median of heights + mean normals over
+  `floor.smooth_window_kf`; anchors off the trend = furniture → demoted) —
+  raw per-keyframe patches gave 197 mm / 2.7° steps; (5) segment OBBs
+  appeared ROTATED against the cloud because `_display_matrix` composed the
+  project composition transform into the active scan's display — the main
+  cloud now shows in the scan's own floor frame only (composition is a
+  fusion concern).
 - ALL parameters in `config.yaml` `correction:` (typed dataclasses; a missing
   key fails at load naming it; zero decision literals in the package —
   enforced by test). Tests: `server/tests/test_correction_*.py` + shared

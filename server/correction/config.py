@@ -37,6 +37,7 @@ class EvidenceConfig:
 class ObservabilityConfig:
     pca_ratio_planar: float
     pca_ratio_cylindrical: float
+    bounded_extent_tol: float
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class SolveConfig:
 
 @dataclass(frozen=True)
 class GatesConfig:
+    mode: str                 # advisory | veto
     max_object_residual_m: float
     residual_improvement_ratio: float
     collapse_floor_m: float
@@ -84,7 +86,7 @@ class FloorConfig:
     ransac_refit_band_m: float
     ransac_iters: int
     ransac_sample: int
-    normal_smooth_kf: int
+    smooth_window_kf: int
     step_demote_m: float
 
 
@@ -187,6 +189,8 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
         pca_ratio_cylindrical=_num(ob, "pca_ratio_cylindrical",
                                    "observability", lo=0.0, hi=1.0,
                                    lo_excl=True),
+        bounded_extent_tol=_num(ob, "bounded_extent_tol", "observability",
+                                lo=0.0, hi=1.0, lo_excl=True),
     )
     if observability.pca_ratio_planar >= observability.pca_ratio_cylindrical:
         raise CorrectionConfigError(
@@ -216,7 +220,13 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
     )
 
     ga = section.get("gates")
+    gmode = _require(ga, "mode", "gates")
+    if gmode not in ("advisory", "veto"):
+        raise CorrectionConfigError(
+            f"'correction.gates.mode' must be 'advisory' or 'veto', got "
+            f"{gmode!r}")
     gates = GatesConfig(
+        mode=gmode,
         max_object_residual_m=_num(ga, "max_object_residual_m", "gates",
                                    lo=0.0, lo_excl=True),
         residual_improvement_ratio=_num(ga, "residual_improvement_ratio",
@@ -264,7 +274,7 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
         ransac_iters=_num(fl, "ransac_iters", "floor", lo=1, integer=True),
         ransac_sample=_num(fl, "ransac_sample", "floor", lo=100,
                            integer=True),
-        normal_smooth_kf=_num(fl, "normal_smooth_kf", "floor", lo=0,
+        smooth_window_kf=_num(fl, "smooth_window_kf", "floor", lo=0,
                               integer=True),
         step_demote_m=_num(fl, "step_demote_m", "floor", lo=0.0,
                            lo_excl=True),
