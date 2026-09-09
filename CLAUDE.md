@@ -89,21 +89,36 @@ geométrica obligatoria en todo artefacto derivado."
   `correction.gates.mode: advisory` (default): every gate is still MEASURED
   and lands in the report as a ⚠ warning, the correction is APPLIED and the
   visual Approve/Undo is the verdict (`veto` keeps the blocking behaviour for
-  evaluation). Same run also fixed: (1) the FLOOR IS A CONSTRAINT of the
-  object correction (per-keyframe floor drift vs the reference visit's floor
-  plane, trend-smoothed, composed with the object transform — a lone desk
-  used to fix its copies while the revisit floor stayed 41 cm off); (2)
-  depth k is expanded BEFORE the floor drift is measured (a compressed visit
-  lifts its own floor); (3) a BOUNDED object whose two copies share extents
-  observes the full translation (`observability.bounded_extent_tol`) —
-  desk1 was solved along its normal only; (4) floor anchors follow the
-  TREND (moving median of heights + mean normals over
-  `floor.smooth_window_kf`; anchors off the trend = furniture → demoted) —
-  raw per-keyframe patches gave 197 mm / 2.7° steps; (5) segment OBBs
-  appeared ROTATED against the cloud because `_display_matrix` composed the
-  project composition transform into the active scan's display — the main
-  cloud now shows in the scan's own floor frame only (composition is a
-  fusion concern).
+  evaluation). Same day, after two more real runs:
+  - **Closure distribution = DRIFT-RATE model (USER's formulation)**: the
+    measured position of every keyframe carries the accumulated error
+    E(d) = ε·d of the distance WALKED since the start (E(0) = 0, the start is
+    exact). A duplicate pins the line (ε = closure / Δchainage between the
+    two copies, each attributed to the median chainage of its evidence
+    points); more duplicates pin a piecewise curve. Every keyframe gets
+    −E(d_k): little near the start, growing along the walk, extrapolated
+    forward — the REFERENCE copy moves too (C(d_j) = C(d_ref) ∘ T_j, exact
+    for the separable model). Removed (both smeared the closure over
+    keyframes that were RIGHT and duplicated correct sectors): the
+    linear-in-keyframes spread with identity up to the reference visit, and
+    the per-chunk seam-weighted blocks. Declared limit: one duplicate
+    observes the net translation/yaw; heading curvature needs a second.
+  - The "floor as a constraint" of the object correction was REMOVED (USER:
+    the per-keyframe low band is not a validated floor curve — "es
+    mentira"). Floor alignment (kind=floor) stays: reference = floor of
+    the first `reference_span_kf` keyframes (a plane over the whole drifted
+    floor followed the drift, 3° tilt, invisible fix), anchors follow the
+    trend (moving median heights + mean normals over `smooth_window_kf`,
+    off-trend anchors = furniture → demoted); ONE floor button in the UI
+    (plane; level/profile stay API-selectable).
+  - A BOUNDED object whose two copies share extents observes the full
+    translation (`observability.bounded_extent_tol`; desk1 was solved along
+    its normal only). Segment OBBs appeared ROTATED against the cloud:
+    `_display_matrix` composed the project composition transform into the
+    active scan's display — the main cloud now shows in the scan's own
+    floor frame only (composition is a fusion concern). The 🔧 modal closes
+    itself when a run is applied so the viewer + collapsible verdict box
+    are free.
 - ALL parameters in `config.yaml` `correction:` (typed dataclasses; a missing
   key fails at load naming it; zero decision literals in the package —
   enforced by test). Tests: `server/tests/test_correction_*.py` + shared

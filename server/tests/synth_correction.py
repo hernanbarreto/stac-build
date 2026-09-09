@@ -197,7 +197,8 @@ def build_scene(tmp: Path, *, n_kf: int = 30, seed: int = 7,
                 write_raw: bool = True,
                 write_omega_npz: bool = False,
                 chunk_plan: Optional[dict] = None,
-                floor_pts_per_kf: int = 260) -> SynthScene:
+                floor_pts_per_kf: int = 260,
+                drift_model: str = "rate") -> SynthScene:
     """Build a session under tmp/output. Ground-truth errors injected on the
     REVISIT keyframes: rigid drift ramps linearly from identity at
     ref end → full (yaw, t) at the revisit start and beyond; depth
@@ -271,10 +272,20 @@ def build_scene(tmp: Path, *, n_kf: int = 30, seed: int = 7,
     ramp_start = ref_kfs[-1]
     ramp_end = revisit_kfs[0]
 
+    walk = np.concatenate([[0.0], np.cumsum(np.linalg.norm(
+        np.diff(centers, axis=0), axis=1))])
+
     def drift_of_kf(k: int) -> Tuple[np.ndarray, np.ndarray, float]:
-        if k <= ramp_start:
-            return np.eye(3), np.zeros(3), 1.0
-        w = min(1.0, (k - ramp_start) / max(ramp_end - ramp_start, 1))
+        """USER 2026-09-09 drift model ('rate'): the accumulated error grows
+        linearly with the distance walked from the start (E(0)=0), the
+        injected (yaw, t) being the error at the END of the walk. 'step'
+        keeps the older ramp-then-constant injection."""
+        if drift_model == "rate":
+            w = float(walk[k] / walk[-1])
+        else:
+            if k <= ramp_start:
+                return np.eye(3), np.zeros(3), 1.0
+            w = min(1.0, (k - ramp_start) / max(ramp_end - ramp_start, 1))
         th = theta * w
         R = np.array([[np.cos(th), 0, np.sin(th)],
                       [0, 1, 0],
@@ -349,6 +360,7 @@ def build_scene(tmp: Path, *, n_kf: int = 30, seed: int = 7,
             np.savez(d / f"frame_{frames[k]}.npz", depth=z)
 
     gt = {"yaw_deg": drift_yaw_deg, "t": t_full, "depth_c": depth_c,
+          "drift_model": drift_model, "walk": walk,
           "k_expected": (1.0 / depth_c), "ramp_start": ramp_start,
           "ramp_end": ramp_end, "revisit_kfs": revisit_kfs,
           "ref_kfs": ref_kfs, "anchor_kfs": anchor_kfs}

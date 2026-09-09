@@ -142,6 +142,14 @@ def _num(section, key, path, lo=None, hi=None, integer=False,
     return int(v) if integer else float(v)
 
 
+def _bool(section, key, path) -> bool:
+    v = _require(section, key, path)
+    if not isinstance(v, bool):
+        raise CorrectionConfigError(
+            f"'correction.{path}.{key}' must be a boolean, got {v!r}")
+    return v
+
+
 def _resolve_workers(v: Any) -> int:
     if v == "auto":
         try:

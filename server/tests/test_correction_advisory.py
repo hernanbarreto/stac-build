@@ -1,6 +1,5 @@
-"""The floor is a CONSTRAINT of the object correction (prompt §5.4, pccr
-2026-09-08 desk1): vertical drift + tilt of every affected keyframe comes
-from the floor, the object solves the rest; advisory gates apply anyway."""
+"""Advisory gates (USER 2026-09-09): gates are measured and reported, the
+correction is applied anyway; the visual Approve/Undo is the verdict."""
 
 import sys
 from pathlib import Path
@@ -19,23 +18,6 @@ def _floor_y_err(scene):
     y = data["y"].astype(np.float64)
     rev = np.isin(scene.ks, list(scene.gt["revisit_kfs"])) & scene.floor_mask
     return float(np.median(np.abs(y[rev] - scene.xyz_true[rev, 1])))
-
-
-def test_single_object_with_vertical_drift_uses_the_floor(tmp_path):
-    """Large vertical drift (15 cm) on the revisit: a single planar desk
-    cannot see it — the floor constraint fixes it and the scene exam
-    passes (veto mode)."""
-    scene = build_scene(tmp_path, drift_yaw_deg=0.0,
-                        drift_t=(0.25, 0.15, 0.10))
-    before = _floor_y_err(scene)
-    assert before > 0.10
-    rep = run_objects(scene.output_dir, [1], "test",
-                      cfg=make_correction_cfg())
-    assert rep["status"] == "pending", rep.get("rejection_reason")
-    assert rep["floor_constraint"]["used"]
-    assert _floor_y_err(scene) < 0.06, "floor drift must be mostly removed"
-    g = next(g for g in rep["gates"] if g["name"] == "scene_exam")
-    assert g["passed"], g["detail"]
 
 
 def test_advisory_mode_applies_with_warnings(tmp_path):

@@ -1,19 +1,27 @@
-"""Per-keyframe distribution of the solved corrections.
+"""Per-keyframe distribution of a loop closure — the DRIFT-RATE model.
 
-USER 2026-09-06 (after two failed variants — per-chunk interpolation
-multiplied the seam, moving only the displaced chunks duplicated shared
-geometry): the revisit's error ACCUMULATED along the trajectory, so the
-correction is spread over KEYFRAMES: identity up to the last keyframe of the
-reference visit, the solved transform anchored at each displaced visit's
-first evidence keyframe, slerp(yaw) + lerp(t) in between, the last anchor's
-transform extended to the end. Neighbouring keyframes differ by millimetres —
-no seam anywhere; the copies still land exactly on the reference.
+USER 2026-09-09 (his formulation): the measured position of every keyframe
+carries the ACCUMULATED error of the walk, p_n = p_n(true) + E_n with
+E_n = Σ δE_i. With a constant per-metre error, E(d) = ε·d where d is the
+distance walked since the start of the scan (E(0) = 0 — the start is exact).
+A duplicated object seen at the reference visit and again at a later visit
+measures the closure t_j = E(d_ref) − E(d_j); with one duplicate the error
+curve is the straight line through (0, 0) and that closure (ε = t_j /
+(d_j − d_ref)); with more duplicates it is piecewise-linear through their
+knots. The correction at ANY keyframe is −E(d_k): small near the start,
+growing along the walk, extrapolated with the last slope beyond the last
+knot. The reference copy moves too (by −E(d_ref)) — it is not exact either,
+only closer to the start.
 
-Depth k is a STEP function over each displaced visit's keyframe span
-(1.0 elsewhere): depth error is a per-frame acquisition error, genuinely
-local to the frames that measured it; interpolating k across unrelated
-keyframes would distort geometry no evidence touched. The continuity gate
-governs the rigid part.
+Superseded and removed (both smeared the closure over keyframes that were
+right): the linear-in-keyframes spread with identity up to the reference,
+and the per-chunk seam-weighted blocks.
+
+Rotation (yaw) follows the same rate model on the rotation vector; depth k
+stays a STEP over each displaced visit's keyframe span (a per-frame
+acquisition error, not accumulated). Declared limitation: a heading drift
+bends the accumulated error into an arc — one duplicate observes only the
+net translation; a second object pins the curvature.
 """
 
 from __future__ import annotations
@@ -21,43 +29,88 @@ from __future__ import annotations
 from typing import Dict, List, Tuple
 
 import numpy as np
-from scipy.spatial.transform import Rotation, Slerp
+from scipy.spatial.transform import Rotation
 
 
-def distribute(n_kf: int, ref_kf_end: int,
+def chainage(poses: np.ndarray) -> np.ndarray:
+    """Distance walked from the start of the scan at each keyframe (m)."""
+    centers = np.asarray(poses)[:, :3, 3]
+    steps = np.linalg.norm(np.diff(centers, axis=0), axis=1)
+    return np.concatenate([[0.0], np.cumsum(steps)])
+
+
+def _interp_extrap(x: float, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+    """Piecewise-linear interpolation of vector knots ys over xs; linear
+    extrapolation with the last (or first) segment's slope."""
+    if x <= xs[0]:
+        return ys[0].copy()
+    if x >= xs[-1]:
+        if len(xs) == 1:
+            return ys[-1].copy()
+        slope = (ys[-1] - ys[-2]) / max(xs[-1] - xs[-2], 1e-9)
+        return ys[-1] + slope * (x - xs[-1])
+    i = int(np.searchsorted(xs, x, side="right")) - 1
+    w = (x - xs[i]) / max(xs[i + 1] - xs[i], 1e-9)
+    return (1 - w) * ys[i] + w * ys[i + 1]
+
+
+def distribute(n_kf: int, d_kf: np.ndarray, ref_kf: int,
                visit_solutions: List[dict]) -> Tuple[np.ndarray, np.ndarray,
                                                      np.ndarray, dict]:
-    """Build per-keyframe R_kf (n,3,3), t_kf (n,3), k_kf (n,) from the solved
-    visits. Each visit_solution: {"anchor_kf", "kf_span": [a,b], "R", "t",
-    "k"}. Returns (R_kf, t_kf, k_kf, distribution_report)."""
-    anchors: Dict[int, Tuple[np.ndarray, np.ndarray]] = {
-        int(ref_kf_end): (np.eye(3), np.zeros(3))}
-    for sol in visit_solutions:
-        a_kf = int(sol["anchor_kf"])
-        if a_kf <= ref_kf_end:
-            continue
-        anchors[a_kf] = (np.asarray(sol["R"]), np.asarray(sol["t"]))
-    a_kfs = sorted(anchors)
-    if len(a_kfs) < 2:
+    """Per-keyframe R_kf (n,3,3), t_kf (n,3), k_kf (n,) from the solved
+    visits under the drift-rate model. ``d_kf``: chainage per keyframe;
+    ``ref_kf``: representative keyframe of the reference visit. Each
+    visit_solution: {"anchor_kf", "kf_span": [a,b], "R", "t", "k"} where
+    (R, t) maps the displaced copy onto the reference copy."""
+    d_kf = np.asarray(d_kf, dtype=np.float64)
+    d_ref = float(d_kf[int(ref_kf)])
+    sols = sorted([s for s in visit_solutions
+                   if float(d_kf[int(s["anchor_kf"])]) > d_ref],
+                  key=lambda s: float(d_kf[int(s["anchor_kf"])]))
+    if not sols:
         raise RuntimeError(
-            "no anchor keyframe after the reference visit — every solved "
-            "visit precedes or overlaps the reference; nothing to distribute")
+            "no displaced visit lies farther along the walk than the "
+            "reference visit — nothing to distribute")
+    # The closure T_j maps the displaced copy onto the reference copy in the
+    # ORIGINAL coordinates. After the correction both copies must coincide:
+    #   C(d_j) ∘ x_d = C(d_ref) ∘ x_r  with  x_r = T_j ∘ x_d
+    #   ⇒ C(d_j) = C(d_ref) ∘ T_j
+    # and the reference copy is itself on the curve, C(d_ref) = C at
+    # chainage d_ref. For the separable rate model C(d) = (exp(f·r), f·τ),
+    # f = d/d_1, the first closure gives it in closed form:
+    #   exp((1−f_r)·r) = R_1  →  r = rotvec(R_1)/(1−f_r)
+    #   τ(1−f_r) = R(d_ref)·t_1  →  τ = exp(f_r·r)·t_1/(1−f_r)
+    s1 = sols[0]
+    d1 = float(d_kf[int(s1["anchor_kf"])])
+    f_r = d_ref / d1
+    R1 = np.asarray(s1["R"], dtype=np.float64)
+    t1 = np.asarray(s1["t"], dtype=np.float64)
+    r_full = Rotation.from_matrix(R1).as_rotvec() / (1.0 - f_r)
+    R_refc = Rotation.from_rotvec(f_r * r_full).as_matrix()
+    tau_full = R_refc @ t1 / (1.0 - f_r)
+    C_ref_R, C_ref_t = R_refc, f_r * tau_full
+    # knots of the CORRECTION curve C(d): C(0)=identity, then every closure
+    # composed with the reference's own correction
+    ds = [0.0]
+    Ct = [np.zeros(3)]
+    Cr = [np.zeros(3)]
+    for s in sols:
+        Rj = np.asarray(s["R"], dtype=np.float64)
+        tj = np.asarray(s["t"], dtype=np.float64)
+        ds.append(float(d_kf[int(s["anchor_kf"])]))
+        Cr.append(Rotation.from_matrix(C_ref_R @ Rj).as_rotvec())
+        Ct.append(C_ref_R @ tj + C_ref_t)
+    xs = np.array(ds)
+    Ct_a = np.stack(Ct)
+    Cr_a = np.stack(Cr)
+    span1 = d1 - d_ref
 
-    rots = Rotation.from_matrix(np.stack([anchors[k][0] for k in a_kfs]))
-    slerp = Slerp(a_kfs, rots)
     R_kf = np.tile(np.eye(3), (n_kf, 1, 1))
     t_kf = np.zeros((n_kf, 3))
     for k in range(n_kf):
-        if k <= a_kfs[0]:
-            continue
-        if k >= a_kfs[-1]:
-            R_kf[k], t_kf[k] = anchors[a_kfs[-1]]
-            continue
-        lo = max(a for a in a_kfs if a <= k)
-        hi = min(a for a in a_kfs if a > k)
-        w = (k - lo) / (hi - lo)
-        R_kf[k] = slerp([k]).as_matrix()[0]
-        t_kf[k] = (1 - w) * anchors[lo][1] + w * anchors[hi][1]
+        t_kf[k] = _interp_extrap(float(d_kf[k]), xs, Ct_a)
+        R_kf[k] = Rotation.from_rotvec(
+            _interp_extrap(float(d_kf[k]), xs, Cr_a)).as_matrix()
 
     k_kf = np.ones(n_kf)
     for sol in visit_solutions:
@@ -67,150 +120,25 @@ def distribute(n_kf: int, ref_kf_end: int,
             k_kf[int(a):int(b) + 1] = kv
 
     from correction.solve import rot_deg
-    steps_t = np.linalg.norm(np.diff(t_kf, axis=0), axis=1)
-    steps_r = [rot_deg(R_kf[i + 1] @ R_kf[i].T) for i in range(n_kf - 1)]
+    rate_t = np.linalg.norm(tau_full) / d1
     report = {
-        "identity_until_kf": int(a_kfs[0]),
-        "anchors": [{"kf": int(k),
-                     "rot_deg": round(rot_deg(anchors[k][0]), 3),
-                     "t_m": round(float(np.linalg.norm(anchors[k][1])), 4)}
-                    for k in a_kfs],
-        "keyframes_warped": int(n_kf - 1 - a_kfs[0]),
-        "max_step_between_keyframes_mm": round(float(steps_t.max()) * 1000, 2)
-        if len(steps_t) else 0.0,
-        "max_step_between_keyframes_deg": round(float(max(steps_r)), 4)
-        if steps_r else 0.0,
-        "depth_keyframes": int((k_kf != 1.0).sum()),
-    }
-    return R_kf, t_kf, k_kf, report
-
-
-def seam_weights_from_reconstruction(output_dir, plan: dict) -> List[float]:
-    """How badly each chunk seam glued, from the reconstruction's OWN
-    evidence (maplong_run/elastic_seams.json: median disagreement of the two
-    copies of the shared frames before any adjustment). One weight per seam
-    (len = n_chunks − 1); uniform when the file is absent (declared in the
-    report by the caller)."""
-    import json
-    from pathlib import Path as _P
-    n_seams = max(len(plan["chunk_ranges"]) - 1, 0)
-    p = _P(output_dir) / "maplong_run" / "elastic_seams.json"
-    if not p.exists() or n_seams == 0:
-        return [1.0] * n_seams
-    data = json.loads(p.read_text())
-    seams = data.get("seams") or {}
-    w = []
-    for i in range(n_seams):
-        entries = seams.get(str(i)) or {}
-        vals = [float(e["before_m"]) for e in entries.values()
-                if isinstance(e, dict) and "before_m" in e]
-        w.append(float(np.median(vals)) if vals else 1.0)
-    if not any(x > 0 for x in w):
-        return [1.0] * n_seams
-    return w
-
-
-def distribute_chunks(n_kf: int, ref_kf_end: int, visit_solutions: List[dict],
-                      plan: dict, seam_weights: List[float]
-                      ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
-    """USER 2026-09-09 (pccr): a loop closure of 0.98 m spread linearly over
-    180 keyframes displaced sectors that were CORRECT and duplicated them.
-    The drift of a chunked reconstruction is produced at the SEAMS (SE(3)
-    gluing), so the closure is applied per CHUNK: identity for the chunks
-    that hold the reference visit, the full solved transform for the chunk
-    of the displaced visit, and in between each seam absorbs a share of the
-    closure proportional to how badly it glued (``seam_weights``). Every
-    chunk is a RIGID SE(3) block (a Sim3 when depth k was diagnosed);
-    keyframes inside a chunk overlap belong to both chunks and interpolate
-    (slerp+lerp) between their two transforms — the step lands smoothly
-    inside the overlap instead of at a hard boundary."""
-    from scipy.spatial.transform import Rotation, Slerp
-    ranges = [(int(a), int(b)) for a, b in plan["chunk_ranges"]]
-    n_ch = len(ranges)
-
-    def chunk_of(kf: int) -> int:
-        """Primary chunk of a keyframe: the LAST chunk whose range holds it
-        (the writer of the frame in an overlap is the later chunk)."""
-        c = 0
-        for i, (a, b) in enumerate(ranges):
-            if a <= kf < b:
-                c = i
-        return c
-
-    ref_chunk = chunk_of(int(ref_kf_end))
-    sols = sorted([s for s in visit_solutions
-                   if int(s["anchor_kf"]) > ref_kf_end],
-                  key=lambda s: int(s["anchor_kf"]))
-    if not sols:
-        raise RuntimeError(
-            "no anchor keyframe after the reference visit — nothing to "
-            "distribute")
-    # per-chunk target transform: identity up to ref_chunk, then the
-    # closure shared over the seams up to each solved visit's chunk
-    chunk_R = [np.eye(3) for _ in range(n_ch)]
-    chunk_t = [np.zeros(3) for _ in range(n_ch)]
-    prev_chunk, prev_R, prev_t = ref_chunk, np.eye(3), np.zeros(3)
-    for sol in sols:
-        tgt_chunk = chunk_of(int(sol["anchor_kf"]))
-        R_s, t_s = np.asarray(sol["R"]), np.asarray(sol["t"])
-        if tgt_chunk <= prev_chunk:
-            chunk_R[tgt_chunk], chunk_t[tgt_chunk] = R_s, t_s
-            continue
-        seams = list(range(prev_chunk, tgt_chunk))     # seam i joins i, i+1
-        wts = np.array([max(seam_weights[i], 0.0) for i in seams])
-        wts = wts / wts.sum() if wts.sum() > 0 else np.ones(len(seams)) / len(seams)
-        cum = np.cumsum(wts)
-        slerp = Slerp([0.0, 1.0], Rotation.from_matrix(np.stack([prev_R, R_s])))
-        for j, c in enumerate(range(prev_chunk + 1, tgt_chunk + 1)):
-            f = float(cum[j])
-            chunk_R[c] = slerp([f]).as_matrix()[0]
-            chunk_t[c] = (1 - f) * prev_t + f * t_s
-        prev_chunk, prev_R, prev_t = tgt_chunk, R_s, t_s
-    for c in range(prev_chunk + 1, n_ch):              # constant after last
-        chunk_R[c], chunk_t[c] = prev_R, prev_t
-
-    # per-keyframe: single chunk → its transform; overlap → blend
-    R_kf = np.tile(np.eye(3), (n_kf, 1, 1))
-    t_kf = np.zeros((n_kf, 3))
-    for kf in range(n_kf):
-        owners = [i for i, (a, b) in enumerate(ranges) if a <= kf < b]
-        if not owners:
-            owners = [chunk_of(kf)]
-        if len(owners) == 1 or kf <= ref_kf_end:
-            c = owners[-1] if kf > ref_kf_end else ref_chunk
-            R_kf[kf], t_kf[kf] = chunk_R[c], chunk_t[c]
-            continue
-        a_c, b_c = owners[0], owners[-1]
-        lo, hi = ranges[b_c][0], ranges[a_c][1]        # overlap [lo, hi)
-        w = (kf - lo + 1) / max(hi - lo + 1, 1)
-        sl = Slerp([0.0, 1.0], Rotation.from_matrix(
-            np.stack([chunk_R[a_c], chunk_R[b_c]])))
-        R_kf[kf] = sl([w]).as_matrix()[0]
-        t_kf[kf] = (1 - w) * chunk_t[a_c] + w * chunk_t[b_c]
-    for kf in range(0, ref_kf_end + 1):
-        R_kf[kf], t_kf[kf] = np.eye(3), np.zeros(3)
-
-    k_kf = np.ones(n_kf)
-    for sol in visit_solutions:
-        kv = float(sol.get("k", 1.0))
-        if kv != 1.0:
-            a, b = sol["kf_span"]
-            k_kf[int(a):int(b) + 1] = kv
-
-    from correction.solve import rot_deg
-    report = {
-        "mode": "chunk_graph",
-        "identity_until_kf": int(ref_kf_end),
+        "mode": "drift_rate_per_metre",
+        "identity_until_kf": -1,
+        "reference_kf": int(ref_kf),
+        "reference_chainage_m": round(d_ref, 3),
+        "reference_correction_m": round(float(np.linalg.norm(C_ref_t)), 4),
+        "drift_rate_mm_per_m": round(float(rate_t) * 1000, 2),
+        "drift_rate_deg_per_m": round(float(np.degrees(
+            np.linalg.norm(r_full))) / d1, 4),
+        "knots": [{"chainage_m": round(float(x), 3),
+                   "correction_m": round(float(np.linalg.norm(c)), 4)}
+                  for x, c in zip(xs, Ct_a)],
         "anchors": [{"kf": int(s["anchor_kf"]),
                      "rot_deg": round(rot_deg(np.asarray(s["R"])), 3),
                      "t_m": round(float(np.linalg.norm(s["t"])), 4)}
                     for s in sols],
-        "chunks": [{"chunk": c, "range": list(ranges[c]),
-                    "rot_deg": round(rot_deg(chunk_R[c]), 3),
-                    "t_m": round(float(np.linalg.norm(chunk_t[c])), 4)}
-                   for c in range(n_ch)],
-        "seam_weights": [round(float(x), 4) for x in seam_weights],
-        "keyframes_warped": int(n_kf - 1 - ref_kf_end),
+        "walk_m": round(float(d_kf[-1]), 3),
+        "keyframes_warped": int(n_kf),
         "depth_keyframes": int((k_kf != 1.0).sum()),
     }
     report.update(steps_report(R_kf, t_kf))
@@ -218,8 +146,7 @@ def distribute_chunks(n_kf: int, ref_kf_end: int, visit_solutions: List[dict],
 
 
 def steps_report(R_kf: np.ndarray, t_kf: np.ndarray) -> dict:
-    """Continuity numbers of a final per-keyframe transform set (used after
-    composing the floor pre-correction with the object transform)."""
+    """Continuity numbers of a per-keyframe transform set."""
     from correction.solve import rot_deg
     n_kf = len(R_kf)
     steps_t = np.linalg.norm(np.diff(t_kf, axis=0), axis=1)

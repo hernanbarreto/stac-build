@@ -69,7 +69,7 @@ def test_plausibility_caps(tmp_path):
     """MEJORAS §3 (box1): a transform beyond max_rot/max_t means broken
     anchors — rejected even when the copies collapse."""
     scene = build_scene(tmp_path, drift_yaw_deg=0.5,
-                        drift_t=(3.6, 0.0, 0.0))
+                        drift_t=(5.0, 0.0, 0.0))
     snap = session_files_snapshot(scene.output_dir)
     rep = run_objects(scene.output_dir, [1, 2], "test",
                       cfg=make_correction_cfg())
@@ -93,7 +93,7 @@ def test_continuity_gate(tmp_path):
 
 
 def test_rejected_run_lands_in_the_ledger(tmp_path):
-    scene = build_scene(tmp_path, drift_yaw_deg=0.5, drift_t=(3.6, 0, 0))
+    scene = build_scene(tmp_path, drift_yaw_deg=0.5, drift_t=(5.0, 0, 0))
     run_objects(scene.output_dir, [1, 2], "test",
                 cfg=make_correction_cfg())
     from correction.ledger import ledger_view

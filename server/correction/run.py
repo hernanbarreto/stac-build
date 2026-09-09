@@ -226,51 +226,18 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
     import dataclasses as _dc
     session_k = _dc.replace(session, xyz=xyz_k)
 
-    # ── FLOOR AS A CONSTRAINT (prompt §5.4 "1 objeto + plano de piso"; pccr
-    # 2026-09-08: a lone desk fixed its own copies while the revisit floor
-    # stayed 41 cm off). The identity region's floor plane is the reference;
-    # every later keyframe's floor drift (height + tilt, trend-smoothed)
-    # becomes a per-keyframe pre-correction; the objects then solve the
-    # horizontal/yaw part on floor-corrected evidence. ──────────────────
-    floor_pre = None
-    floor_report: dict = {"used": False}
-    pt_identity = (session.ks >= 0) & (session.ks <= ev.ref_kf_end)
-    _band, ref_plane = gates._floor_band(xyz_k, pt_identity, cfg, rng)
-    if ref_plane is None:
-        floor_report["why"] = ("no trustworthy floor plane in the reference "
-                               "visit — floor constraint unavailable")
-        log(f"  {floor_report['why']}")
-    else:
-        try:
-            _p(25, "floor constraint: per-keyframe floor drift vs the "
-                   "reference visit's floor plane...")
-            floor_pre = floor_mod.solve_floor(
-                session_k, cfg, "plane", None, rng, log=log,
-                fixed_plane=ref_plane, identity_until=ev.ref_kf_end)
-            floor_report = {"used": True,
-                            "anchors": len(floor_pre["anchors"]),
-                            "demoted": floor_pre["n_demoted"],
-                            "worst_anchor_residual_mm":
-                                floor_pre["exam"]["worst_residual_mm"]}
-        except RuntimeError as e:
-            floor_report["why"] = f"floor constraint unavailable: {e}"
-            log(f"  {floor_report['why']}")
-    R_f = floor_pre["R_kf"] if floor_pre else \
-        np.tile(np.eye(3), (session.n_kf, 1, 1))
-    t_f = floor_pre["t_kf"] if floor_pre else np.zeros((session.n_kf, 3))
+    floor_report: dict = {"used": False,
+                          "why": "USER 2026-09-09: the per-keyframe low band "
+                                 "is not a validated floor curve — the "
+                                 "closure follows the drift-rate model only"}
 
-    def _floor_warp(pts: np.ndarray, idx: np.ndarray) -> np.ndarray:
-        """Apply the per-keyframe floor pre-correction to a point subset."""
-        kk = session.ks[idx]
-        return np.einsum('nij,nj->ni', R_f[kk], pts) + t_f[kk]
-
-    # ── pass 2: solve each group on k-expanded, floor-corrected evidence ─
+    # ── pass 2: solve each group on the k-expanded evidence ──────────────
     _p(30, "solving the object evidence (trimmed ICP per visit)...")
     for pr in prepared:
         gi, grp, label = pr["gi"], pr["grp"], pr["label"]
         members, src_idx = pr["members"], pr["src_idx"]
         visit_obs, diag = pr["visit_obs"], pr["diag"]
-        S = _floor_warp(xyz_k[src_idx], src_idx)
+        S = xyz_k[src_idx].copy()
         # ICP init from the EXPANDED evidence: depth expansion can move a
         # copy by metres (compression pulls objects toward far revisit
         # cameras) — an offset computed on the raw centroids lands the ICP
@@ -344,7 +311,7 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
                 gates_list=gate_results, visits=visit_summaries,
                 observability=obs_reports, diagnosis=diag_reports)
         solutions.append({
-            "group": gi, "anchor_kf": grp["kfs"][0],
+            "group": gi, "anchor_kf": int(np.median(session.ks[src_idx])),
             "kf_span": grp["kf_span"], "R": R, "t": t_full,
             "k": diag["k"], "rot_deg": round(solve.rot_deg(R), 3),
             "t_m": round(float(np.linalg.norm(t_full)), 4),
@@ -376,30 +343,29 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
 
     # distribute ----------------------------------------------------------
     _p(40, "distributing the correction over keyframes (slerp+lerp)...")
-    from correction.units import load_chunk_plan
-    plan = load_chunk_plan(output_dir)
-    if plan is not None:
-        seam_w = distribute.seam_weights_from_reconstruction(output_dir, plan)
-        R_o, t_o, k_kf, dist_report = distribute.distribute_chunks(
-            session.n_kf, ev.ref_kf_end, solutions, plan, seam_w)
-        log(f"  closure applied per CHUNK ({len(plan['chunk_ranges'])} "
-            f"chunks, seam weights {dist_report['seam_weights']})")
-    else:
-        R_o, t_o, k_kf, dist_report = distribute.distribute(
-            session.n_kf, ev.ref_kf_end, solutions)
-        dist_report["mode"] = "per_keyframe (no chunk_plan.json)"
-    # final per-keyframe rigid = object(kf) ∘ floor(kf)
-    R_kf = np.einsum('nij,njk->nik', R_o, R_f)
-    t_kf = np.einsum('nij,nj->ni', R_o, t_f) + t_o
-    dist_report.update(distribute.steps_report(R_kf, t_kf))
+    # reference keyframe = middle of the reference visit; closures measured
+    # against it; the drift-rate line through the walk start distributes
+    # each closure is attributed to the chainage where it was MEASURED: the
+    # median keyframe of the evidence points on each side (a copy spans
+    # several keyframes and the drift grows across them)
+    ref_pts = np.concatenate([rr.seg_idx for rr in ev.ref.values()
+                              if len(rr.seg_idx)])
+    ref_kf_mid = int(np.median(session.ks[ref_pts]))
+    d_kf = distribute.chainage(session.poses)
+    R_o, t_o, k_kf, dist_report = distribute.distribute(
+        session.n_kf, d_kf, ref_kf_mid, solutions)
+    log(f"  drift model: {dist_report['drift_rate_mm_per_m']} mm/m over a "
+        f"{dist_report['walk_m']} m walk; reference copy moves "
+        f"{dist_report['reference_correction_m']} m; knots "
+        f"{dist_report['knots']}")
+    R_kf, t_kf = R_o, t_o
     dist_report["floor_constraint"] = floor_report
 
     # global gates --------------------------------------------------------
     g_plaus = gates.gate_plausibility(solutions, cfg)
     g_cont = gates.gate_continuity(dist_report, cfg)
     gate_results += [g_plaus, g_cont]
-    affected_kfs = list(range(dist_report["identity_until_kf"] + 1,
-                              session.n_kf))
+    affected_kfs = list(range(ev.ref_kf_end + 1, session.n_kf))
     _p(45, "scene exam: floor + unmarked witness instances...")
     g_scene = gates.gate_scene_exam(
         session, [int(i) for i in instance_ids], ev.ref_kf_end,
