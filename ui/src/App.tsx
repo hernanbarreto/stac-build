@@ -129,7 +129,6 @@ function App() {
   const [correctionReport, setCorrectionReport] = useState<any>(null)
   const [correctionProgress, setCorrectionProgress] = useState<{ pct: number; detail: string } | null>(null)
   const [correctionOverrideScale, setCorrectionOverrideScale] = useState(false)
-  const [floorModel, setFloorModel] = useState<'level' | 'plane' | 'profile'>('plane')
   const [correctionLedger, setCorrectionLedger] = useState<any[] | null>(null)
   const [correctionArtifacts, setCorrectionArtifacts] = useState<any[] | null>(null)
   // shared Approve/Undo handlers — used by the 🔧 modal AND the pending
@@ -4235,28 +4234,22 @@ function App() {
                   {/* ── floor alignment (per keyframe, explicit reference model) ── */}
                   <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border-color)' }}>
                     <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>
-                      <b>⇩ Floor alignment</b> — anchors are the keyframes whose
-                      floor plane passes the guards; the rest interpolate.
+                      <b>⇩ Floor alignment</b> — the reference is the floor at the
+                      START of the walk; every keyframe is brought onto it following
+                      the local trend (drift removed, real slopes and steps kept).
                     </div>
-                    <select value={floorModel} disabled={correctionRunning}
-                      onChange={e => setFloorModel(e.target.value as any)}
-                      style={{ width: '100%', marginBottom: 4, padding: 6, background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderRadius: 6, fontSize: 12 }}>
-                      <option value="plane">plane — one fitted reference plane (a real slope survives; only drift is removed)</option>
-                      <option value="level">level — horizontal plane at y=0 (flattens slopes by design)</option>
-                      <option value="profile">profile — longitudinal slope along the walk (ramps / platform drainage)</option>
-                    </select>
                     <button className="bim-action-btn upload" style={{ width: '100%' }}
                       disabled={correctionRunning}
                       onClick={async () => {
                         setCorrectionRunning(true)
                         setCorrectionReport(null)
-                        setStatusMessage(`⇩ aligning the floor (${floorModel}, all qualifying keyframes)...`)
+                        setStatusMessage('⇩ aligning the floor (all qualifying keyframes)...')
                         try {
                           const headers: HeadersInit = { 'Content-Type': 'application/json' }
                           if (token) headers['Authorization'] = `Bearer ${token}`
                           const r = await fetch('/api/correction/floor', {
                             method: 'POST', headers,
-                            body: JSON.stringify({ session_id: activeSession, model: floorModel, keyframes: 'auto' }),
+                            body: JSON.stringify({ session_id: activeSession, model: 'plane', keyframes: 'auto' }),
                           })
                           const d = await r.json().catch(() => ({}))
                           setCorrectionReport(d.report || null)
@@ -4271,7 +4264,7 @@ function App() {
                         loadCorrectionLedger(activeSession!)
                         loadCorrectionArtifacts(activeSession!)
                       }}>
-                      {correctionRunning ? '⏳ aligning…' : `⇩ Align floor (${floorModel})`}
+                      {correctionRunning ? '⏳ aligning…' : '⇩ Align floor'}
                     </button>
                   </div>
 

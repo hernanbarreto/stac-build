@@ -198,11 +198,17 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
             return float(c[1])
         model_params["plane"] = {"normal": UP.tolist(), "y0": 0.0}
     elif model == "plane":
+        # USER 2026-09-09 (pccr): a plane fitted over the WHOLE drifted floor
+        # followed the drift itself (3.0° tilt) and the correction became
+        # invisible. The reference is the floor at the START of the walk —
+        # the first `reference_span_kf` anchors, where drift is zero — and
+        # every later keyframe is brought onto it.
+        ref_ks = sorted(locals_)[:cfg.floor.reference_span_kf]
         pts = np.concatenate([session.xyz[session.ks == k][
             session.xyz[session.ks == k][:, 1]
             < np.percentile(session.xyz[session.ks == k][:, 1],
                             cfg.floor.low_band_pct) + cfg.floor.band_m]
-            for k in locals_])
+            for k in ref_ks])
         if len(pts) > cfg.floor.ransac_sample:
             pts = pts[rng.choice(len(pts), cfg.floor.ransac_sample,
                                  replace=False)]
@@ -238,7 +244,8 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
             "point": [round(float(x), 4) for x in c0],
             "slope_deg": round(float(np.degrees(np.arccos(
                 np.clip(n_ref @ UP, -1, 1)))), 3),
-            "inliers": int(inl.sum())}
+            "inliers": int(inl.sum()),
+            "reference_keyframes": [int(ref_ks[0]), int(ref_ks[-1])]}
 
         def ref_normal(k):
             return n_ref

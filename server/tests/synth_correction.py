@@ -69,7 +69,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
             "min_inlier_ratio": 0.5, "ransac_tol_m": 0.02,
             "ransac_refit_band_m": 0.03, "ransac_iters": 200,
             "ransac_sample": 20000, "smooth_window_kf": 5,
-            "step_demote_m": 0.15,
+            "step_demote_m": 0.15, "reference_span_kf": 8,
         },
         "apply": {"depth_correction_mode": "sidecar",
                   "potree_rebuild": False},

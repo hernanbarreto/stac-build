@@ -88,6 +88,7 @@ class FloorConfig:
     ransac_sample: int
     smooth_window_kf: int
     step_demote_m: float
+    reference_span_kf: int
 
 
 @dataclass(frozen=True)
@@ -278,6 +279,8 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
                               integer=True),
         step_demote_m=_num(fl, "step_demote_m", "floor", lo=0.0,
                            lo_excl=True),
+        reference_span_kf=_num(fl, "reference_span_kf", "floor", lo=1,
+                               integer=True),
     )
 
     ap = section.get("apply")

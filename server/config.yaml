@@ -1868,7 +1868,8 @@ correction:
     scale_agree_tol: 0.05         # max |log| worsening of a DA3 anchor agreement ratio
     scale_mad_tol: 0.03           # max growth of the anchors' MAD
   floor:
-    model_default: plane          # level | plane | profile (user picks in the UI;
+    model_default: plane          # ONE floor correction in the UI (plane + local trend);
+                                  # level | profile stay selectable by API only (USER 2026-09-09;
                                   # plane keeps real slopes, level is y=0 everywhere)
     band_m: 0.5                   # floor band half-height around the low percentile
     low_band_pct: 5.0             # per-keyframe low percentile that seeds the band
@@ -1888,6 +1889,10 @@ correction:
                                   # is smooth along the walk; per-patch noise at a long
                                   # lever arm becomes inter-keyframe steps (pccr
                                   # 2026-09-08: 197 mm / 2.7° → continuity veto)
+    reference_span_kf: 15         # plane model: the reference floor is fitted on the
+                                  # first N anchors of the walk (drift-free start) —
+                                  # a plane over the whole drifted floor followed the
+                                  # drift (pccr 2026-09-09: 3° tilt, invisible fix)
     step_demote_m: 0.15           # plane/profile models: an anchor whose local floor
                                   # sits farther than this from the reference model is
                                   # a REAL step/level change → demoted to interpolated

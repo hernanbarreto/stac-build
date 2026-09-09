@@ -376,8 +376,18 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
 
     # distribute ----------------------------------------------------------
     _p(40, "distributing the correction over keyframes (slerp+lerp)...")
-    R_o, t_o, k_kf, dist_report = distribute.distribute(
-        session.n_kf, ev.ref_kf_end, solutions)
+    from correction.units import load_chunk_plan
+    plan = load_chunk_plan(output_dir)
+    if plan is not None:
+        seam_w = distribute.seam_weights_from_reconstruction(output_dir, plan)
+        R_o, t_o, k_kf, dist_report = distribute.distribute_chunks(
+            session.n_kf, ev.ref_kf_end, solutions, plan, seam_w)
+        log(f"  closure applied per CHUNK ({len(plan['chunk_ranges'])} "
+            f"chunks, seam weights {dist_report['seam_weights']})")
+    else:
+        R_o, t_o, k_kf, dist_report = distribute.distribute(
+            session.n_kf, ev.ref_kf_end, solutions)
+        dist_report["mode"] = "per_keyframe (no chunk_plan.json)"
     # final per-keyframe rigid = object(kf) ∘ floor(kf)
     R_kf = np.einsum('nij,njk->nik', R_o, R_f)
     t_kf = np.einsum('nij,nj->ni', R_o, t_f) + t_o
