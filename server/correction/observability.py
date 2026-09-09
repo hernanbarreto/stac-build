@@ -154,6 +154,20 @@ def analyze_visit(shapes: List[ObjectShape],
     # both copies: its edges observe the full translation; yaw stays free
     # (a rectangle can flip, a column is symmetric).
     if s0.shape in (SHAPE_PLANAR, SHAPE_LINEAR) and bounded.get(s0.iid):
+        # USER 2026-09-09 (pccr desk1): a bounded PLANAR object whose plan is
+        # anisotropic (λ2/λ1 ≤ yaw_anisotropy_max — a desk, not a square
+        # table) also observes YAW through the orientation of its two
+        # copies; translation alone collapses the copies but leaves the
+        # heading drift of the whole walk uncorrected.
+        if s0.shape == SHAPE_PLANAR and \
+                s0.eig_ratios[0] <= cfg.observability.yaw_anisotropy_max:
+            return VisitObservability(
+                ok=True, dof=full_dof, unrestrained=[],
+                projection={"mode": "full"}, depth_allowed=False,
+                objects=shapes, baselines=baselines,
+                suggestion=("mark also a second object (≥ "
+                            f"{cfg.evidence.min_baseline_m:g} m away) to "
+                            "enable a depth diagnosis"))
         return VisitObservability(
             ok=True, dof=["tx", "ty", "tz"], unrestrained=["yaw"],
             projection={"mode": "translation"}, depth_allowed=False,

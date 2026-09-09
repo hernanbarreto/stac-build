@@ -42,7 +42,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
         },
         "observability": {
             "pca_ratio_planar": 0.05, "pca_ratio_cylindrical": 0.15,
-            "bounded_extent_tol": 0.20,
+            "bounded_extent_tol": 0.20, "yaw_anisotropy_max": 0.60,
         },
         "solve": {
             "icp_iters": 60, "icp_trim": 0.7, "icp_sample": 6000,

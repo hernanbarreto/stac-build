@@ -39,6 +39,7 @@ class ObservabilityConfig:
     pca_ratio_planar: float
     pca_ratio_cylindrical: float
     bounded_extent_tol: float
+    yaw_anisotropy_max: float
 
 
 @dataclass(frozen=True)
@@ -201,6 +202,8 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
                                    "observability", lo=0.0, hi=1.0,
                                    lo_excl=True),
         bounded_extent_tol=_num(ob, "bounded_extent_tol", "observability",
+                                lo=0.0, hi=1.0, lo_excl=True),
+        yaw_anisotropy_max=_num(ob, "yaw_anisotropy_max", "observability",
                                 lo=0.0, hi=1.0, lo_excl=True),
     )
     if observability.pca_ratio_planar >= observability.pca_ratio_cylindrical:

@@ -1831,6 +1831,11 @@ correction:
   observability:
     pca_ratio_planar: 0.05        # λ3/λ1 below this → planar object (no in-plane DOF)
     pca_ratio_cylindrical: 0.15   # λ2/λ1 below this → elongated object (no along-axis DOF)
+    yaw_anisotropy_max: 0.60      # USER 2026-09-09 (pccr desk1): a bounded planar object
+                                  # whose plan is anisotropic (λ2/λ1 ≤ this — a desk, not
+                                  # a square table) observes YAW through the orientation
+                                  # of its two copies; translation alone collapsed the
+                                  # copies but left the heading drift of the walk
     bounded_extent_tol: 0.20      # a planar/elongated object whose two copies have the
                                   # same supported extents (p5..p95, within this ratio)
                                   # is BOUNDED and equally covered → its edges observe

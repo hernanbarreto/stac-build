@@ -89,3 +89,19 @@ def test_bounded_planar_object_observes_full_translation(tmp_path):
     t = npz["t_kf"][scene.gt["revisit_kfs"][-1]]
     # the IN-PLANE (x) drift is recovered too, not only the normal (z)
     assert abs(t[0] + 0.30) < 0.04 and abs(t[2] + 0.12) < 0.04, t
+
+
+def test_anisotropic_bounded_plane_observes_yaw():
+    """A desk-like plan (λ2/λ1 well below 1) with equal-coverage copies
+    observes yaw; a near-square one does not."""
+    from correction.observability import (ObjectShape, SHAPE_PLANAR,
+                                          analyze_visit)
+    cfg = make_correction_cfg()
+    desk = ObjectShape(1, "desk", SHAPE_PLANAR, [0.25, 0.04],
+                       normal=np.array([0, 1.0, 0]), axis=None)
+    obs = analyze_visit([desk], {1: np.zeros(3)}, cfg, {1: True})
+    assert obs.projection["mode"] == "full" and "yaw" in obs.dof
+    square = ObjectShape(1, "table", SHAPE_PLANAR, [0.95, 0.04],
+                         normal=np.array([0, 1.0, 0]), axis=None)
+    obs2 = analyze_visit([square], {1: np.zeros(3)}, cfg, {1: True})
+    assert obs2.projection["mode"] == "translation"
