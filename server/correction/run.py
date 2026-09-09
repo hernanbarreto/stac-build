@@ -153,12 +153,24 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
 
     # ── pass 1: evidence, observability, diagnosis (k) per group ─────────
     prepared: List[dict] = []
+    skipped_objects: List[str] = []
     for gi, grp in enumerate(groups):
         members = grp["members"]
         label = f"visit kf {grp['kf_span'][0]}..{grp['kf_span'][1]}"
         shapes = []
         centroids: Dict[int, np.ndarray] = {}
         seg_parts = []
+        # an object with no reference copy carries no closure: it must not
+        # enter the evidence (its points would pull the ICP toward nothing)
+        no_ref = sorted({cp.label for cp in members if cp.iid not in ev.ref})
+        if no_ref:
+            skipped_objects.append(
+                f"{label}: {no_ref} seen only once (no reference copy) — "
+                f"not a duplicate, excluded from the evidence")
+            log(f"  {skipped_objects[-1]}")
+        members = [cp for cp in members if cp.iid in ev.ref]
+        if not members:
+            continue
         for cp in members:
             if len(cp.seg_idx) >= cfg.evidence.min_object_points_fingerprint:
                 centroids[cp.iid] = np.median(session.xyz[cp.seg_idx], axis=0)
@@ -255,14 +267,6 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
         else:
             big = max((cp for cp in members if cp.iid in ev.ref),
                       key=lambda cp: len(cp.idx), default=None)
-            if big is None:
-                return _reject(
-                    f"{label}: none of its objects has a reference copy — "
-                    f"there is nothing to align it against",
-                    gates_list=gate_results, visits=visit_summaries,
-                    observability=obs_reports, diagnosis=diag_reports,
-                    suggestion="mark also an object that appears in the "
-                               "first visit")
             n_pl, c_pl = solve.fit_plane(
                 session.xyz[ev.ref[big.iid].seg_idx], rng, cfg)
             off = float(np.median((S - c_pl) @ n_pl))
@@ -321,8 +325,9 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
             "dof": visit_obs.dof, "unrestrained": visit_obs.unrestrained})
 
     if not solutions:
-        return _reject("no displaced visit gathered enough evidence to "
-                       "solve", gates_list=gate_results,
+        return _reject("no marked object is seen TWICE (no duplicate to "
+                       "close): " + "; ".join(skipped_objects),
+                       gates_list=gate_results,
                        visits=visit_summaries, observability=obs_reports,
                        diagnosis=diag_reports,
                        suggestion="mark objects with more curated points in "
@@ -387,7 +392,7 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
     gate_results.append(g_scale)
 
     failed = [g for g in gate_results if not g["passed"]]
-    warnings: List[str] = []
+    warnings: List[str] = list(skipped_objects)
     if failed:
         names = [g["name"] for g in failed]
         if not advisory:

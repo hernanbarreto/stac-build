@@ -170,14 +170,21 @@ def extract_evidence(session: CorrectionSession, instance_ids: List[int],
     for m in ref_group:
         ref_kf_set.update(range(spans[m][0], spans[m][1] + 1))
 
+    # a copy is evidence ONLY through its curated points: the bbox alone
+    # (floor, neighbours, floaters) is never a reference nor an ICP source
+    # (pccr 2026-09-09: a bbox-only "reference" with 0 curated points sent
+    # the ICP to 92°)
+    min_pts = cfg.evidence.min_object_points_solve
     ref: Dict[int, Copy] = {}
     for iid in instance_ids:
-        cands = [copies[m] for m in ref_group if copies[m].iid == int(iid)]
+        cands = [copies[m] for m in ref_group
+                 if copies[m].iid == int(iid)
+                 and len(copies[m].seg_idx) >= min_pts]
         if cands:
-            ref[int(iid)] = max(cands, key=lambda c: len(c.idx))
+            ref[int(iid)] = max(cands, key=lambda c: len(c.seg_idx))
         else:
-            log(f"  {labels.get(int(iid))}: not seen in the reference visit "
-                f"— its copies are displaced only")
+            log(f"  {labels.get(int(iid))}: no curated copy in the "
+                f"reference visit — its copies are displaced only")
     if not ref:
         raise RuntimeError(
             "no marked instance is observed in the earliest visit — there is "
@@ -189,7 +196,8 @@ def extract_evidence(session: CorrectionSession, instance_ids: List[int],
             f"({len(r.seg_idx):,} curated pts, kf {r.kf_range})")
 
     displaced = [cp for cp in copies if not cp.is_reference
-                 and not set(cp.kfs) <= ref_kf_set]
+                 and not set(cp.kfs) <= ref_kf_set
+                 and len(cp.seg_idx) > 0]
     if not displaced:
         raise RuntimeError(
             "every copy lies inside the reference visit — nothing to "

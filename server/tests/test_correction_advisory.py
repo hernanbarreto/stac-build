@@ -43,3 +43,27 @@ def test_floor_alignment_advisory_applies(tmp_path):
                                                "gates.max_step_mm": 1.0}))
     assert rep["status"] == "pending", rep.get("rejection_reason")
     assert rep["warnings"]
+
+
+def test_single_visit_object_is_ignored_not_rejected(tmp_path):
+    """USER 2026-09-09 (pccr door): an object seen only once carries no
+    closure — it is skipped with a warning while the duplicated one drives
+    the correction."""
+    scene = build_scene(tmp_path, drift_yaw_deg=1.0, drift_t=(0.3, 0, 0.1),
+                        extra_unmarked=True)
+    import json
+    res_p = scene.output_dir / "segmentation_result.json"
+    res = json.loads(res_p.read_text())
+    # turn 'shelf1' (iid 4) into a single-visit object seen only AFTER the
+    # reference visit (like pccr's door): keep its revisit copy only
+    rev = set(scene.gt["revisit_kfs"])
+    for inst in res["instances"]:
+        if inst["label"] == "shelf1":
+            g = np.asarray(inst["globalIndices"])
+            inst["globalIndices"] = [int(i) for i in g
+                                     if scene.ks[i] in rev]
+    res_p.write_text(json.dumps(res))
+    rep = run_objects(scene.output_dir, [1, 4], "test",
+                      cfg=make_correction_cfg(**{"gates.mode": "advisory"}))
+    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert any("seen only once" in w for w in rep["warnings"]), rep["warnings"]
