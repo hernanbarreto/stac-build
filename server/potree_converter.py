@@ -169,6 +169,18 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
                     f"({', '.join(f'{k}:{np.dtype(v).name}' for k, v in _types.items())}) "
                     f"→ propagated to octree")
 
+    # claude_stac.txt §6 / §11: the witness fields (mv_votes, mask_votes,
+    # mask_conflicts, status — uint8) ride along as extra dims so the viewer
+    # colours by status / mv_votes straight from the octree attributes
+    _wit = [n for n in ("mv_votes", "mask_votes", "mask_conflicts", "status")
+            if data.dtype.names and n in data.dtype.names]
+    for name in _wit:
+        las.add_extra_dim(laspy.ExtraBytesParams(name=name, type=np.uint8))
+        setattr(las, name, np.asarray(data[name]).astype(np.uint8))
+    if _wit:
+        logger.info(f"[Potree] Witness fields written as LAS extra dims ({', '.join(_wit)}) "
+                    f"→ propagated to octree")
+
     las.write(las_path)
     logger.info(f"[Potree] Written LAS: {las_path} ({las_path.stat().st_size / 1024**2:.1f} MB)")
 

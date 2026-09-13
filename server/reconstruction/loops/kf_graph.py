@@ -149,10 +149,14 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
                        operator: str = "auto", apply: bool = True,
                        extra_loop_edges: Optional[List[dict]] = None,
                        use_structural: bool = True,
-                       log: Callable[[str], None] = print) -> dict:
+                       log: Callable[[str], None] = print, session=None,
+                       use_fork_edges: bool = True) -> dict:
     """Solve the keyframe graph on the session; apply as an epoch when the
     gates pass (or record identity). Returns the report (also written to
-    output/keyframe_graph.json)."""
+    output/keyframe_graph.json). ``session``: an in-memory CorrectionSession
+    (the certification loop hands the state of the current iteration);
+    ``use_fork_edges``: include the reconstruction's own keyframe loop edges
+    (maplong_run/loop_edges.json)."""
     _vendor_on_path()
     from loop_utils.pose_graph import PoseGraph
     from loop_utils.lie import se3_inv, se3_log
@@ -161,11 +165,11 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     gc = cfg.graph
     output_dir, session_dir = Path(output_dir), Path(session_dir)
     t0 = time.time()
-    session = load_session(output_dir)
+    session = session if session is not None else load_session(output_dir)
     N = session.n_kf
     per_kf = _per_kf_points_fn(session)
     s_metric = _metric_scale_applied(output_dir)
-    loops = _loop_edges(output_dir, s_metric) + list(extra_loop_edges or [])
+    loops = (_loop_edges(output_dir, s_metric) if use_fork_edges else []) + list(extra_loop_edges or [])
     unc, unc_med = _uncertainty(output_dir, session.frames)
     res_path = output_dir / "segmentation_result.json"
     instances = json.loads(res_path.read_text()).get("instances", []) if res_path.exists() else []
@@ -198,7 +202,8 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
         for e in loops:
             eid = pg.add_relative(int(e["i"]), int(e["j"]), np.asarray(e["Z"]),
                                   float(e["sigma_deg"]), float(e["sigma_m"]), huber=True,
-                                  tag=f"loop:{e.get('bridge', -1)}")
+                                  tag=f"loop:{e.get('bridge', -1)}",
+                                  info_t=e.get("info_t"), info_rot=e.get("info_rot"))
             loop_ids.append((eid, e))
         for g in range(N):
             pg.add_gravity(g, g_down, gc.sigma_gravity_deg)
@@ -256,7 +261,9 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     budget = cfg.loops.spatial
     centres = T0[:, :3, 3]
     pg, loop_ids, srep, plane_nodes = build()
-    loop_before = float(np.sum([r["t_m"] for r in pg.edge_residuals("loop").values()]))
+    # residuals in the directions the edges OBSERVE (a floor-only closure has
+    # no in-plane claim): the gain and the veto judge those, not fake zeros
+    loop_before = float(np.sum([r["t_obs_m"] for r in pg.edge_residuals("loop").values()]))
     while True:
         pg.solve(log=log)
         Xc_all = pg.corrections()
@@ -272,7 +279,7 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
             delta = max(budget.drift_floor_m, budget.drift_rate_m_per_m * L)
             # what the edge DEMANDS: obtained correction + what it still asks for
             need = max(float(np.linalg.norm(Xc[i][:3, 3])), float(np.linalg.norm(Xc[j][:3, 3])),
-                       float(edge_res.get(eid, {}).get("t_m", 0.0)))
+                       float(edge_res.get(eid, {}).get("t_obs_m", 0.0)))
             if need > delta:
                 offenders.append((need - delta, eid, e, need, delta))
         if not offenders:
@@ -289,10 +296,18 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     planes_solved = {name: {"normal": pg.plane_of(node)[0].tolist(), "offset_m": pg.plane_of(node)[1]}
                      for name, node in plane_nodes.items()}
     after = pg.edge_residuals("loop")
-    loop_after = float(np.sum([r["t_m"] for r in after.values()]))
+    loop_after = float(np.sum([r["t_obs_m"] for r in after.values()]))
     n_active = sum(1 for eid, _ in loop_ids if pg._edges[eid]["active"])
     held_after = _held_median(held, Xc)
-    gain = (1.0 - loop_after / loop_before) if loop_before > 0 else 0.0
+    # the gain against what the edges can deliver: no edge closes better than
+    # its own σ (a post-hoc region closure carries its ICP residual), so the
+    # residual floor Σσ is subtracted from both sides — a 30 cm drift closed
+    # to the 5 cm the closures resolve is a full gain, not a half one
+    sigma_floor = float(np.sum([float(e["sigma_m"]) for eid, e in loop_ids if pg._edges[eid]["active"]]))
+    if loop_before <= sigma_floor:
+        gain = 1.0 if loop_after <= loop_before else 0.0     # already within the edges' σ
+    else:
+        gain = 1.0 - max(loop_after - sigma_floor, 0.0) / (loop_before - sigma_floor)
     ok_gain = (gain >= gc.min_loop_gain) if n_active > 0 else (use_structural and bool(srep))
     ok_held = (not np.isfinite(held_before)) or (held_after <= held_before + gc.max_seam_degradation_m)
     t_mag = np.linalg.norm(Xc[:, :3, 3], axis=1)
@@ -312,7 +327,8 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
               "s_metric_applied": s_metric,
               "gates": {"loop_gain": {"value": gain, "min": gc.min_loop_gain, "passed": ok_gain,
                                       "loop_residual_before_m": loop_before,
-                                      "loop_residual_after_m": loop_after},
+                                      "loop_residual_after_m": loop_after,
+                                      "sigma_floor_m": sigma_floor},
                         "holdout_pairs": {"n_pairs": len(held), "median_before_m": held_before,
                                           "median_after_m": held_after,
                                           "max_degradation_m": gc.max_seam_degradation_m,
@@ -352,10 +368,7 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
         tx = stage_transaction(session, ccfg, R_kf, t_kf, k_kf, correction_id=cid,
                                scale_diag_new=None, floor_npz=None, log=log, progress=None)
         swap_transaction(output_dir, tx, log=log)
-        try:
-            update_instance_store(output_dir, session, R_kf, t_kf, k_kf, log=log)
-        except TypeError:
-            update_instance_store(output_dir, R_kf, t_kf, k_kf)
+        update_instance_store(output_dir, R_kf, t_kf, k_kf, session.frames, log=log)
         rep_path = output_dir / "corrections" / f"report_{cid}.json"
         rep_path.parent.mkdir(parents=True, exist_ok=True)
         rep_path.write_text(json.dumps(report, indent=1, default=float))

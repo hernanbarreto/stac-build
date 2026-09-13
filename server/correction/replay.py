@@ -45,26 +45,36 @@ def apply_epoch_to_arrays(xyz: np.ndarray, fg: np.ndarray,
     kf_by_frame: Dict[int, int] = {int(f): i
                                    for i, f in enumerate(npz["frames"])}
     R_kf, t_kf, k_kf = npz["R_kf"], npz["t_kf"], npz["k_kf"]
+    b_kf = (npz["b_kf"] if "b_kf" in getattr(npz, "files", npz.keys())
+            else np.zeros(len(k_kf)))
     # cameras first? No: depth expansion needs the PRE-transform camera
     # centres, which are the current poses — transform points, then cameras.
     cam_center = {}
+    cam_axis = {}
     for i, f in enumerate(frames):
         j = kf_by_frame.get(int(f))
         if j is not None:
             cam_center[int(f)] = poses[i][:3, 3].copy()
+            cam_axis[int(f)] = poses[i][:3, 2].copy()
     for j_src, f in enumerate(npz["frames"]):
         sel = np.where(fg == int(f))[0]
         if not len(sel):
             continue
         kv = float(k_kf[j_src])
-        if kv != 1.0:
+        bv = float(b_kf[j_src])
+        if kv != 1.0 or bv != 0.0:
             cam = cam_center.get(int(f))
             if cam is None:
                 raise RuntimeError(
                     f"replay: frame {f} carries a depth correction but the "
                     f"target session has no pose for it — cannot re-apply "
                     f"the depth expansion")
-            xyz[sel] = cam + (xyz[sel] - cam) * kv
+            if bv != 0.0:
+                z = (xyz[sel] - cam) @ cam_axis[int(f)]
+                zc = np.where(np.abs(z) > 1e-9, z, 1e-9)
+                xyz[sel] = cam + (xyz[sel] - cam) * ((kv * z + bv) / zc)[:, None]
+            else:
+                xyz[sel] = cam + (xyz[sel] - cam) * kv
         xyz[sel] = xyz[sel] @ R_kf[j_src].T + t_kf[j_src]
     for i, f in enumerate(frames):
         j = kf_by_frame.get(int(f))

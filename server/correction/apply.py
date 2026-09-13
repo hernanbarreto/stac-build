@@ -62,10 +62,13 @@ def assert_no_interrupted_swap(output_dir: Path) -> None:
 
 def warp_full_cloud(session: CorrectionSession, R_kf: np.ndarray,
                     t_kf: np.ndarray, k_kf: np.ndarray,
-                    log=print) -> Tuple[np.ndarray, int]:
-    """New coordinates for the whole cloud (per-keyframe grouping; depth k
-    along each point's own camera ray first, then the rigid transform).
-    Returns (xyz_new, n_moved)."""
+                    log=print, b_kf: Optional[np.ndarray] = None
+                    ) -> Tuple[np.ndarray, int]:
+    """New coordinates for the whole cloud (per-keyframe grouping; depth
+    z' = k·z + b along each point's own camera ray first, then the rigid
+    transform). ``b_kf`` (metres, default 0) is the affine offset of the
+    depth-by-correspondences stage (claude_stac.txt §6.4). Returns
+    (xyz_new, n_moved)."""
     xyz_new = session.xyz.copy()
     ks = session.ks
     n_kf = session.n_kf
@@ -78,15 +81,22 @@ def warp_full_cloud(session: CorrectionSession, R_kf: np.ndarray,
         if not len(sel):
             continue
         kv = float(k_kf[k])
+        bv = float(b_kf[k]) if b_kf is not None else 0.0
         R, t = R_kf[k], t_kf[k]
-        is_id = (kv == 1.0 and np.allclose(R, identity[0])
+        is_id = (kv == 1.0 and bv == 0.0 and np.allclose(R, identity[0])
                  and np.allclose(t, identity[1]))
         if is_id:
             continue
-        if kv != 1.0:
+        if kv != 1.0 or bv != 0.0:
             frame = session.frames[k]
             cam = session.cam_center[frame]
-            xyz_new[sel] = cam + (xyz_new[sel] - cam) * kv
+            if bv != 0.0:
+                axis = session.poses[k][:3, 2]        # camera z in world
+                z = (xyz_new[sel] - cam) @ axis
+                zc = np.where(np.abs(z) > 1e-9, z, 1e-9)
+                xyz_new[sel] = cam + (xyz_new[sel] - cam) * ((kv * z + bv) / zc)[:, None]
+            else:
+                xyz_new[sel] = cam + (xyz_new[sel] - cam) * kv
         xyz_new[sel] = xyz_new[sel] @ R.T + t
         n_moved += len(sel)
     return xyz_new, n_moved
@@ -136,7 +146,8 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
                       R_kf: np.ndarray, t_kf: np.ndarray, k_kf: np.ndarray,
                       *, correction_id: str, scale_diag_new: Optional[dict],
                       floor_npz: Optional[dict] = None,
-                      log=print, progress=None) -> dict:
+                      log=print, progress=None,
+                      b_kf: Optional[np.ndarray] = None) -> dict:
     """Build every new-epoch artifact under output/_tx_epoch_<N>/. Returns
     {"tx_dir", "epoch_from", "epoch_to", "artifacts": [...],
      "pose_copies_skipped": [...], "points_moved": int}. Raises on any
@@ -163,7 +174,7 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
 
     # 1) cloud ------------------------------------------------------------
     _p(55, "tx: warping cloud per keyframe...")
-    xyz_new, n_moved = warp_full_cloud(session, R_kf, t_kf, k_kf, log=log)
+    xyz_new, n_moved = warp_full_cloud(session, R_kf, t_kf, k_kf, log=log, b_kf=b_kf)
     data_new = session.data.copy()
     data_new["x"] = xyz_new[:, 0].astype(session.data.dtype["x"])
     data_new["y"] = xyz_new[:, 1].astype(session.data.dtype["y"])
@@ -183,7 +194,7 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
             ks=session.ks, frames=session.frames, kf_index=session.kf_index,
             poses=session.poses, cam_center=session.cam_center,
             raw_header=None, raw_data=None, pose_copies=[])
-        raw_new, _ = warp_full_cloud(raw_sess, R_kf, t_kf, k_kf, log=log)
+        raw_new, _ = warp_full_cloud(raw_sess, R_kf, t_kf, k_kf, log=log, b_kf=b_kf)
         raw_data_new = session.raw_data.copy()
         raw_data_new["x"] = raw_new[:, 0].astype(session.raw_data.dtype["x"])
         raw_data_new["y"] = raw_new[:, 1].astype(session.raw_data.dtype["y"])
@@ -226,20 +237,23 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
         (tx / "segmentation_result.json").write_text(json.dumps(result))
         _art("segmentation_result.json")
 
-    # 5) depth-correction sidecar (cumulative product) --------------------
+    # 5) depth-correction sidecar (cumulative affine z'' = k·(k₀z + b₀) + b) --
     from segmentation.session_io import DEPTH_CORRECTION_NAME, \
-        load_depth_correction
-    old_k = load_depth_correction(output_dir) or {}
-    new_k = dict(old_k)
+        load_depth_affine
+    old_kb = load_depth_affine(output_dir) or {}
+    new_kb = dict(old_kb)
     for kf in range(session.n_kf):
         kv = float(k_kf[kf])
-        if kv != 1.0:
+        bv = float(b_kf[kf]) if b_kf is not None else 0.0
+        if kv != 1.0 or bv != 0.0:
             frame = session.frames[kf]
-            new_k[frame] = new_k.get(frame, 1.0) * kv
-    if new_k or old_k:
+            k0, b0 = new_kb.get(frame, (1.0, 0.0))
+            new_kb[frame] = (k0 * kv, kv * b0 + bv)
+    if new_kb or old_kb:
         (tx / DEPTH_CORRECTION_NAME).write_text(json.dumps(
-            {"version": 1, "epoch": epoch_to,
-             "k": {str(f): round(v, 6) for f, v in sorted(new_k.items())}},
+            {"version": 2, "epoch": epoch_to,
+             "k": {str(f): round(v[0], 6) for f, v in sorted(new_kb.items())},
+             "b": {str(f): round(v[1], 6) for f, v in sorted(new_kb.items())}},
             indent=1))
         _art(DEPTH_CORRECTION_NAME)
 
@@ -256,7 +270,7 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
 
     # 8) exact per-keyframe transform -------------------------------------
     save_epoch_npz(output_dir, epoch_to, R_kf, t_kf, k_kf, session.frames,
-                   dir_override=tx / EPOCH_NPZ_DIR)
+                   dir_override=tx / EPOCH_NPZ_DIR, b_kf=b_kf)
     _art(f"{EPOCH_NPZ_DIR}/epoch_{epoch_to}.npz")
 
     # 9) floor transform (floor-align kind only) --------------------------
@@ -404,17 +418,34 @@ def undo_swap(output_dir: Path, log=print) -> dict:
     return manifest
 
 
+def pending_prev_dirs(output_dir: Path) -> List[Path]:
+    """The chain of pending previous-epoch directories, newest first
+    (_epoch_<cur-1>, _epoch_<cur-2>, … while they exist)."""
+    output_dir = Path(output_dir)
+    cur = current_epoch(output_dir)
+    out = []
+    e = cur - 1
+    while e >= 0:
+        p = output_dir / f"{PREV_PREFIX}{e}"
+        if not p.exists():
+            break
+        out.append(p)
+        e -= 1
+    return out
+
+
 def approve_swap(output_dir: Path, log=print) -> dict:
-    """Approve: the corrected epoch IS the session; the previous epoch's
-    files are removed (USER: approval leaves no remains — the ledger keeps
-    the record)."""
+    """Approve: the current epoch IS the session; every pending previous
+    epoch of the chain is removed (USER: approval leaves no remains — the
+    ledger keeps the record). Returns the newest manifest."""
     output_dir = Path(output_dir)
     assert_no_interrupted_swap(output_dir)
-    prev = prev_dir_for(output_dir)
-    if prev is None:
+    chain = pending_prev_dirs(output_dir)
+    if not chain:
         raise RuntimeError("no pending correction to approve")
-    manifest = json.loads((prev / MANIFEST_NAME).read_text())
-    shutil.rmtree(prev)
+    manifest = json.loads((chain[0] / MANIFEST_NAME).read_text())
+    for prev in chain:
+        shutil.rmtree(prev)
     log(f"  approved: epoch {manifest['epoch_to']} is now the session; "
-        f"{prev.name}/ removed")
+        f"{len(chain)} pending epoch dir(s) removed")
     return manifest

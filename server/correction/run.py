@@ -743,6 +743,12 @@ def run_verdict(output_dir, verdict: str, operator: str,
         raise RuntimeError(f"no pending correction to {verdict}")
     if verdict == "approved":
         manifest = approve_swap(output_dir, log=log)
+        # a certification chain: every pending epoch below the top is
+        # approved with it (their files are gone; the ledger says so)
+        for older in ledger.pending_runs(output_dir):
+            if older["correction_id"] != pend["correction_id"]:
+                ledger.record_verdict(output_dir, older["correction_id"],
+                                      verdict, operator)
     elif verdict == "undone":
         # capture the undone epoch's exact transform BEFORE the swap discards
         # it — the store's findings must be inverse-warped back
@@ -751,9 +757,11 @@ def run_verdict(output_dir, verdict: str, operator: str,
         R_inv = np.transpose(undone["R_kf"], (0, 2, 1))
         t_inv = -np.einsum('nij,nj->ni', R_inv, undone["t_kf"])
         k_inv = 1.0 / undone["k_kf"]
+        # inverse of z' = k z + b is z = z'/k − b/k
+        b_inv = -np.asarray(undone["b_kf"]) / undone["k_kf"]
         try:
             update_instance_store(output_dir, R_inv, t_inv, k_inv,
-                                  undone["frames"], log=log)
+                                  undone["frames"], log=log, b_kf=b_inv)
         except RuntimeError as e:
             log(f"  instance-store refresh after undo failed (geometry is "
                 f"restored; store stays stale until the next rebuild): {e}")

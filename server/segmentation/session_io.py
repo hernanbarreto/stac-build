@@ -88,13 +88,15 @@ def _detect_world_up(cam_positions: np.ndarray, points: np.ndarray) -> str:
 # are what the scale gate checks against.
 
 DEPTH_CORRECTION_NAME = "depth_correction.json"
-_depth_corr_cache: Dict[str, Tuple[float, Dict[int, float]]] = {}
+_depth_corr_cache: Dict[str, Tuple[float, Dict[int, Tuple[float, float]]]] = {}
 
 
-def load_depth_correction(output_dir) -> Optional[Dict[int, float]]:
-    """Per-keyframe depth-correction factors {frame_global: k}, or None when
-    the session has no depth correction. Cached by file mtime. A corrupt
-    sidecar is an error (fail-fast doctrine), never silently ignored."""
+def load_depth_affine(output_dir) -> Optional[Dict[int, Tuple[float, float]]]:
+    """Per-keyframe depth correction {frame_global: (k, b)} — z' = k·z + b
+    along the ray (k from the correction module, b from the depth-by-
+    correspondences stage, claude_stac.txt §6.4) — or None when the session
+    has none. Cached by file mtime. A corrupt sidecar is an error
+    (fail-fast doctrine), never silently ignored."""
     path = Path(output_dir) / DEPTH_CORRECTION_NAME
     if not path.exists():
         return None
@@ -106,26 +108,46 @@ def load_depth_correction(output_dir) -> Optional[Dict[int, float]]:
     try:
         data = json.loads(path.read_text())
         k_map = {int(f): float(k) for f, k in (data.get("k") or {}).items()}
+        b_map = {int(f): float(b) for f, b in (data.get("b") or {}).items()}
+        kb = {f: (k, b_map.get(f, 0.0)) for f, k in k_map.items()}
+        for f, b in b_map.items():
+            kb.setdefault(f, (1.0, b))
     except (ValueError, KeyError, TypeError) as e:
         raise RuntimeError(
             f"corrupt {DEPTH_CORRECTION_NAME} at {path}: {e} — restore it "
             f"from the last correction epoch or delete it if the session "
             f"has no approved depth correction") from e
-    _depth_corr_cache[key] = (mtime, k_map)
-    return k_map
+    _depth_corr_cache[key] = (mtime, kb)
+    return kb
+
+
+def load_depth_correction(output_dir) -> Optional[Dict[int, float]]:
+    """Per-keyframe multiplicative factors {frame_global: k} (the affine
+    sidecar's k component), or None when the session has no correction."""
+    kb = load_depth_affine(output_dir)
+    if kb is None:
+        return None
+    return {f: k for f, (k, _b) in kb.items()}
 
 
 def correct_depth(depth: np.ndarray, frame_global: int, output_dir):
     """Return ``depth`` with the session's per-keyframe depth correction
-    applied (a fresh array when k != 1; the input untouched otherwise, so
-    memory-mapped sources stay read-only)."""
-    k_map = load_depth_correction(output_dir)
-    if not k_map:
+    applied — z' = k·z + b on valid pixels (a fresh array when the frame
+    is corrected; the input untouched otherwise, so memory-mapped sources
+    stay read-only)."""
+    kb = load_depth_affine(output_dir)
+    if not kb:
         return depth
-    k = k_map.get(int(frame_global), 1.0)
-    if k == 1.0:
+    k, b = kb.get(int(frame_global), (1.0, 0.0))
+    if k == 1.0 and b == 0.0:
         return depth
-    return depth * np.float32(k)
+    if b == 0.0:
+        return depth * np.float32(k)
+    d = np.asarray(depth)
+    valid = np.isfinite(d) & (d > 0)
+    out = d.astype(np.float32, copy=True)
+    out[valid] = (d[valid] * np.float32(k) + np.float32(b)).astype(np.float32)
+    return out
 
 
 # ── Camera data loader ──────────────────────────────────────────────

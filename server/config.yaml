@@ -2193,6 +2193,111 @@ certify:                            # §4.8 (F3 adds the certification loop keys
                                     # elastic_seam A/B harness (§7) and the certification loop
                                     # read them. (The 2026-09-04 streaming clean deleted them
                                     # right after the scale; tens of GB per session.)
+  # ── §9 certification loop (post-hoc over the session: scale → poses → depth → witnesses)
+  max_iters: 3                      # iterations; each one is an epoch (Approve/Undo in the kit)
+  eps: 0.05                         # relative objective improvement below this → converged
+  auto_after_segmentation: true     # run when the Segmentation Manager closes (instances exist)
+  objective_weights:                # objective = Σ weight × metric (metres; fractions × zref)
+    loop_residual_m: 1.0
+    seam_residual_m: 1.0
+    closure_m: 1.0
+    depth_disagreement_frac: 5.0
+    duplicates: 0.1
+  gates:                            # an iteration that fails a gate is ROLLED BACK (§9)
+    max_seam_degradation_m: 0.005   # held-out surface pairs may not worsen beyond this
+    max_loop_residual_increase_m: 0.005   # what the revisits still demand (median) — noise floor of
+                                          # a region closure (ICP on pixel-quantised points)
+    max_depth_disagreement_increase: 0.001  # multi-view depth disagreement (relative) — below the
+                                            # pair sensor's 0.2 % floor
+    max_verified_drop_frac: 0.05    # the verified share of the cloud may not fall more than this
+    duplicates_must_not_increase: true
+  scale:                            # §5 post-hoc scale rows from the two copies of an instance
+    sigma_loop_min_log: 0.01        # floor of a copy-to-copy scale row σ (log units)
+    sigma_seam_log: 0.02            # a correction that differs between neighbouring chunks
+    sigma_anchor_log: 0.03          # per-chunk DA3 anchor agreement rows
+    min_copy_points: 300
+    max_copy_residual_m: 0.05       # copy fit residual beyond this → the row is not trusted
+    icp_iters: 30
+    icp_trim: 0.8
+    max_correction_log: 0.2         # |log r_k| beyond this → the scale stage is IDENTITY
+  visit_loops:                      # §4.4 post-hoc: geometric revisits (correction.revisit) → loop edges
+    sigma_floor_m: 0.01             # translation σ floor (the joint closure's ICP rms is the measurement)
+    unobserved_sigma_m: 5.0         # a direction the visit does not observe (a floor's in-plane) — huge σ
+    unobserved_sigma_deg: 30.0      # roll / pitch of a yaw-only closure — huge σ
+    window_kf: 15                   # an instance's copy = its points within ± this of the visit keyframe
+  known_answer:                     # §10.10 field check of the instrument
+    chunk: last                     # the perturbed chunk: the revisited one — where the loops see it
+                                    # (a kink in a chunk no loop covers is the §4.6 corridor case:
+                                    # only structure can localise it, and the envelope says how much)
+    yaw_deg: 1.0
+    t_m: 0.20
+    scale: 1.03
+    tol_t_m: 0.05
+    tol_deg: 0.30
+    tol_scale: 0.01
+  envelope:                         # §10.11 collapse experiment → declared operating envelope
+    levels_t_m: [0.1, 0.2, 0.4, 0.8, 1.6]
+    levels_scale_pct: [1, 2, 5, 10, 20]
+    loop_densities: [1.0, 0.5, 0.25]
+  determinism:                      # §10.13 two runs → same acta within tolerance
+    tol_m: 1.0e-4
+    tol_frac: 0.01
+    seed: 0
+
+witness:                            # §6 witnesses on the cloud (F3): evidence, never deletion
+  n_neighbors: 4                    # keyframes (nearest camera centres) that vote per frame
+  tau_rel: 0.02                     # a neighbour agrees when |z − d_j| / d_j ≤ this
+  cpu_threads: 8                    # torch threads when the witnesses run on CPU (unbounded
+                                    # threads on the 252-core box: 50 ms per tiny op, measured)
+  at_merge: true                    # mv_votes + provisional status computed inside the GPU clean
+                                    # (before voxel/SOR; those run ONLY on clean_statuses — §6.3)
+  mask_erosion_px: 2                # SAM3 masks eroded before voting — borders never penalised
+  occlusion_tol_rel: 0.05           # a point deeper than the frame's own surface by this
+                                    # fraction is occluded in that view → no vote
+  rules:                            # §6.3 status rules
+    verified_min_mv_votes: 2        # verified: ≥ this many agreeing neighbours …
+    verified_max_mask_conflicts: 1  # … and at most this many conflicting mask views
+    conflict_min: 1                 # mask_conflict: conflicts > votes and ≥ this
+  clean_statuses: [verified, unobserved]                 # voxel + SOR (final net) only on these
+  mls_excluded_statuses: [mask_conflict, single_witness] # scene_consolidate never moves these
+  tracks:                           # §6.4 depth by correspondences (vendored VGGSfM tracker)
+    enabled: true
+    python: /workspace/miniforge3/envs/mapanything/bin/python
+    win: 24
+    stride: 12
+    loop_window: 8
+    min_views: 2
+    reproj_max_px: 2.0
+    sigma_rel: 0.01                 # σ of a triangulated depth observation (relative)
+    min_obs_per_frame: 20
+    depth_edge_tol_rel: 0.05        # track pixels on a depth edge (2×2 neighbourhood spread > 5 %)
+                                    # give no observation — an interpolated edge depth is a blend
+  contours:                         # mask-contour correspondences where tracks are sparse
+    enabled: true
+    min_gradient: 20.0              # image gradient (0–255) at the contour below this → no observation
+    samples_per_instance: 64
+    search_rel: 0.15                # depth search ±15 % along the ray
+    search_steps: 31
+    sigma_rel: 0.02
+  depth:                            # the per-frame affine model z' = a·z + b (depth_graph)
+    pair_offsets: [1, 2, 3, 5, 8]   # pairwise sensor (current projections) frame offsets
+    pair_samples: 8000
+    holdout_fraction: 0.25          # pairs never fitted — the verdict is judged on them
+    min_pairs: 10
+    improve: 0.8                    # held-out disagreement must fall to ≤ 80 % of before
+    bound: 5.0                      # corrections within 5× the pairwise signal
+    zref_m: 5.0
+    scale_only: false
+    pair_sigma_floor_rel: 0.002     # a projection-sensor row never weighs more than this σ (the
+                                    # pixel-rounded association: 0.25 % measured on exact depth)
+    refine_iters: 2                 # solve → correct the depth → re-measure the pairs → re-solve
+    prior_sigma_rel: 0.005          # prior a=1, b=0 per frame at the sensors' resolution: a frame
+                                    # without correspondences moves only on pair evidence stronger
+                                    # than half a percent (corner rows carry structured 0.5–0.8 %
+                                    # association noise — measured — and must not move a clean frame)
+    pair_scatter_clip_sigma: 5.0    # a pair row weighs 1/RMS of its post-fit residual, gross outliers
+                                    # clipped at 5 robust σ: a corner's structured association error
+                                    # counts against the row, an occlusion mismatch does not
 
 loops:                              # candidate detector + spatial gate (§4.4/§4.5/§4.9)
   min_gap_keyframes: 30             # two windows of one instance this far apart = revisit

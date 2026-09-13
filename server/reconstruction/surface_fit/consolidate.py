@@ -525,7 +525,8 @@ def scene_consolidate(output_dir: Path,
                       max_radius_m: float = 0.06,
                       iterations: int = 2,
                       normal_gate: float = 0.25,
-                      k: int = 24) -> Optional[dict]:
+                      k: int = 24,
+                      excluded_statuses=None) -> Optional[dict]:
     """Stage-1 at SCENE level: consolidate cleaned_cloud.ply IN PLACE with
     normal-aware robust MLS so TSDF masking, Potree, segmentation and every
     fit see the thin surface instead of onion layers.
@@ -593,9 +594,26 @@ def scene_consolidate(output_dir: Path,
             logger.info("scene_consolidate: trace normals unavailable (%s)", _e)
     if normals is None:
         normals = estimate_oriented_normals(pts, cams)
-    moved = consolidate_mls(pts, radius=r, k=k, iterations=iterations,
-                            max_points=None, normals=normals,
-                            normal_gate=normal_gate)
+    # claude_stac.txt §6.3: the MLS never runs on mask_conflict /
+    # single_witness points (witness.mls_excluded_statuses) — they neither
+    # move nor pull their neighbours; the raw measurement stays theirs
+    allowed = np.ones(n, bool)
+    n_excluded = 0
+    if excluded_statuses and "status" in names:
+        from reconstruction.witness.status import status_mask
+        allowed = ~status_mask(np.asarray(data["status"]), excluded_statuses)
+        n_excluded = int((~allowed).sum())
+        logger.info("scene_consolidate: %s pts excluded from the MLS (status in %s)",
+                    f"{n_excluded:,}", list(excluded_statuses))
+    if allowed.all():
+        moved = consolidate_mls(pts, radius=r, k=k, iterations=iterations,
+                                max_points=None, normals=normals,
+                                normal_gate=normal_gate)
+    else:
+        moved = pts.copy()
+        moved[allowed] = consolidate_mls(pts[allowed], radius=r, k=k, iterations=iterations,
+                                         max_points=None, normals=normals[allowed],
+                                         normal_gate=normal_gate)
     _bad = ~np.isfinite(moved).all(axis=1)
     if _bad.any():
         raise RuntimeError(
@@ -610,6 +628,7 @@ def scene_consolidate(output_dir: Path,
     out["z"] = moved[:, 2].astype(data.dtype["z"])
     _write_ply_structured(cloud_path, header, out)
     stats = {"n_points": int(n), "radius_m": float(r),
+             "n_excluded_by_status": int(n_excluded),
              "mean_move_mm": float(disp.mean() * 1000.0),
              "p95_move_mm": float(np.percentile(disp, 95) * 1000.0),
              "raw_backup": raw_path.name}

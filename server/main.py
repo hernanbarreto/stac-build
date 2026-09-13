@@ -4976,6 +4976,11 @@ correction_api.configure(resolve_ctx=_ctx,
                          notify_viewer=_correction_notify_viewer)
 app.include_router(correction_api.router)
 
+# ── Certification loop + acta (claude_stac.txt §9–§11) ─────────────────────
+from reconstruction.certify import api as certify_api
+certify_api.configure(resolve_ctx=_ctx, notify_viewer=_correction_notify_viewer)
+app.include_router(certify_api.router)
+
 
 @app.post("/api/segmentation/perfect/export")
 async def export_perfect_endpoint(request: Request):
@@ -6253,6 +6258,15 @@ async def refresh_segmentation(body: dict):
     if result.get("instances"):
         asyncio.get_event_loop().run_in_executor(
             None, _session_intel_when_chat_up, session_id, True)
+        # claude_stac.txt §9: the instances exist now — the certification
+        # loop (instance loops → scale → poses → depth → witnesses, one
+        # pending epoch per iteration, Approve/Undo in the kit) runs in the
+        # background when certify.auto_after_segmentation is on.
+        from reconstruction.loops.config import load_loops_config as _llc_cert
+        if _llc_cert().certify.auto_after_segmentation:
+            from reconstruction.certify import api as _certify_api
+            _cert_loop = asyncio.get_event_loop()
+            _cert_loop.run_in_executor(None, _certify_api.auto_run, session_id, _cert_loop)
     return {"ok": True, **result}
 
 

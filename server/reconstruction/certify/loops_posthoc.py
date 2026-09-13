@@ -1,0 +1,332 @@
+"""Loop measurement on the finished cloud (§4.4 doctrine, post-hoc).
+
+Two sources, two products:
+
+  * VISIT LOOPS → pose-graph edges. The correction package's geometric
+    revisit detection (``correction.revisit``, USER 2026-09-09: "ver los
+    mismos lugares desde diferentes posiciones") finds every place two
+    visits both wrote — occlusion-verified co-visibility → REGIONS, each
+    with its own rigid closure (trimmed yaw+t ICP on what both visits saw
+    there) and its own observability. Every region becomes an edge
+    Z_ij = T_i⁻¹ X⁻¹ T_j between the central keyframes of the two visits
+    that saw it (X = later → earlier, world), with a per-DOF information
+    matrix from the region's shape (a floor observes its normal, a column
+    the plane across its axis, a compact block everything; yaw only when
+    the block is anisotropic): unobserved directions enter with a huge σ,
+    never as a fake zero. The module's single joint closure per visit pair
+    is a rigid compromise meant for a manual correction — drift within a
+    visit is not rigid, and the graph wants the local evidence. Measured on
+    partial pieces one object at a time this was wrong too (certify smoke:
+    half a column aligned onto the other half demanded 1 m).
+
+  * INSTANCE COPIES → scale rows (§5.1). A SAM3 instance seen in two visits
+    (the F1 detector's temporal / duplicate candidates) is the same object
+    twice; a Sim3 fit between its copies (rigid ICP → nearest neighbours →
+    weighted Umeyama with Cauchy IRLS) measures ``s_ab``, trusted only when
+    the object is compact and the copies cover each other (a wall patch has
+    no scale to give).
+
+Nothing here decides: every record carries its residual, its observability
+and whether it is trusted; the scale graph, the pose graph and the gates
+weigh it.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import numpy as np
+
+
+def _vendor_on_path():
+    vendor = Path(__file__).resolve().parents[3] / "vendor" / "VGGT-Long"
+    if str(vendor) not in sys.path:
+        sys.path.insert(0, str(vendor))
+
+
+# ── copies of one instance → scale rows ─────────────────────────────────────
+
+def _kabsch(P: np.ndarray, Q: np.ndarray):
+    mp, mq = P.mean(0), Q.mean(0)
+    H = (P - mp).T @ (Q - mq)
+    U, _, Vt = np.linalg.svd(H)
+    D = np.diag([1.0, 1.0, np.sign(np.linalg.det(Vt.T @ U.T))])
+    R = Vt.T @ D @ U.T
+    return R, mq - R @ mp
+
+
+def rigid_icp(src: np.ndarray, dst: np.ndarray, iters: int, trim: float):
+    """Trimmed point-to-point ICP src → dst (full SE(3)). Returns (R, t,
+    trimmed rms)."""
+    from scipy.spatial import cKDTree
+    tree = cKDTree(dst)
+    R = np.eye(3); t = np.zeros(3)
+    S = src.copy()
+    rms = float("inf")
+    for _ in range(int(iters)):
+        d, j = tree.query(S, k=1)
+        k = max(10, int(len(S) * float(trim)))
+        sel = np.argsort(d)[:k]
+        Ri, ti = _kabsch(S[sel], dst[j[sel]])
+        S = S @ Ri.T + ti
+        R = Ri @ R
+        t = Ri @ t + ti
+        rms = float(np.sqrt((np.linalg.norm(S[sel] - dst[j[sel]], axis=1) ** 2).mean()))
+        if np.degrees(np.arccos(np.clip((np.trace(Ri) - 1) / 2, -1, 1))) < 1e-3 and np.linalg.norm(ti) < 1e-5:
+            break
+    return R, t, rms
+
+
+def measure_copy(pts_a: np.ndarray, pts_b: np.ndarray, scfg, seed: int = 0,
+                 max_points: int = 20000) -> Optional[dict]:
+    """Sim3 of copy A onto copy B. None when starved; else {"s_ab",
+    "residual_m", "n", "coverage_a", "coverage_b", "trusted", "scale_trusted"}."""
+    _vendor_on_path()
+    from loop_utils.loop_bridges import robust_sim3
+    from scipy.spatial import cKDTree
+    a = np.asarray(pts_a, np.float64); b = np.asarray(pts_b, np.float64)
+    if len(a) < int(scfg.min_copy_points) or len(b) < int(scfg.min_copy_points):
+        return None
+    rng = np.random.default_rng(seed)
+    if len(a) > max_points:
+        a = a[rng.choice(len(a), max_points, replace=False)]
+    if len(b) > max_points:
+        b = b[rng.choice(len(b), max_points, replace=False)]
+    R0, t0, rms = rigid_icp(a, b, scfg.icp_iters, scfg.icp_trim)
+    a2 = a @ R0.T + t0
+    tree_b = cKDTree(b)
+    d_ab, j = tree_b.query(a2, k=1)
+    thr = max(2.0 * float(np.median(d_ab)), 1e-3)
+    ok = d_ab <= thr
+    cov_a = float(ok.mean())
+    d_ba, _ = cKDTree(a2).query(b, k=1)
+    cov_b = float((d_ba <= thr).mean())
+    if ok.sum() < int(scfg.min_copy_points):
+        return None
+    fit = robust_sim3(a[ok], b[j[ok]], min_points=int(scfg.min_copy_points))
+    if fit is None:
+        return None
+    s, _R, _t, med, n = fit
+    trusted = bool(med <= float(scfg.max_copy_residual_m))
+    return {"s_ab": float(s), "residual_m": float(med), "n": int(n), "coverage_a": cov_a,
+            "coverage_b": cov_b, "rigid_rms": float(rms), "trusted": trusted,
+            "scale_trusted": bool(trusted and cov_a >= 0.8 and cov_b >= 0.8)}
+
+
+def copy_scale_rows(session, candidates: List[dict], scfg, window_kf: int, log=print) -> List[dict]:
+    """Scale measurements from the copies of every revisited instance
+    (candidates with verdict loop|ambiguous and a temporal gap)."""
+    res_path = Path(session.output_dir) / "segmentation_result.json"
+    instances = {int(i.get("instance_id", i.get("id"))): i
+                 for i in (json.loads(res_path.read_text()).get("instances") or [])} if res_path.exists() else {}
+    out = []
+    for cand in candidates:
+        if cand.get("verdict") not in ("loop", "ambiguous"):
+            continue
+        iid = int(cand["instance_id"])
+        i, j = int(cand["i"]), int(cand["j"])
+        rec = {"instance_id": iid, "label": cand.get("label"), "i": i, "j": j, "verdict": cand["verdict"],
+               "kind": cand.get("kind")}
+        inst = instances.get(iid)
+        if inst is None:
+            rec["reason"] = "instance no longer in the segmentation"
+            out.append(rec); continue
+        if abs(i - j) <= 2 * int(window_kf):
+            rec["reason"] = "not a revisit (the two copies come from overlapping keyframe windows)"
+            out.append(rec); continue
+        gi = np.asarray(inst.get("globalIndices") or [], np.int64)
+        gi = gi[(gi >= 0) & (gi < session.n_points)]
+        ks = session.ks[gi]
+        idx_a = gi[np.abs(ks - i) <= int(window_kf)]
+        idx_b = gi[np.abs(ks - j) <= int(window_kf)]
+        m = measure_copy(session.xyz[idx_a], session.xyz[idx_b], scfg, seed=iid)
+        if m is None:
+            rec["reason"] = f"copies starved ({len(idx_a)} / {len(idx_b)} points)"
+            out.append(rec); continue
+        rec.update(m)
+        rec["extent_m"] = float(np.linalg.norm(np.ptp(session.xyz[idx_a], axis=0)))
+        out.append(rec)
+        log(f"[loops-posthoc] copies {cand.get('label')}#{iid} kf {i}<->{j}: s_ab {m['s_ab']:.4f}, residual "
+            f"{m['residual_m'] * 100:.1f} cm, coverage {m['coverage_a']:.2f}/{m['coverage_b']:.2f} → "
+            f"{'scale row' if m['scale_trusted'] else 'no scale row'}")
+    return out
+
+
+# ── visits → pose-graph edges ────────────────────────────────────────────────
+
+def _info_from_projection(sigma_obs: float, sigma_big: float, mode: str, axis: Optional[np.ndarray],
+                          R_i: np.ndarray) -> np.ndarray:
+    """3×3 translation information in node i's frame for an observability
+    mode: full | normal (only along ``axis``) | perp_axis (all but ``axis``)."""
+    I3 = np.eye(3)
+    wo, wb = 1.0 / sigma_obs ** 2, 1.0 / sigma_big ** 2
+    if mode == "full" or axis is None:
+        Sw = wo * I3
+    else:
+        a = np.asarray(axis, np.float64); a = a / (np.linalg.norm(a) + 1e-12)
+        P = np.outer(a, a)
+        Sw = (wo * P + wb * (I3 - P)) if mode == "normal" else (wo * (I3 - P) + wb * P)
+    # the residual's translation lives in node i's frame: Σ_i = R_iᵀ Σ_w R_i → info_i = R_iᵀ info_w R_i
+    return R_i.T @ Sw @ R_i
+
+
+def _pair_key(rg: dict):
+    return (int(rg["earlier_kfs"][0]), int(rg["earlier_kfs"][1]), int(rg["later_kfs"][0]), int(rg["later_kfs"][1]))
+
+
+def _joint_closures_by_pair(rep: dict) -> Dict[tuple, dict]:
+    """The joint closure (R, t; later → earlier) of every visit pair, keyed
+    by the regions' (earlier span, later span): a region belongs to the
+    merged pair whose spans contain its own."""
+    out = {}
+    closures = rep.get("_closures_full") or []
+    for rg in rep.get("regions", []):
+        if not rg.get("measured"):
+            continue
+        ea, eb = rg["earlier_kfs"]; la, lb = rg["later_kfs"]
+        for cl in closures:
+            if cl["earlier_kfs"][0] <= ea and eb <= cl["earlier_kfs"][1] and \
+                    cl["later_kfs"][0] <= la and lb <= cl["later_kfs"][1]:
+                out[_pair_key(rg)] = cl
+                break
+    return out
+
+
+def _refine_region(session, rg: dict, joint: dict, ccfg, rng) -> dict:
+    """Re-measure a region's closure (later → earlier) starting from the visit
+    pair's joint closure: local trimmed ICP with the region's own
+    observability (yaw only for compact / anisotropic blocks; translation
+    projected to the observed direction otherwise). Returns the region
+    record with its closure replaced (closure_found by improvement)."""
+    from correction import observability as obs_mod, solve
+    from correction.revisit import _region_points
+    from scipy.spatial import cKDTree
+    rc = ccfg.revisit
+    lo = np.asarray(rg["volume_m"]["lo"]); hi = np.asarray(rg["volume_m"]["hi"])
+    early = list(range(int(rg["earlier_kfs"][0]), int(rg["earlier_kfs"][1]) + 1))
+    late = list(range(int(rg["later_kfs"][0]), int(rg["later_kfs"][1]) + 1))
+    ia = _region_points(session, early, lo, hi, rng, rc.region_sample)
+    ib = _region_points(session, late, lo, hi, rng, rc.region_sample)
+    if len(ia) < ccfg.evidence.min_object_points_solve or len(ib) < ccfg.evidence.min_object_points_solve:
+        return dict(rg, closure_found=False, closure={"why": "too few points on one side"})
+    A, B = session.xyz[ia], session.xyz[ib]
+    Rj, tj = np.asarray(joint["R"], np.float64), np.asarray(joint["t"], np.float64)
+    B0 = B @ Rj.T + tj
+    tree = cKDTree(A)
+    d0, _ = tree.query(B, workers=ccfg.runtime.workers)
+    before = float(np.median(d0))
+    shape = obs_mod.classify_object(A, 0, "region", ccfg)
+    full = shape.shape == obs_mod.SHAPE_COMPACT or (
+        shape.shape == obs_mod.SHAPE_PLANAR and shape.eig_ratios[0] <= ccfg.observability.yaw_anisotropy_max)
+    sub = B0[rng.choice(len(B0), min(ccfg.solve.icp_sample, len(B0)), replace=False)]
+    R, t, rms = solve.trimmed_icp(sub, tree, A, ccfg, rotation=full)
+    # total closure: p_a = R (Rj p_b + tj) + t
+    R_tot = R @ Rj
+    t_tot = R @ tj + t
+    if not full:
+        # the unobserved components come from the joint closure (a real
+        # measurement of the whole pair); only the observed one is refined
+        spec = ({"mode": "normal", "normal": shape.normal.tolist()} if shape.shape == obs_mod.SHAPE_PLANAR
+                else {"mode": "perp_axis", "axis": shape.axis.tolist()})
+        _R_l, t_l = solve.project_solution(R, t, spec)
+        R_tot = Rj
+        t_tot = tj + t_l
+    d1, _ = tree.query(B @ R_tot.T + t_tot, workers=ccfg.runtime.workers)
+    after = float(np.median(d1))
+    ok = after < before
+    out = dict(rg)
+    out["offset_before_cm"] = round(before * 100, 1)
+    out["offset_after_cm"] = round(after * 100, 1)
+    out["closure_found"] = bool(ok)
+    out["closure"] = ({"rot_deg": round(solve.rot_deg(R_tot), 3), "t_m": [float(x) for x in t_tot],
+                       "t_norm_m": float(np.linalg.norm(t_tot)), "icp_rms_cm": round(rms * 100, 2),
+                       "R": R_tot.tolist(), "yaw_observed": bool(full), "init": "joint"} if ok else
+                      {"why": "ICP from the joint closure did not reduce the offset"})
+    out["shape"] = shape.shape
+    out["normal"] = shape.normal.tolist() if shape.normal is not None else None
+    out["axis"] = shape.axis.tolist() if shape.axis is not None else None
+    return out
+
+
+def visit_edges(session, ccfg, vcfg, loop_sigma_rot_deg: float, log=print,
+                revisits: Optional[dict] = None) -> List[dict]:
+    """Pose-graph loop edges from the revisited places: one edge per
+    REGION (a block both visits wrote, with its own closure and
+    observability), between the central keyframes of the two visits that
+    saw it. The correction module's joint closure per visit pair is a
+    rigid compromise for a manual correction; the graph wants the local
+    evidence — drift within a visit is not rigid. Regions sharing the same
+    keyframe pair keep the best-supported one (the most hits, compact
+    before partial shapes) so correlated blocks do not over-count."""
+    from correction import observability as obs_mod
+    from correction.revisit import detect_revisits
+    rep = revisits if revisits is not None else detect_revisits(session, ccfg, log=lambda m: None,
+                                                                  previews=False)
+    up = -session.poses[:, :3, 1].mean(0); up = up / (np.linalg.norm(up) + 1e-12)
+    rank = {obs_mod.SHAPE_COMPACT: 2, obs_mod.SHAPE_PLANAR: 1, obs_mod.SHAPE_LINEAR: 1}
+    joints = _joint_closures_by_pair(rep)
+    rng = np.random.default_rng(ccfg.solve.seed)
+    best: Dict[tuple, dict] = {}
+    skipped = []
+    for rg in rep.get("regions", []):
+        i = int(round((rg["later_kfs"][0] + rg["later_kfs"][1]) / 2.0))
+        j = int(round((rg["earlier_kfs"][0] + rg["earlier_kfs"][1]) / 2.0))
+        if not rg.get("measured"):
+            skipped.append({"region": rg.get("region"), "i": i, "j": j,
+                            "reason": rg.get("why") or "not measured"})
+            continue
+        # the region's closure re-measured from the visit pair's JOINT closure
+        # as the start (a block's centroid difference starts half the ICPs in
+        # a wrong basin — 0.13 vs 0.33 m for neighbouring keyframes, measured)
+        joint = joints.get(_pair_key(rg))
+        rg = _refine_region(session, rg, joint, ccfg, rng) if joint is not None else rg
+        if not rg.get("closure_found"):
+            skipped.append({"region": rg.get("region"), "i": i, "j": j,
+                            "reason": (rg.get("closure") or {}).get("why") or "no closure"})
+            continue
+        key = (i, j)
+        score = (rank.get(rg.get("shape"), 0), int(rg.get("n_hits", 0)))
+        if key not in best or score > best[key][0]:
+            best[key] = (score, rg)
+    out = []
+    for (i, j), (_score, rg) in sorted(best.items()):
+        cl = rg["closure"]
+        shape = rg.get("shape")
+        if shape == obs_mod.SHAPE_COMPACT or cl.get("yaw_observed"):
+            mode, axis = "full", None
+        elif shape == obs_mod.SHAPE_PLANAR and rg.get("normal") is not None:
+            mode, axis = "normal", np.asarray(rg["normal"], np.float64)
+        elif shape == obs_mod.SHAPE_LINEAR and rg.get("axis") is not None:
+            mode, axis = "perp_axis", np.asarray(rg["axis"], np.float64)
+        else:
+            mode, axis = "full", None
+        X = np.eye(4); X[:3, :3] = np.asarray(cl["R"], np.float64); X[:3, 3] = np.asarray(cl["t_m"], np.float64)
+        Ti, Tj = session.poses[i], session.poses[j]
+        Z = np.linalg.inv(Ti) @ np.linalg.inv(X) @ Tj
+        sigma_t = max(float(cl.get("icp_rms_cm", 0.0)) / 100.0, float(vcfg.sigma_floor_m))
+        R_i = Ti[:3, :3]
+        info_t = _info_from_projection(sigma_t, float(vcfg.unobserved_sigma_m), mode, axis, R_i)
+        Pu = np.outer(up, up)
+        wb = 1.0 / np.radians(vcfg.unobserved_sigma_deg) ** 2
+        wy = (1.0 / np.radians(loop_sigma_rot_deg) ** 2) if cl.get("yaw_observed") else wb
+        info_rot = R_i.T @ (wy * Pu + wb * (np.eye(3) - Pu)) @ R_i
+        out.append({"i": i, "j": j, "region": rg.get("region"), "earlier_kfs": rg["earlier_kfs"],
+                    "later_kfs": rg["later_kfs"], "accepted": True, "trusted": True,
+                    "rot_deg": cl.get("rot_deg"), "t_norm_m": cl.get("t_norm_m"),
+                    "icp_rms_m": sigma_t, "n_hits": rg.get("n_hits"),
+                    "offset_before_m": float(rg.get("offset_before_cm", 0.0)) / 100.0,
+                    "offset_after_m": float(rg.get("offset_after_cm", 0.0)) / 100.0,
+                    "duplicated": bool(rg.get("duplicated")), "shape": shape, "observability": mode,
+                    "observed_axis": (axis.tolist() if axis is not None else None),
+                    "yaw_observed": bool(cl.get("yaw_observed")), "source": "revisit", "bridge": -1,
+                    "Z": Z, "X": X, "sigma_m": float(sigma_t), "sigma_deg": float(loop_sigma_rot_deg),
+                    "info_t": info_t, "info_rot": info_rot})
+    for s in skipped:
+        s.update({"accepted": False, "source": "revisit"})
+    log(f"[loops-posthoc] {len(rep.get('regions', []))} revisit region(s) → {len(out)} loop edge(s) "
+        f"({sum(1 for e in out if e['observability'] == 'full')} full, "
+        f"{sum(1 for e in out if e['duplicated'])} duplicated), {len(skipped)} without closure")
+    return out + skipped

@@ -31,7 +31,7 @@ if _SERVER_DIR not in sys.path:
 
 def update_instance_store(output_dir, R_kf: np.ndarray, t_kf: np.ndarray,
                           k_kf: np.ndarray, frames: List[int],
-                          log=print) -> dict:
+                          log=print, b_kf: Optional[np.ndarray] = None) -> dict:
     """In-place geometry refresh of scene_r.db from the CORRECTED session
     files. A full store rebuild would delete findings/volumes/notes — this
     updates instead. Returns a summary; raises with an actionable message on
@@ -105,10 +105,17 @@ def update_instance_store(output_dir, R_kf: np.ndarray, t_kf: np.ndarray,
                 continue
             p = np.asarray(p3, dtype=np.float64).reshape(3)
             kv = float(k_kf[kf])
-            if kv != 1.0:
+            bv = float(b_kf[kf]) if b_kf is not None else 0.0
+            if kv != 1.0 or bv != 0.0:
                 cam_corr = poses_corr[kf][:3, 3]
                 cam0 = R_kf[kf].T @ (cam_corr - t_kf[kf])
-                p = cam0 + (p - cam0) * kv
+                if bv != 0.0:
+                    axis0 = R_kf[kf].T @ poses_corr[kf][:3, 2]
+                    z = float((p - cam0) @ axis0)
+                    zc = z if abs(z) > 1e-9 else 1e-9
+                    p = cam0 + (p - cam0) * ((kv * z + bv) / zc)
+                else:
+                    p = cam0 + (p - cam0) * kv
             p = R_kf[kf] @ p + t_kf[kf]
             store.conn.execute(
                 "UPDATE findings SET point3d = ? WHERE finding_id = ?",

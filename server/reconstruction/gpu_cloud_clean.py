@@ -259,6 +259,10 @@ def main() -> int:
     ap.add_argument("--skip-sor", action="store_true")
     ap.add_argument("--skip-noise", action="store_true")
     ap.add_argument("--skip-normals", action="store_true")
+    ap.add_argument("--witness", action="store_true",
+                    help="claude_stac.txt §6: mv_votes + provisional status on the merged "
+                         "cloud BEFORE the net; voxel/SOR then run only on witness."
+                         "clean_statuses (server config.yaml witness:)")
     args = ap.parse_args()
 
     os.environ.setdefault("OMP_NUM_THREADS", "8")
@@ -337,9 +341,10 @@ def main() -> int:
               f"({time.time() - t1:.1f}s)\n")
 
     keep = np.arange(total_input, dtype=np.int64)
+    wit = None            # witness fields (dict of uint8 arrays) — §6, before the net
 
     def _apply(mask_or_idx):
-        nonlocal xyz, rgb, fg, pr, pc, conf, keep
+        nonlocal xyz, rgb, fg, pr, pc, conf, keep, wit
         xyz = xyz[mask_or_idx]
         keep = keep[mask_or_idx]
         rgb = rgb[mask_or_idx] if rgb is not None else None
@@ -347,6 +352,49 @@ def main() -> int:
         pr = pr[mask_or_idx] if pr is not None else None
         pc = pc[mask_or_idx] if pc is not None else None
         conf = conf[mask_or_idx] if conf is not None else None
+        if wit is not None:
+            wit = {k: v[mask_or_idx] for k, v in wit.items()}
+
+    # ── Step 1w: witnesses (§6.1/§6.3) on the merged cloud, BEFORE any point
+    # can be dropped: mv_votes per point through the provenance with the final
+    # poses; masks do not exist yet (segmentation comes later) → provisional
+    # status. The net (voxel + SOR) then runs ONLY on clean_statuses; every
+    # other point is kept untouched with its status — nothing silent.
+    eligible = None
+    if args.witness:
+        if fg is None:
+            print("[GPU-clean] ❌ --witness needs the provenance fields (origins) — "
+                  "cannot compute per-point witnesses")
+            return 1
+        tw = time.time()
+        server_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if server_dir not in sys.path:
+            sys.path.insert(0, server_dir)
+        from reconstruction.loops.config import load_loops_config
+        from reconstruction.witness.frames import load_session_frames
+        from reconstruction.witness.run import witness_fields, summarize
+        from reconstruction.witness.status import status_mask
+        wcfg = load_loops_config().witness
+        out_dir = os.path.dirname(os.path.abspath(args.output))
+        frames = load_session_frames(out_dir, log=lambda m: print(f"  [witness] {m}"))
+        wit = witness_fields(xyz, fg, pr, pc, frames, wcfg, None, None, (), device=dev)
+        s = summarize(wit)
+        eligible = status_mask(wit["status"], wcfg.clean_statuses)
+        print(f"[Step 1w] Witnesses on {total_input:,} pts ({len(frames)} keyframes): "
+              f"{s['status_counts']} | mv_votes mean {s['mv_votes_mean']:.2f} | net eligible "
+              f"{int(eligible.sum()):,} ({wcfg.clean_statuses}) ({time.time() - tw:.1f}s)\n")
+
+    def _net(fn_keep_idx):
+        """Run a keep-index filter on the net-ELIGIBLE points only; the rest
+        survive untouched. Returns a global boolean mask."""
+        nonlocal eligible
+        if eligible is None:
+            return fn_keep_idx(xyz)
+        sub = np.flatnonzero(eligible)
+        ki = fn_keep_idx(xyz[sub])
+        m = ~eligible
+        m[sub[ki]] = True
+        return m
 
     # ── Step 1c: confidence gate ──
     if args.conf_min_norm and args.conf_min_norm > 0:
@@ -358,6 +406,8 @@ def main() -> int:
         cmin, cmax = float(conf.min()), float(conf.max())
         thr = cmin + args.conf_min_norm * max(cmax - cmin, 1e-6)
         m = conf >= thr
+        if eligible is not None:
+            m = m | ~eligible          # the gate is part of the net: eligible points only
         if not m.any():
             print("[GPU-clean] ❌ Confidence gate dropped everything")
             return 1
@@ -365,6 +415,8 @@ def main() -> int:
               f"raw>={thr:.1f}  {total_input:,} → {int(m.sum()):,} "
               f"({time.time() - t1c:.1f}s)\n")
         _apply(m)
+        if eligible is not None:
+            eligible = eligible[m]
 
     # ── Step 2: near-duplicate micro-voxel ──
     if not args.skip_duplicates:
@@ -372,8 +424,10 @@ def main() -> int:
         n_b = len(xyz)
         print("[Step 2/6] Removing near-duplicate points "
               "(micro-voxel 0.1mm)...")
-        ki = _voxel_keep(xyz, 1e-4)
-        _apply(ki)
+        m = _net(lambda p: _voxel_keep(p, 1e-4))
+        _apply(m)
+        if eligible is not None:
+            eligible = eligible[m]
         print(f"  ✅ {n_b:,} → {len(xyz):,} ({time.time() - t2:.1f}s)\n")
     else:
         print("[Step 2/6] Near-duplicate removal: SKIPPED\n")
@@ -383,8 +437,10 @@ def main() -> int:
     n_b = len(xyz)
     print(f"[Step 3/6] Voxel spatial subsampling "
           f"({args.voxel_size * 1000:.1f}mm)...")
-    ki = _voxel_keep(xyz, args.voxel_size)
-    _apply(ki)
+    m = _net(lambda p: _voxel_keep(p, args.voxel_size))
+    _apply(m)
+    if eligible is not None:
+        eligible = eligible[m]
     print(f"  ✅ {n_b:,} → {len(xyz):,} "
           f"({(1 - len(xyz) / n_b) * 100:.1f}% reduction)")
     print(f"  ({time.time() - t3:.1f}s)\n")
@@ -395,12 +451,22 @@ def main() -> int:
         n_b = len(xyz)
         print(f"[Step 4/6] Statistical Outlier Removal "
               f"(knn={args.sor_knn}, σ={args.sor_sigma})...")
-        m, mu, sd = _sor_keep(xyz, args.sor_knn, args.sor_sigma,
-                              cell_h=max(args.voxel_size * 3.0, 0.01))
+        stats = {}
+
+        def _sor_idx(p):
+            mm, mu_, sd_ = _sor_keep(p, args.sor_knn, args.sor_sigma,
+                                     cell_h=max(args.voxel_size * 3.0, 0.01))
+            stats["mu"], stats["sd"] = mu_, sd_
+            return np.flatnonzero(mm)
+
+        m = _net(_sor_idx)
+        mu, sd = stats["mu"], stats["sd"]
         if not m.any():
             print("[GPU-clean] ❌ SOR dropped everything")
             return 1
         _apply(m)
+        if eligible is not None:
+            eligible = eligible[m]
         print(f"  ✅ {n_b:,} → {len(xyz):,} ({n_b - len(xyz):,} outliers, "
               f"{(n_b - len(xyz)) / n_b * 100:.1f}%) "
               f"[mean d {mu * 1000:.1f}mm σ {sd * 1000:.1f}mm]")
@@ -417,8 +483,10 @@ def main() -> int:
         larger = args.voxel_size / ((args.max_points / n_b) ** (1 / 3))
         print(f"  🔧 Capping to {args.max_points:,} pts "
               f"(voxel={larger * 1000:.1f}mm)...")
-        ki = _voxel_keep(xyz, larger)
-        _apply(ki)
+        m = _net(lambda p: _voxel_keep(p, larger))
+        _apply(m)
+        if eligible is not None:
+            eligible = eligible[m]
         print(f"  ✅ {n_b:,} → {len(xyz):,}  ({time.time() - tm:.1f}s)\n")
     torch.cuda.empty_cache()
 
@@ -457,6 +525,10 @@ def main() -> int:
                    ("pixel_col", "<i2")]
         header += ["property int frame_global", "property short pixel_row",
                    "property short pixel_col"]
+    if wit is not None:
+        for name in ("mv_votes", "mask_votes", "mask_conflicts", "status"):
+            fields.append((name, "u1"))
+            header.append(f"property uchar {name}")
     header.append("end_header")
     packed = np.empty(len(xyz), np.dtype(fields))
     packed["x"], packed["y"], packed["z"] = xyz[:, 0], xyz[:, 1], xyz[:, 2]
@@ -468,6 +540,9 @@ def main() -> int:
         packed["frame_global"] = fg
         packed["pixel_row"] = pr
         packed["pixel_col"] = pc
+    if wit is not None:
+        for name in ("mv_votes", "mask_votes", "mask_conflicts", "status"):
+            packed[name] = wit[name]
     with open(out, "wb") as f:
         f.write(("\n".join(header) + "\n").encode("ascii"))
         packed.tofile(f)

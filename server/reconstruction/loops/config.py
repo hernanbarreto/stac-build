@@ -251,7 +251,144 @@ class StructuralConfig:
     regulated_dims: Tuple[RegulatedDim, ...]   # empty by default; per project
 
 
-# ── certify (§4.8 ensemble witness; F3 adds the loop keys) ──────────────────
+# ── witness (§6) ─────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class WitnessRules:
+    verified_min_mv_votes: int
+    verified_max_mask_conflicts: int
+    conflict_min: int               # mask_conflict needs at least this many conflicting views
+
+
+@dataclass(frozen=True)
+class TracksConfig:
+    enabled: bool
+    python: str                     # interpreter of the env carrying the vendored VGGSfM tracker
+    win: int
+    stride: int
+    loop_window: int
+    min_views: int                  # views a track needs to be triangulated
+    reproj_max_px: float            # triangulation reprojection gate
+    sigma_rel: float                # σ (relative) of a track depth observation
+    min_obs_per_frame: int          # frames with fewer observations get no track row
+    depth_edge_tol_rel: float       # a track pixel whose 2×2 depth neighbourhood spreads more than
+                                    # this (relative) sits on a depth edge — no observation (an
+                                    # interpolated depth across an edge is a blend, not a surface)
+
+
+@dataclass(frozen=True)
+class ContourConfig:
+    enabled: bool
+    min_gradient: float             # image gradient at the contour (0–255 scale) below → no observation
+    samples_per_instance: int
+    search_rel: float               # depth search range ±this fraction along the ray
+    search_steps: int
+    sigma_rel: float
+
+
+@dataclass(frozen=True)
+class DepthStageConfig:
+    pair_offsets: Tuple[int, ...]   # frame offsets of the pairwise depth sensor (fitted)
+    pair_samples: int
+    holdout_fraction: float         # fraction of pairs held out for the verdict (never fitted)
+    min_pairs: int
+    improve: float                  # held-out disagreement must fall to ≤ this × before
+    bound: float                    # corrections within this × the pairwise signal
+    zref_m: float
+    scale_only: bool
+    pair_sigma_floor_rel: float     # σ floor of a projection-sensor row (pixel quantisation noise)
+    refine_iters: int               # re-measure the pair rows on the corrected depth and re-solve
+    prior_sigma_rel: float          # weak prior a=1, b=0 per frame (σ, relative): the (a, b) pair of a
+                                    # frame whose depths span a narrow range is ill-conditioned —
+                                    # what the evidence cannot tell stays identity
+    pair_scatter_clip_sigma: float  # a pair row's precision is its RMS residual after the fit with
+                                    # gross outliers clipped at this many robust σ — a structured
+                                    # association error (a corner) must count, an occlusion must not
+
+
+@dataclass(frozen=True)
+class WitnessConfig:
+    n_neighbors: int
+    tau_rel: float
+    cpu_threads: int                # torch threads on the CPU path (252-core box: unbounded
+                                    # threads make every small op crawl — measured 50 ms/op)
+    at_merge: bool                  # compute mv_votes + provisional status inside the GPU clean
+                                    # (before voxel/SOR, which then run only on clean_statuses)
+    mask_erosion_px: int
+    occlusion_tol_rel: float
+    rules: WitnessRules
+    clean_statuses: Tuple[str, ...]         # voxel/SOR may only drop these
+    mls_excluded_statuses: Tuple[str, ...]  # scene_consolidate never moves these
+    tracks: TracksConfig
+    contours: ContourConfig
+    depth: DepthStageConfig
+
+
+# ── certify (§4.8 ensemble witness + §9 loop, §10 harness) ──────────────────
+
+@dataclass(frozen=True)
+class ObjectiveWeights:
+    loop_residual_m: float
+    seam_residual_m: float
+    closure_m: float
+    depth_disagreement_frac: float
+    duplicates: float
+
+
+@dataclass(frozen=True)
+class CertifyGates:
+    max_seam_degradation_m: float
+    max_loop_residual_increase_m: float
+    max_depth_disagreement_increase: float
+    max_verified_drop_frac: float
+    duplicates_must_not_increase: bool
+
+
+@dataclass(frozen=True)
+class CertifyScale:
+    sigma_loop_min_log: float
+    sigma_seam_log: float
+    sigma_anchor_log: float
+    min_copy_points: int
+    max_copy_residual_m: float
+    icp_iters: int
+    icp_trim: float
+    max_correction_log: float
+
+
+@dataclass(frozen=True)
+class VisitLoopsConfig:
+    sigma_floor_m: float            # translation σ floor of a visit closure (the ICP rms is the measurement)
+    unobserved_sigma_m: float       # σ of a translation direction the visit does not observe
+    unobserved_sigma_deg: float     # σ of a rotation the visit does not observe (roll / pitch)
+    window_kf: int                  # an instance's copy = its points within ± this of the visit keyframe
+
+
+@dataclass(frozen=True)
+class KnownAnswerConfig:
+    chunk: str                      # first | middle | last | an index — where the perturbation goes
+                                    # (the revisited chunk is where the loops can see it)
+    yaw_deg: float
+    t_m: float
+    scale: float
+    tol_t_m: float
+    tol_deg: float
+    tol_scale: float
+
+
+@dataclass(frozen=True)
+class EnvelopeConfig:
+    levels_t_m: Tuple[float, ...]
+    levels_scale_pct: Tuple[float, ...]
+    loop_densities: Tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class DeterminismConfig:
+    tol_m: float
+    tol_frac: float
+    seed: int
+
 
 @dataclass(frozen=True)
 class CertifyConfig:
@@ -259,6 +396,16 @@ class CertifyConfig:
     keep_aligned_chunks: bool       # keep maplong_run/_tmp_results_aligned + _tmp_results_loop
                                     # after the scale (the post-hoc graph, the A/B harness and
                                     # the certification loop read them)
+    max_iters: int
+    eps: float                      # relative objective improvement below this → converged
+    auto_after_segmentation: bool
+    objective: ObjectiveWeights
+    gates: CertifyGates
+    scale: CertifyScale
+    visit_loops: VisitLoopsConfig
+    known_answer: KnownAnswerConfig
+    envelope: EnvelopeConfig
+    determinism: DeterminismConfig
 
 
 @dataclass(frozen=True)
@@ -270,6 +417,7 @@ class MetricGraphConfig:
     authority: AuthorityConfig
     structural: StructuralConfig
     certify: CertifyConfig
+    witness: WitnessConfig
 
 
 def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig:
@@ -508,11 +656,157 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
     ce = raw.get("certify")
     if not isinstance(ce, dict):
         raise LoopsConfigError("config section certify is missing")
-    certify = CertifyConfig(
-        ensemble_offset_frames=_num(ce, "ensemble_offset_frames", "certify", lo=0, integer=True),
-        keep_aligned_chunks=_bool(ce, "keep_aligned_chunks", "certify"))
+    certify = _parse_certify(ce)
+    wi = raw.get("witness")
+    if not isinstance(wi, dict):
+        raise LoopsConfigError("config section witness is missing")
+    witness = _parse_witness(wi)
     return MetricGraphConfig(loop=loop, loops=loops, scale=scale, graph=graph,
-                             authority=authority, structural=structural, certify=certify)
+                             authority=authority, structural=structural, certify=certify,
+                             witness=witness)
+
+
+def _sub(section, key, path) -> Dict[str, Any]:
+    v = _require(section, key, path)
+    if not isinstance(v, dict):
+        raise LoopsConfigError(f"config section {path}.{key} must be a mapping")
+    return v
+
+
+def _num_list(section, key, path, lo=None) -> Tuple[float, ...]:
+    v = _require(section, key, path)
+    if not isinstance(v, (list, tuple)) or not v or not all(
+            isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+        raise LoopsConfigError(f"config key {path}.{key} must be a non-empty list of numbers")
+    if lo is not None and any(x < lo for x in v):
+        raise LoopsConfigError(f"config key {path}.{key} must be ≥ {lo} everywhere")
+    return tuple(float(x) for x in v)
+
+
+def _parse_witness(wi: Dict[str, Any]) -> WitnessConfig:
+    from reconstruction.witness.status import STATUS_CODES
+    P = "witness"
+    ru = _sub(wi, "rules", P)
+    rules = WitnessRules(
+        verified_min_mv_votes=_num(ru, "verified_min_mv_votes", P + ".rules", lo=1, integer=True),
+        verified_max_mask_conflicts=_num(ru, "verified_max_mask_conflicts", P + ".rules", lo=0, integer=True),
+        conflict_min=_num(ru, "conflict_min", P + ".rules", lo=1, integer=True))
+    tr = _sub(wi, "tracks", P)
+    T = P + ".tracks"
+    tracks = TracksConfig(
+        enabled=_bool(tr, "enabled", T), python=str(_require(tr, "python", T)),
+        win=_num(tr, "win", T, lo=2, integer=True), stride=_num(tr, "stride", T, lo=1, integer=True),
+        loop_window=_num(tr, "loop_window", T, lo=1, integer=True),
+        min_views=_num(tr, "min_views", T, lo=2, integer=True),
+        reproj_max_px=_num(tr, "reproj_max_px", T, lo=0, lo_excl=True),
+        sigma_rel=_num(tr, "sigma_rel", T, lo=0, lo_excl=True),
+        min_obs_per_frame=_num(tr, "min_obs_per_frame", T, lo=1, integer=True),
+        depth_edge_tol_rel=_num(tr, "depth_edge_tol_rel", T, lo=0, lo_excl=True))
+    co = _sub(wi, "contours", P)
+    C = P + ".contours"
+    contours = ContourConfig(
+        enabled=_bool(co, "enabled", C), min_gradient=_num(co, "min_gradient", C, lo=0),
+        samples_per_instance=_num(co, "samples_per_instance", C, lo=1, integer=True),
+        search_rel=_num(co, "search_rel", C, lo=0, lo_excl=True, hi=0.9),
+        search_steps=_num(co, "search_steps", C, lo=3, integer=True),
+        sigma_rel=_num(co, "sigma_rel", C, lo=0, lo_excl=True))
+    de = _sub(wi, "depth", P)
+    D = P + ".depth"
+    depth = DepthStageConfig(
+        pair_offsets=tuple(int(x) for x in _num_list(de, "pair_offsets", D, lo=1)),
+        pair_samples=_num(de, "pair_samples", D, lo=100, integer=True),
+        holdout_fraction=_num(de, "holdout_fraction", D, lo=0, hi=0.9, lo_excl=True),
+        min_pairs=_num(de, "min_pairs", D, lo=1, integer=True),
+        improve=_num(de, "improve", D, lo=0, hi=1.0, lo_excl=True),
+        bound=_num(de, "bound", D, lo=1.0), zref_m=_num(de, "zref_m", D, lo=0, lo_excl=True),
+        scale_only=_bool(de, "scale_only", D),
+        pair_sigma_floor_rel=_num(de, "pair_sigma_floor_rel", D, lo=0, lo_excl=True),
+        refine_iters=_num(de, "refine_iters", D, lo=1, integer=True),
+        prior_sigma_rel=_num(de, "prior_sigma_rel", D, lo=0, lo_excl=True),
+        pair_scatter_clip_sigma=_num(de, "pair_scatter_clip_sigma", D, lo=1.0))
+    clean = _str_list(wi, "clean_statuses", P)
+    mls = _str_list(wi, "mls_excluded_statuses", P)
+    for name in clean + mls:
+        if name not in STATUS_CODES:
+            raise LoopsConfigError(f"witness status {name!r} unknown (one of {sorted(STATUS_CODES)})")
+    return WitnessConfig(
+        n_neighbors=_num(wi, "n_neighbors", P, lo=1, integer=True),
+        tau_rel=_num(wi, "tau_rel", P, lo=0, lo_excl=True),
+        cpu_threads=_num(wi, "cpu_threads", P, lo=1, integer=True),
+        at_merge=_bool(wi, "at_merge", P),
+        mask_erosion_px=_num(wi, "mask_erosion_px", P, lo=0, integer=True),
+        occlusion_tol_rel=_num(wi, "occlusion_tol_rel", P, lo=0),
+        rules=rules, clean_statuses=clean, mls_excluded_statuses=mls,
+        tracks=tracks, contours=contours, depth=depth)
+
+
+def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
+    P = "certify"
+    ow = _sub(ce, "objective_weights", P)
+    O = P + ".objective_weights"
+    objective = ObjectiveWeights(
+        loop_residual_m=_num(ow, "loop_residual_m", O, lo=0), seam_residual_m=_num(ow, "seam_residual_m", O, lo=0),
+        closure_m=_num(ow, "closure_m", O, lo=0),
+        depth_disagreement_frac=_num(ow, "depth_disagreement_frac", O, lo=0),
+        duplicates=_num(ow, "duplicates", O, lo=0))
+    ga = _sub(ce, "gates", P)
+    G = P + ".gates"
+    gates = CertifyGates(
+        max_seam_degradation_m=_num(ga, "max_seam_degradation_m", G, lo=0),
+        max_loop_residual_increase_m=_num(ga, "max_loop_residual_increase_m", G, lo=0),
+        max_depth_disagreement_increase=_num(ga, "max_depth_disagreement_increase", G, lo=0),
+        max_verified_drop_frac=_num(ga, "max_verified_drop_frac", G, lo=0, hi=1.0),
+        duplicates_must_not_increase=_bool(ga, "duplicates_must_not_increase", G))
+    sc = _sub(ce, "scale", P)
+    S = P + ".scale"
+    scale = CertifyScale(
+        sigma_loop_min_log=_num(sc, "sigma_loop_min_log", S, lo=0, lo_excl=True),
+        sigma_seam_log=_num(sc, "sigma_seam_log", S, lo=0, lo_excl=True),
+        sigma_anchor_log=_num(sc, "sigma_anchor_log", S, lo=0, lo_excl=True),
+        min_copy_points=_num(sc, "min_copy_points", S, lo=10, integer=True),
+        max_copy_residual_m=_num(sc, "max_copy_residual_m", S, lo=0, lo_excl=True),
+        icp_iters=_num(sc, "icp_iters", S, lo=1, integer=True),
+        icp_trim=_num(sc, "icp_trim", S, lo=0.1, hi=1.0),
+        max_correction_log=_num(sc, "max_correction_log", S, lo=0, lo_excl=True))
+    vl = _sub(ce, "visit_loops", P)
+    V = P + ".visit_loops"
+    visit_loops = VisitLoopsConfig(
+        sigma_floor_m=_num(vl, "sigma_floor_m", V, lo=0, lo_excl=True),
+        unobserved_sigma_m=_num(vl, "unobserved_sigma_m", V, lo=0, lo_excl=True),
+        unobserved_sigma_deg=_num(vl, "unobserved_sigma_deg", V, lo=0, lo_excl=True),
+        window_kf=_num(vl, "window_kf", V, lo=1, integer=True))
+    ka = _sub(ce, "known_answer", P)
+    K = P + ".known_answer"
+    chunk = str(_require(ka, "chunk", K))
+    if chunk not in ("first", "middle", "last") and not chunk.lstrip("-").isdigit():
+        raise LoopsConfigError(f"{K}.chunk must be first|middle|last or a chunk index, got {chunk!r}")
+    known = KnownAnswerConfig(
+        chunk=chunk,
+        yaw_deg=_num(ka, "yaw_deg", K, lo=0), t_m=_num(ka, "t_m", K, lo=0),
+        scale=_num(ka, "scale", K, lo=0, lo_excl=True),
+        tol_t_m=_num(ka, "tol_t_m", K, lo=0, lo_excl=True), tol_deg=_num(ka, "tol_deg", K, lo=0, lo_excl=True),
+        tol_scale=_num(ka, "tol_scale", K, lo=0, lo_excl=True))
+    en = _sub(ce, "envelope", P)
+    E = P + ".envelope"
+    envelope = EnvelopeConfig(
+        levels_t_m=_num_list(en, "levels_t_m", E, lo=0),
+        levels_scale_pct=_num_list(en, "levels_scale_pct", E, lo=0),
+        loop_densities=_num_list(en, "loop_densities", E, lo=0))
+    if any(x > 1.0 for x in envelope.loop_densities):
+        raise LoopsConfigError("certify.envelope.loop_densities are fractions in (0, 1]")
+    dt = _sub(ce, "determinism", P)
+    Dm = P + ".determinism"
+    determinism = DeterminismConfig(
+        tol_m=_num(dt, "tol_m", Dm, lo=0), tol_frac=_num(dt, "tol_frac", Dm, lo=0),
+        seed=_num(dt, "seed", Dm, lo=0, integer=True))
+    return CertifyConfig(
+        ensemble_offset_frames=_num(ce, "ensemble_offset_frames", P, lo=0, integer=True),
+        keep_aligned_chunks=_bool(ce, "keep_aligned_chunks", P),
+        max_iters=_num(ce, "max_iters", P, lo=1, integer=True),
+        eps=_num(ce, "eps", P, lo=0),
+        auto_after_segmentation=_bool(ce, "auto_after_segmentation", P),
+        objective=objective, gates=gates, scale=scale, visit_loops=visit_loops,
+        known_answer=known, envelope=envelope, determinism=determinism)
 
 
 # ── fork-facing dicts ────────────────────────────────────────────────────────

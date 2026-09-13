@@ -282,11 +282,15 @@ def measure_region(session: CorrectionSession, early: List[int],
         "closure": ({"rot_deg": round(solve.rot_deg(R), 3),
                      "t_m": [round(float(x), 4) for x in t_full],
                      "t_norm_m": round(float(np.linalg.norm(t_full)), 4),
-                     "icp_rms_cm": round(rms * 100, 2)} if closure_ok else
+                     "icp_rms_cm": round(rms * 100, 2),
+                     "R": R.tolist(), "yaw_observed": bool(full)} if closure_ok else
                     {"why": "ICP did not reduce the offset — closure not "
                             "trusted (partial coverage / structureless)"}),
         "shape": shape.shape,
         "eig_ratios": [round(float(x), 4) for x in shape.eig_ratios],
+        # the observed direction (consumers weigh the closure per DOF)
+        "normal": (shape.normal.tolist() if shape.normal is not None else None),
+        "axis": (shape.axis.tolist() if shape.axis is not None else None),
         "observes": ("yaw+t" if full else
                      "t along normal only" if shape.shape == obs_mod.SHAPE_PLANAR
                      else "t across the axis only"),

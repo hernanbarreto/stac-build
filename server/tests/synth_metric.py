@@ -557,7 +557,8 @@ def raw_server_cfg(**over) -> dict:
         "correction_graph": {"loop": lp, "graph": fork_graph_cfg()},
         "authority": fork_authority_cfg(),
         "structural": structural_cfg(),
-        "certify": {"ensemble_offset_frames": 0, "keep_aligned_chunks": True},
+        "certify": certify_cfg(),
+        "witness": witness_cfg(),
         "loops": {"min_gap_keyframes": 30, "duplicate_min_sep_m": 0.20, "dbscan_eps_m": 0.15,
                   "dbscan_min_samples": 20, "cluster_min_points": 300, "bridge_extra_frames": 4,
                   "coverage_radius_m": 5.0, "min_coverage": 0.5,
@@ -678,4 +679,349 @@ def write_session_dir(root: Path, sess: Session, instances: Dict[int, dict],
          "mask_file": "seg_masks.npz"}))
     np.savez_compressed(out / "seg_masks.npz", **masks)
     (out / ".orientation_applied").write_text("synthetic\n")
+    # the DA3 anchors (scale_align's diagnostics): every keyframe an anchor
+    # agreeing with the applied metre — the absolute reference the post-hoc
+    # scale graph checks a chunk against (a scale error injected later shows
+    # up as an agreement ratio ≠ 1 once the sidecar is regenerated)
+    (out / "scale_diagnostics.json").write_text(json.dumps(
+        {"version": 2, "s_applied": 1.0, "source": "synthetic",
+         "anchors": {"count": int(N), "mad_rel": 0.0, "spread": 0.0,
+                     "frames": [{"num": int(sess.frame_numbers[g]), "s_f": 1.0, "n_px": int(H * W)}
+                                for g in range(N)], "s_over_walk": []},
+         "scale_confidence": 1.0}, indent=1))
     return root
+
+
+# ── F3: witnesses, depth by tracks, certification (claude_stac.txt §6, §8–§10) ──
+
+def witness_cfg(**over) -> dict:
+    """Mirror of config.yaml ``witness:`` (every key present)."""
+    d = {"n_neighbors": 4, "tau_rel": 0.02, "cpu_threads": 8, "at_merge": True, "mask_erosion_px": 1,
+         "occlusion_tol_rel": 0.05,
+         "rules": {"verified_min_mv_votes": 2, "verified_max_mask_conflicts": 1, "conflict_min": 1},
+         "clean_statuses": ["verified", "unobserved"],
+         "mls_excluded_statuses": ["mask_conflict", "single_witness"],
+         "tracks": {"enabled": True, "python": "python", "win": 24, "stride": 12, "loop_window": 8,
+                    "min_views": 2, "reproj_max_px": 2.0, "sigma_rel": 0.01, "min_obs_per_frame": 20,
+                    "depth_edge_tol_rel": 0.05},
+         "contours": {"enabled": True, "min_gradient": 20.0, "samples_per_instance": 64,
+                      "search_rel": 0.15, "search_steps": 31, "sigma_rel": 0.02},
+         "depth": {"pair_offsets": [1, 2, 3, 5, 8], "pair_samples": 8000, "holdout_fraction": 0.25,
+                   "min_pairs": 10, "improve": 0.8, "bound": 5.0, "zref_m": 5.0, "scale_only": False,
+                   "pair_sigma_floor_rel": 0.002, "refine_iters": 2, "prior_sigma_rel": 0.005,
+                   "pair_scatter_clip_sigma": 5.0}}
+    d.update(over)
+    return d
+
+
+def certify_cfg(**over) -> dict:
+    """Mirror of config.yaml ``certify:``."""
+    d = {"ensemble_offset_frames": 0, "keep_aligned_chunks": True,
+         "max_iters": 3, "eps": 0.05, "auto_after_segmentation": True,
+         "objective_weights": {"loop_residual_m": 1.0, "seam_residual_m": 1.0, "closure_m": 1.0,
+                               "depth_disagreement_frac": 5.0, "duplicates": 0.1},
+         "gates": {"max_seam_degradation_m": 0.005, "max_loop_residual_increase_m": 0.005,
+                   "max_depth_disagreement_increase": 0.001, "max_verified_drop_frac": 0.05,
+                   "duplicates_must_not_increase": True},
+         "scale": {"sigma_loop_min_log": 0.01, "sigma_seam_log": 0.02, "sigma_anchor_log": 0.03,
+                   "min_copy_points": 300, "max_copy_residual_m": 0.05, "icp_iters": 30,
+                   "icp_trim": 0.8, "max_correction_log": 0.2},
+         "visit_loops": {"sigma_floor_m": 0.01, "unobserved_sigma_m": 5.0, "unobserved_sigma_deg": 30.0,
+                         "window_kf": 15},
+         "known_answer": {"chunk": "last", "yaw_deg": 1.0, "t_m": 0.20, "scale": 1.03, "tol_t_m": 0.05,
+                          "tol_deg": 0.30, "tol_scale": 0.01},
+         "envelope": {"levels_t_m": [0.1, 0.2, 0.4, 0.8, 1.6], "levels_scale_pct": [1, 2, 5, 10, 20],
+                      "loop_densities": [1.0, 0.5, 0.25]},
+         "determinism": {"tol_m": 1.0e-4, "tol_frac": 0.01, "seed": 0}}
+    d.update(over)
+    return d
+
+
+def copy_session(sess: Session) -> Session:
+    """A deep copy of the arrays (fixtures are shared; injections never leak)."""
+    return Session(sess.scene, sess.poses.copy(), sess.K.copy(), sess.H, sess.W,
+                   sess.depth.copy(), sess.oid.copy(), sess.points.copy(),
+                   sess.frame_numbers.copy())
+
+
+def _pixel_dirs(sess: Session, rows, cols) -> np.ndarray:
+    K = sess.K
+    return np.stack([(np.asarray(cols) - K[0, 2]) / K[0, 0],
+                     (np.asarray(rows) - K[1, 2]) / K[1, 1], np.ones(len(rows))], -1)
+
+
+def inject_floaters(sess: Session, n: int = 200, seed: int = 0, factor=(0.35, 0.7),
+                    margin: int = 4, oids: Optional[Sequence[int]] = None
+                    ) -> Tuple[Session, np.ndarray]:
+    """``n`` random valid pixels of the depth maps become FLOATERS: the depth
+    turns into factor × the surface depth (a blob in mid-air on the ray) and
+    the point moves with it — cloud and per-frame depth stay consistent, the
+    way a real floater is born. ``oids`` restricts the pixels to those scene
+    objects. Returns (session copy, (n,3) [kf, row, col])."""
+    s = copy_session(sess)
+    rng = np.random.default_rng(seed)
+    picks = []
+    while len(picks) < n:
+        g = int(rng.integers(0, s.n_kf))
+        r = int(rng.integers(margin, s.H - margin)); c = int(rng.integers(margin, s.W - margin))
+        if s.depth[g, r, c] <= 0:
+            continue
+        if oids is not None and int(s.oid[g, r, c]) not in set(int(o) for o in oids):
+            continue
+        f = float(rng.uniform(*factor))
+        z = float(s.depth[g, r, c]) * f
+        d = _pixel_dirs(s, [r], [c])[0]
+        T = s.poses[g]
+        s.depth[g, r, c] = z
+        s.points[g, r, c] = T[:3, 3] + (T[:3, :3] @ d) * z
+        picks.append((g, r, c))
+    return s, np.asarray(picks, np.int64)
+
+
+def apply_depth_affine(sess: Session, affine_by_kf: Dict[int, Tuple[float, float]]) -> Session:
+    """z' = a·z + b on a keyframe's depth map and its points along their rays
+    (a per-frame depth-field error, consistent between cloud and depth)."""
+    s = copy_session(sess)
+    for g, (a, b) in affine_by_kf.items():
+        valid = s.depth[g] > 0
+        z = s.depth[g]
+        z2 = np.where(valid, a * z + b, 0.0)
+        T = s.poses[g]
+        ratio = np.where(valid, z2 / np.where(valid, z, 1.0), 1.0)
+        s.points[g] = T[:3, 3] + (s.points[g] - T[:3, 3]) * ratio[..., None]
+        s.depth[g] = z2
+    return s
+
+
+def write_aligned_chunks(root: Path, sess: Session, chunk_size: int = 60, overlap: int = 30,
+                         drift_by_kf: Optional[np.ndarray] = None) -> Path:
+    """The per-keyframe depth store the production witnesses read:
+    output/maplong_run/_tmp_results_aligned/chunk_K.npy dicts (depth,
+    intrinsic, world_points, world_points_conf, extrinsic = world w2c 3x4),
+    chunk_plan.json, chunk_000_meta.json (chunk_step) and maplong_run/
+    frame_list.json — from the session's (possibly corrupted) depth maps."""
+    root = Path(root)
+    out = root / "output"
+    run = out / "maplong_run"
+    al = run / "_tmp_results_aligned"
+    al.mkdir(parents=True, exist_ok=True)
+    ci = chunk_ranges(sess.n_kf, chunk_size, overlap)
+    for k, (a, b) in enumerate(ci):
+        S = b - a
+        dep = np.zeros((S, sess.H, sess.W), np.float32)
+        wp = np.zeros((S, sess.H, sess.W, 3), np.float32)
+        conf = np.zeros((S, sess.H, sess.W), np.float32)
+        ext = np.zeros((S, 3, 4), np.float64)
+        for li, g in enumerate(range(a, b)):
+            valid = sess.depth[g] > 0
+            P = sess.points[g]
+            pose = sess.poses[g]
+            if drift_by_kf is not None:
+                D = drift_by_kf[g]
+                P = P @ D[:3, :3].T + D[:3, 3]
+                pose = D @ pose
+            dep[li] = np.where(valid, sess.depth[g], 0.0)
+            wp[li] = np.where(valid[..., None], P, 0.0)
+            conf[li] = valid.astype(np.float32)
+            ext[li] = np.linalg.inv(pose)[:3]
+        np.save(al / f"chunk_{k}.npy", {"depth": dep, "intrinsic": np.tile(sess.K[None], (S, 1, 1)),
+                                        "world_points": wp, "world_points_conf": conf,
+                                        "extrinsic": ext})
+    names = [f"{int(x):06d}.jpg" for x in sess.frame_numbers]
+    (run / "frame_list.json").write_text(json.dumps(names))
+    (out / "chunk_plan.json").write_text(json.dumps(
+        {"version": 1, "phase": "synthetic", "n_keyframes": int(sess.n_kf),
+         "chunk_size": int(chunk_size), "overlap": int(overlap),
+         "chunk_ranges": [[int(a), int(b)] for a, b in ci], "walk_m": None}, indent=1))
+    (out / "chunk_000_meta.json").write_text(json.dumps(
+        {"chunk_id": 0, "source_chunk": 0, "n_points": 0, "chunk_step": int(chunk_size - overlap)}))
+    return al
+
+
+def write_images(root: Path, sess: Session, seed: int = 0) -> Path:
+    """frames/<name>.jpg: one flat colour per scene object (sharp contours at
+    every object boundary — the contour witness's input)."""
+    import cv2
+    root = Path(root)
+    fd = root / "frames"
+    fd.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    n_oid = int(sess.oid.max()) + 1
+    lut = rng.integers(40, 230, size=(n_oid + 1, 3)).astype(np.uint8)
+    lut[0] = 0
+    for g in range(sess.n_kf):
+        img = lut[np.clip(sess.oid[g], 0, n_oid)]
+        cv2.imwrite(str(fd / f"{int(sess.frame_numbers[g]):06d}.jpg"), img,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 98])
+    return fd
+
+
+def synthetic_tracks(root: Path, sess: Session, win: int = 24, stride: int = 12,
+                     loop_pairs: Sequence[Tuple[int, int]] = (), per_frame: int = 40,
+                     loop_window: int = 8, seed: int = 0) -> Path:
+    """output/ba_run/tracks.npz in vggt_tracks' layout from EXACT scene
+    correspondences: query pixels of a window's first keyframe, their GT 3-D
+    point projected into every keyframe of the window where it is visible
+    (depth test). Loop pairs get their own window (both sides)."""
+    root = Path(root)
+    rng = np.random.default_rng(seed)
+    n = sess.n_kf
+    windows = []
+    s = 0
+    while True:
+        e = min(s + win, n)
+        windows.append(list(range(s, e)))
+        if e >= n:
+            break
+        s += stride
+    for i, j in loop_pairs:
+        h = loop_window // 2
+        wi = [k for k in range(max(0, i - h), min(n, i + h + 1))]
+        wj = [k for k in range(max(0, j - h), min(n, j + h + 1))]
+        windows.append(sorted(set(wi + wj)))
+    K = sess.K
+    t_id, t_frame, t_uv = [], [], []
+    q_frame, q_uv = [], []
+    tid = 0
+    for wnd in windows:
+        q = wnd[0]
+        valid = np.argwhere(sess.depth[q] > 0)
+        if len(valid) == 0:
+            continue
+        pick = valid[rng.choice(len(valid), min(per_frame, len(valid)), replace=False)]
+        for r, c in pick:
+            P = sess.points[q, r, c]
+            obs = []
+            for f in wnd:
+                w2c = np.linalg.inv(sess.poses[f])
+                X = w2c[:3, :3] @ P + w2c[:3, 3]
+                if X[2] <= 0.05:
+                    continue
+                u = K[0, 0] * X[0] / X[2] + K[0, 2]
+                v = K[1, 1] * X[1] / X[2] + K[1, 2]
+                ui, vi = int(round(u)), int(round(v))
+                if not (0 <= ui < sess.W and 0 <= vi < sess.H):
+                    continue
+                d = sess.depth[f, vi, ui]
+                if d <= 0 or abs(d - X[2]) > 0.01 * X[2]:
+                    continue      # occluded (or off the surface) in this view
+                obs.append((f, u, v))
+            if len(obs) < 2:
+                continue
+            for f, u, v in obs:
+                t_id.append(tid); t_frame.append(int(sess.frame_numbers[f])); t_uv.append((u, v))
+            q_frame.append(int(sess.frame_numbers[q])); q_uv.append((float(c), float(r)))
+            tid += 1
+    ba = root / "output" / "ba_run"
+    ba.mkdir(parents=True, exist_ok=True)
+    p = ba / "tracks.npz"
+    np.savez_compressed(p, obs_track=np.asarray(t_id, np.int64), obs_frame=np.asarray(t_frame, np.int64),
+                        obs_uv=np.asarray(t_uv, np.float32).reshape(-1, 2),
+                        obs_vis=np.ones(len(t_id), np.float32), obs_score=np.ones(len(t_id), np.float32),
+                        track_query_frame=np.asarray(q_frame, np.int64),
+                        track_query_uv=np.asarray(q_uv, np.float32).reshape(-1, 2),
+                        meta=np.asarray([sess.H, sess.W], np.int64))
+    return p
+
+
+def leak_mask(out_dir: Path, from_iid: int, to_iid: int, px: int = 20) -> int:
+    """Corrupt seg_masks.npz the way a SAM3 leak does: instance ``from_iid``'s
+    mask grows by ``px`` over ``to_iid``'s pixels and ``to_iid`` loses them,
+    in every keyframe where both appear. Returns the number of leaked
+    pixels."""
+    from scipy.ndimage import binary_dilation
+    p = Path(out_dir) / "seg_masks.npz"
+    z = np.load(p)
+    masks = {k: z[k] for k in z.files}
+    a_suf, b_suf = f"_o{int(from_iid) - 1}", f"_o{int(to_iid) - 1}"
+    leaked = 0
+    for key in list(masks):
+        if not key.endswith(a_suf) or not key.startswith("f"):
+            continue
+        kb = key[:key.index("_o")] + b_suf
+        if kb not in masks:
+            continue
+        A = masks[key].astype(bool); B = masks[kb].astype(bool)
+        grown = binary_dilation(A, iterations=int(px)) & B
+        masks[key] = (A | grown).astype(np.uint8)
+        masks[kb] = (B & ~grown).astype(np.uint8)
+        leaked += int(grown.sum())
+    np.savez_compressed(p, **masks)
+    return leaked
+
+
+# ── adversarial scenes and trajectories (§10.12) ─────────────────────────────
+
+def hall_scene(nx: int = 4, nz: int = 3, pitch_m: float = 6.0, ceiling_h: float = 4.0,
+               radius: float = 0.3) -> Scene:
+    """A symmetric hall: a floor, a ceiling, four walls and a REGULAR grid of
+    identical columns — every column looks like every other one (the
+    identity trap of §4.5)."""
+    sc = Scene()
+    hx, hz = nx * pitch_m / 2.0 + 3.0, nz * pitch_m / 2.0 + 3.0
+    sc.add(Plane(np.array([0.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]),
+                 np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]), hx, hz, 1, "floor"))
+    sc.add(Plane(np.array([0.0, ceiling_h, 0.0]), np.array([0.0, -1.0, 0.0]),
+                 np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]), hx, hz, 2, "ceiling"))
+    wall(sc, [hx, 0, 0], [-1, 0, 0], [0, 0, 1], hz, ceiling_h / 2, 3)
+    wall(sc, [-hx, 0, 0], [1, 0, 0], [0, 0, 1], hz, ceiling_h / 2, 4)
+    wall(sc, [0, 0, hz], [0, 0, -1], [1, 0, 0], hx, ceiling_h / 2, 5)
+    wall(sc, [0, 0, -hz], [0, 0, 1], [1, 0, 0], hx, ceiling_h / 2, 6)
+    oid = 7
+    for i in range(nx):
+        for j in range(nz):
+            x = -(nx - 1) * pitch_m / 2.0 + i * pitch_m
+            z = -(nz - 1) * pitch_m / 2.0 + j * pitch_m
+            sc.add(Cylinder(np.array([x, 0.0, z]), radius, ceiling_h, oid, "column"))
+            oid += 1
+    return sc
+
+
+def hall_trajectory(n_kf: int, nx: int = 4, nz: int = 3, pitch_m: float = 6.0, y: float = 1.5,
+                    yaw_offset_deg: float = 30.0) -> np.ndarray:
+    """A serpentine through the column grid, returning past the start."""
+    xs = [-(nx - 1) * pitch_m / 2.0 - pitch_m / 2.0 + i * pitch_m for i in range(nx + 1)]
+    z0, z1 = -(nz - 1) * pitch_m / 2.0 - pitch_m / 2.0, (nz - 1) * pitch_m / 2.0 + pitch_m / 2.0
+    way = []
+    for i, x in enumerate(xs):
+        way.append((x, z0 if i % 2 == 0 else z1))
+        way.append((x, z1 if i % 2 == 0 else z0))
+    way.append(way[0])
+    seg = []
+    for a, b in zip(way[:-1], way[1:]):
+        seg.append((np.asarray(a, np.float64), np.asarray(b, np.float64)))
+    total = sum(np.linalg.norm(b - a) for a, b in seg)
+    s = np.linspace(0.0, total, n_kf, endpoint=False)
+    poses = []
+    a_ = np.radians(yaw_offset_deg)
+    Ry = np.array([[np.cos(a_), 0, np.sin(a_)], [0, 1, 0], [-np.sin(a_), 0, np.cos(a_)]])
+    for si in s:
+        d = si
+        for a, b in seg:
+            L = np.linalg.norm(b - a)
+            if d <= L:
+                p = a + (b - a) * (d / L)
+                fwd = np.array([(b - a)[0], 0.0, (b - a)[1]]) / L
+                poses.append(look_c2w((p[0], y, p[1]), Ry @ fwd))
+                break
+            d -= L
+    return np.stack(poses)
+
+
+def rotation_only_trajectory(n_kf: int, pos=(0.0, 1.5, -5.5), sweep_deg: float = 120.0) -> np.ndarray:
+    """A tripod-like stretch: the camera turns in place (no parallax)."""
+    poses = []
+    for k in range(n_kf):
+        a = np.radians(-sweep_deg / 2 + sweep_deg * k / max(n_kf - 1, 1))
+        poses.append(look_c2w(pos, (np.sin(a), 0.0, np.cos(a))))
+    return np.stack(poses)
+
+
+def static_trajectory(n_kf: int, pos=(0.0, 1.5, -5.5), forward=(1.0, 0.0, 0.0)) -> np.ndarray:
+    """A still stretch: identical poses (the operator stopped)."""
+    return np.stack([look_c2w(pos, forward) for _ in range(n_kf)])
+
+
+def with_stretch(poses: np.ndarray, extra: np.ndarray, at: int) -> np.ndarray:
+    """Insert ``extra`` poses into a trajectory at index ``at``."""
+    return np.concatenate([poses[:at], extra, poses[at:]])

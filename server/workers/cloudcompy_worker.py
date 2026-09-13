@@ -84,6 +84,15 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         max_points = postproc.get("max_points", 0)
         if max_points > 0:
             cmd.extend(["--max-points", str(max_points)])
+        # claude_stac.txt §6: witnesses before the net (GPU path; validated config)
+        import sys as _sys
+        _srv = str(Path(__file__).resolve().parent.parent)
+        if _srv not in _sys.path:
+            _sys.path.insert(0, _srv)
+        from reconstruction.loops.config import load_loops_config as _llc
+        _wcfg = _llc(config).witness
+        if bool(postproc.get("gpu_clean", True)) and _wcfg.at_merge:
+            cmd.append("--witness")
         for flag in ("skip_duplicates", "skip_sor", "skip_noise", "skip_normals"):
             if postproc.get(flag, False):
                 cmd.append(f"--{flag.replace('_', '-')}")
@@ -211,6 +220,7 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
                 if server_dir_str not in sys.path:
                     sys.path.insert(0, server_dir_str)
                 from reconstruction.surface_fit.consolidate import scene_consolidate
+                from reconstruction.loops.config import load_loops_config as _llc2
                 stats = scene_consolidate(
                     output_dir,
                     radius_m=sc_cfg.get("radius_m"),
@@ -218,6 +228,7 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
                     max_radius_m=float(sc_cfg.get("max_radius_m", 0.06)),
                     iterations=int(sc_cfg.get("iterations", 2)),
                     normal_gate=float(sc_cfg.get("normal_gate", 0.25)),
+                    excluded_statuses=_llc2(config).witness.mls_excluded_statuses,
                 )
                 if stats:
                     pipe.send_log(

@@ -135,6 +135,12 @@ def ledger_view(output_dir) -> List[dict]:
     return view
 
 
+def pending_runs(output_dir) -> List[dict]:
+    """Every run still awaiting a verdict, oldest first (the certification
+    loop leaves one pending epoch per iteration — a chain)."""
+    return [row for row in ledger_view(output_dir) if row["verdict"] == "pending"]
+
+
 def pending_run(output_dir) -> Optional[dict]:
     for row in reversed(ledger_view(output_dir)):
         if row["verdict"] == "pending":
@@ -144,13 +150,15 @@ def pending_run(output_dir) -> Optional[dict]:
 
 def save_epoch_npz(output_dir, epoch: int, R_kf: np.ndarray,
                    t_kf: np.ndarray, k_kf: np.ndarray,
-                   frames: List[int], dir_override: Optional[Path] = None
-                   ) -> Path:
+                   frames: List[int], dir_override: Optional[Path] = None,
+                   b_kf: Optional[np.ndarray] = None) -> Path:
     d = (Path(dir_override) if dir_override
          else Path(output_dir) / EPOCH_NPZ_DIR)
     d.mkdir(parents=True, exist_ok=True)
     p = d / f"epoch_{int(epoch)}.npz"
-    np.savez(p, R_kf=R_kf, t_kf=t_kf, k_kf=k_kf,
+    b = (np.asarray(b_kf, np.float64) if b_kf is not None
+         else np.zeros(len(k_kf), np.float64))
+    np.savez(p, R_kf=R_kf, t_kf=t_kf, k_kf=k_kf, b_kf=b,
              frames=np.asarray(frames, dtype=np.int64))
     return p
 
@@ -163,4 +171,5 @@ def load_epoch_npz(output_dir, epoch: int) -> dict:
                            f"files removed by approve?)")
     d = np.load(p)
     return {"R_kf": d["R_kf"], "t_kf": d["t_kf"], "k_kf": d["k_kf"],
+            "b_kf": (d["b_kf"] if "b_kf" in d.files else np.zeros(len(d["k_kf"]))),
             "frames": [int(f) for f in d["frames"]]}

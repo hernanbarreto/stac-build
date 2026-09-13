@@ -211,6 +211,16 @@ def instance_candidates(session, inst: dict, cfg: MetricGraphConfig) -> List[Can
             if _bridging(pts, ca, cb, cfg.loops.dbscan_eps_m):
                 continue
             ka, kb = _median_kf(ks[ca]), _median_kf(ks[cb])
+            # a DUPLICATE is a revisit: the two clusters must come from
+            # keyframes at least min_gap_keyframes apart. Two clusters written
+            # by the SAME visit (a wall in two pieces past a doorway, a fused
+            # segmentation of two neighbours) are never a loop — an edge
+            # between adjacent keyframes closes nothing and, measured on
+            # partial pieces, demands a correction that is pure noise
+            # (certify smoke: 82↔81, 76↔76 vetoed at 1 m); they are pieces
+            # (same surface) or a split (the spatial gate says which)
+            if abs(int(ka) - int(kb)) < cfg.loops.min_gap_keyframes:
+                continue
             if ka >= kb:
                 cands.append(Candidate("duplicate", iid, label, i=ka, j=kb,
                                        idx_a=gi[ca], idx_b=gi[cb]))

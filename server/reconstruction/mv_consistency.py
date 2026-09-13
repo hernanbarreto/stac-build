@@ -148,6 +148,9 @@ def _load_keyframe_data(output_dir: Path, log) -> Dict[int, dict]:
     return frames
 
 
+load_keyframe_data = _load_keyframe_data   # public: the witnesses (§6.1) read the same sources
+
+
 def run(output_dir: Path, n_neighbors: int = 4, min_consistent_views: int = 2,
         tau_rel: float = 0.02, replace_median: bool = False,
         warn_discard_pct: float = 40.0, log=None, device=None,
