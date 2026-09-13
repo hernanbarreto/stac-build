@@ -1444,58 +1444,14 @@ def _run_da3_anchor(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     needed: the scale is a per-pixel depth RATIO, poses don't participate. Runs
     extract_da3_depth.py (--per_frame) and converts its output to the exact layout
     scale_align consumes: da3_run/results_output/frame_<num>.npz (depth + conf)."""
-    import numpy as np
-    server_dir = Path(__file__).resolve().parent.parent
-    tmp = output_dir / "_da3_anchor_frames"
-    if tmp.exists():
-        shutil.rmtree(tmp)
-    tmp.mkdir(parents=True)
-    for f in anchor_files:
-        src = frames_dir / f
-        if src.exists():
-            os.symlink(str(src), str(tmp / f))
-    raw = output_dir / "da3_run" / "anchor_raw"
+    from reconstruction.da3_anchor import extract_anchor_depths
     model_id = str((recon_cfg.get("da3", {}) or {}).get(
         "model_id", "depth-anything/DA3NESTED-GIANT-LARGE-1.1"))
-    cmd = [sys.executable, str(server_dir / "extract_da3_depth.py"),
-           "--image_dir", str(tmp), "--output_dir", str(raw),
-           "--model", model_id, "--per_frame"]
-    pipe.send_log(f"DA3 anchor: isolated per-frame depth on {len(anchor_files)} frames "
-                  f"({model_id}) — no streaming")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1)
-    for line in proc.stdout:
-        line = line.strip()
-        if line:
-            pipe.send_log(line)
-        if pipe.check_cancel():
-            proc.terminate()
-            return
-    proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError(f"DA3 anchor extraction exited with code {proc.returncode}")
-
-    ro = output_dir / "da3_run" / "results_output"
-    ro.mkdir(parents=True, exist_ok=True)
-    n = 0
-    for f in anchor_files:
-        stem = os.path.splitext(f)[0]
-        dp, cp = raw / f"{stem}_depth.npy", raw / f"{stem}_conf.npy"
-        if not dp.exists():
-            continue
-        num = int(stem)
-        arrays = {"depth": np.load(dp).astype(np.float32)}
-        if cp.exists():
-            arrays["conf"] = np.load(cp).astype(np.float32)
-        kp = raw / f"{stem}_intrinsics.npy"
-        if kp.exists():
-            arrays["intrinsics"] = np.load(kp).astype(np.float64)
-        np.savez_compressed(ro / f"frame_{num}.npz", **arrays)
-        n += 1
-    shutil.rmtree(tmp, ignore_errors=True)
+    n = extract_anchor_depths(frames_dir, output_dir, anchor_files, model_id,
+                              python=sys.executable, log=pipe.send_log,
+                              check_cancel=pipe.check_cancel)
     if n == 0:
-        raise RuntimeError("DA3 anchor produced no depth maps — scale cannot be estimated")
-    pipe.send_log(f"DA3 anchor: {n} metric depth maps → {ro}")
+        pipe.send_log("DA3 anchor extraction cancelled by user", level="warning")
 
 
 def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
@@ -1681,6 +1637,44 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             _va_cfg.get("depth_graph", False))
         cfg_v["Model"]["blend_copies"] = bool(
             _va_cfg.get("blend_copies", False))
+        # ── claude_stac.txt F1: exact loop bridges + closed scale graph ──
+        # loops:/scale:/correction_graph: are validated here (a missing key
+        # aborts naming it) and handed to the fork as Model.loops/Model.scale;
+        # the fork imports the spatial gate + the DA3 anchor extractor from
+        # stac_server_dir. Absolute scale rows (VIO per chunk, regulated
+        # dimensions, a user measurement) join the same solve.
+        from reconstruction.loops.config import (load_loops_config, fork_model_loops,
+                                                 fork_model_scale)
+        _mg = load_loops_config(config)
+        _server_dir = str(Path(__file__).resolve().parent.parent)
+        cfg_v["Model"]["loops"] = fork_model_loops(_mg, _server_dir)
+        cfg_v["Model"]["scale"] = fork_model_scale(_mg)
+        cfg_v["Model"]["metric_lock"]["anchor_extract"] = {
+            "python": sys.executable, "frames_dir": str(frames_dir),
+            "output_dir": str(output_dir),
+            "model_id": str((recon_cfg.get("da3", {}) or {}).get(
+                "model_id", "depth-anything/DA3NESTED-GIANT-LARGE-1.1"))}
+        _abs_path = output_dir / "scale_absolute_rows.json"
+        _abs_rows = []
+        if _abs_path.exists():
+            _abs_rows = list(json.loads(_abs_path.read_text()).get("rows", []))
+            pipe.send_log(f"[scale-graph] {len(_abs_rows)} absolute scale row(s) from "
+                          f"{_abs_path.name} enter the chunk scale graph")
+        cfg_v["Model"]["metric_lock"]["absolute_rows"] = _abs_rows
+        if bool(_va_cfg.get("scale_vio", True)):
+            from ingestors.vio_detector import detect_vio_data
+            _det = detect_vio_data(frames_dir.parent)
+            if _det["has_vio"]:
+                from reconstruction.vio_scale import video_fps
+                _fps = video_fps(frames_dir.parent)
+                if not _fps:
+                    raise RuntimeError("VIO present but the video fps could not be read — "
+                                       "VIO rows need a time base (docs/VIO_FORMAT.md)")
+                cfg_v["Model"]["metric_lock"]["vio"] = {
+                    "path": str(_det["vio_path"]), "fps": float(_fps),
+                    "min_coverage": float(_va_cfg.get("vio_min_coverage", 0.5))}
+                pipe.send_log(f"[scale-graph] VIO {_det['vio_path'].name} → per-chunk "
+                              f"absolute scale rows (σ {_mg.scale.sigma_vio})")
         _adj = [k for k in ("exact_seam_align", "frame_ownership",
                             "ownership_backfill", "elastic_seam", "intra_chunk",
                             "hybrid_da3", "depth_graph", "blend_copies")
@@ -1863,6 +1857,21 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 "metric scale alignment FAILED — scale_align could not estimate s. Refusing to "
                 "produce a NON-METRIC reconstruction (it can't be compared against BIM). See the "
                 "[scale-align] lines above for the exact reason (frame match / ratios / inputs).")
+        # claude_stac.txt §5.4: in chunked-metric mode the chunks are already
+        # locked, so scale_align is the VERIFIER — s ≈ 1 expected. A deviation
+        # beyond scale.verify_max_dev is a session failure, not a warning.
+        if tag == "chunked-metric":
+            from reconstruction.loops.config import load_loops_config
+            _vmax = load_loops_config(config).scale.verify_max_dev
+            _dev = abs(float(_s) - 1.0)
+            pipe.send_log(f"[scale-verify] chunked-metric residual s={float(_s):.4f} "
+                          f"(|s-1|={_dev:.4f}, limit {_vmax:g})")
+            if _dev > _vmax:
+                raise RuntimeError(
+                    f"scale VERIFICATION FAILED: the locked chunks disagree with the DA3/VIO "
+                    f"verifier by {_dev*100:.1f}% (> {_vmax*100:.0f}% = scale.verify_max_dev). "
+                    f"The scale graph (scale_graph.json / metric_lock.json) does not close — "
+                    f"session failure, not a warning.")
 
         # ── SIMPLE: bake the upright orientation (gravity from the camera poses) ──
         if _simple_on and bool(_simple_cfg.get("orient_from_poses", True)):

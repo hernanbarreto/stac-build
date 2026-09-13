@@ -1,0 +1,127 @@
+"""Instance class for loop evidence: structural | movable | dynamic (§4.4).
+
+Qwen (server/semantic) looks at an isolated crop of the instance in one of its
+keyframes and answers a JSON with the class — nothing else. It never moves a
+point: the class only decides whether an instance may PROPOSE a loop
+candidate (structural), is ignored (movable) or is excluded (dynamic), and
+feeds the per-session movable label list of the verifier. Classes are cached
+in the instance store (``scene_r.db`` meta ``loop_class_<iid>``), provenance
+``vlm_proposed``. When the VLM is unavailable the configured default class is
+recorded with provenance ``default`` — never silently structural.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+import numpy as np
+
+CLASSES = ("structural", "movable", "dynamic")
+
+_SYSTEM = ("You classify one object of a construction / infrastructure site for a "
+           "measurement system. Answer ONLY the JSON requested.")
+
+_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "class": {"type": "string", "enum": list(CLASSES)},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "why": {"type": "string"},
+    },
+    "required": ["class", "confidence"],
+}
+
+
+def _prompt(label: str) -> str:
+    return (f"The highlighted object was segmented with the label '{label}'. Classify it:\n"
+            f"- structural: fixed part of the building or infrastructure (wall, column, "
+            f"floor, ceiling, beam, platform, track, rail, duct, stair, fixed door frame)\n"
+            f"- movable: an object that can be moved between visits (cart, ladder, box, "
+            f"chair, table, tool, vehicle, door leaf)\n"
+            f"- dynamic: something moving during the capture (person, worker, machine "
+            f"in motion)\n"
+            f"Reply with JSON: {{\"class\": ..., \"confidence\": ..., \"why\": ...}}")
+
+
+def _mask_crop(output_dir: Path, session_dir: Path, iid: int, oid: Optional[int],
+               frames: List[int], crops: int):
+    """Isolated crops (image with the mask kept, background darkened) for up to
+    ``crops`` frames where the instance's mask is largest."""
+    from segmentation.shape_proposer import _load_frame_rgb, _isolated_crop
+    p = output_dir / "seg_masks.npz"
+    if oid is None or not p.exists():
+        return []
+    z = np.load(p, allow_pickle=True)
+    cand = []
+    for f in frames:
+        key = f"f{int(f)}_o{int(oid)}"
+        if key in z.files:
+            m = z[key]
+            cand.append((int(m.sum()), int(f), key))
+    cand.sort(reverse=True)
+    out = []
+    for _area, f, key in cand[:crops]:
+        img = _load_frame_rgb(session_dir, f)
+        if img is None:
+            continue
+        m = z[key]
+        mask_rgb = np.repeat((m > 0)[..., None], 3, axis=2).astype(np.uint8) * 255
+        try:
+            out.append(_isolated_crop(img, mask_rgb))
+        except Exception as e:  # noqa: BLE001 — a bad crop is skipped, the VLM sees the rest
+            print(f"[loop-class] crop failed for instance {iid} frame {f}: {e}")
+    return out
+
+
+def classify_instances(output_dir, session_dir, instances: List[dict], cfg,
+                       oid_of: Dict[int, Optional[int]], frames_of: Dict[int, List[int]],
+                       log: Callable[[str], None] = print) -> Dict[int, dict]:
+    """{instance_id: {class, confidence, provenance}} for every instance,
+    cached in the instance store. ``cfg`` = LoopsConfig.semantic."""
+    from phase_r.instance_store import InstanceStore
+    output_dir, session_dir = Path(output_dir), Path(session_dir)
+    store = InstanceStore(output_dir / "scene_r.db")
+    out: Dict[int, dict] = {}
+    client = None
+    if cfg.enabled:
+        try:
+            from semantic.client import get_semantic_client
+            client = get_semantic_client(consumer="loops.classify")
+            if not client.health().get("ok", True):
+                client = None
+        except Exception as e:  # noqa: BLE001 — declared below, never silent
+            log(f"[loop-class] semantic service unavailable ({e}) — default class "
+                f"'{cfg.default_class}' recorded for unclassified instances")
+            client = None
+    for inst in instances:
+        iid = int(inst.get("instance_id", inst.get("id")))
+        label = str(inst.get("label", "segment"))
+        cached = store.get_meta(f"loop_class_{iid}")
+        if cached:
+            try:
+                out[iid] = json.loads(cached)
+                continue
+            except json.JSONDecodeError:
+                pass
+        rec = {"class": cfg.default_class, "confidence": 0.0, "provenance": "default",
+               "label": label}
+        if client is not None:
+            crops = _mask_crop(output_dir, session_dir, iid, oid_of.get(iid),
+                               frames_of.get(iid, []), cfg.crops_per_instance)
+            if crops:
+                from segmentation.shape_proposer import _chat_json
+                from semantic.types import system, user
+                parsed, _raw = _chat_json(
+                    client, [system(_SYSTEM), user(_prompt(label), images=crops)],
+                    _SCHEMA, cfg.max_tokens, log=log)
+                if isinstance(parsed, dict) and parsed.get("class") in CLASSES:
+                    rec = {"class": str(parsed["class"]),
+                           "confidence": float(parsed.get("confidence", 0.0)),
+                           "why": str(parsed.get("why", "")), "provenance": "vlm_proposed",
+                           "label": label}
+        store.set_meta(f"loop_class_{iid}", json.dumps(rec))
+        out[iid] = rec
+        log(f"[loop-class] instance {iid} '{label}' → {rec['class']} ({rec['provenance']})")
+    return out

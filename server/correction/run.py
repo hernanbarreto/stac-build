@@ -365,6 +365,17 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
         f"{dist_report['knots']}")
     R_kf, t_kf = R_o, t_o
     dist_report["floor_constraint"] = floor_report
+    # claude_stac.txt §4.4 ("manual = misma arista"): every solved visit pair
+    # is also a loop candidate (source `manual`) for the exact-bridge machinery
+    # — the reference visit's middle keyframe and the displaced visit's anchor.
+    from reconstruction.loops.instance_loops import add_manual_candidate
+    manual_candidates = []
+    for sol in solutions:
+        add_manual_candidate(output_dir, int(sol["anchor_kf"]), ref_kf_mid,
+                             [int(i) for i in instance_ids], log=log)
+        manual_candidates.append([int(max(sol["anchor_kf"], ref_kf_mid)),
+                                  int(min(sol["anchor_kf"], ref_kf_mid))])
+    dist_report["manual_loop_candidates"] = manual_candidates
 
     # global gates --------------------------------------------------------
     g_plaus = gates.gate_plausibility(solutions, cfg)

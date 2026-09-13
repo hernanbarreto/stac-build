@@ -2068,3 +2068,98 @@ scan_fusion:
   runtime:
     workers: auto                 # never a fixed count (sched_setaffinity lesson)
     seed: 0
+
+# ── Loop closure evidence + closed scale graph (claude_stac.txt, 2026-09-13) ──
+# Consumed by server/reconstruction/loops/config.py (typed dataclasses, validated
+# at load; a missing/out-of-range key aborts naming it) and handed to the
+# VGGT-Long fork as Model.loops / Model.scale by workers/map_worker.py. Every
+# decision threshold of the loop machinery lives here — zero literals in code.
+correction_graph:
+  loop:                             # exact bridges + verification (§4.1/§4.2)
+    anchors_per_bridge: 3           # DA3 anchor frames planned INSIDE each bridge window
+                                    # (own metric lock; without them the bridge takes the
+                                    # scale graph's value for its parents — recorded)
+    max_edge_sigma_m: 0.05          # a pose edge whose exact residual σ exceeds this never
+                                    # enters the optimizer (the chain seams sit at mm–cm)
+    max_residual_m: 0.10            # geometric acceptance of a bridge fit (median residual
+                                    # of the exact correspondences on one side)
+    min_correspondences: 20000      # ...and at least this many exact correspondences per side
+    corr_per_frame: 20000           # exact correspondences kept per shared frame (equal voice)
+    fit_sample: 200000              # IRLS sample per fit (robust_rigid / robust_sim3)
+    scale_tol_log: 0.05             # |log s_ab| beyond ~5 % → scale_break: the edge is KEPT
+                                    # with σ inflated and the seams between the chunks flagged
+    scale_break_sigma_factor: 4.0
+    starved_sigma_m: 0.30           # σ recorded for the vendor point-map fallback (its
+                                    # measured tolerance is 25–30 cm) — low confidence, never
+                                    # silent, never in the optimizer (> max_edge_sigma_m)
+    ambiguous_sigma_factor: 3.0     # σ inflation when the spatial gate says 'ambiguous'
+    attention_verify: false         # §4.2.3 aggregator-token agreement — implemented, OFF
+                                    # until an A/B shows fewer false positives
+    attention_min_score: 0.5
+    movable_labels: [person, worker, cart, vehicle, ladder, box, chair, table, door,
+                     equipment, tool, persona, carro, escalera, caja, silla, mesa, puerta]
+    min_shared_structural_labels: 1 # semantic check when BOTH frames carry SAM3 instances
+    intra_chunk_loops: true         # candidates inside one chunk are pose edges for the
+                                    # keyframe graph (no scale row) — still bridged
+
+loops:                              # candidate detector + spatial gate (§4.4/§4.5/§4.9)
+  min_gap_keyframes: 30             # two windows of one instance this far apart = revisit
+  duplicate_min_sep_m: 0.20         # two disjoint 3-D clusters of one instance, centroids
+                                    # farther than this and no bridging points = duplicate
+  dbscan_eps_m: 0.15                # cluster split of an instance's points
+  dbscan_min_samples: 20
+  cluster_min_points: 300           # smaller clusters are noise, not a copy
+  bridge_extra_frames: 4            # §4.9 non-keyframe (blur-valid) frames added per bridge
+                                    # window — they densify the revisit, never join the chain
+  spatial:                          # §4.5 — SAM3/SALAD propose, geometry decides
+    drift_floor_m: 0.30             # δ(L) = max(floor, rate·L): measured Omega drift 1.3 cm/m
+    drift_rate_m_per_m: 0.013
+    drift_floor_deg: 2.0            # θ(L) = max(floor, rate·L)
+    drift_rate_deg_per_m: 0.10
+    identity_reject_factor: 3.0     # separation > factor·δ(L) is NOT drift → instance split
+    frustum_margin_px: 20.0
+    occlusion_tol_m: 0.30           # a copy farther than δ + this BEHIND the frame's own
+                                    # measured surface is occluded (inside the frustum, not
+                                    # visible — the block between two corridor legs)
+    min_depth_m: 0.3
+    max_depth_m: 15.0
+    min_frustum_frames: 2           # reciprocal visibility in ≥ this many frames per visit
+    frustum_window_kf: 3            # ± keyframes around each visit centre that are tested
+    frustum_points: 2000
+    min_visible_frac: 0.30          # fraction of the other copy's points inside the frustum
+    size_tol: 0.15                  # model dimensions of the two copies within 15 %
+    repetitive_labels: [column, pillar, columna, pilar, light, luminaire, luminaria,
+                        sign, señal, beam, viga, rail, riel]
+    min_context_instances: 1        # repetitive class in a corridor: neighbours that also pass
+    corridor_width_m: 3.0           # lateral extent of the walk below this = corridor
+    corridor_min_frustum_frames: 4  # SALAD pair inside a corridor: stricter reciprocity
+    dims_pct_lo: 5.0                # supported extents (percentile band along the copy's
+    dims_pct_hi: 95.0               # principal axes) compared by the size rule
+    same_surface_angle_deg: 10.0    # two disjoint clusters on ONE plane (normals within this,
+    same_surface_offset_m: 0.10     # plane offsets within this) or ONE axis are a single
+                                    # object with an unobserved middle (a wall past a doorway)
+                                    # — never a duplicate, never a fused identity
+    same_surface_planar_ratio: 0.05 # λ3/λ1 below this → planar cluster
+    same_surface_axis_ratio: 0.15   # λ2/λ1 below this → elongated cluster
+  semantic:                         # Qwen classifies instances structural|movable|dynamic
+    enabled: true                   # (§4.4) — it never touches geometry
+    max_tokens: 256
+    crops_per_instance: 1
+    default_class: movable          # class recorded when the VLM is unavailable (never counts
+                                    # as structural evidence)
+
+scale:                              # scale graph sources beyond DA3 + seams (§5)
+  sigma_loop: 0.005                 # σ (log) of an exact-bridge loop row — calibrated on the
+                                    # synthetic set (bridge Sim3 fits recover s_ab to ~0.3 %)
+  sigma_vio: 0.03                   # σ (log) of a per-chunk VIO row
+  sigma_regulated: 0.01             # σ (log) of a regulated-dimension row (§4.6)
+  verify_max_dev: 0.10              # chunked-metric: scale_align must land within ±10 % of 1
+                                    # — beyond it the session FAILS (§5.4), no warning
+  vio_segment_s: 5.0                # VIO↔chunk ratio segment length (s)
+  vio_min_segments_chunk: 3         # a chunk needs this many voting segments for its VIO row
+  vio_min_seg_disp_m: 0.5           # a segment votes when VIO walked at least this
+  break_localisation_gap: 2.0       # §5.3: a scale break is LOCALISED to one seam only when
+                                    # the leave-one-seam-out cost of the runner-up exceeds the
+                                    # best by this Δχ² — one cycle alone cannot place a jump;
+                                    # the absolute rows (anchors/VIO) break the tie, or the
+                                    # report says "ambiguous" with the ranking
