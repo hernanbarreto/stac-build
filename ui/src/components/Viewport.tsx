@@ -151,6 +151,14 @@ export interface ViewportHandle {
     setScanLayers: (layers: Array<{ key: string; url: string; floorTransform?: number[] | null; composition?: number[] | null; visible: boolean }>) => void
     setScanLayerVisible: (key: string, visible: boolean) => void
     clearScanLayers: () => void
+    // Validation kit (claude_stac.txt §11): colour by witness status /
+    // mv_votes, the previous epoch's octree as a tinted layer (before/after),
+    // the trajectory with its loop edges, fly-to anchors.
+    setWitnessColorMode: (mode: 'rgb' | 'status' | 'mv_votes', mvThreshold: number) => void
+    setEpochLayer: (url: string | null) => void
+    setEpochLayerVisible: (visible: boolean) => void
+    setTrajectoryEdges: (data: any | null, show: { odometry: boolean; loops: boolean }) => void
+    flyToPoint: (p: number[], radius: number) => void
 }
 
 // One item of /api/segmentation/tsdf/list — per-instance entries carry
@@ -176,9 +184,15 @@ const makeSegVisTexture = () => {
 const vertexShader = `
   attribute float classId;
   attribute float confidence;
+  // witness fields (claude_stac.txt §6): status code and agreeing views per
+  // point — the validation kit colours by them (0 when the octree has none)
+  attribute float status;
+  attribute float mvVotes;
   varying float vClassId;
   varying float vConfidence;
   varying float vSegVisible;
+  varying float vStatus;
+  varying float vMvVotes;
   varying vec3 vColor;
   varying vec3 vWorldPos;
   uniform float pointSize;
@@ -192,6 +206,8 @@ const vertexShader = `
   void main() {
     vClassId = classId;
     vConfidence = confidence;
+    vStatus = status;
+    vMvVotes = mvVotes;
     vColor = color;
     vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
 
@@ -223,11 +239,20 @@ const fragmentShader = `
   varying float vClassId;
   varying float vConfidence;
   varying float vSegVisible;
+  varying float vStatus;
+  varying float vMvVotes;
   varying vec3 vColor;
   varying vec3 vWorldPos;
   uniform float highlightIntensity;
   uniform float uOpacity;
   uniform float uConfidenceThreshold;
+  // validation kit (§11): 0 = rgb, 1 = colour by status, 2 = colour by
+  // mv_votes against uMvThreshold; uTint/uTintMix tint a whole layer (the
+  // previous epoch's octree in the before/after toggle)
+  uniform int uColorMode;
+  uniform float uMvThreshold;
+  uniform vec3 uTint;
+  uniform float uTintMix;
   uniform bool sectionBoxEnabled;
   uniform vec3 sectionBoxMin;
   uniform vec3 sectionBoxMax;
@@ -265,6 +290,24 @@ const fragmentShader = `
     float alpha = 1.0 - smoothstep(0.35, 0.5, dist);
     
     vec3 finalColor = vColor * 0.85;
+
+    if (uColorMode == 1) {
+      // status: verified green, single_witness yellow, mask_conflict red,
+      // dynamic magenta, unobserved grey (codes of witness/status.py)
+      int s = int(vStatus + 0.5);
+      vec3 sc = vec3(0.54, 0.54, 0.54);
+      if (s == 1) sc = vec3(0.24, 0.86, 0.52);
+      else if (s == 2) sc = vec3(1.0, 0.82, 0.40);
+      else if (s == 3) sc = vec3(1.0, 0.30, 0.30);
+      else if (s == 4) sc = vec3(0.84, 0.42, 1.0);
+      finalColor = mix(sc, finalColor, 0.25);
+    } else if (uColorMode == 2) {
+      float t = clamp(vMvVotes / max(uMvThreshold, 1.0), 0.0, 1.0);
+      vec3 mc = (vMvVotes < uMvThreshold) ? mix(vec3(1.0, 0.25, 0.2), vec3(1.0, 0.75, 0.3), t)
+                                          : mix(vec3(0.55, 0.9, 0.45), vec3(0.2, 0.85, 0.5), clamp((vMvVotes - uMvThreshold) / 4.0, 0.0, 1.0));
+      finalColor = mix(mc, finalColor, 0.25);
+    }
+    if (uTintMix > 0.0) finalColor = mix(finalColor, uTint, uTintMix);
 
     if (uSelBoxOn) {
       vec3 lp = (uSelBoxInv * vec4(vWorldPos, 1.0)).xyz;
@@ -472,6 +515,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // NON-reference scan, display-only (forceClassId -1 → not affected by
     // the reference's segment toggles), placed by floor × composition.
     const scanLayersRef = useRef<Map<string, { loader: PotreeOctreeLoader; visible: boolean }>>(new Map())
+    // validation kit: the previous epoch's octree (own tinted material) and
+    // the trajectory/edges group with hover reasons
+    const epochLayerRef = useRef<{ loader: PotreeOctreeLoader; material: THREE.ShaderMaterial } | null>(null)
+    const trajectoryGroupRef = useRef<THREE.Group | null>(null)
     const composeScanMatrix = (floor?: number[] | null, comp?: number[] | null): number[] => {
         // both 16-length; floor is column-major (potree_ready convention),
         // composition is ROW-major (API) → transpose it; world = C · F
@@ -1032,6 +1079,26 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     }, [onStatusMessage])
 
     // Hover highlight for measurement — shows which point would be picked
+    // validation kit: hovering a loop-edge marker shows its verdict + reason
+    const kitHoverTextRef = useRef<string | null>(null)
+    const handleKitHover = useCallback((event: MouseEvent) => {
+        const group = trajectoryGroupRef.current
+        const renderer = rendererRef.current, camera = cameraRef.current
+        if (!group || !group.visible || !renderer || !camera || group.children.length === 0) return
+        const rect = renderer.domElement.getBoundingClientRect()
+        const mouse = new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1,
+                                        -((event.clientY - rect.top) / rect.height) * 2 + 1)
+        const rc = camRaycasterRef.current
+        rc.setFromCamera(mouse, camera)
+        const markers = group.children.filter(c => (c as THREE.Mesh).isMesh && c.userData.isLoopEdge)
+        const hits = rc.intersectObjects(markers, false)
+        const text = hits.length ? (hits[0].object.userData.text as string) : null
+        if (text !== kitHoverTextRef.current) {
+            kitHoverTextRef.current = text
+            if (text && onStatusMessage) onStatusMessage(`↔ ${text}`)
+        }
+    }, [onStatusMessage])
+
     const handleMeasureHover = useCallback((event: MouseEvent) => {
         const tool = activeToolRef.current
         if (tool !== 'measure-distance' && tool !== 'measure-angle') {
@@ -2049,6 +2116,102 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             assistantVizRef.current?.setVolumeStatus(volumeId, status),
         setVolumeSolid: (volumeId: number, solid: boolean) =>
             assistantVizRef.current?.setVolumeSolid(volumeId, solid),
+        setWitnessColorMode: (mode, mvThreshold) => {
+            const mat = materialRef.current
+            if (!mat) return
+            mat.uniforms.uColorMode.value = mode === 'status' ? 1 : mode === 'mv_votes' ? 2 : 0
+            mat.uniforms.uMvThreshold.value = mvThreshold
+            const ep = epochLayerRef.current
+            if (ep) {
+                ep.material.uniforms.uColorMode.value = mat.uniforms.uColorMode.value
+                ep.material.uniforms.uMvThreshold.value = mvThreshold
+            }
+        },
+        setEpochLayer: (url) => {
+            const scene = sceneRef.current, camera = cameraRef.current, mat = materialRef.current
+            if (!scene || !camera || !mat) return
+            if (epochLayerRef.current) {
+                epochLayerRef.current.loader.dispose()
+                epochLayerRef.current.material.dispose()
+                epochLayerRef.current = null
+            }
+            if (!url) return
+            // own material: the shared uniforms (visibility texture, section
+            // box…) but a tint so the previous epoch reads as "before"
+            const material = mat.clone() as THREE.ShaderMaterial
+            material.uniforms.uSegVisTex.value = mat.uniforms.uSegVisTex.value
+            material.uniforms.uTintMix.value = 0.55
+            const loader = new PotreeOctreeLoader(scene, camera, material, pointBudget, -1)
+            loader.getOctreeGroup().name = 'potree-octree-epoch-before'
+            const ft = floorTransformRef.current
+            if (ft) loader.setTransform(ft.toArray())
+            epochLayerRef.current = { loader, material }
+            loader.load(url).catch(err => {
+                if (onStatusMessage) onStatusMessage(`epoch octree load failed: ${err.message}`)
+            })
+        },
+        setEpochLayerVisible: (visible) => {
+            const ep = epochLayerRef.current
+            if (ep) ep.loader.getOctreeGroup().visible = visible
+        },
+        setTrajectoryEdges: (data, show) => {
+            const scene = sceneRef.current
+            if (!scene) return
+            let group = trajectoryGroupRef.current
+            if (!group) {
+                group = new THREE.Group()
+                group.name = 'certify-trajectory'
+                const octree = scene.getObjectByName('potree-octree')
+                ;(octree || scene).add(group)
+                trajectoryGroupRef.current = group
+            }
+            while (group.children.length) {
+                const c = group.children[0] as any
+                group.remove(c)
+                c.geometry?.dispose?.()
+                c.material?.dispose?.()
+            }
+            if (!data || !Array.isArray(data.positions)) return
+            const P: number[][] = data.positions
+            const colorOf: Record<string, number> = { accepted: 0x3ddc84, scale_break: 0xff9f1c, vetoed: 0xff4d4d,
+                                                       rejected: 0xff4d4d, ambiguous: 0xffd166 }
+            if (show.odometry) {
+                const pts = P.map(p => new THREE.Vector3(p[0], p[1], p[2]))
+                const geom = new THREE.BufferGeometry().setFromPoints(pts)
+                const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: 0x9a9a9a, depthTest: false, transparent: true, opacity: 0.8 }))
+                line.renderOrder = 998
+                group.add(line)
+            }
+            if (show.loops) {
+                for (const e of (data.loops || [])) {
+                    const a = P[e.i], b = P[e.j]
+                    if (!a || !b) continue
+                    const va = new THREE.Vector3(a[0], a[1], a[2]), vb = new THREE.Vector3(b[0], b[1], b[2])
+                    const geom = new THREE.BufferGeometry().setFromPoints([va, vb])
+                    const col = colorOf[e.kind] ?? 0xffffff
+                    const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: col, depthTest: false, transparent: true, opacity: 0.9 }))
+                    line.renderOrder = 999
+                    group.add(line)
+                    // a marker at the midpoint carries the verdict + reason for the hover
+                    const mid = va.clone().add(vb).multiplyScalar(0.5)
+                    const marker = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 6),
+                                                  new THREE.MeshBasicMaterial({ color: col, depthTest: false }))
+                    marker.position.copy(mid)
+                    marker.renderOrder = 999
+                    marker.userData = { isLoopEdge: true,
+                                        text: `loop kf ${e.i} ↔ ${e.j}: ${e.kind}${e.residual_m != null ? ` · ${(e.residual_m * 100).toFixed(1)} cm` : ''}${e.reason ? ` — ${e.reason}` : ''}` }
+                    group.add(marker)
+                }
+            }
+        },
+        flyToPoint: (p, radius) => {
+            const camera = cameraRef.current, controls = controlsRef.current
+            if (!camera || !controls || !p) return
+            const center = new THREE.Vector3(p[0], p[1], p[2])
+            const dir = camera.position.clone().sub(controls.target).normalize()
+            const dist = Math.max(radius, 0.5) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.4
+            animateCameraTo(center, center.clone().addScaledVector(dir, dist))
+        },
         setScanLayers: (layers) => {
             const scene = sceneRef.current, camera = cameraRef.current
             const mat = materialRef.current
@@ -2856,6 +3019,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 highlightIntensity: { value: 0.5 },
                 uOpacity: { value: 1.0 },
                 uConfidenceThreshold: { value: 0.0 },
+                uColorMode: { value: 0 },
+                uMvThreshold: { value: 0.0 },
+                uTint: { value: new THREE.Color(0xff9f1c) },
+                uTintMix: { value: 0.0 },
                 uConfHl: { value: -1.0 },
                 // 256-slot visibility lookup texture (see vertex shader)
                 uSegVisTex: { value: makeSegVisTexture() },
@@ -3363,6 +3530,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         renderer.domElement.addEventListener('mousedown', onSectionDown)
         renderer.domElement.addEventListener('mousemove', onSectionMove)
         renderer.domElement.addEventListener('mousemove', handleMeasureHover)
+        renderer.domElement.addEventListener('mousemove', handleKitHover)
         renderer.domElement.addEventListener('mouseup', onSectionUp)
         renderer.domElement.addEventListener('mousemove', onEraseMove)
         renderer.domElement.addEventListener('mousedown', onEraseMouseDown)
@@ -3381,6 +3549,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             renderer.domElement.removeEventListener('mousedown', onSectionDown)
             renderer.domElement.removeEventListener('mousemove', onSectionMove)
             renderer.domElement.removeEventListener('mousemove', handleMeasureHover)
+            renderer.domElement.removeEventListener('mousemove', handleKitHover)
             renderer.domElement.removeEventListener('mouseup', onSectionUp)
             renderer.domElement.removeEventListener('mousemove', onEraseMove)
             renderer.domElement.removeEventListener('mousedown', onEraseMouseDown)

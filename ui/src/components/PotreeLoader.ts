@@ -108,6 +108,8 @@ export class PotreeOctreeLoader {
     private _loading = false
     private _smallCloudLogged = false
     private _hasConfidence = false
+    private _hasWitness = false
+    get hasWitness(): boolean { return this._hasWitness }
     private _forceClassId: number | undefined = undefined
 
     // Pre-allocated scratch for updateVisibility() (runs ~10 Hz over hundreds of
@@ -618,6 +620,11 @@ export class PotreeOctreeLoader {
         let intensityOffset = -1
         let classOffset = -1
         let confidenceOffset = -1
+        // witness fields (claude_stac.txt §6 / §11): uint8 extra dims the
+        // converter carries from cleaned_cloud.ply — colour by status /
+        // mv_votes in the validation kit
+        let statusOffset = -1
+        let mvVotesOffset = -1
         let attrOffset = 0
         for (const attr of meta.attributes) {
             if (attr.name === 'position') posOffset = attrOffset
@@ -625,8 +632,11 @@ export class PotreeOctreeLoader {
             else if (attr.name === 'intensity') intensityOffset = attrOffset
             else if (attr.name === 'classification') classOffset = attrOffset
             else if (attr.name === 'confidence') confidenceOffset = attrOffset
+            else if (attr.name === 'status') statusOffset = attrOffset
+            else if (attr.name === 'mv_votes') mvVotesOffset = attrOffset
             attrOffset += attr.size
         }
+        const hasWitness = statusOffset >= 0 && mvVotesOffset >= 0
 
         if (posOffset < 0) {
             console.warn(`[PotreeLoader] No position attribute found`)
@@ -648,6 +658,8 @@ export class PotreeOctreeLoader {
         const colors = new Float32Array(numPoints * 3)
         const classIds = new Float32Array(numPoints)
         const confidences = hasConf ? new Float32Array(numPoints) : null
+        const statuses = hasWitness ? new Float32Array(numPoints) : null
+        const mvVotes = hasWitness ? new Float32Array(numPoints) : null
 
         const scale = meta.scale
         const offset = meta.offset
@@ -702,6 +714,11 @@ export class PotreeOctreeLoader {
                 }
             }
 
+            if (statuses && mvVotes && base + Math.max(statusOffset, mvVotesOffset) + 1 <= dvLen) {
+                statuses[validPoints] = nodeData.getUint8(base + statusOffset)
+                mvVotes[validPoints] = nodeData.getUint8(base + mvVotesOffset)
+            }
+
             validPoints++
         }
 
@@ -718,6 +735,11 @@ export class PotreeOctreeLoader {
         if (confidences) {
             geometry.setAttribute('confidence', new THREE.BufferAttribute(confidences.subarray(0, validPoints), 1))
             this._hasConfidence = true
+        }
+        if (statuses && mvVotes) {
+            geometry.setAttribute('status', new THREE.BufferAttribute(statuses.subarray(0, validPoints), 1))
+            geometry.setAttribute('mvVotes', new THREE.BufferAttribute(mvVotes.subarray(0, validPoints), 1))
+            this._hasWitness = true
         }
         geometry.computeBoundingSphere()
 

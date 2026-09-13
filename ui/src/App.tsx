@@ -12,6 +12,7 @@ import WebRTCCall from './components/WebRTCCall'
 import BIMNavigator from './components/BIMNavigator'
 import FuseScansModal from './components/FuseScansModal'
 import CorrectionVerdictDialog from './components/CorrectionVerdictDialog'
+import CertifyKitPanel from './components/CertifyKitPanel'
 import type { IFCLoadResult } from './components/IFCLoader'
 import { useAuth } from './context/AuthContext'
 import LoginPage from './pages/LoginPage'
@@ -99,6 +100,10 @@ function App() {
   // toolbar): user marks the segments with the parallel-copies error; the
   // algorithm does the rest. One pending correction at a time → Approve/Undo.
   const [showCorrectionModal, setShowCorrectionModal] = useState(false)
+  // 🧪 Certification kit (claude_stac.txt §11): epochs before/after, colour by
+  // witness status / mv_votes, trajectory with loop edges, duplicates,
+  // attention list, acta — the user judges; Approve/Undo per epoch chain.
+  const [showCertifyKit, setShowCertifyKit] = useState(false)
   const [correctionSelected, setCorrectionSelected] = useState<Set<number>>(new Set())
   const [correctionRunning, setCorrectionRunning] = useState(false)
   const [correctionState, setCorrectionState] = useState<any>(null)
@@ -2607,6 +2612,12 @@ function App() {
                     🔧 Correction
                   </button>
                   <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
+                    disabled={!activeSession}
+                    title="Certification kit: before/after per epoch, colour by witness status / mv_votes, trajectory with loop edges, duplicates, attention list, acta — Approve or Undo the epochs"
+                    onClick={() => setShowCertifyKit(v => !v)}>
+                    🧪 Certify
+                  </button>
+                  <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
                     disabled={!activeSession || projectScans.filter(sc => sc.kind !== 'fused').length < 2}
                     title={projectScans.filter(sc => sc.kind !== 'fused').length < 2
                       ? 'Fuse needs a project with at least two scans'
@@ -4081,6 +4092,10 @@ function App() {
            segments (or launches a floor alignment with an explicit model);
            the system resolves per keyframe, validates on the rest of the
            scene and applies atomically. Approve (it IS the cloud) or Undo. ── */}
+      {showCertifyKit && activeSession && (
+        <CertifyKitPanel session={activeSession} token={token} viewport={viewportRef.current}
+          onStatus={setStatusMessage} onClose={() => setShowCertifyKit(false)} />
+      )}
       {showCorrectionModal && (
         <div className="admin-overlay" style={{ zIndex: 2000 }}>
           <div className="admin-panel" style={{ maxWidth: 560, maxHeight: '80vh', overflow: 'auto' }}>

@@ -232,6 +232,22 @@ async def attention(session_id: str):
     return attention_list(Path(ctx.output_dir))
 
 
+@router.get("/edges/{session_id}")
+async def edges(session_id: str):
+    """§11 trajectory with edges + duplicates list (from the session's records)."""
+    ctx = _ctx(session_id)
+    from reconstruction.certify.kit import kit_edges
+    return kit_edges(Path(ctx.output_dir))
+
+
+@router.get("/epochs/{session_id}")
+async def epochs(session_id: str):
+    """§11 before/after: the epoch chain and which epochs carry an octree."""
+    ctx = _ctx(session_id)
+    from reconstruction.certify.kit import epoch_layers
+    return epoch_layers(Path(ctx.output_dir))
+
+
 @router.post("/approve")
 async def approve(body: dict, credentials: HTTPAuthorizationCredentials = Depends(_security)):
     return await _verdict(body, "approved", credentials)

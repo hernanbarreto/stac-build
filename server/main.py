@@ -1127,6 +1127,20 @@ async def serve_scan_potree_files(project: str, date: str, source: str,
                         headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/potree_epoch/{session_id}/{epoch}/{file_path:path}")
+async def serve_epoch_potree_files(session_id: str, epoch: int, file_path: str):
+    """Serve the Potree octree of a PENDING previous epoch (claude_stac.txt
+    §11 before/after toggle): output/_epoch_<N>/potree/… kept by the
+    transactional apply until Approve/Undo."""
+    from fastapi.responses import FileResponse
+    ctx = _ctx(session_id)
+    full_path = ctx.output_dir / f"_epoch_{int(epoch)}" / "potree" / file_path
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"epoch {epoch} has no octree file {file_path}")
+    content_type = "application/json" if file_path.endswith(".json") else "application/octet-stream"
+    return FileResponse(str(full_path), media_type=content_type, headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/potree/{session_id}/{file_path:path}")
 async def serve_potree_files(session_id: str, file_path: str):
     """Serve Potree octree files for a session."""

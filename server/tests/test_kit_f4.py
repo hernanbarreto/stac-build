@@ -1,0 +1,77 @@
+"""claude_stac.txt F4 — smoke test of the visual validation kit's data over a
+synthetic session (§11): after a certification run the kit's endpoints'
+builders deliver the trajectory with its edges and verdicts, the duplicates
+list with fly-to anchors, the attention list, the epoch chain and the
+per-epoch quality reports the acta panel shows. (`ui` compiles: build.)"""
+
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tests.test_certify_f3 import _cfg, _write, _drift, _run, N_KF   # noqa: E402
+from tests.synth_metric import make_session, corridor_loop_scene, loop_trajectory   # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def certified(tmp_path_factory):
+    sess = make_session(H=40, W=56, scene=corridor_loop_scene(), poses=loop_trajectory(N_KF, extra_laps=0.15))
+    root = _write(tmp_path_factory.mktemp("kit") / "s", sess, _drift(sess))
+    acta = _run(root, sess, _cfg(), max_iters=1)
+    assert acta["iterations"][0]["verdict"] == "applied"
+    return root / "output", acta
+
+
+def test_kit_edges_duplicates_and_attention(certified):
+    out, acta = certified
+    from reconstruction.certify.kit import kit_edges, epoch_layers
+    from reconstruction.certify.attention import attention_list
+    k = kit_edges(out)
+    assert k["n_keyframes"] == N_KF and len(k["positions"]) == N_KF and len(k["odometry"]) == N_KF - 1
+    kinds = {e["kind"] for e in k["loops"]}
+    assert "accepted" in kinds, kinds
+    for e in k["loops"]:
+        assert 0 <= e["i"] < N_KF and 0 <= e["j"] < N_KF
+        assert e["kind"] in ("accepted", "rejected", "vetoed", "scale_break", "ambiguous")
+        if e["kind"] in ("rejected", "vetoed"):
+            assert e["reason"], e                      # every red edge says why
+    revisit = [e for e in k["loops"] if e["source"].startswith("revisit")]
+    assert revisit and all(e.get("offset_before_m") is not None for e in revisit if e["kind"] == "accepted")
+    # duplicates carry fly-to anchors
+    for d in k["duplicates"]:
+        if d["i"] is not None:
+            assert len(d["i_pos"]) == 3
+    assert set(k["legend"]) >= {"accepted", "vetoed", "scale_break", "ambiguous", "odometry"}
+    # attention list: sorted by severity, every item with text (+ anchor when it has a place)
+    att = attention_list(out)
+    assert att["n"] == len(att["items"])
+    sev = [it["severity"] for it in att["items"]]
+    assert sev == sorted(sev, reverse=True)
+    for it in att["items"]:
+        assert it["kind"] and it["text"]
+        if it["anchor"] is not None:
+            assert len(it["anchor"]["position"]) == 3
+    assert any(it["kind"] == "low_mv_votes" for it in att["items"])     # the cloud has witnesses
+    # epoch chain for the before/after toggle
+    ep = epoch_layers(out)
+    assert ep["epoch"] == 1 and [p["epoch"] for p in ep["previous"]] == [0]
+    assert ep["previous"][0]["potree"] is False                        # no octree in the synthetic session
+
+
+def test_kit_acta_and_reports(certified):
+    out, acta = certified
+    from reconstruction.quality.report import QUALITY_DIR
+    rep = json.loads((out / QUALITY_DIR / "report_epoch_1.json").read_text())
+    m = rep["metrics"]
+    for key in ("loop_residual", "seam_residual", "closure", "duplicates", "scale", "witnesses",
+                "depth_disagreement", "loop_coverage", "authority", "objective"):
+        assert key in m, key
+    assert rep["comparison_vs_previous"]["objective"] < 0
+    it = acta["iterations"][0]
+    assert all({"name", "value", "threshold", "passed"} <= set(g) for g in it["gates"])
+    a = json.loads((out / "certify_acta.json").read_text())
+    assert a["stop_reason"] and a["iterations"][0]["verdict"] == "applied"
