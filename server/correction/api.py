@@ -154,6 +154,28 @@ async def correction_floor(request: Request,
     return {"ok": True, "status": report.get("status"), "report": report}
 
 
+@router.post("/revisit")
+async def correction_revisit(request: Request,
+                             credentials: Optional[
+                                 HTTPAuthorizationCredentials]
+                             = Depends(_security)):
+    body = await request.json()
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(400, "session_id required")
+    operator = _operator(credentials)
+    ctx = _ctx(session_id)
+    from correction.run import run_revisit
+
+    report = await _run_locked(
+        session_id, "Revisit detection + loop closure",
+        lambda progress: run_revisit(ctx.output_dir, operator, log=_log,
+                                     progress=progress))
+    if report.get("status") == "pending" and _notify_viewer:
+        await _notify_viewer(session_id, ctx.output_dir)
+    return {"ok": True, "status": report.get("status"), "report": report}
+
+
 @router.post("/approve")
 async def correction_approve(request: Request,
                              credentials: Optional[

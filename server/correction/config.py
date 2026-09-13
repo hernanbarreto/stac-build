@@ -94,6 +94,66 @@ class FloorConfig:
 
 
 @dataclass(frozen=True)
+class RevisitConfig:
+    sample_per_kf: int
+    min_gap_kf: int
+    min_covis: float
+    depth_min_m: float
+    depth_max_m: float
+    zbuffer_cell_px: int
+    same_surface_tol_m: float
+    same_surface_tol_rel: float
+    region_cell_m: float
+    region_sample: int
+    offset_min_m: float
+    image_max_px: int
+
+
+@dataclass(frozen=True)
+class ConsistencyConfig:
+    cell_m: float             # block size of the region-centric check
+    block_min_points: int     # blocks with fewer points are not verifiable
+    block_sample: int         # consensus points per block (cap)
+    writer_min_points: int    # a keyframe must have written this many in the block
+    writer_query_sample: int  # points of the writer queried against the others
+    viewer_probe: int         # probe points per block for the viewer test
+    viewer_min_frac: float    # fraction of probes a keyframe must see unoccluded
+    near_kf: int              # |i-j| ≤ this = same pass (neighbours); beyond = distant
+
+
+@dataclass(frozen=True)
+class KfGraphConfig:
+    pair_src_sample: int      # source points per pair (i's points in shared blocks)
+    pair_tgt_sample: int      # target points per pair (j's points in shared blocks)
+    normal_k: int             # neighbours for the target normals (information matrix)
+    gn_iters: int             # Gauss-Newton iterations
+    gn_converge: float        # max step (m or rad) below which the solve stops
+    damping: float            # initial Levenberg damping (relative to the diagonal)
+    damping_min: float        # floor of the damping as steps keep being accepted
+    lm_factor: float          # damping multiplier when a step is rejected
+    lm_tries: int             # rejected steps allowed per iteration
+    floor_m: float            # neighbour floor: pairs still above it after the solve are reported
+
+
+@dataclass(frozen=True)
+class PhotoConfig:
+    candidate_sample: int     # points per keyframe projected to find candidate pairs
+    candidate_min: int        # samples of j inside k's image to make (k, j) a pair
+    pair_min_points: int      # rendered points below which a pair is skipped
+    points_per_pair: int      # correspondences kept per pair for the solve
+    splat_radius: int         # splat radius (px) of the synthetic photo
+    outer_iters: int          # render → flow → solve rounds
+    huber_px: float           # Huber threshold on the reprojection residual (px)
+
+
+@dataclass(frozen=True)
+class PoseGraphConfig:
+    loop_weight: float        # weight of a loop-closure edge vs the seam prior
+    rot_lever_m: float        # metres per radian: converts yaw residuals to m
+    min_blocks_improved: float  # fraction of a pair's blocks the joint closure must improve
+
+
+@dataclass(frozen=True)
 class ApplyConfig:
     depth_correction_mode: str
     potree_rebuild: bool
@@ -111,6 +171,11 @@ class CorrectionConfig:
     solve: SolveConfig
     gates: GatesConfig
     floor: FloorConfig
+    revisit: RevisitConfig
+    consistency: ConsistencyConfig
+    kfgraph: KfGraphConfig
+    photo: PhotoConfig
+    posegraph: PoseGraphConfig
     apply: ApplyConfig
     runtime: RuntimeConfig
 
@@ -296,6 +361,82 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
                                integer=True),
     )
 
+    rv = section.get("revisit")
+    revisit = RevisitConfig(
+        sample_per_kf=_num(rv, "sample_per_kf", "revisit", lo=50, integer=True),
+        min_gap_kf=_num(rv, "min_gap_kf", "revisit", lo=1, integer=True),
+        min_covis=_num(rv, "min_covis", "revisit", lo=0.0, hi=1.0,
+                       lo_excl=True),
+        depth_min_m=_num(rv, "depth_min_m", "revisit", lo=0.0),
+        depth_max_m=_num(rv, "depth_max_m", "revisit", lo=0.0, lo_excl=True),
+        zbuffer_cell_px=_num(rv, "zbuffer_cell_px", "revisit", lo=1,
+                             integer=True),
+        same_surface_tol_m=_num(rv, "same_surface_tol_m", "revisit", lo=0.0,
+                                lo_excl=True),
+        same_surface_tol_rel=_num(rv, "same_surface_tol_rel", "revisit",
+                                  lo=0.0, hi=1.0, lo_excl=True),
+        region_cell_m=_num(rv, "region_cell_m", "revisit", lo=0.0,
+                           lo_excl=True),
+        region_sample=_num(rv, "region_sample", "revisit", lo=100,
+                           integer=True),
+        offset_min_m=_num(rv, "offset_min_m", "revisit", lo=0.0, lo_excl=True),
+        image_max_px=_num(rv, "image_max_px", "revisit", lo=64, integer=True),
+    )
+    if revisit.depth_max_m <= revisit.depth_min_m:
+        raise CorrectionConfigError("'correction.revisit.depth_max_m' must "
+                                    "exceed depth_min_m")
+
+    cn = section.get("consistency")
+    consistency = ConsistencyConfig(
+        cell_m=_num(cn, "cell_m", "consistency", lo=0.0, lo_excl=True),
+        block_min_points=_num(cn, "block_min_points", "consistency", lo=1,
+                              integer=True),
+        block_sample=_num(cn, "block_sample", "consistency", lo=100,
+                          integer=True),
+        writer_min_points=_num(cn, "writer_min_points", "consistency", lo=1,
+                               integer=True),
+        writer_query_sample=_num(cn, "writer_query_sample", "consistency",
+                                 lo=10, integer=True),
+        viewer_probe=_num(cn, "viewer_probe", "consistency", lo=1,
+                          integer=True),
+        viewer_min_frac=_num(cn, "viewer_min_frac", "consistency", lo=0.0,
+                             hi=1.0, lo_excl=True),
+        near_kf=_num(cn, "near_kf", "consistency", lo=1, integer=True),
+    )
+
+    kg = section.get("kfgraph")
+    kfgraph = KfGraphConfig(
+        pair_src_sample=_num(kg, "pair_src_sample", "kfgraph", lo=100, integer=True),
+        pair_tgt_sample=_num(kg, "pair_tgt_sample", "kfgraph", lo=100, integer=True),
+        normal_k=_num(kg, "normal_k", "kfgraph", lo=3, integer=True),
+        gn_iters=_num(kg, "gn_iters", "kfgraph", lo=1, integer=True),
+        gn_converge=_num(kg, "gn_converge", "kfgraph", lo=0.0, lo_excl=True),
+        damping=_num(kg, "damping", "kfgraph", lo=0.0, lo_excl=True),
+        damping_min=_num(kg, "damping_min", "kfgraph", lo=0.0, lo_excl=True),
+        lm_factor=_num(kg, "lm_factor", "kfgraph", lo=1.0, lo_excl=True),
+        lm_tries=_num(kg, "lm_tries", "kfgraph", lo=1, integer=True),
+        floor_m=_num(kg, "floor_m", "kfgraph", lo=0.0, lo_excl=True),
+    )
+
+    ph = section.get("photo")
+    photo = PhotoConfig(
+        candidate_sample=_num(ph, "candidate_sample", "photo", lo=10, integer=True),
+        candidate_min=_num(ph, "candidate_min", "photo", lo=1, integer=True),
+        pair_min_points=_num(ph, "pair_min_points", "photo", lo=1, integer=True),
+        points_per_pair=_num(ph, "points_per_pair", "photo", lo=10, integer=True),
+        splat_radius=_num(ph, "splat_radius", "photo", lo=0, integer=True),
+        outer_iters=_num(ph, "outer_iters", "photo", lo=1, integer=True),
+        huber_px=_num(ph, "huber_px", "photo", lo=0.0, lo_excl=True),
+    )
+
+    pg = section.get("posegraph")
+    posegraph = PoseGraphConfig(
+        loop_weight=_num(pg, "loop_weight", "posegraph", lo=0.0, lo_excl=True),
+        rot_lever_m=_num(pg, "rot_lever_m", "posegraph", lo=0.0, lo_excl=True),
+        min_blocks_improved=_num(pg, "min_blocks_improved", "posegraph",
+                                 lo=0.0, hi=1.0, lo_excl=True),
+    )
+
     ap = section.get("apply")
     depth_mode = _require(ap, "depth_correction_mode", "apply")
     if depth_mode not in _DEPTH_MODES:
@@ -322,4 +463,6 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
 
     return CorrectionConfig(evidence=evidence, observability=observability,
                             solve=solve, gates=gates, floor=floor,
+                            revisit=revisit, consistency=consistency,
+                            kfgraph=kfgraph, photo=photo, posegraph=posegraph,
                             apply=apply_cfg, runtime=runtime)

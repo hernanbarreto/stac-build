@@ -1,0 +1,280 @@
+0. Rol y entregable
+
+Actuás como ingeniero senior responsable de la cadena métrica de un sistema de control dimensional de obra. El producto fusionado se mide y se compara contra BIM; un tercero puede cuestionar cada número. El estándar es el de un instrumento: la escala del producto tiene una fuente declarada, cada transformación es trazable y reproducible, y ninguna diferencia se "reparte" para que la escena cierre visualmente.
+
+El entregable es la mejora implementada: paquete server/fusion/ funcionando (con la validación métrica por medida incluida), fuse_scans.py/cloudcompy_register.py reemplazados o reducidos a lo que sobreviva, FuseScansModal.tsx rediseñado, tests nuevos verdes junto con los existentes. Ningún archivo .md. Las decisiones de diseño van en docstrings de los módulos y en comentarios del YAML.
+
+Entrega completa, no incremental. Sin "TODO", "por ahora", fallbacks silenciosos ni literales numéricos de decisión fuera de config.yaml. No se pide aprobación entre fases: se lee, se decide, se implementa, se verifica. Un bloqueo real (información ausente del repo) se reporta al final con la pregunta exacta y con todo lo demás ya implementado.
+
+Convenciones del repo: código, comentarios y docstrings en inglés; decisiones del usuario citadas con fecha (USER 2026-09-08: ...).
+
+1. Contexto y objetivo
+
+Un proyecto tiene varios escaneos (días/fuentes) del mismo sitio. Cada escaneo se reconstruye de forma independiente (VGGT-Ω + DA3, escala "métrica" por anclas DA3 y/o VIO). La fusión lleva un escaneo al frame del escaneo de referencia usando objetos invariantes segmentados en ambos.
+
+Problema observado (USER 2026-09-08, proyecto de prueba pccr): los dos escaneos, ambos supuestamente métricos, difieren en escala (hasta 10-15 %); las subnubes de los objetos pareados no son la misma superficie (cobertura distinta, voladores, fuga de máscara); tras superponer, los objetos de ambos escaneos aparecen desplazados y con distinto tamaño.
+
+Objetivo: que la fusión sea correcta y verificable:
+
+Cada escaneo se lleva a escala física con una medida validada por el usuario sobre un elemento de dimensión conocida (una medida obligatoria; una segunda opcional como verificación de uniformidad).
+La fusión no reparte escala: el frame del producto es el del escaneo de referencia; la escala residual entre escaneos es un número de control sujeto a un umbral configurable (por defecto ±3 % cuando ambos escaneos están validados), no un parámetro libre.
+Los objetos segmentados iguales en ambos escaneos siguen siendo la evidencia de la fusión (el usuario los elige a propósito). Lo que cambia es cómo se usan: la alineación se resuelve sobre primitivas geométricas robustas ajustadas a los puntos de cada objeto pareado (planos, ejes, esquinas, dimensiones de modelo), no sobre las subnubes crudas con voladores ni sobre extents de bbox; se refina con ICP sobre el solape de escena completo con escala bloqueada. 3b. Con varios escaneos del mismo proyecto (hoy no hay IFC; el IFC es futuro y opcional), el conjunto de escaneos es en sí mismo la fuente de consistencia: cada objeto invariante medido en N escaneos da N estimaciones de su tamaño; el consenso multi-escaneo (§6b) estima el tamaño verdadero de cada objeto y el sesgo de escala de cada escaneo, anclado a unidades físicas por la medida del usuario. Eso define la escala correcta sin IFC.
+Si tras la alineación global un par sigue desplazado y el diagnóstico indica escala/pose no uniforme en el escaneo a fusionar, se corrige por keyframe con el módulo de corrección (el escaneo de referencia actúa como "visita de referencia"), no absorbiendo el error en la similitud.
+La fusión se ejecuta igual mientras se está validando (USER 2026-09-08: "en principio quiero que la fusión se haga igual porque estamos validando"): los umbrales son de configuración; la validación métrica no bloquea, marca.
+2. Doctrina (no negociable)
+La nube es la verdad; la escala tiene dueño. Cada escaneo declara la fuente de su escala: user_measurement | multiscan_consensus | vio | da3_anchors (sin validar). bim_registration queda previsto como fuente futura (hoy no hay IFC) y no debe ser requisito de nada. El producto fusionado declara la del escaneo de referencia.
+Nunca escala simétrica. Se elimina el "reference × 1/√s, scan × √s". El escaneo de referencia no se toca en la fusión (identidad, escala 1). Todo ajuste recae sobre el escaneo que se fusiona y queda registrado.
+Una tolerancia no es un fix. Una diferencia de escala fuera del umbral no se absorbe: se reporta con su diagnóstico y se rechaza (o se aplica solo con override registrado).
+La persona propone, la geometría mide. El usuario elige el elemento de dimensión conocida e ingresa su valor real; el sistema mide en la nube entre primitivas ajustadas, nunca entre dos clics. El usuario elige los invariantes; el sistema determina correspondencias, diagnóstico y transformación.
+El resto de la escena es el examen. Los pares dan la solución; el held-out (puntos no pareados, piso, otras instancias comunes) la valida. Falla el examen → no se aplica nada.
+Fail-fast, transaccional, sin except Exception: pass.
+Trazabilidad por punto intacta en el fusionado: frame_global, pixel_row, pixel_col, confidence + scan resolubles a un keyframe de un escaneo concreto.
+Nada hardcodeado: todo parámetro en server/config.yaml bajo fusion: y metric_validation:, con validación al cargar.
+No tocar la receta de reconstrucción pinneada ni vendor/.
+3. Diagnóstico de partida (verificado en el código el 2026-09-08)
+#	Hallazgo	Ubicación	Consecuencia
+F1	Escala simétrica: referencia × 1/√s, escaneo × √s; reference_scale = media geométrica de 1/√s.	fuse_scans.py paso 5 y ~243–262, 292–318	Ninguno de los dos escaneos queda en su tamaño real; la referencia (que puede tener correcciones, registro BIM, mediciones previas) cambia de escala; el error se reparte en vez de medirse.
+F2	Tolerancia de escala scale_min/max = 0.7–1.4 ("tolerant to scale, two VGGT runs differ by up to ~10-15 %").	fuse_scans.py params	Oculta el problema métrico que hay que resolver antes de fusionar.
+F3	Registro sobre subnubes crudas: dominant_planes + size_measure (extents) + coarse_align por centroides + ICP con escala.	cloudcompy_register.py	Voladores y cobertura parcial sesgan extents, centroides e ICP (desliza en planos, engancha piso con piso).
+F4	Pares por etiqueta compartida únicamente; culling de pares que no calzan ("la puerta si no calza").	fuse_scans.py find_pairs, ~114–141	Sin identidad de elemento; objetos móviles (hojas de puerta) aceptados como invariantes; el culling descarta evidencia en vez de diagnosticar por qué no calza.
+F5	Un solo Sim3 global por escaneo.	register_scan	No modela deriva de escala/pose a lo largo del recorrido; con dos pares de ratio local distinto, ninguno calza.
+F6	No existe validación métrica por medida ni registro de la fuente de escala por escaneo.	—	La "escala correcta" no está definida en ningún lado.
+F7	Held-out solo como mediana NN del escaneo contra la referencia; sin examen por par, sin piso, sin instancias comunes no pareadas.	fuse_scans.py paso 4	Examen incompleto.
+F8	Parámetros literales en params y en cloudcompy_register.py; sin sección en config.yaml.	ambos	Nada configurable.
+F9	Reporte de fusión mínimo en project.json (composition); sin acta reproducible ni replay.	fuse_scans.py ~296–318	El fusionado no se puede auditar ni regenerar de forma trazable.
+4. Proceso completo de fusión (usuario + sistema)
+
+Paso 0 — Prerrequisitos por escaneo. Reconstrucción terminada; surface_fit corrido al menos sobre las instancias que se usarán (invariantes y elemento de medida); si el módulo de corrección existe, correcciones aprobadas.
+
+Paso 1 — Validación métrica (por escaneo, obligatoria una medida). Usuario: elige un elemento fijo de dimensión conocida (vano, columna, contrahuella, módulo), indica qué dimensión (ancho / alto / diámetro / distancia entre dos elementos) e ingresa el valor real en metros con su tolerancia (p. ej. 2.030 ± 0.005). Sistema: mide esa dimensión en la nube entre primitivas ajustadas (§6), devuelve la medida, su incertidumbre, s = L_real / L_medida y aplica s a todo el escaneo (nube, nube raw, poses, sidecar de profundidad) como época métrica en el ledger. Recomienda una segunda medida en el otro extremo del recorrido; si se ingresa, compara s₁ y s₂: si difieren más que la suma de incertidumbres + uniformity_tol, declara escala no uniforme y sugiere el módulo de corrección antes de fusionar. La fusión sigue disponible en cualquier caso; el estado queda en la ficha del escaneo (metric_source, s, σ_s, uniform).
+
+Paso 2 — Invariantes. Usuario: segmenta en ambos escaneos los mismos objetos invariantes con la misma etiqueta (la etiqueta es la identidad del par; una identidad IFC podrá sumarse en el futuro, no es requisito). Mínimo configurable (2), recomendado ≥ 3, repartidos a lo largo del recorrido, estructurales (columnas, esquinas de muro, jambas, intersección piso-muro, vanos fijos). La UI advierte sobre etiquetas de objetos móviles (puerta, silla, etc., lista configurable) y sobre pares concentrados en una sola zona (cobertura del recorrido < min_pair_spread_ratio).
+
+Paso 3 — Fusión (sistema). A) Diagnóstico de uniformidad; B) alineación por primitivas; C) refino de escena; D) corrección cruzada por keyframe si hace falta; E) gates; F) construcción del fusionado en transacción. Detalle en §5.
+
+Paso 4 — Veredicto. El usuario lee el acta (§10): fuente de escala de cada escaneo, s residual y umbral aplicado, diagnóstico de uniformidad, residuo por par antes/después, held-out, gates. Aprueba o deshace. Si un gate falló, la fusión no se aplicó y el acta dice qué hacer (medir de nuevo, agregar un invariante en tal zona, corregir el escaneo X).
+
+Paso 5 — Producto. El fusionado es de solo lectura (medir, malla, chat); la segmentación y las correcciones viven en cada escaneo. Se regenera de forma reproducible desde los escaneos
+
+la composición registrada. Toda medida sobre el fusionado lleva metric_source, fusion_id, época de cada escaneo y human_directed_corrections.
+5. Diseño objetivo
+5.1 Paquete server/fusion/
+
+Reemplaza fuse_scans.py y cloudcompy_register.py (lo que de ellos sobreviva se mueve, no se duplica). Módulos:
+
+server/fusion/
+  __init__.py
+  config.py       # secciones fusion: y metric_validation: → dataclasses validadas
+  metric.py       # validación métrica por medida (§6): medir entre primitivas, s, σ_s,
+                  # aplicar como época métrica, segunda medida → uniformidad
+  pairs.py        # pares por etiqueta (identidad IFC opcional a futuro); cobertura del
+                  # recorrido; avisos
+  consensus.py    # consenso métrico multi-escaneo (§6b): tamaño verdadero por objeto y
+                  # sesgo de escala por escaneo a partir de N escaneos
+  primitives.py   # primitiva robusta por instancia y escaneo (§5.3)
+  diagnose.py     # uniformidad: ratios de tamaño por par, ratios de distancias entre
+                  # pares, dispersión DA3; ¿uniforme? ¿qué escaneo es inconsistente?
+  align.py        # Sim3/SE3 global por correspondencias de primitivas (§5.4)
+  refine.py       # ICP recortado sobre el solape de escena, escala bloqueada (§5.5)
+  crosscorrect.py # corrección por keyframe del escaneo a fusionar usando el módulo de
+                  # corrección con la referencia como visita de referencia (§5.6)
+  gates.py        # todos los criterios (§5.7), puros y testeables
+  build.py        # construcción transaccional del fusionado (§5.8)
+  report.py       # acta de fusión (§10)
+  replay.py       # regenerar el fusionado desde escaneos + composición
+  api.py          # router FastAPI; main.py solo lo incluye
+
+Dependencia con server/correction/ (época geométrica, ledger, distribute, apply transaccional por keyframe): reutilizar si existe. Si no existe, implementar en server/correction/ el núcleo mínimo que este paquete necesita (epoch.py, ledger.py, distribute.py, apply.py por keyframe con transacción) con la misma especificación que usará la corrección por duplicados; nunca una copia local dentro de fusion/.
+
+5.2 Unidades y frames
+La unidad de transformación es el keyframe (provenance frame_global → camera_frames.txt del escaneo). La validación métrica es un Sim3 con R = I, t = 0, s aplicado a todos los keyframes; la corrección cruzada es un Sim3 por keyframe distribuido.
+Frame del producto = frame del escaneo de referencia después de sus propias épocas. La referencia nunca recibe transformaciones desde la fusión. Si el diagnóstico señala a la referencia como inconsistente, la fusión se rechaza con la instrucción de corregir la referencia primero (allow_reference_correction: false, configurable pero por defecto falso).
+5.3 Primitivas por instancia (primitives.py)
+
+Para cada instancia pareada, en cada escaneo:
+
+Si existe un FittedSurface/ReconstructedElement de surface_fit para la instancia, usarlo (planos con normal + offset y extents con soporte; cilindros con eje + radio; swept_profile con eje; aberturas con jambas/dintel).
+Si no existe, ajustar en el momento con el mismo código de surface_fit (no reimplementar RANSAC): limpieza previa de voladores (componente conexa principal + SOR configurables), planos dominantes con normales orientadas por el up del mundo, cilindro si aplica.
+Derivar features de correspondencia: normales de planos, offsets, ejes, esquinas (intersección de ≥ 2 planos no paralelos + piso), y dimensiones de modelo (ancho de vano entre jambas, diámetro, extents soportados), cada una con incertidumbre a partir de los residuos del ajuste.
+Registrar la distancia de toma mediana (provenance → centro de cámara) de la instancia en cada escaneo; pares con distancias muy distintas (shoot_dist_ratio_max) pesan menos.
+5.4 Alineación global por primitivas (align.py)
+Correspondencias: plano↔plano (misma etiqueta, misma orientación relativa), eje↔eje, esquina↔esquina. Rotación por alineación de direcciones (Kabsch/Wahba ponderado sobre normales y ejes); traslación por mínimos cuadrados sobre offsets de planos y esquinas; escala (solo si el perfil lo permite, §7) por ratio robusto de dimensiones de modelo, nunca por extents de bbox.
+Observabilidad: se requieren, entre todos los pares, ≥ 2 normales no paralelas más una restricción vertical (piso) para SE(3) completo; si no se alcanza, rechazo con "agregá un invariante con orientación X". Yaw libre entre días; pitch/roll acotados por max_tilt_deg.
+El culling de pares se reemplaza por diagnóstico: un par que no calza se reporta con su residuo y con la hipótesis (móvil / mal segmentado / deriva local) y solo se excluye si el usuario lo confirma en la UI o si auto_exclude_outlier_pairs: true y el par supera pair_outlier_sigma respecto a los demás; la exclusión queda en el acta.
+5.5 Refino de escena (refine.py)
+
+ICP recortado (trim configurable) del escaneo contra la referencia sobre la zona de solape (puntos del escaneo con vecino de referencia dentro de overlap_radius_m), con escala bloqueada cuando ambos escaneos están validados; escala libre pero acotada por el perfil cuando no. Submuestreo configurable; convergencia por criterio, no por número fijo de iteraciones sin control.
+
+5.6 Corrección cruzada por keyframe (crosscorrect.py)
+
+Cuando diagnose declara no uniformidad en el escaneo a fusionar y tras la alineación global algún par supera pair_residual_max_m:
+
+Los objetos de referencia de cada par son la "visita de referencia"; los keyframes del escaneo que observan cada par son la "visita desplazada". Se invoca el mismo solver y la misma distribución por keyframe del módulo de corrección (identidad hasta el primer par, transform en cada ancla, slerp+lerp entre anclas, constante después), con los mismos gates de continuidad y examen de escena, sobre una copia transaccional del escaneo.
+Si el módulo de corrección aplica su propia época al escaneo, esa época se registra en el ledger del escaneo con kind: cross_scan y reference: <scan_key>; el usuario la ve en el historial del escaneo, no solo en la fusión.
+Después de corregir se repite §5.5 y se recalculan los gates.
+5.7 Gates (gates.py) — todos configurables, todos en el acta, todos vetan
+Escala: |s_fusion − 1| ≤ scale_tol del perfil activo (§7).
+Inclinación: pitch/roll ≤ max_tilt_deg.
+Residuo por par: mediana NN objeto↔objeto (sobre las primitivas, no las subnubes crudas) ≤ pair_residual_max_m para todos los pares no excluidos.
+Held-out: puntos del escaneo no pareados dentro del solape: mediana NN a la referencia ≤ heldout_nn_max_m; piso del escaneo contra plano de piso de la referencia dentro de heldout_floor_tol_m; instancias comunes no pareadas (misma etiqueta, no usadas como evidencia) con residuo ≤ heldout_object_tol_m.
+Uniformidad: si diagnose declaró no uniforme y crosscorrect no pudo resolverlo, rechazo.
+Cobertura: número de pares ≥ min_pairs; spread ≥ min_pair_spread_ratio (aviso o veto según pair_spread_mode).
+Integridad: provenance de todos los puntos resoluble; conteos consistentes.
+5.8 Construcción del fusionado (build.py)
+Transacción en scans/fused/_tx_<stamp>/: nube = referencia (sin transformar) ∪ escaneo transformado; campos de provenance intactos + scan (índice al catálogo de escaneos del acta); classification.npy namespaced; segmentation_result.json combinado con scan por instancia; Potree; acta. Verificación de integridad antes del swap atómico.
+project.json: composición por escaneo = metric_epoch usada, fusion_transform (Sim3 global), cross_correction_epoch si hubo; reference_scale desaparece (siempre 1).
+Undo de un nivel; approve conserva el ledger; el fusionado anterior se elimina solo al aprobar.
+6. Validación métrica por medida (metric.py)
+Entrada: scan_key, instance_id(s), dimension (width | height | depth | diameter | distance_between con feature1/feature2 de measure_between), true_value_m, true_tol_m.
+Medición: entre primitivas ajustadas (distancia plano-plano entre jambas, altura entre plano de piso y dintel, diámetro del cilindro, distancia entre ejes/esquinas). Prohibido medir entre dos puntos crudos o entre extremos de bbox. La incertidumbre σ_L sale de los residuos del ajuste y de la densidad local (documentar la fórmula en el docstring).
+Escala: s = L_true / L_meas, σ_s = s · sqrt((σ_L/L_meas)² + (tol_true/L_true)²). Guardas: L_meas ≥ min_measure_length_m (una medida corta amplifica el error), σ_s ≤ max_sigma_s, |s − 1| ≤ max_metric_correction (una corrección enorme indica otra cosa: intrínsecos, anclas DA3; se reporta y requiere override registrado).
+Aplicación: Sim3 global (R = I, t = 0, s) a nube, nube raw, poses (centros × s) y sidecar de profundidad (k por keyframe × s), como época kind: metric en el ledger del escaneo con source: user_measurement, instancia, dimensión, L_true, L_meas, s, σ_s, operador y fecha. La ficha del escaneo (project.json / store) expone metric_source, s_total, σ_s, uniform.
+Segunda medida (opcional, recomendada en el otro extremo del recorrido): no se aplica como escala; se compara. |s₂/s₁ − 1| ≤ σ₁ + σ₂ + uniformity_tol → uniform: true; si no, uniform: false con la posición de ambas medidas a lo largo del recorrido y la sugerencia de corrección por keyframe. Si el usuario elige aplicar la media de ambas, queda registrado.
+Diagnóstico complementario automático: dispersión de ratios DA3 entre anclas (scale_diagnostics.json) y, si hay VIO, acuerdo VIO/DA3; se muestran junto a la medida. Si el fx estimado del escaneo difiere del intrínseco del dispositivo más de fx_mismatch_warn, se avisa (causa probable de la diferencia de escala entre corridas).
+
+¿Alcanza con una medida? Una medida fija un escalar: la escala global. Alcanza si la escala del escaneo es uniforme y la medida es buena (elemento fijo, longitud ≥ 1 m, entre primitivas, bien cubierto). No detecta deriva ni compresión de profundidad; para eso están la segunda medida y el diagnóstico de uniformidad de los pares. Por eso: una obligatoria, la segunda recomendada, y la uniformidad siempre verificada antes de dar por buena la escala.
+
+6b. Consenso métrico multi-escaneo (consensus.py)
+
+Cuando el proyecto tiene N ≥ 2 escaneos con objetos invariantes segmentados en varios de ellos, el sistema estima la escala correcta sin IFC a partir de los propios escaneos:
+
+Para cada objeto invariante i y escaneo j donde existe, L_ij = dimensión de modelo de la primitiva ajustada (ancho entre jambas, diámetro, extent soportado), con su σ_ij.
+Modelo en log-escala: log L_ij = log L_i + log b_j + ε_ij, donde L_i es el tamaño verdadero del objeto y b_j el sesgo de escala del escaneo j. Se resuelve de forma robusta (mínimos cuadrados ponderados por 1/σ² con pérdida de Huber, o medianas alternadas; elegir y justificar en el docstring).
+Gauge: el sistema tiene un grado de libertad global (multiplicar todos los L_i y dividir todos los b_j). Lo fija la medida del usuario (§6): L_i del objeto medido = L_true. Con varias medidas, ajuste ponderado. Sin ninguna medida, el consenso se expresa relativo a la referencia (b_ref = 1) y el producto se marca sin fuente física.
+Salidas: b_j por escaneo (→ época metric, source: multiscan_consensus, con σ), L_i por objeto (tamaño consensuado, con σ), y residuos ε_ij: un residuo grande aislado señala una segmentación mala o un objeto no invariante (se reporta al usuario con el par y el escaneo); residuos correlacionados con la posición del objeto a lo largo del recorrido de un escaneo señalan escala no uniforme en ese escaneo (→ corrección por keyframe, §5.6).
+Elección de referencia: el sistema propone como referencia el escaneo con menor |log b_j| y menor dispersión de residuos (más consistente con el consenso), salvo que el usuario fije otra; la elección y el motivo van al acta.
+El consenso se recalcula cuando se agrega un escaneo, una medida o una corrección; las épocas anteriores no se reescriben, se agregan (ledger).
+Umbrales en metric_validation.consensus: (min_scans, min_objects, huber_delta, residual_outlier_sigma, nonuniform_corr_min).
+7. Regla de escala en la fusión
+Autoridad: el escaneo de referencia en su frame actual (validado por medida y/o por consenso multi-escaneo). Nunca se reescala desde la fusión.
+Perfiles de tolerancia, seleccionados automáticamente por el estado de ambos escaneos y todos configurables:
+validated_both (ambos con metric_source ∈ {user_measurement, multiscan_consensus, vio}): escala bloqueada en 1 en align/refine; s_fusion se mide igualmente por ratio de dimensiones de modelo y se reporta; gate scale_tol (default 0.03).
+validated_reference (solo referencia): escala libre acotada; s_fusion se aplica al escaneo y queda registrado como época kind: metric, source: fusion_to_reference en su ledger; gate scale_tol_unvalidated (default configurable, más amplio).
+unvalidated (ninguno): igual que el anterior, con advertencia en el acta de que la escala del producto no tiene fuente física; scale_tol_unvalidated.
+Fuera de tolerancia: rechazo con diagnóstico. Override posible con override_scale_gate: true en la petición, registrado en el acta y en el ledger con operador y motivo.
+Si ambos están validados y s_fusion excede σ_s_ref + σ_s_scan + scale_tol, el acta declara explícitamente que una de las dos medidas está mal y cuál sería consistente con el resto de la evidencia (ratios de pares, DA3).
+8. Configuración (server/config.yaml)
+
+Secciones nuevas cargadas por fusion/config.py en dataclasses validadas (rangos, tipos, dependencias). Clave faltante o fuera de rango → error de carga con el nombre de la clave. Nombres orientativos; unificar con el estilo del archivo:
+
+yaml
+metric_validation:
+  min_measure_length_m: 1.0
+  max_sigma_s: 0.02
+  max_metric_correction: 0.20      # |s-1| mayor → requiere override registrado
+  uniformity_tol: 0.01
+  fx_mismatch_warn: 0.03
+  consensus:
+    min_scans: 2
+    min_objects: 2
+    huber_delta: 0.02
+    residual_outlier_sigma: 3.0
+    nonuniform_corr_min: 0.7
+  primitives:
+    floater_sor_k: 16
+    floater_sor_sigma: 2.0
+    keep_main_component: true
+
+fusion:
+  pairs:
+    min_pairs: 2
+    recommended_pairs: 3
+    min_pair_spread_ratio: 0.4
+    pair_spread_mode: warn         # warn | veto
+    movable_labels: [door, chair, table, box, cart, person]
+    shoot_dist_ratio_max: 3.0
+    auto_exclude_outlier_pairs: false
+    pair_outlier_sigma: 3.0
+  scale:
+    scale_tol: 0.03                # perfil validated_both
+    scale_tol_unvalidated: 0.10
+    allow_reference_correction: false
+  align:
+    max_tilt_deg: 5.0
+    min_nonparallel_normals: 2
+  refine:
+    overlap_radius_m: 0.10
+    icp_trim: 0.7
+    icp_max_iters: 100
+    icp_convergence_m: 0.0005
+    icp_samples: 300000
+  gates:
+    pair_residual_max_m: 0.03
+    heldout_nn_max_m: 0.05
+    heldout_floor_tol_m: 0.02
+    heldout_object_tol_m: 0.03
+  crosscorrect:
+    enabled: true
+    trigger_pair_residual_m: 0.03
+  build:
+    potree: true
+  runtime:
+    workers: auto                  # respetar sched_setaffinity (CLAUDE.md)
+    seed: 0
+
+Los valores actuales que sobreviven (overlap, ransac_epsilon, max_tilt_deg, ICP) pasan al YAML como defaults; los nuevos se calibran con el set sintético (§12) y su justificación va en un comentario del YAML.
+
+9. Transaccionalidad y errores
+Toda escritura (validación métrica, corrección cruzada, fusionado) va a un directorio de transacción, se verifica y se hace swap atómico; ante cualquier fallo, la sesión y el proyecto quedan intactos. Ningún estado "la nube ya cambió pero Potree falló".
+Lock por proyecto para la fusión y por escaneo para la validación métrica; segundo pedido concurrente → 409 con el task_id que bloquea.
+Sin except Exception: pass; estados o actas corruptos son errores. Mensajes accionables: qué medir, qué invariante agregar y dónde, qué escaneo corregir, qué clave de config.
+El job de CloudComPy (si se conserva por alguna primitiva) corre en su env con timeout y su salida se valida; no se acepta un resultado parcial.
+10. Trazabilidad
+Ledger por escaneo (reutilizar el de server/correction/): épocas metric, cross_scan, con todos los datos de §6/§5.6, veredicto y operador; nunca se borra historia.
+Acta de fusión scans/fused/<id>/fusion_report.json: catálogo de escaneos (clave, época, metric_source, s_total, σ_s, uniform), perfil de escala, pares (instancia en cada escaneo, primitivas usadas, distancia de toma, residuo antes/después, excluido y por qué), diagnóstico de uniformidad, transform global, corrección cruzada (si hubo) con sus anclas, cada gate con valor/umbral/veredicto, overrides, algorithm_version, operador, fecha. provenance: tool_measured, human_directed: true.
+Replay: python -m fusion.replay --project <p> --fusion <id> regenera el fusionado desde los escaneos + composición; un test verifica que reproduce el fusionado dentro de tolerancia float.
+Medidas sobre el fusionado (phase5_qa, fase 6, comparación BIM): incluyen metric_source de la referencia, fusion_id, épocas por escaneo y human_directed_corrections.
+Campo scan por punto + tablas de keyframes por escaneo dentro del fusionado: cualquier punto se resuelve a (escaneo, keyframe, píxel).
+11. UI (ui/src)
+Ficha del escaneo: estado métrico (fuente, s, σ_s, uniforme sí/no/desconocido) con botón "Validar medida".
+Diálogo de validación métrica: seleccionar instancia(s) en el viewer, elegir dimensión, ingresar valor real y tolerancia; el sistema muestra la medida en la nube, s, σ_s y las guardas; Aplicar/Descartar; sugerencia de segunda medida en el otro extremo del recorrido; resultado de uniformidad.
+FuseScansModal.tsx rediseñado: estado métrico de ambos escaneos y perfil de escala que se aplicará; lista de pares con avisos (móvil, concentración, distancia de toma); botón Fusionar; progreso por etapa (diagnóstico, primitivas, alineación, refino, corrección cruzada, gates, construcción); acta legible con cada gate; Aprobar/Deshacer; si se rechazó, la razón y la acción sugerida.
+Historial de fusiones y de épocas por escaneo.
+El viewer carga el fusionado solo después del swap atómico.
+12. Tests obligatorios (server/tests/test_fusion_*.py, test_metric_*.py)
+
+Generador sintético sin GPU: una escena de verdad conocida (planos, columnas cilíndricas, vanos, piso con y sin pendiente) → dos "escaneos" con trayectorias distintas, cobertura parcial distinta por objeto, voladores inyectados, ruido, escala global distinta y, opcionalmente, deriva de escala/pose a lo largo del recorrido. Con eso:
+
+Validación métrica: una medida entre primitivas recupera s inyectado dentro de σ_s; medida corta → guarda; |s − 1| grande → requiere override; segunda medida detecta uniforme / no uniforme correctamente. 1b. Consenso multi-escaneo: tres escaneos sintéticos con sesgos b_j distintos y una segmentación mala inyectada → recupera b_j y L_i dentro de σ, aísla la mala en los residuos, detecta la no uniformidad inyectada por correlación con la posición, y propone la referencia correcta; sin medida del usuario, expresa todo relativo a la referencia y marca "sin fuente física".
+Primitivas robustas: voladores y cobertura parcial no cambian la normal/offset/ejes más que la tolerancia; extents de bbox contaminados no se usan.
+Alineación: con escaneos validados, align + refine con escala bloqueada dejan residuo por par y held-out dentro de tolerancia; observabilidad insuficiente → rechazo con el mensaje correcto.
+Perfiles de escala: validated_both mide s_fusion y veta fuera de ±3 %; unvalidated aplica s_fusion y lo registra; override registrado.
+La referencia no se toca: bit-a-bit idéntica antes y después de la fusión.
+Corrección cruzada: escaneo con deriva inyectada → diagnóstico no uniforme → corrección por keyframe → pares dentro de tolerancia y continuidad respetada; referencia inconsistente → rechazo con instrucción.
+Held-out veta: una solución que calza los pares pero desplaza el piso o una instancia común no pareada se rechaza sin escribir nada.
+Transaccionalidad: fallo simulado en Potree → proyecto intacto; undo/approve; 409 ante concurrencia.
+Provenance: cada punto del fusionado resuelve a (escaneo, keyframe, píxel); globalIndices combinados válidos.
+Replay reproduce el fusionado.
+Config: claves faltantes/fuera de rango → error nombrado; test estático: cero literales de decisión en server/fusion/ fuera de config.py.
+Los tests existentes siguen verdes; ui compila.
+13. Método de trabajo (en este orden, sin saltear; fases 1–2 sin archivos)
+
+Fase 1 — Inventario en sesión. Leer los archivos del encabezado; grep de todos los lectores/escritores de project.json (composition, reference_scale), de scans/fused/, de floor_transform.npz, del campo scan, y de cómo phase5_qa, bim/ (solo para no romper lo existente; el IFC no es requisito), el viewer y el chat consumen el fusionado. Cada consumidor termina migrado en la fase 3. Verificar qué persiste surface_fit por instancia (ruta, meta.json) para que primitives.py lo reutilice. Comprobar si server/correction/ existe y qué expone.
+
+Fase 2 — Diseño en sesión. Fijar contratos de metric.py, align.py, crosscorrect.py con correction/, esquema del acta, rutas API (eliminadas: /api/project/{project}/fuse/* actuales; nuevas: validación métrica, pares con diagnóstico, run, approve/undo, historial, replay), cambios de UI, lista de tests. Directamente a código.
+
+Fase 3 — Implementación (el entregable). fusion/config.py + YAML → primitives.py → metric.py + UI de validación → consensus.py → pairs.py/diagnose.py → align.py → refine.py → gates.py → crosscorrect.py (con/sobre correction/) → build.py + report.py + replay.py → api.py y limpieza de main.py → FuseScansModal.tsx → migración de consumidores del fusionado → eliminación de fuse_scans.py y cloudcompy_register.py (o reducción a lo que sobreviva) → tests de §12. Commits por unidad funcional citando el hallazgo (F1…F9). Si el contexto se agota, cada commit deja el repo ejecutable y el último mensaje dice dónde retomar.
+
+Fase 4 — Verificación obligatoria. pytest server/tests -q; npm run build en ui/; búsqueda estática de 1/√s, sqrt(s), reference_scale, scale_min, size_measure, except Exception: pass, literales de decisión fuera de config.py; replay sobre la escena sintética. Rojo → corregir y volver a verificar.
+
+Fase 5 — Cierre (mensaje final, no un archivo). Por hallazgo F1…F9: qué se hizo, dónde, cómo se prueba; archivos eliminados/creados/modificados; salida de las verificaciones; bloqueos reales con la pregunta exacta y lo implementado a pesar de ellos.
+
+14. Definition of Done
+ Validación métrica por medida implementada: medición entre primitivas, s y σ_s, guardas, aplicación a todo el escaneo como época metric en el ledger, segunda medida → uniformidad, ficha del escaneo con fuente de escala.
+ Consenso métrico multi-escaneo implementado (sesgo por escaneo, tamaño por objeto, residuos, propuesta de referencia), anclado por la medida del usuario; sin IFC.
+ La referencia nunca se transforma ni reescala desde la fusión; no existe escala simétrica ni reference_scale ≠ 1.
+ Perfiles de escala por estado de validación; s_fusion medido y reportado siempre; gate configurable (default ±3 % con ambos validados); override registrado.
+ Alineación por primitivas robustas (reutilizando surface_fit), refino con escala bloqueada, observabilidad verificada; culling reemplazado por diagnóstico.
+ Diagnóstico de uniformidad previo y corrección cruzada por keyframe sobre server/correction/ (compartido, no duplicado).
+ Todos los gates de §5.7 implementados, configurables y vetando.
+ Fusionado transaccional con undo/approve, acta completa, provenance por punto resoluble, replay reproducible; medidas sobre el fusionado con fuente de escala.
+ fuse_scans.py y cloudcompy_register.py eliminados o reducidos; main.py sin lógica de fusión; FuseScansModal.tsx rediseñado; consumidores migrados.
+ Todo parámetro en config.yaml (fusion:, metric_validation:) con validación; cero literales de decisión; sin except Exception: pass; lock por proyecto/escaneo.
+ Tests de §12 verdes junto con los existentes; ui compila.
+ Ningún archivo .md creado ni modificado; nada quedó como "pendiente".
+15. Restricciones
+No modificar la receta de reconstrucción pinneada ni valores "do NOT change" de CLAUDE.md; no tocar vendor/; no agregar dependencias de licencia no comercial.
+No cambiar el orden de puntos de las nubes de origen; el fusionado se construye por concatenación con scan y offsets registrados.
+No regenerar automáticamente mallas ni ajustes sobre el fusionado; es de solo lectura.
+No reimplementar RANSAC/ajuste de primitivas: reutilizar surface_fit.
+Preguntar solo ante un bloqueo real; todo lo demás se decide, se implementa y se justifica en el docstring correspondiente.

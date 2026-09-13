@@ -4272,6 +4272,44 @@ function App() {
                     </button>
                   </div>
 
+                  {/* ── geometric revisit detection + loop closure (no marking needed) ── */}
+                  <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border-color)' }}>
+                    <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>
+                      <b>🔁 Revisits</b> — finds from the poses and the depth where the walk
+                      saw the same place twice, measures the offset, solves one closure per
+                      revisit and distributes it over the reconstruction chunks.
+                    </div>
+                    <button className="bim-action-btn upload" style={{ width: '100%' }}
+                      disabled={correctionRunning}
+                      onClick={async () => {
+                        setCorrectionRunning(true)
+                        setCorrectionReport(null)
+                        setStatusMessage('🔁 detecting revisits and closing loops...')
+                        try {
+                          const headers: HeadersInit = { 'Content-Type': 'application/json' }
+                          if (token) headers['Authorization'] = `Bearer ${token}`
+                          const r = await fetch('/api/correction/revisit', {
+                            method: 'POST', headers,
+                            body: JSON.stringify({ session_id: activeSession }),
+                          })
+                          const d = await r.json().catch(() => ({}))
+                          setCorrectionReport(d.report || null)
+                          if (r.ok && d.status === 'pending') setShowCorrectionModal(false)
+                          setStatusMessage(r.ok
+                            ? (d.status === 'pending'
+                              ? `🔁 ${d.report?.solutions?.length || 0} closure(s) applied — Approve or Undo`
+                              : `🔁 revisit closure rejected: ${d.report?.rejection_reason || 'see the report'}`)
+                            : `🔁 revisit closure failed: ${typeof d.detail === 'string' ? d.detail : 'error'}`)
+                        } catch { setStatusMessage('🔁 revisit closure failed') }
+                        setCorrectionRunning(false)
+                        refreshCorrectionStatus(activeSession!)
+                        loadCorrectionLedger(activeSession!)
+                        loadCorrectionArtifacts(activeSession!)
+                      }}>
+                      {correctionRunning ? '⏳ closing…' : '🔁 Detect & close revisits'}
+                    </button>
+                  </div>
+
                   {/* ── derived artifacts vs the current geometry epoch ── */}
                   {correctionArtifacts && correctionArtifacts.length > 0 && (
                     <div style={{ marginTop: 14 }}>

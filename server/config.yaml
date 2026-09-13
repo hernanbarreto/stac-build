@@ -25,6 +25,7 @@
 #   segmentation/scene_analyzer.py→ scene_analysis (parts)
 #   bim/comparison.py             → bim.deviation
 #   stray_da3_streaming.py        → reconstruction.lidar.trust_range
+#   fusion/*                      → metric_validation, scan_fusion (multi-scan fusion)
 #   correction/*                  → correction (user-directed correction module;
 #                                   EVERY key is mandatory — correction/config.py
 #                                   fails at load naming any missing key)
@@ -1906,6 +1907,83 @@ correction:
                                   # sits farther than this from the reference model is
                                   # a REAL step/level change → demoted to interpolated
                                   # (the step is preserved, only drift is removed)
+  revisit:                        # geometric revisit detection (USER 2026-09-09): "ver los
+                                  # mismos lugares desde diferentes posiciones" — frustum +
+                                  # depth co-visibility between keyframes, no descriptors,
+                                  # no segmentation; duplicates measured per region
+    sample_per_kf: 1500           # own points sampled per keyframe for the visibility test
+    min_gap_kf: 30                # keyframes closer than this are the same pass, not a revisit
+    min_covis: 0.10               # fraction of a keyframe's points that land ON the other
+                                  # keyframe's own measured surface (z-buffer agreement)
+    depth_min_m: 0.3              # visibility depth window in the target camera
+    depth_max_m: 12.0
+    zbuffer_cell_px: 8            # the other keyframe's own points build a coarse depth
+                                  # image (cell size in provenance pixels): a point that
+                                  # sits BEHIND that surface is occluded (pccr 2026-09-09:
+                                  # frustum-only co-visibility looked through walls)
+    same_surface_tol_m: 0.10      # |Δdepth| ≤ max(this, rel × depth) = same surface
+    same_surface_tol_rel: 0.10
+    region_cell_m: 3.0            # co-visible points are binned into FIXED 3-D blocks of
+                                  # this size — one block = one place (connected 1 m cells
+                                  # chained whole corridors into one "region"); the
+                                  # observers of a block split into visits by temporal gap
+    region_sample: 20000          # points per side used to measure the region's offset
+    offset_min_m: 0.05            # NN median above this = the region IS duplicated
+    image_max_px: 640             # reprojection previews (longest side)
+  consistency:                    # region-centric multi-view check (USER 2026-09-09):
+                                  # "me paro en una región y veo quién me ve; la
+                                  # verificación se hace con TODOS los KF que la crearon"
+    cell_m: 1.0                   # block size — one region
+    block_min_points: 500         # smaller blocks are not verifiable
+    block_sample: 20000           # consensus points per block (cap)
+    writer_min_points: 200        # a keyframe counts as a writer of the block above this
+    writer_query_sample: 2000     # its points queried against the other writers
+    viewer_probe: 50              # probe points per block for the "who sees me" test
+    viewer_min_frac: 0.5          # a keyframe sees the block if it sees this fraction of
+                                  # the probes unoccluded (frustum + own z-buffer)
+    near_kf: 10                   # writer pairs closer than this are the same pass
+                                  # (report split: vs neighbours / vs distant writers)
+  kfgraph:                        # per-KEYFRAME pose graph over the pairwise consistency
+                                  # evidence (USER 2026-09-09): every pair of keyframes
+                                  # that wrote the same blocks → T_ij by trimmed 3-D ICP
+                                  # + point-to-plane information (observability); X_k per
+                                  # keyframe, kf 0 fixed; the per-step increment says
+                                  # where the error was born. Read-only diagnostics.
+    pair_src_sample: 2000
+    pair_tgt_sample: 6000
+    normal_k: 12
+    gn_iters: 15
+    gn_converge: 0.0001
+    damping: 0.001                # initial relative LM damping (× diagonal), grows on rejected steps
+    damping_min: 0.000000001      # floor while steps keep being accepted (quadratic convergence)
+    lm_factor: 10.0
+    lm_tries: 8
+    floor_m: 0.03                 # neighbour agreement floor (1.5 cm median, 2.2 p90 on
+                                  # pccr 31/08): a pair still above it after the solve is
+                                  # not explained by a rigid pose — reported as such
+  photo:                          # photometric bundle adjustment (USER 2026-09-09: reproject
+                                  # the other keyframes' coloured points into each photo and
+                                  # minimise the optical-flow misalignment, all poses at once)
+    candidate_sample: 1500        # points per keyframe projected to find who lands in whose photo
+    candidate_min: 150            # ≥ this many samples inside the image → candidate pair
+    pair_min_points: 300          # rendered points below which the pair carries nothing
+    points_per_pair: 400          # correspondences kept per pair for the solve
+    splat_radius: 2               # px
+    outer_iters: 1                # render → flow → solve rounds
+    huber_px: 4.0                 # residuals beyond this (px) lose quadratic pull — the
+                                  # neighbour floor is ~4 px on pccr 31/08
+  posegraph:                      # per-CHUNK pose graph fed by the revisit closures
+                                  # (USER 2026-09-09): nodes = the chunks of
+                                  # chunk_plan.json (chunk 0 fixed — the start is
+                                  # exact), seam edges between consecutive chunks
+                                  # weighted by the distance walked between their
+                                  # centres, loop edges = ONE joint closure per pair
+                                  # of visits (all its blocks solved together, yaw+t);
+                                  # keyframes in an overlap blend the two chunks
+    loop_weight: 100.0            # a closure is evidence, the seam prior is smoothness
+    rot_lever_m: 3.0              # 1 rad of yaw residual counts like this many metres
+    min_blocks_improved: 1.0      # the joint closure must reduce the offset in this
+                                  # fraction of the pair's blocks (1.0 = ALL of them)
   apply:
     depth_correction_mode: sidecar  # sidecar (output/depth_correction.json served
                                     # via segmentation/session_io.correct_depth) |
@@ -1943,11 +2021,12 @@ metric_validation:
     min_points: 300               # an instance below this cannot carry a primitive
 
 # ── Fusion (USER 2026-09-08 redesign: the reference is NEVER rescaled) ─────
-# Consumed ONLY by server/fusion/config.py. The symmetric √s split is GONE:
+# Consumed ONLY by server/fusion/config.py (NOT the legacy `fusion:` block of
+# fusion_engine.py above — YAML last-wins would mask it). The symmetric √s split is GONE:
 # the product frame is the reference scan's frame, the residual inter-scan
 # scale is a CONTROL number under a profile-dependent gate, never a free
 # parameter. Alignment solves on fitted primitives, never on raw subclouds.
-fusion:
+scan_fusion:
   pairs:
     min_pairs: 2                  # hard minimum of invariant pairs per scan
     recommended_pairs: 3          # below this the UI warns

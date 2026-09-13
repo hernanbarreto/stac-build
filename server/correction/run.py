@@ -591,6 +591,137 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
     return report
 
 
+def run_revisit(output_dir, operator: str, log: Callable = print,
+                progress: Callable = _noop_progress,
+                cfg: Optional[CorrectionConfig] = None,
+                previews: bool = True) -> dict:
+    """Geometric loop closure (kind=revisit, USER 2026-09-09): detect the
+    revisits from poses + intrinsics + provenance (no segmentation, no
+    descriptors), solve ONE joint closure per pair of visits, distribute it
+    over the chunk pose graph, apply transactionally — same gates (advisory),
+    same ledger, same Approve/Undo."""
+    from correction import posegraph, revisit as revisit_mod
+    from correction.units import load_chunk_plan
+    t0 = time.time()
+    output_dir = Path(output_dir)
+    if cfg is None:
+        cfg = load_correction_config()
+    _check_ready(output_dir)
+    correction_id = ledger.new_correction_id()
+    epoch_from = current_epoch(output_dir)
+    advisory = cfg.gates.mode == "advisory"
+
+    def _p(pct, msg):
+        log(msg)
+        progress(pct, msg)
+
+    def _reject(reason, gates_list, revisits=None, dist=None):
+        report = build_report(
+            correction_id=correction_id, kind="revisit", operator=operator,
+            status="rejected", instance_ids=None, visits=None,
+            observability=None, diagnosis=None,
+            solutions=(revisits or {}).get("closures"),
+            distribution=dist, gates=gates_list, overrides=None,
+            epoch_from=epoch_from, epoch_to=None, rejection_reason=reason,
+            extra={"revisits": {k: v for k, v in (revisits or {}).items()
+                                if k != "_closures_full"}},
+            elapsed_s=time.time() - t0)
+        path = save_report(output_dir, report)
+        ledger.record_run(
+            output_dir, correction_id=correction_id, epoch_from=epoch_from,
+            epoch_to=epoch_from, kind="revisit", operator=operator,
+            instance_ids=[], visits=[], observability=[], diagnosis=[],
+            anchors=[], gates=gates_list, overrides=None,
+            report_path=str(path.relative_to(output_dir)),
+            verdict="rejected")
+        _p(100, f"❌ revisit closure REJECTED: {reason}")
+        return report
+
+    _p(2, "loading cloud + provenance...")
+    session = load_session(output_dir)
+    g_int = gates.gate_integrity(session)
+    if not g_int["passed"]:
+        return _reject(g_int["detail"], [g_int])
+
+    def _sub_progress(pct, msg):
+        progress(5 + pct * 35 / 100, msg)   # detector spans 5..40 %
+
+    rev = revisit_mod.detect_revisits(session, cfg, log=log,
+                                      progress=_sub_progress,
+                                      previews=previews)
+    closures = [c for c in rev["_closures_full"] if c["accepted"]]
+    if not closures:
+        why = ("no revisit found — the walk never saw the same place twice "
+               "beyond the temporal gap" if not rev["regions"] else
+               "no joint closure improved every block of its visit pair — "
+               "nothing consistent to apply")
+        return _reject(why, [g_int], rev)
+
+    _p(42, "distributing the closures over the chunk pose graph...")
+    plan = load_chunk_plan(output_dir)
+    R_kf, t_kf, dist_report = posegraph.distribute_closures(
+        plan, session.poses, closures, cfg, log=log)
+    k_kf = np.ones(session.n_kf)
+
+    g_plaus = gates.gate_plausibility(
+        [{"R": np.asarray(c["R"]), "t": np.asarray(c["t"])} for c in closures], cfg)
+    g_cont = gates.gate_continuity(dist_report, cfg)
+    gate_results = [g_int, g_plaus, g_cont]
+    failed = [g for g in gate_results if not g["passed"]]
+    warnings: List[str] = []
+    if failed:
+        if not advisory:
+            return _reject(f"gate(s) failed: {[g['name'] for g in failed]} — "
+                           f"{failed[0]['detail']}", gate_results, rev,
+                           dist_report)
+        for g in failed:
+            g["advisory"] = True
+            warnings.append(f"{g['name']}: {g['detail']}")
+        log(f"  ⚠ advisory gate(s) failed (applied anyway, USER 2026-09-09): "
+            f"{[g['name'] for g in failed]}")
+
+    _p(50, "staging the transaction...")
+    tx_info = stage_transaction(
+        session, cfg, R_kf, t_kf, k_kf, correction_id=correction_id,
+        scale_diag_new=diagnose.regenerate_scale_diagnostics(
+            output_dir, {}, epoch_from + 1, correction_id),
+        log=log, progress=progress)
+    _p(90, "atomic swap...")
+    swap_transaction(output_dir, tx_info, log=log)
+    _p(93, "updating the instance store in place...")
+    store_summary = update_instance_store(
+        output_dir, R_kf, t_kf, k_kf, session.frames, log=log)
+
+    closures_clean = [{k: v for k, v in c.items() if k not in ("R", "t")}
+                      for c in closures]
+    report = build_report(
+        correction_id=correction_id, kind="revisit", operator=operator,
+        status="pending", instance_ids=None, visits=None,
+        observability=None, diagnosis=None, solutions=closures_clean,
+        distribution=dist_report, gates=gate_results, overrides=None,
+        epoch_from=epoch_from, epoch_to=tx_info["epoch_to"],
+        extra={"points_moved": tx_info["points_moved"],
+               "pose_copies_skipped": tx_info["pose_copies_skipped"],
+               "instance_store": store_summary,
+               "revisits": {k: v for k, v in rev.items()
+                            if k != "_closures_full"},
+               "warnings": warnings},
+        elapsed_s=time.time() - t0)
+    path = save_report(output_dir, report)
+    ledger.record_run(
+        output_dir, correction_id=correction_id, epoch_from=epoch_from,
+        epoch_to=tx_info["epoch_to"], kind="revisit", operator=operator,
+        instance_ids=[], visits=[], observability=[], diagnosis=[],
+        anchors=[{"kf": c["later_kfs"][0], "rot_deg": c["rot_deg"],
+                  "t_m": c["t_norm_m"], "k": 1.0} for c in closures_clean],
+        gates=gate_results, overrides=None,
+        report_path=str(path.relative_to(output_dir)))
+    _p(100, f"✅ revisit closure applied (epoch {tx_info['epoch_to']}, "
+            f"{len(closures)} closure(s)) — awaiting your verdict: Approve "
+            f"or Undo")
+    return report
+
+
 def run_verdict(output_dir, verdict: str, operator: str,
                 log: Callable = print) -> dict:
     """Approve or undo the pending correction. Undo restores the previous

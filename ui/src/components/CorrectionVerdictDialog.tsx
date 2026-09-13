@@ -52,11 +52,12 @@ export default function CorrectionVerdictDialog({ state, session, otherSession, 
                   <tbody>
                     {solutions.map((c, i) => (
                       <tr key={i}>
-                        <td>{c.kf_span ? `${c.kf_span[0]}..${c.kf_span[1]}` : (c.anchors ? `${c.anchors.length} anchors` : '—')}</td>
-                        <td>{c.rot_deg != null ? `${c.rot_deg}° / ${c.t_m} m` : '—'}</td>
+                        <td>{c.kf_span ? `${c.kf_span[0]}..${c.kf_span[1]}` : c.later_kfs ? `${c.earlier_kfs[0]}..${c.earlier_kfs[1]} ↔ ${c.later_kfs[0]}..${c.later_kfs[1]}` : (c.anchors ? `${c.anchors.length} anchors` : '—')}</td>
+                        <td>{c.rot_deg != null ? `${c.rot_deg}° / ${c.t_norm_m ?? c.t_m} m` : '—'}</td>
                         <td>{c.k && c.k !== 1 ? c.k : '—'}</td>
-                        <td>{c.residual_cm ? <>{c.residual_cm.before} → <b>{c.residual_cm.after}</b> cm</> : '—'}</td>
-                        <td>{c.dof ? c.dof.join(',') : '—'}</td>
+                        <td>{c.residual_cm ? <>{c.residual_cm.before} → <b>{c.residual_cm.after}</b> cm</>
+                          : c.per_block ? c.per_block.map((b: any) => `R${b.region} ${b.before_cm}→${b.after_cm}`).join(' · ') : '—'}</td>
+                        <td>{c.dof ? c.dof.join(',') : c.n_blocks != null ? `yaw+t · ${c.blocks_improved}/${c.n_blocks} blocks` : '—'}</td>
                       </tr>
                     ))}
                   </tbody>
