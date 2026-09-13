@@ -123,6 +123,8 @@ class LoopsConfig:
     dbscan_min_samples: int
     cluster_min_points: int
     bridge_extra_frames: int        # §4.9 non-keyframe frames per bridge window
+    coverage_radius_m: float        # §4.6a: trajectory within this of a loop endpoint = covered
+    min_coverage: float             # below this the acta declares the loop density insufficient
     spatial: SpatialGateConfig
     semantic: SemanticClassConfig
 
@@ -142,11 +144,132 @@ class ScaleConfig:
                                     # candidate below which a scale break is NOT localised
 
 
+# ── correction_graph.graph — keyframe SE(3) graph (§4.3) ─────────────────
+
+@dataclass(frozen=True)
+class GraphConfig:
+    sigma_odo_intra_m: float        # odometry σ between consecutive keyframes inside a chunk
+    sigma_odo_intra_deg: float
+    loop_sigma_rot_deg: float       # rotation σ of a loop edge (its translation σ is measured)
+    sigma_gravity_deg: float        # weak per-node prior: camera down stays the chain consensus
+    huber_delta_m: float            # Huber on loop + structural edges (never odometry)
+    huber_delta_deg: float
+    dense_max_unknowns: int         # 6·n_kf ≤ this → dense Cholesky, else block-Jacobi PCG
+    lambda_init: float
+    lambda_max: float
+    lm_diag_floor: float
+    tol: float
+    rel_tol: float
+    max_iters: int
+    pcg_tol: float
+    pcg_max_iters: int
+    min_loop_gain: float            # gate: total loop residual must drop by this fraction
+    max_seam_degradation_m: float   # gate: held-out surface pairs may not worsen beyond this
+    holdout_offsets: Tuple[int, ...]  # frame offsets of the held-out pairs (chunk_field_verdict)
+    holdout_stride: int
+    holdout_samples: int
+    holdout_max_nn_m: float         # cloud held-out judge: a NN pair beyond this is not a correspondence
+    run_without_loops: bool         # solve with odometry + priors only (no loop edge)
+
+
+# ── authority (§4.7) ───────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class AuthorityConfig:
+    saturation_warn: float          # fraction of the declared authority that raises the flag
+    pose_graph_max_m: float
+    pose_graph_max_deg: float
+    scale_graph_max_log: float
+    depth_graph_max_log_a: float
+    depth_graph_max_b_m: float
+    intra_chunk_max_m: float
+
+
+# ── structural (§4.6) ──────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class FloorDatumConfig:
+    enabled: bool
+    sigma_angle_deg: float
+    sigma_offset_m: float
+    max_tilt_deg: float             # a low-band plane tilted more than this is not a floor patch
+    reference_span_kf: int          # the datum plane is fitted on the first N keyframes' patches
+    step_demote_m: float            # a patch farther than this from the datum is a real step
+    low_band_pct: float             # per-keyframe low height percentile that seeds the patch
+    band_m: float                   # patch band half-height
+    min_points: int
+    ransac_tol_m: float
+    ransac_iters: int
+
+
+@dataclass(frozen=True)
+class WallPlanarityConfig:
+    enabled: bool
+    wall_tol_m: float               # tolerated residual of a wall patch to its plane (Huber δ)
+    sigma_angle_deg: float
+    sigma_offset_m: float
+    min_span_m: float               # only walls this long constrain the lateral bend
+    min_points_per_kf: int
+    labels: Tuple[str, ...]
+    reference_span_kf: int          # the wall plane NODE starts at the plane of its earliest N patches
+    planar_ratio: float             # λ3/λ1 of a keyframe patch above this → not a plane, no edge
+    min_patch_extent_m: float       # a patch narrower than this (2nd axis) is a sliver, no edge
+
+
+@dataclass(frozen=True)
+class ColumnVerticalConfig:
+    enabled: bool
+    sigma_deg: float
+    labels: Tuple[str, ...]
+    min_points_per_kf: int
+    axis_ratio: float               # λ2/λ1 below this → the patch has an axis
+
+
+@dataclass(frozen=True)
+class RepeatedParallelConfig:
+    enabled: bool
+    sigma_deg: float
+    labels: Tuple[str, ...]
+    min_points_per_kf: int
+    axis_ratio: float               # λ2/λ1 below this → the patch has an axis (a partial face has none)
+
+
+@dataclass(frozen=True)
+class RegulatedDim:
+    label: str
+    dimension: str                  # width | diameter | height | gauge
+    value_m: float
+    tol_m: float
+
+
+@dataclass(frozen=True)
+class StructuralConfig:
+    floor_datum: FloorDatumConfig
+    wall_planarity: WallPlanarityConfig
+    column_vertical: ColumnVerticalConfig
+    repeated_parallel: RepeatedParallelConfig
+    regulated_dims: Tuple[RegulatedDim, ...]   # empty by default; per project
+
+
+# ── certify (§4.8 ensemble witness; F3 adds the loop keys) ──────────────────
+
+@dataclass(frozen=True)
+class CertifyConfig:
+    ensemble_offset_frames: int     # >0 → a second Omega pass with shifted chunk boundaries
+    keep_aligned_chunks: bool       # keep maplong_run/_tmp_results_aligned + _tmp_results_loop
+                                    # after the scale (the post-hoc graph, the A/B harness and
+                                    # the certification loop read them)
+
+
 @dataclass(frozen=True)
 class MetricGraphConfig:
     loop: LoopEdgeConfig
     loops: LoopsConfig
     scale: ScaleConfig
+    graph: GraphConfig
+    authority: AuthorityConfig
+    structural: StructuralConfig
+    certify: CertifyConfig
 
 
 def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig:
@@ -241,6 +364,8 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         dbscan_min_samples=_num(ls, "dbscan_min_samples", L, lo=1, integer=True),
         cluster_min_points=_num(ls, "cluster_min_points", L, lo=1, integer=True),
         bridge_extra_frames=_num(ls, "bridge_extra_frames", L, lo=0, integer=True),
+        coverage_radius_m=_num(ls, "coverage_radius_m", L, lo=0, lo_excl=True),
+        min_coverage=_num(ls, "min_coverage", L, lo=0, hi=1.0),
         spatial=spatial, semantic=semantic,
     )
 
@@ -258,7 +383,136 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         vio_min_seg_disp_m=_num(sc, "vio_min_seg_disp_m", C, lo=0),
         break_localisation_gap=_num(sc, "break_localisation_gap", C, lo=0),
     )
-    return MetricGraphConfig(loop=loop, loops=loops, scale=scale)
+    gp = cg.get("graph")
+    if not isinstance(gp, dict):
+        raise LoopsConfigError("config section correction_graph.graph is missing")
+    G = "correction_graph.graph"
+    ho = _require(gp, "holdout_offsets", G)
+    if not isinstance(ho, (list, tuple)) or not ho or not all(isinstance(x, int) and x > 0 for x in ho):
+        raise LoopsConfigError("correction_graph.graph.holdout_offsets must be a non-empty list "
+                               "of positive integers")
+    graph = GraphConfig(
+        sigma_odo_intra_m=_num(gp, "sigma_odo_intra_m", G, lo=0, lo_excl=True),
+        sigma_odo_intra_deg=_num(gp, "sigma_odo_intra_deg", G, lo=0, lo_excl=True),
+        loop_sigma_rot_deg=_num(gp, "loop_sigma_rot_deg", G, lo=0, lo_excl=True),
+        sigma_gravity_deg=_num(gp, "sigma_gravity_deg", G, lo=0, lo_excl=True),
+        huber_delta_m=_num(gp, "huber_delta_m", G, lo=0, lo_excl=True),
+        huber_delta_deg=_num(gp, "huber_delta_deg", G, lo=0, lo_excl=True),
+        dense_max_unknowns=_num(gp, "dense_max_unknowns", G, lo=6, integer=True),
+        lambda_init=_num(gp, "lambda_init", G, lo=0, lo_excl=True),
+        lambda_max=_num(gp, "lambda_max", G, lo=0, lo_excl=True),
+        lm_diag_floor=_num(gp, "lm_diag_floor", G, lo=0),
+        tol=_num(gp, "tol", G, lo=0, lo_excl=True),
+        rel_tol=_num(gp, "rel_tol", G, lo=0, lo_excl=True),
+        max_iters=_num(gp, "max_iters", G, lo=1, integer=True),
+        pcg_tol=_num(gp, "pcg_tol", G, lo=0, lo_excl=True),
+        pcg_max_iters=_num(gp, "pcg_max_iters", G, lo=1, integer=True),
+        min_loop_gain=_num(gp, "min_loop_gain", G, lo=0, hi=1.0),
+        max_seam_degradation_m=_num(gp, "max_seam_degradation_m", G, lo=0),
+        holdout_offsets=tuple(int(x) for x in ho),
+        holdout_stride=_num(gp, "holdout_stride", G, lo=1, integer=True),
+        holdout_samples=_num(gp, "holdout_samples", G, lo=100, integer=True),
+        holdout_max_nn_m=_num(gp, "holdout_max_nn_m", G, lo=0, lo_excl=True),
+        run_without_loops=_bool(gp, "run_without_loops", G),
+    )
+
+    au = raw.get("authority")
+    if not isinstance(au, dict):
+        raise LoopsConfigError("config section authority is missing")
+    A = "authority"
+    authority = AuthorityConfig(
+        saturation_warn=_num(au, "saturation_warn", A, lo=0, hi=1.0),
+        pose_graph_max_m=_num(au, "pose_graph_max_m", A, lo=0, lo_excl=True),
+        pose_graph_max_deg=_num(au, "pose_graph_max_deg", A, lo=0, lo_excl=True),
+        scale_graph_max_log=_num(au, "scale_graph_max_log", A, lo=0, lo_excl=True),
+        depth_graph_max_log_a=_num(au, "depth_graph_max_log_a", A, lo=0, lo_excl=True),
+        depth_graph_max_b_m=_num(au, "depth_graph_max_b_m", A, lo=0, lo_excl=True),
+        intra_chunk_max_m=_num(au, "intra_chunk_max_m", A, lo=0, lo_excl=True),
+    )
+
+    st = raw.get("structural")
+    if not isinstance(st, dict):
+        raise LoopsConfigError("config section structural is missing")
+    fd = st.get("floor_datum")
+    if not isinstance(fd, dict):
+        raise LoopsConfigError("config section structural.floor_datum is missing")
+    F = "structural.floor_datum"
+    floor = FloorDatumConfig(
+        enabled=_bool(fd, "enabled", F),
+        sigma_angle_deg=_num(fd, "sigma_angle_deg", F, lo=0, lo_excl=True),
+        sigma_offset_m=_num(fd, "sigma_offset_m", F, lo=0, lo_excl=True),
+        max_tilt_deg=_num(fd, "max_tilt_deg", F, lo=0, hi=90.0),
+        reference_span_kf=_num(fd, "reference_span_kf", F, lo=1, integer=True),
+        step_demote_m=_num(fd, "step_demote_m", F, lo=0, lo_excl=True),
+        low_band_pct=_num(fd, "low_band_pct", F, lo=0, hi=100.0),
+        band_m=_num(fd, "band_m", F, lo=0, lo_excl=True),
+        min_points=_num(fd, "min_points", F, lo=3, integer=True),
+        ransac_tol_m=_num(fd, "ransac_tol_m", F, lo=0, lo_excl=True),
+        ransac_iters=_num(fd, "ransac_iters", F, lo=1, integer=True),
+    )
+    wp = st.get("wall_planarity")
+    if not isinstance(wp, dict):
+        raise LoopsConfigError("config section structural.wall_planarity is missing")
+    W = "structural.wall_planarity"
+    wall = WallPlanarityConfig(
+        enabled=_bool(wp, "enabled", W),
+        wall_tol_m=_num(wp, "wall_tol_m", W, lo=0, lo_excl=True),
+        sigma_angle_deg=_num(wp, "sigma_angle_deg", W, lo=0, lo_excl=True),
+        sigma_offset_m=_num(wp, "sigma_offset_m", W, lo=0, lo_excl=True),
+        min_span_m=_num(wp, "min_span_m", W, lo=0),
+        min_points_per_kf=_num(wp, "min_points_per_kf", W, lo=3, integer=True),
+        labels=_str_list(wp, "labels", W),
+        reference_span_kf=_num(wp, "reference_span_kf", W, lo=1, integer=True),
+        planar_ratio=_num(wp, "planar_ratio", W, lo=0, hi=1.0),
+        min_patch_extent_m=_num(wp, "min_patch_extent_m", W, lo=0),
+    )
+    cv = st.get("column_vertical")
+    if not isinstance(cv, dict):
+        raise LoopsConfigError("config section structural.column_vertical is missing")
+    V = "structural.column_vertical"
+    column = ColumnVerticalConfig(
+        enabled=_bool(cv, "enabled", V),
+        sigma_deg=_num(cv, "sigma_deg", V, lo=0, lo_excl=True),
+        labels=_str_list(cv, "labels", V),
+        min_points_per_kf=_num(cv, "min_points_per_kf", V, lo=3, integer=True),
+        axis_ratio=_num(cv, "axis_ratio", V, lo=0, hi=1.0),
+    )
+    rp = st.get("repeated_parallel")
+    if not isinstance(rp, dict):
+        raise LoopsConfigError("config section structural.repeated_parallel is missing")
+    R = "structural.repeated_parallel"
+    repeated = RepeatedParallelConfig(
+        enabled=_bool(rp, "enabled", R),
+        sigma_deg=_num(rp, "sigma_deg", R, lo=0, lo_excl=True),
+        labels=_str_list(rp, "labels", R),
+        min_points_per_kf=_num(rp, "min_points_per_kf", R, lo=3, integer=True),
+        axis_ratio=_num(rp, "axis_ratio", R, lo=0, hi=1.0),
+    )
+    rd = st.get("regulated_dims")
+    if rd is None or not isinstance(rd, (list, tuple)):
+        raise LoopsConfigError("config key structural.regulated_dims must be a list (empty by default)")
+    dims = []
+    for k, e in enumerate(rd):
+        D = f"structural.regulated_dims[{k}]"
+        if not isinstance(e, dict):
+            raise LoopsConfigError(f"{D} must be a mapping")
+        dim = str(_require(e, "dimension", D))
+        if dim not in ("width", "diameter", "height", "gauge"):
+            raise LoopsConfigError(f"{D}.dimension must be width|diameter|height|gauge")
+        dims.append(RegulatedDim(label=str(_require(e, "label", D)).lower(), dimension=dim,
+                                 value_m=_num(e, "value_m", D, lo=0, lo_excl=True),
+                                 tol_m=_num(e, "tol_m", D, lo=0, lo_excl=True)))
+    structural = StructuralConfig(floor_datum=floor, wall_planarity=wall, column_vertical=column,
+                                  repeated_parallel=repeated, regulated_dims=tuple(dims))
+
+    ce = raw.get("certify")
+    if not isinstance(ce, dict):
+        raise LoopsConfigError("config section certify is missing")
+    certify = CertifyConfig(
+        ensemble_offset_frames=_num(ce, "ensemble_offset_frames", "certify", lo=0, integer=True),
+        keep_aligned_chunks=_bool(ce, "keep_aligned_chunks", "certify"))
+    return MetricGraphConfig(loop=loop, loops=loops, scale=scale, graph=graph,
+                             authority=authority, structural=structural, certify=certify)
 
 
 # ── fork-facing dicts ────────────────────────────────────────────────────────
@@ -279,3 +533,17 @@ def fork_model_loops(cfg: MetricGraphConfig, stac_server_dir: str) -> Dict[str, 
 
 def fork_model_scale(cfg: MetricGraphConfig) -> Dict[str, Any]:
     return asdict(cfg.scale)
+
+
+def fork_model_graph(cfg: MetricGraphConfig) -> Dict[str, Any]:
+    d = asdict(cfg.graph)
+    d["holdout_offsets"] = list(cfg.graph.holdout_offsets)
+    return d
+
+
+def fork_model_authority(cfg: MetricGraphConfig) -> Dict[str, Any]:
+    return asdict(cfg.authority)
+
+
+def fork_model_certify(cfg: MetricGraphConfig) -> Dict[str, Any]:
+    return asdict(cfg.certify)

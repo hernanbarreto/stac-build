@@ -112,6 +112,63 @@ def corridor_loop_scene(ceiling_h: float = 3.0) -> Scene:
     return sc
 
 
+def corridor_scene(length_m: float = 40.0, width_m: float = 4.0, ceiling_h: float = 3.0,
+                   step_at_x: Optional[float] = None, step_h: float = 0.30) -> Scene:
+    """A straight corridor along +x (x ∈ [0, L], z ∈ ±w/2): floor (optionally
+    with a REAL step of ``step_h`` beyond ``step_at_x``), ceiling, two long
+    walls, columns every 8 m on the +z wall, beams across the ceiling."""
+    sc = Scene()
+    hw = width_m / 2.0
+    if step_at_x is None:
+        sc.add(Plane(np.array([length_m / 2, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]),
+                     np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]), length_m / 2, hw, 1, "floor"))
+    else:
+        sc.add(Plane(np.array([step_at_x / 2, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]),
+                     np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]), step_at_x / 2, hw, 1, "floor"))
+        sc.add(Plane(np.array([(length_m + step_at_x) / 2, step_h, 0.0]), np.array([0.0, 1.0, 0.0]),
+                     np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]),
+                     (length_m - step_at_x) / 2, hw, 1, "floor"))
+        sc.add(Plane(np.array([step_at_x, step_h / 2, 0.0]), np.array([-1.0, 0.0, 0.0]),
+                     np.array([0.0, 0.0, 1.0]), np.array([0.0, 1.0, 0.0]), hw, step_h / 2, 20, "riser"))
+    sc.add(Plane(np.array([length_m / 2, ceiling_h, 0.0]), np.array([0.0, -1.0, 0.0]),
+                 np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]), length_m / 2, hw, 2, "ceiling"))
+    wall(sc, [length_m / 2, 0, hw], [0, 0, -1], [1, 0, 0], length_m / 2, ceiling_h / 2, 3)
+    wall(sc, [length_m / 2, 0, -hw], [0, 0, 1], [1, 0, 0], length_m / 2, ceiling_h / 2, 4)
+    wall(sc, [length_m, 0, 0], [-1, 0, 0], [0, 0, 1], hw, ceiling_h / 2, 5)
+    wall(sc, [0.0, 0, 0], [1, 0, 0], [0, 0, 1], hw, ceiling_h / 2, 6)
+    oid = 7
+    for x in np.arange(4.0, length_m - 2.0, 8.0):
+        sc.add(Cylinder(np.array([x, 0.0, hw - 0.4]), 0.25, ceiling_h, oid, "column"))
+        oid += 1
+    for x in np.arange(6.0, length_m - 2.0, 8.0):
+        sc.add(Box(np.array([x - 0.15, ceiling_h - 0.4, -hw]), np.array([x + 0.15, ceiling_h, hw]),
+                   oid, "beam"))
+        oid += 1
+    return sc
+
+
+def out_and_back_trajectory(n_kf: int, length_m: float = 40.0, y: float = 1.5,
+                            lane_z: float = 0.5, yaw_offset_deg: float = 35.0) -> np.ndarray:
+    """Walk +x along z = −lane, turn, walk back along z = +lane: the walk
+    returns to its start (one loop at the end) and every wall/floor/column is
+    seen twice from the two lanes. The camera looks ahead-and-toward the far
+    wall of its lane."""
+    half = n_kf // 2
+    poses = []
+    for k in range(n_kf):
+        if k < half:
+            x = 1.0 + (length_m - 2.0) * k / max(half - 1, 1)
+            pos, fwd = (x, y, -lane_z), np.array([1.0, 0.0, 0.0])
+            a = np.radians(yaw_offset_deg)
+        else:
+            x = (length_m - 1.0) - (length_m - 2.0) * (k - half) / max(n_kf - half - 1, 1)
+            pos, fwd = (x, y, lane_z), np.array([-1.0, 0.0, 0.0])
+            a = np.radians(yaw_offset_deg)
+        Ry = np.array([[np.cos(a), 0, np.sin(a)], [0, 1, 0], [-np.sin(a), 0, np.cos(a)]])
+        poses.append(look_c2w(pos, Ry @ fwd))
+    return np.stack(poses)
+
+
 # ── cameras ─────────────────────────────────────────────────────────────────
 
 def intrinsics(H: int, W: int, fov_deg: float = 70.0) -> np.ndarray:
@@ -235,9 +292,11 @@ class Session:
 
 
 def make_session(n_kf: int = 150, H: int = 48, W: int = 64, seed: int = 0,
-                 scene: Optional[Scene] = None, frame_step: int = 30) -> Session:
+                 scene: Optional[Scene] = None, frame_step: int = 30,
+                 poses: Optional[np.ndarray] = None) -> Session:
     scene = scene or corridor_loop_scene()
-    poses = loop_trajectory(n_kf)
+    poses = loop_trajectory(n_kf) if poses is None else np.asarray(poses, np.float64)
+    n_kf = len(poses)
     K = intrinsics(H, W)
     depth = np.zeros((n_kf, H, W), np.float64)
     oid = np.zeros((n_kf, H, W), np.int32)
@@ -280,13 +339,48 @@ def chunk_ranges(n: int, size: int, overlap: int) -> List[Tuple[int, int]]:
     return out
 
 
+def drift_field(n_kf: int, yaw_deg_per_kf: float = 0.0, t_per_kf=(0.0, 0.0, 0.0)) -> np.ndarray:
+    """Accumulated per-keyframe rigid drift D_g = Exp(g·ξ) (N,4,4) — the
+    feed-forward error that grows along the walk and that no per-chunk rigid
+    seam can remove (the keyframe graph's job)."""
+    D = np.zeros((n_kf, 4, 4))
+    for g in range(n_kf):
+        D[g] = np.eye(4)
+        D[g, :3, :3] = yaw_R(yaw_deg_per_kf * g)
+        D[g, :3, 3] = np.asarray(t_per_kf, np.float64) * g
+    return D
+
+
+def chain_drift(poses: np.ndarray, steps: np.ndarray) -> np.ndarray:
+    """Realistic odometric drift: a small LOCAL perturbation Exp(steps[g]) of
+    every relative motion, integrated along the chain (the feed-forward error
+    of one step is small; the far-field displacement is the accumulated
+    rotation times the lever arm). Returns D (N,4,4) with T'_g = D_g · T_g."""
+    import sys
+    from pathlib import Path as _P
+    vendor = _P(__file__).resolve().parents[2] / "vendor" / "VGGT-Long"
+    if str(vendor) not in sys.path:
+        sys.path.insert(0, str(vendor))
+    from loop_utils.lie import se3_exp, se3_inv
+    P = np.asarray(poses, np.float64)
+    n = len(P)
+    T = [P[0].copy()]
+    for g in range(1, n):
+        Z = se3_inv(P[g - 1]) @ P[g]
+        T.append(T[-1] @ Z @ se3_exp(np.asarray(steps[g - 1], np.float64)))
+    return np.stack([T[g] @ se3_inv(P[g]) for g in range(n)])
+
+
 def make_chunks(sess: Session, chunk_size: int = 60, overlap: int = 30,
                 scale_err: Sequence[float] = None, yaw_err_deg: Sequence[float] = None,
                 t_err: Sequence[Sequence[float]] = None, depth_noise_rel: float = 0.003,
-                seed: int = 0):
+                seed: int = 0, drift: Optional[np.ndarray] = None):
     """Chunk prediction dicts in each chunk's OWN gauge: GT geometry under an
     injected Sim3 error E_k = (s_k, R_k, t_k), plus multiplicative depth
-    noise. Returns (chunks, chunk_indices, errors)."""
+    noise. ``drift`` (N,4,4): per-keyframe accumulated rigid drift applied to
+    the frame's points AND camera before the chunk gauge (shared frames carry
+    the same drift in both chunks, so exact seams stay exact while the walk
+    as a whole is bent). Returns (chunks, chunk_indices, errors)."""
     rng = np.random.default_rng(seed)
     ci = chunk_ranges(sess.n_kf, chunk_size, overlap)
     n = len(ci)
@@ -313,6 +407,10 @@ def make_chunks(sess: Session, chunk_size: int = 60, overlap: int = 30,
             dcam = np.stack([(uu - sess.K[0, 2]) / sess.K[0, 0],
                              (vv - sess.K[1, 2]) / sess.K[1, 1], np.ones_like(uu)], -1)
             P = cam[:3, 3] + (dcam * z[..., None]) @ cam[:3, :3].T
+            if drift is not None:
+                Dg = drift[g]
+                P = P @ Dg[:3, :3].T + Dg[:3, 3]
+                cam = Dg @ cam
             P = sim3_apply(P.reshape(-1, 3), s, R, t).reshape(sess.H, sess.W, 3)
             wp[li] = np.where(valid[..., None], P, 0.0)
             dep[li] = np.where(valid, s * z, 0.0)
@@ -405,6 +503,49 @@ def fork_scale_cfg(**over) -> dict:
     return d
 
 
+def fork_graph_cfg(**over) -> dict:
+    d = {"sigma_odo_intra_m": 0.01, "sigma_odo_intra_deg": 0.2, "loop_sigma_rot_deg": 1.0,
+         "sigma_gravity_deg": 2.0, "huber_delta_m": 0.10, "huber_delta_deg": 2.0,
+         "dense_max_unknowns": 12000, "lambda_init": 1e-4, "lambda_max": 1e12,
+         "lm_diag_floor": 1e-9, "tol": 1e-8, "rel_tol": 1e-6, "max_iters": 50,
+         "pcg_tol": 1e-10, "pcg_max_iters": 2000, "min_loop_gain": 0.5,
+         "max_seam_degradation_m": 0.005, "holdout_offsets": [4, 10], "holdout_stride": 3,
+         "holdout_samples": 4000, "holdout_max_nn_m": 0.10, "run_without_loops": False}
+    d.update(over)
+    return d
+
+
+def fork_authority_cfg(**over) -> dict:
+    d = {"saturation_warn": 0.8, "pose_graph_max_m": 1.0, "pose_graph_max_deg": 5.0,
+         "scale_graph_max_log": 0.10, "depth_graph_max_log_a": 0.10,
+         "depth_graph_max_b_m": 0.50, "intra_chunk_max_m": 0.15}
+    d.update(over)
+    return d
+
+
+def structural_cfg(**over) -> dict:
+    d = {"floor_datum": {"enabled": True, "sigma_angle_deg": 1.0, "sigma_offset_m": 0.02,
+                         "max_tilt_deg": 10.0, "reference_span_kf": 15, "step_demote_m": 0.15, "low_band_pct": 5.0,
+                         "band_m": 0.5, "min_points": 200, "ransac_tol_m": 0.02,
+                         "ransac_iters": 200},
+         "wall_planarity": {"enabled": True, "wall_tol_m": 0.02, "sigma_angle_deg": 1.0,
+                            "sigma_offset_m": 0.02, "min_span_m": 4.0, "min_points_per_kf": 100,
+                            "labels": ["wall"], "reference_span_kf": 15,
+                            "planar_ratio": 0.05, "min_patch_extent_m": 1.0},
+         "column_vertical": {"enabled": True, "sigma_deg": 1.0, "labels": ["column"],
+                             "min_points_per_kf": 50, "axis_ratio": 0.15},
+         "repeated_parallel": {"enabled": True, "sigma_deg": 1.0, "labels": ["beam"],
+                               "min_points_per_kf": 50, "axis_ratio": 0.15},
+         "regulated_dims": []}
+    for k, val in over.items():
+        node = d
+        parts = k.split(".")
+        for p in parts[:-1]:
+            node = node[p]
+        node[parts[-1]] = val
+    return d
+
+
 def raw_server_cfg(**over) -> dict:
     """The server-side config dict for reconstruction.loops.config (mirrors
     server/config.yaml; every key present)."""
@@ -413,9 +554,13 @@ def raw_server_cfg(**over) -> dict:
     lp.pop("stac_server_dir")
     lp.pop("bridge_extra_frames")
     raw = {
-        "correction_graph": {"loop": lp},
+        "correction_graph": {"loop": lp, "graph": fork_graph_cfg()},
+        "authority": fork_authority_cfg(),
+        "structural": structural_cfg(),
+        "certify": {"ensemble_offset_frames": 0, "keep_aligned_chunks": True},
         "loops": {"min_gap_keyframes": 30, "duplicate_min_sep_m": 0.20, "dbscan_eps_m": 0.15,
                   "dbscan_min_samples": 20, "cluster_min_points": 300, "bridge_extra_frames": 4,
+                  "coverage_radius_m": 5.0, "min_coverage": 0.5,
                   "spatial": sp,
                   "semantic": {"enabled": False, "max_tokens": 256, "crops_per_instance": 1,
                                "default_class": "structural"}},

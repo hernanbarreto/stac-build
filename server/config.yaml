@@ -2105,6 +2105,94 @@ correction_graph:
     min_shared_structural_labels: 1 # semantic check when BOTH frames carry SAM3 instances
     intra_chunk_loops: true         # candidates inside one chunk are pose edges for the
                                     # keyframe graph (no scale row) — still bridged
+  graph:                            # keyframe SE(3) graph (§4.3) — replaces sim3loop in vggtomega
+    sigma_odo_intra_m: 0.01         # odometry σ between consecutive keyframes of one chunk
+    sigma_odo_intra_deg: 0.20       # (the exact-seam residual + the two-copy uncertainty are
+                                    # added in quadrature where the chain crosses a seam)
+    loop_sigma_rot_deg: 1.0         # rotation σ of a loop edge (translation σ is measured)
+    sigma_gravity_deg: 2.0          # weak per-node prior: camera-down stays the chain consensus
+                                    # — the graph cannot tilt the world
+    huber_delta_m: 0.10             # Huber on loop + structural edges (odometry stays quadratic)
+    huber_delta_deg: 2.0
+    dense_max_unknowns: 12000       # 6·n_kf ≤ this (≈2000 keyframes) → dense Cholesky; beyond,
+                                    # block-Jacobi preconditioned conjugate gradient
+    lambda_init: 1.0e-4             # Levenberg-Marquardt (Nielsen update)
+    lambda_max: 1.0e+12
+    lm_diag_floor: 1.0e-9
+    tol: 1.0e-8                     # ‖δ‖ below this → converged
+    rel_tol: 1.0e-6                 # relative cost improvement below this → converged
+    max_iters: 50
+    pcg_tol: 1.0e-10
+    pcg_max_iters: 2000
+    min_loop_gain: 0.5              # gate: total loop residual must drop by ≥ 50 %
+    max_seam_degradation_m: 0.005   # gate: held-out surface pairs (chunk_field_verdict strategy)
+                                    # may not worsen by more than 5 mm
+    holdout_offsets: [4, 10]        # frame offsets of the held-out pairs (never fitted)
+    holdout_stride: 3
+    holdout_samples: 4000
+    holdout_max_nn_m: 0.10          # post-hoc (cloud) judge: NN pairs farther apart are not
+                                    # the same surface — they never enter the held-out median
+    run_without_loops: false        # no verified loop → identity (nothing to close)
+
+authority:                          # §4.7 — every corrective stage declares its maximum
+  saturation_warn: 0.8              # fraction used above this → flag in the acta + kit visual
+  pose_graph_max_m: 1.0             # per keyframe; a correction beyond → the stage is IDENTITY
+  pose_graph_max_deg: 5.0
+  scale_graph_max_log: 0.10         # |log δ| of the loop-closed scale per chunk
+  depth_graph_max_log_a: 0.10       # per-frame depth gain
+  depth_graph_max_b_m: 0.50         # per-frame depth offset
+  intra_chunk_max_m: 0.15           # per-frame intra-chunk field
+
+structural:                         # §4.6 — the work as its own control (server-side graph)
+  floor_datum:
+    enabled: true
+    sigma_angle_deg: 1.0
+    sigma_offset_m: 0.02
+    max_tilt_deg: 10.0              # a low-band plane tilted beyond this is a wall band, not floor
+    reference_span_kf: 15           # datum plane = floor of the first N keyframes (drift-free start;
+                                    # correction.floor.reference_span_kf precedent)
+    step_demote_m: 0.15             # a patch this far from the datum is a REAL step → no edge
+    low_band_pct: 5.0
+    band_m: 0.5
+    min_points: 500
+    ransac_tol_m: 0.02
+    ransac_iters: 200
+  wall_planarity:
+    enabled: true
+    wall_tol_m: 0.02                # Huber width on the wall-plane residual (real walls are not perfect)
+    sigma_angle_deg: 1.0
+    sigma_offset_m: 0.02
+    min_span_m: 4.0                 # only long walls constrain the lateral bend
+    min_points_per_kf: 300
+    labels: [wall, muro, pared, partition, tabique]
+    reference_span_kf: 15           # the wall's plane NODE (solved jointly with the poses) starts
+                                    # at the plane of the wall's EARLIEST patches
+    planar_ratio: 0.05              # a keyframe's wall patch votes only as a well-conditioned
+    min_patch_extent_m: 1.0         # plane of some extent — a sliver's normal is noise
+  column_vertical:
+    enabled: true
+    sigma_deg: 1.0
+    labels: [column, pillar, columna, pilar]
+    min_points_per_kf: 200
+    axis_ratio: 0.15
+  repeated_parallel:
+    enabled: true
+    sigma_deg: 1.0
+    labels: [beam, viga, rail, riel, luminaire, luminaria, duct, ducto]
+    min_points_per_kf: 200
+    axis_ratio: 0.15                # a partial face of a beam has no axis — no edge
+  regulated_dims: []                # per project: {label, dimension (width|diameter|height|
+                                    # gauge), value_m, tol_m} → absolute scale rows (§5.2)
+
+certify:                            # §4.8 (F3 adds the certification loop keys)
+  ensemble_offset_frames: 0         # >0: a second Omega pass with chunk boundaries shifted by
+                                    # this many frames — a third prediction per frame for
+                                    # certification runs (OFF: doubles the inference)
+  keep_aligned_chunks: true         # keep maplong_run/_tmp_results_aligned (+ the loop bridges)
+                                    # after the scale: the post-hoc keyframe graph, the
+                                    # elastic_seam A/B harness (§7) and the certification loop
+                                    # read them. (The 2026-09-04 streaming clean deleted them
+                                    # right after the scale; tens of GB per session.)
 
 loops:                              # candidate detector + spatial gate (§4.4/§4.5/§4.9)
   min_gap_keyframes: 30             # two windows of one instance this far apart = revisit
@@ -2115,6 +2203,9 @@ loops:                              # candidate detector + spatial gate (§4.4/�
   cluster_min_points: 300           # smaller clusters are noise, not a copy
   bridge_extra_frames: 4            # §4.9 non-keyframe (blur-valid) frames added per bridge
                                     # window — they densify the revisit, never join the chain
+  coverage_radius_m: 5.0            # §4.6a loop_coverage: trajectory within this walked distance
+                                    # of an accepted loop endpoint counts as covered
+  min_coverage: 0.5                 # below this the acta declares it and the kit shows it
   spatial:                          # §4.5 — SAM3/SALAD propose, geometry decides
     drift_floor_m: 0.30             # δ(L) = max(floor, rate·L): measured Omega drift 1.3 cm/m
     drift_rate_m_per_m: 0.013

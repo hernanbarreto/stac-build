@@ -1644,11 +1644,17 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # stac_server_dir. Absolute scale rows (VIO per chunk, regulated
         # dimensions, a user measurement) join the same solve.
         from reconstruction.loops.config import (load_loops_config, fork_model_loops,
-                                                 fork_model_scale)
+                                                 fork_model_scale, fork_model_graph,
+                                                 fork_model_authority, fork_model_certify)
         _mg = load_loops_config(config)
         _server_dir = str(Path(__file__).resolve().parent.parent)
         cfg_v["Model"]["loops"] = fork_model_loops(_mg, _server_dir)
         cfg_v["Model"]["scale"] = fork_model_scale(_mg)
+        # F2: keyframe SE(3) graph replaces the vendor sim3loop; authority
+        # budgets per stage; optional ensemble witness (§4.3/§4.7/§4.8)
+        cfg_v["Model"]["graph"] = fork_model_graph(_mg)
+        cfg_v["Model"]["authority"] = fork_model_authority(_mg)
+        cfg_v["Model"]["certify"] = fork_model_certify(_mg)
         cfg_v["Model"]["metric_lock"]["anchor_extract"] = {
             "python": sys.executable, "frames_dir": str(frames_dir),
             "output_dir": str(output_dir),
@@ -1896,7 +1902,11 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # (the fail path raises above); a phase-2 chunked re-run regenerates
         # the dir from scratch.
         _aligned = Path(vggt_save_dir) / "_tmp_results_aligned"
-        if _aligned.exists():
+        from reconstruction.loops.config import load_loops_config as _llc
+        if _llc(config).certify.keep_aligned_chunks:
+            pipe.send_log("[cleanup] _tmp_results_aligned KEPT (certify.keep_aligned_chunks: "
+                          "the post-hoc graph / A/B harness / certification read it)")
+        elif _aligned.exists():
             _mb = sum(f.stat().st_size for f in _aligned.rglob("*")
                       if f.is_file()) / 1048576
             shutil.rmtree(_aligned, ignore_errors=True)
@@ -2102,7 +2112,15 @@ def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: W
     Idempotent (skips what's already gone), so it is safe — and now called — on BOTH the
     normal path AND the resume early-exit. Previously the resume path returned before the
     cleanup, so temps (tens of GB) accumulated across resumed runs and never got freed."""
-    for tmp_dir_name in ["_tmp_results_unaligned", "_tmp_results_loop", "pcd"]:
+    _keep_loop = False
+    try:
+        from reconstruction.loops.config import load_loops_config as _llc
+        from config import cfg as _cfg_all
+        _keep_loop = bool(_llc(_cfg_all).certify.keep_aligned_chunks)
+    except Exception as _e:  # noqa: BLE001 — a cleanup must never abort a finished reconstruction
+        pipe.send_log(f"[cleanup] certify config unavailable ({_e}) — loop bridges deleted",
+                      level="warning")
+    for tmp_dir_name in ["_tmp_results_unaligned", "pcd"] + ([] if _keep_loop else ["_tmp_results_loop"]):
         tmp_dir = save_dir / tmp_dir_name
         if tmp_dir.exists():
             size_mb = sum(f.stat().st_size for f in tmp_dir.rglob("*") if f.is_file()) / (1024 * 1024)

@@ -3,6 +3,17 @@
 pose_refine — E-full: GLOBAL per-frame pose refinement (the stage
 docs/pose_refinement.md specs, sized to reality: 210 keyframes x 6 DOF).
 
+SUPERSEDED (claude_stac.txt §7, 2026-09-13): this pure-numpy CPU stage stalled
+pccr_v1 for 2 h+ at 1,328 keyframes and was killed on the user's order
+(2026-09-04); its role — reconciling the feed-forward per-frame poses — is
+taken by the keyframe SE(3) pose graph (vendor/VGGT-Long/loop_utils/pose_graph.py,
+run inside the reconstruction as vggt_long._stac_pose_graph, and post-hoc with
+structural constraints by server/reconstruction/loops/kf_graph.py): exact loop
+bridges + verified edges with measured σ, torch LM, gated by held-out surface
+pairs, applied rigidly per frame. This file stays OFF the flow
+(reconstruction.pose_refine.enabled: false) and is kept for its tests and as
+the reference of the point-to-plane formulation.
+
 WHY (measured, test4 2026-07-11). The omega backbone emits per-frame poses in
 one feed-forward pass — no joint optimization ever reconciles them. Phase A
 proved every repair stage (elastic/drift/intra/finereg) leaves the core defect

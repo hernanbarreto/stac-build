@@ -9,4 +9,5 @@ server/config.yaml (`loops:`, `scale:`, `correction_graph:`), validated by
 """
 
 from .config import (LoopsConfigError, load_loops_config, fork_model_loops,   # noqa: F401
-                     fork_model_scale)
+                     fork_model_scale, fork_model_graph, fork_model_authority,
+                     fork_model_certify)

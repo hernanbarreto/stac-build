@@ -413,6 +413,23 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
     if to_write:
         merge_loop_closures(output_dir, to_write, log=log)
     report["n_written"] = len(to_write)
+    # §4.6 regulated dimensions of structural instances → ABSOLUTE scale rows
+    # (§5.2) for the next scale-graph solve (scale_absolute_rows.json)
+    if cfg.structural.regulated_dims:
+        from reconstruction.loops import structural as st
+        from correction.units import load_chunk_plan
+        plan = load_chunk_plan(output_dir)
+        ranges = plan["chunk_ranges"] if plan else None
+        downs = session.poses[:, :3, 1]
+        g_down = downs.mean(0); g_down = g_down / (np.linalg.norm(g_down) + 1e-12)
+        cls_map = {int(k): v.get("class", cfg.loops.semantic.default_class) for k, v in classes.items()}
+        rows = st.regulated_rows(session, instances, cls_map, cfg.structural.regulated_dims,
+                                 cfg.scale.sigma_regulated, -g_down, chunk_ranges=ranges,
+                                 dims_pct=(cfg.loops.spatial.dims_pct_lo, cfg.loops.spatial.dims_pct_hi))
+        if rows:
+            p = st.write_absolute_rows(output_dir, rows, ranges)
+            log(f"[instance-loops] {len(rows)} regulated-dimension scale row(s) → {p.name}")
+        report["regulated_rows"] = rows
     report["elapsed_s"] = round(time.time() - t0, 1)
     (output_dir / CANDIDATES_JSON).write_text(json.dumps(report, indent=1, default=float))
     (output_dir / DUPLICATES_JSON).write_text(json.dumps(
