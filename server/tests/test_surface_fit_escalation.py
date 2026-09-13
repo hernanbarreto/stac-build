@@ -52,12 +52,15 @@ def make_elliptic_vault(a=3.0, b=2.0, length=14.0, n=150_000, sigma=SIGMA, rng=N
 
 
 def make_warped_sheet(n=120_000, sigma=SIGMA, rng=None):
+    """Free-form BEYOND construction tolerance: 15 cm amplitude, metre-scale
+    wavelength — a plane leaves ~75 mm rms (above the 35 mm accept gate,
+    USER 2026-08-29: a surface a plane explains within tolerance STAYS a
+    plane), quadrics and the swept profile can't explain it; the B-spline
+    must. (The former 2 cm version was inside tolerance by that decision.)"""
     rng = rng or np.random.default_rng(14)
-    """Gently free-form: 2 cm amplitude, metre-scale wavelength — quadrics and
-    the swept profile can't explain it; the B-spline must."""
     x = rng.uniform(0, 8, n)
     y = rng.uniform(0, 6, n)
-    z = 0.02 * np.sin(x / 1.5) * np.cos(y / 1.2) + rng.normal(0, sigma, n)
+    z = 0.15 * np.sin(x / 1.5) * np.cos(y / 1.2) + rng.normal(0, sigma, n)
     return np.column_stack([x, y, z])
 
 

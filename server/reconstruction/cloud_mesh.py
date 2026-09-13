@@ -277,7 +277,23 @@ def _subsample_with_origins(xyz, rgb, fg, cam_ok_mask, max_points: int,
     raise RuntimeError("cloud_mesh: subsample failed to converge")
 
 
-def _implicit_finish(mesh, target_voxel: float, crop_dist: float, log=logger.info):
+def _pymeshlab_threads() -> int:
+    """Pin this process to at most 8 cores (CLAUDE.md environment lesson: TBB/
+    OpenMP solvers hang unpinned on the 252-core box) and return the thread
+    count pymeshlab's filters must be told to use — its default is every core."""
+    import os
+    try:
+        allowed = os.sched_getaffinity(0)
+        n = min(8, len(allowed))
+        os.sched_setaffinity(0, set(sorted(allowed)[:n]))
+    except (AttributeError, OSError):
+        n = min(8, os.cpu_count() or 8)
+    os.environ.setdefault("OMP_NUM_THREADS", str(n))
+    return n
+
+
+def _implicit_finish(mesh, target_voxel: float, crop_dist: float, log=logger.info,
+                     regularize_steps: int = 10):
     """CONTINUOUS surface extraction over the visibility-validated points —
     the TSDF/PGSR finish with OUR coverage. The Delaunay cut already decided
     WHERE surface exists (complete, onion-free); its vertices + CUT-ORIENTED
@@ -300,19 +316,32 @@ def _implicit_finish(mesh, target_voxel: float, crop_dist: float, log=logger.inf
         8, 12))
     # pymeshlab's screened Poisson, NOT Open3D's: o3d's (TBB, uncappable by
     # OMP_NUM_THREADS) thrashed >4 min on a 21k-point sphere on this 252-core
-    # box; pymeshlab solved the same solve in seconds.
+    # box; pymeshlab solved the same solve in seconds — PROVIDED its own
+    # thread count is capped (`threads=`; its default is every core, and on
+    # this box that thrashes exactly like Open3D: measured 2026-09-13, a 20k
+    # sphere at depth 8 never finished unpinned, 2.2 s with threads=8) and
+    # the process is pinned (CLAUDE.md environment lesson). The mesh is passed
+    # IN MEMORY: the PLY round-trip depended on pymeshlab's io plugin, which
+    # fails to load where libOpenGL.so.0 is absent ("Unknown format for load:
+    # ply") — the filter plugins do not need it.
     import pymeshlab
-    import tempfile
-    with tempfile.TemporaryDirectory() as _td:
-        _pin = _td + "/pts.ply"
-        _pout = _td + "/poisson.ply"
-        o3d.io.write_point_cloud(_pin, pcd, write_ascii=False)
-        ms = pymeshlab.MeshSet()
-        ms.load_new_mesh(_pin)
-        ms.generate_surface_reconstruction_screened_poisson(
-            depth=depth, preclean=True)
-        ms.save_current_mesh(_pout)
-        sm = o3d.io.read_triangle_mesh(_pout)
+    _threads = _pymeshlab_threads()
+    ms = pymeshlab.MeshSet()
+    ms.add_mesh(pymeshlab.Mesh(vertex_matrix=np.ascontiguousarray(P, dtype=np.float64),
+                               v_normals_matrix=np.ascontiguousarray(N, dtype=np.float64)))
+    ms.generate_surface_reconstruction_screened_poisson(
+        depth=depth, preclean=True, threads=_threads)
+    if int(regularize_steps) > 0:
+        # marching cubes leaves irregular slivers whose vertices sit off their
+        # neighbours' mean even on a perfectly smooth implicit surface; a few
+        # Taubin steps regularise the tessellation without shrinking (measured
+        # on the synthetic noisy sphere: local roughness 7.5 → 1.4 mm, true
+        # surface error 1.5 → 1.3 mm at 10 steps)
+        ms.apply_coord_taubin_smoothing(stepsmoothnum=int(regularize_steps))
+    _cm = ms.current_mesh()
+    sm = o3d.geometry.TriangleMesh(
+        o3d.utility.Vector3dVector(np.asarray(_cm.vertex_matrix(), np.float64)),
+        o3d.utility.Vector3iVector(np.asarray(_cm.face_matrix(), np.int32)))
     log(f"[cloud-mesh] implicit finish: screened Poisson depth={depth} → "
         f"{len(sm.vertices):,} verts (pre-crop)")
     # crop to the master surface: kill Poisson's blind closures/extrapolations
@@ -343,26 +372,19 @@ def _taubin_target(mesh, iters: int, work_dir: Path) -> np.ndarray:
     (roughness 7.0→1.07 mm vs →2.73 mm at ×30, same true-error ≈1.1 mm), so
     it is the primary; Open3D is the fallback. Vertex count must not change."""
     try:
-        import open3d as o3d
         import pymeshlab
-        work_dir.mkdir(parents=True, exist_ok=True)
-        tmp_in = work_dir / "_taubin_in.ply"
-        tmp_out = work_dir / "_taubin_out.ply"
-        try:
-            o3d.io.write_triangle_mesh(str(tmp_in), mesh, write_ascii=False)
-            ms = pymeshlab.MeshSet()
-            ms.load_new_mesh(str(tmp_in))
-            ms.apply_coord_taubin_smoothing(stepsmoothnum=int(iters))
-            ms.save_current_mesh(str(tmp_out))
-            out = o3d.io.read_triangle_mesh(str(tmp_out))
-            V1 = np.asarray(out.vertices)
-            if len(V1) != len(mesh.vertices):
-                raise RuntimeError("vertex count changed")
-            logger.info(f"[cloud-mesh] polish target: pymeshlab taubin ×{iters}")
-            return V1
-        finally:
-            tmp_in.unlink(missing_ok=True)
-            tmp_out.unlink(missing_ok=True)
+        _pymeshlab_threads()
+        # in memory (no io plugin — see _implicit_finish)
+        ms = pymeshlab.MeshSet()
+        ms.add_mesh(pymeshlab.Mesh(
+            vertex_matrix=np.ascontiguousarray(np.asarray(mesh.vertices), dtype=np.float64),
+            face_matrix=np.ascontiguousarray(np.asarray(mesh.triangles), dtype=np.int32)))
+        ms.apply_coord_taubin_smoothing(stepsmoothnum=int(iters))
+        V1 = np.asarray(ms.current_mesh().vertex_matrix(), np.float64)
+        if len(V1) != len(mesh.vertices):
+            raise RuntimeError("vertex count changed")
+        logger.info(f"[cloud-mesh] polish target: pymeshlab taubin ×{iters}")
+        return V1
     except Exception as _e:  # noqa: BLE001 — o3d fallback keeps the polish alive
         logger.info(f"[cloud-mesh] polish target: o3d taubin ×{iters} "
                     f"(pymeshlab unavailable: {_e})")
@@ -520,6 +542,10 @@ def export_cloud_mesh_scene(
                                          # polishing can never reach it). "vertex" = the taubin
                                          # polish path. Falls back to "vertex" on failure.
     cm_finish_crop: float = 0.02,        # implicit finish crop distance (m) to the master
+    cm_finish_regularize_steps: int = 10,  # implicit finish: Taubin steps that regularise the
+                                         # marching-cubes vertices (measured on the synthetic
+                                         # noisy sphere: roughness 7.5→1.4 mm, true error
+                                         # 1.5→1.3 mm; 0 = raw Poisson output)
     cm_polish: str = "taubin",           # POLISH on the finished mesh: strong Taubin low-pass
                                          # blended per-vertex by cloud CONFIDENCE. MEASURED on
                                          # a noisy synthetic sphere: roughness 7.0→1.1mm AND
@@ -595,7 +621,8 @@ def export_cloud_mesh_scene(
         _prog("smoothing")
         try:
             mesh = _implicit_finish(mesh, float(cm_target_voxel),
-                                    float(cm_finish_crop))
+                                    float(cm_finish_crop),
+                                    regularize_steps=int(cm_finish_regularize_steps))
             _implicit_done = True
         except Exception as _e:  # noqa: BLE001 — master mesh + vertex polish still ship
             logger.warning(f"[cloud-mesh] implicit finish failed ({_e}) — "

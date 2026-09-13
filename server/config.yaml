@@ -585,6 +585,10 @@ tsdf:
                                # attempts. The region-fusion architecture replaces it.
                                # "implicit" (parked) | "vertex" = taubin polish.
   cm_finish_crop: 0.02         # implicit crop distance (m) to the master surface
+  cm_finish_regularize_steps: 10  # implicit finish: Taubin steps that regularise the
+                               # marching-cubes tessellation (2026-09-13, synthetic noisy
+                               # sphere: roughness 7.5→1.4 mm, true error 1.5→1.3 mm; the
+                               # raw Poisson output is smooth but its slivers read as rough)
   cm_polish: "taubin"          # POLISH stage ON the finished mesh (topology/completeness
                                # untouched — only vertex positions low-passed): strong Taubin
                                # blended per-vertex by the cloud's CONFIDENCE (low conf =

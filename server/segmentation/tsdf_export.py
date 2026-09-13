@@ -1584,6 +1584,8 @@ def export_tsdf_scene(
                                          # continuous TSDF/PGSR look with our coverage.
                                          # "vertex" = taubin polish path (fallback).
     cm_finish_crop: float = 0.02,        # implicit crop distance (m) to the master surface
+    cm_finish_regularize_steps: int = 10,  # implicit finish: Taubin steps regularising the
+                                         # marching-cubes tessellation (0 = raw Poisson)
     cm_polish: str = "taubin",           # cloud_delaunay POLISH on the finished mesh: strong
                                          # Taubin blended per-vertex by cloud confidence
                                          # (measured: roughness 7.0→1.1mm, true-error 3.2→1.1mm
@@ -1846,6 +1848,7 @@ def export_tsdf_scene(
             cm_max_edge_m=cm_max_edge_m,
             cm_min_component_tris=cm_min_component_tris,
             cm_finish=cm_finish, cm_finish_crop=cm_finish_crop,
+            cm_finish_regularize_steps=cm_finish_regularize_steps,
             cm_polish=cm_polish, cm_polish_steps=cm_polish_steps,
             guide_glb=str(guide_glb) if guide_glb else None,
             cm_guide_max_dist=cm_guide_max_dist,
