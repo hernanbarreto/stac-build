@@ -383,6 +383,8 @@ def main():
     ap.add_argument("--frames-dir", required=True)
     ap.add_argument("--win", type=int, default=24)
     ap.add_argument("--stride", type=int, default=12)
+    ap.add_argument("--loop-window", type=int, default=8,
+                    help="keyframes around each loop pair tracked in their own window")
     ap.add_argument("--grid-side", type=int, default=48)
     ap.add_argument("--frame-list", default=None, help="json (e.g. da3_frames.json) for DENSE tracking")
     ap.add_argument("--smoke", action="store_true")
@@ -390,6 +392,7 @@ def main():
     out = extract_tracks(
         Path(args.output_dir), Path(args.frames_dir),
         win=args.win, stride=args.stride, grid_side=args.grid_side, smoke=args.smoke,
+        loop_window=args.loop_window,
         frame_list_json=args.frame_list,
     )
     print(f"[TRACKS-RESULT] {out if out else 'NONE'}")

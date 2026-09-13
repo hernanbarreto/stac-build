@@ -69,7 +69,8 @@ def ensure_tracks(output_dir, frames_dir, tcfg, log: Callable[[str], None] = pri
     if not (output_dir / TRACKS_REL).exists():
         server_dir = Path(__file__).resolve().parents[2]
         cmd = [tcfg.python, "-m", "reconstruction.vggt_tracks", "--output-dir", str(output_dir),
-               "--frames-dir", str(frames_dir), "--win", str(int(tcfg.win)), "--stride", str(int(tcfg.stride))]
+               "--frames-dir", str(frames_dir), "--win", str(int(tcfg.win)), "--stride", str(int(tcfg.stride)),
+               "--loop-window", str(int(tcfg.loop_window))]
         log(f"[depth-tracks] extracting tracks: {' '.join(cmd)}")
         proc = subprocess.run(cmd, cwd=str(server_dir), capture_output=True, text=True)
         if proc.returncode != 0:

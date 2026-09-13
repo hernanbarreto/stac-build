@@ -2124,7 +2124,8 @@ correction_graph:
     max_iters: 50
     pcg_tol: 1.0e-10
     pcg_max_iters: 2000
-    min_loop_gain: 0.5              # gate: total loop residual must drop by ≥ 50 %
+    min_loop_gain: 0.5              # gate: the loop residual (observed components) must drop by
+                                    # ≥ 50 % of what the edges can deliver (their σ floor excluded)
     max_seam_degradation_m: 0.005   # gate: held-out surface pairs (chunk_field_verdict strategy)
                                     # may not worsen by more than 5 mm
     holdout_offsets: [4, 10]        # frame offsets of the held-out pairs (never fitted)
@@ -2184,7 +2185,7 @@ structural:                         # §4.6 — the work as its own control (ser
   regulated_dims: []                # per project: {label, dimension (width|diameter|height|
                                     # gauge), value_m, tol_m} → absolute scale rows (§5.2)
 
-certify:                            # §4.8 (F3 adds the certification loop keys)
+certify:                            # §4.8 ensemble witness + §9 certification loop + §10 harness
   ensemble_offset_frames: 0         # >0: a second Omega pass with chunk boundaries shifted by
                                     # this many frames — a third prediction per frame for
                                     # certification runs (OFF: doubles the inference)
