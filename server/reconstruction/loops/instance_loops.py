@@ -305,8 +305,22 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
         gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
         gi = gi[(gi >= 0) & (gi < session.n_points)]
         frames_of[iid] = sorted({int(f) for f in np.unique(session.fg[gi])})
+    # The crops are looked up in seg_masks.npz, which is keyed by KEYFRAME
+    # POSITION, while frames_of above carries the cloud's REAL video frame
+    # numbers. Built ONCE here, over the whole keyframe set, because the
+    # translation cannot be derived from one instance's handful of frames.
+    try:
+        import numpy as _np
+        from segmentation.pipeline import _mask_frame_lookup
+        _mask_frames = _np.load(output_dir / "seg_masks.npz",
+                                allow_pickle=True)["frames"].tolist()
+        cloud_to_mask = _mask_frame_lookup(
+            output_dir, _mask_frames, sorted({int(f) for f in _np.unique(session.fg)}))
+    except Exception as e:  # noqa: BLE001 — classification degrades, never fails the run
+        log(f"[loop-class] mask frame lookup unavailable ({e}) — keys used as-is")
+        cloud_to_mask = {}
     classes = classify_instances(output_dir, session_dir, instances, cfg.loops.semantic,
-                                 oid_of, frames_of, log=log)
+                                 oid_of, frames_of, cloud_to_mask, log=log)
     # per-frame label lists for the verifier (§4.2.4) — keyed by REAL frame number
     per_frame: Dict[str, Dict[str, List[str]]] = {}
     for inst in instances:

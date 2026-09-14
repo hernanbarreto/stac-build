@@ -46,9 +46,19 @@ def _prompt(label: str) -> str:
 
 
 def _mask_crop(output_dir: Path, session_dir: Path, iid: int, oid: Optional[int],
-               frames: List[int], crops: int):
+               frames: List[int], crops: int, cloud_to_mask: Dict[int, int]):
     """Isolated crops (image with the mask kept, background darkened) for up to
-    ``crops`` frames where the instance's mask is largest."""
+    ``crops`` frames where the instance's mask is largest.
+
+    ``frames`` are the cloud's frame_global — REAL video frame numbers — while
+    the masks are keyed by KEYFRAME POSITION. ``_load_frame_rgb`` wants the
+    first and ``z[key]`` the second, so ``cloud_to_mask`` translates for the
+    key and only for the key. Without it the lookup hit only the handful of
+    numbers that collide by accident: pccr 2026-09-14 classified 4 instances of
+    61 and the other 57 fell to the default class, while the few that did
+    "hit" paired an image with another keyframe's mask and raised
+    IndexError out of the crop.
+    """
     from segmentation.shape_proposer import _load_frame_rgb, _isolated_crop
     p = output_dir / "seg_masks.npz"
     if oid is None or not p.exists():
@@ -56,7 +66,7 @@ def _mask_crop(output_dir: Path, session_dir: Path, iid: int, oid: Optional[int]
     z = np.load(p, allow_pickle=True)
     cand = []
     for f in frames:
-        key = f"f{int(f)}_o{int(oid)}"
+        key = f"f{cloud_to_mask.get(int(f), int(f))}_o{int(oid)}"
         if key in z.files:
             m = z[key]
             cand.append((int(m.sum()), int(f), key))
@@ -77,6 +87,7 @@ def _mask_crop(output_dir: Path, session_dir: Path, iid: int, oid: Optional[int]
 
 def classify_instances(output_dir, session_dir, instances: List[dict], cfg,
                        oid_of: Dict[int, Optional[int]], frames_of: Dict[int, List[int]],
+                       cloud_to_mask: Optional[Dict[int, int]] = None,
                        log: Callable[[str], None] = print) -> Dict[int, dict]:
     """{instance_id: {class, confidence, provenance}} for every instance,
     cached in the instance store. ``cfg`` = LoopsConfig.semantic."""
@@ -117,7 +128,8 @@ def classify_instances(output_dir, session_dir, instances: List[dict], cfg,
                "label": label}
         if client is not None:
             crops = _mask_crop(output_dir, session_dir, iid, oid_of.get(iid),
-                               frames_of.get(iid, []), cfg.crops_per_instance)
+                               frames_of.get(iid, []), cfg.crops_per_instance,
+                               cloud_to_mask or {})
             if crops:
                 from segmentation.shape_proposer import _chat_json
                 from semantic.types import system, user
