@@ -1,7 +1,7 @@
 /**
  * AppHeader — 36 px, --surface-brand (prompt_ui.txt §5):
- * logo · menu bar (File / View / Tools / Help — the existing actions) ·
- * session ▾ · scan ▾ · search (Ctrl+K) · assistant toggle · user ▾.
+ * logo, menu bar (File / View / Tools / Help — the existing actions) ,
+ * session ▾, scan ▾, search (Ctrl+K), assistant toggle, user ▾.
  * Purely presentational: every entry is built by App from its handlers.
  */
 import { ChevronRight, Search, Sparkles, User } from 'lucide-react'

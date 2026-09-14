@@ -12,6 +12,16 @@ import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.j
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { PotreeOctreeLoader } from './PotreeLoader'
 import { AssistantViz, type SceneObject, type UserVolume, type TraceEntry } from './assistantViz'
+import { Eye, EyeOff, Focus, RotateCw, Move, Save, Trash2, X, Box as BoxIcon, Scaling, RefreshCw, MonitorX } from 'lucide-react'
+import { getT, getFmt } from '../i18n'
+import { tokenColor, tokenHex, edgeColorHex, VP } from './viewport/palette'
+import { Button } from './ui/Button'
+import { IconButton } from './ui/IconButton'
+import { Slider } from './ui/Field'
+import type { ReadoutAnchor, ViewPreset } from './viewport/ViewportHud'
+
+/** Translator for callbacks (the active language is read at call time). */
+const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
 
 // Factory for the shared GLTFLoader. The TSDF/recon .glb files are compressed
 // with EXT_meshopt_compression (geometry) + WebP textures (see tools/glb/), so
@@ -31,7 +41,7 @@ interface ViewportProps {
     confidenceThreshold: number
     activeSession: string | null
     // multi-scan: scan to show when the project OPENS (double-click on a
-    // scan of a not-loaded project); undefined → the composition reference
+    // scan of a not-loaded project); undefined  the composition reference
     openScanKey?: string | null
     activeTool: Tool
     showAxes?: boolean
@@ -68,6 +78,14 @@ interface ViewportProps {
     onTsdfReady?: (sessionId: string, stage: string) => void
     /** Volume deleted from the viewer toolbar. */
     onVolumeDeleted?: (volumeId: number) => void
+    /** The loaded octree carries witness fields (status / mv_votes). */
+    onHasWitness?: (has: boolean) => void
+    /** World position under the cursor while measuring (null = nothing hit). */
+    onCursor?: (p: { x: number; y: number; z: number } | null) => void
+    /** Measurement labels projected to screen space (HUD readouts). */
+    onReadouts?: (anchors: ReadoutAnchor[]) => void
+    /** Metres per screen pixel at the orbit target (HUD scale bar). */
+    onViewScale?: (metersPerPixel: number) => void
 }
 
 export interface SegmentInstance {
@@ -106,7 +124,7 @@ export interface ViewportHandle {
     alignSceneObject: (op: 'floor' | 'same_base' | 'on_top' | 'center_xz' | 'center_y', targetKey?: string) => void
     /** Preview the brush confidence filter: points below thr light up red. null = off. */
     setConfHighlight: (thr: number | null) => void
-    /** Apply the brush confidence filter: visible segments' points below thr → unsegmented. */
+    /** Apply the brush confidence filter: visible segments' points below thr  unsegmented. */
     applyConfidenceFilter: (thr: number, onlyInstances?: number[], includeUnsegmented?: boolean) => Promise<void>
     setEraseBoxMode: (m: 'translate' | 'rotate' | 'scale') => void
     removeSelectedEraseBox: () => void
@@ -128,7 +146,7 @@ export interface ViewportHandle {
     reloadReconScene: (sessionId: string) => Promise<void>
     setReconElementVisibility: (instanceId: number, visible: boolean) => void
     clearReconScene: () => void
-    // Flythrough (synced video↔3D): drive the camera to a per-frame c2w pose.
+    // Flythrough (synced video3D): drive the camera to a per-frame c2w pose.
     setFlythroughActive: (active: boolean) => void
     setCameraToPose: (c2wRowMajor: number[]) => void
     // Match the 3D camera's vertical FOV to the real camera (from intrinsics) so
@@ -159,6 +177,8 @@ export interface ViewportHandle {
     setEpochLayerVisible: (visible: boolean) => void
     setTrajectoryEdges: (data: any | null, show: { odometry: boolean; loops: boolean }) => void
     flyToPoint: (p: number[], radius: number) => void
+    /** Navigation cube: look from a standard direction keeping target + distance. */
+    setStandardView: (preset: ViewPreset) => void
 }
 
 // One item of /api/segmentation/tsdf/list — per-instance entries carry
@@ -325,27 +345,7 @@ const fragmentShader = `
 `
 
 // ── Measurement helpers (outside component) ──
-function createTextSprite(text: string, color: string = '#ffffff'): THREE.Sprite {
-    const canvas = document.createElement('canvas')
-    canvas.width = 128; canvas.height = 32
-    const ctx = canvas.getContext('2d')!
-    ctx.font = 'bold 22px sans-serif'
-    ctx.fillStyle = 'rgba(0,0,0,0.7)'
-    ctx.roundRect(0, 0, 128, 32, 4)
-    ctx.fill()
-    ctx.fillStyle = color
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(text, 64, 16)
-    const texture = new THREE.CanvasTexture(canvas)
-    const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false, sizeAttenuation: true })
-    const sprite = new THREE.Sprite(mat)
-    sprite.scale.set(0.12, 0.03, 1)
-    sprite.renderOrder = 1000
-    return sprite
-}
-
-function createMarker(position: THREE.Vector3, color: number = 0xff4444): THREE.Mesh {
+function createMarker(position: THREE.Vector3, color: number = tokenHex(VP.marker)): THREE.Mesh {
     const geom = new THREE.SphereGeometry(0.008, 12, 12)
     const mat = new THREE.MeshBasicMaterial({ color, depthTest: false })
     const mesh = new THREE.Mesh(geom, mat)
@@ -354,7 +354,7 @@ function createMarker(position: THREE.Vector3, color: number = 0xff4444): THREE.
     return mesh
 }
 
-function createMeasurementLine(points: THREE.Vector3[], color: number = 0x00ff88): THREE.Line {
+function createMeasurementLine(points: THREE.Vector3[], color: number = tokenHex(VP.measure)): THREE.Line {
     const geom = new THREE.BufferGeometry().setFromPoints(points)
     const mat = new THREE.LineBasicMaterial({ color, depthTest: false, linewidth: 2 })
     const line = new THREE.Line(geom, mat)
@@ -384,7 +384,7 @@ function createArc(
         pts.push(pt)
     }
     if (pts.length < 2) pts.push(center.clone(), center.clone())
-    return createMeasurementLine(pts, 0xffaa00)
+    return createMeasurementLine(pts, tokenHex(VP.angle))
 }
 
 // ── Measurement data types ──
@@ -435,7 +435,7 @@ function adaptGrid(
     // Grid covers the XZ footprint of the cloud with slight margin
     const gridSize = Math.max(size.x, size.z) * 1.1
     const divisions = Math.max(10, Math.min(80, Math.round(gridSize / 0.5)))
-    const grid = new THREE.GridHelper(gridSize, divisions, 0x252d3a, 0x1c2333)
+    const grid = new THREE.GridHelper(gridSize, divisions, tokenHex(VP.gridMajor), tokenHex(VP.gridMinor))
     // Grid at Y=0 (floor level) — floor transform aligns floor to Y=0
     grid.position.set(center.x, 0, center.z)
     grid.visible = visible
@@ -446,7 +446,7 @@ function adaptGrid(
 // Pre-allocated scratch for setCameraToPose — called every video frame during the
 // flythrough. Reused so the per-frame camera update allocates nothing (no GC churn).
 const _ctpC2W = new THREE.Matrix4()
-const _ctpCvToGl = new THREE.Matrix4().makeScale(1, -1, -1)   // constant CV→GL flip
+const _ctpCvToGl = new THREE.Matrix4().makeScale(1, -1, -1)   // constant CVGL flip
 const _ctpGroup = new THREE.Matrix4()
 const _ctpPos = new THREE.Vector3()
 const _ctpQuat = new THREE.Quaternion()
@@ -454,7 +454,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onViewScale },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -485,7 +485,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // backends can be displayed simultaneously for A/B comparison.
     const tsdfGroupRef = useRef<THREE.Group | null>(null)
     // Lazy TSDF: per-instance meshes are NOT downloaded at session open (only
-    // the whole-scene mesh is). Entries wait here (folder → list item) until
+    // the whole-scene mesh is). Entries wait here (folder  list item) until
     // setTsdfVisibility(folder, true) pulls them in on demand.
     const tsdfPendingRef = useRef<Map<string, TsdfListEntry>>(new Map())
     const tsdfLoadingRef = useRef<Set<string>>(new Set())
@@ -512,7 +512,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const camTweenRef = useRef<number | null>(null)
 
     // ── multi-scan layers (USER 2026-09-06): one extra octree loader per
-    // NON-reference scan, display-only (forceClassId -1 → not affected by
+    // NON-reference scan, display-only (forceClassId -1  not affected by
     // the reference's segment toggles), placed by floor × composition.
     const scanLayersRef = useRef<Map<string, { loader: PotreeOctreeLoader; visible: boolean }>>(new Map())
     // validation kit: the previous epoch's octree (own tinted material) and
@@ -521,7 +521,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const trajectoryGroupRef = useRef<THREE.Group | null>(null)
     const composeScanMatrix = (floor?: number[] | null, comp?: number[] | null): number[] => {
         // both 16-length; floor is column-major (potree_ready convention),
-        // composition is ROW-major (API) → transpose it; world = C · F
+        // composition is ROW-major (API)  transpose it; world = C  F
         const F = new THREE.Matrix4()
         if (floor && floor.length === 16) F.fromArray(floor)
         const C = new THREE.Matrix4()
@@ -529,7 +529,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         return C.multiply(F).toArray()
     }
 
-    // ── evaluation-volume gizmo (select → move/rotate/resize, user 2026-08-29)
+    // ── evaluation-volume gizmo (select  move/rotate/resize, user 2026-08-29)
     const [selVolume, setSelVolume] = useState<number | null>(null)
     const [volMode, setVolMode] = useState<'translate' | 'rotate' | 'scale'>('translate')
     const [volSolid, setVolSolid] = useState(false)
@@ -556,7 +556,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const dragging = !!(e as unknown as { value?: boolean }).value
             controls.enabled = !dragging
             if (!dragging) {
-                // drag finished → persist + re-evaluate collision state
+                // drag finished  persist + re-evaluate collision state
                 const params = assistantVizRef.current?.volumeParams(selVolume)
                 if (params) onVolumeChangedRef.current?.(params)
             }
@@ -648,7 +648,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ session_id: sid, id }),
             })
-            if (onStatusMessage) onStatusMessage('📦 reference removed from the scene (source GLB untouched)')
+            if (onStatusMessage) onStatusMessage(tt('vp.refRemoved'))
         } catch { /* silent */ }
     }
     const _sceneObjectsGroup = () => {
@@ -707,17 +707,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             sceneObjByIdRef.current.set(entry.id, g)
             _emitSceneObjects()
             if (select) {
-                // fresh insert with identity matrix → drop it at the orbit target
+                // fresh insert with identity matrix  drop it at the orbit target
                 if (!entry.matrix) {
                     const tgt = controlsRef.current?.target
                     if (tgt) { g.position.copy(tgt); _persistSceneObj(entry.id) }
                 }
                 setSelSceneObj(entry.id)
             }
-            if (onStatusMessage && select) onStatusMessage(`📦 "${entry.name}" placed — drag the gizmo to align (G/R keys, Del removes the reference)`)
+            if (onStatusMessage && select) onStatusMessage(tt('vp.refPlaced', { name: entry.name }))
         } catch (e) {
             console.warn('[Viewport] placed object load failed', entry.url, e)
-            if (onStatusMessage) onStatusMessage(`📦 failed to load "${entry.name}"`)
+            if (onStatusMessage) onStatusMessage(tt('vp.refLoadFailed', { name: entry.name }))
         }
     }
 
@@ -735,7 +735,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const d = await r.json()
             for (const o of (d.objects || [])) await _loadPlacedObject(o, false)
             if ((d.objects || []).length && onStatusMessage)
-                onStatusMessage(`📦 ${(d.objects || []).length} placed object(s) restored`)
+                onStatusMessage(tt('vp.refsRestored', { n: (d.objects || []).length }))
         } catch { /* silent */ }
     }
 
@@ -868,6 +868,20 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => { onEraseLedgerRef.current = onEraseLedger }, [onEraseLedger])
     const onTsdfReadyRef = useRef(onTsdfReady)
     useEffect(() => { onTsdfReadyRef.current = onTsdfReady }, [onTsdfReady])
+    const onHasWitnessRef = useRef(onHasWitness)
+    useEffect(() => { onHasWitnessRef.current = onHasWitness }, [onHasWitness])
+    const onCursorRef = useRef(onCursor)
+    useEffect(() => { onCursorRef.current = onCursor }, [onCursor])
+    const onReadoutsRef = useRef(onReadouts)
+    useEffect(() => { onReadoutsRef.current = onReadouts }, [onReadouts])
+    const onViewScaleRef = useRef(onViewScale)
+    useEffect(() => { onViewScaleRef.current = onViewScale }, [onViewScale])
+    // HUD readouts: world anchors of the measurement labels, projected each frame
+    type WorldReadout = { id: string; kind: 'distance' | 'angle'; pos: THREE.Vector3; anchor: THREE.Vector3; metres?: number; degrees?: number }
+    const readoutsWorldRef = useRef<WorldReadout[]>([])
+    const liveReadoutRef = useRef<WorldReadout | null>(null)
+    const lastReadoutKeyRef = useRef('')
+    const lastMppRef = useRef(0)
     // bridge: renderOBBs is declared later in the file — the potree_ready
     // handler needs it to resync OBBs + panel after an erase/refresh rebuild
     const renderOBBsRef = useRef<((instances: Array<Record<string, unknown>>) => void) | null>(null)
@@ -959,6 +973,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         pendingMarkersRef.current = []
         pendingLineRef.current = null
         measurementsRef.current = []
+        readoutsWorldRef.current = []
+        liveReadoutRef.current = null
+        lastReadoutKeyRef.current = ''
+        onReadoutsRef.current?.([])
     }, [])
 
     // Cancel in-progress measurement
@@ -993,6 +1011,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             })
             livePreviewRef.current = null
         }
+        liveReadoutRef.current = null
     }, [])
 
     // Finalize a distance measurement
@@ -1000,20 +1019,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const group = measureGroupRef.current
         if (!group) return
         const dist = p1.distanceTo(p2)
-        const label = dist < 1 ? `${(dist * 100).toFixed(1)} cm` : `${dist.toFixed(3)} m`
+        const label = getFmt().lengthText(dist)
 
-        const line = createMeasurementLine([p1, p2], 0x00ff88)
+        const line = createMeasurementLine([p1, p2], tokenHex(VP.measure))
         const mid = p1.clone().add(p2).multiplyScalar(0.5)
-        const sprite = createTextSprite(label, '#00ff88')
-        sprite.position.copy(mid)
-        sprite.position.y += 0.05
+        readoutsWorldRef.current.push({ id: `d${Date.now()}`, kind: 'distance', pos: mid.clone(), anchor: mid.clone(), metres: dist })
+        liveReadoutRef.current = null
 
         group.add(line)
-        group.add(sprite)
 
         const measurement: Measurement = {
             type: 'distance',
-            objects: [...pendingMarkersRef.current, line, sprite]
+            objects: [...pendingMarkersRef.current, line]
         }
         measurementsRef.current.push(measurement)
 
@@ -1030,7 +1047,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             livePreviewRef.current = null
         }
 
-        if (onStatusMessage) onStatusMessage(`Distance: ${label}`)
+        if (onStatusMessage) onStatusMessage(tt('vp.distance', { value: label }))
     }, [onStatusMessage])
 
     // Finalize an angle measurement
@@ -1043,23 +1060,22 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const angleRad = v1.angleTo(v2)
         const angleDeg = THREE.MathUtils.radToDeg(angleRad)
 
-        const line1 = createMeasurementLine([vertex, p1], 0xffaa00)
-        const line2 = createMeasurementLine([vertex, p3], 0xffaa00)
+        const line1 = createMeasurementLine([vertex, p1], tokenHex(VP.angle))
+        const line2 = createMeasurementLine([vertex, p3], tokenHex(VP.angle))
         const arc = createArc(vertex, v1, v2, angleDeg, 0.15)
 
-        const label = `${angleDeg.toFixed(1)}\u00B0`
-        const sprite = createTextSprite(label, '#ffaa00')
+        const label = getFmt().degrees(angleDeg, 1)
         const labelDir = v1.clone().normalize().add(v2.clone().normalize()).normalize()
-        sprite.position.copy(vertex).addScaledVector(labelDir, 0.2)
+        readoutsWorldRef.current.push({ id: `a${Date.now()}`, kind: 'angle', pos: vertex.clone().addScaledVector(labelDir, 0.2), anchor: vertex.clone(), degrees: angleDeg })
+        liveReadoutRef.current = null
 
         group.add(line1)
         group.add(line2)
         group.add(arc)
-        group.add(sprite)
 
         const measurement: Measurement = {
             type: 'angle',
-            objects: [...pendingMarkersRef.current, line1, line2, arc, sprite]
+            objects: [...pendingMarkersRef.current, line1, line2, arc]
         }
         measurementsRef.current.push(measurement)
 
@@ -1075,7 +1091,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             livePreviewRef.current = null
         }
 
-        if (onStatusMessage) onStatusMessage(`Angle: ${label}`)
+        if (onStatusMessage) onStatusMessage(tt('vp.angle', { value: label }))
     }, [onStatusMessage])
 
     // Hover highlight for measurement — shows which point would be picked
@@ -1095,7 +1111,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const text = hits.length ? (hits[0].object.userData.text as string) : null
         if (text !== kitHoverTextRef.current) {
             kitHoverTextRef.current = text
-            if (text && onStatusMessage) onStatusMessage(`↔ ${text}`)
+            if (text && onStatusMessage) onStatusMessage(text)
         }
     }, [onStatusMessage])
 
@@ -1103,6 +1119,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const tool = activeToolRef.current
         if (tool !== 'measure-distance' && tool !== 'measure-angle') {
             if (hoverHighlightRef.current) hoverHighlightRef.current.visible = false
+            onCursorRef.current?.(null)
             return
         }
 
@@ -1161,10 +1178,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         })
         if (!hit) {
             if (hoverHighlightRef.current) hoverHighlightRef.current.visible = false
+            onCursorRef.current?.(null)
+            liveReadoutRef.current = null
             return
         }
 
         const hitPoint = hit.point
+        onCursorRef.current?.({ x: hitPoint.x, y: hitPoint.y, z: hitPoint.z })
 
         // Create hover highlight lazily
         if (!hoverHighlightRef.current) {
@@ -1172,7 +1192,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             // Outer ring
             const ringGeom = new THREE.RingGeometry(0.010, 0.016, 24)
             const ringMat = new THREE.MeshBasicMaterial({
-                color: 0x00ffff, side: THREE.DoubleSide,
+                color: tokenHex(VP.measure), side: THREE.DoubleSide,
                 transparent: true, opacity: 0.7, depthTest: false
             })
             const ring = new THREE.Mesh(ringGeom, ringMat)
@@ -1181,7 +1201,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             // Center dot
             const dotGeom = new THREE.SphereGeometry(0.004, 8, 8)
             const dotMat = new THREE.MeshBasicMaterial({
-                color: 0xffffff, depthTest: false,
+                color: tokenHex(VP.light), depthTest: false,
                 transparent: true, opacity: 0.9
             })
             const dot = new THREE.Mesh(dotGeom, dotMat)
@@ -1217,7 +1237,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
             const previewGroup = new THREE.Group()
             const lastPt = pending[pending.length - 1]
-            const lineColor = tool === 'measure-distance' ? 0x00ff88 : 0xffaa00
+            const lineColor = tool === 'measure-distance' ? tokenHex(VP.measure) : tokenHex(VP.angle)
 
             // Dashed line
             const lineGeom = new THREE.BufferGeometry().setFromPoints([lastPt, hitPoint])
@@ -1230,29 +1250,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             dashedLine.renderOrder = 999
             previewGroup.add(dashedLine)
 
-            // Distance label sprite
+            // Live distance readout (HUD): anchored to the midpoint of the preview
             const dist = lastPt.distanceTo(hitPoint)
-            const distStr = dist < 1 ? `${(dist * 100).toFixed(1)} cm` : `${dist.toFixed(3)} m`
-            const lCanvas = document.createElement('canvas')
-            lCanvas.width = 128; lCanvas.height = 32
-            const lCtx = lCanvas.getContext('2d')!
-            lCtx.font = 'bold 22px sans-serif'
-            lCtx.fillStyle = 'rgba(0,0,0,0.7)'
-            lCtx.roundRect(0, 0, 128, 32, 4)
-            lCtx.fill()
-            lCtx.fillStyle = '#ffffff'
-            lCtx.textAlign = 'center'
-            lCtx.textBaseline = 'middle'
-            lCtx.fillText(distStr, 64, 16)
-            const lTex = new THREE.CanvasTexture(lCanvas)
-            const lMat = new THREE.SpriteMaterial({ map: lTex, depthTest: false })
-            const lSprite = new THREE.Sprite(lMat)
             const mid = new THREE.Vector3().lerpVectors(lastPt, hitPoint, 0.5)
-            lSprite.position.copy(mid)
-            lSprite.position.y += 0.04
-            lSprite.scale.set(0.12, 0.03, 1)
-            lSprite.renderOrder = 1000
-            previewGroup.add(lSprite)
+            liveReadoutRef.current = { id: 'live', kind: 'distance', pos: mid, anchor: mid.clone(), metres: dist }
 
             group.add(previewGroup)
             livePreviewRef.current = previewGroup
@@ -1324,7 +1325,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         pendingPointsRef.current.push(hitPoint)
 
         // Place marker
-        const markerColor = tool === 'measure-distance' ? 0x00ff88 : 0xffaa00
+        const markerColor = tool === 'measure-distance' ? tokenHex(VP.measure) : tokenHex(VP.angle)
         const marker = createMarker(hitPoint, markerColor)
         group.add(marker)
         pendingMarkersRef.current.push(marker)
@@ -1338,7 +1339,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 pendingLineRef.current.geometry.dispose()
                     ; (pendingLineRef.current.material as THREE.Material).dispose()
             }
-            const lineColor = tool === 'measure-distance' ? 0x00ff88 : 0xffaa00
+            const lineColor = tool === 'measure-distance' ? tokenHex(VP.measure) : tokenHex(VP.angle)
             const previewLine = createMeasurementLine(
                 pendingPointsRef.current.slice(),
                 lineColor
@@ -1391,7 +1392,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         [1, 0], [1, 1],  // Y min, Y max
         [2, 0], [2, 1],  // Z min, Z max
     ]
-    const HANDLE_COLORS = [0xff4444, 0xff4444, 0x44ff44, 0x44ff44, 0x4488ff, 0x4488ff]
+    const HANDLE_COLORS = [VP.axisX, VP.axisX, VP.axisY, VP.axisY, VP.axisZ, VP.axisZ].map(tokenHex)
 
     const updateSectionBoxWireframe = useCallback(() => {
         const wire = sectionBoxWireRef.current
@@ -1461,7 +1462,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // Wireframe box (unit cube scaled/positioned)
         const boxGeom = new THREE.BoxGeometry(1, 1, 1)
         const edges = new THREE.EdgesGeometry(boxGeom)
-        const wireMat = new THREE.LineBasicMaterial({ color: 0x00ddff, linewidth: 1, transparent: true, opacity: 0.6 })
+        const wireMat = new THREE.LineBasicMaterial({ color: tokenHex(VP.sectionBox), linewidth: 1, transparent: true, opacity: 0.6 })
         const wireframe = new THREE.LineSegments(edges, wireMat)
         wireframe.renderOrder = 998
         group.add(wireframe)
@@ -1711,7 +1712,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             setAlignDirty(false)
             setAlignMode('rotate')
             alignSavedRef.current = false
-            if (onStatusMessage) onStatusMessage('⛶ Align mode: drag gizmo to rotate/translate')
+            if (onStatusMessage) onStatusMessage(tt('vp.alignMode'))
 
             return () => {
                 // Cleanup gizmo
@@ -1768,7 +1769,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const arr = composedM.toArray() // column-major
 
         try {
-            if (onStatusMessage) onStatusMessage('💾 Saving alignment...')
+            if (onStatusMessage) onStatusMessage(tt('vp.alignSaving'))
             const res = await fetch(`/api/sessions/${activeSession}/alignment`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1798,9 +1799,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
             alignSavedRef.current = true
             setAlignDirty(false)
-            if (onStatusMessage) onStatusMessage('✅ Alignment saved! Reload session to see updated OBBs.')
+            if (onStatusMessage) onStatusMessage(tt('vp.alignSaved'))
         } catch (e: any) {
-            if (onStatusMessage) onStatusMessage(`Error saving alignment: ${e.message}`)
+            if (onStatusMessage) onStatusMessage(tt('vp.alignError', { detail: e.message }))
         }
     }, [activeSession, onStatusMessage])
 
@@ -1881,7 +1882,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
         }
         if (onStatusMessage && loaded > 0) {
-            onStatusMessage(`Loaded ${loaded} reconstructed mesh${loaded !== 1 ? 'es' : ''}`)
+            onStatusMessage(tt('vp.loadedObjectMeshes', { n: loaded }))
         }
     }, [clearAllShapes, onStatusMessage])
 
@@ -1956,7 +1957,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // Lazy split: only whole-scene meshes (no instance_id — scene /
         // scene_poisson) download at session open. Eagerly pulling every
         // per-instance GLB blew up big sessions (test2: 40 GLBs ≈ 230 MB on
-        // top of the point cloud → renderer OOM). Instance meshes wait in
+        // top of the point cloud  renderer OOM). Instance meshes wait in
         // tsdfPendingRef until setTsdfVisibility(folder, true) requests them.
         const eager: TsdfListEntry[] = []
         for (const sh of meshes) {
@@ -1974,7 +1975,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         if (onStatusMessage && loaded > 0) {
             const pending = tsdfPendingRef.current.size
-            onStatusMessage(`Loaded ${loaded} TSDF scene mesh${loaded !== 1 ? 'es' : ''}${pending > 0 ? ` — ${pending} instance mesh${pending !== 1 ? 'es' : ''} on demand` : ''}`)
+            onStatusMessage(tt('vp.loadedSceneMeshes', { n: loaded, pending }))
         }
     }, [clearAllTsdf, loadTsdfMeshEntry, onStatusMessage])
 
@@ -2065,7 +2066,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
         }
         if (onStatusMessage && loaded > 0) {
-            onStatusMessage(`Loaded reconstruction scene: ${loaded} element${loaded !== 1 ? 's' : ''}`)
+            onStatusMessage(tt('vp.loadedReconScene', { n: loaded }))
         }
     }, [clearAllReconScene, onStatusMessage])
 
@@ -2147,7 +2148,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (ft) loader.setTransform(ft.toArray())
             epochLayerRef.current = { loader, material }
             loader.load(url).catch(err => {
-                if (onStatusMessage) onStatusMessage(`epoch octree load failed: ${err.message}`)
+                if (onStatusMessage) onStatusMessage(tt('vp.epochLoadFailed', { detail: err.message }))
             })
         },
         setEpochLayerVisible: (visible) => {
@@ -2173,12 +2174,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
             if (!data || !Array.isArray(data.positions)) return
             const P: number[][] = data.positions
-            const colorOf: Record<string, number> = { accepted: 0x3ddc84, scale_break: 0xff9f1c, vetoed: 0xff4d4d,
-                                                       rejected: 0xff4d4d, ambiguous: 0xffd166 }
+            const colorOf = (kind: string) => edgeColorHex(kind)
             if (show.odometry) {
                 const pts = P.map(p => new THREE.Vector3(p[0], p[1], p[2]))
                 const geom = new THREE.BufferGeometry().setFromPoints(pts)
-                const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: 0x9a9a9a, depthTest: false, transparent: true, opacity: 0.8 }))
+                const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: tokenHex(VP.edgeOdo), depthTest: false, transparent: true, opacity: 0.8 }))
                 line.renderOrder = 998
                 group.add(line)
             }
@@ -2188,7 +2188,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     if (!a || !b) continue
                     const va = new THREE.Vector3(a[0], a[1], a[2]), vb = new THREE.Vector3(b[0], b[1], b[2])
                     const geom = new THREE.BufferGeometry().setFromPoints([va, vb])
-                    const col = colorOf[e.kind] ?? 0xffffff
+                    const col = colorOf(e.kind)
                     const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: col, depthTest: false, transparent: true, opacity: 0.9 }))
                     line.renderOrder = 999
                     group.add(line)
@@ -2199,7 +2199,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     marker.position.copy(mid)
                     marker.renderOrder = 999
                     marker.userData = { isLoopEdge: true,
-                                        text: `loop kf ${e.i} ↔ ${e.j}: ${e.kind}${e.residual_m != null ? ` · ${(e.residual_m * 100).toFixed(1)} cm` : ''}${e.reason ? ` — ${e.reason}` : ''}` }
+                                        text: `loop kf ${e.i}  ${e.j}: ${e.kind}${e.residual_m != null ? `  ${(e.residual_m * 100).toFixed(1)} cm` : ''}${e.reason ? ` — ${e.reason}` : ''}` }
                     group.add(marker)
                 }
             }
@@ -2234,7 +2234,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         loader.setTransform(composeScanMatrix(l.floorTransform, l.composition))
                         loader.getOctreeGroup().visible = entry!.visible
                     }).catch(() => {
-                        if (onStatusMessage) onStatusMessage(`scan layer ${l.key} failed to load`)
+                        if (onStatusMessage) onStatusMessage(tt('vp.scanLayerFailed', { key: l.key }))
                     })
                 } else {
                     entry.loader.setTransform(composeScanMatrix(l.floorTransform, l.composition))
@@ -2267,7 +2267,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             // Apply a new floor transform (16 floats, column-major) to the
             // octree group at runtime — same path the alignment-gizmo save
             // uses, so cloud + TSDF/shape children update instantly with no
-            // session reload. Used by the floor→y=0 leveling flow.
+            // session reload. Used by the floory=0 leveling flow.
             const loader = potreeLoaderRef.current
             if (!loader || !arr || arr.length !== 16) return
             const M = new THREE.Matrix4().fromArray(arr)
@@ -2366,18 +2366,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const pending = tsdfPendingRef.current.get(folder)
             if (!pending || tsdfLoadingRef.current.has(folder)) return
             tsdfLoadingRef.current.add(folder)
-            if (onStatusMessage) onStatusMessage(`Loading TSDF mesh: ${folder}...`)
+            if (onStatusMessage) onStatusMessage(tt('vp.meshLoading', { folder }))
             loadTsdfMeshEntry(pending).then((g) => {
                 tsdfLoadingRef.current.delete(folder)
                 if (g) {
                     tsdfPendingRef.current.delete(folder)
-                    if (onStatusMessage) onStatusMessage(`TSDF mesh loaded: ${folder}`)
+                    if (onStatusMessage) onStatusMessage(tt('vp.meshLoaded', { folder }))
                 }
             }).catch((e) => {
                 // Keep the entry pending so re-toggling retries the download
                 tsdfLoadingRef.current.delete(folder)
                 console.warn(`[Viewport] on-demand TSDF load failed for ${folder}`, e)
-                if (onStatusMessage) onStatusMessage(`TSDF mesh load failed: ${folder}`)
+                if (onStatusMessage) onStatusMessage(tt('vp.meshLoadFailed', { folder }))
             })
         },
         clearTsdf: () => clearAllTsdf(),
@@ -2419,7 +2419,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     if (mat._originalEmissive === undefined) {
                         mat._originalEmissive = mat.emissive.getHex()
                     }
-                    mat.emissive.setHex(0x335599)
+                    mat.emissive.setHex(tokenHex(VP.bimHighlight))
                 }
             })
         },
@@ -2487,7 +2487,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const posArr = new Float32Array(data.positions)
                 const colArr = new Float32Array(nPts * 3)
 
-                // Convert RGBA → RGB for PointsMaterial (alpha is uniform)
+                // Convert RGBA  RGB for PointsMaterial (alpha is uniform)
                 for (let i = 0; i < nPts; i++) {
                     colArr[i * 3] = data.colors[i * 4]
                     colArr[i * 3 + 1] = data.colors[i * 4 + 1]
@@ -2519,7 +2519,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 }
                 const meshName = child.name || ''
                 const ifcName = child.userData?.ifc_name || ''
-                // Check if this is an unmatched element → more transparent
+                // Check if this is an unmatched element  more transparent
                 let isUnmatched = false
                 for (const key of unmatchedKeys) {
                     if (ifcName.endsWith(':' + key) || ifcName === key ||
@@ -2529,7 +2529,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     }
                 }
                 child.material = new THREE.MeshBasicMaterial({
-                    color: isUnmatched ? 0x808080 : 0xaaaaaa,
+                    color: isUnmatched ? tokenHex(VP.sabanaUnmatched) : tokenHex(VP.sabanaDefault),
                     transparent: true,
                     opacity: isUnmatched ? 0.15 : 0.20,
                     side: THREE.DoubleSide,
@@ -2599,7 +2599,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         child.userData._originalMaterial = child.material
                     }
                     child.material = new THREE.MeshBasicMaterial({
-                        color: 0x888888,
+                        color: tokenHex(VP.sabanaUnmatched),
                         transparent: true,
                         opacity: 0.20,
                         side: THREE.DoubleSide,
@@ -2759,6 +2759,19 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         removeSelectedEraseBox: () => eraseBoxApiRef.current?.remove(),
         clearEraseMarks: () => eraseApiRef.current?.clear(),
         resetSectionBox: destroySectionBox,
+        setStandardView: (preset: ViewPreset) => {
+            const cam = cameraRef.current
+            const ctrl = controlsRef.current
+            if (!cam || !ctrl) return
+            const dirs: Record<ViewPreset, [number, number, number]> = {
+                top: [0, 1, 0.001], bottom: [0, -1, 0.001], front: [0, 0, 1], back: [0, 0, -1], right: [1, 0, 0], left: [-1, 0, 0], iso: [1, 1, 1],
+            }
+            const dist = Math.max(0.5, cam.position.distanceTo(ctrl.target))
+            const d = new THREE.Vector3(...dirs[preset]).normalize()
+            cam.position.copy(ctrl.target).addScaledVector(d, dist)
+            cam.lookAt(ctrl.target)
+            ctrl.update()
+        },
         resetCamera: () => {
             const cam = cameraRef.current
             const ctrl = controlsRef.current
@@ -2803,16 +2816,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const ctrl = controlsRef.current
             if (!cam || !c2wRowMajor || c2wRowMajor.length < 16) return
             // c2w in the cloud's NATIVE frame (row-major). fromArray expects
-            // column-major → transpose. Apply the same group transform used for
+            // column-major  transpose. Apply the same group transform used for
             // the displayed cloud (floor align). Convert OpenCV cam convention
-            // (+Z forward, +Y down) → three.js (-Z forward, +Y up) via diag(1,-1,-1).
+            // (+Z forward, +Y down)  three.js (-Z forward, +Y up) via diag(1,-1,-1).
             // NOTE: if the flythrough view comes out mirrored/upside-down, this
-            // CV→GL flip is the knob to adjust.
+            // CVGL flip is the knob to adjust.
             const c2w = _ctpC2W.fromArray(c2wRowMajor).transpose()
             c2w.multiply(_ctpCvToGl)
             // Apply the SAME transform the displayed cloud uses (floor_transform /
             // alignment) so the camera path lives in the cloud's displayed frame.
-            // (Earlier this used cameraGroupRef.matrixWorld — wrong matrix → camera
+            // (Earlier this used cameraGroupRef.matrixWorld — wrong matrix  camera
             // ended up far below. floorTransformRef is what the cloud bbox uses.)
             const groupM = floorTransformRef.current
                 ? _ctpGroup.copy(floorTransformRef.current)
@@ -2860,7 +2873,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
         renderer.setPixelRatio(window.devicePixelRatio)
         renderer.setSize(container.clientWidth, container.clientHeight)
-        renderer.setClearColor(0x0d1117, 1)
+        renderer.setClearColor(tokenHex(VP.clear), 1)
         renderer.outputColorSpace = THREE.SRGBColorSpace
         renderer.toneMapping = THREE.ACESFilmicToneMapping
         renderer.toneMappingExposure = 1.0
@@ -2885,7 +2898,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // Scene
         const scene = new THREE.Scene()
         // Very subtle fog — only noticeable at 200+ meters, never obscures close-up detail
-        scene.fog = new THREE.FogExp2(0x0d1117, 0.0003)
+        scene.fog = new THREE.FogExp2(tokenHex(VP.clear), 0.0003)
         sceneRef.current = scene
 
         // Environment map for PBR (image-based lighting): a PMREM-prefiltered version
@@ -2903,12 +2916,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
         // Discrete lights (still useful for shadow direction / sharper highlights;
         // env map provides the soft ambient/diffuse).
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.25)
+        const ambientLight = new THREE.AmbientLight(tokenHex(VP.light), 0.25)
         scene.add(ambientLight)
-        const dirLight = new THREE.DirectionalLight(0xffffff, 0.85)
+        const dirLight = new THREE.DirectionalLight(tokenHex(VP.light), 0.85)
         dirLight.position.set(10, 20, 10)
         scene.add(dirLight)
-        const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.30)
+        const dirLight2 = new THREE.DirectionalLight(tokenHex(VP.light), 0.30)
         dirLight2.position.set(-10, -5, -10)
         scene.add(dirLight2)
 
@@ -2942,7 +2955,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         assistantVizRef.current = assistantViz
 
         // Grid helper (will be replaced when cloud loads)
-        const gridHelper = new THREE.GridHelper(20, 40, 0x252d3a, 0x1c2333)
+        const gridHelper = new THREE.GridHelper(20, 40, tokenHex(VP.gridMajor), tokenHex(VP.gridMinor))
         gridHelper.visible = showGrid
         scene.add(gridHelper)
         gridRef.current = gridHelper
@@ -2969,9 +2982,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             sprite.scale.set(0.15, 0.15, 0.15)
             return sprite
         }
-        axesGroup.add(makeLabel('X', '#ff4444', [2.15, 0, 0]))
-        axesGroup.add(makeLabel('Y', '#44ff44', [0, 2.15, 0]))
-        axesGroup.add(makeLabel('Z', '#4488ff', [0, 0, 2.15]))
+        axesGroup.add(makeLabel('X', tokenColor(VP.axisX), [2.15, 0, 0]))
+        axesGroup.add(makeLabel('Y', tokenColor(VP.axisY), [0, 2.15, 0]))
+        axesGroup.add(makeLabel('Z', tokenColor(VP.axisZ), [0, 0, 2.15]))
         scene.add(axesGroup)
         axesGroup.visible = showAxes
         axesRef.current = axesGroup
@@ -3021,7 +3034,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 uConfidenceThreshold: { value: 0.0 },
                 uColorMode: { value: 0 },
                 uMvThreshold: { value: 0.0 },
-                uTint: { value: new THREE.Color(0xff9f1c) },
+                uTint: { value: new THREE.Color(tokenHex(VP.epochTint)) },
                 uTintMix: { value: 0.0 },
                 uConfHl: { value: -1.0 },
                 // 256-slot visibility lookup texture (see vertex shader)
@@ -3075,6 +3088,23 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
             // Update time uniform
             material.uniforms.time.value = now * 0.001
+
+            // HUD: project measurement readouts + metres-per-pixel at the target
+            {
+                const w = renderer.domElement.clientWidth, h = renderer.domElement.clientHeight
+                const list = liveReadoutRef.current ? [...readoutsWorldRef.current, liveReadoutRef.current] : readoutsWorldRef.current
+                const v = new THREE.Vector3()
+                const out: ReadoutAnchor[] = list.map(r => {
+                    v.copy(r.pos).project(camera)
+                    const x = (v.x * 0.5 + 0.5) * w, y = (-v.y * 0.5 + 0.5) * h, visible = v.z < 1 && x >= 0 && x <= w && y >= 0 && y <= h
+                    v.copy(r.anchor).project(camera)
+                    return { id: r.id, kind: r.kind, x: Math.round(x), y: Math.round(y), ax: Math.round((v.x * 0.5 + 0.5) * w), ay: Math.round((-v.y * 0.5 + 0.5) * h), metres: r.metres, degrees: r.degrees, visible }
+                })
+                const key = out.map(r => `${r.id}:${r.x}:${r.y}:${r.visible ? 1 : 0}`).join('|')
+                if (key !== lastReadoutKeyRef.current) { lastReadoutKeyRef.current = key; onReadoutsRef.current?.(out) }
+                const mpp = (2 * orbitDist * Math.tan((camera.fov * Math.PI / 180) / 2)) / Math.max(1, h)
+                if (Math.abs(mpp - lastMppRef.current) > lastMppRef.current * 0.01) { lastMppRef.current = mpp; onViewScaleRef.current?.(mpp) }
+            }
 
             // Advance immersive assistant animations (measurement reveals)
             assistantVizRef.current?.update(now)
@@ -3150,7 +3180,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const eraseCursor: THREE.Mesh = new THREE.Mesh(
             eraseSphereGeom as THREE.BufferGeometry,
             new THREE.MeshBasicMaterial({
-                color: 0xff4444, transparent: true, opacity: 0.28,
+                color: tokenHex(VP.eraseMark), transparent: true, opacity: 0.28,
                 depthWrite: false,
             }))
         eraseCursor.visible = false
@@ -3228,12 +3258,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const markGeom = new THREE.SphereGeometry(1, 20, 14)
         const markCubeGeom = new THREE.BoxGeometry(2, 2, 2)
         const markMat = new THREE.MeshBasicMaterial({
-            color: 0xff3333, transparent: true, opacity: 0.38, depthWrite: false,
+            color: tokenHex(VP.eraseBox), transparent: true, opacity: 0.38, depthWrite: false,
         })
         // SHIFT + hover highlight: the mark about to be deleted (user
         // 2026-08-30: with 50 marks, one wrong mark must be removable alone)
         const markHighlightMat = new THREE.MeshBasicMaterial({
-            color: 0xffffff, transparent: true, opacity: 0.6, depthWrite: false,
+            color: tokenHex(VP.light), transparent: true, opacity: 0.6, depthWrite: false,
         })
         let highlightedMark: THREE.Mesh | null = null
         const setHighlight = (mesh: THREE.Mesh | null) => {
@@ -3255,7 +3285,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         // ── BOX SELECTION (user 2026-08-30: "debe ser una caja, punto"):
         // right-click in box mode drops a box ANYWHERE (surface hit, or 3 m in
-        // front of the camera). Left-click selects it → gizmo (Move default;
+        // front of the camera). Left-click selects it  gizmo (Move default;
         // panel buttons or G/R/S; Esc done; Del removes). While selected,
         // every point INSIDE lights up golden (shader highlight).
         let boxTc: TransformControls | null = null
@@ -3302,7 +3332,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             boxTc = tc
             _updateSelBoxUniform()
             onEraseBoxSelectedRef.current?.(true)
-            if (onStatusMessage) onStatusMessage('🔳 box selected — Move/Rotate/Stretch (panel or G/R/S) · Esc done · Del remove')
+            if (onStatusMessage) onStatusMessage(tt('vp.boxSelected'))
         }
         eraseBoxApiRef.current = {
             setMode: (m: 'translate' | 'rotate' | 'scale') => boxTc?.setMode(m),
@@ -3359,8 +3389,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
             onEraseMarksChangedRef.current?.(0)
         }
-        // commit: no target → DELETE; target id → REASSIGN into that segment;
-        // newLabel → CREATE a new segment from the zones (user 2026-08-29)
+        // commit: no target  DELETE; target id  REASSIGN into that segment;
+        // newLabel  CREATE a new segment from the zones (user 2026-08-29)
         // shared POST + transaction-trace reporting for every brush apply
         // (zones commit AND confidence filter)
         const postErase = async (payload: Record<string, unknown>, newLabel?: string) => {
@@ -3383,28 +3413,27 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                             .map(([k, n]) => `${k}: ${(n as number).toLocaleString()}`)
                         if (led.unsegmented_taken) from.push(`unsegmented: ${led.unsegmented_taken.toLocaleString()}`)
                         if (led.mode === 'reassign' && led.target) {
-                            parts.push(`🖌 ${(led.total_moved || 0).toLocaleString()} pts → ${led.target.label}_${led.target.instance_id}`)
+                            parts.push(tt('vp.ledgerReassigned', { n: getFmt().integer(led.total_moved || 0), target: `${led.target.label}_${led.target.instance_id}` }))
                         } else if (led.mode === 'delete') {
-                            parts.push(`🧽 ${(led.total_moved || 0).toLocaleString()} pts erased`)
+                            parts.push(tt('vp.ledgerErased', { n: getFmt().integer(led.total_moved || 0) }))
                         }
-                        if (from.length) parts.push(`from ${from.join(', ')}`)
-                        if (led.balance) parts.push(`balance ${led.balance.consistent ? '✓' : '✗ MISMATCH'}`)
+                        if (from.length) parts.push(tt('vp.ledgerFrom', { list: from.join(', ') }))
+                        if (led.balance) parts.push(led.balance.consistent ? tt('vp.ledgerBalanceOk') : tt('vp.ledgerBalanceMismatch'))
                         if (led.files_verified !== null && led.files_verified !== undefined)
-                            parts.push(`files ${led.files_verified ? '✓' : '✗ MISMATCH'}`)
+                            parts.push(led.files_verified ? tt('vp.ledgerFilesOk') : tt('vp.ledgerFilesMismatch'))
                         if (led.exclusive !== undefined)
-                            parts.push(led.exclusive ? 'exclusive ✓'
-                                : `✗ ${(led.overlap_points || 0).toLocaleString()} pts owned by >1 segment`)
-                        if (led.deleted_points) parts.push(`🗑 ${led.deleted_points.toLocaleString()} unsegmented pts DELETED from the cloud (irreversible)`)
+                            parts.push(led.exclusive ? tt('vp.ledgerExclusive') : tt('vp.ledgerOverlap', { n: getFmt().integer(led.overlap_points || 0) }))
+                        if (led.deleted_points) parts.push(tt('vp.ledgerDeleted', { n: getFmt().integer(led.deleted_points) }))
                         const prot = Object.entries(led.protected_hidden || {})
                         if (prot.length) {
                             const nProt = prot.reduce((a, [, n]) => a + (n as number), 0)
-                            parts.push(`⚠ ${nProt.toLocaleString()} pts in HIDDEN segments untouched (${prot.map(([k]) => k).join(', ')})`)
+                            parts.push(tt('vp.ledgerProtected', { n: getFmt().integer(nProt), list: prot.map(([k]) => k).join(', ') }))
                         }
-                        if (!led.total_moved && !prot.length) parts.push('no applicable points in the zones')
-                        onStatusMessage(parts.join(' · '))
-                    } else if (nRe) onStatusMessage(`🖌 ${nRe.toLocaleString()} points ${newLabel ? `→ new segment "${newLabel}"` : 'reassigned'} — recoloring...`)
-                    else if (nDel) onStatusMessage(`🧽 ${nDel.toLocaleString()} points erased from ${Object.keys(data.touched || {}).length} object(s) — recoloring...`)
-                    else onStatusMessage('🖌 the marked zones had no applicable points')
+                        if (!led.total_moved && !prot.length) parts.push(tt('vp.ledgerNothing'))
+                        onStatusMessage(parts.join(', '))
+                    } else if (nRe) onStatusMessage(tt('vp.reassigned', { n: getFmt().integer(nRe), target: newLabel || '' }))
+                    else if (nDel) onStatusMessage(tt('vp.erased', { n: getFmt().integer(nDel), objects: Object.keys(data.touched || {}).length }))
+                    else onStatusMessage(tt('vp.ledgerNothing'))
                 }
                 onEraseLedgerRef.current?.(data.ledger ?? null)
         }
@@ -3412,7 +3441,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const sid = activeSessionRef.current
             if (!sid || !eraseMarks.length) return
             try {
-                if (onStatusMessage) onStatusMessage(`🖌 applying ${eraseMarks.length} zone(s)...`)
+                if (onStatusMessage) onStatusMessage(tt('vp.applyingZones', { n: eraseMarks.length }))
                 const payload: Record<string, unknown> = {
                     session_id: sid,
                     spheres: eraseMarks.map(m => {
@@ -3441,7 +3470,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 await postErase(payload, newLabel)
                 eraseClearMarks()
             } catch {
-                if (onStatusMessage) onStatusMessage('🖌 apply failed')
+                if (onStatusMessage) onStatusMessage(tt('vp.applyFailed'))
             }
         }
         // confidence filter (user 2026-08-31): points below the threshold go
@@ -3450,18 +3479,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const sid = activeSessionRef.current
             if (!sid) return
             try {
-                if (onStatusMessage) onStatusMessage(`🎚 applying confidence filter < ${(thr * 100).toFixed(0)}%...`)
+                if (onStatusMessage) onStatusMessage(tt('vp.applyingConfidence', { pct: (thr * 100).toFixed(0) }))
                 await postErase({
                     session_id: sid,
                     spheres: [],
                     conf_below: thr,
                     only_instances: onlyInstances,
-                    // Unsegmented toggle ON → its low-confidence points are
+                    // Unsegmented toggle ON  its low-confidence points are
                     // PHYSICALLY DELETED from the cloud (user 2026-08-31)
                     include_unsegmented: includeUnsegmented ?? false,
                 })
             } catch {
-                if (onStatusMessage) onStatusMessage('🎚 confidence filter failed')
+                if (onStatusMessage) onStatusMessage(tt('vp.confidenceFailed'))
             }
         }
         eraseApiRef.current = { commit: eraseCommit, clear: eraseClearMarks, confApply: eraseConfApply }
@@ -3491,7 +3520,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 if (idx >= 0) eraseMarks.splice(idx, 1)
                 eraseMarksGroup.remove(mesh)
                 onEraseMarksChangedRef.current?.(eraseMarks.length)
-                if (onStatusMessage) onStatusMessage(`🖌 mark removed — ${eraseMarks.length} zone(s) left`)
+                if (onStatusMessage) onStatusMessage(tt('vp.markRemoved', { n: eraseMarks.length }))
                 return
             }
             if (eraseShapeRef.current === 'box') {
@@ -3522,7 +3551,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             eraseMarksGroup.add(mark)
             eraseMarks.push({ shape, center: p.clone(), radius: r, yawDeg, mesh: mark })
             onEraseMarksChangedRef.current?.(eraseMarks.length)
-            if (onStatusMessage) onStatusMessage(`🖌 ${eraseMarks.length} zone(s) marked — press Erase or Assign to apply`)
+            if (onStatusMessage) onStatusMessage(tt('vp.zonesMarked', { n: eraseMarks.length }))
         }
 
         renderer.domElement.addEventListener('click', onCanvasClick)
@@ -3590,7 +3619,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
     }, [pointSize])
 
-    // Update LOD point budget when prop changes → re-evaluate visible nodes
+    // Update LOD point budget when prop changes  re-evaluate visible nodes
     useEffect(() => {
         const loader = potreeLoaderRef.current
         if (loader) {
@@ -3643,7 +3672,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => {
         activeSessionRef.current = activeSession
         sessionFramedRef.current = null  // reset so new session gets framed
-        sentLoadForSessionRef.current = null  // new session → allow one auto-load
+        sentLoadForSessionRef.current = null  // new session  allow one auto-load
     }, [activeSession])
 
     // Connect WebSocket with auto-reconnect
@@ -3892,7 +3921,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const ws = wsRef.current
         if (!ws || ws.readyState !== WebSocket.OPEN) return
         // Already auto-loaded this session on this socket (e.g. onopen got there
-        // first) → don't fire a second load that reloads the cloud + re-fetches
+        // first)  don't fire a second load that reloads the cloud + re-fetches
         // the TSDF .glb.
         if (sentLoadForSessionRef.current === activeSession) return
         sentLoadForSessionRef.current = activeSession
@@ -3908,17 +3937,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             open: true,
             scan_key: openScanKeyRef.current || undefined,
         }))
-    }, [activeSession]) // eslint-disable-line react-hooks/exhaustive-deps
+    }, [activeSession])  
 
     // Clear geometry and OBBs
     const clearScene = useCallback(() => {
         // Reset stale view-state refs so a fresh load is never blocked:
         //  - cloudHiddenRef: if it stuck `true` (e.g. all segments hidden), the
         //    LOD loop would skip loading the cloud entirely on the next load.
-        //  - preserveCameraRef: set-once and otherwise never cleared → a later
+        //  - preserveCameraRef: set-once and otherwise never cleared  a later
         //    full load would skip frameCloud and restore a stale camera, leaving
         //    the frustum pointing at nothing (cloud "loads" but shows no points).
-        // F5 reset these (fresh module state); unload→reload did not — that was
+        // F5 reset these (fresh module state); unloadreload did not — that was
         // exactly the "reload shows only camera poses, no cloud" bug.
         cloudHiddenRef.current = false
         preserveCameraRef.current = null
@@ -4073,8 +4102,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const parent = potreeLoaderRef.current?.getOctreeGroup() || sceneRef.current
                 if (parent) loadTsdfIntoGroup(sid, parent)
                 onTsdfReadyRef.current?.(sid, msg.stage as string)
-                if (onStatusMessage) onStatusMessage(
-                    `🧩 ${msg.count} ${msg.stage} mesh(es) ready — list updated`)
+                if (onStatusMessage) onStatusMessage(tt('vp.meshesReady', { n: msg.count as number, stage: msg.stage as string }))
             }
             return
         }
@@ -4084,8 +4112,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (onStatusMessage) {
                 const pct = ((msg.agreement as number) * 100).toFixed(2)
                 onStatusMessage(msg.ok
-                    ? `octree verified ✓ ${msg.matched}/${msg.checked} (${pct}%)`
-                    : `⚠ OCTREE MISMATCH: ${msg.matched}/${msg.checked} (${pct}%) ${msg.error || ''} — viewer may show stale classes`)
+                    ? tt('vp.octreeVerified', { matched: msg.matched as number, checked: msg.checked as number, pct })
+                    : tt('vp.octreeMismatch', { matched: msg.matched as number, checked: msg.checked as number, pct, detail: (msg.error as string) || '' }))
             }
             return
         }
@@ -4095,7 +4123,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const floorTransform = msg.floorTransform as number[] | undefined
             const serverHasConfidence = msg.hasConfidence as boolean | undefined
             // console.log(`[Viewport] Potree ready: ${pts?.toLocaleString()} points at ${url}`)
-            if (onStatusMessage) onStatusMessage(`Loading LOD octree (${pts?.toLocaleString()} points)...`)
+            if (onStatusMessage) onStatusMessage(tt('vp.octreeLoading', { n: getFmt().integer(pts || 0) }))
 
             // Create loader with existing material for section-box/segmentation compat
             const scene = sceneRef.current
@@ -4140,11 +4168,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             loader.load(url).then((loadedPts) => {
                 // Guard: if this loader was replaced (e.g. by sábana), skip
                 if (potreeLoaderRef.current !== loader) return
-                if (onStatusMessage) onStatusMessage(`LOD octree loaded — ${pts?.toLocaleString()} total points`)
+                if (onStatusMessage) onStatusMessage(tt('vp.octreeLoaded', { n: getFmt().integer(pts || 0) }))
                 onPointCount(loadedPts)
                 // undefined = the sender didn't say (older erase-rebuild
                 // broadcasts) — never DROP a known-true confidence over that
                 if (onHasConfidence && serverHasConfidence !== undefined) onHasConfidence(!!serverHasConfidence)
+                onHasWitnessRef.current?.(loader.hasWitness)
 
                 // resync OBBs + side panel: an erase/refresh may have changed
                 // the instances behind this reload (user 2026-08-30: bbox
@@ -4254,7 +4283,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 }
             }).catch((err) => {
                 console.error('[Viewport] Potree load failed:', err)
-                if (onStatusMessage) onStatusMessage(`Potree load error: ${err.message}`)
+                if (onStatusMessage) onStatusMessage(tt('vp.octreeError', { detail: err.message }))
             })
             return // Don't process further
         }
@@ -4291,7 +4320,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             // Bump load counter — any in-flight loads with an older ID are stale
             const thisLoadId = ++sabanaLoadIdRef.current
             console.log(`[Viewport] Sábana Potree ready (load #${thisLoadId}): ${nPts?.toLocaleString()} points at ${url}`)
-            if (onStatusMessage) onStatusMessage(`Loading sábana LOD octree (${nPts?.toLocaleString()} points)...`)
+            if (onStatusMessage) onStatusMessage(tt('vp.deviationLoading', { n: getFmt().integer(nPts || 0) }))
 
             const scene = sceneRef.current
             const camera = cameraRef.current
@@ -4312,7 +4341,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
             totalPointsRef.current = 0
 
-            // 2) Load sábana via PotreeOctreeLoader (forceClassId=-1 → always visible)
+            // 2) Load sábana via PotreeOctreeLoader (forceClassId=-1  always visible)
             const loader = new PotreeOctreeLoader(scene, camera, mat, pointBudget, -1)
             potreeLoaderRef.current = loader
             loader.load(url).then((loadedPts) => {
@@ -4322,7 +4351,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     return
                 }
                 console.log(`[Viewport] Sábana Potree loaded (load #${thisLoadId}): ${loadedPts.toLocaleString()} points`)
-                if (onStatusMessage) onStatusMessage(`Sábana: ${nPts?.toLocaleString()} deviation points`)
+                if (onStatusMessage) onStatusMessage(tt('deviation.loadedPoints', { n: getFmt().integer(nPts || 0) }))
                 onPointCount(loadedPts)
 
                 // Keep camera where it is — user navigates from current position
@@ -4337,7 +4366,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                             child.userData._originalMaterial = child.material
                         }
                         child.material = new THREE.MeshBasicMaterial({
-                            color: 0x888888,
+                            color: tokenHex(VP.sabanaUnmatched),
                             transparent: true,
                             opacity: 0.20,
                             side: THREE.DoubleSide,
@@ -4358,7 +4387,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }).catch((err) => {
                 if (sabanaLoadIdRef.current !== thisLoadId) return  // stale, ignore error too
                 console.error('[Viewport] Sábana Potree load error:', err)
-                if (onStatusMessage) onStatusMessage(`Sábana load error: ${err.message}`)
+                if (onStatusMessage) onStatusMessage(tt('vp.deviationError', { detail: err.message }))
             })
         }
         // ── BIM: load IFC models via web-ifc ──
@@ -4373,7 +4402,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 let remaining = models.length
                 for (const model of models) {
                     // console.log(`[Viewport] Loading BIM: ${model.name}`)
-                    if (onStatusMessage) onStatusMessage(`Loading BIM: ${model.name}...`)
+                    if (onStatusMessage) onStatusMessage(tt('vp.bimLoading', { name: model.name }))
                     loadIFC(model.url, model.name).then((result) => {
                         bimGroup.add(result.group)
                         const bimBox = new THREE.Box3().setFromObject(result.group)
@@ -4409,8 +4438,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                                 adaptGrid(cloudBBoxRef.current, sceneRef.current, gridRef, showGridRef.current)
                             }
                         }
-                        console.log(`[Viewport] ✅ BIM loaded: ${model.name} (${result.group.children.length} elements, ${result.hierarchy.length} hierarchy roots)`)
-                        if (onStatusMessage) onStatusMessage(`BIM loaded: ${model.name} (${result.group.children.length} elements)`)
+                        console.log(`[Viewport]  BIM loaded: ${model.name} (${result.group.children.length} elements, ${result.hierarchy.length} hierarchy roots)`)
+                        if (onStatusMessage) onStatusMessage(tt('bim.loaded', { name: model.name, n: result.group.children.length }))
                         loadedResults.push(result)
                         remaining--
                         if (remaining === 0 && onBimLoaded) {
@@ -4418,7 +4447,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         }
                     }).catch((err) => {
                         console.error(`[Viewport] BIM load error: ${model.name}`, err)
-                        if (onStatusMessage) onStatusMessage(`BIM error: ${err.message}`)
+                        if (onStatusMessage) onStatusMessage(tt('vp.bimError', { detail: err.message }))
                         remaining--
                         if (remaining === 0 && onBimLoaded && loadedResults.length > 0) {
                             onBimLoaded(loadedResults)
@@ -4447,7 +4476,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // label Sprites with CanvasTextures) were being removed WITHOUT disposal —
     // every segments refresh leaked GPU buffers/textures, which is why the
     // viewer slowed down over time and got WORSE after deleting elements
-    // (each delete triggers a full OBB rebuild → another leaked generation).
+    // (each delete triggers a full OBB rebuild  another leaked generation).
     const disposeDeep = useCallback((root: THREE.Object3D) => {
         root.traverse(obj => {
             const mesh = obj as THREE.Mesh
@@ -4490,7 +4519,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const obb = inst.obb as Record<string, unknown> | undefined
             const instId = (inst.instance_id || inst.id || 0) as number
             const label = (inst.label || 'object') as string
-            const colorStr = (inst.color || '#00d4ff') as string
+            const colorStr = (inst.color || tokenColor(VP.measure)) as string
             const totalPoints = (inst.total_points || 0) as number
             const globalKey = (inst.global_id || `${label}_${instId}`) as string
 
@@ -4574,7 +4603,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 // ── Wireframe: connect neighboring voxel centers via grid hash (O(n)) ──
                 const linePositions: number[] = []
 
-                // Build spatial hash: grid key → voxel index
+                // Build spatial hash: grid key  voxel index
                 const gridMap = new Map<string, number>()
                 for (let vi = 0; vi < voxelMesh.count; vi++) {
                     const d = voxelMesh.data[vi]
@@ -4628,7 +4657,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             labelCanvas.width = Math.max(textWidth + 20, 64)
             labelCanvas.height = 36
             ctx.font = 'bold 28px sans-serif'
-            ctx.fillStyle = 'rgba(0,0,0,0.6)'
+            ctx.fillStyle = tokenColor(VP.labelBg)
             ctx.roundRect(0, 0, labelCanvas.width, labelCanvas.height, 6)
             ctx.fill()
             ctx.fillStyle = colorStr
@@ -4662,273 +4691,117 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     }, [onSegments])
     useEffect(() => { renderOBBsRef.current = renderOBBs }, [renderOBBs])
 
+    const T = getT()
+    const measuring = activeTool === 'measure-distance' || activeTool === 'measure-angle'
     return (
-        <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-            <div ref={containerRef} className="viewport-canvas" style={{ width: '100%', height: '100%' }} />
+        <div className="viewport-root">
+            <div ref={containerRef} className={`viewport-canvas ${measuring ? 'viewport-canvas--measure' : ''}`.trim()} />
             {contextLost && (
-                <div style={{
-                    position: 'absolute', inset: 0, zIndex: 500,
-                    display: 'flex', flexDirection: 'column', alignItems: 'center',
-                    justifyContent: 'center', gap: 12, textAlign: 'center',
-                    background: 'rgba(13, 17, 23, 0.94)', color: '#e6edf3', padding: 24,
-                }}>
-                    <div style={{ fontSize: 34 }}>🖥️⚠️</div>
-                    <div style={{ fontSize: 16, fontWeight: 700 }}>WebGL context lost</div>
-                    <div style={{ fontSize: 13, color: '#8b949e', maxWidth: 460 }}>
-                        The GPU ran out of resources rendering this scene. If it does
-                        not recover automatically, lower the Detail (point budget)
-                        slider and reload.
-                    </div>
-                    <button
-                        onClick={() => window.location.reload()}
-                        style={{
-                            padding: '8px 20px', border: 'none', borderRadius: 8,
-                            background: 'var(--accent, #2f81f7)', color: '#fff',
-                            fontSize: 13, fontWeight: 600, cursor: 'pointer',
-                        }}
-                    >↻ Reload</button>
+                <div className="stac-vplost" role="alert">
+                    <MonitorX className="stac-empty__icon" aria-hidden />
+                    <div className="stac-empty__title">{T('vp.contextLostTitle')}</div>
+                    <div className="stac-empty__desc">{T('vp.contextLostDesc')}</div>
+                    <Button variant="primary" icon={<RefreshCw aria-hidden />} onClick={() => window.location.reload()}>{T('common.retry')}</Button>
                 </div>
             )}
             {activeTool === 'align' && (
-                <div style={{
-                    position: 'absolute', top: 12, right: 12, background: 'var(--glass-bg)',
-                    borderRadius: 10, padding: '14px 18px', color: '#fff', fontSize: 13,
-                    display: 'flex', flexDirection: 'column', gap: 10, minWidth: 180,
-                    border: '1px solid var(--glass-border)', backdropFilter: 'blur(8px)',
-                    zIndex: 100
-                }}>
-                    <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 2 }}>⛶ Align Cloud</div>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                        <button
-                            style={{ flex: 1, padding: '6px 0', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: alignMode === 'rotate' ? 'var(--accent)' : 'var(--bg-active)', color: '#fff' }}
-                            onClick={() => setAlignMode('rotate')}
-                        >🔄 Rotate</button>
-                        <button
-                            style={{ flex: 1, padding: '6px 0', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: alignMode === 'translate' ? 'var(--accent-2)' : 'var(--bg-active)', color: '#fff' }}
-                            onClick={() => setAlignMode('translate')}
-                        >↔️ Move</button>
+                <div className="stac-vpcard stac-vpcard--topright" role="group" aria-label={T('vp.alignTitle')}>
+                    <div className="stac-vpcard__title">{T('vp.alignTitle')}</div>
+                    <div className="stac-vpcard__row">
+                        <Button size="sm" icon={<RotateCw aria-hidden />} active={alignMode === 'rotate'} onClick={() => setAlignMode('rotate')}>{T('gizmo.rotate')}</Button>
+                        <Button size="sm" icon={<Move aria-hidden />} active={alignMode === 'translate'} onClick={() => setAlignMode('translate')}>{T('gizmo.move')}</Button>
                     </div>
-                    <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '2px 0' }} />
-                    <button
-                        style={{ padding: '8px 0', border: 'none', borderRadius: 6, cursor: alignDirty ? 'pointer' : 'not-allowed', fontSize: 13, fontWeight: 700, background: alignDirty ? 'var(--success)' : 'var(--bg-active)', color: '#fff', opacity: alignDirty ? 1 : 0.5 }}
-                        onClick={saveAlignment}
-                        disabled={!alignDirty}
-                    >💾 Save Alignment</button>
+                    <Button variant="primary" icon={<Save aria-hidden />} disabled={!alignDirty} onClick={saveAlignment}>{T('vp.saveAlignment')}</Button>
                 </div>
             )}
-            {/* Evaluation-volume gizmo toolbar (click a volume to select it) */}
             {selVolume != null && (
-                <div style={{
-                    position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
-                    background: 'var(--glass-bg)', borderRadius: 10, padding: '8px 12px',
-                    color: '#fff', fontSize: 12, display: 'flex', gap: 6, alignItems: 'center',
-                    border: '1px solid var(--glass-border)', backdropFilter: 'blur(8px)', zIndex: 100,
-                }}>
-                    <span style={{ fontWeight: 700, color: '#c4b5ff', marginRight: 4 }}>⬚ Volume #{selVolume}</span>
-                    {([['translate', '↔ Move'], ['rotate', '🔄 Rotate'], ['scale', '⤢ Resize']] as const).map(([m, lbl]) => (
-                        <button key={m}
-                            style={{ padding: '5px 10px', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: volMode === m ? 'var(--accent-2)' : 'var(--bg-active)', color: '#fff' }}
-                            onClick={() => setVolMode(m)}>{lbl}</button>
-                    ))}
-                    <button
-                        style={{ padding: '5px 10px', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: volSolid ? 'var(--accent)' : 'var(--bg-active)', color: '#fff' }}
-                        onClick={() => {
-                            const s = !volSolid
-                            setVolSolid(s)
-                            assistantVizRef.current?.setVolumeSolid(selVolume, s)
-                        }}>◼ Solid</button>
-                    <button
-                        style={{ padding: '5px 10px', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: 'var(--danger, #f85149)', color: '#fff' }}
-                        onClick={() => {
-                            const vid = selVolume
-                            setSelVolume(null)
-                            assistantVizRef.current?.removeVolume(vid)
-                            onVolumeDeletedRef.current?.(vid)
-                        }}>🗑</button>
-                    <button
-                        style={{ padding: '5px 8px', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, background: 'var(--bg-active)', color: '#fff' }}
-                        onClick={() => setSelVolume(null)}>✕</button>
+                <div className="stac-vpcard stac-vpcard--topcenter" role="toolbar" aria-label={T('vp.volumeTitle', { id: selVolume })}>
+                    <span className="stac-vpcard__title">{T('vp.volumeTitle', { id: selVolume })}</span>
+                    <Button size="sm" icon={<Move aria-hidden />} active={volMode === 'translate'} onClick={() => setVolMode('translate')}>{T('gizmo.move')}</Button>
+                    <Button size="sm" icon={<RotateCw aria-hidden />} active={volMode === 'rotate'} onClick={() => setVolMode('rotate')}>{T('gizmo.rotate')}</Button>
+                    <Button size="sm" icon={<Scaling aria-hidden />} active={volMode === 'scale'} onClick={() => setVolMode('scale')}>{T('gizmo.resize')}</Button>
+                    <Button size="sm" icon={<BoxIcon aria-hidden />} active={volSolid} onClick={() => { const v = !volSolid; setVolSolid(v); assistantVizRef.current?.setVolumeSolid(selVolume, v) }}>{T('vp.solid')}</Button>
+                    <IconButton size="sm" variant="danger" label={T('common.delete')} icon={<Trash2 aria-hidden />} onClick={() => { const vid = selVolume; setSelVolume(null); assistantVizRef.current?.removeVolume(vid); onVolumeDeletedRef.current?.(vid) }} />
+                    <IconButton size="sm" label={T('common.close')} icon={<X aria-hidden />} onClick={() => setSelVolume(null)} />
                 </div>
             )}
-            {/* Camera pose hover tooltip */}
             {camTooltip && (
-                <div style={{
-                    position: 'absolute',
-                    left: camTooltip.x + 16,
-                    top: camTooltip.y - 80,
-                    background: 'var(--glass-bg)',
-                    borderRadius: 8,
-                    padding: 8,
-                    color: '#fff',
-                    fontSize: 11,
-                    fontWeight: 600,
-                    zIndex: 200,
-                    pointerEvents: 'none',
-                    border: '1px solid var(--glass-border)',
-                    backdropFilter: 'blur(6px)',
-                    minWidth: 120,
-                    maxWidth: 220,
-                }}>
-                    <div style={{ marginBottom: 4 }}>{camTooltip.frameName}</div>
-                    <img
-                        src={`/api/sessions/${camTooltip.sessionId}/frames/${camTooltip.frameName}`}
-                        alt={camTooltip.frameName}
-                        style={{ width: '100%', borderRadius: 4, display: 'block' }}
-                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
-                    />
+                <div className="stac-vptip" style={{ '--tip-x': `${camTooltip.x + 16}px`, '--tip-y': `${camTooltip.y - 80}px` } as React.CSSProperties}>
+                    <div className="stac-mono">{camTooltip.frameName}</div>
+                    <img className="stac-vptip__thumb" src={`/api/sessions/${camTooltip.sessionId}/frames/${camTooltip.frameName}`} alt={camTooltip.frameName}
+                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
                 </div>
             )}
-            {/* BIM element hover tooltip */}
             {bimTooltip && !camTooltip && (
-                <div style={{
-                    position: 'absolute',
-                    left: bimTooltip.x + 14,
-                    top: bimTooltip.y + 14,
-                    background: 'var(--glass-bg)',
-                    borderRadius: 6,
-                    padding: '5px 10px',
-                    color: '#fff',
-                    fontSize: 11,
-                    zIndex: 200,
-                    pointerEvents: 'none',
-                    border: '1px solid rgba(79, 209, 255, 0.3)',
-                    backdropFilter: 'blur(6px)',
-                    maxWidth: 360,
-                    wordBreak: 'break-all' as const,
-                }}>
-                    <span style={{ color: 'var(--accent-2)', fontWeight: 600 }}>{bimTooltip.type.replace('Ifc', '')}</span>
-                    {bimTooltip.name && !bimTooltip.name.startsWith('Element_') && (
-                        <span style={{ marginLeft: 6, opacity: 0.8 }}>{bimTooltip.name}</span>
-                    )}
+                <div className="stac-vptip" style={{ '--tip-x': `${bimTooltip.x + 14}px`, '--tip-y': `${bimTooltip.y + 14}px` } as React.CSSProperties}>
+                    <span className="stac-vptip__type">{bimTooltip.type.replace('Ifc', '')}</span>
+                    {bimTooltip.name && !bimTooltip.name.startsWith('Element_') && <span className="stac-vptip__name">{bimTooltip.name}</span>}
                 </div>
             )}
-            {/* BIM right-click context menu */}
             {bimCtxMenu && (
-                <div style={{
-                    position: 'absolute',
-                    left: bimCtxMenu.x,
-                    top: bimCtxMenu.y,
-                    background: 'var(--glass-bg)',
-                    borderRadius: 8,
-                    padding: 0,
-                    color: '#fff',
-                    fontSize: 12,
-                    zIndex: 300,
-                    border: '1px solid rgba(100,180,255,0.25)',
-                    backdropFilter: 'blur(10px)',
-                    minWidth: 200,
-                    boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-                    overflow: 'hidden',
-                }} onClick={e => e.stopPropagation()}>
-                    {/* Header */}
-                    <div style={{
-                        padding: '8px 12px',
-                        borderBottom: '1px solid rgba(255,255,255,0.1)',
-                        fontSize: 11,
-                        opacity: 0.7,
-                        wordBreak: 'break-all' as const,
-                    }}>
-                        <span style={{ color: 'var(--accent-2)', fontWeight: 600 }}>{bimCtxMenu.type.replace('Ifc', '')}</span>
-                        {bimCtxMenu.name && !bimCtxMenu.name.startsWith('Element_') && (
-                            <span style={{ marginLeft: 6 }}>{bimCtxMenu.name}</span>
-                        )}
+                <div className="stac-vpctx" role="menu" style={{ '--tip-x': `${bimCtxMenu.x}px`, '--tip-y': `${bimCtxMenu.y}px` } as React.CSSProperties} onClick={e => e.stopPropagation()}>
+                    <div className="stac-vpctx__header">
+                        <span className="stac-vptip__type">{bimCtxMenu.type.replace('Ifc', '')}</span>
+                        {bimCtxMenu.name && !bimCtxMenu.name.startsWith('Element_') && <span className="stac-vptip__name">{bimCtxMenu.name}</span>}
                     </div>
-                    {/* Transparency slider */}
-                    <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-light)' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ fontSize: 11, opacity: 0.7, minWidth: 70 }}>Transparency</span>
-                            <input
-                                type="range" min="0" max="100"
-                                value={Math.round((1 - bimCtxMenu.opacity) * 100)}
-                                onChange={e => {
-                                    const newOpacity = 1 - parseInt(e.target.value) / 100
-                                    const bimGroup = bimGroupRef.current
-                                    if (!bimGroup) return
-                                    bimGroup.traverse(child => {
-                                        if ((child as THREE.Mesh).isMesh && child.userData?.expressID === bimCtxMenu.expressID) {
-                                            const mat = (child as THREE.Mesh).material as THREE.MeshStandardMaterial
-                                            // Save original state on first modification
-                                            if (child.userData._origOpacity === undefined) {
-                                                child.userData._origOpacity = mat.opacity
-                                                child.userData._origTransparent = mat.transparent
-                                                child.userData._origDepthWrite = mat.depthWrite
-                                            }
-                                            mat.opacity = newOpacity
-                                            mat.transparent = true
-                                            mat.depthWrite = newOpacity > 0.9
-                                            mat.needsUpdate = true
+                    <div className="stac-vpctx__row">
+                        <Slider tone="measure" min={0} max={100} step={1} value={Math.round((1 - bimCtxMenu.opacity) * 100)} label={T('vp.transparency')} format={v => `${v} %`}
+                            onChange={v => {
+                                const newOpacity = 1 - v / 100
+                                const bimGroup = bimGroupRef.current
+                                if (!bimGroup) return
+                                bimGroup.traverse(child => {
+                                    if ((child as THREE.Mesh).isMesh && child.userData?.expressID === bimCtxMenu.expressID) {
+                                        const mat = (child as THREE.Mesh).material as THREE.MeshStandardMaterial
+                                        // Save original state on first modification
+                                        if (child.userData._origOpacity === undefined) {
+                                            child.userData._origOpacity = mat.opacity
+                                            child.userData._origTransparent = mat.transparent
+                                            child.userData._origDepthWrite = mat.depthWrite
                                         }
-                                    })
-                                    setBimCtxMenu(prev => prev ? { ...prev, opacity: newOpacity } : null)
-                                }}
-                                style={{ flex: 1, accentColor: 'var(--accent-2)' }}
-                            />
-                            <span style={{ fontSize: 10, opacity: 0.5, minWidth: 28, textAlign: 'right' }}>
-                                {Math.round((1 - bimCtxMenu.opacity) * 100)}%
-                            </span>
-                        </div>
+                                        mat.opacity = newOpacity
+                                        mat.transparent = true
+                                        mat.depthWrite = newOpacity > 0.9
+                                        mat.needsUpdate = true
+                                    }
+                                })
+                                setBimCtxMenu(prev => prev ? { ...prev, opacity: newOpacity } : null)
+                            }} />
                     </div>
-                    {/* Hide */}
-                    <div
-                        style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border-light)' }}
-                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
-                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                        onClick={() => {
-                            const bimGroup = bimGroupRef.current
-                            if (!bimGroup) return
-                            bimGroup.traverse(child => {
-                                if ((child as THREE.Mesh).isMesh && child.userData?.expressID === bimCtxMenu.expressID) {
-                                    child.visible = false
-                                }
-                            })
-                            setBimCtxMenu(null)
-                        }}
-                    >👁‍🗨 Hide</div>
-                    {/* Isolate */}
-                    <div
-                        style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border-light)' }}
-                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
-                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                        onClick={() => {
-                            const bimGroup = bimGroupRef.current
-                            if (!bimGroup) return
-                            bimGroup.traverse(child => {
-                                if ((child as THREE.Mesh).isMesh && child.userData?.expressID !== undefined) {
-                                    child.visible = child.userData.expressID === bimCtxMenu.expressID
-                                }
-                            })
-                            setBimCtxMenu(null)
-                        }}
-                    >🔍 Isolate</div>
-                    {/* Show all */}
-                    <div
-                        style={{ padding: '8px 12px', cursor: 'pointer' }}
-                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
-                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                        onClick={() => {
-                            const bimGroup = bimGroupRef.current
-                            if (!bimGroup) return
-                            bimGroup.traverse(child => {
-                                if ((child as THREE.Mesh).isMesh) {
-                                    child.visible = true
-                                    const mat = (child as THREE.Mesh).material as THREE.MeshStandardMaterial
-                                    // Restore original material state (preserves IFC glass transparency)
-                                    const origOpacity = child.userData._origOpacity ?? mat.opacity
-                                    const origTransparent = child.userData._origTransparent ?? mat.transparent
-                                    const origDepthWrite = child.userData._origDepthWrite ?? mat.depthWrite
-                                    mat.opacity = origOpacity
-                                    mat.transparent = origTransparent
-                                    mat.depthWrite = origDepthWrite
-                                    mat.needsUpdate = true
-                                    // Clear saved state
-                                    delete child.userData._origOpacity
-                                    delete child.userData._origTransparent
-                                    delete child.userData._origDepthWrite
-                                }
-                            })
-                            setBimCtxMenu(null)
-                        }}
-                    >✨ Show All</div>
+                    <button type="button" role="menuitem" className="stac-vpctx__item" onClick={() => {
+                        const bimGroup = bimGroupRef.current
+                        if (!bimGroup) return
+                        bimGroup.traverse(child => { if ((child as THREE.Mesh).isMesh && child.userData?.expressID === bimCtxMenu.expressID) child.visible = false })
+                        setBimCtxMenu(null)
+                    }}><EyeOff aria-hidden />{T('vp.hide')}</button>
+                    <button type="button" role="menuitem" className="stac-vpctx__item" onClick={() => {
+                        const bimGroup = bimGroupRef.current
+                        if (!bimGroup) return
+                        bimGroup.traverse(child => { if ((child as THREE.Mesh).isMesh && child.userData?.expressID !== undefined) child.visible = child.userData.expressID === bimCtxMenu.expressID })
+                        setBimCtxMenu(null)
+                    }}><Focus aria-hidden />{T('vp.isolate')}</button>
+                    <button type="button" role="menuitem" className="stac-vpctx__item" onClick={() => {
+                        const bimGroup = bimGroupRef.current
+                        if (!bimGroup) return
+                        bimGroup.traverse(child => {
+                            if ((child as THREE.Mesh).isMesh) {
+                                child.visible = true
+                                const mat = (child as THREE.Mesh).material as THREE.MeshStandardMaterial
+                                // Restore original material state (preserves IFC glass transparency)
+                                const origOpacity = child.userData._origOpacity ?? mat.opacity
+                                const origTransparent = child.userData._origTransparent ?? mat.transparent
+                                const origDepthWrite = child.userData._origDepthWrite ?? mat.depthWrite
+                                mat.opacity = origOpacity
+                                mat.transparent = origTransparent
+                                mat.depthWrite = origDepthWrite
+                                mat.needsUpdate = true
+                                delete child.userData._origOpacity
+                                delete child.userData._origTransparent
+                                delete child.userData._origDepthWrite
+                            }
+                        })
+                        setBimCtxMenu(null)
+                    }}><Eye aria-hidden />{T('vp.showAll')}</button>
                 </div>
             )}
         </div>

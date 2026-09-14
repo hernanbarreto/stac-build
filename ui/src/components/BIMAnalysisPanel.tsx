@@ -1,272 +1,112 @@
 /**
- * BIM Analysis Panel — Construction progress report
- * Shows per-element quality, advance, and global progress
- * when the sábana (deviation comparison) is active.
+ * BIM Analysis Panel — construction progress report shown in the Acta /
+ * Quality tab when the deviation comparison is active: per-element quality,
+ * advance and global progress. Tone colours come from the state tokens.
  */
-import './BIMAnalysisPanel.css'
+import { Lock, CheckCircle2, Hammer, Award, Square } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { Section, KeyValue, Row, Stack } from './ui/Panel'
+import { Progress } from './ui/Progress'
+import { Badge, type BadgeTone } from './ui/Badge'
+import { useFmt, useT } from '../i18n'
 
 interface ElementMeta {
-    element_key: string
-    label: string
-    ifc_type: string
-    status: string
-    quality?: string        // good | regular | bad | not_built
-    advance_pct?: number
-    coverage_pct?: number
-    coverage_cumulative?: number
-    occluded_pct?: number
-    element_state?: string   // NOT_STARTED | IN_PROGRESS | COMPLETED | VERIFIED | OCCLUDED_FROZEN
-    correctness_pct?: number
-    mean_mm?: number
-    bim_surface_m2?: number
-    total_points?: number
+  element_key: string
+  label: string
+  ifc_type: string
+  status: string
+  quality?: string        // good | regular | bad | not_built
+  advance_pct?: number
+  coverage_pct?: number
+  coverage_cumulative?: number
+  occluded_pct?: number
+  element_state?: string   // NOT_STARTED | IN_PROGRESS | COMPLETED | VERIFIED | OCCLUDED_FROZEN
+  correctness_pct?: number
+  mean_mm?: number
+  bim_surface_m2?: number
+  total_points?: number
 }
 
 interface SabanaMeta {
-    date: string
-    tolerance_mm: number
-    total_points: number
-    global_advance_pct: number
-    quality_thresholds?: {
-        good_pct: number
-        regular_pct: number
-    }
-    summary: {
-        total_elements: number
-        evaluated: number
-        unmatched: number
-        errors: number
-    }
-    elements: ElementMeta[]
+  date: string
+  tolerance_mm: number
+  total_points: number
+  global_advance_pct: number
+  quality_thresholds?: { good_pct: number; regular_pct: number }
+  summary: { total_elements: number; evaluated: number; unmatched: number; errors: number }
+  elements: ElementMeta[]
 }
 
-interface BIMAnalysisPanelProps {
-    meta: SabanaMeta
-    sessionId: string
+const QUALITY_TONE: Record<string, BadgeTone> = { good: 'ok', regular: 'warn', bad: 'err', not_built: 'neutral' }
+const STATE_TONE: Record<string, BadgeTone> = { NOT_STARTED: 'neutral', IN_PROGRESS: 'info', COMPLETED: 'ok', VERIFIED: 'brand', OCCLUDED_FROZEN: 'warn' }
+const STATE_ICON: Record<string, ReactNode> = {
+  NOT_STARTED: <Square aria-hidden />, IN_PROGRESS: <Hammer aria-hidden />, COMPLETED: <CheckCircle2 aria-hidden />, VERIFIED: <Award aria-hidden />, OCCLUDED_FROZEN: <Lock aria-hidden />,
 }
 
-const QUALITY_COLORS: Record<string, string> = {
-    good: '#4ade80',
-    regular: '#fbbf24',
-    bad: '#ef4444',
-    not_built: '#64748b',
+function progressTone(pct: number): 'ok' | 'warn' | 'brand' | 'err' {
+  if (pct >= 80) return 'ok'
+  if (pct >= 50) return 'warn'
+  if (pct > 0) return 'brand'
+  return 'err'
 }
 
-const QUALITY_LABELS: Record<string, string> = {
-    good: 'Good',
-    regular: 'Regular',
-    bad: 'Bad',
-    not_built: 'Not Built',
-}
+export function BIMAnalysisPanel({ meta, sessionId }: { meta: SabanaMeta; sessionId: string }) {
+  const t = useT()
+  const fmt = useFmt()
+  const evaluated = meta.elements.filter(e => e.status === 'evaluated')
+  const unmatched = meta.elements.filter(e => e.status !== 'evaluated')
+  const counts = { good: 0, regular: 0, bad: 0, not_built: unmatched.length }
+  evaluated.forEach(e => { const q = (e.quality || 'bad') as keyof typeof counts; if (q in counts) counts[q]++ })
 
-const QUALITY_ICONS: Record<string, string> = {
-    good: '✅',
-    regular: '⚠️',
-    bad: '❌',
-    not_built: '⬜',
-}
-
-const STATE_COLORS: Record<string, string> = {
-    NOT_STARTED: '#64748b',
-    IN_PROGRESS: '#3b82f6',
-    COMPLETED: '#4ade80',
-    VERIFIED: '#a78bfa',
-    OCCLUDED_FROZEN: '#f97316',
-}
-
-const STATE_LABELS: Record<string, string> = {
-    NOT_STARTED: 'Not Started',
-    IN_PROGRESS: 'In Progress',
-    COMPLETED: 'Completed',
-    VERIFIED: 'Verified',
-    OCCLUDED_FROZEN: 'Occluded',
-}
-
-const STATE_ICONS: Record<string, string> = {
-    NOT_STARTED: '⬜',
-    IN_PROGRESS: '🔨',
-    COMPLETED: '✅',
-    VERIFIED: '🏆',
-    OCCLUDED_FROZEN: '🔒',
-}
-
-function formatDate(dateStr: string): string {
-    try {
-        const d = new Date(dateStr)
-        return d.toLocaleDateString('en-US', {
-            year: 'numeric', month: 'short', day: 'numeric',
-            hour: '2-digit', minute: '2-digit',
-        })
-    } catch {
-        return dateStr
-    }
-}
-
-function getProgressColor(pct: number): string {
-    if (pct >= 80) return '#4ade80'
-    if (pct >= 50) return '#fbbf24'
-    if (pct > 0) return '#fb923c'
-    return '#64748b'
-}
-
-export function BIMAnalysisPanel({ meta, sessionId }: BIMAnalysisPanelProps) {
-    const evaluated = meta.elements.filter(e => e.status === 'evaluated')
-    const unmatched = meta.elements.filter(e => e.status !== 'evaluated')
-
-    // Count by quality
-    const counts = { good: 0, regular: 0, bad: 0, not_built: unmatched.length }
-    evaluated.forEach(e => {
-        const q = e.quality || 'bad'
-        if (q in counts) counts[q as keyof typeof counts]++
-    })
-
-    return (
-        <div className="bap-container">
-            {/* ── Header / Metadata ── */}
-            <div className="bap-header">
-                <div className="bap-title">BIM Analysis Report</div>
-                <div className="bap-meta-grid">
-                    <div className="bap-meta-item">
-                        <span className="bap-meta-label">Session</span>
-                        <span className="bap-meta-value">{sessionId}</span>
-                    </div>
-                    <div className="bap-meta-item">
-                        <span className="bap-meta-label">Date</span>
-                        <span className="bap-meta-value">{formatDate(meta.date)}</span>
-                    </div>
-                    <div className="bap-meta-item">
-                        <span className="bap-meta-label">Tolerance</span>
-                        <span className="bap-meta-value">{meta.tolerance_mm} mm</span>
-                    </div>
-                    <div className="bap-meta-item">
-                        <span className="bap-meta-label">Scan Points</span>
-                        <span className="bap-meta-value">{meta.total_points.toLocaleString()}</span>
-                    </div>
-                </div>
+  return (
+    <div className="stac-bap">
+      <Section title={t('report.title')}>
+        <KeyValue label={t('properties.session')} mono>{sessionId}</KeyValue>
+        <KeyValue label={t('scans.date')} mono>{fmt.dateTime(meta.date)}</KeyValue>
+        <KeyValue label={t('deviation.tolerance')} mono>{fmt.mm(meta.tolerance_mm, 0)}</KeyValue>
+        <KeyValue label={t('report.scanPoints')} mono>{fmt.integer(meta.total_points)}</KeyValue>
+      </Section>
+      <Section title={t('report.globalProgress')}>
+        <Progress value={Math.min(meta.global_advance_pct, 100)} tone={progressTone(meta.global_advance_pct)} size="md" />
+        <Row wrap>
+          {(['good', 'regular', 'bad', 'not_built'] as const).map(q => (
+            <Badge key={q} tone={QUALITY_TONE[q]} mono>{fmt.integer(counts[q])} {t(`quality.${q}`)}</Badge>
+          ))}
+        </Row>
+      </Section>
+      <Section title={t('report.elements', { n: meta.elements.length })}>
+        <Stack gap={2}>
+          {evaluated.map(el => (
+            <div key={el.element_key} className="stac-bap__el">
+              <Row className="stac-bap__head">
+                <span className="stac-bap__label" title={el.label}>{el.label.split(':').slice(0, -1).join(':') || el.label}</span>
+                <span className="stac-bap__type">{el.ifc_type.replace('Ifc', '')}</span>
+                <Badge tone={QUALITY_TONE[el.quality || 'bad']} size="sm">{t(`quality.${el.quality || 'bad'}`)}</Badge>
+              </Row>
+              <Progress value={Math.min(el.advance_pct || 0, 100)} tone={el.quality === 'good' ? 'ok' : el.quality === 'regular' ? 'warn' : 'err'} />
+              <Row wrap className="stac-bap__meta">
+                {el.element_state && <Badge tone={STATE_TONE[el.element_state] ?? 'neutral'} size="sm">{STATE_ICON[el.element_state]} {t(`elementState.${el.element_state}`)}</Badge>}
+                {(el.occluded_pct || 0) > 0 && <span className="stac-mono">{t('report.occluded', { pct: fmt.percent((el.occluded_pct || 0) / 100) })}</span>}
+                {el.coverage_cumulative != null && <span className="stac-mono">{t('report.cumulative', { pct: fmt.percent(el.coverage_cumulative / 100) })}</span>}
+                <span className="stac-mono">{t('report.correctness', { pct: fmt.percent((el.correctness_pct || 0) / 100, 1) })}</span>
+                <span className="stac-mono">{t('report.mean', { mm: fmt.mm(el.mean_mm || 0) })}</span>
+                {el.bim_surface_m2 ? <span className="stac-mono">{t('report.surface', { area: fmt.area(el.bim_surface_m2) })}</span> : null}
+              </Row>
             </div>
-
-            {/* ── Global Progress ── */}
-            <div className="bap-global">
-                <div className="bap-global-label">Global Progress</div>
-                <div className="bap-global-bar-container">
-                    <div
-                        className="bap-global-bar"
-                        style={{
-                            width: `${Math.min(meta.global_advance_pct, 100)}%`,
-                            backgroundColor: getProgressColor(meta.global_advance_pct),
-                        }}
-                    />
-                </div>
-                <div className="bap-global-value" style={{ color: getProgressColor(meta.global_advance_pct) }}>
-                    {meta.global_advance_pct}%
-                </div>
-            </div>
-
-            {/* ── Summary Chips ── */}
-            <div className="bap-summary">
-                <div className="bap-chip" style={{ borderColor: QUALITY_COLORS.good }}>
-                    <span className="bap-chip-count" style={{ color: QUALITY_COLORS.good }}>{counts.good}</span>
-                    <span className="bap-chip-label">Good</span>
-                </div>
-                <div className="bap-chip" style={{ borderColor: QUALITY_COLORS.regular }}>
-                    <span className="bap-chip-count" style={{ color: QUALITY_COLORS.regular }}>{counts.regular}</span>
-                    <span className="bap-chip-label">Regular</span>
-                </div>
-                <div className="bap-chip" style={{ borderColor: QUALITY_COLORS.bad }}>
-                    <span className="bap-chip-count" style={{ color: QUALITY_COLORS.bad }}>{counts.bad}</span>
-                    <span className="bap-chip-label">Bad</span>
-                </div>
-                <div className="bap-chip" style={{ borderColor: QUALITY_COLORS.not_built }}>
-                    <span className="bap-chip-count" style={{ color: QUALITY_COLORS.not_built }}>{counts.not_built}</span>
-                    <span className="bap-chip-label">Not Built</span>
-                </div>
-            </div>
-
-            {/* ── Element List ── */}
-            <div className="bap-elements-header">Elements ({meta.elements.length})</div>
-            <div className="bap-elements-list">
-                {evaluated.map(el => (
-                    <div key={el.element_key} className="bap-element">
-                        <div className="bap-el-top">
-                            <span className="bap-el-icon">{QUALITY_ICONS[el.quality || 'bad']}</span>
-                            <div className="bap-el-info">
-                                <div className="bap-el-label">{el.label.split(':').slice(0, -1).join(':') || el.label}</div>
-                                <div className="bap-el-type">{el.ifc_type.replace('Ifc', '')}</div>
-                            </div>
-                            <span
-                                className="bap-el-quality"
-                                style={{ color: QUALITY_COLORS[el.quality || 'bad'] }}
-                            >
-                                {QUALITY_LABELS[el.quality || 'bad']}
-                            </span>
-                        </div>
-                        <div className="bap-el-stats">
-                            <div className="bap-el-bar-container">
-                                <div
-                                    className="bap-el-bar"
-                                    style={{
-                                        width: `${Math.min(el.advance_pct || 0, 100)}%`,
-                                        backgroundColor: QUALITY_COLORS[el.quality || 'bad'],
-                                    }}
-                                />
-                                {el.coverage_cumulative != null && el.coverage_cumulative !== (el.advance_pct || 0) && (
-                                    <div
-                                        className="bap-el-bar bap-el-bar-cumul"
-                                        style={{
-                                            width: `${Math.min(el.coverage_cumulative, 100)}%`,
-                                            backgroundColor: '#60a5fa33',
-                                            position: 'absolute', top: 0, left: 0, height: '100%',
-                                        }}
-                                    />
-                                )}
-                            </div>
-                            <span className="bap-el-advance">{el.advance_pct || 0}%</span>
-                        </div>
-                        {el.element_state && (
-                            <div className="bap-el-state">
-                                <span
-                                    className="bap-el-state-badge"
-                                    style={{ backgroundColor: STATE_COLORS[el.element_state] + '22', color: STATE_COLORS[el.element_state], borderColor: STATE_COLORS[el.element_state] }}
-                                >
-                                    {STATE_ICONS[el.element_state] || '❓'} {STATE_LABELS[el.element_state] || el.element_state}
-                                </span>
-                                {(el.occluded_pct || 0) > 0 && (
-                                    <span className="bap-el-occlusion">
-                                        🔒 {el.occluded_pct?.toFixed(0)}% occluded
-                                    </span>
-                                )}
-                                {el.coverage_cumulative != null && (
-                                    <span className="bap-el-cumul">
-                                        📊 {el.coverage_cumulative.toFixed(0)}% cumulative
-                                    </span>
-                                )}
-                            </div>
-                        )}
-                        <div className="bap-el-details">
-                            <span>Correctness: {el.correctness_pct?.toFixed(1)}%</span>
-                            <span>Mean: {el.mean_mm?.toFixed(1)} mm</span>
-                            {el.bim_surface_m2 ? <span>Surface: {el.bim_surface_m2.toFixed(2)} m²</span> : null}
-                        </div>
-                    </div>
-                ))}
-                {unmatched.length > 0 && (
-                    <>
-                        <div className="bap-section-divider">Not Built ({unmatched.length})</div>
-                        {unmatched.map(el => (
-                            <div key={el.element_key} className="bap-element bap-element-unbuilt">
-                                <div className="bap-el-top">
-                                    <span className="bap-el-icon">⬜</span>
-                                    <div className="bap-el-info">
-                                        <div className="bap-el-label">{el.label.split(':').slice(0, -1).join(':') || el.label}</div>
-                                        <div className="bap-el-type">{el.ifc_type.replace('Ifc', '')}</div>
-                                    </div>
-                                    <span className="bap-el-quality" style={{ color: '#64748b' }}>Not Built</span>
-                                </div>
-                            </div>
-                        ))}
-                    </>
-                )}
-            </div>
-        </div>
-    )
+          ))}
+          {unmatched.length > 0 && (
+            <Section flush title={t('report.notBuilt', { n: unmatched.length })}>
+              {unmatched.map(el => (
+                <Row key={el.element_key} className="stac-bap__head stac-bap__el--unbuilt">
+                  <span className="stac-bap__label" title={el.label}>{el.label.split(':').slice(0, -1).join(':') || el.label}</span>
+                  <span className="stac-bap__type">{el.ifc_type.replace('Ifc', '')}</span>
+                  <Badge size="sm">{t('quality.not_built')}</Badge>
+                </Row>
+              ))}
+            </Section>
+          )}
+        </Stack>
+      </Section>
+    </div>
+  )
 }

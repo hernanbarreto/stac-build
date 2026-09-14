@@ -107,7 +107,7 @@
   text-align: center;
 }
 
-.stac-table__spacer td {
+.stac-table__spacer-cell {
   height: var(--spacer-h);
   padding: 0;
   border: none;

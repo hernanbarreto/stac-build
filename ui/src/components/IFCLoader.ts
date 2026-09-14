@@ -35,7 +35,7 @@ async function ensureInit(): Promise<WebIFC.IfcAPI> {
     ifcApi = new WebIFC.IfcAPI()
     ifcApi.SetWasmPath('/web-ifc/')
     await ifcApi.Init()
-    console.log('[IFC] ✅ web-ifc WASM initialized')
+    console.log('[IFC] web-ifc WASM initialized')
     return ifcApi
 }
 
@@ -144,14 +144,14 @@ function getElementName(api: WebIFC.IfcAPI, modelID: number, expressID: number):
 /**
  * Build the spatial hierarchy tree from the IFC model.
  * Uses IfcRelAggregates and IfcRelContainedInSpatialStructure
- * to traverse the tree: Project → Site → Building → Storey → Elements
+ * to traverse the tree: Project -> Site -> Building -> Storey -> Elements
  */
 function buildHierarchy(
     api: WebIFC.IfcAPI,
     modelID: number,
     meshNamesByExpressID: Map<number, string[]>
 ): IFCTreeNode[] {
-    // Build parent→children map from IfcRelAggregates
+    // Build parent->children map from IfcRelAggregates
     const childrenMap = new Map<number, number[]>()
 
     try {
@@ -167,7 +167,7 @@ function buildHierarchy(
         console.warn('[IFC] Could not read IfcRelAggregates:', e)
     }
 
-    // Build spatial-structure→contained-elements map from IfcRelContainedInSpatialStructure
+    // Build spatial-structure->contained-elements map from IfcRelContainedInSpatialStructure
     const containedMap = new Map<number, number[]>()
 
     try {
@@ -268,7 +268,7 @@ export async function loadIFC(url: string, name: string): Promise<IFCLoadResult>
     // web-ifc already outputs Y-up coordinates in meters — no transform needed
     const baseTransform = new THREE.Matrix4() // identity
 
-    // Map expressID → mesh names (for hierarchy)
+    // Map expressID -> mesh names (for hierarchy)
     const meshNamesByExpressID = new Map<number, string[]>()
 
     for (let i = 0; i < allMeshes.size(); i++) {
@@ -356,6 +356,6 @@ export async function loadIFC(url: string, name: string): Promise<IFCLoadResult>
 
     api.CloseModel(modelID)
 
-    console.log(`[IFC] ✅ Loaded ${name}: ${group.children.length} meshes, hierarchy: ${hierarchy.length} roots`)
+    console.log(`[IFC] Loaded ${name}: ${group.children.length} meshes, hierarchy: ${hierarchy.length} roots`)
     return { group, hierarchy, filename: name }
 }

@@ -1,7 +1,7 @@
 /**
- * StatusBar — 28 px readout strip (§5, §7): connection · session · last
- * message · units · geometric epoch · cursor X Y Z (mono, 3 decimals, m) ·
- * job · points / fps. Every number carries its unit.
+ * StatusBar — 28 px readout strip (§5, §7): connection, session, last
+ * message, units, geometric epoch, cursor X Y Z (mono, 3 decimals, m) ,
+ * job, points / fps. Every number carries its unit.
  */
 import { Terminal } from 'lucide-react'
 import { useFmt, useT } from '../i18n'

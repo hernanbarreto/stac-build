@@ -1,13 +1,17 @@
 import { useState } from 'react'
-import './ConfirmDialog.css'
+import { AlertTriangle, CheckCircle2, ChevronUp, Undo2, Wrench } from 'lucide-react'
+import { Dialog } from './ui/Dialog'
+import { Button } from './ui/Button'
+import { Table, type Column } from './ui/Table'
+import { Stack } from './ui/Panel'
+import { GateList } from '../features/CorrectionDialog'
+import { useFmt, useT } from '../i18n'
 
-/** Pending-correction verdict (USER 2026-09-06: "ponelo lindo en el medio,
- *  como uno que ya usamos de aceptar o rechazar"). Same look as the
- *  ConfirmDialog, centred, but WITHOUT a blocking backdrop — the user must
- *  orbit the cloud to judge the correction. A ⌃ collapses it to a small
- *  pill at the top so the centre of the viewport is free; click reopens.
- *  Approve makes the corrected cloud THE cloud; Undo restores the
- *  previous one (one level). */
+/** Pending-correction verdict (USER 2026-09-06: centred, like the confirm
+ *  dialog, but WITHOUT a blocking backdrop — the user must orbit the cloud
+ *  to judge the correction). A collapse button shrinks it to a pill at the
+ *  top so the centre of the viewport is free; click reopens. Approve makes
+ *  the corrected cloud THE cloud; Undo restores the previous one. */
 export default function CorrectionVerdictDialog({ state, session, otherSession, busy, onApprove, onUndo }: {
   state: any
   session: string | null
@@ -16,77 +20,51 @@ export default function CorrectionVerdictDialog({ state, session, otherSession, 
   onApprove: () => void
   onUndo: () => void
 }) {
+  const t = useT()
+  const fmt = useFmt()
   const [collapsed, setCollapsed] = useState(false)
   const report = state?.report
   const solutions: any[] = report?.solutions || []
   const gates: any[] = report?.gates || []
-  const kind = state?.kind || report?.kind || 'correction'
+  const kind = state?.kind || report?.kind || t('correction.kindFallback')
   const epoch = report?.epoch_to ?? state?.epoch
-  const title = otherSession ? `Correction pending in ${otherSession}` : `Correction applied${session ? ` on ${session}` : ''} — your verdict`
+  const title = otherSession ? t('verdict.pendingIn', { session: otherSession }) : t('verdict.appliedOn', { session: session ?? '' })
 
   if (collapsed) {
     return (
-      <button className="cvd-pill" onClick={() => setCollapsed(false)} title="show the pending correction">
-        ⚠ Correction pending{otherSession ? ` in ${otherSession}` : ''} — click to decide
+      <button type="button" className="stac-verdict-pill" onClick={() => setCollapsed(false)} title={t('verdict.showPending')}>
+        <AlertTriangle aria-hidden />
+        {otherSession ? t('verdict.pendingIn', { session: otherSession }) : t('verdict.pendingPill')}
       </button>
     )
   }
+
+  const columns: Column<any>[] = [
+    { id: 'visit', header: t('verdict.visit'), mono: true, cell: c => c.kf_span ? `${c.kf_span[0]}..${c.kf_span[1]}` : c.later_kfs ? `${c.earlier_kfs[0]}..${c.earlier_kfs[1]} / ${c.later_kfs[0]}..${c.later_kfs[1]}` : c.anchors ? t('verdict.anchors', { n: c.anchors.length }) : t('status.dash') },
+    { id: 'rigid', header: t('verdict.rigid'), mono: true, cell: c => c.rot_deg != null ? `${fmt.degrees(c.rot_deg)} / ${fmt.number(c.t_norm_m ?? c.t_m ?? 0, 3)} m` : t('status.dash') },
+    { id: 'k', header: t('verdict.depthK'), mono: true, align: 'right', cell: c => c.k && c.k !== 1 ? fmt.number(c.k, 4) : t('status.dash') },
+    { id: 'copies', header: t('verdict.copies'), mono: true, cell: c => c.residual_cm ? `${fmt.number(c.residual_cm.before, 1)} -> ${fmt.number(c.residual_cm.after, 1)} cm` : c.per_block ? c.per_block.map((b: any) => `R${b.region} ${b.before_cm}->${b.after_cm}`).join(', ') : t('status.dash') },
+    { id: 'dof', header: t('verdict.dof'), mono: true, cell: c => c.dof ? c.dof.join(',') : c.n_blocks != null ? t('verdict.blocks', { improved: c.blocks_improved, n: c.n_blocks }) : t('status.dash') },
+  ]
+
   return (
-    <div className="cvd-wrap">
-      <div className="cd-dialog cvd-dialog">
-        <div className="cd-header">
-          <img src="/logo.png" alt="STAC" className="cd-logo" />
-          <span className="cd-app-name">STAC Build</span>
-          <span style={{ flex: 1 }} />
-          <button className="cvd-collapse" onClick={() => setCollapsed(true)} title="collapse — inspect the cloud">⌃</button>
-        </div>
-        <div className="cd-body">
-          <span className="cd-icon">🔧</span>
-          <div className="cd-content">
-            <div className="cd-title">{title}</div>
-            <div className="cd-message">
-              <div>{kind}{epoch != null ? ` · epoch ${epoch}` : ''}{report?.points_moved ? ` · ${(report.points_moved / 1e6).toFixed(2)}M points moved` : ''}{report?.operator ? ` · by ${report.operator}` : ''}</div>
-              {solutions.length > 0 && (
-                <table className="cvd-table">
-                  <thead><tr><th>visit (kf)</th><th>rigid</th><th>k</th><th>copies before → after</th><th>DOF</th></tr></thead>
-                  <tbody>
-                    {solutions.map((c, i) => (
-                      <tr key={i}>
-                        <td>{c.kf_span ? `${c.kf_span[0]}..${c.kf_span[1]}` : c.later_kfs ? `${c.earlier_kfs[0]}..${c.earlier_kfs[1]} ↔ ${c.later_kfs[0]}..${c.later_kfs[1]}` : (c.anchors ? `${c.anchors.length} anchors` : '—')}</td>
-                        <td>{c.rot_deg != null ? `${c.rot_deg}° / ${c.t_norm_m ?? c.t_m} m` : '—'}</td>
-                        <td>{c.k && c.k !== 1 ? c.k : '—'}</td>
-                        <td>{c.residual_cm ? <>{c.residual_cm.before} → <b>{c.residual_cm.after}</b> cm</>
-                          : c.per_block ? c.per_block.map((b: any) => `R${b.region} ${b.before_cm}→${b.after_cm}`).join(' · ') : '—'}</td>
-                        <td>{c.dof ? c.dof.join(',') : c.n_blocks != null ? `yaw+t · ${c.blocks_improved}/${c.n_blocks} blocks` : '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-              {gates.length > 0 && (
-                <div style={{ marginTop: 6, opacity: 0.85 }}>
-                  {gates.map((g: any) => (
-                    <div key={g.name + String(g.group ?? '')}>{g.advisory ? '⚠' : g.passed ? '✅' : '❌'} {g.name} — {g.detail}{g.advisory ? ' (advisory)' : ''}</div>
-                  ))}
-                </div>
-              )}
-              {report?.distribution && (
-                <div style={{ marginTop: 6, opacity: 0.85 }}>
-                  Spread over {report.distribution.keyframes_warped} keyframes after kf {report.distribution.identity_until_kf}
-                  {' '}· max step {report.distribution.max_step_between_keyframes_mm} mm / {report.distribution.max_step_between_keyframes_deg}° (no seam)
-                </div>
-              )}
-              <div style={{ marginTop: 8 }}>
-                Orbit the cloud and decide. <b>Approve</b> makes this the cloud; <b>Undo</b> restores the previous one.
-              </div>
-            </div>
-          </div>
-        </div>
-        <div className="cd-actions">
-          <button className="cd-btn cd-btn-cancel" disabled={busy} onClick={onUndo}>↩ Undo</button>
-          <button className="cd-btn cd-btn-confirm" disabled={busy} onClick={onApprove} autoFocus>✓ Approve</button>
-        </div>
-      </div>
-    </div>
+    <Dialog open nonBlocking size="lg" tone="warn" icon={<Wrench aria-hidden />} title={title} busy={busy}
+      subtitle={`${kind}${epoch != null ? ` — ${t('status.epoch')} ${epoch}` : ''}${report?.points_moved ? ` — ${t('verdict.pointsMoved', { n: fmt.millions(report.points_moved) })}` : ''}${report?.operator ? ` — ${report.operator}` : ''}`}
+      footer={
+        <>
+          <Button variant="ghost" size="sm" icon={<ChevronUp aria-hidden />} onClick={() => setCollapsed(true)} title={t('verdict.collapseHint')}>{t('verdict.collapse')}</Button>
+          <Button icon={<Undo2 aria-hidden />} disabled={busy} onClick={onUndo}>{t('common.undo')}</Button>
+          <Button variant="primary" icon={<CheckCircle2 aria-hidden />} disabled={busy} onClick={onApprove} data-autofocus>{t('common.approve')}</Button>
+        </>
+      }>
+      <Stack gap={3}>
+        {solutions.length > 0 && <Table columns={columns} rows={solutions} rowKey={(_, i) => i} maxHeight={false} caption={t('verdict.solutions')} />}
+        {gates.length > 0 && <GateList compact gates={gates} />}
+        {report?.distribution && (
+          <p className="stac-dialog__message">{t('verdict.distribution', { kf: report.distribution.keyframes_warped, from: report.distribution.identity_until_kf, mm: report.distribution.max_step_between_keyframes_mm, deg: report.distribution.max_step_between_keyframes_deg })}</p>
+        )}
+        <p className="stac-dialog__message">{t('verdict.instruction')}</p>
+      </Stack>
+    </Dialog>
   )
 }

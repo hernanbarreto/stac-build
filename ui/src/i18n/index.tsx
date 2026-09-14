@@ -8,7 +8,7 @@
  *
  * Numbers, dates and lengths go through Intl with the active locale, so a
  * measurement is never rendered without its unit (§9): `fmt.length(1.234)`
- * gives `{ value: '1.234', unit: 'm' }`, `fmt.length(0.087)` → `8.7 cm`.
+ * gives `{ value: '1.234', unit: 'm' }`, `fmt.length(0.087)` -> `8.7 cm`.
  *
  * Language and density are the only preferences kept in localStorage (§15).
  */
@@ -58,7 +58,7 @@ export interface Formatters {
   number: (n: number, digits?: number) => string
   integer: (n: number) => string
   percent: (fraction: number, digits?: number) => string
-  /** metres in → best unit out; digits are fixed per unit (mm 0, cm 1, m 3) */
+  /** metres in -> best unit out; digits are fixed per unit (mm 0, cm 1, m 3) */
   length: (metres: number) => { value: string; unit: 'mm' | 'cm' | 'm' }
   lengthText: (metres: number) => string
   /** millimetres in (deviations, tolerances) */

@@ -21,6 +21,8 @@ export interface TreeNodeData<T = unknown> {
   visible?: boolean
   onVisible?: (v: boolean) => void
   actions?: ReactNode
+  /** render meta + actions on a second line (always visible) instead of inline */
+  twoLine?: boolean
   children?: TreeNodeData<T>[]
   data?: T
   muted?: boolean
@@ -67,6 +69,28 @@ function TreeRow<T>({ node, depth, selectedId, activeId, onSelect, onActivate }:
           else if (e.key === 'ArrowLeft' && hasChildren) setExpanded(false)
         }}
       >
+        {node.twoLine ? (
+          <div className="stac-tree__lines">
+            <div className="stac-tree__line">
+              <span className="stac-tree__indent" aria-hidden />
+              {hasChildren ? (
+                <button type="button" className="stac-tree__chevron" tabIndex={-1} aria-hidden onClick={e => { e.stopPropagation(); setExpanded(v => !v) }}>
+                  {expanded ? <ChevronDown /> : <ChevronRight />}
+                </button>
+              ) : <span className="stac-tree__chevron stac-tree__chevron--leaf" aria-hidden />}
+              {node.color && <ColorDot color={node.color} />}
+              {node.icon && <span className="stac-tree__icon" aria-hidden>{node.icon}</span>}
+              <span className="stac-tree__label">{node.label}</span>
+              {node.badge != null && <span className="stac-tree__badge">{node.badge}</span>}
+            </div>
+            <div className="stac-tree__line stac-tree__line--second">
+              <span className="stac-tree__indent" aria-hidden />
+              <span className="stac-tree__chevron stac-tree__chevron--leaf" aria-hidden />
+              {node.meta && <span className="stac-tree__meta">{node.meta}</span>}
+              {node.actions && <span className="stac-tree__actions stac-tree__actions--always" onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()}>{node.actions}</span>}
+            </div>
+          </div>
+        ) : (<>
         <span className="stac-tree__indent" aria-hidden />
         {hasChildren ? (
           <button type="button" className="stac-tree__chevron" tabIndex={-1} aria-hidden onClick={e => { e.stopPropagation(); setExpanded(v => !v) }}>
@@ -84,6 +108,7 @@ function TreeRow<T>({ node, depth, selectedId, activeId, onSelect, onActivate }:
         {node.meta && <span className="stac-tree__meta">{node.meta}</span>}
         {node.badge != null && <span className="stac-tree__badge">{node.badge}</span>}
         {node.actions && <span className="stac-tree__actions" onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()}>{node.actions}</span>}
+        </>)}
       </div>
       {hasChildren && expanded && (
         <ul role="group" className="stac-tree__children">

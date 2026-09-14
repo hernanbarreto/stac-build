@@ -75,7 +75,7 @@ export function Table<T>({ columns, rows, rowKey, selectedKey, onRowClick, empty
           <tr>
             {columns.map(c => (
               <th key={c.id} scope="col" className={`stac-table__th stac-table__th--${c.align ?? 'left'} ${c.sortValue ? 'stac-table__th--sortable' : ''}`.trim()}
-                style={c.width ? ({ '--col-w': c.width } as React.CSSProperties) : undefined}
+                style={{ '--col-w': c.width ?? 'auto' } as React.CSSProperties}
                 aria-sort={sort?.id === c.id ? (sort.dir === 'asc' ? 'ascending' : 'descending') : undefined}>
                 {c.sortValue ? (
                   <button type="button" className="stac-table__sort" onClick={() => toggleSort(c.id)}>
@@ -88,7 +88,7 @@ export function Table<T>({ columns, rows, rowKey, selectedKey, onRowClick, empty
           </tr>
         </thead>
         <tbody>
-          {virtual && first > 0 && <tr className="stac-table__spacer" style={{ '--spacer-h': `${first * rowH}px` } as React.CSSProperties}><td colSpan={columns.length} /></tr>}
+          {virtual && first > 0 && <tr className="stac-table__spacer"><td className="stac-table__spacer-cell" colSpan={columns.length} style={{ '--spacer-h': `${first * rowH}px` } as React.CSSProperties} /></tr>}
           {visible.map((row, i) => {
             const key = rowKey(row, first + i)
             const selected = selectedKey != null && key === selectedKey
@@ -103,7 +103,7 @@ export function Table<T>({ columns, rows, rowKey, selectedKey, onRowClick, empty
               </tr>
             )
           })}
-          {virtual && last < sorted.length && <tr className="stac-table__spacer" style={{ '--spacer-h': `${(sorted.length - last) * rowH}px` } as React.CSSProperties}><td colSpan={columns.length} /></tr>}
+          {virtual && last < sorted.length && <tr className="stac-table__spacer"><td className="stac-table__spacer-cell" colSpan={columns.length} style={{ '--spacer-h': `${(sorted.length - last) * rowH}px` } as React.CSSProperties} /></tr>}
         </tbody>
       </table>
       {rows.length === 0 && emptyTitle && (

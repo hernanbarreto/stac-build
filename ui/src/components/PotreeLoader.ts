@@ -88,11 +88,11 @@ export class PotreeOctreeLoader {
     // Aborts all in-flight fetches (metadata/hierarchy/per-node octree ranges)
     // when this loader is disposed. Without it, abandoned fetches from a previous
     // session pile up in the browser's connection pool (cap ~6/host) and starve
-    // the next load → progressively slower, then nothing (only F5 cleared it).
+    // the next load -> progressively slower, then nothing (only F5 cleared it).
     private _abort = new AbortController()
     // Cap on simultaneous octree.bin Range fetches. A large cloud (e.g. 64M pts)
     // queues hundreds of in-budget nodes in a SINGLE updateVisibility() pass; firing
-    // a fetch() for each at once floods the browser → net::ERR_INSUFFICIENT_RESOURCES,
+    // a fetch() for each at once floods the browser -> net::ERR_INSUFFICIENT_RESOURCES,
     // and the storm starves OTHER downloads (the 284 MB TSDF .glb, frame images) of
     // connection slots so they appear to "never render". We cap in-flight fetches
     // low enough to leave headroom for those other requests; nodes that don't get a
@@ -113,7 +113,7 @@ export class PotreeOctreeLoader {
     private _forceClassId: number | undefined = undefined
 
     // Pre-allocated scratch for updateVisibility() (runs ~10 Hz over hundreds of
-    // nodes). Reused every call so the LOD pass allocates nothing → no GC churn,
+    // nodes). Reused every call so the LOD pass allocates nothing -> no GC churn,
     // which otherwise builds up as the camera moves and shows as growing jank.
     private _frustum = new THREE.Frustum()
     private _projMat = new THREE.Matrix4()
@@ -346,7 +346,7 @@ export class PotreeOctreeLoader {
 
             // Debug: proxy count
             // const proxyCount = Array.from(this.nodes.values()).filter(n => n.nodeType === 2 && !n.hierarchyLoaded).length
-            // console.log(`[PotreeLoader] Expanded proxy '${node.name}' → ${this.nodes.size} total nodes (${proxyCount} proxies remaining)`)
+            // console.log(`[PotreeLoader] Expanded proxy '${node.name}' -> ${this.nodes.size} total nodes (${proxyCount} proxies remaining)`)
         } catch (e) {
             node.hierarchyLoading = false
             console.error(`[PotreeLoader] Failed to load hierarchy for proxy '${node.name}':`, e)
@@ -375,7 +375,7 @@ export class PotreeOctreeLoader {
     /** Update visibility — Potree-style priority queue traversal.
      *  Based on the real Potree updateVisibility algorithm:
      *  1. Start with root at MAX priority
-     *  2. Pop highest-priority node → SHOW it (additive)
+     *  2. Pop highest-priority node -> SHOW it (additive)
      *  3. Add its children to queue IF their projected pixel size >= threshold
      *  4. Stop when budget is reached
      *  Parents are always shown BEFORE children, ensuring base coverage.
@@ -396,7 +396,7 @@ export class PotreeOctreeLoader {
         if (this.metadata.points <= this.pointBudget) {
             this._updateVisibilityLoadAll()
             if (!this._smallCloudLogged) {
-                console.log(`[PotreeLoader] ✅ Small cloud bypass: ${this.metadata.points.toLocaleString()} pts <= budget ${this.pointBudget.toLocaleString()}, loading ALL nodes (${this.nodes.size} nodes)`)
+                console.log(`[PotreeLoader] Small cloud bypass: ${this.metadata.points.toLocaleString()} pts <= budget ${this.pointBudget.toLocaleString()}, loading ALL nodes (${this.nodes.size} nodes)`)
                 this._smallCloudLogged = true
             }
             return
@@ -541,7 +541,7 @@ export class PotreeOctreeLoader {
     private async loadNode(node: OctreeNode): Promise<void> {
         if (!this.metadata || node.loaded || node.loading) return
 
-        // Cache hit: geometry still in memory from a previous visit → just
+        // Cache hit: geometry still in memory from a previous visit -> just
         // re-attach to the scene. No network, no re-parse (instant).
         if (node.points) {
             this.octreeGroup.add(node.points)
@@ -566,7 +566,7 @@ export class PotreeOctreeLoader {
         node.loading = true
 
         // ── Fetch ONLY this node's byte range from octree.bin ──
-        // Starlette's FileResponse honours Range → returns 206 with just the
+        // Starlette's FileResponse honours Range -> returns 206 with just the
         // slice. We never hold the whole multi-GB file in memory.
         this._inFlightFetches++
         let buffer: ArrayBuffer
@@ -598,7 +598,7 @@ export class PotreeOctreeLoader {
         // Disposed/replaced while awaiting? bail out.
         if (!this.metadata) { node.loading = false; return }
 
-        // 206 → buffer is exactly the node slice (base 0). If a server ignored
+        // 206 -> buffer is exactly the node slice (base 0). If a server ignored
         // Range and returned 200 (whole file), fall back to slicing at byteOffset.
         let dvBase = 0
         if (buffer.byteLength !== byteSize && buffer.byteLength >= byteOffset + byteSize) {
@@ -672,7 +672,7 @@ export class PotreeOctreeLoader {
             if (base + posOffset + 12 > dvLen) break
             if (rgbOffset >= 0 && base + rgbOffset + 6 > dvLen) break
 
-            // Potree 2.0: int32 quantized positions → int * scale + offset
+            // Potree 2.0: int32 quantized positions -> int * scale + offset
             const ix = nodeData.getInt32(base + posOffset, true)
             const iy = nodeData.getInt32(base + posOffset + 4, true)
             const iz = nodeData.getInt32(base + posOffset + 8, true)
@@ -701,10 +701,10 @@ export class PotreeOctreeLoader {
             } else if (classOffset >= 0 && base + classOffset + 1 <= dvLen) {
                 classIds[validPoints] = nodeData.getUint8(base + classOffset)
             } else {
-                classIds[validPoints] = -1  // no classification → always visible (e.g. sábana)
+                classIds[validPoints] = -1  // no classification -> always visible (e.g. sábana)
             }
 
-            // Confidence → normalized [0,1] for the adjustable slider
+            // Confidence -> normalized [0,1] for the adjustable slider
             if (confidences) {
                 if (confidenceOffset >= 0 && base + confidenceOffset + 4 <= dvLen) {
                     const c = nodeData.getFloat32(base + confidenceOffset, true)
@@ -746,7 +746,7 @@ export class PotreeOctreeLoader {
         // Use the shared material from the Viewport
         const points = new THREE.Points(geometry, this.material)
         points.name = `potree-node-${node.name}`
-        // Per-class point counts → WHOLE-NODE culling when every point in the
+        // Per-class point counts -> WHOLE-NODE culling when every point in the
         // node belongs to hidden segments (user 2026-08-30: hiding segments
         // only discarded per-fragment — the full cloud kept costing GPU and
         // made single-segment work "imposible")

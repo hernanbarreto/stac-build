@@ -38,7 +38,7 @@ export class WebXREngine implements IXREngine {
   scaleIdx = 0
 
   constructor(private sessionId: string, private cb: EngineCallbacks) {
-    ;(this.raycaster as any).firstHitOnly = true
+    (this.raycaster as any).firstHitOnly = true
   }
 
   async start(canvas: HTMLCanvasElement) {
@@ -124,7 +124,7 @@ export class WebXREngine implements IXREngine {
 
   private cloudPoints: THREE.Points | null = null
 
-  /** ARC1 binary cloud → THREE.Points (loaded alongside the mesh). */
+  /** ARC1 binary cloud -> THREE.Points (loaded alongside the mesh). */
   private async loadCloud() {
     try {
       const r = await fetch(`/api/ar/cloud/${encodeURIComponent(this.sessionId)}`)

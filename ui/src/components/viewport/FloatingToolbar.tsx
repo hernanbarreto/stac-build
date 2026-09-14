@@ -1,9 +1,9 @@
 /**
  * FloatingToolbar — glass toolbar centred at the top of the viewport (§7).
- * Groups: navigate (orbit, reset view) · select (brush: sphere / cube / box)
- * · measure (distance, angle, clear) · edit (align cloud, add object,
- * section box, reset section) · view (display settings, colour by, camera
- * poses, grid, axes, fullscreen) · BIM comparison when a model and segments
+ * Groups: navigate (orbit, reset view), select (brush: sphere / cube / box)
+ *, measure (distance, angle, clear), edit (align cloud, add object,
+ * section box, reset section), view (display settings, colour by, camera
+ * poses, grid, axes, fullscreen), BIM comparison when a model and segments
  * exist. One active mode at a time, highlighted with --brand-orange-soft.
  *
  * Sub-panels (brush, display settings, placed-object alignment) open under

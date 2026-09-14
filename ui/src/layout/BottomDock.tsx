@@ -1,6 +1,6 @@
 /**
- * BottomDock — collapsible strip under the viewport (§5): Console · Jobs ·
- * Timeline · Report. Height is dragged from its top edge; App passes the
+ * BottomDock — collapsible strip under the viewport (§5): Console, Jobs ,
+ * Timeline, Report. Height is dragged from its top edge; App passes the
  * content per tab.
  */
 import type { ReactNode } from 'react'

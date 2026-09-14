@@ -1,4 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
+import { CheckCircle2, Crosshair, Undo2, AlertTriangle } from 'lucide-react'
+import { Section, Row, Stack, KeyValue } from './ui/Panel'
+import { Button } from './ui/Button'
+import { Checkbox, SegmentedControl, Slider } from './ui/Field'
+import { Badge } from './ui/Badge'
+import { Tabs } from './ui/Tabs'
+import { Table, type Column } from './ui/Table'
+import { Legend } from './ui/Legend'
+import { EmptyState } from './ui/EmptyState'
+import { GateList } from '../features/CorrectionDialog'
+import { EDGE_TOKENS, STATUS_TOKENS } from './viewport/palette'
+import { useFmt, useT } from '../i18n'
+import type { ColorMode } from './viewport/FloatingToolbar'
 
 /** Visual validation kit (claude_stac.txt §11) — what the user needs to look
  *  where it matters. Nothing here decides: the certification loop measured,
@@ -7,16 +20,12 @@ import { useCallback, useEffect, useState } from 'react'
  *  leaves a CHAIN of pending epochs: Undo pops the last one, Approve accepts
  *  them all).
  *
- *  Sections: epochs (before/after toggle, Approve/Undo, run), colour by
- *  status / mv_votes with the threshold slider, trajectory with edges
- *  (odometry grey, accepted green, scale_break orange, rejected/vetoed red
- *  with the reason), duplicates with fly-to, attention list (opens first),
- *  acta (§10 metrics per epoch, gates with value / threshold / verdict). */
-
-type ColorMode = 'rgb' | 'status' | 'mv_votes'
+ *  Lives in the Inspector's "Acta / Quality" tab (prompt_ui.txt §5). The
+ *  colour mode (rgb / status / votes) is owned by App and shared with the
+ *  viewport toolbar, so the two controls never fight over the viewer. */
 
 export interface KitViewport {
-  setWitnessColorMode: (mode: ColorMode, mvThreshold: number) => void
+  setWitnessColorMode: (mode: 'rgb' | 'status' | 'mv_votes', mvThreshold: number) => void
   setEpochLayer: (url: string | null) => void
   setEpochLayerVisible: (visible: boolean) => void
   setCloudObjectVisible: (visible: boolean) => void
@@ -24,39 +33,35 @@ export interface KitViewport {
   flyToPoint: (p: number[], radius: number) => void
 }
 
-const KIND_COLOR: Record<string, string> = {
-  accepted: '#3ddc84', scale_break: '#ff9f1c', vetoed: '#ff4d4d', rejected: '#ff4d4d', ambiguous: '#ffd166', odometry: '#9a9a9a',
-}
-const STATUS_COLOR: Record<string, string> = {
-  verified: '#3ddc84', single_witness: '#ffd166', mask_conflict: '#ff4d4d', dynamic: '#d66cff', unobserved: '#8a8a8a',
-}
+type KitTab = 'attention' | 'edges' | 'duplicates' | 'acta'
 
-function fmt(v: any, digits = 3): string {
-  if (v == null || Number.isNaN(v)) return '—'
-  if (typeof v === 'number') return Math.abs(v) < 1 && v !== 0 ? v.toFixed(digits) : v.toFixed(2)
-  return String(v)
-}
-
-export default function CertifyKitPanel({ session, token, viewport, onStatus, onClose }: {
+export default function CertifyKitPanel({ session, token, viewport, onStatus, refreshKey = 0, colorMode, onColorMode, mvThreshold, onMvThreshold, onStateLoaded }: {
   session: string
   token: string | null
   viewport: KitViewport | null
   onStatus: (msg: string) => void
-  onClose: () => void
+  /** bumped by the app when the pipeline's automatic certification finishes
+   *  (the cloud reloads) — the kit re-reads the acta/epochs/edges */
+  refreshKey?: number
+  colorMode: ColorMode
+  onColorMode: (m: ColorMode) => void
+  mvThreshold: number
+  onMvThreshold: (v: number) => void
+  onStateLoaded?: (state: any) => void
 }) {
+  const t = useT()
+  const fmt = useFmt()
   const [state, setState] = useState<any>(null)
   const [epochs, setEpochs] = useState<any>(null)
   const [edges, setEdges] = useState<any>(null)
   const [attention, setAttention] = useState<any>(null)
   const [report, setReport] = useState<any>(null)
   const [busy, setBusy] = useState(false)
-  const [colorMode, setColorMode] = useState<ColorMode>('rgb')
-  const [mvThreshold, setMvThreshold] = useState(2)
   const [showOdometry, setShowOdometry] = useState(true)
   const [showLoops, setShowLoops] = useState(true)
   const [beforeOn, setBeforeOn] = useState(false)
   const [afterOn, setAfterOn] = useState(true)
-  const [tab, setTab] = useState<'attention' | 'edges' | 'duplicates' | 'acta'>('attention')
+  const [tab, setTab] = useState<KitTab>('attention')
 
   const headers = useCallback((): HeadersInit => {
     const h: HeadersInit = { 'Content-Type': 'application/json' }
@@ -65,19 +70,17 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, on
   }, [token])
 
   const load = useCallback(async () => {
-    const get = async (url: string) => {
-      const r = await fetch(url)
-      return r.ok ? r.json() : null
-    }
+    const get = async (url: string) => { const r = await fetch(url); return r.ok ? r.json() : null }
     const [st, ep, ed, at, rp] = await Promise.all([
       get(`/api/certify/state/${session}`), get(`/api/certify/epochs/${session}`),
       get(`/api/certify/edges/${session}`), get(`/api/certify/attention/${session}`),
       get(`/api/certify/report/${session}`),
     ])
     setState(st); setEpochs(ep); setEdges(ed); setAttention(at); setReport(rp)
-  }, [session])
+    onStateLoaded?.(st ? { ...st, report_metrics: rp?.metrics } : null)
+  }, [session, onStateLoaded])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load() }, [load, refreshKey])
 
   // the trajectory + edges live in the viewer while the panel is open
   useEffect(() => {
@@ -85,11 +88,6 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, on
     viewport.setTrajectoryEdges(edges, { odometry: showOdometry, loops: showLoops })
     return () => viewport.setTrajectoryEdges(null, { odometry: false, loops: false })
   }, [viewport, edges, showOdometry, showLoops])
-
-  useEffect(() => {
-    viewport?.setWitnessColorMode(colorMode, mvThreshold)
-    return () => viewport?.setWitnessColorMode('rgb', 0)
-  }, [viewport, colorMode, mvThreshold])
 
   // before/after: the previous pending epoch's octree as a tinted layer
   useEffect(() => {
@@ -103,29 +101,19 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, on
 
   const verdict = async (kind: 'approve' | 'undo') => {
     setBusy(true)
-    onStatus(kind === 'approve' ? '🧪 approving the epoch chain…' : '🧪 undoing the last epoch (restores the previous one exactly)…')
+    onStatus(kind === 'approve' ? t('certify.approving') : t('certify.undoing'))
     try {
       const r = await fetch(`/api/certify/${kind}`, { method: 'POST', headers: headers(), body: JSON.stringify({ session_id: session }) })
       const d = await r.json().catch(() => ({}))
-      onStatus(r.ok ? `🧪 ${kind === 'approve' ? 'approved' : 'undone'} — epoch ${d.epoch ?? '?'}` : `🧪 ${kind} failed: ${typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail || d)}`)
-    } catch (e) { onStatus(`🧪 ${kind} failed`) }
-    setBusy(false)
-    load()
-  }
-
-  const run = async () => {
-    setBusy(true)
-    onStatus('🧪 certification loop running (scale → poses → depth → witnesses per iteration)…')
-    try {
-      const r = await fetch('/api/certify/run', { method: 'POST', headers: headers(), body: JSON.stringify({ session_id: session }) })
-      const d = await r.json().catch(() => ({}))
-      onStatus(r.ok ? `🧪 certification: ${d.acta?.stop_reason || 'done'} (epoch ${d.acta?.epoch_final})` : `🧪 certification failed: ${typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail || d)}`)
-    } catch (e) { onStatus('🧪 certification failed') }
+      onStatus(r.ok ? t(kind === 'approve' ? 'certify.approved' : 'certify.undone', { epoch: d.epoch ?? '' })
+        : t('certify.verdictFailed', { detail: typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail || d) }))
+    } catch { onStatus(t('certify.verdictFailed', { detail: '' })) }
     setBusy(false)
     load()
   }
 
   const fly = (p: number[] | null | undefined, radius = 3) => { if (p && viewport) viewport.flyToPoint(p, radius) }
+  const cm = (m: number | null | undefined, digits = 1) => (m != null ? `${fmt.number(m * 100, digits)} cm` : t('status.dash'))
   const acta = state?.acta
   const metrics = report?.metrics
   const prevWithPotree = epochs?.previous?.find((p: any) => p.potree)
@@ -133,172 +121,139 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, on
   const iterations: any[] = acta?.iterations || []
   const dupList: any[] = edges?.duplicates || []
   const loopList: any[] = edges?.loops || []
+  const kitMode = colorMode === 'status' || colorMode === 'mv_votes' ? colorMode : 'rgb'
+
+  const edgeColumns: Column<any>[] = [
+    { id: 'kind', header: t('edges.kind'), cell: e => <Badge size="sm" tone={e.kind === 'accepted' ? 'ok' : e.kind === 'scale_break' ? 'warn' : e.kind === 'rejected' || e.kind === 'vetoed' ? 'err' : 'info'}>{t(`edgeKind.${e.kind}`)}</Badge> },
+    { id: 'pair', header: t('edges.pair'), mono: true, cell: e => `${e.i} / ${e.j}`, sortValue: e => e.i },
+    { id: 'source', header: t('edges.source'), cell: e => e.source },
+    { id: 'residual', header: t('edges.residual'), align: 'right', mono: true, sortValue: e => e.residual_m ?? -1, cell: e => cm(e.residual_m) },
+    { id: 'reason', header: t('edges.reason'), cell: e => e.reason || e.observability || '' },
+    { id: 'fly', header: '', align: 'right', cell: e => (
+      <Row>
+        {edges?.positions?.[e.i] && <Button size="sm" variant="ghost" icon={<Crosshair aria-hidden />} onClick={() => fly(edges.positions[e.i])}>{t('edges.flyI')}</Button>}
+        {edges?.positions?.[e.j] && <Button size="sm" variant="ghost" icon={<Crosshair aria-hidden />} onClick={() => fly(edges.positions[e.j])}>{t('edges.flyJ')}</Button>}
+      </Row>
+    ) },
+  ]
+  const dupColumns: Column<any>[] = [
+    { id: 'label', header: t('duplicates.instance'), cell: d => `${d.label}${d.instance_id != null ? ` ${d.instance_id}` : ''}` },
+    { id: 'pair', header: t('edges.pair'), mono: true, cell: d => `${d.i} / ${d.j}` },
+    { id: 'sep', header: t('duplicates.separation'), align: 'right', mono: true, sortValue: d => d.separation_m ?? -1, cell: d => cm(d.separation_m) },
+    { id: 'after', header: t('duplicates.after'), align: 'right', mono: true, cell: d => cm(d.closure_after_m) },
+    { id: 'verdict', header: t('duplicates.verdict'), cell: d => d.verdict },
+    { id: 'fly', header: '', align: 'right', cell: d => (
+      <Row>
+        {d.i_pos && <Button size="sm" variant="ghost" icon={<Crosshair aria-hidden />} onClick={() => fly(d.i_pos)}>{t('edges.flyI')}</Button>}
+        {d.j_pos && <Button size="sm" variant="ghost" icon={<Crosshair aria-hidden />} onClick={() => fly(d.j_pos)}>{t('edges.flyJ')}</Button>}
+      </Row>
+    ) },
+  ]
 
   return (
-    <div className="admin-overlay" style={{ zIndex: 2000, pointerEvents: 'none' }}>
-      <div className="admin-panel" style={{ maxWidth: 520, maxHeight: '86vh', overflow: 'auto', pointerEvents: 'auto', position: 'absolute', right: 16, top: 60 }}>
-        <div className="admin-header">
-          <h2>🧪 Certification kit</h2>
-          <button className="admin-close" onClick={onClose}>✕</button>
-        </div>
-        <div style={{ padding: 14, fontSize: 12, color: 'var(--text-secondary)' }}>
-          {/* ── epochs: state, before/after, verdict ── */}
-          <div style={{ marginBottom: 12, padding: 10, background: 'var(--bg-tertiary)', borderRadius: 8 }}>
-            <div style={{ color: 'var(--text-primary)', fontSize: 13, marginBottom: 6 }}>
-              <b>Epoch {epochs?.epoch ?? state?.epoch ?? '—'}</b>
-              {pending > 0 ? ` · ${pending} pending epoch${pending > 1 ? 's' : ''} (Undo pops the last, Approve accepts all)` : ' · nothing pending'}
-              {state?.witness_fields ? ' · witnesses in the cloud' : ' · no witness fields yet'}
-              {state?.running_task ? ' · ⏳ running' : ''}
-            </div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              <label style={{ display: 'flex', gap: 4, alignItems: 'center' }} title={prevWithPotree ? `epoch ${prevWithPotree.epoch} octree, tinted orange` : 'the previous epoch has no octree (apply.potree_rebuild off) — nothing to overlay'}>
-                <input type="checkbox" disabled={!prevWithPotree} checked={beforeOn} onChange={e => setBeforeOn(e.target.checked)} /> before (epoch {prevWithPotree?.epoch ?? '—'})
-              </label>
-              <label style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                <input type="checkbox" checked={afterOn} onChange={e => setAfterOn(e.target.checked)} /> after (current)
-              </label>
-              <span style={{ flex: 1 }} />
-              <button className="bim-action-btn upload" disabled={busy || pending === 0} onClick={() => verdict('approve')}>✅ Approve</button>
-              <button className="bim-action-btn upload" disabled={busy || pending === 0} onClick={() => verdict('undo')}>↩ Undo epoch</button>
-              <button className="bim-action-btn upload" disabled={busy || !!state?.running_task} onClick={run}>▶ Run certification</button>
-            </div>
-            {acta && (
-              <div style={{ marginTop: 6 }}>
-                stopped: <b>{acta.stop_reason}</b> · {acta.elapsed_s}s ·
-                {' '}{iterations.map((it: any) => `it${it.iteration}:${it.verdict}${it.objective != null ? ` (${fmt(it.objective_prev)}→${fmt(it.objective)})` : ''}`).join(' · ')}
+    <div className="stac-kit">
+      <Section title={t('certify.epochTitle', { epoch: epochs?.epoch ?? state?.epoch ?? t('status.dash') })}
+        actions={state?.running_task ? <Badge tone="brand" dot size="sm">{t('certify.running')}</Badge> : undefined}>
+        <p className="stac-section__hint">
+          {pending > 0 ? t.plural('certify.pendingEpochs', pending) : t('certify.nothingPending')} {state?.witness_fields ? t('certify.witnessesPresent') : t('certify.noWitnesses')}
+        </p>
+        <Row wrap>
+          <Checkbox checked={beforeOn} disabled={!prevWithPotree} onChange={setBeforeOn} label={t('certify.before', { epoch: prevWithPotree?.epoch ?? t('status.dash') })}
+            description={prevWithPotree ? undefined : t('certify.noPreviousOctree')} />
+          <Checkbox checked={afterOn} onChange={setAfterOn} label={t('certify.after')} />
+        </Row>
+        <Row>
+          <Button block variant="primary" icon={<CheckCircle2 aria-hidden />} disabled={busy || pending === 0} loading={busy} onClick={() => verdict('approve')}>{t('certify.approveChain')}</Button>
+          <Button block icon={<Undo2 aria-hidden />} disabled={busy || pending === 0} onClick={() => verdict('undo')}>{t('certify.undoEpoch')}</Button>
+        </Row>
+        {!acta && !state?.running_task && <p className="stac-section__hint">{t('certify.noActa')}</p>}
+        {acta && (
+          <KeyValue label={t('certify.stopped')} mono>{acta.stop_reason} ({fmt.duration(acta.elapsed_s || 0)})</KeyValue>
+        )}
+      </Section>
+
+      <Section title={t('toolbar.colorBy')}>
+        <SegmentedControl<'rgb' | 'status' | 'mv_votes'> size="sm" ariaLabel={t('toolbar.colorBy')} value={kitMode} onChange={m => onColorMode(m)} options={[
+          { value: 'rgb', label: t('colorMode.rgb') }, { value: 'status', label: t('colorMode.status') }, { value: 'mv_votes', label: t('colorMode.votes') },
+        ]} />
+        {kitMode === 'mv_votes' && <Slider min={0} max={8} step={1} value={mvThreshold} onChange={onMvThreshold} label={t('colorMode.threshold')} format={v => t('colorMode.views', { n: fmt.integer(v) })} />}
+        {kitMode === 'status' && (
+          <Legend orientation="horizontal" categories={Object.entries(STATUS_TOKENS).map(([k, tok]) => ({
+            color: tok, label: t(`witness.${k}`), value: metrics?.witnesses?.status_fraction?.[k] != null ? fmt.percent(metrics.witnesses.status_fraction[k], 1) : undefined,
+          }))} />
+        )}
+        {kitMode === 'mv_votes' && <p className="stac-section__hint">{t('colorMode.votesHint', { n: fmt.integer(mvThreshold) })}</p>}
+      </Section>
+
+      <Section title={t('edges.trajectory')}>
+        <Row wrap>
+          <Checkbox checked={showOdometry} onChange={setShowOdometry} label={t('edgeKind.odometry')} />
+          <Checkbox checked={showLoops} onChange={setShowLoops} label={t('edges.loopEdges')} />
+        </Row>
+        <Legend orientation="horizontal" categories={Object.entries(EDGE_TOKENS).filter(([k]) => k !== 'odometry').map(([k, tok]) => ({ color: tok, label: t(`edgeKind.${k}`) }))} />
+      </Section>
+
+      <Tabs<KitTab> size="sm" ariaLabel={t('certify.sections')} value={tab} onChange={setTab} items={[
+        { id: 'attention', label: t('certify.attention'), badge: attention?.n ?? 0 },
+        { id: 'edges', label: t('edges.title'), badge: loopList.length },
+        { id: 'duplicates', label: t('duplicates.title'), badge: dupList.length },
+        { id: 'acta', label: t('inspector.acta') },
+      ]} />
+
+      <div className="stac-kit__body">
+        {tab === 'attention' && (
+          <Stack gap={2}>
+            <p className="stac-section__hint">{t('certify.attentionHint')}</p>
+            {(attention?.items || []).length === 0 && <EmptyState compact title={t('certify.nothingFlagged')} />}
+            {(attention?.items || []).map((it: any, i: number) => (
+              <div key={i} className="stac-attention">
+                <span className={`stac-attention__sev stac-attention__sev--${it.severity >= 3 ? 'err' : it.severity === 2 ? 'warn' : 'info'}`} aria-hidden><AlertTriangle /></span>
+                <span className="stac-attention__text"><strong>{it.kind}</strong> {it.text}</span>
+                {it.anchor?.position && <Button size="sm" variant="ghost" icon={<Crosshair aria-hidden />} onClick={() => fly(it.anchor.position)}>{t('certify.flyTo')}</Button>}
+                {it.anchor_b?.position && <Button size="sm" variant="ghost" icon={<Crosshair aria-hidden />} onClick={() => fly(it.anchor_b.position)}>{t('certify.otherSide')}</Button>}
               </div>
-            )}
-          </div>
-
-          {/* ── colour mode ── */}
-          <div style={{ marginBottom: 12, padding: 10, background: 'var(--bg-tertiary)', borderRadius: 8 }}>
-            <div style={{ color: 'var(--text-primary)', fontSize: 13, marginBottom: 6 }}><b>Colour</b></div>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-              {(['rgb', 'status', 'mv_votes'] as ColorMode[]).map(m => (
-                <label key={m} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                  <input type="radio" name="kit-color" checked={colorMode === m} onChange={() => setColorMode(m)} /> {m}
-                </label>
-              ))}
-              {colorMode === 'mv_votes' && (
-                <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                  threshold <input type="range" min={0} max={8} step={1} value={mvThreshold} onChange={e => setMvThreshold(parseInt(e.target.value))} /> {mvThreshold} views
-                </label>
-              )}
-            </div>
-            {colorMode === 'status' && (
-              <div style={{ display: 'flex', gap: 10, marginTop: 6, flexWrap: 'wrap' }}>
-                {Object.entries(STATUS_COLOR).map(([k, c]) => (
-                  <span key={k}><span style={{ display: 'inline-block', width: 10, height: 10, background: c, borderRadius: 2, marginRight: 4 }} />{k}
-                    {metrics?.witnesses?.status_counts ? ` ${(100 * (metrics.witnesses.status_fraction?.[k] ?? 0)).toFixed(1)}%` : ''}</span>
-                ))}
-              </div>
-            )}
-            {colorMode === 'mv_votes' && <div style={{ marginTop: 4 }}>red = fewer than {mvThreshold} agreeing views, green = more</div>}
-          </div>
-
-          {/* ── trajectory ── */}
-          <div style={{ marginBottom: 12, padding: 10, background: 'var(--bg-tertiary)', borderRadius: 8 }}>
-            <div style={{ color: 'var(--text-primary)', fontSize: 13, marginBottom: 6 }}><b>Trajectory</b></div>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              <label><input type="checkbox" checked={showOdometry} onChange={e => setShowOdometry(e.target.checked)} /> odometry</label>
-              <label><input type="checkbox" checked={showLoops} onChange={e => setShowLoops(e.target.checked)} /> loop edges</label>
-              {Object.entries(KIND_COLOR).filter(([k]) => k !== 'odometry').map(([k, c]) => (
-                <span key={k}><span style={{ display: 'inline-block', width: 10, height: 10, background: c, borderRadius: 2, marginRight: 4 }} />{k}</span>
-              ))}
-            </div>
-          </div>
-
-          {/* ── tabs ── */}
-          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-            {(['attention', 'edges', 'duplicates', 'acta'] as const).map(t => (
-              <button key={t} className="bim-action-btn upload" style={{ opacity: tab === t ? 1 : 0.6 }} onClick={() => setTab(t)}>
-                {t === 'attention' ? `👁 attention (${attention?.n ?? 0})` : t === 'edges' ? `↔ edges (${loopList.length})` : t === 'duplicates' ? `⧉ duplicates (${dupList.length})` : '📋 acta'}
-              </button>
             ))}
-          </div>
-
-          {tab === 'attention' && (
-            <div>
-              <div style={{ marginBottom: 6 }}>Where the system is least sure — look here first, not where the cloud looks nice.</div>
-              {(attention?.items || []).length === 0 && <div>nothing flagged</div>}
-              {(attention?.items || []).map((it: any, i: number) => (
-                <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'flex-start', padding: '4px 0', borderBottom: '1px solid var(--border-color)' }}>
-                  <span style={{ color: it.severity >= 3 ? '#ff4d4d' : it.severity === 2 ? '#ff9f1c' : '#ffd166' }}>●</span>
-                  <span style={{ flex: 1 }}><b>{it.kind}</b> — {it.text}</span>
-                  {it.anchor?.position && <button className="bim-action-btn upload" onClick={() => fly(it.anchor.position)}>fly to</button>}
-                  {it.anchor_b?.position && <button className="bim-action-btn upload" onClick={() => fly(it.anchor_b.position)}>other side</button>}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {tab === 'edges' && (
-            <div>
-              {loopList.map((e: any, i: number) => {
-                const pi = edges?.positions?.[e.i], pj = edges?.positions?.[e.j]
-                return (
-                  <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '3px 0', borderBottom: '1px solid var(--border-color)' }}>
-                    <span style={{ display: 'inline-block', width: 10, height: 10, background: KIND_COLOR[e.kind] || '#fff', borderRadius: 2 }} />
-                    <span style={{ flex: 1 }}>kf {e.i} ↔ {e.j} · {e.kind} · {e.source}{e.residual_m != null ? ` · ${(e.residual_m * 100).toFixed(1)} cm` : ''}{e.observability ? ` · ${e.observability}` : ''}
-                      {e.reason ? <span style={{ color: '#ff9f1c' }}> — {e.reason}</span> : null}</span>
-                    {pi && <button className="bim-action-btn upload" onClick={() => fly(pi)}>i</button>}
-                    {pj && <button className="bim-action-btn upload" onClick={() => fly(pj)}>j</button>}
-                  </div>
-                )
-              })}
-            </div>
-          )}
-
-          {tab === 'duplicates' && (
-            <div>
-              <div style={{ marginBottom: 6 }}>Target: an empty list.</div>
-              {dupList.length === 0 && <div style={{ color: '#3ddc84' }}>no duplicates</div>}
-              {dupList.map((d: any, i: number) => (
-                <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '3px 0', borderBottom: '1px solid var(--border-color)' }}>
-                  <span style={{ flex: 1 }}>{d.label}{d.instance_id != null ? `#${d.instance_id}` : ''} · kf {d.i} ↔ {d.j}
-                    {d.separation_m != null ? ` · ${(d.separation_m * 100).toFixed(1)} cm` : ''}
-                    {d.closure_after_m != null ? ` → ${(d.closure_after_m * 100).toFixed(1)} cm` : ''} · {d.verdict}</span>
-                  {d.i_pos && <button className="bim-action-btn upload" onClick={() => fly(d.i_pos)}>fly to</button>}
-                  {d.j_pos && <button className="bim-action-btn upload" onClick={() => fly(d.j_pos)}>copy</button>}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {tab === 'acta' && (
-            <div>
-              {!report && <div>no quality report yet — run the certification</div>}
-              {report && (
-                <>
-                  <div style={{ color: 'var(--text-primary)', marginBottom: 4 }}><b>Report epoch {report.epoch}</b>{report.available_epochs ? ` (epochs ${report.available_epochs.join(', ')})` : ''}</div>
-                  <table className="cvd-table" style={{ width: '100%' }}>
-                    <tbody>
-                      <tr><td>objective</td><td>{fmt(metrics?.objective)}</td><td>{report.comparison_vs_previous?.objective != null ? `Δ ${fmt(report.comparison_vs_previous.objective)}` : ''}</td></tr>
-                      <tr><td>loop demand (median)</td><td>{metrics?.loop_residual?.median_demand_m != null ? `${(metrics.loop_residual.median_demand_m * 100).toFixed(1)} cm` : '—'}</td><td>{metrics?.loop_residual?.n_accepted} accepted / {metrics?.loop_residual?.n_edges}</td></tr>
-                      <tr><td>seams (held-out)</td><td>{metrics?.seam_residual?.median_m != null ? `${(metrics.seam_residual.median_m * 100).toFixed(2)} cm` : '—'}</td><td>p95 {metrics?.seam_residual?.p95_m != null ? `${(metrics.seam_residual.p95_m * 100).toFixed(2)} cm` : '—'}</td></tr>
-                      <tr><td>closure</td><td>{metrics?.closure?.median_m != null ? `${(metrics.closure.median_m * 100).toFixed(1)} cm` : '—'}</td><td>max {metrics?.closure?.max_m != null ? `${(metrics.closure.max_m * 100).toFixed(1)} cm` : '—'}</td></tr>
-                      <tr><td>duplicates</td><td>{metrics?.duplicates?.n}</td><td>target {metrics?.duplicates?.target}</td></tr>
-                      <tr><td>scale</td><td>{metrics?.scale?.applied ? `r ${(metrics.scale.r_per_chunk || []).map((x: number) => x.toFixed(4)).join(' ')}` : 'identity'}</td><td>{metrics?.scale?.scale_break ? 'scale_break' : ''}</td></tr>
-                      <tr><td>witnesses</td><td>{metrics?.witnesses ? Object.entries(metrics.witnesses.status_fraction || {}).map(([k, v]: any) => `${k} ${(100 * v).toFixed(1)}%`).join(' · ') : '—'}</td><td>mv_votes mean {fmt(metrics?.witnesses?.mv_votes_mean)} · conflicts {metrics?.witnesses?.mask_conflicts_total}</td></tr>
-                      <tr><td>depth disagreement</td><td>{metrics?.depth_disagreement?.holdout_rel_after != null ? `${(100 * metrics.depth_disagreement.holdout_rel_after).toFixed(2)}%` : fmt(metrics?.depth_disagreement?.pair_rel_median_before)}</td><td>{metrics?.depth_disagreement?.applied ? 'corrected' : 'identity'}</td></tr>
-                      <tr><td>known dimensions</td><td>{metrics?.known_dimensions ? `p50 ${fmt(metrics.known_dimensions.p50_m)} m` : 'none registered'}</td><td>{metrics?.known_dimensions ? `p95 ${fmt(metrics.known_dimensions.p95_m)} m` : ''}</td></tr>
-                      <tr><td>loop coverage</td><td>{metrics?.loop_coverage ? `${(100 * metrics.loop_coverage.coverage).toFixed(0)}%` : '—'}</td><td>{metrics?.authority?.pose_graph ? `authority ${(100 * metrics.authority.pose_graph.fraction_used).toFixed(0)}%${metrics.authority.pose_graph.saturated ? ' SATURATED' : ''}` : ''}</td></tr>
-                    </tbody>
-                  </table>
-                  {iterations.map((it: any) => (
-                    <div key={it.iteration} style={{ marginTop: 8 }}>
-                      <div style={{ color: 'var(--text-primary)' }}>iteration {it.iteration}: <b>{it.verdict}</b>{it.reason ? ` — ${it.reason}` : ''}</div>
-                      {(it.gates || []).map((g: any) => (
-                        <div key={g.name}>{g.passed ? '✅' : '❌'} {g.name} — {fmt(g.value)} vs {fmt(g.threshold)}{g.detail ? ` (${g.detail})` : ''}</div>
-                      ))}
-                    </div>
-                  ))}
-                </>
-              )}
-            </div>
-          )}
-        </div>
+          </Stack>
+        )}
+        {tab === 'edges' && <Table columns={edgeColumns} rows={loopList} rowKey={(_, i) => i} emptyTitle={t('edges.none')} caption={t('edges.title')} />}
+        {tab === 'duplicates' && (
+          <Stack gap={2}>
+            <p className="stac-section__hint">{t('duplicates.target')}</p>
+            <Table columns={dupColumns} rows={dupList} rowKey={(_, i) => i} emptyTitle={t('duplicates.none')} caption={t('duplicates.title')} />
+          </Stack>
+        )}
+        {tab === 'acta' && (
+          <Stack gap={3}>
+            {!report && <EmptyState compact title={t('certify.noReport')} description={t('certify.noActa')} />}
+            {report && (
+              <>
+                <KeyValue label={t('certify.reportEpoch')} mono>{report.epoch}{report.available_epochs ? ` (${report.available_epochs.join(', ')})` : ''}</KeyValue>
+                <KeyValue label={t('acta.objective')} mono>{fmtNum(metrics?.objective, fmt)}{report.comparison_vs_previous?.objective != null ? ` (Δ ${fmtNum(report.comparison_vs_previous.objective, fmt)})` : ''}</KeyValue>
+                <KeyValue label={t('acta.loopDemand')} mono>{cm(metrics?.loop_residual?.median_demand_m)} — {metrics?.loop_residual?.n_accepted ?? 0} / {metrics?.loop_residual?.n_edges ?? 0}</KeyValue>
+                <KeyValue label={t('acta.seams')} mono>{`${cm(metrics?.seam_residual?.median_m, 2)} (p95 ${cm(metrics?.seam_residual?.p95_m, 2)})`}</KeyValue>
+                <KeyValue label={t('acta.closure')} mono>{`${cm(metrics?.closure?.median_m)} (max ${cm(metrics?.closure?.max_m)})`}</KeyValue>
+                <KeyValue label={t('duplicates.title')} mono>{metrics?.duplicates?.n ?? t('status.dash')} ({t('duplicates.targetShort')} {metrics?.duplicates?.target ?? 0})</KeyValue>
+                <KeyValue label={t('acta.scale')} mono>{metrics?.scale?.applied ? (metrics.scale.r_per_chunk || []).map((x: number) => fmt.number(x, 4)).join(' ') : t('acta.identity')}{metrics?.scale?.scale_break ? ` ${t('edgeKind.scale_break')}` : ''}</KeyValue>
+                <KeyValue label={t('acta.witnesses')} mono>{metrics?.witnesses ? Object.entries(metrics.witnesses.status_fraction || {}).map(([k, v]: any) => `${t(`witness.${k}`)} ${fmt.percent(v, 1)}`).join(', ') : t('status.dash')}</KeyValue>
+                <KeyValue label={t('acta.depthDisagreement')} mono>{metrics?.depth_disagreement?.holdout_rel_after != null ? fmt.percent(metrics.depth_disagreement.holdout_rel_after, 2) : fmtNum(metrics?.depth_disagreement?.pair_rel_median_before, fmt)} ({metrics?.depth_disagreement?.applied ? t('acta.corrected') : t('acta.identity')})</KeyValue>
+                <KeyValue label={t('acta.knownDimensions')} mono>{metrics?.known_dimensions ? `p50 ${fmt.lengthText(metrics.known_dimensions.p50_m)} / p95 ${fmt.lengthText(metrics.known_dimensions.p95_m)}` : t('acta.noneRegistered')}</KeyValue>
+                <KeyValue label={t('acta.loopCoverage')} mono>{metrics?.loop_coverage ? fmt.percent(metrics.loop_coverage.coverage) : t('status.dash')}{metrics?.authority?.pose_graph ? ` — ${t('acta.authority')} ${fmt.percent(metrics.authority.pose_graph.fraction_used)}${metrics.authority.pose_graph.saturated ? ` (${t('acta.saturated')})` : ''}` : ''}</KeyValue>
+                {iterations.map((it: any) => (
+                  <Section key={it.iteration} flush title={t('acta.iteration', { n: it.iteration, verdict: it.verdict })} hint={`${it.reason || ''}${it.gate_mode ? ` — ${t('acta.gates')} ${it.gate_mode}` : ''}`}>
+                    <GateList compact gates={(it.gates || []).map((g: any) => ({ name: g.name, passed: g.passed, advisory: g.advisory, detail: `${fmtNum(g.value, fmt)} vs ${fmtNum(g.threshold, fmt)}${g.detail ? ` (${g.detail})` : ''}` }))} />
+                  </Section>
+                ))}
+              </>
+            )}
+          </Stack>
+        )}
       </div>
     </div>
   )
+}
+
+function fmtNum(v: any, fmt: ReturnType<typeof useFmt>): string {
+  if (v == null || Number.isNaN(v)) return '—'
+  if (typeof v === 'number') return Math.abs(v) < 1 && v !== 0 ? fmt.number(v, 3) : fmt.number(v, 2)
+  return String(v)
 }

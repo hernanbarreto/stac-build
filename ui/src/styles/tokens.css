@@ -109,7 +109,7 @@
   --cat-11: #e4c7f0;
   --cat-12: #6a65a5;
 
-  /* ── Deviation ramp (heat map: within tolerance → far out) ─────────── */
+  /* ── Deviation ramp (heat map: within tolerance to far out) ─────────── */
   --dev-0: #3fb950;
   --dev-1: #a3d34d;
   --dev-2: #f5b041;
@@ -192,6 +192,7 @@
   --motion-fast: 150ms ease;
   --motion-panel: 180ms ease;
   --motion-progress: 400ms ease;
+  --motion-none: 0.01ms;          /* prefers-reduced-motion */
 
   /* ── Iconography ───────────────────────────────────────────────────── */
   --icon-sm: 14px;

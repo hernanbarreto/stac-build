@@ -148,8 +148,8 @@ samp,
 
 .stac-visually-hidden {
   position: absolute;
-  width: 1px;
-  height: 1px;
+  width: var(--bw);
+  height: var(--bw);
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
@@ -214,8 +214,8 @@ samp,
   *,
   *::before,
   *::after {
-    transition-duration: 0.01ms;
-    animation-duration: 0.01ms;
+    transition-duration: var(--motion-none);
+    animation-duration: var(--motion-none);
     animation-iteration-count: 1;
     scroll-behavior: auto;
   }

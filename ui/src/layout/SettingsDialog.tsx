@@ -1,6 +1,6 @@
 /**
  * SettingsDialog — density (compact / comfortable) and language (es-MX / en),
- * both persisted (§4.5, §8). Opened from File → Settings, the activity bar
+ * both persisted (§4.5, §8). Opened from File -> Settings, the activity bar
  * gear and the command palette.
  */
 import { Dialog } from '../components/ui/Dialog'

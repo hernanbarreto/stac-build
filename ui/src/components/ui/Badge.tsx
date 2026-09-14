@@ -18,11 +18,10 @@ export interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
   children?: ReactNode
 }
 
-export function Badge({ tone = 'neutral', color, dot = false, mono = false, size = 'md', className = '', children, style, ...rest }: BadgeProps) {
+export function Badge({ tone = 'neutral', color, dot = false, mono = false, size = 'md', className = '', children, ...rest }: BadgeProps) {
   const cls = ['stac-badge', `stac-badge--${tone}`, `stac-badge--${size}`, color ? 'stac-badge--cat' : '', mono ? 'stac-mono' : '', className].filter(Boolean).join(' ')
-  const vars = color ? ({ '--badge-color': color, ...(style ?? {}) } as React.CSSProperties) : style
   return (
-    <span className={cls} style={vars} {...rest}>
+    <span className={cls} style={{ '--badge-color': color ?? 'currentColor' } as React.CSSProperties} {...rest}>
       {(dot || color) && <span className="stac-badge__dot" aria-hidden />}
       {children}
     </span>

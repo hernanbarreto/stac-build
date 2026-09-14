@@ -127,6 +127,30 @@
   flex-shrink: 0;
 }
 
+.stac-tree__lines {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  padding: var(--sp-1) 0;
+  gap: var(--sp-half);
+}
+
+.stac-tree__line {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.stac-tree__line--second .stac-tree__meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .stac-tree__actions {
   display: inline-flex;
   align-items: center;
@@ -140,4 +164,16 @@
 .stac-tree__row:focus-within .stac-tree__actions,
 .stac-tree__row--selected .stac-tree__actions {
   opacity: 1;
+}
+
+/* Two-line rows keep their actions permanently visible: they sit on their own
+   line, so there is no hover affordance to discover them. Declared after the
+   base rule because both selectors have the same specificity. */
+.stac-tree__actions--always {
+  opacity: 1;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: var(--sp-half);
+  max-width: 100%;
 }

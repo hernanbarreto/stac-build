@@ -116,10 +116,10 @@ export function categoricalPalette(): string[] {
   return Array.from({ length: 12 }, (_, i) => tokenColor(`--cat-${String(i + 1).padStart(2, '0')}`))
 }
 
-/** Deviation heat ramp tokens, within tolerance → far out. */
+/** Deviation heat ramp tokens, within tolerance -> far out. */
 export const DEV_RAMP = ['--dev-0', '--dev-1', '--dev-2', '--dev-3', '--dev-4']
 
-/** Interpolate the deviation ramp for a fraction 0..1 → CSS rgb string. */
+/** Interpolate the deviation ramp for a fraction 0..1 -> CSS rgb string. */
 export function deviationColor(frac: number): string {
   const f = Math.max(0, Math.min(1, frac)) * (DEV_RAMP.length - 1)
   const i = Math.min(DEV_RAMP.length - 2, Math.floor(f))

@@ -7,6 +7,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // Check if we should include Electron plugin
 const isWebOnly = process.env.WEB_ONLY === 'true'
+// Backend target for the dev proxy; the screenshot harness points it at the mock server.
+const apiTarget = process.env.STAC_API_TARGET ?? 'https://localhost:8765'
 
 // https://vitejs.dev/config/
 export default defineConfig(async () => {
@@ -14,7 +16,6 @@ export default defineConfig(async () => {
 
   // Only include Electron plugin when not in web-only mode
   if (!isWebOnly) {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const electronModule = await import('vite-plugin-electron/simple')
     const electron = electronModule.default as any
     const electronPlugins = electron({
@@ -43,50 +44,50 @@ export default defineConfig(async () => {
       // Proxy API requests to STAC server (avoids CORS)
       proxy: {
         '/sessions': {
-          target: 'https://localhost:8765',
+          target: apiTarget,
           changeOrigin: true,
           secure: false, // Accept self-signed certs
         },
         '/ws': {
-          target: 'https://localhost:8765',
+          target: apiTarget,
           ws: true,
           changeOrigin: true,
           secure: false,
         },
         '/slam': {
-          target: 'https://localhost:8765',
+          target: apiTarget,
           changeOrigin: true,
           secure: false,
         },
         '/segments': {
-          target: 'https://localhost:8765',
+          target: apiTarget,
           changeOrigin: true,
           secure: false,
         },
         '/mode': {
-          target: 'https://localhost:8765',
+          target: apiTarget,
           changeOrigin: true,
           secure: false,
         },
         '/api': {
-          target: 'https://localhost:8765',
+          target: apiTarget,
           changeOrigin: true,
           secure: false,
           timeout: 300000,        // 5 min — SAM3 model loading takes ~3 min
           proxyTimeout: 300000,   // 5 min — prevent proxy from dropping long requests
         },
         '/health': {
-          target: 'https://localhost:8765',
+          target: apiTarget,
           changeOrigin: true,
           secure: false,
         },
         '/status': {
-          target: 'https://localhost:8765',
+          target: apiTarget,
           changeOrigin: true,
           secure: false,
         },
         '/potree': {
-          target: 'https://localhost:8765',
+          target: apiTarget,
           changeOrigin: true,
           secure: false,
         },

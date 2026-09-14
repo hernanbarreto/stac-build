@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════════════
-   STAC Build — stylesheet entry (order matters: tokens → base → layout →
-   catalog → viewport → features). Nothing else declares a literal.
+   STAC Build — stylesheet entry (order matters: tokens to base to layout to
+   catalog to viewport to features). Nothing else declares a literal.
    ═══════════════════════════════════════════════════════════════════════ */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 @import './styles/tokens.css';
@@ -10,3 +10,4 @@
 @import './layout/regions.css';
 @import './components/viewport/viewport.css';
 @import './features/features.css';
+@import './components/components.css';

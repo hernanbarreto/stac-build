@@ -11,9 +11,11 @@
    ═══════════════════════════════════════════════════════════════════════ */
 
 .stac-app {
+  /* LayoutContext writes --left-w / --inspector-w / --dock-h on this element;
+     --inspector-w and --dock-h already have their default in tokens.css, so
+     only --left-w needs one here (re-declaring the other two as
+     `var(--inspector-w)` would be a self-reference and void the grid). */
   --left-w: var(--left-panel-w);
-  --inspector-w: var(--inspector-w);
-  --dock-h: var(--dock-h);
   display: grid;
   grid-template-rows: var(--header-h) minmax(0, 1fr) var(--statusbar-h);
   grid-template-columns: var(--activity-w) var(--left-w) minmax(0, 1fr) var(--inspector-w);
@@ -35,9 +37,14 @@
   grid-template-columns: var(--activity-w) 0 minmax(0, 1fr) 0;
 }
 
+/* The header and the status bar sit above the three scrolling regions, so a
+   panel can never paint over the menu bar; the menus themselves portal to the
+   body at --z-popover and stay above both. */
 .stac-app__header {
   grid-row: 1;
   grid-column: 1 / -1;
+  position: relative;
+  z-index: var(--z-panel);
 }
 
 .stac-app__activity {
@@ -71,6 +78,8 @@
 .stac-app__status {
   grid-row: 3;
   grid-column: 1 / -1;
+  position: relative;
+  z-index: var(--z-panel);
 }
 
 /* Viewport area: the hero; tabs on top, dock below */
@@ -119,16 +128,18 @@
   z-index: var(--z-panel);
 }
 
+/* The three regions clip their overflow, so the grab strips sit fully inside
+   their own edge: hung outside they were half-invisible and half-unclickable. */
 .stac-resize--right {
-  right: calc(-1 * var(--resize-handle-w) / 2);
+  right: 0;
 }
 
 .stac-resize--left {
-  left: calc(-1 * var(--resize-handle-w) / 2);
+  left: 0;
 }
 
 .stac-resize--top {
-  top: calc(-1 * var(--resize-handle-w) / 2);
+  top: 0;
   bottom: auto;
   left: 0;
   right: 0;

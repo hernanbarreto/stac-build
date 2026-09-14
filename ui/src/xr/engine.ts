@@ -67,7 +67,7 @@ export class StacXREngine implements IXREngine {
     private sessionId: string,
     private cb: EngineCallbacks,
   ) {
-    ;(this.raycaster as any).firstHitOnly = true
+    (this.raycaster as any).firstHitOnly = true
   }
 
   start(canvas: HTMLCanvasElement) {
@@ -91,7 +91,7 @@ export class StacXREngine implements IXREngine {
     // default 300×150 showed the camera as a tiny corner rectangle. (XRExtras'
     // FullWindowCanvas module does this in stock 8th Wall setups.)
     // FROZEN canvas size for the whole AR session: ANY canvas.width/height
-    // reassignment resets the GL context → the engine restarts the camera →
+    // reassignment resets the GL context -> the engine restarts the camera ->
     // the SLAM loses its map (the drift the user saw). iOS resize events fire
     // constantly as Safari's bars animate — so we size ONCE and never again.
     canvas.width = document.documentElement.clientWidth
@@ -223,7 +223,7 @@ export class StacXREngine implements IXREngine {
         if (e?.status && e.status !== 'failed') this.cameraStarted = true
         if (e?.status === 'failed') {
           this.cb.onError('Camera access failed — allow the camera for this '
-            + 'site (aA menu → Website settings) and retry')
+            + 'site (aA menu -> Website settings) and retry')
         }
       },
       listeners: [{

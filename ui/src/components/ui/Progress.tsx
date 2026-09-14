@@ -1,6 +1,6 @@
 /**
  * Progress — a bar with an optional list of named stages (pipeline:
- * reconstruction → segmentation → …) and the percentage in mono (§6).
+ * reconstruction -> segmentation -> …) and the percentage in mono (§6).
  * Stage status drives the colour: running = brand, done = ok, failed = err.
  */
 import { Check, Loader2, X } from 'lucide-react'

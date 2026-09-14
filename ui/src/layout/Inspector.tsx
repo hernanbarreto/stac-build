@@ -1,5 +1,5 @@
 /**
- * Inspector — the right region (§5): tabs Properties · Acta / Quality ·
+ * Inspector — the right region (§5): tabs Properties, Acta / Quality ,
  * Assistant, own scroll per tab, drag handle on its left edge. The content
  * of each tab is passed by App (`panels[tab]`); the tab strip is the only
  * UI this component owns.

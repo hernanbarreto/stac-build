@@ -1,5 +1,20 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Maximize, Check, Pencil, Eye, EyeOff, Plus, Play, Trash2, Brain, MousePointer, Type, Bot, Crosshair } from 'lucide-react'
 import { useConfirmDialog } from './ConfirmDialog'
+import { Dialog } from './ui/Dialog'
+import { Button } from './ui/Button'
+import { IconButton } from './ui/IconButton'
+import { Input, SegmentedControl, Checkbox } from './ui/Field'
+import { Badge, ColorDot } from './ui/Badge'
+import { Progress } from './ui/Progress'
+import { Tooltip } from './ui/Tooltip'
+import { Sep } from './ui/Panel'
+import { EmptyState } from './ui/EmptyState'
+import { categoricalPalette, tokenColor, VP } from './viewport/palette'
+import { getT, useFmt, useT } from '../i18n'
+
+/** Translator for callbacks (active language read at call time). */
+const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
 
 interface InstanceInfo {
     id: number
@@ -18,11 +33,8 @@ interface Props {
 
 type SegMode = 'manual' | 'text' | 'auto'
 
-// Predefined colors for new instances
-const INSTANCE_COLORS = [
-    '#00d4aa', '#e94560', '#3498db', '#f39c12', '#9b59b6',
-    '#2ecc71', '#e74c3c', '#1abc9c', '#e67e22', '#8e44ad',
-]
+// New instances take the categorical palette from the design tokens (--cat-*)
+const instanceColors = () => categoricalPalette()
 
 export default function SegmentationManager({ sessionId, onClose, onUpdate }: Props) {
     const { confirmDanger, dialogElement } = useConfirmDialog()
@@ -31,7 +43,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const [stateId, setStateId] = useState<string | null>(null)
     const [keyframes, setKeyframes] = useState<string[]>([])
     const [kfIndex, setKfIndex] = useState(0)
-    const [status, setStatus] = useState('Initializing...')
+    const [status, setStatus] = useState(() => tt('seg.initializing'))
     const [mode, setMode] = useState<SegMode>('manual')
     const [instances, setInstances] = useState<InstanceInfo[]>([])
     const [selectedInstance, setSelectedInstance] = useState<number | null>(null)
@@ -105,7 +117,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const currentFrame = keyframes[kfIndex] || null
 
     // Keep the active thumbnail visible in the carousel when the viewer
-    // navigates (thumbnail click, ◀/▶ buttons, or propagate progress).
+    // navigates (thumbnail click, / buttons, or propagate progress).
     const thumbRefs = useRef<(HTMLDivElement | null)[]>([])
     useEffect(() => {
         thumbRefs.current[kfIndex]?.scrollIntoView({
@@ -131,32 +143,32 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 setLoading(true)
 
                 // Load existing instances
-                setStatus('Loading existing segmentation...')
+                setStatus(tt('seg.loadingExisting'))
                 const segRes = await fetch(`/api/sessions/${sessionId}/segmentation`)
                 if (segRes.ok) {
                     const segData = await segRes.json()
                     setInstances((segData.instances || []).map((inst: any, i: number) => ({
                         id: inst.id,
-                        label: inst.label || `Object ${inst.id}`,
-                        color: inst.color || INSTANCE_COLORS[i % INSTANCE_COLORS.length],
+                        label: inst.label || tt('seg.objectFallback', { id: inst.id }),
+                        color: inst.color || instanceColors()[i % instanceColors().length],
                         total_points: inst.total_points || 0,
                         excluded: inst.excluded || false,
                     })))
                 }
 
                 // Load keyframes
-                setStatus('Loading keyframes...')
+                setStatus(tt('seg.loadingKeyframes'))
                 const kfRes = await fetch(`/api/sessions/${sessionId}/keyframes`)
-                if (!kfRes.ok) throw new Error('Failed to load keyframes')
+                if (!kfRes.ok) throw new Error(tt('seg.keyframesFailed'))
                 const kfData = await kfRes.json()
                 const kfList: string[] = kfData.keyframes || []
-                if (kfList.length === 0) throw new Error('No keyframes found')
+                if (kfList.length === 0) throw new Error(tt('seg.noKeyframes'))
                 setKeyframes(kfList)
                 setKfIndex(0)
                 setSelectedFrames(new Set(kfList.map((_, i) => i)))
 
                 // Fire-and-forget: kick off SAM3 init (server returns 202 immediately)
-                setStatus(`Initializing SAM3 model... (${kfList.length} keyframes)`)
+                setStatus(tt('seg.initModel', { n: kfList.length }))
                 fetch(`/api/segmentation/start_session/${sessionId}`, { method: 'POST' }).catch(() => { })
 
                 // Poll lightweight status endpoint every 2s until ready
@@ -167,9 +179,9 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                             const elapsed = Math.round((Date.now() - startTime) / 1000)
                             const dots = '.'.repeat((elapsed % 3) + 1)
                             if (elapsed < 10) {
-                                setStatus(`Initializing SAM3 model${dots} (${kfList.length} keyframes)`)
+                                setStatus(tt('seg.initModel', { n: kfList.length }) + dots)
                             } else {
-                                setStatus(`Loading SAM3 model${dots} (${elapsed}s)`)
+                                setStatus(tt('seg.loadingModel', { s: elapsed }) + dots)
                             }
 
                             const r = await fetch(`/api/segmentation/init_status/${sessionId}`)
@@ -181,16 +193,16 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                 resolve(data)
                             } else if (data.status === 'error') {
                                 clearInterval(poll)
-                                reject(new Error(data.message || 'SAM3 init failed'))
+                                reject(new Error(data.message || tt('seg.initFailed')))
                             }
                         } catch { /* poll retry */ }
                     }, 2000)
                 })
 
                 setStateId(result.state_id)
-                setStatus(`Ready — ${kfList.length} keyframes`)
+                setStatus(tt('seg.ready', { n: kfList.length }))
             } catch (e: any) {
-                setStatus(`Error: ${e.message}`)
+                setStatus(tt('seg.error', { detail: e.message }))
             } finally {
                 setLoading(false)
             }
@@ -279,7 +291,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             ctx.restore()
         }
 
-        // Draw prompt points (natural coords → canvas coords)
+        // Draw prompt points (natural coords  canvas coords)
         const natW = img.naturalWidth || 1
         const natH = img.naturalHeight || 1
         const scaleX = canvas.width / natW
@@ -291,9 +303,9 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
 
             ctx.beginPath()
             ctx.arc(cx, cy, 7, 0, Math.PI * 2)
-            ctx.fillStyle = pt.label === 1 ? '#2ecc71' : '#e74c3c'
+            ctx.fillStyle = pt.label === 1 ? tokenColor(VP.ok) : tokenColor(VP.err)
             ctx.fill()
-            ctx.strokeStyle = '#fff'
+            ctx.strokeStyle = tokenColor(VP.light)
             ctx.lineWidth = 2
             ctx.stroke()
         })
@@ -355,18 +367,17 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         if (stateId) {
             try {
                 setLoading(true)
-                setStatus('Clearing current object...')
+                setStatus(tt('seg.clearingObject'))
                 const res = await fetch('/api/segmentation/clear_prompts', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ state_id: stateId, obj_id: objId })
                 })
-                setStatus(res.ok ? 'Current object cleared.'
-                    : 'Warning: could not clear the object on backend')
-            } catch { setStatus('Error clearing prompts') }
+                setStatus(res.ok ? tt('seg.objectCleared') : tt('seg.clearBackendWarning'))
+            } catch { setStatus(tt('seg.errorClearing')) }
             finally { setLoading(false) }
         } else {
-            setStatus('Current object cleared.')
+            setStatus(tt('seg.objectCleared'))
         }
     }, [stateId])
 
@@ -380,7 +391,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             setMaskOverlay(null)
             setHasPrompts(false)
             maskCacheRef.current.delete(pKey(kfIndex))
-            setStatus('Last point undone — no prompts left on this frame.')
+            setStatus(tt('seg.undoneEmpty'))
             return
         }
         const img = imgRef.current
@@ -388,7 +399,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         promptingRef.current = true
         try {
             setLoading(true)
-            setStatus('Undoing last point...')
+            setStatus(tt('seg.undoing'))
             const res = await fetch('/api/segmentation/add_prompt', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -407,12 +418,12 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                     maskCacheRef.current.set(pKey(kfIndex), u)
                 }
             }
-            setStatus('Last point undone.')
-        } catch { setStatus('Error undoing point') }
+            setStatus(tt('seg.undone'))
+        } catch { setStatus(tt('seg.errorUndo')) }
         finally { setLoading(false); promptingRef.current = false }
     }, [promptPoints, selectedInstance, stateId, sessionId, kfIndex, currentFrameIdx])
 
-    // ── Keyboard shortcuts: ←/→ navigate frames, Esc cancels the current
+    // ── Keyboard shortcuts: / navigate frames, Esc cancels the current
     // object's prompts, Ctrl/Cmd+Z undoes the last point. Ignored while
     // typing in inputs. ──
     useEffect(() => {
@@ -476,7 +487,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         // ── Edit existing instance (paint mode) ──
         if (selectedInstance !== null) {
             try {
-                setStatus(`${isPositive ? 'Adding' : 'Removing'} mask area...`)
+                setStatus(isPositive ? tt('seg.addingMaskArea') : tt('seg.removingMaskArea'))
                 const res = await fetch(`/api/segmentation/paint_mask`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -493,10 +504,10 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 if (res.ok) {
                     const data = await res.json()
                     if (data.mask_png) setMaskOverlay(`data:image/png;base64,${data.mask_png}`)
-                    setStatus(`Mask updated (${isPositive ? 'added' : 'removed'} area)`)
+                    setStatus(isPositive ? tt('seg.maskAreaAdded') : tt('seg.maskAreaRemoved'))
                     isDirty.current = true
                 }
-            } catch { setStatus('Error painting mask') }
+            } catch { setStatus(tt('seg.errorPainting')) }
             return
         }
 
@@ -520,10 +531,10 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             if (updated.length === 0) {
                 setMaskOverlay(null)
                 setHasPrompts(false)
-                setStatus('All prompts removed.')
+                setStatus(tt('seg.allPromptsRemoved'))
                 // Must release the click lock here too: this early return removed
                 // the last dot, and without resetting it promptingRef stays true
-                // forever → every later click (this image or any other) is ignored.
+                // forever  every later click (this image or any other) is ignored.
                 promptingRef.current = false
                 return
             }
@@ -531,7 +542,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             // Re-send remaining points to SAM3
             try {
                 setLoading(true)
-                setStatus('Updating mask...')
+                setStatus(tt('seg.updatingMask'))
                 const res = await fetch(`/api/segmentation/add_prompt`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -547,8 +558,8 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                     const data = await res.json()
                     if (data.mask_png) setMaskOverlay(`data:image/png;base64,${data.mask_png}`)
                 }
-                setStatus('Prompt updated.')
-            } catch { setStatus('Error updating mask') }
+                setStatus(tt('seg.promptUpdated'))
+            } catch { setStatus(tt('seg.errorUpdatingMask')) }
             finally { setLoading(false); promptingRef.current = false }
             return
         }
@@ -556,7 +567,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         // No hit — add new point
         try {
             setLoading(true)
-            setStatus(`Adding ${isPositive ? '✅ positive' : '❌ negative'} prompt...`)
+            setStatus(isPositive ? tt('seg.addingPositive') : tt('seg.addingNegative'))
 
             // Snapshot the send context: if the user navigates to another
             // frame or object while this request is in flight, the response
@@ -587,7 +598,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                     labels: newPoints.map(p => p.label)
                 }),
             })
-            if (!res.ok) throw new Error('Failed to add prompt')
+            if (!res.ok) throw new Error(tt('seg.addPromptFailed'))
             const data = await res.json()
             const stale = kfIndexRef.current !== sentFrame
                 || currentObjIdRef.current !== sentObj
@@ -600,10 +611,9 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             }
             promptPointsMapRef.current.set(`${sentFrame}:${sentObj}`, newPoints)
             setHasPrompts(true)
-            setStatus(stale ? 'Prompt applied (on the previous frame).'
-                : 'Prompt applied. Add more or propagate.')
+            setStatus(stale ? tt('seg.promptAppliedPrevious') : tt('seg.promptApplied'))
         } catch (e: any) {
-            setStatus(`Error: ${e.message}`)
+            setStatus(tt('seg.error', { detail: e.message }))
         } finally {
             setLoading(false)
             promptingRef.current = false
@@ -633,7 +643,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         if (!stateId || !textPrompt.trim() || loading) return
         try {
             setLoading(true)
-            setStatus(`Text prompt: "${textPrompt}"...`)
+            setStatus(tt('seg.textPromptRunning', { text: textPrompt }))
             const res = await fetch(`/api/segmentation/text_prompt`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -642,13 +652,13 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                     text: textPrompt.trim(), obj_id: currentObjIdRef.current
                 })
             })
-            if (!res.ok) throw new Error('Text prompt failed')
+            if (!res.ok) throw new Error(tt('seg.textPromptFailed'))
             const data = await res.json()
             if (data.mask_png) setMaskOverlay(`data:image/png;base64,${data.mask_png}`)
             setHasPrompts(true)
-            setStatus('Text prompt applied. Add more or propagate.')
+            setStatus(tt('seg.textPromptApplied'))
         } catch (e: any) {
-            setStatus(`Error: ${e.message}`)
+            setStatus(tt('seg.error', { detail: e.message }))
         } finally {
             setLoading(false)
         }
@@ -662,7 +672,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         if (!stateId || !hasPrompts || loading) return;
         try {
             setLoading(true)
-            setStatus('🧠 Evaluating DINOv2 priors across all frames...')
+            setStatus(tt('seg.evaluating'))
             const res = await fetch('/api/segmentation/evaluate_frames', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -673,15 +683,15 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                     obj_id: currentObjIdRef.current
                 })
             })
-            if (!res.ok) throw new Error('Evaluation failed')
+            if (!res.ok) throw new Error(tt('seg.evaluationFailed'))
             const data = await res.json()
             const valid = data.valid_frames as boolean[]
             const newSet = new Set<number>()
             valid.forEach((v, i) => { if (v) newSet.add(i) })
             setSelectedFrames(newSet)
-            setStatus(`✅ Evaluation complete: ${newSet.size}/${valid.length} frames selected. Review before propagating.`)
+            setStatus(tt('seg.evaluated', { n: newSet.size, total: valid.length }))
         } catch (e: any) {
-            setStatus(`Error: ${e.message}`)
+            setStatus(tt('seg.error', { detail: e.message }))
         } finally {
             setLoading(false)
         }
@@ -694,7 +704,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         if (!hasPrompts) return
         const objId = currentObjIdRef.current
         const name = labelName.trim() || `object_${objId}`
-        const color = INSTANCE_COLORS[(instancesRef.current.length + pendingObjects.length) % INSTANCE_COLORS.length]
+        const color = instanceColors()[(instancesRef.current.length + pendingObjects.length) % instanceColors().length]
         setPendingObjects(prev => [...prev, { objId, name, color }])
         currentObjIdRef.current = objId + 1
         // Clear the canvas for the next object (SAM3 keeps this object's prompts).
@@ -704,13 +714,13 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         setLabelName('')
         promptPointsMapRef.current.clear()
         maskCacheRef.current.clear()
-        setStatus(`Queued "${name}". Click the next object, or Propagate all.`)
+        setStatus(tt('seg.queued', { name }))
     }, [hasPrompts, labelName, pendingObjects.length])
 
     const handlePropagate = useCallback(async () => {
         if (!stateId || propagatingRef.current) return
         // Gather every object to track at once: the queued ones + the in-edit one
-        // (if it has prompts). Each keeps its own obj_id → its own saved label.
+        // (if it has prompts). Each keeps its own obj_id  its own saved label.
         const objs = [...pendingObjects]
         if (hasPrompts) {
             const editId = currentObjIdRef.current
@@ -720,12 +730,12 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         propagatingRef.current = true
         const objLabels: Record<number, string> = {}
         objs.forEach(o => { objLabels[o.objId] = o.name })
-        const name = objs.length === 1 ? objs[0].name : `${objs.length} objects`
+        const name = objs.length === 1 ? objs[0].name : tt('seg.nObjects', { n: objs.length })
         let receivedDone = false
         try {
             setLoading(true)
             setPropagationPct(0)
-            setStatus(`Propagating "${name}" on ${selectedFrames.size} frames...`)
+            setStatus(tt('seg.propagating', { name, n: selectedFrames.size }))
 
             const res = await fetch(`/api/segmentation/propagate`, {
                 method: 'POST',
@@ -741,11 +751,11 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
 
             if (res.status === 409) {
                 // Already propagating from a prior click — just wait
-                setStatus(`Propagation already in progress...`)
+                setStatus(tt('seg.propagationInProgress'))
                 return
             }
-            if (!res.ok) throw new Error('Propagation failed')
-            if (!res.body) throw new Error('No response body')
+            if (!res.ok) throw new Error(tt('seg.propagationFailed'))
+            if (!res.body) throw new Error(tt('seg.noResponse'))
 
             const reader = res.body.getReader()
             const decoder = new TextDecoder()
@@ -770,12 +780,12 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                             if (eventType === 'progress') {
                                 setPropagationPct(data.pct || 0)
                                 setKfIndex(data.frame)
-                                setStatus(`Propagating "${name}": frame ${data.frame + 1}/${data.total} (${data.pct}%)`)
+                                setStatus(tt('seg.propagatingFrame', { name, frame: data.frame + 1, total: data.total, pct: data.pct }))
                                 if (data.mask_png) {
                                     setMaskOverlay(`data:image/png;base64,${data.mask_png}`)
                                 }
                             } else if (eventType === 'saving') {
-                                setStatus(data.status || 'Saving...')
+                                setStatus(data.status || tt('seg.saving'))
                             } else if (eventType === 'done') {
                                 receivedDone = true
                                 isDirty.current = true
@@ -788,7 +798,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                 promptPointsMapRef.current.clear()
                                 maskCacheRef.current.clear()
                                 setSelectedFrames(new Set(keyframes.map((_, i) => i)))
-                                setStatus(`✅ "${name}" segmented successfully!`)
+                                setStatus(tt('seg.segmented', { name }))
 
                                 // Clear SAM3 tracked objects so next segment starts fresh
                                 if (stateId) {
@@ -808,8 +818,8 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                         const segData = await segRes.json()
                                         setInstances((segData.instances || []).map((inst: any, i: number) => ({
                                             id: inst.id,
-                                            label: inst.label || `Object ${inst.id}`,
-                                            color: inst.color || INSTANCE_COLORS[i % INSTANCE_COLORS.length],
+                                            label: inst.label || tt('seg.objectFallback', { id: inst.id }),
+                                            color: inst.color || instanceColors()[i % instanceColors().length],
                                             total_points: inst.total_points || 0,
                                             excluded: inst.excluded || false,
                                         })))
@@ -818,14 +828,14 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                     console.error('Failed to reload instances:', fetchErr)
                                 }
                             } else if (eventType === 'error') {
-                                throw new Error(data.message || 'Propagation error')
+                                throw new Error(data.message || tt('seg.propagationFailed'))
                             }
                         }
                     }
                 }
             }
 
-            while (true) {
+            for (;;) {
                 const { done, value } = await reader.read()
                 if (done) break
 
@@ -852,7 +862,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 promptPointsMapRef.current.clear()
                 maskCacheRef.current.clear()
                 setSelectedFrames(new Set(keyframes.map((_, i) => i)))
-                setStatus(`✅ "${name}" propagation finished`)
+                setStatus(tt('seg.propagationFinished', { name }))
                 // Clear SAM3 tracked objects
                 if (stateId) {
                     try {
@@ -870,8 +880,8 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                         const segData = await segRes.json()
                         setInstances((segData.instances || []).map((inst: any, i: number) => ({
                             id: inst.id,
-                            label: inst.label || `Object ${inst.id}`,
-                            color: inst.color || INSTANCE_COLORS[i % INSTANCE_COLORS.length],
+                            label: inst.label || tt('seg.objectFallback', { id: inst.id }),
+                            color: inst.color || instanceColors()[i % instanceColors().length],
                             total_points: inst.total_points || 0,
                             excluded: inst.excluded || false,
                         })))
@@ -879,7 +889,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 } catch { /* silent */ }
             }
         } catch (e: any) {
-            setStatus(`Error: ${e.message}`)
+            setStatus(tt('seg.error', { detail: e.message }))
             setPropagationPct(-1)
         } finally {
             setLoading(false)
@@ -891,12 +901,12 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const handleAutoSegment = useCallback(async () => {
         try {
             setLoading(true)
-            setStatus('🤖 Running VLM analysis + auto-segmentation...')
+            setStatus(tt('seg.autoRunning'))
             const res = await fetch(`/api/segmentation/auto/${sessionId}`, { method: 'POST' })
-            if (!res.ok) throw new Error('Auto-segmentation failed')
+            if (!res.ok) throw new Error(tt('seg.autoFailed'))
             const data = await res.json()
             isDirty.current = true
-            setStatus(`✅ Auto-segmentation complete! ${(data.instances || []).length} instances`)
+            setStatus(tt('seg.autoDone', { n: (data.instances || []).length }))
 
             // Reload instances
             const segRes = await fetch(`/api/sessions/${sessionId}/segmentation`)
@@ -904,14 +914,14 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 const segData = await segRes.json()
                 setInstances((segData.instances || []).map((inst: any, i: number) => ({
                     id: inst.id,
-                    label: inst.label || `Object ${inst.id}`,
-                    color: inst.color || INSTANCE_COLORS[i % INSTANCE_COLORS.length],
+                    label: inst.label || tt('seg.objectFallback', { id: inst.id }),
+                    color: inst.color || instanceColors()[i % instanceColors().length],
                     total_points: inst.total_points || 0,
                     excluded: inst.excluded || false,
                 })))
             }
         } catch (e: any) {
-            setStatus(`Error: ${e.message}`)
+            setStatus(tt('seg.error', { detail: e.message }))
         } finally {
             setLoading(false)
         }
@@ -945,10 +955,10 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
 
     // ── Delete instance ──────────────────────────────────
     const handleDelete = useCallback(async (instId: number, label: string) => {
-        const ok = await confirmDanger(`Delete "${label}"? This removes all masks and 3D data.`, 'Delete Instance')
+        const ok = await confirmDanger(tt('seg.deleteMessage', { label }), tt('instances.deleteTitle'))
         if (!ok) return
         try {
-            setStatus(`Deleting "${label}"...`)
+            setStatus(tt('seg.deleting', { label }))
             const res = await fetch(`/api/segmentation/delete`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -957,17 +967,17 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 // instance_id (e.g. a half-deleted legacy row) never match
                 body: JSON.stringify({ session_id: sessionId, instance_id: instId, label })
             })
-            if (!res.ok) throw new Error('Delete failed')
+            if (!res.ok) throw new Error(tt('seg.deleteFailed'))
             isDirty.current = true
             setInstances(prev => prev.filter(i => i.id !== instId))
             if (selectedInstance === instId) {
                 setSelectedInstance(null)
                 setMaskOverlay(null)
             }
-            setStatus(`✅ "${label}" deleted`)
+            setStatus(tt('instances.deleted', { label }))
             onUpdate?.()
         } catch (e: any) {
-            setStatus(`Error: ${e.message}`)
+            setStatus(tt('seg.error', { detail: e.message }))
         }
     }, [sessionId, selectedInstance, onUpdate])
 
@@ -1012,324 +1022,167 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     }, [])
 
     // ── Render ──────────────────────────────────────────────
+    const t = useT()
+    const fmt = useFmt()
+    const clearAllPrompts = async () => {
+        const n = pendingObjects.length + (hasPrompts ? 1 : 0)
+        const ok = await confirmDanger(t('seg.clearAllMessage', { n: pendingObjects.length }), t('seg.clearAllTitle'))
+        if (!ok) return
+        setPromptPoints([]); setPendingObjects([]); setMaskOverlay(null); setHasPrompts(false); setLabelName('')
+        promptPointsMapRef.current.clear(); maskCacheRef.current.clear()
+        if (stateId) {
+            try {
+                setLoading(true)
+                setStatus(t('seg.clearingAll', { n }))
+                const res = await fetch('/api/segmentation/clear_prompts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state_id: stateId }) })
+                setStatus(res.ok ? t('seg.allCleared') : t('seg.clearBackendWarning'))
+            } catch { setStatus(t('seg.errorClearing')) }
+            finally { setLoading(false) }
+        } else setStatus(t('seg.allCleared'))
+    }
+    const propagateLabel = pendingObjects.length > 0
+        ? t('seg.propagateMany', { objects: pendingObjects.length + (hasPrompts ? 1 : 0), frames: selectedFrames.size })
+        : t('seg.propagate', { frames: selectedFrames.size })
+
     return (
-        <div className="admin-overlay">
-            <div className="admin-panel seg-manager">
-                {/* Header */}
-                <div className="admin-header">
-                    <h2>🏷️ Segmentation Manager — {sessionId}</h2>
-                    <button className="admin-close" onClick={() => onClose(isDirty.current)}>✕</button>
-                </div>
+        <Dialog open size="full" title={t('seg.title')} subtitle={sessionId} icon={<Crosshair aria-hidden />} onClose={() => onClose(isDirty.current)} className="stac-seg">
+            <div className="stac-seg__body">
+                <aside className="stac-seg__sidebar">
+                    <div className="stac-seg__sidebar-head">{t('seg.instances', { n: instances.length })}</div>
+                    <div className="stac-seg__list">
+                        {instances.length === 0 && <EmptyState compact title={t('seg.noInstances')} description={t('seg.noInstancesHint')} />}
+                        {instances.map(inst => (
+                            <div key={inst.id}
+                                className={`stac-seg__inst ${selectedInstance === inst.id ? 'stac-seg__inst--selected' : ''} ${inst.excluded ? 'stac-seg__inst--excluded' : ''}`.trim()}
+                                onClick={() => {
+                                    const newSel = inst.id === selectedInstance ? null : inst.id
+                                    setSelectedInstance(newSel)
+                                    if (newSel !== null && currentFrame) fetchInstanceMask(newSel, currentFrame, kfIndex)
+                                    else setMaskOverlay(null)
+                                }}>
+                                <ColorDot color={inst.color} />
+                                <input className="stac-seg__name" value={inst.label} aria-label={t('instances.renameLabel')}
+                                    onChange={e => { const val = e.target.value; setInstances(prev => prev.map(i => i.id === inst.id ? { ...i, label: val } : i)) }}
+                                    onBlur={e => handleRename(inst.id, e.target.value)} onClick={e => e.stopPropagation()} />
+                                <span className="stac-seg__pts stac-mono">{fmt.integer(inst.total_points)}</span>
+                                <span className="stac-seg__actions" onClick={e => e.stopPropagation()}>
+                                    <IconButton size="sm" label={t('seg.editMask')} icon={<Pencil aria-hidden />} active={selectedInstance === inst.id}
+                                        onClick={() => {
+                                            const newSel = inst.id === selectedInstance ? null : inst.id
+                                            setSelectedInstance(newSel)
+                                            if (newSel !== null && currentFrame) { fetchInstanceMask(newSel, currentFrame, kfIndex); setStatus(t('seg.editing', { label: inst.label })) }
+                                            else setMaskOverlay(null)
+                                        }} />
+                                    <IconButton size="sm" label={inst.excluded ? t('seg.include') : t('seg.exclude')} icon={inst.excluded ? <EyeOff aria-hidden /> : <Eye aria-hidden />}
+                                        active={!!inst.excluded} onClick={() => handleToggleExclude(inst.id, !inst.excluded)} />
+                                    <IconButton size="sm" variant="danger" label={t('instances.delete')} icon={<Trash2 aria-hidden />} onClick={() => handleDelete(inst.id, inst.label)} />
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </aside>
 
-                <div className="seg-manager-body">
-                    {/* ── Left: Instance List ── */}
-                    <div className="seg-sidebar">
-                        <div className="seg-sidebar-header">
-                            <span>Instances ({instances.length})</span>
-                        </div>
+                <section className="stac-seg__viewer">
+                    <div className="stac-seg__status" role="status">
+                        <span className={`stac-live-dot ${loading ? 'stac-live-dot--warn stac-live-dot--pulse' : 'stac-live-dot--ok'}`} aria-hidden />
+                        <span className="stac-seg__status-text stac-mono">{status}</span>
+                    </div>
+                    {propagationPct >= 0 && <Progress value={propagationPct} tone="measure" size="md" className="stac-seg__progress" />}
 
-                        <div className="seg-instance-list">
-                            {instances.length === 0 && (
-                                <div className="seg-empty">No instances yet. Add prompts and propagate.</div>
-                            )}
-                            {instances.map((inst) => (
-                                <div
-                                    key={inst.id}
-                                    className={`seg-instance-item ${selectedInstance === inst.id ? 'selected' : ''} ${inst.excluded ? 'excluded' : ''}`}
-                                    onClick={() => {
-                                        const newSel = inst.id === selectedInstance ? null : inst.id
-                                        setSelectedInstance(newSel)
-                                        if (newSel !== null && currentFrame) {
-                                            fetchInstanceMask(newSel, currentFrame, kfIndex)
-                                        } else {
-                                            setMaskOverlay(null)
-                                        }
-                                    }}
-                                >
-                                    <span className="seg-inst-color" style={{ background: inst.color }} />
-                                    <input
-                                        className="seg-inst-name"
-                                        value={inst.label}
-                                        onChange={e => {
-                                            const val = e.target.value
-                                            setInstances(prev => prev.map(i => i.id === inst.id ? { ...i, label: val } : i))
-                                        }}
-                                        onBlur={e => handleRename(inst.id, e.target.value)}
-                                        onClick={e => e.stopPropagation()}
-                                    />
-                                    <span className="seg-inst-pts">{inst.total_points.toLocaleString()}</span>
-                                    <div className="seg-inst-actions">
-                                        <button
-                                            className={`seg-inst-btn seg-inst-edit ${selectedInstance === inst.id ? 'active' : ''}`}
-                                            title="Edit mask (paint mode)"
-                                            onClick={e => {
-                                                e.stopPropagation()
-                                                const newSel = inst.id === selectedInstance ? null : inst.id
-                                                setSelectedInstance(newSel)
-                                                if (newSel !== null && currentFrame) {
-                                                    fetchInstanceMask(newSel, currentFrame, kfIndex)
-                                                    setStatus(`Editing "${inst.label}" — Left click = add, Right click = remove`)
-                                                } else {
-                                                    setMaskOverlay(null)
-                                                }
-                                            }}
-                                        >✏️</button>
-                                        <button
-                                            className={`seg-inst-btn seg-inst-excl ${inst.excluded ? 'on' : ''}`}
-                                            title={inst.excluded ? 'Include in cloud' : 'Exclude from cloud'}
-                                            onClick={e => { e.stopPropagation(); handleToggleExclude(inst.id, !inst.excluded) }}
-                                        >{inst.excluded ? '⊘' : '👁'}</button>
-                                        <button
-                                            className="seg-inst-btn seg-inst-del"
-                                            title="Delete instance"
-                                            onClick={e => { e.stopPropagation(); handleDelete(inst.id, inst.label) }}
-                                        >✕</button>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
+                    <div className="stac-seg__toolbar">
+                        <SegmentedControl<SegMode> ariaLabel={t('seg.mode')} value={mode} onChange={setMode} options={[
+                            { value: 'manual', label: t('seg.modeManual'), icon: <MousePointer aria-hidden />, disabled: loading },
+                            { value: 'text', label: t('seg.modeText'), icon: <Type aria-hidden />, disabled: loading },
+                            { value: 'auto', label: t('seg.modeAuto'), icon: <Bot aria-hidden />, disabled: loading },
+                        ]} />
+                        <Sep />
+                        <IconButton label={t('seg.prevFrame')} shortcut="ArrowLeft" icon={<ChevronLeft aria-hidden />} disabled={kfIndex <= 0} onClick={() => setKfIndex(i => i - 1)} />
+                        <span className="stac-seg__nav stac-mono">
+                            {t('seg.keyframeOf', { n: kfIndex + 1, total: keyframes.length })}
+                            {currentFrame && <span className="stac-seg__filename">{currentFrame}</span>}
+                        </span>
+                        <IconButton label={t('seg.nextFrame')} shortcut="ArrowRight" icon={<ChevronRight aria-hidden />} disabled={kfIndex >= keyframes.length - 1} onClick={() => setKfIndex(i => i + 1)} />
+                        <Sep />
+                        <IconButton label={t('seg.zoomIn')} icon={<ZoomIn aria-hidden />} onClick={() => setZoom(z => Math.min(8, z + 0.5))} />
+                        <span className="stac-seg__zoom stac-mono">{fmt.percent(zoom)}</span>
+                        <IconButton label={t('seg.zoomOut')} icon={<ZoomOut aria-hidden />} onClick={() => setZoom(z => Math.max(0.5, z - 0.5))} />
+                        <IconButton label={t('seg.resetView')} icon={<Maximize aria-hidden />} onClick={resetView} />
+                        <Sep />
+                        <IconButton label={t('seg.includeFrameNext')} icon={<Check aria-hidden />} tone="brand" onClick={() => {
+                            const next = new Set(selectedFrames); next.add(kfIndex); setSelectedFrames(next)
+                            if (kfIndex < keyframes.length - 1) setKfIndex(i => i + 1)
+                        }} />
+                        <IconButton label={t('seg.excludeFrameNext')} icon={<X aria-hidden />} variant="danger" onClick={() => {
+                            const next = new Set(selectedFrames); next.delete(kfIndex); setSelectedFrames(next)
+                            if (kfIndex < keyframes.length - 1) setKfIndex(i => i + 1)
+                        }} />
                     </div>
 
-                    {/* ── Right: Viewer ── */}
-                    <div className="seg-viewer">
-                        {/* Status bar */}
-                        <div className="seg-status-bar">
-                            <span className={`seg-status-dot ${loading ? 'busy' : 'ready'}`} />
-                            <span className="seg-status-text">{status}</span>
+                    {mode === 'text' && (
+                        <div className="stac-seg__bar">
+                            <Input placeholder={t('seg.textPlaceholder')} value={textPrompt} onChange={e => setTextPrompt(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleTextPrompt()} disabled={loading} />
+                            <Button variant="primary" onClick={handleTextPrompt} disabled={loading || !textPrompt.trim()}>{t('seg.segment')}</Button>
                         </div>
-
-                        {/* Progress bar (visible during propagation) */}
-                        {propagationPct >= 0 && (
-                            <div className="seg-progress-bar">
-                                <div className="seg-progress-fill" style={{ width: `${propagationPct}%` }} />
-                                <span className="seg-progress-text">{propagationPct}%</span>
-                            </div>
-                        )}
-
-                        {/* Mode toolbar */}
-                        <div className="seg-toolbar">
-                            <div className="seg-mode-group">
-                                <button className={`seg-mode-btn ${mode === 'manual' ? 'active' : ''}`}
-                                    onClick={() => setMode('manual')} disabled={loading}>🖱️ Manual</button>
-                                <button className={`seg-mode-btn ${mode === 'text' ? 'active' : ''}`}
-                                    onClick={() => setMode('text')} disabled={loading}>📝 Text</button>
-                                <button className={`seg-mode-btn ${mode === 'auto' ? 'active' : ''}`}
-                                    onClick={() => setMode('auto')} disabled={loading}>🤖 Auto</button>
-                            </div>
-
-                            <div className="seg-nav-group">
-                                <button className="seg-nav-btn" disabled={kfIndex <= 0}
-                                    onClick={() => setKfIndex(i => i - 1)}>◀</button>
-                                <span className="seg-nav-label">
-                                    KF {kfIndex + 1}/{keyframes.length}
-                                    {currentFrame && <span className="seg-nav-filename">{currentFrame}</span>}
-                                </span>
-                                <button className="seg-nav-btn" disabled={kfIndex >= keyframes.length - 1}
-                                    onClick={() => setKfIndex(i => i + 1)}>▶</button>
-                            </div>
-
-                            <div className="seg-zoom-group">
-                                <button className="seg-nav-btn" onClick={() => setZoom(z => Math.min(8, z + 0.5))}>+</button>
-                                <span className="seg-zoom-label">{Math.round(zoom * 100)}%</span>
-                                <button className="seg-nav-btn" onClick={() => setZoom(z => Math.max(0.5, z - 0.5))}>−</button>
-                                <button className="seg-nav-btn" onClick={resetView} title="Reset">⟲</button>
-
-                                <div style={{ width: 12 }}></div>
-
-                                <button className="seg-nav-btn" style={{ color: 'var(--success)', fontWeight: 'bold' }} title="Include frame & Next" onClick={() => {
-                                    const next = new Set(selectedFrames)
-                                    next.add(kfIndex)
-                                    setSelectedFrames(next)
-                                    if (kfIndex < keyframes.length - 1) setKfIndex(i => i + 1)
-                                }}>✓</button>
-                                <button className="seg-nav-btn" style={{ color: 'var(--error)', fontWeight: 'bold' }} title="Exclude frame & Next" onClick={() => {
-                                    const next = new Set(selectedFrames)
-                                    next.delete(kfIndex)
-                                    setSelectedFrames(next)
-                                    if (kfIndex < keyframes.length - 1) setKfIndex(i => i + 1)
-                                }}>✕</button>
-                            </div>
+                    )}
+                    {mode === 'auto' && (
+                        <div className="stac-seg__bar">
+                            <span className="stac-seg__hint">{t('seg.autoDesc')}</span>
+                            <Button variant="primary" icon={<Bot aria-hidden />} onClick={handleAutoSegment} loading={loading}>{t('seg.startAuto')}</Button>
                         </div>
+                    )}
 
-                        {/* Text prompt bar (when in text mode) */}
-                        {mode === 'text' && (
-                            <div className="seg-text-bar">
-                                <input
-                                    className="seg-text-input"
-                                    placeholder='Describe the object (e.g. "the red sofa")'
-                                    value={textPrompt}
-                                    onChange={e => setTextPrompt(e.target.value)}
-                                    onKeyDown={e => e.key === 'Enter' && handleTextPrompt()}
-                                    disabled={loading}
-                                />
-                                <button className="admin-save-btn" onClick={handleTextPrompt}
-                                    disabled={loading || !textPrompt.trim()}>Segment</button>
-                            </div>
-                        )}
-
-                        {/* Auto mode button */}
-                        {mode === 'auto' && (
-                            <div className="seg-text-bar">
-                                <span className="seg-auto-desc">
-                                    VLM will analyze all keyframes, detect objects, and segment them automatically.
-                                </span>
-                                <button className="admin-save-btn" onClick={handleAutoSegment}
-                                    disabled={loading}>🤖 Start Auto-Segmentation</button>
-                            </div>
-                        )}
-
-                        {/* Image canvas with zoom/pan */}
-                        <div
-                            ref={canvasRef}
-                            className={`seg-canvas ${loading ? 'loading' : ''} ${mode === 'manual' ? 'crosshair' : ''}`}
-                            onWheel={handleWheel}
-                            onMouseDown={handleMouseDown}
-                            onMouseMove={handleMouseMove}
-                            onMouseUp={handleMouseUp}
-                            onMouseLeave={handleMouseUp}
-                        >
-                            {currentFrame ? (
-                                <div
-                                    className="seg-transform-container"
-                                    style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
-                                >
-                                    <div className="seg-image-wrapper">
-                                        <img
-                                            ref={imgRef}
-                                            src={`/api/sessions/${sessionId}/frames/${currentFrame}`}
-                                            className="seg-image"
-                                            alt={`Keyframe ${currentFrame}`}
-                                            draggable={false}
-                                            onLoad={() => redrawCanvas()}
-                                        />
-                                        <canvas
-                                            ref={overlayCanvasRef}
-                                            className="seg-overlay-canvas"
-                                            onClick={(e) => handleImageClick(e, true)}
-                                            onContextMenu={(e) => handleImageClick(e, false)}
-                                            onMouseMove={handleCanvasMouseMove}
-                                        />
-                                    </div>
+                    <div ref={canvasRef} className={`stac-seg__canvas ${loading ? 'stac-seg__canvas--loading' : ''} ${mode === 'manual' ? 'stac-seg__canvas--crosshair' : ''}`.trim()}
+                        onWheel={handleWheel} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}>
+                        {currentFrame ? (
+                            <div className="stac-seg__transform" style={{ '--pan-x': `${pan.x}px`, '--pan-y': `${pan.y}px`, '--zoom': zoom } as React.CSSProperties}>
+                                <div className="stac-seg__image-wrap">
+                                    <img ref={imgRef} src={`/api/sessions/${sessionId}/frames/${currentFrame}`} className="stac-seg__image" alt={t('seg.keyframeAlt', { name: currentFrame })} draggable={false} onLoad={() => redrawCanvas()} />
+                                    <canvas ref={overlayCanvasRef} className="stac-seg__overlay" onClick={e => handleImageClick(e, true)} onContextMenu={e => handleImageClick(e, false)} onMouseMove={handleCanvasMouseMove} />
                                 </div>
-                            ) : (
-                                <div className="seg-placeholder">No keyframes loaded</div>
-                            )}
-                        </div>
-
-                        {/* Multi-object queue: objects added but not yet propagated */}
-                        {mode === 'manual' && pendingObjects.length > 0 && (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '6px 10px', background: 'var(--bg-surface)', borderTop: '1px solid var(--border)' }}>
-                                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Queued ({pendingObjects.length}):</span>
-                                {pendingObjects.map(o => (
-                                    <span key={o.objId} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: 'var(--bg-elevated)', border: `1px solid ${o.color}`, borderRadius: 12, padding: '2px 9px', fontSize: 12, color: 'var(--text-primary)' }}>
-                                        <span style={{ width: 9, height: 9, borderRadius: '50%', background: o.color }} />
-                                        {o.name}
-                                    </span>
-                                ))}
-                                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· keep clicking the next object, then “Propagate”. “Clear” discards the queue.</span>
                             </div>
-                        )}
-
-                        {/* Footer */}
-                        <div className="seg-footer">
-                            <span className="seg-hint">
-                                {mode === 'manual' && '🖱️ Left = Positive | Right = Negative | Scroll = Zoom | Shift+Drag = Pan'}
-                                {mode === 'text' && '📝 Type a description and press Enter or Segment'}
-                                {mode === 'auto' && '🤖 Auto mode uses VLM + Segmentation'}
-                            </span>
-                            <div className="seg-actions">
-                                <input
-                                    className="seg-label-input"
-                                    type="text"
-                                    placeholder="Label name..."
-                                    value={labelName}
-                                    onChange={e => setLabelName(e.target.value)}
-                                    disabled={loading}
-                                />
-                                <button
-                                    style={{ background: 'var(--bg-active)', color: 'var(--text-primary)', border: 'none', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13 }}
-                                    title="Clear only the prompts of the object being edited (Esc) — queued objects and saved instances are untouched"
-                                    onClick={clearCurrentObject}
-                                    disabled={loading || !hasPrompts}
-                                >✕ Clear</button>
-                                <button
-                                    style={{ background: 'rgba(248, 81, 73, 0.28)', color: '#ffb4ae', border: 'none', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13 }}
-                                    title="Discard the in-edit object AND the whole queued-object batch (saved instances are kept)"
-                                    onClick={async () => {
-                                        const n = pendingObjects.length + (hasPrompts ? 1 : 0)
-                                        const ok = await confirmDanger(
-                                            `This discards the object being edited and the ${pendingObjects.length} queued object(s) of this batch. Saved instances are NOT deleted.`,
-                                            'Clear all prompts?')
-                                        if (!ok) return
-                                        setPromptPoints([])
-                                        setPendingObjects([])
-                                        setMaskOverlay(null)
-                                        setHasPrompts(false)
-                                        setLabelName('')
-                                        promptPointsMapRef.current.clear()
-                                        maskCacheRef.current.clear()
-                                        if (stateId) {
-                                            try {
-                                                setLoading(true)
-                                                setStatus(`Clearing all prompts (${n} object(s))...`)
-                                                const res = await fetch('/api/segmentation/clear_prompts', {
-                                                    method: 'POST',
-                                                    headers: { 'Content-Type': 'application/json' },
-                                                    body: JSON.stringify({ state_id: stateId })
-                                                })
-                                                setStatus(res.ok ? 'All prompts cleared — ready for new prompts.'
-                                                    : 'Warning: could not clear prompts on backend')
-                                            } catch { setStatus('Error clearing prompts') }
-                                            finally { setLoading(false) }
-                                        } else {
-                                            setStatus('All prompts cleared.')
-                                        }
-                                    }}
-                                    disabled={loading || (!hasPrompts && pendingObjects.length === 0)}
-                                >🗑 Clear all</button>
-                                <button className="admin-save-btn" style={{ background: 'var(--accent-gradient)', color: '#06121a' }} onClick={handleEvaluate}
-                                    disabled={loading || !stateId || !hasPrompts || propagatingRef.current}>🧠 Evaluate</button>
-                                <button className="admin-save-btn" style={{ background: 'var(--accent-2)', color: '#06121a' }} onClick={handleAddObject}
-                                    disabled={loading || !stateId || !hasPrompts} title="Queue this object and start the next one">➕ Add object</button>
-                                <button className="admin-save-btn" onClick={handlePropagate}
-                                    disabled={loading || !stateId || (!hasPrompts && pendingObjects.length === 0)}>
-                                    ▶ Propagate {pendingObjects.length > 0 ? `${pendingObjects.length + (hasPrompts ? 1 : 0)} objs` : ''} ({selectedFrames.size})
-                                </button>
-                            </div>
-                        </div>
-
-                        {/* Frames Gallery. Clicking a thumbnail NAVIGATES the viewer to
-                            that frame (never toggles selection — that's the checkbox's
-                            job); the active thumbnail is kept scrolled into view. */}
-                        <div className="seg-frames-bar" style={{ display: 'flex', overflowX: 'auto', gap: 6, padding: '8px', background: 'var(--bg-surface)', borderTop: '1px solid var(--border)' }}>
-                            {keyframes.map((kf, i) => (
-                                <div key={i} ref={el => { thumbRefs.current[i] = el }}
-                                    style={{ position: 'relative', flexShrink: 0, cursor: 'pointer', opacity: selectedFrames.has(i) ? 1 : 0.4 }}
-                                    onClick={() => setKfIndex(i)}>
-                                    <img src={`/api/sessions/${sessionId}/frames/${kf}`} loading="lazy"
-                                        style={{ height: 40, borderRadius: 4, border: kfIndex === i ? '2px solid var(--accent-2)' : '1px solid transparent' }} />
-                                    {[...promptPointsMapRef.current.keys()].some(k => k.startsWith(`${i}:`)) && (
-                                        <span title="This frame has prompts" style={{ position: 'absolute', top: 2, left: 2, width: 8, height: 8, borderRadius: '50%', background: 'var(--success)', border: '1px solid var(--bg-base)' }} />
-                                    )}
-                                    <input type="checkbox" checked={selectedFrames.has(i)}
-                                        onClick={e => e.stopPropagation()}
-                                        onChange={() => {
-                                            setSelectedFrames(prev => {
-                                                const next = new Set(prev)
-                                                if (next.has(i)) next.delete(i)
-                                                else next.add(i)
-                                                return next
-                                            })
-                                        }}
-                                        style={{ position: 'absolute', top: 2, right: 2, margin: 0, cursor: 'pointer', transform: 'scale(0.8)' }} />
-                                    <div style={{ position: 'absolute', bottom: 2, left: 2, fontSize: 9, background: 'rgba(0,0,0,0.7)', color: 'white', padding: '0 3px', borderRadius: 2 }}>{i + 1}</div>
-                                </div>
-                            ))}
-                        </div>
+                        ) : <EmptyState title={t('seg.noKeyframes')} />}
                     </div>
-                </div>
+
+                    {mode === 'manual' && pendingObjects.length > 0 && (
+                        <div className="stac-seg__queue">
+                            <span className="stac-seg__hint">{t('seg.queuedCount', { n: pendingObjects.length })}</span>
+                            {pendingObjects.map(o => <Badge key={o.objId} color={o.color}>{o.name}</Badge>)}
+                            <span className="stac-seg__hint">{t('seg.queueHint')}</span>
+                        </div>
+                    )}
+
+                    <div className="stac-seg__footer">
+                        <span className="stac-seg__hint stac-seg__hint--grow">
+                            {mode === 'manual' && t('seg.hintManual')}
+                            {mode === 'text' && t('seg.hintText')}
+                            {mode === 'auto' && t('seg.hintAuto')}
+                        </span>
+                        <Input size="sm" className="stac-seg__label" placeholder={t('seg.labelPlaceholder')} value={labelName} onChange={e => setLabelName(e.target.value)} disabled={loading} />
+                        <Tooltip label={t('seg.clearHint')}><span><Button size="sm" icon={<X aria-hidden />} onClick={clearCurrentObject} disabled={loading || !hasPrompts}>{t('common.clear')}</Button></span></Tooltip>
+                        <Tooltip label={t('seg.clearAllHint')}><span><Button size="sm" variant="danger" icon={<Trash2 aria-hidden />} onClick={clearAllPrompts} disabled={loading || (!hasPrompts && pendingObjects.length === 0)}>{t('seg.clearAll')}</Button></span></Tooltip>
+                        <Button size="sm" icon={<Brain aria-hidden />} onClick={handleEvaluate} disabled={loading || !stateId || !hasPrompts || propagatingRef.current}>{t('seg.evaluate')}</Button>
+                        <Tooltip label={t('seg.addObjectHint')}><span><Button size="sm" icon={<Plus aria-hidden />} onClick={handleAddObject} disabled={loading || !stateId || !hasPrompts}>{t('seg.addObject')}</Button></span></Tooltip>
+                        <Button size="sm" variant="primary" icon={<Play aria-hidden />} onClick={handlePropagate} disabled={loading || !stateId || (!hasPrompts && pendingObjects.length === 0)}>{propagateLabel}</Button>
+                    </div>
+
+                    <div className="stac-seg__frames">
+                        {keyframes.map((kf, i) => (
+                            <div key={i} ref={el => { thumbRefs.current[i] = el }}
+                                className={`stac-seg__thumb ${kfIndex === i ? 'stac-seg__thumb--current' : ''} ${selectedFrames.has(i) ? '' : 'stac-seg__thumb--off'}`.trim()}
+                                onClick={() => setKfIndex(i)}>
+                                <img className="stac-seg__thumb-img" src={`/api/sessions/${sessionId}/frames/${kf}`} loading="lazy" alt={t('seg.keyframeAlt', { name: kf })} />
+                                {[...promptPointsMapRef.current.keys()].some(k => k.startsWith(`${i}:`)) && <span className="stac-seg__thumb-dot stac-live-dot stac-live-dot--ok" title={t('seg.frameHasPrompts')} />}
+                                <span className="stac-seg__thumb-check" onClick={e => e.stopPropagation()}>
+                                    <Checkbox checked={selectedFrames.has(i)} aria-label={t('seg.includeFrame', { n: i + 1 })}
+                                        onChange={() => setSelectedFrames(prev => { const next = new Set(prev); if (next.has(i)) next.delete(i); else next.add(i); return next })} />
+                                </span>
+                                <span className="stac-seg__thumb-idx stac-mono">{i + 1}</span>
+                            </div>
+                        ))}
+                    </div>
+                </section>
             </div>
             {dialogElement}
-        </div>
+        </Dialog>
     )
 }

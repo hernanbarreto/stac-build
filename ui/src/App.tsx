@@ -1,9 +1,14 @@
 /**
  * STAC Build — Main Application
  * Hernán Barreto — Ingerop IN3
+ *
+ * State and business logic live here unchanged (every endpoint, every
+ * effect); the shell is composed from layout regions (AppHeader, ActivityBar,
+ * SidePanel, Inspector, BottomDock, StatusBar) and feature panels
+ * (features/*) that receive their handlers as props — prompt_ui.txt §5.
+ * Status messages go through i18n (`tt` = translator for callbacks).
  */
 import { useState, useCallback, useEffect, useRef } from 'react'
-import './App.css'
 import Viewport, { ViewportHandle, SegmentInstance } from './components/Viewport'
 import { SyncPlayer } from './components/SyncPlayer'
 import { BIMAnalysisPanel } from './components/BIMAnalysisPanel'
@@ -13,22 +18,56 @@ import BIMNavigator from './components/BIMNavigator'
 import FuseScansModal from './components/FuseScansModal'
 import CorrectionVerdictDialog from './components/CorrectionVerdictDialog'
 import CertifyKitPanel from './components/CertifyKitPanel'
+import DeviationOverlay from './components/DeviationOverlay'
 import type { IFCLoadResult } from './components/IFCLoader'
 import { useAuth } from './context/AuthContext'
 import LoginPage from './pages/LoginPage'
 import AdminPage from './pages/AdminPage'
 import SegmentationManager from './components/InteractiveSegmentation'
 import { useConfirmDialog } from './components/ConfirmDialog'
-import {
-  Search, Tag, Hammer, Plug, Upload, Settings, Crosshair,
-  Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
-  Move, Palette, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D,
-  Building2, Package, ArrowUpFromLine, ChevronLeft, ChevronRight, Trash2, Unlock, Play, X,
-  Clock, CheckCircle2, XCircle, Ban, Circle, CheckSquare, Square, Check,
-  Scale, Thermometer, Loader2, BarChart3, Home, Pencil, Camera, Plus, SlidersHorizontal,
-  Sparkles, Eraser, Undo2, Brush,
-} from 'lucide-react'
 import AssistantPanel from './components/AssistantPanel'
+import {
+  Search, Tag, Plug, Upload, Settings, Crosshair, Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
+  Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
+  Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, AlertTriangle, Terminal,
+  ListTodo, FileCheck2, Puzzle, Wrench, PanelLeftClose, PanelLeftOpen,
+} from 'lucide-react'
+import { useI18n, getT } from './i18n'
+import { useLayout } from './layout/LayoutContext'
+import { AppHeader, type HeaderMenu } from './layout/AppHeader'
+import { ActivityBar, type ActivityItem } from './layout/ActivityBar'
+import { SidePanel } from './layout/SidePanel'
+import { Inspector } from './layout/Inspector'
+import { BottomDock } from './layout/BottomDock'
+import { StatusBar } from './layout/StatusBar'
+import { CommandPalette, type Command } from './layout/CommandPalette'
+import { SettingsDialog } from './layout/SettingsDialog'
+import { Tabs } from './components/ui/Tabs'
+import { Button } from './components/ui/Button'
+import { Banner } from './components/ui/Banner'
+import { Dialog } from './components/ui/Dialog'
+import { Field, SegmentedControl } from './components/ui/Field'
+import { EmptyState } from './components/ui/EmptyState'
+import { useToast } from './components/ui/Toast'
+import type { MenuEntry } from './components/ui/Menu'
+import type { ProgressStage } from './components/ui/Progress'
+import { FloatingToolbar, type ColorMode } from './components/viewport/FloatingToolbar'
+import { ViewportHud, type ReadoutAnchor } from './components/viewport/ViewportHud'
+import { SplashOverlay } from './components/viewport/SplashOverlay'
+import { WelcomeScreen } from './components/viewport/WelcomeScreen'
+import { tokenColor } from './components/viewport/palette'
+import { SessionsPanel } from './features/SessionsPanel'
+import { InstancesPanel } from './features/InstancesPanel'
+import { ScansPanel } from './features/ScansPanel'
+import { PipelineDialog } from './features/PipelineDialog'
+import { ResumeDialog } from './features/ResumeDialog'
+import { ObjectLibraryDialog } from './features/ObjectLibraryDialog'
+import { CorrectionDialog } from './features/CorrectionDialog'
+import { MeshingDialog } from './features/MeshingDialog'
+import { ConsolePanel, JobsPanel, PropertiesPanel } from './features/DockPanels'
+
+/** Translator for callbacks defined before the i18n hook is read. */
+const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
 
 interface SessionInfo {
   id: string
@@ -83,9 +122,10 @@ function App() {
   // below the threshold in red; applying moves them to unsegmented.
   const [eraseConfThr, setEraseConfThr] = useState(0.25)
   const [eraseConfArmed, setEraseConfArmed] = useState(false)
-  // ✨ Perfect modal (user 2026-08-31): only segments that already have a
-  // poisson/pgsr GLB are eligible — that mesh family is what gets perfected.
-  // 📦 Object library (user 2026-08-31): collection + every project GLB,
+  //  Correction Analysis (USER 2026-09-06, replaces Perfect in the
+  // toolbar): user marks the segments with the parallel-copies error; the
+  // algorithm does the rest. One pending correction at a time  Approve/Undo.
+  // Object library (user 2026-08-31): collection + every project GLB,
   // insertable as scene REFERENCES (delete never touches the source)
   const [showObjectLibrary, setShowObjectLibrary] = useState(false)
   const [objectLibrary, setObjectLibrary] = useState<Array<{ source: string; session?: string; name: string; url: string; size_mb: number }>>([])
@@ -93,17 +133,29 @@ function App() {
   const [placedObjects, setPlacedObjects] = useState<Array<{ id: number; name: string; visible: boolean }>>([])
   const [alignTargets, setAlignTargets] = useState<Array<{ key: string; label: string }>>([])
   const [alignTarget, setAlignTarget] = useState('')
-  const [showPerfectModal, setShowPerfectModal] = useState(false)
-  const [perfectSelected, setPerfectSelected] = useState<Set<number>>(new Set())
-  const [perfectRunning, setPerfectRunning] = useState(false)
-  // 🔧 Correction Analysis (USER 2026-09-06, replaces Perfect in the
-  // toolbar): user marks the segments with the parallel-copies error; the
-  // algorithm does the rest. One pending correction at a time → Approve/Undo.
   const [showCorrectionModal, setShowCorrectionModal] = useState(false)
-  // 🧪 Certification kit (claude_stac.txt §11): epochs before/after, colour by
+  //  Certification kit (claude_stac.txt §11): epochs before/after, colour by
   // witness status / mv_votes, trajectory with loop edges, duplicates,
   // attention list, acta — the user judges; Approve/Undo per epoch chain.
   const [showCertifyKit, setShowCertifyKit] = useState(false)
+  // bumped when a pipeline finishes: the certification stage ran inside it,
+  // so an open kit re-reads the acta / epochs / edges
+  const [certifyRefresh, setCertifyRefresh] = useState(0)
+  // No button (USER 2026-09-13): the kit opens BY ITSELF when the session has
+  // a certification acta with pending epochs to judge (after the pipeline's
+  // certify stage, or on opening such a session).
+  useEffect(() => {
+    if (!activeSession) { setShowCertifyKit(false); return }
+    let cancelled = false
+    fetch(`/api/certify/state/${activeSession}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(st => {
+        if (cancelled || !st) return
+        if (st.acta && (st.pending_epochs ?? 0) > 0) setShowCertifyKit(true)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [activeSession, certifyRefresh])
   const [correctionSelected, setCorrectionSelected] = useState<Set<number>>(new Set())
   const [correctionRunning, setCorrectionRunning] = useState(false)
   const [correctionState, setCorrectionState] = useState<any>(null)
@@ -136,7 +188,7 @@ function App() {
   const [correctionOverrideScale, setCorrectionOverrideScale] = useState(false)
   const [correctionLedger, setCorrectionLedger] = useState<any[] | null>(null)
   const [correctionArtifacts, setCorrectionArtifacts] = useState<any[] | null>(null)
-  // shared Approve/Undo handlers — used by the 🔧 modal AND the pending
+  // shared Approve/Undo handlers — used by the  modal AND the pending
   // banner (USER 2026-09-06: a pending correction MUST be visible).
   const approveCorrection = useCallback(async () => {
     const sid = pendingSessionRef.current || activeSession
@@ -150,9 +202,8 @@ function App() {
         method: 'POST', headers,
         body: JSON.stringify({ session_id: sid }),
       })
-      setStatusMessage(r.ok ? '🔧 correction APPROVED — it is now the cloud'
-        : '🔧 approve failed')
-    } catch { setStatusMessage('🔧 approve failed') }
+      setStatusMessage(r.ok ? tt('correction.approved') : tt('correction.approveFailed'))
+    } catch { setStatusMessage(tt('correction.approveFailed')) }
     setCorrectionRunning(false)
     refreshCorrectionStatus(pendingSessionRef.current || activeSession!)
   }, [activeSession, refreshCorrectionStatus, token])
@@ -161,7 +212,7 @@ function App() {
     if (!sid) return
     setCorrectionRunning(true)
     setCorrectionState({ status: 'working' })   // banner hides immediately
-    setStatusMessage('🔧 undoing (restores cloud+poses, rebuilds Potree)...')
+    setStatusMessage(tt('correction.undoing'))
     try {
       const headers: HeadersInit = { 'Content-Type': 'application/json' }
       if (token) headers['Authorization'] = `Bearer ${token}`
@@ -169,9 +220,8 @@ function App() {
         method: 'POST', headers,
         body: JSON.stringify({ session_id: sid }),
       })
-      setStatusMessage(r.ok ? '🔧 correction UNDONE — cloud restored'
-        : '🔧 undo failed')
-    } catch { setStatusMessage('🔧 undo failed') }
+      setStatusMessage(r.ok ? tt('correction.undone') : tt('correction.undoFailed'))
+    } catch { setStatusMessage(tt('correction.undoFailed')) }
     setCorrectionRunning(false)
     refreshCorrectionStatus(pendingSessionRef.current || activeSession!)
   }, [activeSession, refreshCorrectionStatus, token])
@@ -190,7 +240,7 @@ function App() {
   // per open scan; the ACTIVE tab is the scan being viewed AND worked on
   // (segmentation, brush, corrections, meshing, chat). Closing a tab loses
   // nothing; the scans list reopens it (double-click). The composition
-  // reference is a ★ on the list row (one per project).
+  // reference is a  on the list row (one per project).
   type ScanTab = { key: string; label: string; date: string; kind: 'scan' | 'fused' }
   const [projectScans, setProjectScans] = useState<any[]>([])
   // scans of EVERY project (tree children in the Projects list); the
@@ -200,7 +250,7 @@ function App() {
   const [activeScanTab, setActiveScanTab] = useState<string | null>(null)
   const [showFuseModal, setShowFuseModal] = useState(false)
   // scan requested for the NEXT project open (tree double-click on a
-  // not-loaded project); null → the composition reference opens
+  // not-loaded project); null  the composition reference opens
   const [openScanKey, setOpenScanKey] = useState<string | null>(null)
   const openScanKeyRef = useRef<string | null>(null)
   useEffect(() => { openScanKeyRef.current = openScanKey }, [openScanKey])
@@ -247,7 +297,7 @@ function App() {
     if (reload) {
       viewportRef.current?.clearScanLayers()
       viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid, scan_key: sc.key })
-      setStatusMessage(`working on ${sc.label}`)
+      setStatusMessage(tt('scans.workingOn', { label: sc.label }))
     }
   }, [])
   const closeScanTab = useCallback((key: string) => {
@@ -269,7 +319,7 @@ function App() {
     if (!activeSession) return
     loadProjectScans(activeSession).then(scans => {
       if (!scans.length) return
-      // opening a project shows the composition REFERENCE (★) — the
+      // opening a project shows the composition REFERENCE () — the
       // backend resets the active scan to it on the open load — unless a
       // scan was asked for explicitly from the tree
       const want = openScanKeyRef.current
@@ -347,8 +397,6 @@ function App() {
     }, 2000)
     return () => clearInterval(iv)
   }, [correctionRunning, activeSession])
-  // per-segment source mesh choice when both exist: 'poisson' | 'pgsr'
-  const [perfectSource, setPerfectSource] = useState<Record<number, string>>({})
   // leaving the brush turns the red preview off
   useEffect(() => {
     if (activeTool !== 'erase') {
@@ -356,28 +404,22 @@ function App() {
       viewportRef.current?.setConfHighlight(null)
     }
   }, [activeTool])
+  // shell state now lives in LayoutContext (prompt_ui.txt §5)
+  const layoutCtx = useLayout()
+  const setActivePanel = useCallback((p: 'sessions' | 'segments' | 'bim' | 'team' | 'analysis' | 'assistant' | null) => {
+    if (p === null) layoutCtx.setLeftTab(null)
+    else if (p === 'segments') layoutCtx.setLeftTab('instances')
+    else if (p === 'analysis') layoutCtx.openDock('report')
+    else if (p === 'assistant') layoutCtx.openInspector('assistant')
+    else layoutCtx.setLeftTab(p)
+  }, [layoutCtx])
+  const consoleOpen = layoutCtx.state.dockOpen && layoutCtx.state.dockTab === 'console'
+  const setConsoleOpen = useCallback((open: boolean) => { if (open) layoutCtx.openDock('console'); else layoutCtx.setDockOpen(false) }, [layoutCtx])
   const [connected, setConnected] = useState(false)
   const [serverAlive, setServerAlive] = useState(false)
-  const [activePanel, setActivePanel] = useState<'sessions' | 'segments' | 'bim' | 'team' | 'analysis' | 'assistant' | null>('sessions')
 
   const [bimModels, setBimModels] = useState<IFCLoadResult[]>([])
-  const [sidebarWidth, setSidebarWidth] = useState(280)
-  // Right-side collapsible AI chat dock (user 2026-08-28: the chat lives on the
-  // right, always at hand — works with or without a session/segmentation).
-  const [assistantOpen, setAssistantOpen] = useState<boolean>(
-    () => localStorage.getItem('stac.assistantOpen') !== '0')
-  const [assistantWidth, setAssistantWidth] = useState<number>(
-    () => Number(localStorage.getItem('stac.assistantWidth')) || 360)
-  // Model state reported by the chat panel — drives the menubar icon (gray
-  // until the model is loaded, lit when up).
   const [vlmStatus, setVlmStatus] = useState<'up' | 'loading' | 'busy' | 'down' | null>(null)
-  const toggleAssistant = useCallback(() => {
-    setAssistantOpen((o) => {
-      localStorage.setItem('stac.assistantOpen', o ? '0' : '1')
-      return !o
-    })
-  }, [])
-  const [consoleOpen, setConsoleOpen] = useState(false)
   const [pointSize, setPointSize] = useState(5.0)
   // Potree LOD point budget (max points rendered at once). Higher = more of the
   // cloud visible, but more client GPU/RAM. Slider lets it scale to any
@@ -386,7 +428,6 @@ function App() {
   const [pointBudget, setPointBudget] = useState(10_000_000)
   // Display-settings popover (groups Point Size / Detail / Confidence so they
   // don't eat toolbar space).
-  const [showDisplayMenu, setShowDisplayMenu] = useState(false)
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.0)
   const [hasConfidence, setHasConfidence] = useState(false)
 
@@ -396,13 +437,10 @@ function App() {
   const [sessionLoading, setSessionLoading] = useState<string | null>(null)
   const [fps, setFps] = useState(0)
   const [consoleLogs, setConsoleLogs] = useState<{ ts: string; level: string; msg: string }[]>([])
-  const consoleEndRef = useRef<HTMLDivElement>(null)
-  const [openMenu, setOpenMenu] = useState<string | null>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<ViewportHandle>(null)
   // Timestamp (ms) of the last time a cloud actually loaded into the viewer (point
   // count > 0). Used by the pipeline-done handler to tell "the cloud arrived on this
-  // live socket" from "WS reconnected mid-pipeline → potree_ready went to a dead socket".
+  // live socket" from "WS reconnected mid-pipeline  potree_ready went to a dead socket".
   const lastCloudLoadAtRef = useRef(0)
   const [flythroughOpen, setFlythroughOpen] = useState<string | null>(null)
   const [adminOpen, setAdminOpen] = useState(false)
@@ -426,7 +464,7 @@ function App() {
   const [pipelineDialogOpen, setPipelineDialogOpen] = useState(false)
   const [pipelineDialogSession, setPipelineDialogSession] = useState<string | null>(null)
 
-  // The pipeline always runs end-to-end (reconstruction → cloud cleaning →
+  // The pipeline always runs end-to-end (reconstruction  cloud cleaning 
   // TSDF); the backend ignores any stage selection, so the dialog only asks
   // which scans to rebuild and whether to replace existing outputs.
   const [pipelineReplace, setPipelineReplace] = useState(true)
@@ -449,18 +487,13 @@ function App() {
   const interactiveSessionRef = useRef(interactiveSessionId)
   const [compareDialogOpen, setCompareDialogOpen] = useState(false)
   const [useManualAlignment, setUseManualAlignment] = useState(true)
-  const [creatingProject, setCreatingProject] = useState(false)
-  const [newProjectName, setNewProjectName] = useState('')
-  const [renamingProject, setRenamingProject] = useState<string | null>(null)
-  const [renameValue, setRenameValue] = useState('')
-  // Video upload → frame extraction, keyed by session id. Presence means the
+  // Video upload  frame extraction, keyed by session id. Presence means the
   // session has no frames yet and is uploading/extracting; pct drives the spinner.
   const [extractingSessions, setExtractingSessions] = useState<Record<string, number>>({})
   const videoInputRef = useRef<HTMLInputElement>(null)
   const pendingVideoSession = useRef<string | null>(null)
   const [scansList, setScansList] = useState<{ date: string; source: string; key: string; frame_count: number; has_output: boolean; recon_state?: string; cached_chunks?: number }[]>([])
   const [selectedScans, setSelectedScans] = useState<string[]>([])
-  const [projectFilter, setProjectFilter] = useState('')
 
 
 
@@ -530,7 +563,7 @@ function App() {
   const prevAliveRef = useRef(serverAlive)
   useEffect(() => {
     if (prevAliveRef.current && !serverAlive) {
-      // Server just went from alive → dead (after 3 consecutive failures)
+      // Server just went from alive  dead (after 3 consecutive failures)
       setConnected(false)
       setActivePanel('sessions')
       setSessions([])
@@ -541,12 +574,12 @@ function App() {
       setPointCount(0)
       setPipelineRunning(null)
       setSessionLoading(null)
-      setStatusMessage('Server disconnected')
+      setStatusMessage(tt('status.serverDisconnected'))
       // Dispose Potree data from GPU to free memory and stop LOD updates
       viewportRef.current?.clearScene()
     }
     if (!prevAliveRef.current && serverAlive) {
-      // Server just went from dead → alive: clear stale message
+      // Server just went from dead  alive: clear stale message
       setStatusMessage('')
     }
     prevAliveRef.current = serverAlive
@@ -570,15 +603,10 @@ function App() {
     return () => ws.close()
   }, [consoleOpen])
 
-  // Auto-scroll console
-  useEffect(() => {
-    consoleEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [consoleLogs])
-
   const [statusMessage, setStatusMessage] = useState('')
   const [segments, setSegments] = useState<SegmentInstance[]>([])
   // Unsegmented point count for the panel (user 2026-08-31: every segment
-  // shows its count except Unsegmented). null = unknown → hidden.
+  // shows its count except Unsegmented). null = unknown  hidden.
   const [unsegmentedCount, setUnsegmentedCount] = useState<number | null>(null)
   const refreshUnsegmentedCount = useCallback(async (sid: string | null) => {
     if (!sid) { setUnsegmentedCount(null); return }
@@ -608,7 +636,7 @@ function App() {
             key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
             id: inst.instance_id || inst.id,
             label: `${inst.label}`,
-            color: inst.color || '#4fd1ff',
+            color: inst.color || tokenColor('--measure'),
             totalPoints: inst.total_points || 0,
             visible: vis.get(inst.instance_id || inst.id) ?? true,
             excluded: inst.excluded || false,
@@ -617,18 +645,16 @@ function App() {
       }
     } catch { /* silent */ }
   }, [])
-  // Floor→y=0 leveling: candidates + which floor instance sits at y=0.
+  // Floory=0 leveling: candidates + which floor instance sits at y=0.
   // Changing the combobox re-levels instantly (no confirm); the manager
   // close and session load call the auto modes.
   const [floorLevel, setFloorLevel] = useState<{ candidates: { instance_id: number, label: string, height_m: number | null }[], selected: number | null }>({ candidates: [], selected: null })
   const floorLevelCheckedRef = useRef<string | null>(null)
-  const [editingSegKey, setEditingSegKey] = useState<string | null>(null)
-  const [segSearch, setSegSearch] = useState('')
 
   // Cloud object-level visibility — App owns the truth (Unsegmented + segments).
   // Reset to "visible" on every session switch; the second useEffect combines
   // it with `segments` and tells the Viewport whether to keep the cloud in the
-  // scene (true) or pull it out (false → frees GPU, the Potree LOD self-gates,
+  // scene (true) or pull it out (false  frees GPU, the Potree LOD self-gates,
   // and the raycaster skips it so measurements land on meshes).
   const [unsegmentedVisible, setUnsegmentedVisible] = useState(true)
   useEffect(() => {
@@ -658,9 +684,6 @@ function App() {
   const [shapeMeshes, setShapeMeshes] = useState<MeshListItem[]>([])
   const [tsdfMeshes, setTsdfMeshes] = useState<MeshListItem[]>([])
 
-  // Shape export state
-  const [showShapeModal, setShowShapeModal] = useState(false)
-  const [shapeAutoReconstruct, setShapeAutoReconstruct] = useState(true)
   const [shapeRunning, setShapeRunning] = useState(false)
   // Ref-based busy guard. The `disabled` prop on the Start button only gates
   // clicks AFTER React commits the next render — between the click and that
@@ -669,13 +692,7 @@ function App() {
   // intermediary retry can all sneak a second click through. The ref is set
   // synchronously, so any second entry within the same JS turn is rejected.
   const shapeBusyRef = useRef(false)
-  // Reconstruction-v2 ("scene") trigger — assembles parametric surfaces / swept
-  // solids / boxes / linear-repeats + free-form generated (MeshFlow) meshes into output/scene/.
-  const [reconRunning, setReconRunning] = useState(false)
-  const reconBusyRef = useRef(false)
-  const [shapeResult, setShapeResult] = useState<{ count: number; exported: string[] } | null>(null)
-  const [shapeSelected, setShapeSelected] = useState<Set<number>>(new Set())
-  const [shapeStatus, setShapeStatus] = useState<Record<number, { has_pkl: boolean; has_mesh: boolean }>>({})
+  const [, setShapeStatus] = useState<Record<number, { has_pkl: boolean; has_mesh: boolean }>>({})
 
   // Live progress for the in-flight shape run
   type ShapeInstanceProgress = {
@@ -685,7 +702,7 @@ function App() {
     error?: string
     mesh?: string
   }
-  const [shapeProgress, setShapeProgress] = useState<Record<number, ShapeInstanceProgress>>({})
+  const [, setShapeProgress] = useState<Record<number, ShapeInstanceProgress>>({})
   const [shapeOverall, setShapeOverall] = useState<{ phase: string; total?: number; done?: number }>({ phase: 'idle' })
 
   const refreshShapeStatus = useCallback(async () => {
@@ -746,9 +763,9 @@ function App() {
         return items.map(s => ({
           instanceId: s.meta?.instance_id ?? -1,
           label: (s.meta?.label as string)
-            || (s.meta?.method === 'tsdf_scene' ? '🧱 TSDF — whole scene'
-                : s.meta?.method === 'poisson_scene' ? '🟣 Poisson — whole scene'
-                : s.folder === 'scene' ? '🌐 Whole scene' : s.folder),
+            || (s.meta?.method === 'tsdf_scene' ? ' TSDF — whole scene'
+                : s.meta?.method === 'poisson_scene' ? ' Poisson — whole scene'
+                : s.folder === 'scene' ? ' Whole scene' : s.folder),
           folder: s.folder,
           // Scene meshes start visible (auto-loaded). Per-instance meshes are
           // lazy: every refresh follows a viewer reset (reloadTsdf / session
@@ -762,9 +779,6 @@ function App() {
       })
     } catch { /* ignore */ }
   }, [])
-
-  // (the old standalone Shape modal opener was removed — the 🧩 Meshing modal's
-  // Object button covers it, sharing the same segment selection)
 
   // Poll progress while running
   useEffect(() => {
@@ -798,45 +812,6 @@ function App() {
     const id = window.setInterval(tick, 1500)
     return () => { alive = false; window.clearInterval(id) }
   }, [shapeRunning, activeSession, refreshShapeStatus, refreshShapeMeshList])
-
-  // Poll reconstruction-v2 progress while a run is in flight. The POST kicks
-  // off a background job (single-flight, so it can't OOM the host) and returns
-  // immediately; this drives the status line and reloads the scene when done.
-  useEffect(() => {
-    if (!reconRunning || !activeSession) return
-    let alive = true
-    const tick = async () => {
-      try {
-        const r = await fetch(`/api/segmentation/reconstruct/progress/${activeSession}`)
-        const p = await r.json()
-        if (!alive) return
-        const ph: string = p.phase || 'running'
-        if (ph === 'done') {
-          const s = p.summary || {}
-          const byClass = Object.entries(s.by_class || {}).map(([k, v]) => `${v} ${k}`).join(', ')
-          setStatusMessage(`Scene: ${s.n_elements ?? '?'} element(s) [${byClass}], ${s.n_adjacency ?? 0} adjacency edge(s) — ${s.elapsed_s ?? '?'}s`)
-          try { await viewportRef.current?.reloadReconScene(activeSession) } catch { /* ignore */ }
-          reconBusyRef.current = false
-          setReconRunning(false)
-          return
-        }
-        if (ph === 'error') {
-          setStatusMessage(`Reconstruction error: ${p.error || 'unknown'}`)
-          reconBusyRef.current = false
-          setReconRunning(false)
-          return
-        }
-        const det = (ph === 'classifying' && p.total)
-          ? ` ${p.done ?? 0}/${p.total}${p.current ? ' — ' + p.current : ''}` : ''
-        const nv = p.n_views != null ? ` · ${p.n_views} views` : ''
-        const npts = p.n_points != null ? ` · ${(p.n_points / 1e6).toFixed(1)}M pts` : ''
-        setStatusMessage(`Reconstruction: ${ph}${det}${nv}${npts}…`)
-      } catch { /* keep polling through transient errors */ }
-    }
-    tick()
-    const id = window.setInterval(tick, 1500)
-    return () => { alive = false; window.clearInterval(id) }
-  }, [reconRunning, activeSession])
 
   // ── TSDF export state (parallel to ShapeR — same UX, different backend) ──
   const [showTsdfModal, setShowTsdfModal] = useState(false)
@@ -973,34 +948,6 @@ function App() {
     refreshTsdfMeshList(activeSession)
   }, [activeSession, refreshShapeMeshList, refreshTsdfMeshList])
 
-  // Close menu when clicking outside
-  useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setOpenMenu(null)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [])
-
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Home') { viewportRef.current?.resetCamera(); e.preventDefault() }
-      if (e.key === '`' && e.ctrlKey) {
-        setConsoleOpen(prev => !prev)
-        e.preventDefault()
-      }
-      if (e.key === 'b' && e.ctrlKey) {
-        setActivePanel(prev => prev ? null : 'sessions')
-        e.preventDefault()
-      }
-    }
-    window.addEventListener('keydown', handleKey)
-    return () => window.removeEventListener('keydown', handleKey)
-  }, [])
-
   const connectToServer = useCallback(async () => {
     try {
       const headers: HeadersInit = {}
@@ -1081,7 +1028,7 @@ function App() {
     openScanKeyRef.current = sc.key
     setOpenScanKey(sc.key)     // the open load asks for this scan explicitly
     handleSessionLoad(sid)
-  }, [activeSession, activateScan]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeSession, activateScan])  
 
   // Load session — actually loads the cloud in the viewport
   const handleSessionLoad = useCallback((sessionId: string) => {
@@ -1111,7 +1058,7 @@ function App() {
     setSabanaFullMeta(null)
     // Reset OBBs visibility
     viewportRef.current?.setOBBsVisible(true)
-  }, [sessions]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessions])  
 
   // Dismiss loading overlay when points arrive (session load only, not refresh)
   const prevPointCount = useRef(0)
@@ -1134,19 +1081,19 @@ function App() {
         setSessionLoading(null)
         // Only show error if no pipeline is running on this session
         if (!pipelineRunning || pipelineRunning.status !== 'running' || pipelineRunning.session_id !== activeSession) {
-          setStatusMessage('Session has no point cloud data. Run Reconstruct to generate.')
+          setStatusMessage(tt('sessions.noCloudData'))
         }
       }
     }, 45000)  // 45s: large octrees need time to download before points appear
     return () => clearTimeout(timer)
-  }, [sessionLoading, pipelineRunning, activeSession]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionLoading, pipelineRunning, activeSession])  
 
   // Auto-detect sábana when BIM models first appear after session load
   const prevBimCount = useRef(0)
   useEffect(() => {
     const wasZero = prevBimCount.current === 0
     prevBimCount.current = bimModels.length
-    // Only trigger when transitioning from 0 → N models (fresh session load)
+    // Only trigger when transitioning from 0  N models (fresh session load)
     if (!wasZero || bimModels.length === 0 || !activeSession) return
     fetch(`/api/sessions/${activeSession}/sabana/exists`)
       .then(r => r.json())
@@ -1154,8 +1101,8 @@ function App() {
         if (d.exists) {
           setSabanaVisible(true)
           setSabanaLoading(true)
-          setSessionLoading('Loading sábana comparison...')
-          setStatusMessage('Loading sábana comparison...')
+          setSessionLoading(tt('deviation.loadingComparison'))
+          setStatusMessage(tt('deviation.loadingComparison'))
           viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: activeSession })
           viewportRef.current?.setOBBsVisible(false)
           fetch(`/api/sessions/${activeSession}/sabana/meta`)
@@ -1222,7 +1169,7 @@ function App() {
       if (timer) clearTimeout(timer)
       clearTimeout(initialDelay)
     }
-  }, [activeSession, connected]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeSession, connected])  
 
   // Poll frame-extraction progress until it finishes, then refresh the session
   // list so frameCount > 0 and the "+" button becomes the reconstruct hammer.
@@ -1234,20 +1181,20 @@ function App() {
         const p = await r.json()
         if (p.phase === 'extracting') {
           setExtractingSessions(prev => ({ ...prev, [sessionId]: p.pct || 0 }))
-          setStatusMessage(`Extracting frames: ${p.saved || 0}${p.total ? `/${p.total}` : ''} (${p.pct || 0}%)…`)
+          setStatusMessage(tt('video.extracting', { saved: p.saved || 0, total: p.total ? `/${p.total}` : '', pct: p.pct || 0 }))
           setTimeout(tick, 1500)
         } else if (p.phase === 'error') {
           setExtractingSessions(prev => { const n = { ...prev }; delete n[sessionId]; return n })
-          setStatusMessage(`Frame extraction failed: ${p.error || 'unknown'}`)
+          setStatusMessage(tt('video.extractFailed', { detail: p.error || '' }))
         } else {
-          // done or idle → frames are on disk
+          // done or idle  frames are on disk
           setExtractingSessions(prev => { const n = { ...prev }; delete n[sessionId]; return n })
-          setStatusMessage(`Frames extracted (${p.saved || p.frame_count || 0}). Ready to reconstruct.`)
+          setStatusMessage(tt('video.extracted', { n: p.saved || p.frame_count || 0 }))
           connectToServer()
         }
       } catch {
         setExtractingSessions(prev => { const n = { ...prev }; delete n[sessionId]; return n })
-        setStatusMessage('Lost connection while extracting frames')
+        setStatusMessage(tt('video.lostConnection'))
       }
     }
     tick()
@@ -1268,7 +1215,7 @@ function App() {
     pendingVideoSession.current = null
     if (!sessionId || !token) return
     setExtractingSessions(prev => ({ ...prev, [sessionId]: 0 }))
-    setStatusMessage(`Uploading ${file.name}…`)
+    setStatusMessage(tt('video.uploading', { name: file.name }))
     try {
       const formData = new FormData()
       formData.append('file', file)
@@ -1280,13 +1227,13 @@ function App() {
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         setExtractingSessions(prev => { const n = { ...prev }; delete n[sessionId]; return n })
-        setStatusMessage(`Upload failed: ${err.detail || `HTTP ${res.status}`}`)
+        setStatusMessage(tt('video.uploadFailed', { detail: err.detail || `HTTP ${res.status}` }))
         return
       }
       pollVideoExtraction(sessionId)
     } catch (err: any) {
       setExtractingSessions(prev => { const n = { ...prev }; delete n[sessionId]; return n })
-      setStatusMessage(`Upload error: ${err?.message ?? err}`)
+      setStatusMessage(tt('video.uploadFailed', { detail: err?.message ?? err }))
     }
   }, [token, pollVideoExtraction])
 
@@ -1315,12 +1262,12 @@ function App() {
       if (d.leveled && d.changed && d.matrix) {
         viewportRef.current?.setFloorTransform(d.matrix)
         viewportRef.current?.refreshSegmentOBBs(sessionId)
-        setStatusMessage(`Floor leveled to y=0 (was ${d.residual_before_mm ?? '?'} mm off)`)
+        setStatusMessage(tt('instances.floorLeveled', { mm: d.residual_before_mm ?? '' }))
       }
     } catch { /* non-fatal */ }
   }, [])
 
-  // Floor→y=0 on session load: once the cloud is actually in the viewer
+  // Floory=0 on session load: once the cloud is actually in the viewer
   // (pointCount > 0), detect an un-leveled segmented floor and fix it —
   // the server no-ops when it is already level. Once per session.
   useEffect(() => {
@@ -1378,8 +1325,7 @@ function App() {
         replace: pipelineReplace,
         scans: selectedScans,
       })
-      const label = selectedScans.length === 1 ? selectedScans[0] : `${selectedScans.length} scans`
-      setStatusMessage(`Pipeline started for ${pipelineDialogSession} (${label})...`)
+      setStatusMessage(tt('pipeline.started', { session: pipelineDialogSession, n: selectedScans.length }))
     }, 500)
   }, [pipelineDialogSession, pipelineReplace, selectedScans])
 
@@ -1388,7 +1334,7 @@ function App() {
     if (!targetSession) return
     viewportRef.current?.sendCommand({ type: 'cancel_pipeline', session_id: targetSession })
     setPipelineRunning(null)
-    setStatusMessage('Pipeline cancelled')
+    setStatusMessage(tt('pipeline.cancelled'))
   }, [activeSession, pipelineRunning])
 
   const handlePipelineProgress = useCallback((data: Record<string, unknown>) => {
@@ -1416,20 +1362,21 @@ function App() {
       const shortMsg = currentStage.message?.length > 60
         ? currentStage.message.slice(0, 57) + '…'
         : currentStage.message
-      setStatusMessage(`${currentStage.icon} ${currentStage.label}: ${shortMsg || ''} ${pct}%`)
+      setStatusMessage(`${currentStage.label}: ${shortMsg || ''} ${pct} %`)
     }
     // Dead-socket FALLBACK only: if the WS reconnected during a long pipeline, the
     // backend's _on_pipeline_complete closure sent potree_ready on the now-dead socket,
-    // so no cloud arrives on THIS live socket → reload the session. If the cloud DID load
+    // so no cloud arrives on THIS live socket  reload the session. If the cloud DID load
     // here (the normal case), do NOTHING. The old code unconditionally clearScene()'d +
-    // reloaded, which WIPED the cloud potree_ready had just loaded → the viewer got stuck
+    // reloaded, which WIPED the cloud potree_ready had just loaded  the viewer got stuck
     // and only a backend restart + manual reload recovered it. No clearScene now: the
     // potree_ready handler already disposes/replaces the loader on reload.
     if (newState.status === 'done' && newState.session_id) {
       const sid = newState.session_id
       const doneAt = Date.now()
+      setCertifyRefresh(v => v + 1)
       setTimeout(() => {
-        if (lastCloudLoadAtRef.current >= doneAt) return  // cloud arrived on this socket → keep it
+        if (lastCloudLoadAtRef.current >= doneAt) return  // cloud arrived on this socket  keep it
         viewportRef.current?.sendCommand({ type: 'load_session', session_id: sid })
       }, 8000)
     }
@@ -1437,7 +1384,7 @@ function App() {
 
   const handleSegment = useCallback((sessionId: string) => {
     viewportRef.current?.sendCommand({ type: 'set_prompt', prompt: 'auto' })
-    setStatusMessage(`Segmenting ${sessionId}...`)
+    setStatusMessage(tt('segmentation.segmenting', { session: sessionId }))
   }, [])
 
   const handleUnload = useCallback(() => {
@@ -1457,7 +1404,7 @@ function App() {
   useEffect(() => {
     const wasZero = prevPointCountRef.current === 0
     prevPointCountRef.current = pointCount
-    if (!wasZero || pointCount === 0) return  // Only trigger on 0 → N transition
+    if (!wasZero || pointCount === 0) return  // Only trigger on 0  N transition
     if (!activeSession || !token) return
     prefsLoadedRef.current = false
     fetch(`/api/sessions/${activeSession}/prefs`, {
@@ -1476,7 +1423,7 @@ function App() {
         setPointBudget(10_000_000)
         prefsLoadedRef.current = true
       })
-  }, [pointCount]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pointCount])  
 
   // ── Auto-save viewer prefs to server on change (debounced) ──
   const prefsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1494,9 +1441,9 @@ function App() {
       }).catch(() => {})
     }, 500)
     return () => { if (prefsSaveTimer.current) clearTimeout(prefsSaveTimer.current) }
-  }, [pointSize, confidenceThreshold, pointBudget]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pointSize, confidenceThreshold, pointBudget])  
 
-  // ── Sábana: Generate comparison (auto_match → compare → show via Potree) ──
+  // ── Sábana: Generate comparison (auto_match  compare  show via Potree) ──
   // Open the comparison dialog (shows toggle inside)
   const handleGenerateComparison = useCallback(() => {
     if (!activeSession) return
@@ -1514,12 +1461,12 @@ function App() {
     viewportRef.current?.sendCommand({ type: 'load_session', session_id: activeSession })
     viewportRef.current?.setOBBsVisible(true)
     setActivePanel('bim')
-    setStatusMessage(useManualAlignment ? 'Running BIM comparison (manual alignment)...' : 'Running BIM comparison (auto-register)...')
+    setStatusMessage(useManualAlignment ? tt('deviation.runningManual') : tt('deviation.runningAuto'))
     try {
       const matchRes = await fetch(`/api/bim/auto_match/${activeSession}`)
       const matchData = await matchRes.json()
       if (!matchData.matches?.length) {
-        setStatusMessage('No matches found between segments and IFC elements')
+        setStatusMessage(tt('deviation.noMatches'))
         setSabanaLoading(false)
         return
       }
@@ -1534,7 +1481,7 @@ function App() {
       })
       const compareData = await compareRes.json()
       if (!compareData.ok) {
-        setStatusMessage(`Comparison failed: ${compareData.error || 'unknown'}`)
+        setStatusMessage(tt('deviation.failed', { detail: compareData.error || '' }))
         setSabanaLoading(false)
         return
       }
@@ -1553,7 +1500,7 @@ function App() {
         }
       } catch { /* ignore */ }
     } catch (e: any) {
-      setStatusMessage(`Comparison error: ${e.message}`)
+      setStatusMessage(tt('deviation.failed', { detail: e.message }))
     }
     setSabanaLoading(false)
   }, [activeSession, sabanaVisible, useManualAlignment])
@@ -1562,23 +1509,23 @@ function App() {
   const handleToggleSabana = useCallback(() => {
     if (!activeSession) return
     if (sabanaVisible) {
-      // Toggle OFF → reload original scan cloud + show OBBs (preserve camera!)
+      // Toggle OFF  reload original scan cloud + show OBBs (preserve camera!)
       viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: activeSession })
       viewportRef.current?.setOBBsVisible(true)
       setSabanaVisible(false)
       setSabanaMetrics(null)
       setSabanaFullMeta(null)
-      setStatusMessage('Reloading scan cloud...')
+      setStatusMessage(tt('deviation.reloadingCloud'))
       setActivePanel('bim')
       return
     }
-    // Toggle ON → load sábana + hide OBBs + fetch analysis meta
-    setStatusMessage('Loading sábana...')
+    // Toggle ON  load sábana + hide OBBs + fetch analysis meta
+    setStatusMessage(tt('deviation.loading'))
     viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: activeSession })
     viewportRef.current?.setOBBsVisible(false)
     if (activeTool === 'align') setActiveTool('navigate')
     setSabanaVisible(true)
-    // Fetch full metadata → show analysis panel
+    // Fetch full metadata  show analysis panel
     fetch(`/api/sessions/${activeSession}/sabana/meta`)
       .then(r => r.ok ? r.json() : null)
       .then(fullMeta => {
@@ -1591,29 +1538,444 @@ function App() {
       .catch(() => { })
   }, [activeSession, sabanaVisible])
 
-  const toggleMenu = (menu: string) => {
-    setOpenMenu(openMenu === menu ? null : menu)
-  }
-
-  const menuAction = (action: () => void) => {
-    action()
-    setOpenMenu(null)
-  }
 
   const hasSession = activeSession !== null
-  const panelOpen = activePanel !== null
+  // ── Shell wiring (prompt_ui.txt §5): layout regions, palette, toasts ──
+  const { t, fmt } = useI18n()
+  const layout = useLayout()
+  const { notify } = useToast()
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [colorMode, setColorMode] = useState<ColorMode>('rgb')
+  const [mvThreshold, setMvThreshold] = useState(2)
+  const [selectedSegmentId, setSelectedSegmentId] = useState<number | null>(null)
+  const [cursor, setCursor] = useState<{ x: number; y: number; z: number } | null>(null)
+  const [readouts, setReadouts] = useState<ReadoutAnchor[]>([])
+  const [metersPerPixel, setMetersPerPixel] = useState<number | null>(null)
+  const [certifyState, setCertifyState] = useState<any>(null)
+  const [hasWitness, setHasWitness] = useState(false)
+  const [activeTasks, setActiveTasks] = useState<Array<{ label: string; pct: number; detail: string }>>([])
+  const canManage = user?.role === 'admin' || user?.role === 'manager'
 
-  const togglePanel = (panel: typeof activePanel) => {
-    setActivePanel(prev => prev === panel ? null : panel)
-  }
+  // witness colour mode -> viewer (the certification kit shares this state)
+  useEffect(() => {
+    const mode = colorMode === 'status' || colorMode === 'mv_votes' ? colorMode : 'rgb'
+    viewportRef.current?.setWitnessColorMode(mode, mvThreshold)
+  }, [colorMode, mvThreshold, pointCount])
+  useEffect(() => { if (colorMode === 'deviation' && !sabanaVisible) setColorMode('rgb') }, [sabanaVisible, colorMode])
+  useEffect(() => { setColorMode('rgb'); setSelectedSegmentId(null); setReadouts([]) }, [activeSession])
+  // geometry epoch for the status bar: certify state (re-read with the kit)
+  useEffect(() => {
+    if (!activeSession) { setCertifyState(null); return }
+    let cancelled = false
+    fetch(`/api/certify/state/${activeSession}`).then(r => (r.ok ? r.json() : null)).then(st => { if (!cancelled) setCertifyState(st) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [activeSession, certifyRefresh, correctionState])
+  // the certification kit lives in the Inspector's Acta tab
+  useEffect(() => { if (showCertifyKit) layout.openInspector('acta') }, [showCertifyKit])  
+  // active server tasks for the Jobs dock
+  useEffect(() => {
+    if (!activeSession || !connected) { setActiveTasks([]); return }
+    const iv = setInterval(async () => {
+      try {
+        const d = await fetch(`/api/tasks/${activeSession}`).then(r => r.json())
+        setActiveTasks((d.tasks || []).map((x: any) => ({ label: x.label || x.task_type || '', pct: x.pct || 0, detail: x.detail || '' })))
+      } catch { /* keep last */ }
+    }, 4000)
+    return () => clearInterval(iv)
+  }, [activeSession, connected])
+
+  // keyboard: palette, inspector, left panel, console, reset camera
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tgt = e.target as HTMLElement | null
+      const typing = tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setPaletteOpen(o => !o); return }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') { e.preventDefault(); layout.toggleInspector(); return }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') { e.preventDefault(); layout.setLeftTab(layout.state.leftTab ? null : 'sessions'); return }
+      if ((e.ctrlKey || e.metaKey) && e.key === '`') { e.preventDefault(); if (layout.state.dockOpen && layout.state.dockTab === 'console') layout.setDockOpen(false); else layout.openDock('console'); return }
+      if (typing) return
+      if (e.key === 'Home') { viewportRef.current?.resetCamera(); e.preventDefault() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [layout])
+
+  const report = useCallback((msg: string, tone: 'ok' | 'err' | 'warn' | 'info' = 'info') => {
+    setStatusMessage(msg)
+    if (tone !== 'info') notify(msg, { tone })
+  }, [notify])
+
+  const disconnect = useCallback((andLogout = false) => {
+    viewportRef.current?.sendCommand({ type: 'cleared' })
+    viewportRef.current?.clearScene()
+    setConnected(false)
+    setActivePanel('sessions')
+    setSessions([])
+    setActiveSession(null)
+    setSelectedSession(null)
+    setSessionLoading(null)
+    setSegments([])
+    setBimModels([])
+    setPointCount(0)
+    setActiveTool('navigate')
+    setStatusMessage('')
+    if (andLogout) logout()
+  }, [logout])  
+
+  const openObjectLibrary = useCallback(async () => {
+    setShowObjectLibrary(true)
+    try {
+      const r = await fetch('/api/objects/library')
+      if (r.ok) setObjectLibrary((await r.json()).items || [])
+    } catch { /* silent */ }
+  }, [])
+
+  const undoBrush = useCallback(async () => {
+    if (!activeSession) return
+    try {
+      const r = await fetch('/api/segmentation/erase/undo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession }) })
+      const d = await r.json()
+      report(d.ok ? t('brush.undone', { n: fmt.integer(d.restored || 0) }) : t('brush.nothingToUndo'), d.ok ? 'ok' : 'warn')
+    } catch { report(t('brush.undoFailed'), 'err') }
+  }, [activeSession, report, t, fmt])
+
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) document.exitFullscreen()
+    else document.documentElement.requestFullscreen()
+  }, [])
+
+  const renameSession = useCallback(async (id: string, name: string) => {
+    try {
+      const headers: HeadersInit = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(`/sessions/${id}`, { method: 'PATCH', headers, body: JSON.stringify({ name }) })
+      if (!res.ok) { const err = await res.json().catch(() => ({})); report(err.detail || t('sessions.renameFailed'), 'err') }
+      else { report(t('sessions.renamed', { name }), 'ok'); connectToServer() }
+    } catch { report(t('sessions.renameFailed'), 'err') }
+  }, [token, connectToServer, report, t])
+
+  const deleteSession = useCallback(async (id: string) => {
+    const ok = await confirmDanger(t('sessions.deleteMessage', { id }), t('sessions.deleteTitle', { id }))
+    if (!ok) return
+    try {
+      const headers: HeadersInit = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(`/sessions/${id}`, { method: 'DELETE', headers })
+      if (!res.ok) { const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` })); report(err.detail || t('sessions.deleteFailed'), 'err') }
+      else { if (activeSession === id) handleUnload(); report(t('sessions.deleted', { id }), 'ok'); connectToServer() }
+    } catch (err: any) { report(t('sessions.deleteFailedDetail', { detail: err?.message || err }), 'err') }
+  }, [token, activeSession, handleUnload, connectToServer, confirmDanger, report, t])
+
+  const createSession = useCallback(async (name: string) => {
+    try {
+      const headers: HeadersInit = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch('/sessions', { method: 'POST', headers, body: JSON.stringify({ name }) })
+      if (!res.ok) { const err = await res.json().catch(() => ({})); report(err.detail || t('sessions.createFailed'), 'err') }
+      else { report(t('sessions.created', { name }), 'ok'); connectToServer() }
+    } catch { report(t('sessions.createFailed'), 'err') }
+  }, [token, connectToServer, report, t])
+
+  const setReference = useCallback(async (sid: string, sc: any) => {
+    if (sc.is_reference || sc.kind === 'fused') return
+    try {
+      await fetch(`/api/project/${sid}/composition/reference`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scan_key: sc.key }) })
+      report(t('scans.referenceSet', { label: sc.label }), 'ok')
+      loadProjectScans(sid)
+    } catch { report(t('scans.referenceFailed'), 'err') }
+  }, [loadProjectScans, report, t])
+
+  const renameSegment = useCallback(async (seg: SegmentInstance, newLabel: string) => {
+    if (!activeSession) return
+    await fetch('/api/segmentation/rename', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel, old_label: seg.label.replace(/ #\d+$/, '') }),
+    })
+    setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, label: newLabel } : s)))
+    viewportRef.current?.refreshSegmentOBBs(activeSession)
+  }, [activeSession])
+
+  const deleteSegment = useCallback(async (seg: SegmentInstance) => {
+    const ok = await confirmDanger(t('instances.deleteMessage', { label: seg.label }), t('instances.deleteTitle'))
+    if (!ok || !activeSession) return
+    const res = await fetch('/api/segmentation/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      // label pins the EXACT row: instance_id alone collides across writers (strip the ' #N' suffix)
+      body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: seg.label.replace(/ #\d+$/, '') }),
+    })
+    if (res.ok) {
+      setSegments(prev => prev.filter(s => s.key !== seg.key))
+      viewportRef.current?.setSegmentVisibility(seg.id, false)
+      viewportRef.current?.refreshSegmentOBBs(activeSession)
+      report(t('instances.deleted', { label: seg.label }), 'ok')
+    } else report(t('instances.deleteFailed', { status: res.status }), 'err')
+  }, [activeSession, confirmDanger, report, t])
+
+  const deleteTsdfMesh = useCallback(async (m: MeshListItem) => {
+    if (!activeSession) return
+    const ok = await confirmDanger(t('instances.deleteMeshMessage', { label: m.label, folder: m.folder }), t('instances.deleteMeshTitle'))
+    if (!ok) return
+    try {
+      const r = await fetch('/api/segmentation/tsdf/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, folder: m.folder }) })
+      const d = await r.json()
+      if (d.ok) {
+        report(t('instances.meshDeleted', { label: m.label }), 'ok')
+        viewportRef.current?.clearTsdf()
+        await refreshTsdfMeshList(activeSession)
+        viewportRef.current?.reloadTsdf(activeSession)
+      } else report(t('instances.meshDeleteFailed', { detail: d.detail || '' }), 'err')
+    } catch { report(t('instances.meshDeleteFailed', { detail: '' }), 'err') }
+  }, [activeSession, confirmDanger, refreshTsdfMeshList, report, t])
+
+  const openCorrection = useCallback(() => {
+    if (!activeSession) return
+    setCorrectionSelected(new Set()); setCorrectionReport(null); setShowCorrectionModal(true)
+    refreshCorrectionStatus(activeSession); loadCorrectionLedger(activeSession); loadCorrectionArtifacts(activeSession)
+  }, [activeSession, refreshCorrectionStatus, loadCorrectionLedger, loadCorrectionArtifacts])
+
+  const runCorrectionOp = useCallback(async (kind: 'objects' | 'floor' | 'revisit') => {
+    if (!activeSession) return
+    setCorrectionRunning(true)
+    setCorrectionReport(null)
+    setStatusMessage(kind === 'objects' ? t('correction.analyzing') : kind === 'floor' ? t('correction.aligningFloor') : t('correction.detecting'))
+    try {
+      const headers: HeadersInit = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const url = kind === 'objects' ? '/api/correction/run' : kind === 'floor' ? '/api/correction/floor' : '/api/correction/revisit'
+      const body = kind === 'objects'
+        ? { session_id: activeSession, instance_ids: Array.from(correctionSelected), override_scale_check: correctionOverrideScale }
+        : kind === 'floor' ? { session_id: activeSession, model: 'plane', keyframes: 'auto' } : { session_id: activeSession }
+      const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
+      const d = await r.json().catch(() => ({}))
+      setCorrectionReport(d.report || null)
+      if (r.ok && d.status === 'pending') setShowCorrectionModal(false)
+      if (r.status === 409) report(t('correction.busy'), 'warn')
+      else if (r.ok && d.status === 'pending') report(kind === 'revisit' ? t('correction.closuresApplied', { n: d.report?.solutions?.length || 0 }) : t('correction.applied'), 'ok')
+      else if (r.ok) report(t('correction.rejected', { reason: d.report?.rejection_reason || t('correction.seeReport') }), 'warn')
+      else report(t('correction.failed', { detail: typeof d.detail === 'string' ? d.detail : '' }), 'err')
+    } catch { report(t('correction.failed', { detail: '' }), 'err') }
+    setCorrectionRunning(false)
+    if (kind === 'objects') setCorrectionOverrideScale(false)
+    refreshCorrectionStatus(activeSession); loadCorrectionLedger(activeSession); loadCorrectionArtifacts(activeSession)
+  }, [activeSession, token, correctionSelected, correctionOverrideScale, refreshCorrectionStatus, loadCorrectionLedger, loadCorrectionArtifacts, report, t])
+
+  const runObjectMeshing = useCallback(async () => {
+    if (!activeSession || shapeBusyRef.current) return
+    shapeBusyRef.current = true
+    setShapeRunning(true)
+    setShapeProgress({})
+    setShapeOverall({ phase: 'exporting_pkl', total: tsdfSelected.size, done: 0 })
+    try {
+      const res = await fetch('/api/segmentation/shape/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, instance_ids: [...tsdfSelected], auto_reconstruct: true }) })
+      const data = await res.json()
+      if (data.ok) { report(t('meshing.objectStarted', { n: data.count }), 'ok'); if (!data.reconstructing) setShapeRunning(false) }
+      else { report(t('meshing.objectError', { detail: data.detail || '' }), 'err'); setShapeRunning(false) }
+    } catch (err: any) { report(t('meshing.objectError', { detail: err.message }), 'err'); setShapeRunning(false) }
+    finally { shapeBusyRef.current = false }
+  }, [activeSession, tsdfSelected, report, t])
+
+  const runMesh = useCallback(async () => {
+    if (!activeSession) return
+    setTsdfRunning(true)
+    setTsdfProgress({})
+    setTsdfOverall({ phase: 'surface_fit', total: tsdfSelected.size, done: 0 })
+    try {
+      const res = await fetch('/api/segmentation/tsdf/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, instance_ids: [...tsdfSelected] }) })
+      const data = await res.json()
+      if (data.ok) report(t('meshing.meshStarted', { n: data.count }), 'ok')
+      else { report(t('meshing.meshError', { detail: data.detail || '' }), 'err'); setTsdfRunning(false) }
+    } catch (err: any) { report(t('meshing.meshError', { detail: err.message }), 'err'); setTsdfRunning(false) }
+  }, [activeSession, tsdfSelected, report, t])
+
+  const resumeRun = useCallback(async () => {
+    if (!resumeDialog) return
+    const sid = resumeDialog.session
+    setResumeBusy(true)
+    setResumeProgress(null)
+    setStatusMessage(t('resume.statusResuming'))
+    try {
+      const r = await fetch('/api/segmentation/resume/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid }) })
+      const d = await r.json().catch(() => ({}))
+      report(r.ok ? t('resume.done') : t('resume.failed', { detail: d.detail || '' }), r.ok ? 'ok' : 'err')
+    } catch {
+      // the browser may drop a very long POST while the backend keeps working — wait for the task itself
+      setStatusMessage(t('resume.waitingBackend'))
+      for (let i = 0; i < 2400; i++) {
+        await new Promise(r => setTimeout(r, 3000))
+        const d = await fetch(`/api/tasks/${sid}`).then(r => r.json()).catch(() => null)
+        if (d && !(d.tasks || []).some((x: any) => x.task_type === 'resume')) break
+      }
+      report(t('resume.finished'), 'ok')
+    }
+    setResumeBusy(false)
+    setResumeDialog(null)
+  }, [resumeDialog, report, t])
+
+  const resumeCancel = useCallback(async () => {
+    if (!resumeDialog) return
+    const sid = resumeDialog.session
+    setResumeBusy(true)
+    setStatusMessage(t('resume.deleting'))
+    try {
+      const r = await fetch('/api/segmentation/resume/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid }) })
+      const d = await r.json().catch(() => ({}))
+      report(r.ok ? t('resume.deletedIncomplete', { n: d.deleted || 0 }) : t('resume.cancelFailed'), r.ok ? 'ok' : 'err')
+    } catch { report(t('resume.cancelFailed'), 'err') }
+    setResumeBusy(false)
+    setResumeDialog(null)
+  }, [resumeDialog, report, t])
+
+  const closeSegmentationManager = useCallback(async (dirty: boolean) => {
+    const sid = interactiveSessionId
+    setInteractiveSessionId(null)
+    if (!sid) return
+    if (!dirty) {
+      setStatusMessage(t('segmentation.closedNoChanges'))
+      try {
+        await reloadSegments(sid)
+        viewportRef.current?.refreshSegmentOBBs(sid)
+        viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid })
+      } catch { /* silent */ }
+      return
+    }
+    setSessionLoading(t('segmentation.refreshing'))
+    setStatusMessage(t('segmentation.refreshingDbscan'))
+    try {
+      const res = await fetch('/api/segmentation/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid }) })
+      if (res.ok) {
+        const data = await res.json()
+        report(t('segmentation.refreshed', { n: data.instances?.length || 0 }), 'ok')
+        if (Array.isArray(data.instances)) {
+          setSegments(data.instances.map((inst: any) => ({
+            key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
+            id: inst.instance_id || inst.id,
+            label: `${inst.label}`,
+            color: inst.color || tokenColor('--measure'),
+            totalPoints: inst.total_points || 0,
+            visible: true,
+            excluded: inst.excluded || false,
+          })))
+        }
+        viewportRef.current?.refreshSegmentOBBs(sid)
+        refreshUnsegmentedCount(sid)
+        await applyFloorLevel(sid, 'auto')
+        refreshFloorLevel(sid)
+        viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid })
+      }
+    } catch { /* silent */ }
+    finally { setSessionLoading(null) }
+  }, [interactiveSessionId, reloadSegments, refreshUnsegmentedCount, applyFloorLevel, refreshFloorLevel, report, t])
+
+  // ── Menus (File / View / Tools / Help) — the same actions as before ──
+  const menus: HeaderMenu[] = [
+    { id: 'file', label: t('menu.file'), entries: [
+      connected
+        ? { id: 'disconnect', label: t('menu.disconnect'), icon: <ArrowUpFromLine aria-hidden />, onSelect: () => disconnect(false) }
+        : { id: 'connect', label: t('menu.connect'), icon: <Plug aria-hidden />, onSelect: connectToServer },
+      { type: 'separator', id: 's1' },
+      { id: 'export', label: t('menu.exportCloud'), icon: <Upload aria-hidden />, shortcut: 'Mod+E', disabled: true, onSelect: () => {} },
+      { type: 'separator', id: 's2' },
+      { id: 'settings', label: t('menu.settings'), icon: <Settings aria-hidden />, shortcut: 'Mod+,', onSelect: () => setSettingsOpen(true) },
+    ] },
+    { id: 'view', label: t('menu.view'), entries: [
+      { id: 'panel', label: layout.state.leftTab ? t('menu.hidePanel') : t('menu.showPanel'), icon: layout.state.leftTab ? <PanelLeftClose aria-hidden /> : <PanelLeftOpen aria-hidden />, shortcut: 'Mod+B', onSelect: () => layout.setLeftTab(layout.state.leftTab ? null : 'sessions') },
+      { id: 'inspector', label: layout.state.inspectorOpen ? t('menu.hideInspector') : t('menu.showInspector'), icon: <Sparkles aria-hidden />, shortcut: 'Mod+J', onSelect: layout.toggleInspector },
+      { type: 'separator', id: 's1' },
+      { id: 'reset', label: t('menu.resetCamera'), icon: <Home aria-hidden />, shortcut: 'Home', disabled: !hasSession, onSelect: () => viewportRef.current?.resetCamera() },
+      { id: 'fullscreen', label: t('toolbar.fullscreen'), icon: <Maximize aria-hidden />, shortcut: 'F11', onSelect: toggleFullscreen },
+      { type: 'separator', id: 's2' },
+      { id: 'console', label: t('dock.console'), icon: <Monitor aria-hidden />, shortcut: 'Mod+`', checked: consoleOpen, onSelect: () => setConsoleOpen(!consoleOpen) },
+      { id: 'jobs', label: t('dock.jobs'), icon: <ListTodo aria-hidden />, checked: layout.state.dockOpen && layout.state.dockTab === 'jobs', onSelect: () => layout.openDock('jobs') },
+      { type: 'separator', id: 's3' },
+      { id: 'axes', label: t('menu.axes'), icon: <Axis3D aria-hidden />, checked: showAxes, onSelect: () => setShowAxes(v => !v) },
+      { id: 'grid', label: t('menu.grid'), icon: <Grid3X3 aria-hidden />, checked: showGrid, onSelect: () => setShowGrid(v => !v) },
+      { id: 'density', label: t('settings.density'), icon: <SlidersHorizontal aria-hidden />, hint: t(`settings.${layout.state.density}`), onSelect: () => setSettingsOpen(true) },
+    ] },
+    { id: 'tools', label: t('menu.tools'), disabled: !hasSession, entries: [
+      { id: 'navigate', label: t('toolbar.navigate'), icon: <RotateCcw aria-hidden />, shortcut: 'V', checked: activeTool === 'navigate', onSelect: () => setActiveTool('navigate') },
+      { id: 'resetview', label: t('toolbar.resetView'), icon: <Home aria-hidden />, shortcut: 'Home', onSelect: () => viewportRef.current?.resetCamera() },
+      { type: 'separator', id: 's1' },
+      { id: 'distance', label: t('toolbar.measureDistance'), icon: <Ruler aria-hidden />, shortcut: 'M', checked: activeTool === 'measure-distance', onSelect: () => setActiveTool('measure-distance') },
+      { id: 'angle', label: t('toolbar.measureAngle'), icon: <TriangleRight aria-hidden />, shortcut: 'A', checked: activeTool === 'measure-angle', onSelect: () => setActiveTool('measure-angle') },
+      { id: 'clearm', label: t('toolbar.clearMeasurements'), icon: <Trash2 aria-hidden />, onSelect: () => viewportRef.current?.clearMeasurements() },
+      { type: 'separator', id: 's2' },
+      { id: 'brush', label: t('toolbar.brush'), icon: <Brush aria-hidden />, checked: activeTool === 'erase', onSelect: () => setActiveTool(activeTool === 'erase' ? 'navigate' : 'erase') },
+      { id: 'undobrush', label: t('brush.undo'), icon: <Undo2 aria-hidden />, onSelect: undoBrush },
+      { id: 'align', label: t('toolbar.alignCloud'), icon: <Move aria-hidden />, shortcut: 'G', disabled: sabanaVisible, checked: activeTool === 'align', onSelect: () => setActiveTool(activeTool === 'align' ? 'navigate' : 'align') },
+      { id: 'addobj', label: t('toolbar.addObject'), icon: <Package aria-hidden />, onSelect: openObjectLibrary },
+      { type: 'separator', id: 's3' },
+      { id: 'section', label: t('toolbar.sectionBox'), icon: <Scissors aria-hidden />, shortcut: 'X', checked: activeTool === 'section-box', onSelect: () => setActiveTool('section-box') },
+      { id: 'resetsection', label: t('toolbar.resetSection'), icon: <Unlock aria-hidden />, onSelect: () => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') } },
+      { type: 'separator', id: 's4' },
+      { id: 'segmentation', label: t('instances.segmentation'), icon: <Crosshair aria-hidden />, onSelect: () => activeSession && openSegmentationManager(activeSession) },
+      { id: 'meshing', label: t('instances.meshing'), icon: <Puzzle aria-hidden />, onSelect: openTsdfModal },
+      { id: 'correction', label: t('instances.correction'), icon: <Wrench aria-hidden />, onSelect: openCorrection },
+      { id: 'fuse', label: t('instances.fuse'), icon: <Layers aria-hidden />, disabled: projectScans.filter(sc => sc.kind !== 'fused').length < 2, onSelect: () => setShowFuseModal(true) },
+      ...(hasCameraPoses ? [{ id: 'poses', label: t('menu.cameraPoses'), icon: <Camera aria-hidden />, checked: showCameraPoses, onSelect: () => setShowCameraPoses(v => !v) } as MenuEntry] : []),
+    ] },
+    { id: 'help', label: t('menu.help'), entries: [
+      { id: 'palette', label: t('palette.title'), icon: <Search aria-hidden />, shortcut: 'Mod+K', onSelect: () => setPaletteOpen(true) },
+      { id: 'docs', label: t('menu.documentation'), icon: <BookOpen aria-hidden />, disabled: true, onSelect: () => {} },
+      { id: 'shortcuts', label: t('menu.shortcuts'), icon: <Keyboard aria-hidden />, shortcut: 'Mod+/', disabled: true, onSelect: () => {} },
+      { type: 'separator', id: 's1' },
+      { id: 'about', label: t('menu.about'), icon: <Info aria-hidden />, disabled: true, onSelect: () => {} },
+    ] },
+  ]
+
+  const userEntries: MenuEntry[] = [
+    { type: 'header', id: 'who', label: `${user?.full_name || user?.username || ''} — ${t(`role.${user?.role || 'viewer'}`)}` },
+    { type: 'separator', id: 's0' },
+    ...(user?.role === 'admin' ? [{ id: 'admin', label: t('menu.userManagement'), icon: <Users aria-hidden />, onSelect: () => setAdminOpen(true) } as MenuEntry] : []),
+    { id: 'settings', label: t('menu.settings'), icon: <Settings aria-hidden />, onSelect: () => setSettingsOpen(true) },
+    { type: 'separator', id: 's1' },
+    { id: 'logout', label: t('menu.logout'), icon: <LogOut aria-hidden />, onSelect: () => disconnect(true) },
+  ]
+
+  // ── Command palette: menus + navigation (§5) ──
+  const commands: Command[] = [
+    ...menus.flatMap(m => m.entries.filter((e): e is Extract<MenuEntry, { onSelect: () => void }> => !e.type || e.type === 'item')
+      .map(e => ({ id: `${m.id}.${e.id}`, label: typeof e.label === 'string' ? e.label : e.id, group: m.label, icon: e.icon, shortcut: e.shortcut, disabled: e.disabled || m.disabled, run: e.onSelect }))),
+    ...sessions.map(s => ({ id: `session:${s.id}`, label: s.name, group: t('sessions.title'), icon: <FolderOpen aria-hidden />, keywords: t('sessions.load'), disabled: !s.hasCloud, hint: s.id === activeSession ? t('sessions.loaded') : undefined, run: () => handleSessionLoad(s.id) })),
+    ...segments.map(seg => ({ id: `segment:${seg.key}`, label: seg.label, group: t('instances.title'), icon: <Tag aria-hidden />, hint: fmt.integer(seg.totalPoints), run: () => { setSelectedSegmentId(seg.id); layout.setLeftTab('instances'); layout.openInspector('properties') } })),
+    ...projectScans.map((sc: any) => ({ id: `scan:${sc.key}`, label: sc.kind === 'fused' ? sc.label : `${sc.date} ${sc.label}`, group: t('scans.title'), icon: <Layers aria-hidden />, run: () => activeSession && openScanFromTree(activeSession, sc) })),
+    { id: 'nav.sessions', label: t('sessions.title'), group: t('palette.navigate'), icon: <FolderOpen aria-hidden />, run: () => layout.setLeftTab('sessions') },
+    { id: 'nav.instances', label: t('instances.title'), group: t('palette.navigate'), icon: <Tag aria-hidden />, run: () => layout.setLeftTab('instances') },
+    { id: 'nav.scans', label: t('scans.title'), group: t('palette.navigate'), icon: <Layers aria-hidden />, run: () => layout.setLeftTab('scans') },
+    { id: 'nav.bim', label: t('bim.title'), group: t('palette.navigate'), icon: <Building2 aria-hidden />, run: () => layout.setLeftTab('bim') },
+    { id: 'nav.team', label: t('team.title'), group: t('palette.navigate'), icon: <Users aria-hidden />, run: () => layout.setLeftTab('team') },
+    { id: 'nav.assistant', label: t('assistant.title'), group: t('palette.navigate'), icon: <Sparkles aria-hidden />, run: () => layout.openInspector('assistant') },
+    { id: 'nav.acta', label: t('inspector.acta'), group: t('palette.navigate'), icon: <FileCheck2 aria-hidden />, run: () => layout.openInspector('acta') },
+    { id: 'nav.report', label: t('dock.report'), group: t('palette.navigate'), icon: <BarChart3 aria-hidden />, run: () => layout.openDock('report') },
+    { id: 'nav.timeline', label: t('dock.timeline'), group: t('palette.navigate'), icon: <Clock aria-hidden />, run: () => layout.openDock('timeline') },
+  ]
+
+  const activityItems: ActivityItem[] = [
+    { id: 'sessions', icon: <FolderOpen aria-hidden />, label: t('sessions.title'), shortcut: 'Mod+B', badge: sessions.length || undefined, active: layout.state.leftTab === 'sessions', onClick: () => layout.toggleLeftTab('sessions') },
+    { id: 'instances', icon: <Tag aria-hidden />, label: t('instances.title'), badge: segments.length || undefined, active: layout.state.leftTab === 'instances', disabled: !hasSession, onClick: () => layout.toggleLeftTab('instances') },
+    { id: 'scans', icon: <Layers aria-hidden />, label: t('scans.title'), badge: projectScans.length || undefined, active: layout.state.leftTab === 'scans', disabled: !hasSession, onClick: () => layout.toggleLeftTab('scans') },
+    { id: 'bim', icon: <Building2 aria-hidden />, label: t('bim.title'), badge: bimModels.length || undefined, active: layout.state.leftTab === 'bim', disabled: !hasSession, onClick: () => layout.toggleLeftTab('bim') },
+  ]
+  const activityBottom: ActivityItem[] = [
+    { id: 'team', icon: <Users aria-hidden />, label: t('team.title'), active: layout.state.leftTab === 'team', onClick: () => layout.toggleLeftTab('team') },
+    { id: 'console', icon: <Monitor aria-hidden />, label: t('dock.console'), shortcut: 'Mod+`', active: consoleOpen, onClick: () => setConsoleOpen(!consoleOpen) },
+    { id: 'settings', icon: <Settings aria-hidden />, label: t('menu.settings'), onClick: () => setSettingsOpen(true) },
+  ]
+
+  const activeScanRow = projectScans.find((s: any) => s.key === activeScanTab)
+  const pipelineActiveHere = !!(pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession)
+  const loadingOverlay = sessionLoading && !pipelineActiveHere
+  const pipelineStages: ProgressStage[] = (pipelineRunning?.stages || []).filter(s => s.enabled).map(s => ({ id: s.id, label: s.label, status: s.status, pct: s.pct, detail: s.message }))
+  const currentStage = pipelineRunning?.stages[pipelineRunning.current_stage_idx]
+  const epoch: number | null = certifyState?.epoch ?? correctionState?.epoch ?? null
+  const pendingEpochs: number = certifyState?.pending_epochs ?? 0
+  const selectedSegment = segments.find(s => s.id === selectedSegmentId) ?? null
+  const hasSabanaResult = !!sessions.find(s => s.id === activeSession)?.hasSabana
 
   if (authLoading) {
     return (
-      <div className="login-page">
-        <div className="login-card">
-          <div className="login-logo spinning">S</div>
-          <p className="login-subtitle">Loading…</p>
-        </div>
+      <div className="stac-login">
+        <SplashOverlay title={t('app.name')} status={t('common.loading')} />
       </div>
     )
   }
@@ -1622,1538 +1984,124 @@ function App() {
 
   return (
     <div
-      className={`app-layout ${!panelOpen ? 'panel-collapsed' : ''}`}
-      style={{
-        ...(panelOpen ? { '--sidebar-width': `${sidebarWidth}px` } : {}),
-        '--assistant-width': assistantOpen ? `${assistantWidth}px` : '0px',
-      } as React.CSSProperties}
+      className={`stac-app ${layout.state.leftTab ? '' : 'stac-app--left-closed'} ${layout.state.inspectorOpen ? '' : 'stac-app--inspector-closed'}`.trim()}
+      style={{ '--left-w': `${layout.state.leftWidth}px`, '--inspector-w': `${layout.state.inspectorWidth}px`, '--dock-h': `${layout.state.dockHeight}px` } as React.CSSProperties}
     >
-      {/* Hidden input used by the per-session "+" button to upload a video */}
-      <input
-        ref={videoInputRef}
-        type="file"
+      <input ref={videoInputRef} type="file" className="stac-hidden"
         accept="video/mp4,video/x-msvideo,video/quicktime,video/x-matroska,.mp4,.avi,.mov,.mkv,.m4v"
-        style={{ display: 'none' }}
-        onChange={(e) => {
-          const f = e.target.files?.[0]
-          if (f) handleVideoSelected(f)
-        }}
-      />
-      {/* ── Menu Bar ── */}
-      <div className="menubar" ref={menuRef}>
-        <span className="menu-app-title"><img src="/favicon.ico" alt="" className="menu-app-logo" /> STAC Build</span>
+        onChange={e => { const f = e.target.files?.[0]; if (f) handleVideoSelected(f) }} />
 
-        {/* File Menu */}
-        <div className="menu-item">
-          <button className={`menu-trigger ${openMenu === 'file' ? 'open' : ''}`}
-            onClick={() => toggleMenu('file')}>File</button>
-          {openMenu === 'file' && (
-            <div className="menu-dropdown">
-              {!connected ? (
-                <button className="menu-dropdown-item"
-                  onClick={() => menuAction(connectToServer)}>
-                  <Plug size={14} /> Connect to Server
-                </button>
-              ) : (
-                <button className="menu-dropdown-item"
-                  onClick={() => menuAction(() => {
-                    viewportRef.current?.sendCommand({ type: 'cleared' })
-                    viewportRef.current?.clearScene()
-                    setConnected(false)
-                    setActivePanel('sessions')
-                    setSessions([])
-                    setActiveSession(null)
-                    setSelectedSession(null)
-                    setSessionLoading(null)
-                    setSegments([])
-                    setBimModels([])
-                    setPointCount(0)
-                    setActiveTool('navigate')
-                    setStatusMessage('')
-                  })}>
-                  <ArrowUpFromLine size={14} /> Disconnect
-                </button>
-              )}
-              <div className="menu-separator" />
-              <button className="menu-dropdown-item" disabled={!hasSession}>
-                <Upload size={14} /> Export Point Cloud
-                <span className="menu-shortcut">Ctrl+E</span>
-              </button>
-              <div className="menu-separator" />
-              <button className="menu-dropdown-item" disabled>
-                <Settings size={14} /> Settings
-                <span className="menu-shortcut">Ctrl+,</span>
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* View Menu */}
-        <div className="menu-item">
-          <button className={`menu-trigger ${openMenu === 'view' ? 'open' : ''}`}
-            onClick={() => toggleMenu('view')}>View</button>
-          {openMenu === 'view' && (
-            <div className="menu-dropdown">
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => togglePanel('sessions'))}>
-                {panelOpen ? <><ChevronLeft size={14} /> Hide Panel</> : <><ChevronRight size={14} /> Show Panel</>}
-                <span className="menu-shortcut">Ctrl+B</span>
-              </button>
-              <div className="menu-separator" />
-              <button className="menu-dropdown-item" disabled={!hasSession}
-                onClick={() => menuAction(() => viewportRef.current?.resetCamera())}>
-                <Home size={14} /> Reset Camera
-                <span className="menu-shortcut">Home</span>
-              </button>
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => {
-                  if (document.fullscreenElement) document.exitFullscreen()
-                  else document.documentElement.requestFullscreen()
-                })}>
-                <Maximize size={14} /> Fullscreen
-                <span className="menu-shortcut">F11</span>
-              </button>
-              <div className="menu-separator" />
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => {
-                  setConsoleOpen(prev => !prev)
-                })}>
-                {consoleOpen ? <><Monitor size={14} /> Console <Check size={12} /></> : <><Monitor size={14} /> Console</>}
-                <span className="menu-shortcut">Ctrl+`</span>
-              </button>
-              <div className="menu-separator" />
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => setShowAxes(prev => !prev))}>
-                {showAxes ? <><Axis3D size={14} /> Axes <Check size={12} /></> : <><Axis3D size={14} /> Axes</>}
-              </button>
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => setShowGrid(prev => !prev))}>
-                {showGrid ? <><Grid3X3 size={14} /> Grid <Check size={12} /></> : <><Grid3X3 size={14} /> Grid</>}
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Tools Menu */}
-        <div className="menu-item">
-          <button className={`menu-trigger ${openMenu === 'tools' ? 'open' : ''}`}
-            onClick={() => toggleMenu('tools')} disabled={!hasSession}>Tools</button>
-          {openMenu === 'tools' && hasSession && (
-            <div className="menu-dropdown">
-              {/* Same grouping/order as the viewport toolbar (user 2026-08-30) */}
-              {/* ── Navigation ── */}
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => setActiveTool('navigate'))}>
-                <RotateCcw size={14} /> Navigate
-                <span className="menu-shortcut">V</span>
-              </button>
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => viewportRef.current?.resetCamera())}>
-                <Home size={14} /> Reset View
-                <span className="menu-shortcut">Home</span>
-              </button>
-              <div className="menu-separator" />
-              {/* ── Measurement ── */}
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => setActiveTool('measure-distance'))}>
-                <Ruler size={14} /> Measure Distance
-                <span className="menu-shortcut">M</span>
-              </button>
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => setActiveTool('measure-angle'))}>
-                <TriangleRight size={14} /> Measure Angle
-                <span className="menu-shortcut">A</span>
-              </button>
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => viewportRef.current?.clearMeasurements())}>
-                <Trash2 size={14} /> Clear Measurements
-              </button>
-              <div className="menu-separator" />
-              {/* ── Editing ── */}
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => setActiveTool(activeTool === 'erase' ? 'navigate' : 'erase'))}>
-                <Brush size={14} /> Segment Brush
-                {activeTool === 'erase' && <span className="menu-shortcut">ON</span>}
-              </button>
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(async () => {
-                  if (!activeSession) return
-                  try {
-                    const r = await fetch('/api/segmentation/erase/undo', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ session_id: activeSession }),
-                    })
-                    const d = await r.json()
-                    setStatusMessage(d.ok ? `↩ erase undone (${(d.restored || 0).toLocaleString()} pts restored)` : '↩ nothing to undo')
-                  } catch { setStatusMessage('↩ undo failed') }
-                })}>
-                <Undo2 size={14} /> Undo Brush Edit
-              </button>
-              <button className="menu-dropdown-item"
-                disabled={sabanaVisible}
-                style={sabanaVisible ? { opacity: 0.4, pointerEvents: 'none' } : {}}
-                onClick={() => menuAction(() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align'))}>
-                <Move size={14} /> Align Cloud
-                <span className="menu-shortcut">G</span>
-              </button>
-              <button className="menu-dropdown-item"
-                disabled={!hasSession}
-                onClick={() => menuAction(async () => {
-                  setShowObjectLibrary(true)
-                  try {
-                    const r = await fetch('/api/objects/library')
-                    if (r.ok) setObjectLibrary((await r.json()).items || [])
-                  } catch { /* silent */ }
-                })}>
-                <Package size={14} /> Add Object…
-              </button>
-              <div className="menu-separator" />
-              {/* ── Sectioning ── */}
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => setActiveTool('section-box'))}>
-                <Scissors size={14} /> Section Box
-                <span className="menu-shortcut">X</span>
-              </button>
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') })}>
-                <Unlock size={14} /> Reset Section Box
-              </button>
-              <div className="menu-separator" />
-              {/* ── View / display ── */}
-              <div className="menu-dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Palette size={14} /> Point Size
-                <input type="range" min="0.01" max="5" step="0.01" value={pointSize}
-                  onChange={e => setPointSize(parseFloat(e.target.value))}
-                  onClick={e => e.stopPropagation()}
-                  style={{ width: 80, accentColor: 'var(--accent)' }} />
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 24 }}>{pointSize.toFixed(2)}</span>
-              </div>
-              {hasCameraPoses && (
-                <button className="menu-dropdown-item"
-                  onClick={() => menuAction(() => setShowCameraPoses(prev => !prev))}>
-                  {showCameraPoses ? <><Camera size={14} /> Camera Poses <Check size={12} /></> : <><Camera size={14} /> Camera Poses</>}
-                </button>
-              )}
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => setShowGrid(prev => !prev))}>
-                {showGrid ? <><Grid3X3 size={14} /> Grid <Check size={12} /></> : <><Grid3X3 size={14} /> Grid</>}
-              </button>
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => setShowAxes(prev => !prev))}>
-                {showAxes ? <><Axis3D size={14} /> Axes <Check size={12} /></> : <><Axis3D size={14} /> Axes</>}
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Help Menu */}
-        <div className="menu-item">
-          <button className={`menu-trigger ${openMenu === 'help' ? 'open' : ''}`}
-            onClick={() => toggleMenu('help')}>Help</button>
-          {openMenu === 'help' && (
-            <div className="menu-dropdown">
-              <button className="menu-dropdown-item" disabled>
-                <BookOpen size={14} /> Documentation
-              </button>
-              <button className="menu-dropdown-item" disabled>
-                <Keyboard size={14} /> Keyboard Shortcuts
-                <span className="menu-shortcut">Ctrl+/</span>
-              </button>
-              <div className="menu-separator" />
-              <button className="menu-dropdown-item" disabled>
-                <Info size={14} /> About STAC Build
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* User Menu — right side */}
-        <div className="menu-spacer" />
-        {/* AI chat dock toggle — top right, left of the logged-in user.
-            Gray while the model is unloaded/loading; lit when it is up. */}
-        <div className="menu-item">
-          <button
-            className={`menu-trigger chat-trigger ${assistantOpen ? 'open' : ''} ${vlmStatus === 'up' ? 'model-up' : 'model-off'}`}
-            onClick={toggleAssistant}
-            title={`AI Assistant — ${
-              vlmStatus === 'up' ? 'model loaded'
-              : vlmStatus === 'loading' ? 'loading the model…'
-              : vlmStatus === 'busy' ? 'GPU busy — model unloaded'
-              : 'model unloaded'}`}>
-            <Sparkles size={14} />
-          </button>
-        </div>
-        <div className="menu-item">
-          <button className={`menu-trigger user-trigger ${openMenu === 'user' ? 'open' : ''}`}
-            onClick={() => toggleMenu('user')}>
-            <span className="user-avatar-small">{user.username[0].toUpperCase()}</span>
-            {user.username}
-          </button>
-          {openMenu === 'user' && (
-            <div className="menu-dropdown menu-dropdown-right">
-              <div className="menu-dropdown-header">
-                <strong>{user.full_name || user.username}</strong>
-                <div className="menu-dropdown-role">{user.role}</div>
-              </div>
-              <div className="menu-separator" />
-              {user.role === 'admin' && (
-                <button className="menu-dropdown-item"
-                  onClick={() => menuAction(() => setAdminOpen(true))}>
-                  <Users size={14} /> User Management
-                </button>
-              )}
-              <button className="menu-dropdown-item"
-                onClick={() => menuAction(() => {
-                  viewportRef.current?.sendCommand({ type: 'cleared' })
-                  setConnected(false)
-                  setActivePanel('sessions')
-                  setSessions([])
-                  setActiveSession(null)
-                  setSelectedSession(null)
-                  setSegments([])
-                  setBimModels([])
-                  setPointCount(0)
-                  setActiveTool('navigate')
-                  setStatusMessage('')
-                  logout()
-                })}>
-                <LogOut size={14} /> Logout
-              </button>
-            </div>
-          )}
-        </div>
+      <div className="stac-app__header">
+        <AppHeader menus={menus} connected={connected}
+          sessions={sessions.map(s => ({ id: s.id, name: s.name, loaded: s.id === activeSession, hasCloud: s.hasCloud }))}
+          activeSession={activeSession} onSelectSession={handleSessionLoad}
+          scans={projectScans.map((s: any) => ({ key: s.key, label: s.label, date: s.date, kind: s.kind || 'scan', isReference: !!s.is_reference }))}
+          activeScan={activeScanTab} onSelectScan={key => { const sc = projectScans.find((s: any) => s.key === key); if (sc && activeSession) activateScan(activeSession, { key: sc.key, label: sc.label, date: sc.date, kind: sc.kind || 'scan' }) }}
+          onOpenPalette={() => setPaletteOpen(true)} inspectorOpen={layout.state.inspectorOpen} onToggleInspector={layout.toggleInspector}
+          vlmStatus={vlmStatus} userName={user.username} userEntries={userEntries} />
       </div>
 
-      {/* ── Activity Bar ── */}
-      <div className="activity-bar">
-        <button className={`activity-btn ${activePanel === 'sessions' ? 'active' : ''}`}
-          onClick={() => togglePanel('sessions')} title="Projects">
-          <FolderOpen size={18} />
-          {sessions.length > 0 && <span className="activity-badge">{sessions.length}</span>}
-        </button>
-
-        {hasSession && (
-          <button className={`activity-btn ${activePanel === 'segments' ? 'active' : ''}`}
-            onClick={() => togglePanel('segments')} title="Segments">
-            <Tag size={18} />
-            {segments.length > 0 && <span className="activity-badge">{segments.length}</span>}
-          </button>
-        )}
-        {hasSession && (
-          <button className={`activity-btn ${activePanel === 'bim' ? 'active' : ''}`}
-            onClick={() => togglePanel('bim')} title="BIM Navigator">
-            <Building2 size={18} />
-            {bimModels.length > 0 && <span className="activity-badge">{bimModels.length}</span>}
-          </button>
-        )}
-        {hasSession && sabanaFullMeta && (
-          <button className={`activity-btn ${activePanel === 'analysis' ? 'active' : ''}`}
-            onClick={() => togglePanel('analysis')} title="BIM Analysis">
-            <BarChart3 size={18} />
-          </button>
-        )}
-        {/* Chat lives ONLY on the right dock (user 2026-08-28) — no toggle here */}
-        <div className="activity-spacer" />
-        <button className={`activity-btn ${activePanel === 'team' ? 'active' : ''}`}
-          onClick={() => togglePanel('team')} title="Team">
-          <Users size={18} />
-        </button>
-        <button className={`activity-btn ${consoleOpen ? 'active' : ''}`}
-          onClick={() => setConsoleOpen(prev => !prev)} title="Console">
-          <Monitor size={18} />
-        </button>
-        <button className="activity-btn" disabled title="Settings">
-          <Settings size={18} />
-        </button>
+      <div className="stac-app__activity">
+        <ActivityBar items={activityItems} bottom={activityBottom} ariaLabel={t('layout.activityBar')} />
       </div>
 
-      {/* ── Panel ── */}
-      {panelOpen && (
-        <div className="panel-column">
-          <div className="panel">
-            {/* Sessions Panel */}
-            {activePanel === 'sessions' && (
-              <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-                <div className="panel-header">Projects</div>
-                <nav className="sidebar-nav" style={{ flex: 1, overflowY: 'auto' }}>
-                  {!connected ? (
-                    <>
-                      <div className="nav-section">Server</div>
-                      <div className="nav-item" onClick={connectToServer}>
-                        <span className="nav-item-icon"><Plug size={14} /></span>
-                        <span className="nav-item-label">Connect to Server</span>
-                      </div>
-                    </>
-                  ) : (
-                    <div className="session-list">
-                      {/* Search filter — all users */}
-                      <div className="session-search-bar">
-                        <Search size={14} className="session-search-icon" />
-                        <input
-                          className="session-search-input"
-                          placeholder="Search projects..."
-                          value={projectFilter}
-                          onChange={e => setProjectFilter(e.target.value)}
-                        />
-                        {projectFilter && (
-                          <button className="session-search-clear" onClick={() => setProjectFilter('')}>✕</button>
-                        )}
-                      </div>
-                      {sessions.filter(s => !projectFilter || s.name.toLowerCase().includes(projectFilter.toLowerCase())).map(s => (
-                        <div
-                          key={s.id}
-                          className={`session-item ${selectedSession === s.id ? 'active' : ''} ${activeSession === s.id ? 'loaded' : ''}`}
-                          onClick={() => handleSessionSelect(s.id)}
-                        >
-                          <div className="session-header">
-                            <div className={`session-dot ${s.hasCloud ? 'online' : ''} ${activeSession === s.id ? 'loaded' : ''}`} />
-                            {renamingProject === s.id ? (
-                              <input
-                                className="session-rename-input"
-                                autoFocus
-                                value={renameValue}
-                                onClick={e => e.stopPropagation()}
-                                onChange={e => setRenameValue(e.target.value)}
-                                onKeyDown={async e => {
-                                  if (e.key === 'Escape') { setRenamingProject(null); setRenameValue('') }
-                                  if (e.key === 'Enter' && renameValue.trim() && renameValue.trim() !== s.id) {
-                                    try {
-                                      const headers: HeadersInit = { 'Content-Type': 'application/json' }
-                                      if (token) headers['Authorization'] = `Bearer ${token}`
-                                      const res = await fetch(`/sessions/${s.id}`, {
-                                        method: 'PATCH', headers,
-                                        body: JSON.stringify({ name: renameValue.trim() }),
-                                      })
-                                      if (!res.ok) {
-                                        const err = await res.json().catch(() => ({}))
-                                        setStatusMessage(err.detail || 'Rename failed')
-                                      } else {
-                                        setStatusMessage(`Renamed to "${renameValue.trim()}"`)
-                                        connectToServer()
-                                      }
-                                    } catch { setStatusMessage('Rename failed') }
-                                    setRenamingProject(null); setRenameValue('')
-                                  }
-                                }}
-                                onBlur={() => { setRenamingProject(null); setRenameValue('') }}
-                              />
-                            ) : (
-                              <div className="session-name">{s.name}</div>
-                            )}
-                          </div>
-                          <div className="session-meta">
-                            {s.frameCount} frames{s.hasCloud && ` · ${s.cloudSizeMb}MB`}
-                            {s.hasSegments && <> · <Tag size={11} /></>}
-                            {s.hasBim && <> · <Building2 size={11} />{s.bimCount > 1 ? ` (${s.bimCount})` : ''}</>}
-                            {activeSession === s.id && <> · <Circle size={8} fill="var(--accent)" stroke="none" /> loaded</>}
-                            {pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === s.id && (
-                              <> · <span className="sidebar-pipeline-badge" title="Pipeline running">⚙️ rebuilding</span></>
-                            )}
-                          </div>
-                          <div className="session-actions">
-                            <button className="session-action-btn load"
-                              title={s.hasCloud ? 'Load Session' : 'No cloud. Run Reconstruct first.'}
-                              disabled={!s.hasCloud}
-                              style={!s.hasCloud ? { opacity: 0.3 } : undefined}
-                              onClick={(e) => { e.stopPropagation(); handleSessionLoad(s.id) }}
-                            ><FolderOpen size={14} /></button>
-                            <button className="session-action-btn flythrough"
-                              title={s.hasCloud ? 'Flythrough: video ↔ escena 3D' : 'Sin nube todavía'}
-                              disabled={!s.hasCloud}
-                              style={!s.hasCloud ? { opacity: 0.3 } : undefined}
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                // use the already-loaded cloud/octree — only load if
-                                // this session isn't the active one (avoid a reload).
-                                if (activeSession !== s.id) handleSessionLoad(s.id)
-                                setFlythroughOpen(s.id)
-                              }}
-                            ><Play size={14} /></button>
-                            {s.id in extractingSessions ? (
-                              <button className="session-action-btn reconstruct"
-                                title={`Extracting frames… ${extractingSessions[s.id] || 0}%`}
-                                disabled
-                                onClick={(e) => e.stopPropagation()}
-                              ><Loader2 size={14} className="spin" /></button>
-                            ) : s.frameCount > 0 ? (
-                              <button className="session-action-btn reconstruct"
-                                title="Reconstruct Geometry"
-                                onClick={(e) => { e.stopPropagation(); handleReconstruct(s.id) }}
-                              ><Hammer size={14} /></button>
-                            ) : (
-                              (user?.role === 'admin' || user?.role === 'manager') && (
-                                <button className="session-action-btn reconstruct"
-                                  title="No frames yet — upload a video to extract frames"
-                                  onClick={(e) => { e.stopPropagation(); handlePickVideo(s.id) }}
-                                ><Plus size={14} /></button>
-                              )
-                            )}
-                            {activeSession === s.id && (
-                              <button className="session-action-btn segment"
-                                title="Segment Objects"
-                                onClick={(e) => { e.stopPropagation(); handleSegment(s.id) }}
-                              ><Tag size={14} /></button>
-                            )}
-                            {activeSession === s.id && (
-                              <button className="session-action-btn segment"
-                                title="Manual Interactive Segmentation"
-                                onClick={(e) => { e.stopPropagation(); openSegmentationManager(s.id) }}
-                              ><Crosshair size={14} /></button>
-                            )}
-                            {activeSession === s.id && (
-                              <button className="session-action-btn unload"
-                                title="Unload Session"
-                                onClick={(e) => { e.stopPropagation(); handleUnload() }}
-                              ><ArrowUpFromLine size={14} /></button>
-                            )}
-                            {(user?.role === 'admin' || user?.role === 'manager') && (
-                              <button className="session-action-btn reconstruct"
-                                title="Rename Project"
-                                onClick={(e) => { e.stopPropagation(); setRenamingProject(s.id); setRenameValue(s.id) }}
-                              ><Pencil size={14} /></button>
-                            )}
-                            {(user?.role === 'admin' || user?.role === 'manager') && (
-                              <button className="session-action-btn delete"
-                                title="Delete Project"
-                                onClick={async (e) => {
-                                  e.stopPropagation()
-                                  const ok = await confirmDanger(
-                                    `This will permanently delete "${s.id}" and all its data. This cannot be undone.`,
-                                    `Delete ${s.id}?`
-                                  )
-                                  if (!ok) return
-                                  try {
-                                    const headers: HeadersInit = {}
-                                    if (token) headers['Authorization'] = `Bearer ${token}`
-                                    const res = await fetch(`/sessions/${s.id}`, { method: 'DELETE', headers })
-                                    if (!res.ok) {
-                                      const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }))
-                                      setStatusMessage(err.detail || 'Failed to delete project')
-                                    } else {
-                                      if (activeSession === s.id) handleUnload()
-                                      setStatusMessage(`Project "${s.id}" deleted`)
-                                      connectToServer()
-                                    }
-                                  } catch (err: any) {
-                                    setStatusMessage(`Delete failed: ${err?.message || err}`)
-                                  }
-                                }}
-                              ><Trash2 size={14} /></button>
-                            )}
-                          </div>
-                          {/* ── Scans as CHILDREN of their project (USER
-                               2026-09-06): date + label + points; ★ =
-                               composition reference; double-click opens the
-                               scan as a tab (loading the project first when
-                               it is not the loaded one). ── */}
-                          {(() => {
-                            const kids: any[] = s.id === activeSession && projectScans.length ? projectScans : (allProjectScans[s.id] || [])
-                            if (kids.length < 1) return null
-                            return (
-                              <div className="scan-tree" onClick={e => e.stopPropagation()}>
-                                {kids.map((sc, i) => (
-                                  <div key={sc.key}
-                                    className={`scan-tree-row ${activeSession === s.id && activeScanTab === sc.key ? 'active' : ''}`}
-                                    title={sc.kind === 'fused' ? 'merged cloud — double-click: open as a tab' : 'double-click: open as a tab'}
-                                    onDoubleClick={() => openScanFromTree(s.id, sc)}>
-                                    <span className="scan-tree-branch">{i === kids.length - 1 ? '└' : '├'}</span>
-                                    <span title={sc.kind === 'fused' ? 'merged product' : (sc.is_reference ? 'composition reference' : 'set as composition reference')}
-                                      style={{ cursor: sc.kind === 'fused' ? 'default' : 'pointer', color: sc.is_reference ? '#e0a632' : 'var(--text-secondary)' }}
-                                      onClick={async (e) => {
-                                        e.stopPropagation()
-                                        if (sc.is_reference || sc.kind === 'fused') return
-                                        try {
-                                          await fetch(`/api/project/${s.id}/composition/reference`, {
-                                            method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ scan_key: sc.key }),
-                                          })
-                                          setStatusMessage(`reference → ${sc.label}`)
-                                          loadProjectScans(s.id)
-                                        } catch { setStatusMessage('setting reference failed') }
-                                      }}>{sc.kind === 'fused' ? '⛶' : (sc.is_reference ? '★' : '☆')}</span>
-                                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                      {sc.kind !== 'fused' && <span style={{ color: 'var(--text-secondary)' }}>{sc.date} </span>}{sc.label}
-                                    </span>
-                                    <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                                      {sc.points ? `${(sc.points / 1e6).toFixed(1)}M` : (sc.recon_state || '—')}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            )
-                          })()}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </nav>
-                {connected && user && (user.role === 'admin' || user.role === 'manager') && (
-                  <div className="bim-actions" style={{ marginTop: 'auto' }}>
-                    {!creatingProject ? (
-                      <button className="bim-action-btn upload" onClick={() => setCreatingProject(true)}>
-                        + New Project
-                      </button>
-                    ) : (
-                      <div className="session-create-input" style={{ display: 'flex', gap: '4px' }}>
-                        <input
-                          autoFocus
-                          placeholder="project-name"
-                          value={newProjectName}
-                          style={{ flex: 1 }}
-                          onChange={e => setNewProjectName(e.target.value)}
-                          onKeyDown={async e => {
-                            if (e.key === 'Enter' && newProjectName.trim()) {
-                              try {
-                                const headers: HeadersInit = { 'Content-Type': 'application/json' }
-                                if (token) headers['Authorization'] = `Bearer ${token}`
-                                const res = await fetch('/sessions', {
-                                  method: 'POST', headers,
-                                  body: JSON.stringify({ name: newProjectName.trim() }),
-                                })
-                                if (!res.ok) {
-                                  const err = await res.json().catch(() => ({}))
-                                  setStatusMessage(err.detail || 'Failed to create project')
-                                } else {
-                                  setNewProjectName('')
-                                  setCreatingProject(false)
-                                  connectToServer()
-                                }
-                              } catch { setStatusMessage('Failed to create project') }
-                            }
-                            if (e.key === 'Escape') { setCreatingProject(false); setNewProjectName('') }
-                          }}
-                        />
-                        <button className="session-create-confirm"
-                          disabled={!newProjectName.trim()}
-                          onClick={async () => {
-                            if (!newProjectName.trim()) return
-                            try {
-                              const headers: HeadersInit = { 'Content-Type': 'application/json' }
-                              if (token) headers['Authorization'] = `Bearer ${token}`
-                              const res = await fetch('/sessions', {
-                                method: 'POST', headers,
-                                body: JSON.stringify({ name: newProjectName.trim() }),
-                              })
-                              if (!res.ok) {
-                                const err = await res.json().catch(() => ({}))
-                                setStatusMessage(err.detail || 'Failed to create project')
-                              } else {
-                                setNewProjectName('')
-                                setCreatingProject(false)
-                                connectToServer()
-                              }
-                            } catch { setStatusMessage('Failed to create project') }
-                          }}>✓</button>
-                        <button className="session-create-cancel"
-                          onClick={() => { setCreatingProject(false); setNewProjectName('') }}>✕</button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+      <div className="stac-app__left">
+        {layout.state.leftTab && (
+          <SidePanel>
+            {layout.state.leftTab === 'sessions' && (
+              <SessionsPanel connected={connected} sessions={sessions} selectedSession={selectedSession} activeSession={activeSession}
+                scansOf={sid => (sid === activeSession && projectScans.length ? projectScans : (allProjectScans[sid] || []))}
+                activeScanKey={activeScanTab} rebuildingSession={pipelineRunning?.status === 'running' ? pipelineRunning.session_id ?? null : null}
+                extracting={extractingSessions} canManage={canManage}
+                onConnect={connectToServer} onSelect={handleSessionSelect} onLoad={handleSessionLoad}
+                onFlythrough={id => { if (activeSession !== id) handleSessionLoad(id); setFlythroughOpen(id) }}
+                onReconstruct={handleReconstruct} onPickVideo={handlePickVideo} onSegment={handleSegment} onOpenManager={openSegmentationManager}
+                onUnload={handleUnload} onRename={renameSession} onDelete={deleteSession} onCreate={createSession}
+                onOpenScan={openScanFromTree} onSetReference={setReference} />
             )}
-
-
-
-            {/* Segments Panel */}
-            {activePanel === 'segments' && activeSession && (
-              <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-                <div className="panel-header">
-                  Segments
-                  {segments.length > 0 && (
-                    <span style={{ float: 'right', display: 'flex', gap: '4px' }}>
-                      <button className="segment-toggle-btn" title="Select All"
-                        onClick={() => {
-                          setSegments(prev => prev.map(s => ({ ...s, visible: true })))
-                          setUnsegmentedVisible(true)
-                          segments.forEach(s => {
-                            viewportRef.current?.toggleOBB(s.key, true)
-                            viewportRef.current?.setSegmentVisibility(s.id, true)
-                          })
-                          viewportRef.current?.setSegmentVisibility(0, true)  // unsegmented
-                        }}><CheckSquare size={13} /></button>
-                      <button className="segment-toggle-btn" title="Deselect All"
-                        onClick={() => {
-                          setSegments(prev => prev.map(s => ({ ...s, visible: false })))
-                          setUnsegmentedVisible(false)
-                          segments.forEach(s => {
-                            viewportRef.current?.toggleOBB(s.key, false)
-                            viewportRef.current?.setSegmentVisibility(s.id, false)
-                          })
-                          viewportRef.current?.setSegmentVisibility(0, false)  // unsegmented
-                        }}><Square size={13} /></button>
-                    </span>
-                  )}
-                </div>
-                <div className="bim-search">
-                  <span className="bim-search-icon"><Search size={12} /></span>
-                  <input
-                    className="bim-search-input"
-                    placeholder="Search..."
-                    value={segSearch}
-                    onChange={e => setSegSearch(e.target.value)}
-                  />
-                  {segSearch && (
-                    <span className="bim-search-clear" onClick={() => setSegSearch('')}>✕</span>
-                  )}
-                </div>
-                {floorLevel.candidates.length > 0 && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
-                    <span title="Selected floor is leveled to y=0 on the XZ plane" style={{ color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>Floor @ y=0</span>
-                    <select
-                      value={floorLevel.selected ?? ''}
-                      onChange={e => {
-                        const iid = parseInt(e.target.value)
-                        if (!Number.isNaN(iid) && activeSession) {
-                          // applies immediately — no confirmation by design
-                          applyFloorLevel(activeSession, 'explicit', iid)
-                        }
-                      }}
-                      style={{ flex: 1, background: 'var(--bg-input, #222)', color: 'var(--text-primary)', border: '1px solid var(--border, #444)', borderRadius: 4, padding: '2px 6px', fontSize: 12 }}
-                    >
-                      {floorLevel.selected == null && <option value="">(auto: lowest)</option>}
-                      {floorLevel.candidates.map(c => (
-                        <option key={c.instance_id} value={c.instance_id}>
-                          {c.label} #{c.instance_id}{c.height_m != null ? ` (y=${c.height_m.toFixed(2)}m)` : ''}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-                <div className="segments-list" style={{ flex: 1, overflowY: 'auto' }}>
-                  {segments.length === 0 && (
-                    <div style={{ padding: '14px 16px 6px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '12px', opacity: 0.6 }}>
-                      No segmented objects yet — the full cloud is listed as “Unsegmented” below.
-                    </div>
-                  )}
-                      {segments.filter(seg => !segSearch || seg.label.toLowerCase().includes(segSearch.toLowerCase())).map(seg => (
-                        <div key={seg.key} className="segment-item">
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%' }}>
-                            <input
-                              type="checkbox"
-                              checked={seg.visible}
-                              title="Toggle Visibility in 3D"
-                              className="segment-checkbox"
-                              onChange={() => {
-                                const newVis = !seg.visible
-                                setSegments(prev => prev.map(s =>
-                                  s.key === seg.key ? { ...s, visible: newVis } : s
-                                ))
-                                viewportRef.current?.toggleOBB(seg.key, newVis)
-                                viewportRef.current?.setSegmentVisibility(seg.id, newVis)
-                              }}
-                            />
-                            <span
-                              className="segment-color-dot"
-                              style={{ background: seg.color }}
-                            />
-                            {editingSegKey === seg.key ? (
-                              <input
-                                autoFocus
-                                defaultValue={seg.label}
-                                className="segment-label"
-                                style={{ flex: 1, background: 'var(--bg-input)', border: '1px solid var(--accent)', borderRadius: '3px', padding: '1px 4px', color: 'var(--text-primary)', fontSize: '12px', outline: 'none' }}
-                                onKeyDown={async (e) => {
-                                  if (e.key === 'Enter') {
-                                    const newLabel = (e.target as HTMLInputElement).value.trim()
-                                    if (newLabel && newLabel !== seg.label && activeSession) {
-                                      await fetch('/api/segmentation/rename', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel, old_label: seg.label.replace(/ #\d+$/, '') }),
-                                      })
-                                      setSegments(prev => prev.map(s =>
-                                        s.key === seg.key ? { ...s, label: newLabel } : s
-                                      ))
-                                      viewportRef.current?.refreshSegmentOBBs(activeSession)
-                                    }
-                                    setEditingSegKey(null)
-                                  } else if (e.key === 'Escape') {
-                                    setEditingSegKey(null)
-                                  }
-                                }}
-                                onBlur={async (e) => {
-                                  const newLabel = e.target.value.trim()
-                                  if (newLabel && newLabel !== seg.label && activeSession) {
-                                    await fetch('/api/segmentation/rename', {
-                                      method: 'POST',
-                                      headers: { 'Content-Type': 'application/json' },
-                                      body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel, old_label: seg.label.replace(/ #\d+$/, '') }),
-                                    })
-                                    setSegments(prev => prev.map(s =>
-                                      s.key === seg.key ? { ...s, label: newLabel } : s
-                                    ))
-                                    viewportRef.current?.refreshSegmentOBBs(activeSession)
-                                  }
-                                  setEditingSegKey(null)
-                                }}
-                              />
-                            ) : (
-                              <span className="segment-label" style={{ flex: 1 }}>{seg.label}</span>
-                            )}
-                            <span className="segment-count">
-                              ({seg.totalPoints.toLocaleString()})
-                            </span>
-                            <button className="seg-inst-btn seg-inst-edit" title="Rename"
-                              onClick={() => setEditingSegKey(seg.key)}>
-                              <Pencil size={12} />
-                            </button>
-                            <button className="seg-inst-btn seg-inst-del" title="Delete"
-                              onClick={async () => {
-                                const ok = await confirmDanger(
-                                  'Delete Segment',
-                                  `Delete "${seg.label}"? This will remove the segment and its masks permanently.`
-                                )
-                                if (!ok || !activeSession) return
-                                const res = await fetch('/api/segmentation/delete', {
-                                  method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
-                                  // label pins the EXACT row: instance_id alone
-                                  // collides across writers and deleted the
-                                  // wrong instance (strip the ' #N' suffix
-                                  // some list writers append to the label)
-                                  body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: seg.label.replace(/ #\d+$/, '') }),
-                                })
-                                if (res.ok) {
-                                  setSegments(prev => prev.filter(s => s.key !== seg.key))
-                                  // hide this segment's POINTS immediately — the
-                                  // shader keeps painting them until a full cloud
-                                  // reload otherwise (delete looked like a no-op)
-                                  viewportRef.current?.setSegmentVisibility(seg.id, false)
-                                  viewportRef.current?.refreshSegmentOBBs(activeSession)
-                                } else {
-                                  setStatusMessage(`Delete failed (${res.status}) — segment kept`)
-                                }
-                              }}>
-                              <Trash2 size={12} />
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                      {/* Unsegmented points toggle */}
-                      <div className="segment-item" style={{ borderTop: '1px solid var(--border)' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <input
-                            type="checkbox"
-                            checked={unsegmentedVisible}
-                            title="Show/hide unsegmented points"
-                            className="segment-checkbox"
-                            onChange={(e) => {
-                              setUnsegmentedVisible(e.target.checked)
-                              viewportRef.current?.setSegmentVisibility(0, e.target.checked)
-                            }}
-                          />
-                          <span
-                            className="segment-color-dot"
-                            style={{ background: 'var(--text-muted)' }}
-                          />
-                          <span className="segment-label" style={{ flex: 1, fontStyle: 'italic', opacity: 0.7 }}>Unsegmented</span>
-                          {unsegmentedCount !== null && (
-                            <span className="segment-count">
-                              ({unsegmentedCount.toLocaleString()})
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                  {/* OBJECTS section — placed library objects (references) */}
-                  {placedObjects.length > 0 && (
-                    <>
-                      <div style={{
-                        marginTop: '8px', padding: '6px 8px 4px', fontSize: '10px',
-                        fontWeight: 600, letterSpacing: '0.08em',
-                        color: 'var(--text-secondary)', textTransform: 'uppercase',
-                        borderTop: '1px solid var(--border)', opacity: 0.85,
-                      }}>
-                        📦 Objects ({placedObjects.length})
-                      </div>
-                      {placedObjects.map(o => (
-                        <div key={`pobj-${o.id}`} className="segment-item">
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%' }}>
-                            <input type="checkbox" checked={o.visible}
-                              title="Show/hide this placed object"
-                              className="segment-checkbox"
-                              onChange={e => viewportRef.current?.setSceneObjectVisible(o.id, e.target.checked)} />
-                            <span className="segment-label" style={{ flex: 1 }}>{o.name}</span>
-                            <button
-                              title="Remove from THIS scene only — the source GLB is never deleted"
-                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: 2 }}
-                              onClick={() => viewportRef.current?.removeSceneObject(o.id)}>
-                              <Trash2 size={12} />
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </>
-                  )}
-                  {/* SHAPE section — generated MeshFlow meshes (visual, non-metric) (visibility toggles) */}
-                  {shapeMeshes.length > 0 && (
-                    <>
-                      <div style={{
-                        marginTop: '8px',
-                        padding: '6px 8px 4px',
-                        fontSize: '10px',
-                        fontWeight: 600,
-                        letterSpacing: '0.08em',
-                        color: 'var(--text-secondary)',
-                        textTransform: 'uppercase',
-                        borderTop: '1px solid var(--border)',
-                        opacity: 0.85,
-                      }}>
-                        🧊 Shape ({shapeMeshes.length})
-                      </div>
-                      {shapeMeshes.map(m => (
-                        <div key={`shape-${m.folder}`} className="segment-item">
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%' }}>
-                            <input
-                              type="checkbox"
-                              checked={m.visible}
-                              title="Toggle generated mesh visibility"
-                              className="segment-checkbox"
-                              onChange={() => {
-                                const newVis = !m.visible
-                                setShapeMeshes(prev => prev.map(x =>
-                                  x.folder === m.folder ? { ...x, visible: newVis } : x
-                                ))
-                                viewportRef.current?.setShapeVisibility(m.instanceId, newVis)
-                              }}
-                            />
-                            <span className="segment-label" style={{ flex: 1 }}>{m.label}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </>
-                  )}
-                  {/* TSDF section — generated TSDF meshes (visibility toggles) */}
-                  {tsdfMeshes.length > 0 && (
-                    <>
-                      <div style={{
-                        marginTop: '8px',
-                        padding: '6px 8px 4px',
-                        fontSize: '10px',
-                        fontWeight: 600,
-                        letterSpacing: '0.08em',
-                        color: 'var(--text-secondary)',
-                        textTransform: 'uppercase',
-                        borderTop: '1px solid var(--border)',
-                        opacity: 0.85,
-                      }}>
-                        🧱 TSDF ({tsdfMeshes.length})
-                      </div>
-                      {tsdfMeshes.map(m => (
-                        <div key={`tsdf-${m.folder}`} className="segment-item">
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%' }}>
-                            <input
-                              type="checkbox"
-                              checked={m.visible}
-                              title="Toggle TSDF mesh visibility"
-                              className="segment-checkbox"
-                              onChange={() => {
-                                const newVis = !m.visible
-                                setTsdfMeshes(prev => prev.map(x =>
-                                  x.folder === m.folder ? { ...x, visible: newVis } : x
-                                ))
-                                viewportRef.current?.setTsdfVisibility(m.folder, newVis)
-                              }}
-                            />
-                            <span className="segment-label" style={{ flex: 1 }}>{m.label}</span>
-                            <button
-                              className="segment-action-btn"
-                              title={`Delete this mesh (${m.folder}) — cannot be undone`}
-                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: 2 }}
-                              onClick={async () => {
-                                if (!activeSession) return
-                                const ok = await confirmDanger(
-                                  'Delete Mesh',
-                                  `Delete mesh "${m.label}" (${m.folder})? This cannot be undone.`
-                                )
-                                if (!ok) return
-                                try {
-                                  const r = await fetch('/api/segmentation/tsdf/delete', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ session_id: activeSession, folder: m.folder }),
-                                  })
-                                  const d = await r.json()
-                                  if (d.ok) {
-                                    setStatusMessage(`🗑 mesh "${m.label}" deleted`)
-                                    viewportRef.current?.clearTsdf()
-                                    await refreshTsdfMeshList(activeSession)
-                                    viewportRef.current?.reloadTsdf(activeSession)
-                                  } else setStatusMessage(`🗑 delete failed: ${d.detail || 'error'}`)
-                                } catch { setStatusMessage('🗑 delete failed') }
-                              }}>
-                              <Trash2 size={12} />
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </>
-                  )}
-                </div>
-                {/* flexWrap + minWidth: the buttons REFLOW with the panel
-                    width instead of overflowing out of sight when the
-                    panel shrinks (USER 2026-09-06). */}
-                <div className="bim-actions" style={{ marginTop: 'auto', display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                  <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
-                    onClick={() => openSegmentationManager(activeSession!)}>
-                    <Crosshair size={14} style={{ marginRight: '6px', verticalAlign: 'middle' }} /> Segmentation
-                  </button>
-                  <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
-                    disabled={!activeSession}
-                    title="Per-object meshing: Object (generative) or Mesh (RANSAC + Poisson)"
-                    onClick={openTsdfModal}>
-                    🧩 Meshing
-                  </button>
-                  <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
-                    disabled={!activeSession}
-                    title="Correction analysis: mark the segments showing the parallel-copies error; the algorithm diagnoses (pose/depth), corrects cloud+poses+Potree, then you approve or undo"
-                    onClick={() => { setCorrectionSelected(new Set()); setCorrectionReport(null); setShowCorrectionModal(true); refreshCorrectionStatus(activeSession!); loadCorrectionLedger(activeSession!); loadCorrectionArtifacts(activeSession!) }}>
-                    🔧 Correction
-                  </button>
-                  <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
-                    disabled={!activeSession}
-                    title="Certification kit: before/after per epoch, colour by witness status / mv_votes, trajectory with loop edges, duplicates, attention list, acta — Approve or Undo the epochs"
-                    onClick={() => setShowCertifyKit(v => !v)}>
-                    🧪 Certify
-                  </button>
-                  <button className="bim-action-btn upload" style={{ flex: '1 1 45%', minWidth: 110 }}
-                    disabled={!activeSession || projectScans.filter(sc => sc.kind !== 'fused').length < 2}
-                    title={projectScans.filter(sc => sc.kind !== 'fused').length < 2
-                      ? 'Fuse needs a project with at least two scans'
-                      : 'Fuse scans: register on shared invariant segments (same label in both scans, ≥2) and build the merged cloud'}
-                    onClick={() => setShowFuseModal(true)}>
-                    ⛶ Fuse
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* BIM Navigator Panel */}
-            {activePanel === 'bim' && (
-              <>
-                <BIMNavigator
-                  models={bimModels}
-                  userRole={activeSession ? (user?.role || 'viewer') : 'viewer'}
-                  onToggleVisibility={(meshNames, visible) => viewportRef.current?.toggleBIMVisibility(meshNames, visible)}
-                  onSelectElement={(meshNames) => viewportRef.current?.highlightBIMElement(meshNames)}
-                  onSetOpacity={(meshNames, opacity) => viewportRef.current?.setBIMOpacity(meshNames, opacity)}
-                  onUploadIFC={async (file) => {
-                    if (!activeSession || !token) return
-                    const formData = new FormData()
-                    formData.append('file', file)
-                    try {
-                      const res = await fetch(`/api/sessions/${activeSession}/bim/upload`, {
-                        method: 'POST',
-                        headers: { 'Authorization': `Bearer ${token}` },
-                        body: formData,
-                      })
-                      if (res.ok) {
-                        setStatusMessage(`BIM uploaded: ${file.name}, loading...`)
-                        const { loadIFC } = await import('./components/IFCLoader')
-                        const url = `/api/sessions/${activeSession}/bim/${file.name}`
-                        const result = await loadIFC(url, file.name)
-                        viewportRef.current?.addBIMGroup(result.group)
-                        setBimModels(prev => [...prev, result])
-                        setStatusMessage(`BIM loaded: ${file.name} (${result.group.children.length} elements)`)
-                        connectToServer()
-                      } else {
-                        setStatusMessage(`Upload failed: ${(await res.json()).detail}`)
-                      }
-                    } catch (err: any) {
-                      setStatusMessage(`Upload error: ${err.message}`)
-                    }
-                  }}
-                  onDeleteIFC={async (filename) => {
-                    if (!activeSession || !token) return
-                    const ok = await confirmDanger(`Delete ${filename}?`, 'Delete BIM File')
-                    if (!ok) return
-                    try {
-                      const res = await fetch(`/api/sessions/${activeSession}/bim/${filename}`, {
-                        method: 'DELETE',
-                        headers: { 'Authorization': `Bearer ${token}` },
-                      })
-                      if (res.ok) {
-                        setStatusMessage(`BIM deleted: ${filename}`)
-                        viewportRef.current?.removeBIMGroup(filename)
-                        setBimModels(prev => prev.filter(m => m.filename !== filename))
-                        connectToServer()
-                      } else {
-                        setStatusMessage(`Delete failed: ${(await res.json()).detail}`)
-                      }
-                    } catch (err: any) {
-                      setStatusMessage(`Delete error: ${err.message}`)
-                    }
-                  }}
-                />
-                {/* Registration toggle moved to comparison dialog */}
-              </>
-            )}
-
-            {/* Team Panel */}
-            {activePanel === 'team' && (
-              <TeamPanel
-                onCallUser={(userId, username) => setCallTarget({ userId, username })}
-              />
-            )}
-
-            {/* Analysis Panel (Sábana) */}
-            {activePanel === 'analysis' && sabanaFullMeta && activeSession && (
-              <BIMAnalysisPanel meta={sabanaFullMeta} sessionId={activeSession} />
-            )}
-
-          </div>
-          {/* Resize handle */}
-          <div
-            className="panel-resize-handle"
-            onMouseDown={(e) => {
-              e.preventDefault()
-              const startX = e.clientX
-              const startW = sidebarWidth
-              const onMove = (ev: MouseEvent) => {
-                const delta = ev.clientX - startX
-                const newW = Math.max(180, Math.min(600, startW + delta))
-                setSidebarWidth(newW)
-              }
-              const onUp = () => {
-                document.removeEventListener('mousemove', onMove)
-                document.removeEventListener('mouseup', onUp)
-                document.body.style.cursor = ''
-                document.body.style.userSelect = ''
-              }
-              document.addEventListener('mousemove', onMove)
-              document.addEventListener('mouseup', onUp)
-              document.body.style.cursor = 'col-resize'
-              document.body.style.userSelect = 'none'
-            }}
-          />
-        </div>
-      )}
-
-      {/* ── Main Content ── */}
-      <main className="main-content">
-        {/* Toolbar — visible whenever a session is loaded (any content: cloud,
-            IFC, TSDF, etc.). `pointCount > 0` was the old gate, but it tracks
-            currently-rendered points (frustum-culled), so it hid the toolbar
-            whenever the cloud left the view or was toggled off. */}
-        {hasSession && !sessionLoading && (
-          <div className="toolbar">
-            {!sabanaVisible && (
-              <>
-              {/* ── Navigation ── */}
-              <div className="toolbar-group">
-                <button className={`tool-btn ${activeTool === 'navigate' ? 'active' : ''}`}
-                  onClick={() => setActiveTool('navigate')} title="Navigate (V)"><RotateCcw size={16} /></button>
-                <button className="tool-btn" onClick={() => viewportRef.current?.resetCamera()}
-                  title="Reset View (Home)"><Home size={16} /></button>
-              </div>
-              <div className="toolbar-separator" />
-              {/* ── Measurement ── */}
-              <div className="toolbar-group">
-                <button className={`tool-btn ${activeTool === 'measure-distance' ? 'active' : ''}`}
-                  onClick={() => setActiveTool('measure-distance')} title="Measure Distance (M)"><Ruler size={16} /></button>
-                <button className={`tool-btn ${activeTool === 'measure-angle' ? 'active' : ''}`}
-                  onClick={() => setActiveTool('measure-angle')} title="Measure Angle (A)"><TriangleRight size={16} /></button>
-                <button className="tool-btn" onClick={() => viewportRef.current?.clearMeasurements()}
-                  title="Clear Measurements"><Trash2 size={16} /></button>
-              </div>
-              <div className="toolbar-separator" />
-              {/* ── Editing (brush + cloud alignment gizmo) ── */}
-              <div className="toolbar-group">
-                <span style={{ position: 'relative', display: 'inline-block' }}>
-                  <button className={`tool-btn ${activeTool === 'erase' ? 'active' : ''}`}
-                    onClick={() => setActiveTool(activeTool === 'erase' ? 'navigate' : 'erase')}
-                    title="Mark zones (right-click) to erase or reassign"><Brush size={16} /></button>
-                  {/* Eraser sub-panel (user 2026-08-29): radius + undo live UNDER
-                      the eraser button — they are eraser functions, not toolbar
-                      tools. Visible only while the eraser is the active tool. */}
-                  {activeTool === 'erase' && (
-                    <div style={{
-                      position: 'absolute', top: 'calc(100% + 6px)', left: 0,
-                      zIndex: 60,
-                      display: 'flex', flexDirection: 'column', gap: 8,
-                      background: 'rgba(24,26,31,0.97)',
-                      border: '1px solid rgba(255,255,255,0.14)',
-                      borderRadius: 8, padding: '10px 12px',
-                      boxShadow: '0 6px 18px rgba(0,0,0,0.45)',
-                      whiteSpace: 'nowrap',
-                    }}>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-                        title="Brush size (sphere radius / cube half-side)">
-                        <button className={`tool-btn ${eraseShape === 'sphere' ? 'active' : ''}`}
-                          style={{ fontSize: 12, padding: '2px 7px' }}
-                          title="Sphere brush"
-                          onClick={() => setEraseShape('sphere')}>⚪</button>
-                        <button className={`tool-btn ${eraseShape === 'cube' ? 'active' : ''}`}
-                          style={{ fontSize: 12, padding: '2px 7px' }}
-                          title="Cube brush (axis-aligned)"
-                          onClick={() => setEraseShape('cube')}>⬜</button>
-                        <button className={`tool-btn ${eraseShape === 'box' ? 'active' : ''}`}
-                          style={{ fontSize: 12, padding: '2px 7px' }}
-                          title="Big selection box: right-click drops it anywhere; left-click it for the gizmo (points inside light up)"
-                          onClick={() => setEraseShape('box')}>🔳</button>
-                        <input type="range" min={3} max={150} step={1}
-                          value={Math.round(eraseRadius * 100)}
-                          onChange={e => setEraseRadius(Number(e.target.value) / 100)}
-                          style={{ width: 96, accentColor: '#ff5555' }} />
-                        <span style={{ fontSize: 11, minWidth: 44, opacity: 0.85 }}>
-                          {Math.round(eraseRadius * 100)} cm
-                        </span>
-                      </span>
-                      {eraseShape === 'cube' && (
-                        <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-                          title="Cube rotation about the vertical axis">
-                          <span style={{ fontSize: 11, opacity: 0.7 }}>↻</span>
-                          <input type="range" min={0} max={90} step={1}
-                            value={eraseYawDeg}
-                            onChange={e => setEraseYawDeg(Number(e.target.value))}
-                            style={{ width: 150, accentColor: '#ff9955' }} />
-                          <span style={{ fontSize: 11, minWidth: 30, opacity: 0.85 }}>
-                            {eraseYawDeg}°
-                          </span>
-                        </span>
-                      )}
-                      {hasConfidence && (
-                        <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-                          title="Confidence filter: points below the threshold light up red; Apply moves them to unsegmented (visible segments only)">
-                          <span style={{ fontSize: 11, opacity: 0.7 }}>🎚</span>
-                          <input type="range" min={0} max={100} step={1}
-                            value={Math.round(eraseConfThr * 100)}
-                            onChange={e => {
-                              const v = Number(e.target.value) / 100
-                              setEraseConfThr(v)
-                              setEraseConfArmed(true)
-                              viewportRef.current?.setConfHighlight(v)
-                            }}
-                            style={{ width: 96, accentColor: '#ff4444' }} />
-                          <span style={{ fontSize: 11, minWidth: 34, opacity: 0.85 }}>
-                            {Math.round(eraseConfThr * 100)}%
-                          </span>
-                          <button className="tool-btn"
-                            disabled={!eraseConfArmed}
-                            style={{ fontSize: 11, padding: '2px 8px',
-                              background: eraseConfArmed ? '#a83232' : undefined,
-                              opacity: eraseConfArmed ? 1 : 0.5 }}
-                            title={unsegmentedVisible
-                              ? "Apply: visible segments' low-confidence points → unsegmented; UNSEGMENTED low-confidence points are DELETED from the cloud (irreversible)"
-                              : "Apply: move the highlighted low-confidence points of the VISIBLE segments to unsegmented"}
-                            onClick={async () => {
-                              await viewportRef.current?.applyConfidenceFilter(
-                                eraseConfThr,
-                                segments.filter(s => s.visible).map(s => s.id),
-                                unsegmentedVisible)
-                              setEraseConfArmed(false)
-                            }}>Apply</button>
-                          {eraseConfArmed && (
-                            <button className="tool-btn" style={{ fontSize: 11, padding: '2px 6px' }}
-                              title="Turn off the preview without applying"
-                              onClick={() => {
-                                setEraseConfArmed(false)
-                                viewportRef.current?.setConfHighlight(null)
-                              }}><X size={12} /></button>
-                          )}
-                        </span>
-                      )}
-                      {eraseBoxSel && (
-                        <div style={{ display: 'flex', gap: 6 }}>
-                          <button className="tool-btn" style={{ flex: 1, fontSize: 11 }}
-                            title="Move (G)" onClick={() => viewportRef.current?.setEraseBoxMode('translate')}>Move</button>
-                          <button className="tool-btn" style={{ flex: 1, fontSize: 11 }}
-                            title="Rotate (R)" onClick={() => viewportRef.current?.setEraseBoxMode('rotate')}>Rotate</button>
-                          <button className="tool-btn" style={{ flex: 1, fontSize: 11 }}
-                            title="Stretch faces (S)" onClick={() => viewportRef.current?.setEraseBoxMode('scale')}>Stretch</button>
-                          <button className="tool-btn" style={{ flex: 1, fontSize: 11, color: '#ff7777' }}
-                            title="Remove this box (Del)" onClick={() => viewportRef.current?.removeSelectedEraseBox()}>Del</button>
-                        </div>
-                      )}
-                      <button className="tool-btn"
-                        disabled={eraseMarks === 0}
-                        style={{
-                          width: '100%', display: 'flex', alignItems: 'center',
-                          gap: 6, justifyContent: 'center',
-                          background: eraseMarks > 0 ? '#a83232' : undefined,
-                          opacity: eraseMarks > 0 ? 1 : 0.5,
-                        }}
-                        title="Erase the marked zones (visible segments only; points become unsegmented)"
-                        onClick={() => viewportRef.current?.commitErase(null, undefined,
-                          segments.filter(s => s.visible).map(s => s.id))}>
-                        <Eraser size={14} /> <span style={{ fontSize: 11 }}>Erase ({eraseMarks})</span>
-                      </button>
-                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                        <select value={eraseTarget}
-                          onChange={e => setEraseTarget(e.target.value)}
-                          style={{ flex: 1, fontSize: 11, background: '#1d2026', color: '#ddd', border: '1px solid rgba(255,255,255,0.18)', borderRadius: 5, padding: '4px 6px' }}>
-                          <option value="">Reassign to…</option>
-                          {segments.map(s => (
-                            <option key={s.id} value={String(s.id)}>{s.label}_{s.id}</option>
-                          ))}
-                          <option value="new">➕ New segment…</option>
-                        </select>
-                        <button className="tool-btn"
-                          disabled={eraseMarks === 0 || eraseTarget === ''}
-                          style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: (eraseMarks > 0 && eraseTarget !== '') ? 1 : 0.5 }}
-                          title="Assign the marked zones to the chosen segment (includes unsegmented points)"
-                          onClick={() => {
-                            const visibles = segments.filter(s => s.visible).map(s => s.id)
-                            if (eraseTarget === 'new') {
-                              const name = window.prompt('New segment name:')
-                              if (!name || !name.trim()) return
-                              viewportRef.current?.commitErase(null, name.trim(), visibles, unsegmentedVisible)
-                            } else {
-                              viewportRef.current?.commitErase(Number(eraseTarget), undefined, visibles, unsegmentedVisible)
-                            }
-                            setEraseTarget('')
-                          }}>
-                          <Check size={14} /> <span style={{ fontSize: 11 }}>Assign</span>
-                        </button>
-                      </div>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <button className="tool-btn"
-                          disabled={eraseMarks === 0}
-                          style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'center', opacity: eraseMarks > 0 ? 1 : 0.5 }}
-                          title="Remove all marks without erasing"
-                          onClick={() => viewportRef.current?.clearEraseMarks()}>
-                          <X size={14} /> <span style={{ fontSize: 11 }}>Clear</span>
-                        </button>
-                        <button className="tool-btn" style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'center' }}
-                          title="Undo the last applied commit"
-                          onClick={async () => {
-                            if (!activeSession) return
-                            try {
-                              const r = await fetch('/api/segmentation/erase/undo', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ session_id: activeSession }),
-                              })
-                              const d = await r.json()
-                              setStatusMessage(d.ok ? `↩ erase undone (${(d.restored || 0).toLocaleString()} pts restored)` : '↩ nothing to undo')
-                            } catch { setStatusMessage('↩ undo failed') }
-                          }}>
-                          <Undo2 size={14} /> <span style={{ fontSize: 11 }}>Undo</span>
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </span>
-                <button className={`tool-btn ${activeTool === 'align' ? 'active' : ''}`}
-                  onClick={() => setActiveTool(activeTool === 'align' ? 'navigate' : 'align')} title="Align Cloud (G)"><Move size={16} /></button>
-                <button className="tool-btn"
-                  title="Add Object — insert a mesh from the collection or any project into this scene"
-                  onClick={async () => {
-                    setShowObjectLibrary(true)
-                    try {
-                      const r = await fetch('/api/objects/library')
-                      if (r.ok) setObjectLibrary((await r.json()).items || [])
-                    } catch { /* silent */ }
-                  }}><Package size={16} /></button>
-              </div>
-              <div className="toolbar-separator" />
-              {/* ── Sectioning (clip box: hides everything outside; unlock restores) ── */}
-              <div className="toolbar-group">
-                <button className={`tool-btn ${activeTool === 'section-box' ? 'active' : ''}`}
-                  onClick={() => setActiveTool('section-box')} title="Section Box (X) — isolate a region, hide everything outside"><Scissors size={16} /></button>
-                <button className="tool-btn" onClick={() => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') }}
-                  title="Reset Section Box — show the full scene again"><Unlock size={16} /></button>
-              </div>
-              <div className="toolbar-separator" />
-              {/* ── Display settings ── */}
-              <div className="toolbar-group" style={{ position: 'relative' }}>
-                <button className="tool-btn"
-                  title="Display settings — Point Size, Detail (LOD budget), Confidence"
-                  onClick={() => setShowDisplayMenu(v => !v)}
-                  style={showDisplayMenu ? { background: 'var(--accent)' } : undefined}>
-                  <SlidersHorizontal size={16} />
-                </button>
-                {showDisplayMenu && (
-                  <>
-                    {/* click-outside backdrop */}
-                    <div onClick={() => setShowDisplayMenu(false)}
-                      style={{ position: 'fixed', inset: 0, zIndex: 90 }} />
-                    <div style={{
-                      position: 'absolute', top: '100%', left: 0, marginTop: 6, zIndex: 100,
-                      background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 6,
-                      padding: 12, minWidth: 240, boxShadow: 'var(--shadow-lg)',
-                      display: 'flex', flexDirection: 'column', gap: 12,
-                    }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span className="control-label" style={{ minWidth: 74 }}>Point Size</span>
-                        <input className="control-slider" type="range" style={{ flex: 1 }}
-                          min="0.01" max="5" step="0.01" value={pointSize}
-                          onChange={e => setPointSize(parseFloat(e.target.value))} />
-                        <span className="control-value" style={{ minWidth: 30 }}>{pointSize.toFixed(2)}</span>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span className="control-label" style={{ minWidth: 74 }}
-                          title="Max points rendered at once (LOD budget). Higher = more of the cloud visible, more GPU/RAM.">Detail</span>
-                        <input className="control-slider" type="range" style={{ flex: 1 }}
-                          min="2" max="40" step="1" value={pointBudget / 1_000_000}
-                          onChange={e => setPointBudget(parseFloat(e.target.value) * 1_000_000)} />
-                        <span className="control-value" style={{ minWidth: 30 }}>{(pointBudget / 1_000_000).toFixed(0)}M</span>
-                      </div>
-                      {hasConfidence && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <span className="control-label" style={{ minWidth: 74 }}>Confidence</span>
-                          <input className="control-slider" type="range" style={{ flex: 1 }}
-                            min={0} max={1} step={0.01} value={confidenceThreshold}
-                            onChange={e => setConfidenceThreshold(parseFloat(e.target.value))} />
-                          <span className="control-value" style={{ minWidth: 30 }}>{confidenceThreshold.toFixed(2)}</span>
-                        </div>
-                      )}
-                    </div>
-                  </>
-                )}
-              </div>
-              </>
-            )}
-            {/* ── View helpers: camera poses (nube only) + grid + axes + fullscreen ── */}
-            <div className="toolbar-separator" />
-            <div className="toolbar-group">
-              {!sabanaVisible && hasCameraPoses && (
-                <button className={`tool-btn ${showCameraPoses ? 'active' : ''}`}
-                  onClick={() => setShowCameraPoses(v => !v)}
-                  title={showCameraPoses ? 'Hide Camera Poses' : 'Show Camera Poses'}>
-                  <Camera size={16} />
-                </button>
-              )}
-              <button className={`tool-btn ${showGrid ? 'active' : ''}`}
-                onClick={() => setShowGrid(v => !v)}
-                title={showGrid ? 'Hide Grid' : 'Show Grid'}>
-                <Grid3X3 size={16} />
-              </button>
-              <button className={`tool-btn ${showAxes ? 'active' : ''}`}
-                onClick={() => setShowAxes(v => !v)}
-                title={showAxes ? 'Hide Axes' : 'Show Axes'}>
-                <Axis3D size={16} />
-              </button>
-              <button className="tool-btn"
-                onClick={() => {
-                  if (document.fullscreenElement) document.exitFullscreen()
-                  else document.documentElement.requestFullscreen()
+            {layout.state.leftTab === 'instances' && activeSession && (
+              <InstancesPanel segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} floorLevel={floorLevel}
+                placedObjects={placedObjects} shapeMeshes={shapeMeshes} tsdfMeshes={tsdfMeshes} selectedSegmentId={selectedSegmentId}
+                canFuse={projectScans.filter((sc: any) => sc.kind !== 'fused').length >= 2}
+                onSelectSegment={id => { setSelectedSegmentId(id); if (id != null) layout.openInspector('properties') }}
+                onSelectAll={() => {
+                  setSegments(prev => prev.map(s => ({ ...s, visible: true }))); setUnsegmentedVisible(true)
+                  segments.forEach(s => { viewportRef.current?.toggleOBB(s.key, true); viewportRef.current?.setSegmentVisibility(s.id, true) })
+                  viewportRef.current?.setSegmentVisibility(0, true)
                 }}
-                title="Fullscreen (F11)">
-                <Maximize size={16} />
-              </button>
-            </div>
-            {/* ── Sábana / BIM Comparison ── */}
-            {bimModels.length > 0 && segments.length > 0 && (
-              <>
-                <div className="toolbar-separator" />
-                <div className="toolbar-group">
-                  {!sabanaVisible && (
-                    <button className="tool-btn"
-                      onClick={handleGenerateComparison}
-                      disabled={sabanaLoading}
-                      title="Generate BIM vs Scan comparison">
-                      {sabanaLoading ? <Loader2 size={16} className="spin" /> : <Scale size={16} />}
-                    </button>
-                  )}
-                  {!sabanaLoading && sessions.find(s => s.id === activeSession)?.hasSabana && (
-                    <button className={`tool-btn ${sabanaVisible ? 'active' : ''}`}
-                      onClick={handleToggleSabana}
-                      disabled={sabanaLoading}
-                      title={sabanaVisible ? 'Hide Sábana' : 'Show Sábana'}>
-                      <Thermometer size={16} />
-                    </button>
-                  )}
-                  {sabanaVisible && sabanaMetrics && (
-                    <span className="toolbar-chip" title="Overall pass rate">
-                      {sabanaMetrics.elements?.filter((e: any) => e.status === 'evaluated').length || 0}/{sabanaMetrics.summary?.total_elements || 0} elements
-                    </span>
-                  )}
-                </div>
-              </>
+                onDeselectAll={() => {
+                  setSegments(prev => prev.map(s => ({ ...s, visible: false }))); setUnsegmentedVisible(false)
+                  segments.forEach(s => { viewportRef.current?.toggleOBB(s.key, false); viewportRef.current?.setSegmentVisibility(s.id, false) })
+                  viewportRef.current?.setSegmentVisibility(0, false)
+                }}
+                onToggleSegment={(seg, vis) => { setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, visible: vis } : s))); viewportRef.current?.toggleOBB(seg.key, vis); viewportRef.current?.setSegmentVisibility(seg.id, vis) }}
+                onRenameSegment={renameSegment} onDeleteSegment={deleteSegment}
+                onToggleUnsegmented={v => { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) }}
+                onFloorLevel={iid => applyFloorLevel(activeSession, 'explicit', iid)}
+                onTogglePlaced={(id, v) => viewportRef.current?.setSceneObjectVisible(id, v)} onRemovePlaced={id => viewportRef.current?.removeSceneObject(id)}
+                onToggleShape={(m, v) => { setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setShapeVisibility(m.instanceId, v) }}
+                onToggleTsdf={(m, v) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setTsdfVisibility(m.folder, v) }}
+                onDeleteTsdf={deleteTsdfMesh}
+                onOpenSegmentation={() => openSegmentationManager(activeSession)} onOpenMeshing={openTsdfModal} onOpenCorrection={openCorrection} onOpenFuse={() => setShowFuseModal(true)} />
             )}
-          </div>
+            {layout.state.leftTab === 'scans' && (
+              <ScansPanel sessionId={activeSession} scans={projectScans} activeScanKey={activeScanTab}
+                onOpenScan={sc => activeSession && openScanFromTree(activeSession, sc)} onSetReference={sc => activeSession && setReference(activeSession, sc)} onFuse={() => setShowFuseModal(true)} />
+            )}
+            {layout.state.leftTab === 'bim' && (
+              <BIMNavigator models={bimModels} userRole={activeSession ? (user?.role || 'viewer') : 'viewer'}
+                onToggleVisibility={(names, v) => viewportRef.current?.toggleBIMVisibility(names, v)}
+                onSelectElement={names => viewportRef.current?.highlightBIMElement(names)}
+                onSetOpacity={(names, o) => viewportRef.current?.setBIMOpacity(names, o)}
+                onUploadIFC={async file => {
+                  if (!activeSession || !token) return
+                  const formData = new FormData(); formData.append('file', file)
+                  try {
+                    const res = await fetch(`/api/sessions/${activeSession}/bim/upload`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}` }, body: formData })
+                    if (res.ok) {
+                      setStatusMessage(t('bim.uploadedLoading', { name: file.name }))
+                      const { loadIFC } = await import('./components/IFCLoader')
+                      const result = await loadIFC(`/api/sessions/${activeSession}/bim/${file.name}`, file.name)
+                      viewportRef.current?.addBIMGroup(result.group)
+                      setBimModels(prev => [...prev, result])
+                      report(t('bim.loaded', { name: file.name, n: result.group.children.length }), 'ok')
+                      connectToServer()
+                    } else report(t('bim.uploadFailed', { detail: (await res.json()).detail }), 'err')
+                  } catch (err: any) { report(t('bim.uploadFailed', { detail: err.message }), 'err') }
+                }}
+                onDeleteIFC={async filename => {
+                  if (!activeSession || !token) return
+                  const ok = await confirmDanger(t('bim.deleteMessage', { name: filename }), t('bim.deleteTitle'))
+                  if (!ok) return
+                  try {
+                    const res = await fetch(`/api/sessions/${activeSession}/bim/${filename}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } })
+                    if (res.ok) { report(t('bim.deleted', { name: filename }), 'ok'); viewportRef.current?.removeBIMGroup(filename); setBimModels(prev => prev.filter(m => m.filename !== filename)); connectToServer() }
+                    else report(t('bim.deleteFailed', { detail: (await res.json()).detail }), 'err')
+                  } catch (err: any) { report(t('bim.deleteFailed', { detail: err.message }), 'err') }
+                }} />
+            )}
+            {layout.state.leftTab === 'team' && <TeamPanel onCallUser={(userId, username) => setCallTarget({ userId, username })} />}
+          </SidePanel>
         )}
+      </div>
 
-        {/* ── Placed-object alignment bar (visible while one is selected) ── */}
-        {sceneObjSel != null && (() => {
-          const objName = placedObjects.find(o => o.id === sceneObjSel)?.name || `object ${sceneObjSel}`
-          const bstyle = { fontSize: 12, padding: '4px 10px', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4, height: 'auto', width: 'auto' }
-          return (
-          <div className="toolbar" style={{ top: 52 }}>
-            <div className="toolbar-group">
-              <span style={{ fontSize: 12, fontWeight: 600, opacity: 0.9, padding: '0 8px', whiteSpace: 'nowrap' }}>📦 {objName}</span>
-              <button className="tool-btn" style={bstyle} title="Move (G)"
-                onClick={() => viewportRef.current?.setSceneObjectMode('translate')}>Move</button>
-              <button className="tool-btn" style={bstyle} title="Rotate (R)"
-                onClick={() => viewportRef.current?.setSceneObjectMode('rotate')}>Rotate</button>
-              <button className="tool-btn" style={bstyle} title="Scale"
-                onClick={() => viewportRef.current?.setSceneObjectMode('scale')}>Scale</button>
-            </div>
-            <div className="toolbar-separator" />
-            <div className="toolbar-group">
-              <button className="tool-btn" style={bstyle} title="Rest on the floor (bottom → y=0)"
-                onClick={() => viewportRef.current?.alignSceneObject('floor')}>⬇ Floor</button>
-              <select value={alignTarget}
-                onChange={e => setAlignTarget(e.target.value)}
-                style={{ fontSize: 12, background: 'var(--bg-elevated, #1d2026)', color: 'var(--text-primary, #ddd)', border: '1px solid var(--border, rgba(255,255,255,0.18))', borderRadius: 5, padding: '4px 8px', maxWidth: 170 }}>
-                <option value="">Align to…</option>
-                {alignTargets.map(t => <option key={t.key} value={t.key}>{t.label}</option>)}
-              </select>
-              <button className="tool-btn" style={bstyle} disabled={!alignTarget} title="Same base level as the target"
-                onClick={() => viewportRef.current?.alignSceneObject('same_base', alignTarget)}>⬍ Base</button>
-              <button className="tool-btn" style={bstyle} disabled={!alignTarget} title="Rest on top of the target"
-                onClick={() => viewportRef.current?.alignSceneObject('on_top', alignTarget)}>⬆ On top</button>
-              <button className="tool-btn" style={bstyle} disabled={!alignTarget} title="Center horizontally with the target (X/Z)"
-                onClick={() => viewportRef.current?.alignSceneObject('center_xz', alignTarget)}>⇔ Horizontal</button>
-              <button className="tool-btn" style={bstyle} disabled={!alignTarget} title="Center vertically with the target (Y)"
-                onClick={() => viewportRef.current?.alignSceneObject('center_y', alignTarget)}>⇕ Vertical</button>
-            </div>
-            <div className="toolbar-separator" />
-            <div className="toolbar-group">
-              <button className="tool-btn" style={{ ...bstyle, color: '#ff7777' }}
-                title="Remove from THIS scene only — the source GLB is never deleted"
-                onClick={() => viewportRef.current?.removeSelectedSceneObject()}>
-                <Trash2 size={14} /> Remove ref
-              </button>
-            </div>
-          </div>
-          )
-        })()}
-
-        {/* Synced video↔3D flythrough overlay (shrinks the viewport to the right half) */}
-        {flythroughOpen && (
-          <SyncPlayer
-            sessionId={flythroughOpen}
-            viewportRef={viewportRef}
-            onClose={() => setFlythroughOpen(null)}
-          />
-        )}
-
-        {/* ── Scan tabs (USER 2026-09-06, VS-Code style): active tab = the scan
-             being viewed and worked on. ★ reference · ⚠ correction pending. ── */}
+      <main className="stac-app__main">
         {activeSession && scanTabs.length > 0 && (
-          <div style={{ display: 'flex', alignItems: 'stretch', gap: 2, padding: '0 6px', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)', height: 30, flexShrink: 0 }}>
-            {scanTabs.map(t => {
-              const sc = projectScans.find(s => s.key === t.key)
-              const isActive = t.key === activeScanTab
-              return (
-                <div key={t.key}
-                  onClick={() => { if (!isActive) activateScan(activeSession, t) }}
-                  title={`${t.date} · ${t.label}${sc?.is_reference ? ' · reference' : ''}`}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 6, padding: '0 10px', cursor: 'pointer', fontSize: 12,
-                    color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    background: isActive ? 'var(--bg-primary)' : 'transparent',
-                    borderBottom: isActive ? '2px solid #e0a632' : '2px solid transparent',
-                  }}>
-                  {sc?.is_reference && <span style={{ color: '#e0a632' }}>★</span>}
-                  {t.kind === 'fused' && <span>⛶</span>}
-                  <span>{t.date}</span>
-                  <span style={{ opacity: 0.8 }}>{t.label}</span>
-                  {isActive && correctionState?.status === 'pending' && <span title="correction pending" style={{ color: '#e0a632' }}>⚠</span>}
-                  <span onClick={(e) => { e.stopPropagation(); closeScanTab(t.key) }}
-                    title="close tab (reopen from the scans list)"
-                    style={{ marginLeft: 4, opacity: 0.6 }}>✕</span>
-                </div>
-              )
+          <Tabs<string> className="stac-main__tabs" variant="chrome" size="sm" ariaLabel={t('scans.openTabs')}
+            items={scanTabs.map(tab => {
+              const sc = projectScans.find((s: any) => s.key === tab.key)
+              const isActive = tab.key === activeScanTab
+              return {
+                id: tab.key, closable: true, title: `${tab.date} ${tab.label}${sc?.is_reference ? ` (${t('header.reference')})` : ''}`,
+                icon: sc?.is_reference ? <Star className="stac-scantabs__ref" aria-hidden /> : tab.kind === 'fused' ? <Layers aria-hidden /> : undefined,
+                label: tab.kind === 'fused' ? tab.label : `${tab.date} ${tab.label}`,
+                badge: isActive && correctionState?.status === 'pending' ? <AlertTriangle className="stac-scantabs__warn" aria-label={t('correction.pendingShort')} /> : undefined,
+              }
             })}
-          </div>
+            value={activeScanTab} onChange={key => { const tab = scanTabs.find(x => x.key === key); if (tab && tab.key !== activeScanTab) activateScan(activeSession, tab) }} onClose={closeScanTab} />
         )}
 
-        {/* 3D Viewport — don't hide during pipeline runs (pipeline panel shows progress) */}
-        <div className={`viewport-container${sessionLoading && !(pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession) ? ' viewport-hidden' : ''}${flythroughOpen ? ' viewport-flythrough' : ''}`}>
+        <div className={`stac-main__viewport ${loadingOverlay ? 'stac-main__viewport--hidden' : ''} ${flythroughOpen ? 'stac-main__viewport--flythrough' : ''}`.trim()}>
           <Viewport
             ref={viewportRef}
             openScanKey={openScanKey}
@@ -3171,1544 +2119,232 @@ function App() {
             showAxes={showAxes}
             showGrid={showGrid}
             pipelineRunning={!!pipelineRunning && pipelineRunning.status === 'running'}
-            onPointCount={(n) => { setPointCount(n); if (n > 0) lastCloudLoadAtRef.current = Date.now() }}
+            onPointCount={n => { setPointCount(n); if (n > 0) lastCloudLoadAtRef.current = Date.now() }}
             onFps={setFps}
             onStatusMessage={setStatusMessage}
-            onSegments={(list) => { setSegments(list); refreshUnsegmentedCount(activeSession) }}
+            onSegments={list => { setSegments(list); refreshUnsegmentedCount(activeSession) }}
             onEraseLedger={() => reloadSegments(activeSession)}
-            onTsdfReady={(sid) => refreshTsdfMeshList(sid)}
+            onTsdfReady={sid => refreshTsdfMeshList(sid)}
             onSceneObjectsChanged={setPlacedObjects}
-            onSceneObjectSelected={(id) => {
-              setSceneObjSel(id)
-              setAlignTarget('')
-              setAlignTargets(id != null ? (viewportRef.current?.getSceneAlignTargets() || []) : [])
-            }}
+            onSceneObjectSelected={id => { setSceneObjSel(id); setAlignTarget(''); setAlignTargets(id != null ? (viewportRef.current?.getSceneAlignTargets() || []) : []) }}
             onPipelineProgress={handlePipelineProgress}
-            onVolumeChanged={async (params) => {
-              // Gizmo edit finished: persist the volume, then re-evaluate its
-              // collision state against the scene and tint it accordingly.
+            onVolumeChanged={async params => {
               if (!activeSession) return
               try {
-                await fetch('/api/scene/volumes/update', {
-                  method: 'POST', headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ session_id: activeSession, ...params }),
-                })
-                const er = await fetch('/api/scene/volumes/evaluate', {
-                  method: 'POST', headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ session_id: activeSession, volume_id: params.volume_id }),
-                })
+                await fetch('/api/scene/volumes/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, ...params }) })
+                const er = await fetch('/api/scene/volumes/evaluate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, volume_id: params.volume_id }) })
                 const ed = await er.json()
                 const occ = 1 - (typeof ed.free_fraction === 'number' ? ed.free_fraction : 1)
-                viewportRef.current?.setVolumeStatus(params.volume_id,
-                  occ < 0.02 ? 'free' : occ < 0.12 ? 'touching' : 'colliding')
-              } catch { /* non-fatal: the volume stays its last color */ }
+                viewportRef.current?.setVolumeStatus(params.volume_id, occ < 0.02 ? 'free' : occ < 0.12 ? 'touching' : 'colliding')
+              } catch { /* non-fatal: the volume keeps its last colour */ }
             }}
-            onVolumeDeleted={async (volumeId) => {
+            onVolumeDeleted={async volumeId => {
               if (!activeSession) return
-              try {
-                await fetch('/api/scene/volumes/delete', {
-                  method: 'POST', headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ session_id: activeSession, volume_id: volumeId }),
-                })
-              } catch { /* ignore */ }
+              try { await fetch('/api/scene/volumes/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, volume_id: volumeId }) }) } catch { /* ignore */ }
             }}
-            onHasConfidence={(has) => {
-              setHasConfidence(has)
-            }}
-            onBimLoaded={(models) => {
-              setBimModels(models)
-              if (models.length > 0) {
-                setShowAxes(false)
-                setShowGrid(false)
-              }
-            }}
-            onSabanaLoaded={(nPts) => {
-              setSabanaLoading(false)
-              setSessionLoading(null)
-              setStatusMessage(`Sábana: ${nPts?.toLocaleString()} deviation points`)
-            }}
+            onHasConfidence={setHasConfidence}
+            onHasWitness={setHasWitness}
+            onBimLoaded={models => { setBimModels(models); if (models.length > 0) { setShowAxes(false); setShowGrid(false) } }}
+            onSabanaLoaded={nPts => { setSabanaLoading(false); setSessionLoading(null); setStatusMessage(t('deviation.loadedPoints', { n: fmt.integer(nPts ?? 0) })) }}
             showCameraPoses={showCameraPoses && !sabanaVisible}
             onHasCameraPoses={setHasCameraPoses}
+            onCursor={setCursor}
+            onReadouts={setReadouts}
+            onViewScale={setMetersPerPixel}
           />
 
-          {/* Session Loading Overlay — hidden when pipeline is running (show pipeline panel instead) */}
-          {sessionLoading && !(pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession) && (
-            <div className="session-loading-overlay">
-              <div className="slo-particles">
-                {Array.from({ length: 20 }, (_, i) => (
-                  <div key={i} className="slo-dot" />
-                ))}
-              </div>
-              <div className="slo-logo-wrap">
-                <div className="slo-logo-ring" />
-                <div className="slo-logo-ring" />
-                <div className="slo-logo-ring" />
-                <img src="/logo.png" alt="STAC Build" className="slo-logo-img" />
-              </div>
-              <div className="slo-text">
-                <div className="slo-title">Loading Session</div>
-                <div className="slo-status">
-                  <div className="slo-spinner" />
-                  <span>{sessionLoading}</span>
-                </div>
-              </div>
-            </div>
+          {hasSession && !sessionLoading && (
+            <FloatingToolbar
+              activeTool={activeTool} onTool={setActiveTool} onResetCamera={() => viewportRef.current?.resetCamera()}
+              onClearMeasurements={() => viewportRef.current?.clearMeasurements()} onAddObject={openObjectLibrary}
+              onResetSection={() => viewportRef.current?.resetSectionBox()} sabanaVisible={sabanaVisible}
+              brush={{
+                shape: eraseShape, onShape: setEraseShape, radiusM: eraseRadius, onRadiusM: setEraseRadius, yawDeg: eraseYawDeg, onYawDeg: setEraseYawDeg,
+                hasConfidence, confThr: eraseConfThr, confArmed: eraseConfArmed,
+                onConfThr: v => { setEraseConfThr(v); setEraseConfArmed(true); viewportRef.current?.setConfHighlight(v) },
+                onApplyConf: async () => { await viewportRef.current?.applyConfidenceFilter(eraseConfThr, segments.filter(s => s.visible).map(s => s.id), unsegmentedVisible); setEraseConfArmed(false) },
+                onCancelConf: () => { setEraseConfArmed(false); viewportRef.current?.setConfHighlight(null) },
+                boxSelected: eraseBoxSel, onBoxMode: m => viewportRef.current?.setEraseBoxMode(m), onRemoveBox: () => viewportRef.current?.removeSelectedEraseBox(),
+                marks: eraseMarks, onErase: () => viewportRef.current?.commitErase(null, undefined, segments.filter(s => s.visible).map(s => s.id)),
+                targets: segments.map(s => ({ id: s.id, label: s.label })), target: eraseTarget, onTarget: setEraseTarget,
+                onAssign: () => {
+                  const visibles = segments.filter(s => s.visible).map(s => s.id)
+                  if (eraseTarget === 'new') {
+                    const name = window.prompt(t('brush.newSegmentPrompt'))
+                    if (!name || !name.trim()) return
+                    viewportRef.current?.commitErase(null, name.trim(), visibles, unsegmentedVisible)
+                  } else viewportRef.current?.commitErase(Number(eraseTarget), undefined, visibles, unsegmentedVisible)
+                  setEraseTarget('')
+                },
+                onClearMarks: () => viewportRef.current?.clearEraseMarks(), onUndo: undoBrush,
+              }}
+              display={{ pointSize, onPointSize: setPointSize, budgetM: pointBudget / 1_000_000, onBudgetM: v => setPointBudget(v * 1_000_000), hasConfidence, confidence: confidenceThreshold, onConfidence: setConfidenceThreshold }}
+              view={{ hasCameraPoses, showCameraPoses, onToggleCameraPoses: () => setShowCameraPoses(v => !v), showGrid, onToggleGrid: () => setShowGrid(v => !v), showAxes, onToggleAxes: () => setShowAxes(v => !v), onFullscreen: toggleFullscreen }}
+              color={{
+                mode: sabanaVisible ? 'deviation' : colorMode, hasWitness, hasDeviation: hasSabanaResult, mvThreshold, onMvThreshold: setMvThreshold,
+                onMode: m => { if (m === 'deviation') { if (!sabanaVisible) handleToggleSabana() } else { if (sabanaVisible) handleToggleSabana(); setColorMode(m) } },
+              }}
+              compare={{
+                available: bimModels.length > 0 && segments.length > 0, loading: sabanaLoading, hasResult: hasSabanaResult, showing: sabanaVisible,
+                onRun: handleGenerateComparison, onToggle: handleToggleSabana,
+                chip: sabanaMetrics ? t('deviation.elementsChip', { n: sabanaMetrics.elements?.filter((e: any) => e.status === 'evaluated').length || 0, total: sabanaMetrics.summary?.total_elements || 0 }) : undefined,
+              }}
+              placed={sceneObjSel != null ? {
+                name: placedObjects.find(o => o.id === sceneObjSel)?.name || t('placed.fallbackName', { id: sceneObjSel }),
+                onMode: m => viewportRef.current?.setSceneObjectMode(m), onAlign: (op, target) => viewportRef.current?.alignSceneObject(op, target),
+                targets: alignTargets, target: alignTarget, onTarget: setAlignTarget, onRemove: () => viewportRef.current?.removeSelectedSceneObject(),
+              } : null}
+            />
           )}
 
-          {/* Deviation Analysis — will be redesigned as toolbar buttons */}
-
-          {/* Pipeline Loading Overlay — animated logo while building, before cloud exists */}
-          {pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession && pointCount === 0 && (
-            <div className="session-loading-overlay">
-              <div className="slo-particles">
-                {Array.from({ length: 20 }, (_, i) => (
-                  <div key={i} className="slo-dot" />
-                ))}
-              </div>
-              <div className="slo-logo-wrap">
-                <div className="slo-logo-ring" />
-                <div className="slo-logo-ring" />
-                <div className="slo-logo-ring" />
-                <img src="/logo.png" alt="STAC Build" className="slo-logo-img" />
-              </div>
-              <div className="slo-text">
-                <div className="slo-title">Building Point Cloud</div>
-                <div className="slo-status">
-                  <div className="slo-spinner" />
-                  <span>{(() => {
-                    const stage = pipelineRunning.stages[pipelineRunning.current_stage_idx]
-                    return stage ? `${stage.label}: ${stage.message} (${Math.round(stage.pct)}%)` : 'Initializing...'
-                  })()}</span>
-                </div>
-              </div>
-            </div>
+          {hasSession && !sessionLoading && (
+            <ViewportHud onView={preset => viewportRef.current?.setStandardView(preset)} metersPerPixel={metersPerPixel}
+              colorMode={sabanaVisible ? 'deviation' : colorMode} mvThreshold={mvThreshold}
+              statusFractions={certifyState?.report_metrics?.witnesses?.status_fraction ?? null}
+              deviationRange={sabanaVisible && sabanaMetrics ? { maxMm: (sabanaMetrics.tolerance_mm || 15) * 3, toleranceMm: sabanaMetrics.tolerance_mm || 15 } : null}
+              showEdges={showCertifyKit} readouts={readouts}
+              banner={pipelineActiveHere && pointCount > 0 && currentStage ? (
+                <Banner glass compact tone="brand" title={t('pipeline.runningBanner', { stage: currentStage.label })} action={<Button size="sm" variant="ghost" onClick={handlePipelineCancel}>{t('common.cancel')}</Button>}>
+                  {currentStage.message} {fmt.percent(currentStage.pct / 100)}
+                </Banner>
+              ) : undefined} />
           )}
 
-          {/* Welcome screen — shown when no session */}
-          {!hasSession && !sessionLoading && (
-            <div className="welcome-screen">
-              <img src="/logo.png" alt="STAC Build" className="welcome-logo-img" />
-              <div className="welcome-subtitle">
-                {!connected
-                  ? 'Connect to a STAC server to browse and visualize your 3D scan sessions.'
-                  : 'Select a project from the sidebar.'}
-              </div>
-              {!connected && (
-                <button className="welcome-btn" onClick={connectToServer}>
-                  <Plug size={14} /> Connect to Server
-                </button>
-              )}
-              <div className="welcome-hint">
-                {connected
-                  ? `${sessions.length} project${sessions.length !== 1 ? 's' : ''} available`
-                  : 'Default: wss://localhost:8765'}
-              </div>
-            </div>
-          )}
+          {flythroughOpen && <SyncPlayer sessionId={flythroughOpen} viewportRef={viewportRef} onClose={() => setFlythroughOpen(null)} />}
 
-          {/* Viewport info overlay */}
-          {hasSession && (
-            <div className="viewport-overlay">
-              <div className="viewport-info">
-                {pointCount > 0 && `${(pointCount / 1000000).toFixed(2)}M points`}
-                {fps > 0 && ` · ${fps} fps`}
-              </div>
-            </div>
+          {loadingOverlay && <SplashOverlay title={t('splash.loadingSession')} status={sessionLoading || undefined} />}
+          {pipelineActiveHere && pointCount === 0 && (
+            <SplashOverlay title={t('splash.building')} status={currentStage ? `${currentStage.label}: ${currentStage.message}` : t('splash.initializing')} stages={pipelineStages} />
           )}
-
-          {/* Console Panel — horizontal bottom overlay */}
-          {consoleOpen && (
-            <div className="console-panel">
-              <div className="console-header">
-                <span>Console</span>
-                <button className="console-close" onClick={() => setConsoleOpen(false)} title="Close console"><X size={14} /></button>
-              </div>
-              <div className="console-body">
-                {consoleLogs.map((entry, i) => (
-                  <div key={i} className={`console-line console-${entry.level}`}>
-                    <span className="console-ts">{entry.ts}</span>
-                    <span className="console-msg">{entry.msg}</span>
-                  </div>
-                ))}
-                <div ref={consoleEndRef} />
-              </div>
-            </div>
-          )}
-
-          {/* Pipeline progress overlay — only for the active session */}
-          {pipelineRunning && pipelineRunning.stages.length > 0 && pipelineRunning.session_id === activeSession && (
-            <div className="pipeline-progress-overlay">
-              <div className="pipeline-progress-card">
-                <div className="pipeline-progress-header">
-                  <span>Pipeline {pipelineRunning.status === 'running' ? <Clock size={14} /> : pipelineRunning.status === 'done' ? <CheckCircle2 size={14} color="#3fb950" /> : pipelineRunning.status === 'failed' ? <XCircle size={14} color="#f85149" /> : <Ban size={14} />}</span>
-                  {pipelineRunning.status === 'running' && (
-                    <button className="pipeline-cancel-btn" onClick={handlePipelineCancel}>Cancel</button>
-                  )}
-                </div>
-                {pipelineRunning.stages.filter(s => s.enabled).map((stage) => (
-                  <div key={stage.id} className={`pipeline-stage-row ${stage.status}`}>
-                    <span className="pipeline-stage-icon">{stage.icon}</span>
-                    <span className="pipeline-stage-label">{stage.label}</span>
-                    <div className="pipeline-stage-bar">
-                      <div
-                        className="pipeline-stage-fill"
-                        style={{ width: `${stage.pct}%` }}
-                      />
-                    </div>
-                    <span className="pipeline-stage-pct">{Math.round(stage.pct)}%</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          {!hasSession && !sessionLoading && <WelcomeScreen connected={connected} sessionCount={sessions.length} onConnect={connectToServer} />}
         </div>
+
+        {layout.state.dockOpen && (
+          <div className="stac-main__dock">
+            <BottomDock
+              tabs={[
+                { id: 'console', label: t('dock.console'), icon: <Terminal aria-hidden /> },
+                { id: 'jobs', label: t('dock.jobs'), icon: <ListTodo aria-hidden />, badge: pipelineRunning ? 1 : undefined },
+                { id: 'timeline', label: t('dock.timeline'), icon: <Clock aria-hidden /> },
+                { id: 'report', label: t('dock.report'), icon: <BarChart3 aria-hidden /> },
+              ]}
+              panels={{
+                console: <ConsolePanel logs={consoleLogs} />,
+                jobs: <JobsPanel pipeline={pipelineRunning ? { session_id: pipelineRunning.session_id, status: pipelineRunning.status, stages: pipelineStages } : null} onCancelPipeline={handlePipelineCancel}
+                  correction={correctionRunning ? correctionProgress : null} meshing={tsdfRunning ? tsdfOverall : null} object={shapeRunning ? shapeOverall : null}
+                  resume={resumeBusy ? resumeProgress : null} extracting={extractingSessions} tasks={activeTasks} />,
+                timeline: <ScansPanel variant="timeline" sessionId={activeSession} scans={projectScans} activeScanKey={activeScanTab}
+                  onOpenScan={sc => activeSession && openScanFromTree(activeSession, sc)} onSetReference={sc => activeSession && setReference(activeSession, sc)} onFuse={() => setShowFuseModal(true)} />,
+                report: activeSession && bimModels.length > 0 && segments.length > 0
+                  ? <DeviationOverlay sessionId={activeSession} viewportRef={viewportRef} onClose={() => layout.setDockOpen(false)} />
+                  : <EmptyState compact icon={<BarChart3 aria-hidden />} title={t('report.emptyTitle')} description={t('report.emptyDesc')} />,
+              }} />
+          </div>
+        )}
       </main>
 
-      {/* ── Right-side collapsible AI Assistant dock ─────────────────────
-          Always mounted (the conversation survives collapse); the grid column
-          animates to 0 when hidden. Works without a session or segmentation —
-          the backend falls back to general chat. */}
-      <aside className={`assistant-dock ${assistantOpen ? '' : 'closed'}`}>
-        {/* Resize handle on the dock's left edge — same drag behaviour as the
-            left sidebar's, mirrored (dragging left widens the dock) */}
-        {assistantOpen && (
-          <div
-            className="assistant-resize-handle"
-            onMouseDown={(e) => {
-              e.preventDefault()
-              const startX = e.clientX
-              const startW = assistantWidth
-              const onMove = (ev: MouseEvent) => {
-                const newW = Math.max(260, Math.min(640, startW - (ev.clientX - startX)))
-                setAssistantWidth(newW)
-              }
-              const onUp = () => {
-                document.removeEventListener('mousemove', onMove)
-                document.removeEventListener('mouseup', onUp)
-                document.body.style.cursor = ''
-                document.body.style.userSelect = ''
-                setAssistantWidth((w) => {
-                  localStorage.setItem('stac.assistantWidth', String(w))
-                  return w
-                })
-              }
-              document.addEventListener('mousemove', onMove)
-              document.addEventListener('mouseup', onUp)
-              document.body.style.cursor = 'col-resize'
-              document.body.style.userSelect = 'none'
-            }}
-          />
-        )}
-        <div className="assistant-dock-header">
-          <span className="assistant-dock-title"><Sparkles size={14} /> AI Assistant</span>
-          <button className="assistant-dock-close" title="Hide chat" onClick={toggleAssistant}>
-            <ChevronRight size={16} />
-          </button>
-        </div>
-        <AssistantPanel sessionId={activeSession} viewport={viewportRef}
-          onVlmStatus={setVlmStatus} />
-      </aside>
-
-      {/* Pipeline Config Dialog */}
-      {
-        pipelineDialogOpen && (
-          <div className="pipeline-dialog-backdrop" onClick={() => setPipelineDialogOpen(false)}>
-            <div className="pipeline-dialog" onClick={e => e.stopPropagation()}>
-              <h3>Run Pipeline</h3>
-              <p className="pipeline-dialog-session">Session: {pipelineDialogSession}</p>
-
-              {/* Scan Selection */}
-              {scansList.length > 0 && (
-                <div className="pipeline-dialog-scans">
-                  <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '6px' }}>
-                    {scansList.length === 1 ? 'Scan to reconstruct:' : `Select scans to reconstruct (${selectedScans.length}/${scansList.length}):`}
-                  </p>
-                  {scansList.map(scan => {
-                    const isPipelineActive = !!(pipelineRunning && (pipelineRunning.status === 'running' || pipelineRunning.status === 'queued') && pipelineRunning.session_id === pipelineDialogSession)
-                    const isRebuilding = isPipelineActive && (!pipelineRunning!.scans || pipelineRunning!.scans.includes(scan.key))
-                    return (
-                      <label key={scan.key} className="pipeline-scan-item" style={isRebuilding ? { opacity: 0.5 } : undefined}>
-                        <input
-                          type="checkbox"
-                          checked={selectedScans.includes(scan.key)}
-                          disabled={scansList.length === 1 || isRebuilding}
-                          onChange={e => {
-                            if (e.target.checked) {
-                              setSelectedScans(prev => [...prev, scan.key])
-                            } else {
-                              setSelectedScans(prev => prev.filter(k => k !== scan.key))
-                            }
-                          }}
-                        />
-                        <span className="pipeline-scan-date">{scan.date}</span>
-                        {scan.source !== 'default' && <span className="pipeline-scan-source">{scan.source}</span>}
-                        <span className="pipeline-scan-frames">{scan.frame_count} frames</span>
-                        {scan.has_output && <span className="pipeline-scan-badge">✓ output</span>}
-                        {isRebuilding && <span className="pipeline-scan-badge" style={{ color: 'var(--accent)' }}>⚙️ rebuilding</span>}
-                      </label>
-                    )
-                  })}
+      <div className="stac-app__inspector">
+        {layout.state.inspectorOpen && (
+          <Inspector
+            tabs={[
+              { id: 'properties', label: t('inspector.properties') },
+              { id: 'acta', label: t('inspector.acta'), badge: pendingEpochs > 0 ? pendingEpochs : undefined },
+              { id: 'assistant', label: t('assistant.title') },
+            ]}
+            panels={{
+              properties: <PropertiesPanel sessionId={activeSession} scanLabel={activeScanRow ? `${activeScanRow.date} ${activeScanRow.label}` : null} isReference={!!activeScanRow?.is_reference}
+                pointCount={pointCount} fps={fps} epoch={epoch} pendingEpochs={pendingEpochs} segments={segments} selected={selectedSegment} unsegmentedCount={unsegmentedCount} bimCount={bimModels.length} hasSabana={hasSabanaResult} />,
+              acta: (
+                <div className="stac-inspector__stack">
+                  {activeSession ? (
+                    <CertifyKitPanel session={activeSession} token={token} viewport={viewportRef.current} onStatus={setStatusMessage} refreshKey={certifyRefresh}
+                      colorMode={colorMode} onColorMode={setColorMode} mvThreshold={mvThreshold} onMvThreshold={setMvThreshold} onStateLoaded={setCertifyState} />
+                  ) : <EmptyState icon={<FileCheck2 aria-hidden />} title={t('properties.noSession')} description={t('welcome.pickSession')} />}
+                  {sabanaFullMeta && activeSession && <BIMAnalysisPanel meta={sabanaFullMeta} sessionId={activeSession} />}
                 </div>
-              )}
-              <div className="pipeline-dialog-stages">
-                <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px' }}>
-                  Runs the full reconstruction end-to-end: 3D Reconstruction → Cloud Cleaning → TSDF Mesh
-                </p>
-                {(() => {
-                  const partial = scansList.filter(s => selectedScans.includes(s.key) && s.recon_state === 'partial')
-                  if (partial.length === 0) return null
-                  const totalCached = partial.reduce((n, s) => n + (s.cached_chunks || 0), 0)
-                  return (
-                    <div style={{ fontSize: '11px', background: 'rgba(46,160,67,0.12)', border: '1px solid rgba(46,160,67,0.4)', color: 'var(--success)', borderRadius: '6px', padding: '8px', margin: '8px 0' }}>
-                      ⏸ Reconstrucción incompleta detectada ({totalCached} chunk{totalCached === 1 ? '' : 's'} en cache).
-                      Al ejecutar se <b>reanuda</b> y completa lo que falta sin re-procesar lo ya hecho.
-                    </div>
-                  )
-                })()}
-                <label className="pipeline-replace-toggle">
-                  <input
-                    type="checkbox"
-                    checked={pipelineReplace}
-                    onChange={e => setPipelineReplace(e.target.checked)}
-                  />
-                  <span>Replace existing outputs</span>
-                </label>
-                {pipelineReplace && scansList.some(s => selectedScans.includes(s.key) && s.recon_state === 'partial') && (
-                  <div style={{ fontSize: '11px', color: 'var(--warning)', marginTop: '4px' }}>
-                    ⚠️ Con esto activado se borra el cache y la reconstrucción arranca de cero. Desactivalo para reanudar.
-                  </div>
-                )}
-              </div>
-              <div className="pipeline-dialog-actions">
-                <button className="pipeline-btn-cancel" onClick={() => setPipelineDialogOpen(false)}>Cancel</button>
-                <button className="pipeline-btn-run" onClick={handlePipelineRun} disabled={selectedScans.length === 0}>
-                  <Play size={14} /> Run Pipeline
-                </button>
-              </div>
-            </div>
-          </div>
-        )
-      }
-
-      {/* ── Status Bar ── */}
-      <div className="statusbar">
-        <div className="statusbar-item">
-          <span><Circle size={8} fill={serverAlive ? '#3fb950' : '#f85149'} stroke="none" /></span>
-          <span>STAC Server</span>
-        </div>
-        <div className="statusbar-item">
-          <span><Circle size={8} fill={connected ? '#3fb950' : '#f85149'} stroke="none" /></span>
-          <span>{connected ? 'Connected' : 'Disconnected'}</span>
-        </div>
-        <div className="statusbar-spacer" />
-        <div className="statusbar-item">
-          {activeSession ? `Project: ${activeSession}` : 'No project'}
-        </div>
-        {statusMessage && (
-          <div className="statusbar-item statusbar-status">
-            {statusMessage}
-          </div>
+              ),
+              assistant: <AssistantPanel sessionId={activeSession} viewport={viewportRef} onVlmStatus={setVlmStatus} />,
+            }} />
         )}
-        <div className="statusbar-item font-mono">
-          {pointCount > 0 ? `${pointCount.toLocaleString()} pts` : ''}
-        </div>
       </div>
-      {/* Admin Panel Overlay */}
+
+      <div className="stac-app__status">
+        <StatusBar serverAlive={serverAlive} connected={connected} sessionLabel={activeSession}
+          scanLabel={activeScanRow ? `${activeScanRow.date} ${activeScanRow.label}` : null}
+          message={statusMessage} epoch={epoch} pendingEpochs={pendingEpochs} cursor={cursor}
+          job={pipelineActiveHere && currentStage ? currentStage.label : correctionRunning ? t('jobs.correction') : tsdfRunning ? t('jobs.meshing') : null}
+          jobPct={pipelineActiveHere && currentStage ? currentStage.pct : correctionRunning ? correctionProgress?.pct ?? null : null}
+          points={pointCount} fps={fps} consoleOpen={consoleOpen} onToggleConsole={() => setConsoleOpen(!consoleOpen)} />
+      </div>
+
+      <PipelineDialog open={pipelineDialogOpen} sessionId={pipelineDialogSession} scans={scansList} selected={selectedScans}
+        onToggleScan={(key, on) => setSelectedScans(prev => (on ? [...prev, key] : prev.filter(k => k !== key)))}
+        replace={pipelineReplace} onReplace={setPipelineReplace}
+        rebuildingKeys={(() => { const pr = pipelineRunning; const active = !!(pr && (pr.status === 'running' || pr.status === 'queued') && pr.session_id === pipelineDialogSession); return active ? (pr!.scans || scansList.map(s => s.key)) : [] })()}
+        onCancel={() => setPipelineDialogOpen(false)} onRun={handlePipelineRun} />
+
       {adminOpen && <AdminPage onClose={() => setAdminOpen(false)} />}
 
-      {/* WebRTC Call Overlay */}
-      {
-        (callTarget || incomingCall) && user && (
-          <WebRTCCall
-            wsRef={teamWsRef}
-            userId={user.id}
-            callTarget={callTarget}
-            incomingCall={incomingCall}
-            onClose={() => { setCallTarget(null); setIncomingCall(null) }}
-            onIncomingHandled={() => setIncomingCall(null)}
-          />
-        )
-      }
+      {(callTarget || incomingCall) && user && (
+        <WebRTCCall wsRef={teamWsRef} userId={user.id} callTarget={callTarget} incomingCall={incomingCall}
+          onClose={() => { setCallTarget(null); setIncomingCall(null) }} onIncomingHandled={() => setIncomingCall(null)} />
+      )}
 
-      {/* ── Fuse scans modal (USER 2026-09-06): pick the scans, see the
-           segment pairs found by label (≥2 required), register on them
-           (CloudComPy) and build the merged cloud, which opens as a tab. ── */}
       {showFuseModal && activeSession && (
-        <FuseScansModal
-          project={activeSession}
-          scans={projectScans}
-          onClose={() => setShowFuseModal(false)}
-          onStatus={setStatusMessage}
+        <FuseScansModal project={activeSession} scans={projectScans} onClose={() => setShowFuseModal(false)} onStatus={setStatusMessage}
           onFused={async () => {
             const scans = await loadProjectScans(activeSession)
             const fused = scans.filter(s => s.kind === 'fused').slice(-1)[0]
             if (fused) activateScan(activeSession, { key: fused.key, label: fused.label, date: fused.date, kind: 'fused' })
-          }}
-        />
+          }} />
       )}
 
-      {/* Resume / Cancel incomplete propagation (USER 2026-09-06) */}
-      {resumeDialog && (
-        <div className="admin-overlay" style={{ zIndex: 2100 }}>
-          <div className="admin-panel" style={{ maxWidth: 520 }}>
-            <div className="admin-header"><h2>⚠ Incomplete segmentation</h2></div>
-            <div style={{ padding: 16 }}>
-              <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
-                {resumeDialog.incomplete.length} instance(s) were not fully
-                propagated (a previous propagation was interrupted).
-                {resumeDialog.complete > 0 ? ` ${resumeDialog.complete} complete instance(s) are unaffected.` : ''}
-              </p>
-              <ul style={{ maxHeight: 160, overflow: 'auto', fontSize: 12, color: 'var(--text-primary)', margin: '0 0 12px', paddingLeft: 18 }}>
-                {resumeDialog.incomplete.map((i: any) => (
-                  <li key={i.instance_id}>{i.label} <span style={{ color: 'var(--text-secondary)' }}>({i.frames} frames)</span></li>
-                ))}
-              </ul>
-              <p style={{ color: '#e0a632', fontSize: 12.5, marginBottom: 14 }}>
-                <strong>Cancel</strong> deletes every incomplete instance
-                permanently — from the list, the masks, and every file
-                (they will no longer exist). <strong>Resume</strong> re-seeds
-                them from their saved masks and finishes propagating (in
-                batches, so it won't run out of memory).
-              </p>
-              {resumeBusy && (
-                <div style={{ marginBottom: 12 }}>
-                  <div style={{ fontSize: 12, color: 'var(--text-primary)', marginBottom: 4 }}>
-                    ⏳ {resumeProgress?.detail || 'starting…'}
-                    {resumeProgress ? ` — ${resumeProgress.pct}%` : ''}
-                    {resumeProgress ? ` (${Math.round(resumeProgress.elapsed_s / 60)} min elapsed)` : ''}
-                  </div>
-                  <div style={{ height: 8, background: 'var(--bg-tertiary)', borderRadius: 4, overflow: 'hidden' }}>
-                    <div style={{ height: '100%', width: `${resumeProgress?.pct || 0}%`, background: '#e0a632', transition: 'width .4s' }} />
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
-                    Objects are propagated in batches; this dialog closes when all batches are saved.
-                  </div>
-                </div>
-              )}
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button className="bim-action-btn upload" style={{ flex: 1 }}
-                  disabled={resumeBusy}
-                  onClick={async () => {
-                    const sid = resumeDialog.session
-                    setResumeBusy(true)
-                    setResumeProgress(null)
-                    // SAM3 is already ready (the dialog was raised on ready)
-                    setStatusMessage('▶ resuming propagation (seed + batched propagate)…')
-                    try {
-                      const r = await fetch('/api/segmentation/resume/run', {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ session_id: sid }),
-                      })
-                      const d = await r.json().catch(() => ({}))
-                      setStatusMessage(r.ok ? '▶ propagation resumed — instances completed'
-                        : `▶ resume failed: ${d.detail || 'error'}`)
-                    } catch (e: any) {
-                      // the browser may drop a very long POST while the backend
-                      // keeps working — wait for the backend task itself
-                      setStatusMessage('▶ connection dropped — waiting for the backend task to finish…')
-                      for (let i = 0; i < 2400; i++) {
-                        await new Promise(r => setTimeout(r, 3000))
-                        const d = await fetch(`/api/tasks/${sid}`).then(r => r.json()).catch(() => null)
-                        if (d && !(d.tasks || []).some((x: any) => x.task_type === 'resume')) break
-                      }
-                      setStatusMessage('▶ resume task finished (check the segments)')
-                    }
-                    setResumeBusy(false)
-                    setResumeDialog(null)
-                  }}>
-                  {resumeBusy ? '⏳ resuming…' : '▶ Resume'}
-                </button>
-                <button className="bim-action-btn" style={{ flex: 1 }}
-                  disabled={resumeBusy}
-                  onClick={async () => {
-                    const sid = resumeDialog.session
-                    setResumeBusy(true)
-                    setStatusMessage('🗑 deleting incomplete instances…')
-                    try {
-                      const r = await fetch('/api/segmentation/resume/cancel', {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ session_id: sid }),
-                      })
-                      const d = await r.json().catch(() => ({}))
-                      setStatusMessage(r.ok ? `🗑 ${d.deleted || 0} incomplete instance(s) deleted — keep segmenting`
-                        : '🗑 cancel failed')
-                    } catch { setStatusMessage('🗑 cancel failed') }
-                    setResumeBusy(false)
-                    setResumeDialog(null)
-                    // stay in the manager: Cancel just clears the incomplete ones
-                  }}>
-                  {resumeBusy ? '⏳…' : '🗑 Cancel (delete incomplete)'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+      {resumeDialog && <ResumeDialog incomplete={resumeDialog.incomplete} complete={resumeDialog.complete} busy={resumeBusy} progress={resumeProgress} onResume={resumeRun} onCancelDelete={resumeCancel} />}
+
+      {interactiveSessionId && (
+        <SegmentationManager sessionId={interactiveSessionId} onClose={closeSegmentationManager}
+          onUpdate={async () => { if (!activeSession) return; try { await reloadSegments(activeSession); viewportRef.current?.refreshSegmentOBBs(activeSession) } catch { /* silent */ } }}
+          onSuccess={newInstances => { report(t('segmentation.propagated', { n: newInstances.length }), 'ok'); setInteractiveSessionId(null); if (activeSession) viewportRef.current?.sendCommand({ type: 'refresh_segments', session_id: activeSession }) }} />
       )}
 
-      {/* Segmentation Manager Overlay */}
-      {
-        interactiveSessionId && (
-          <SegmentationManager
-            sessionId={interactiveSessionId}
-            onClose={async (dirty: boolean) => {
-              const sid = interactiveSessionId
-              setInteractiveSessionId(null)
-              if (!sid) return
+      <Dialog open={compareDialogOpen} size="sm" title={t('deviation.compareTitle')} icon={<Scale aria-hidden />} tone="measure" onClose={() => setCompareDialogOpen(false)}
+        footer={<><Button onClick={() => setCompareDialogOpen(false)}>{t('common.cancel')}</Button><Button variant="primary" onClick={runComparison} data-autofocus>{t('deviation.runComparison')}</Button></>}>
+        <p className="stac-dialog__message">{t('deviation.compareDesc')}</p>
+        <Field label={t('deviation.registration')} inline>
+          <SegmentedControl<'auto' | 'manual'> ariaLabel={t('deviation.registration')} value={useManualAlignment ? 'manual' : 'auto'} onChange={v => setUseManualAlignment(v === 'manual')}
+            options={[{ value: 'auto', label: t('deviation.registrationAuto') }, { value: 'manual', label: t('deviation.registrationManual') }]} />
+        </Field>
+      </Dialog>
 
-              if (!dirty) {
-                // Nothing changed — just reload cached segmentation for sidebar
-                setStatusMessage('Segmentation closed (no changes)')
-                try {
-                  await reloadSegments(sid)
-                  viewportRef.current?.refreshSegmentOBBs(sid)
-                  // Reload Potree so new classification data (classId per point) takes effect
-                  viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid })
-                } catch { /* silent */ }
-                return
-              }
+      <ObjectLibraryDialog open={showObjectLibrary} items={objectLibrary} onClose={() => setShowObjectLibrary(false)}
+        onPick={async it => {
+          if (!activeSession) return
+          try {
+            const r = await fetch('/api/objects/scene/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, name: it.name, url: it.url }) })
+            const d = await r.json()
+            if (d.ok) { setShowObjectLibrary(false); await viewportRef.current?.placeSceneObject(d.object) }
+          } catch { report(t('library.addFailed'), 'err') }
+        }} />
 
-              // Masks changed — regenerate DBSCAN + OBBs
-              setSessionLoading('Refreshing segmentation…')
-              setStatusMessage('Refreshing segmentation (DBSCAN)...')
-              try {
-                const res = await fetch('/api/segmentation/refresh', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ session_id: sid }),
-                })
-                if (res.ok) {
-                  const data = await res.json()
-                  setStatusMessage(`Segmentation refreshed: ${data.instances?.length || 0} instances`)
-                  if (Array.isArray(data.instances)) {
-                    setSegments(data.instances.map((inst: any) => ({
-                      key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
-                      id: inst.instance_id || inst.id,
-                      label: `${inst.label}`,
-                      color: inst.color || '#4fd1ff',
-                      totalPoints: inst.total_points || 0,
-                      visible: true,
-                      excluded: inst.excluded || false,
-                    })))
-                  }
-                  viewportRef.current?.refreshSegmentOBBs(sid)
-                  refreshUnsegmentedCount(sid)
-                  // Floor→y=0 after finalize: level the selected floor (or the
-                  // lowest when several) — the manager may have created/edited
-                  // floor segments (applies instantly, no confirmation).
-                  await applyFloorLevel(sid, 'auto')
-                  refreshFloorLevel(sid)
-                  // Reload Potree so new classification data (classId per point) takes effect
-                  viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid })
-                }
-              } catch { /* silent */ }
-              finally { setSessionLoading(null) }
-            }}
-            onUpdate={async () => {
-              if (!activeSession) return
-              try {
-                await reloadSegments(activeSession)
-                // Also refresh 3D OBBs in the viewport
-                viewportRef.current?.refreshSegmentOBBs(activeSession)
-              } catch { /* silent */ }
-            }}
-            onSuccess={(newInstances) => {
-              setStatusMessage(`Successfully propagated ${newInstances.length} instances.`)
-              setInteractiveSessionId(null)
-              // Refresh segments in sidebar
-              if (activeSession) {
-                viewportRef.current?.sendCommand({ type: 'refresh_segments', session_id: activeSession })
-              }
-            }}
-          />
-        )
-      }
-      {/* BIM Comparison dialog with registration toggle */}
-      {compareDialogOpen && (
-        <div className="cd-overlay" onClick={(e) => { if (e.target === e.currentTarget) setCompareDialogOpen(false) }}>
-          <div className="cd-dialog cd-confirm">
-            <div className="cd-header">
-              <img src="/logo.png" alt="STAC" className="cd-logo" />
-              <span className="cd-app-name">STAC Build</span>
-            </div>
-            <div className="cd-body">
-              <span className="cd-icon">📐</span>
-              <div className="cd-content">
-                <div className="cd-title">BIM vs Scan Comparison</div>
-              </div>
-            </div>
-            <div className="compare-dialog-option">
-              <label className="bim-alignment-toggle">
-                <span className="bim-alignment-label">Registration</span>
-                <div className="toggle-switch-container">
-                  <span className={`toggle-option-label ${!useManualAlignment ? 'active' : ''}`}>Auto</span>
-                  <button
-                    className={`toggle-switch ${useManualAlignment ? 'on' : ''}`}
-                    onClick={() => setUseManualAlignment(!useManualAlignment)}
-                  >
-                    <span className="toggle-switch-knob" />
-                  </button>
-                  <span className={`toggle-option-label ${useManualAlignment ? 'active' : ''}`}>Manual</span>
-                </div>
-              </label>
-            </div>
-            <div className="cd-actions">
-              <button className="cd-btn cd-btn-cancel" onClick={() => setCompareDialogOpen(false)}>Cancel</button>
-              <button className="cd-btn cd-btn-confirm" onClick={runComparison}>Run Comparison</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Shape Export Modal ── */}
-      {showShapeModal && (
-        <div className="admin-overlay" style={{ zIndex: 2000 }}>
-          <div className="admin-panel" style={{ maxWidth: 540, maxHeight: '80vh', overflow: 'auto' }}>
-            <div className="admin-header">
-              <h2>🧊 Shape Export</h2>
-              <button className="admin-close" onClick={() => setShowShapeModal(false)}>✕</button>
-            </div>
-            <div style={{ padding: 16 }}>
-              <p style={{ color: 'var(--text-secondary)', marginBottom: 12, fontSize: 13 }}>
-                Select which objects to export. Existing PKLs/meshes will be overwritten.
-              </p>
-
-              {(() => {
-                const phaseBadge = (phase?: string) => {
-                  if (!phase || phase === 'pending') return null
-                  const styles: Record<string, { bg: string; fg: string; icon: string; label: string }> = {
-                    captioning:      { bg: '#9b59b633', fg: '#bd93d3', icon: '📝', label: 'caption' },
-                    exporting_pkl:   { bg: '#3498db33', fg: '#5dade2', icon: '📦', label: 'pkl…' },
-                    pkl_ready:       { bg: '#e67e2233', fg: '#f0a868', icon: '📦', label: 'pkl' },
-                    reconstructing:  { bg: '#f39c1233', fg: '#f4b656', icon: '🔄', label: 'mesh…' },
-                    done:            { bg: '#2ecc7133', fg: '#52d68d', icon: '🧊', label: 'done' },
-                    error:           { bg: '#e74c3c33', fg: '#ec7063', icon: '❌', label: 'error' },
-                  }
-                  const s = styles[phase]
-                  if (!s) return null
-                  return (
-                    <span style={{
-                      fontSize: 11, background: s.bg, color: s.fg,
-                      padding: '1px 6px', borderRadius: 4, whiteSpace: 'nowrap',
-                    }}>
-                      {s.icon} {s.label}
-                    </span>
-                  )
-                }
-
-                return segments.filter(s => s.label !== 'Unsegmented').map(seg => {
-                  const st = shapeStatus[seg.id]
-                  const prog = shapeProgress[seg.id]
-                  const checked = shapeSelected.has(seg.id)
-                  const livePhase = prog?.phase
-                  return (
-                    <div key={seg.key} style={{
-                      display: 'flex', flexDirection: 'column', gap: 6,
-                      padding: '10px 12px', marginBottom: 8,
-                      background: checked ? 'var(--bg-secondary)' : 'var(--bg-tertiary)',
-                      borderRadius: 8,
-                      border: `2px solid ${checked ? seg.color + '55' : 'transparent'}`,
-                      opacity: checked ? 1 : 0.6,
-                      transition: 'all 0.15s',
-                    }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <input type="checkbox" checked={checked}
-                          disabled={shapeRunning}
-                          onChange={() => {
-                            setShapeSelected(prev => {
-                              const next = new Set(prev)
-                              if (next.has(seg.id)) next.delete(seg.id)
-                              else next.add(seg.id)
-                              return next
-                            })
-                          }}
-                          style={{ cursor: shapeRunning ? 'not-allowed' : 'pointer' }}
-                        />
-                        <span style={{
-                          width: 12, height: 12, borderRadius: '50%',
-                          background: seg.color, flexShrink: 0,
-                        }} />
-                        <strong style={{ flex: 1, color: 'var(--text-primary)', fontSize: 13 }}>{seg.label}</strong>
-                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                          {seg.totalPoints.toLocaleString()} pts
-                        </span>
-                        {/* Live badge wins over static status */}
-                        {livePhase ? phaseBadge(livePhase) :
-                          st?.has_mesh ? phaseBadge('done') :
-                          st?.has_pkl ? phaseBadge('pkl_ready') : null}
-                      </div>
-                      {prog?.elapsed != null && livePhase === 'done' && (
-                        <div style={{ fontSize: 11, color: 'var(--text-secondary)', paddingLeft: 24 }}>
-                          mesh ready · {prog.elapsed.toFixed(0)}s
-                        </div>
-                      )}
-                      {prog?.error && (
-                        <div style={{ fontSize: 11, color: 'var(--error)', paddingLeft: 24 }}>
-                          {prog.error.slice(0, 140)}
-                        </div>
-                      )}
-                      {checked && !shapeRunning && (
-                        <>
-                          {st?.has_mesh && (
-                            <div style={{ fontSize: 11, color: 'var(--warning)', padding: '2px 0' }}>
-                              ⚠️ This object already has a mesh. Running will overwrite it.
-                            </div>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  )
-                })
-              })()}
-
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '12px 0 4px', color: 'var(--text-secondary)', fontSize: 13 }}>
-                <input type="checkbox" checked={shapeAutoReconstruct} disabled={shapeRunning}
-                  onChange={e => setShapeAutoReconstruct(e.target.checked)} />
-                Generate mesh after export (runs MeshFlow — ~12 s per object on GPU)
-              </label>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', margin: '0 0 12px 24px' }}>
-                ⚠ Visual asset (generative, non-metric). Architectural classes are routed to the
-                metric surface-fit pipeline instead.
-              </div>
-
-              {shapeOverall.phase !== 'idle' && (shapeRunning || shapeOverall.phase === 'done' || shapeOverall.phase === 'error') && (
-                <div style={{
-                  padding: '10px 12px', marginBottom: 12,
-                  background: shapeOverall.phase === 'error' ? 'rgba(231,76,60,.1)' :
-                              shapeOverall.phase === 'done' ? 'rgba(46,204,113,.1)' :
-                              'rgba(52,152,219,.1)',
-                  borderRadius: 6, fontSize: 13,
-                  border: `1px solid ${shapeOverall.phase === 'error' ? '#e74c3c' :
-                          shapeOverall.phase === 'done' ? '#2ecc71' : '#3498db'}`,
-                  color: shapeOverall.phase === 'error' ? '#e74c3c' :
-                         shapeOverall.phase === 'done' ? '#2ecc71' : '#5dade2',
-                }}>
-                  {shapeOverall.phase === 'reconstructing' && (
-                    <>🔄 Reconstructing mesh {shapeOverall.done || 0}/{shapeOverall.total || 0}…</>
-                  )}
-                  {shapeOverall.phase === 'exporting_pkl' && (
-                    <>📦 Generating PKLs ({shapeOverall.total || 0})…</>
-                  )}
-                  {shapeOverall.phase === 'done' && (
-                    <>✅ All done — {shapeOverall.done || 0}/{shapeOverall.total || 0} mesh(es) reconstructed</>
-                  )}
-                  {shapeOverall.phase === 'error' && (
-                    <>❌ Pipeline error — check the console log for details</>
-                  )}
-                </div>
-              )}
-
-              {shapeResult && !shapeRunning && shapeOverall.phase !== 'reconstructing' && (
-                <div style={{
-                  padding: '10px 12px', marginBottom: 12,
-                  background: 'rgba(46, 204, 113, 0.1)', borderRadius: 6,
-                  border: '1px solid #2ecc71', color: '#2ecc71',
-                  fontSize: 13,
-                }}>
-                  Exported {shapeResult.count} PKL{shapeResult.count !== 1 ? 's' : ''}.
-                </div>
-              )}
-
-              <button
-                className="bim-action-btn upload"
-                style={{
-                  width: '100%', padding: 12, fontWeight: 600, fontSize: 14,
-                  opacity: shapeRunning || shapeSelected.size === 0 ? 0.5 : 1,
-                }}
-                disabled={shapeRunning || shapeSelected.size === 0}
-                onClick={async () => {
-                  if (!activeSession) return
-                  // Synchronous busy guard — `disabled` only kicks in after the
-                  // next React render, this gate fires immediately so a stray
-                  // second click in the same turn is dropped.
-                  if (shapeBusyRef.current) return
-                  shapeBusyRef.current = true
-                  setShapeRunning(true)
-                  setShapeResult(null)
-                  setShapeProgress({})
-                  setShapeOverall({ phase: 'exporting_pkl', total: shapeSelected.size, done: 0 })
-                  try {
-                    const res = await fetch('/api/segmentation/shape/export', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        session_id: activeSession,
-                        instance_ids: [...shapeSelected],
-                        auto_reconstruct: shapeAutoReconstruct,
-                      }),
-                    })
-                    const data = await res.json()
-                    if (data.ok) {
-                      setShapeResult({ count: data.count, exported: data.exported })
-                      setStatusMessage(`Shape: exported ${data.count} segment(s)` +
-                        (data.reconstructing ? ' — reconstructing mesh in background' : ''))
-                      if (!data.reconstructing) {
-                        await refreshShapeStatus()
-                        setShapeRunning(false)
-                      }
-                      // else: keep shapeRunning=true; the polling effect will track it
-                    } else {
-                      setStatusMessage(`Shape error: ${data.detail || 'Unknown'}`)
-                      setShapeRunning(false)
-                    }
-                  } catch (err: any) {
-                    setStatusMessage(`Shape error: ${err.message}`)
-                    setShapeRunning(false)
-                  } finally {
-                    // Always clear the ref so the button can be re-armed once
-                    // the run is fully complete (the polling effect handles
-                    // setShapeRunning(false) for the reconstruction path).
-                    shapeBusyRef.current = false
-                  }
-                }}
-              >
-                {shapeRunning
-                  ? (shapeOverall.phase === 'reconstructing'
-                      ? `🔄 Reconstructing ${shapeOverall.done || 0}/${shapeOverall.total || 0}…`
-                      : '⏳ Working…')
-                  : `🚀 Start (${shapeSelected.size} object${shapeSelected.size !== 1 ? 's' : ''})`}
-              </button>
-
-              {/* Reconstruction v2 — assemble a coherent scene (parametric surfaces,
-                  swept solids, boxes, openings, ...) from the segmented cloud. */}
-              <button
-                className="bim-action-btn"
-                style={{ width: '100%', padding: 10, marginTop: 8, fontWeight: 600, fontSize: 13,
-                         opacity: reconRunning ? 0.5 : 1 }}
-                disabled={reconRunning}
-                title="Classify every segment and reconstruct parametric surfaces / swept solids / boxes + openings; free-form objects use the ShapeR meshes. Writes output/scene/scene.json."
-                onClick={async () => {
-                  if (!activeSession || reconBusyRef.current) return
-                  reconBusyRef.current = true
-                  setReconRunning(true)
-                  setStatusMessage('Reconstruction v2: starting…')
-                  try {
-                    const res = await fetch(`/api/segmentation/reconstruct/${activeSession}`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({}),
-                    })
-                    const data = await res.json().catch(() => ({} as any))
-                    if (res.status === 409) {
-                      setStatusMessage(`Reconstruction: ${data.detail || 'ya hay una reconstrucción corriendo — esperá a que termine'}`)
-                      reconBusyRef.current = false
-                      setReconRunning(false)
-                      return
-                    }
-                    if (!res.ok || !data.started) {
-                      setStatusMessage(`Reconstruction error: ${data.detail || data.error || 'no se pudo iniciar'}`)
-                      reconBusyRef.current = false
-                      setReconRunning(false)
-                      return
-                    }
-                    // Job is running in the background — the polling effect above
-                    // (keyed on reconRunning) drives the status line and reloads
-                    // the scene when it finishes, then clears reconRunning.
-                  } catch (err: any) {
-                    setStatusMessage(`Reconstruction error: ${err?.message ?? err}`)
-                    reconBusyRef.current = false
-                    setReconRunning(false)
-                  }
-                }}
-              >
-                {reconRunning ? '⏳ Assembling scene…' : '🏗️ Reconstruct scene (v2)'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── 📦 Object Library Modal (user 2026-08-31) ── */}
-      {showObjectLibrary && (
-        <div className="admin-overlay" style={{ zIndex: 2000 }}>
-          <div className="admin-panel" style={{ maxWidth: 560, maxHeight: '80vh', overflow: 'auto' }}>
-            <div className="admin-header">
-              <h2>📦 Add Object</h2>
-              <button className="admin-close" onClick={() => setShowObjectLibrary(false)}>✕</button>
-            </div>
-            <div style={{ padding: 16 }}>
-              <p style={{ color: 'var(--text-secondary)', marginBottom: 12, fontSize: 13 }}>
-                Insert any mesh — from the collection or from ANY project — into
-                this scene as a reference. Click one to place it, then use the
-                gizmo and alignment tools. Removing it later only removes the
-                reference, never the source.
-              </p>
-              {['collection', ...Array.from(new Set(objectLibrary.filter(o => o.source === 'project').map(o => o.session)))].map(group => {
-                const items = group === 'collection'
-                  ? objectLibrary.filter(o => o.source === 'collection')
-                  : objectLibrary.filter(o => o.session === group)
-                if (!items.length) return null
-                return (
-                  <div key={String(group)} style={{ marginBottom: 10 }}>
-                    <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)', margin: '6px 0' }}>
-                      {group === 'collection' ? '⭐ Collection' : `🗂 ${group}`}
-                    </div>
-                    {items.map(it => (
-                      <div key={it.url} className="segment-item"
-                        style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px' }}
-                        onClick={async () => {
-                          if (!activeSession) return
-                          try {
-                            const r = await fetch('/api/objects/scene/add', {
-                              method: 'POST', headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ session_id: activeSession, name: it.name, url: it.url }),
-                            })
-                            const d = await r.json()
-                            if (d.ok) {
-                              setShowObjectLibrary(false)
-                              await viewportRef.current?.placeSceneObject(d.object)
-                            }
-                          } catch { setStatusMessage('📦 add failed') }
-                        }}>
-                        <span style={{ flex: 1, fontSize: 13 }}>{it.name}</span>
-                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{it.size_mb} MB</span>
-                      </div>
-                    ))}
-                  </div>
-                )
-              })}
-              {objectLibrary.length === 0 && (
-                <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>No meshes published yet in any project.</p>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── pending-correction banner (USER 2026-09-06: "eso debe
-           aparecer") — always visible while a correction awaits verdict ── */}
       {(correctionState?.status === 'pending' || (pendingSession && pendingSession !== activeSession)) && (
-        <CorrectionVerdictDialog
-          state={correctionState}
-          session={activeSession}
-          otherSession={pendingSession && pendingSession !== activeSession ? pendingSession : null}
-          busy={correctionRunning}
-          onApprove={approveCorrection}
-          onUndo={undoCorrection}
-        />
+        <CorrectionVerdictDialog state={correctionState} session={activeSession} otherSession={pendingSession && pendingSession !== activeSession ? pendingSession : null}
+          busy={correctionRunning} onApprove={approveCorrection} onUndo={undoCorrection} />
       )}
 
-      {/* ── 🔧 Correction (USER 2026-09-08 redesign): keyframe-based,
-           gated, transactional, epoch-tracked. The user marks duplicated
-           segments (or launches a floor alignment with an explicit model);
-           the system resolves per keyframe, validates on the rest of the
-           scene and applies atomically. Approve (it IS the cloud) or Undo. ── */}
-      {showCertifyKit && activeSession && (
-        <CertifyKitPanel session={activeSession} token={token} viewport={viewportRef.current}
-          onStatus={setStatusMessage} onClose={() => setShowCertifyKit(false)} />
-      )}
-      {showCorrectionModal && (
-        <div className="admin-overlay" style={{ zIndex: 2000 }}>
-          <div className="admin-panel" style={{ maxWidth: 560, maxHeight: '80vh', overflow: 'auto' }}>
-            <div className="admin-header">
-              <h2>🔧 Correction Analysis</h2>
-              <button className="admin-close" onClick={() => setShowCorrectionModal(false)}>✕</button>
-            </div>
-            <div style={{ padding: 16 }}>
-              {/* gates renderer shared by pending + rejected panels */}
-              {(() => null)()}
-              {correctionState?.status === 'pending' ? (
-                <>
-                  <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 8 }}>
-                    A correction is APPLIED (epoch {correctionState.report?.epoch_to ?? correctionState.epoch},
-                    {' '}kind: {correctionState.kind || correctionState.report?.kind || 'objects'},
-                    {' '}{(correctionState.report?.points_moved || 0).toLocaleString()} points moved)
-                    and awaits your verdict. Inspect it in the viewer and decide.
-                  </p>
-                  {(correctionState.report?.gates || []).map((g: any) => (
-                    <div key={g.name + String(g.group ?? '')} style={{ fontSize: 12, marginBottom: 4, color: 'var(--text-primary)' }}>
-                      {g.advisory ? '⚠' : g.passed ? '✅' : '❌'} <b>{g.name}</b> — <span style={{ color: 'var(--text-secondary)' }}>{g.detail}{g.advisory ? ' (advisory — applied anyway, judge it visually)' : ''}</span>
-                    </div>
-                  ))}
-                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                    <button className="bim-action-btn upload" style={{ flex: 1 }}
-                      disabled={correctionRunning}
-                      onClick={approveCorrection}>
-                      ✓ Approve
-                    </button>
-                    <button className="bim-action-btn upload" style={{ flex: 1 }}
-                      disabled={correctionRunning}
-                      onClick={undoCorrection}>
-                      ↩ Undo
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
-                    Mark the segments showing the parallel-copies error (the same
-                    object duplicated by a revisit). The system resolves which
-                    copies match which — per KEYFRAME —, diagnoses pose vs depth,
-                    validates against the rest of the scene (floor + unmarked
-                    objects + DA3 scale + continuity) and applies transactionally.
-                    Nothing is applied if any gate fails; you always get the numbers.
-                  </p>
-                  {correctionRunning && correctionProgress && (
-                    <div style={{ marginBottom: 10 }}>
-                      <div style={{ fontSize: 12, color: 'var(--text-primary)', marginBottom: 4 }}>
-                        ⏳ {correctionProgress.detail}
-                      </div>
-                      <div style={{ height: 6, background: 'var(--bg-tertiary)', borderRadius: 3 }}>
-                        <div style={{ height: 6, width: `${correctionProgress.pct}%`, background: 'var(--accent-color, #4a9eff)', borderRadius: 3, transition: 'width .5s' }} />
-                      </div>
-                    </div>
-                  )}
-                  {correctionReport?.status === 'rejected' && (
-                    <div style={{ marginBottom: 12, padding: 10, background: 'var(--bg-tertiary)', borderRadius: 8, border: '1px solid #a4433355' }}>
-                      <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>
-                        ❌ <b>Rejected — nothing was applied.</b>
-                      </div>
-                      <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>
-                        {correctionReport.rejection_reason}
-                      </div>
-                      {correctionReport.suggestion && (
-                        <div style={{ fontSize: 12, color: 'var(--text-primary)', marginBottom: 6 }}>
-                          💡 {correctionReport.suggestion}
-                        </div>
-                      )}
-                      {(correctionReport.gates || []).map((g: any) => (
-                        <div key={g.name + String(g.group ?? '')} style={{ fontSize: 11, marginBottom: 2, color: 'var(--text-secondary)' }}>
-                          {g.passed ? '✅' : '❌'} {g.name} — {g.detail}
-                        </div>
-                      ))}
-                      {(correctionReport.gates || []).some((g: any) => g.name === 'scale_vs_da3' && !g.passed) && (
-                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-primary)', marginTop: 6, cursor: 'pointer' }}>
-                          <input type="checkbox" checked={correctionOverrideScale}
-                            onChange={() => setCorrectionOverrideScale(v => !v)} />
-                          Override the DA3 scale gate on the next run (recorded in the ledger with your name and the numbers)
-                        </label>
-                      )}
-                    </div>
-                  )}
-                  {segments.length === 0 && (
-                    <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
-                      No segments yet — segment the faulty objects first.
-                    </p>
-                  )}
-                  {segments.map(seg => {
-                    const checked = correctionSelected.has(seg.id)
-                    return (
-                      <div key={seg.key} style={{
-                        display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '10px 12px', marginBottom: 8,
-                        background: checked ? 'var(--bg-secondary)' : 'var(--bg-tertiary)',
-                        borderRadius: 8,
-                        border: `2px solid ${checked ? seg.color + '55' : 'transparent'}`,
-                        opacity: checked ? 1 : 0.6,
-                      }}>
-                        <input type="checkbox" checked={checked}
-                          disabled={correctionRunning}
-                          onChange={() => setCorrectionSelected(prev => {
-                            const next = new Set(prev)
-                            if (next.has(seg.id)) next.delete(seg.id)
-                            else next.add(seg.id)
-                            return next
-                          })} />
-                        <span style={{ width: 12, height: 12, borderRadius: '50%', background: seg.color, flexShrink: 0 }} />
-                        <strong style={{ flex: 1, color: 'var(--text-primary)', fontSize: 13 }}>{seg.label}</strong>
-                      </div>
-                    )
-                  })}
-                  <button className="bim-action-btn upload" style={{ width: '100%', marginTop: 8 }}
-                    disabled={correctionRunning || correctionSelected.size === 0}
-                    onClick={async () => {
-                      setCorrectionRunning(true)
-                      setCorrectionReport(null)
-                      setStatusMessage('🔧 analyzing and correcting (transactional — the cloud only changes if every gate passes)...')
-                      try {
-                        const headers: HeadersInit = { 'Content-Type': 'application/json' }
-                        if (token) headers['Authorization'] = `Bearer ${token}`
-                        const r = await fetch('/api/correction/run', {
-                          method: 'POST', headers,
-                          body: JSON.stringify({
-                            session_id: activeSession,
-                            instance_ids: Array.from(correctionSelected),
-                            override_scale_check: correctionOverrideScale,
-                          }),
-                        })
-                        const d = await r.json().catch(() => ({}))
-                        setCorrectionReport(d.report || null)
-                        // applied → close the blocking modal so the viewer and the
-                        // collapsible verdict box are free for visual inspection
-                        if (r.ok && d.status === 'pending') setShowCorrectionModal(false)
-                        if (r.status === 409) {
-                          setStatusMessage('🔧 busy: another correction operation is running on this session')
-                        } else {
-                          setStatusMessage(r.ok
-                            ? (d.status === 'pending'
-                              ? '🔧 correction applied — inspect it in the viewer, then Approve or Undo'
-                              : `🔧 correction rejected: ${d.report?.rejection_reason || 'see the report'}`)
-                            : `🔧 correction failed: ${typeof d.detail === 'string' ? d.detail : 'error'}`)
-                        }
-                      } catch { setStatusMessage('🔧 correction failed') }
-                      setCorrectionRunning(false)
-                      setCorrectionOverrideScale(false)
-                      refreshCorrectionStatus(activeSession!)
-                      loadCorrectionLedger(activeSession!)
-                      loadCorrectionArtifacts(activeSession!)
-                    }}>
-                    {correctionRunning ? '⏳ correcting…' : '🔧 Analyze & Correct'}
-                  </button>
+      <CorrectionDialog open={showCorrectionModal} onClose={() => setShowCorrectionModal(false)} state={correctionState} report={correctionReport} running={correctionRunning} progress={correctionProgress}
+        segments={segments} selected={correctionSelected} onToggleSelected={id => setCorrectionSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}
+        overrideScale={correctionOverrideScale} onOverrideScale={setCorrectionOverrideScale} ledger={correctionLedger} artifacts={correctionArtifacts}
+        onRun={() => runCorrectionOp('objects')} onFloor={() => runCorrectionOp('floor')} onRevisit={() => runCorrectionOp('revisit')} onApprove={approveCorrection} onUndo={undoCorrection} />
 
-                  {/* ── floor alignment (per keyframe, explicit reference model) ── */}
-                  <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border-color)' }}>
-                    <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>
-                      <b>⇩ Floor alignment</b> — the reference is the floor at the
-                      START of the walk; every keyframe is brought onto it following
-                      the local trend (drift removed, real slopes and steps kept).
-                    </div>
-                    <button className="bim-action-btn upload" style={{ width: '100%' }}
-                      disabled={correctionRunning}
-                      onClick={async () => {
-                        setCorrectionRunning(true)
-                        setCorrectionReport(null)
-                        setStatusMessage('⇩ aligning the floor (all qualifying keyframes)...')
-                        try {
-                          const headers: HeadersInit = { 'Content-Type': 'application/json' }
-                          if (token) headers['Authorization'] = `Bearer ${token}`
-                          const r = await fetch('/api/correction/floor', {
-                            method: 'POST', headers,
-                            body: JSON.stringify({ session_id: activeSession, model: 'plane', keyframes: 'auto' }),
-                          })
-                          const d = await r.json().catch(() => ({}))
-                          setCorrectionReport(d.report || null)
-                          if (r.ok && d.status === 'pending') setShowCorrectionModal(false)
-                          setStatusMessage(r.ok
-                            ? (d.status === 'pending'
-                              ? '⇩ floor alignment applied — Approve or Undo'
-                              : `⇩ floor alignment rejected: ${d.report?.rejection_reason || 'see the report'}`)
-                            : `⇩ floor alignment failed: ${typeof d.detail === 'string' ? d.detail : 'error'}`)
-                        } catch { setStatusMessage('⇩ floor alignment failed') }
-                        setCorrectionRunning(false)
-                        refreshCorrectionStatus(activeSession!)
-                        loadCorrectionLedger(activeSession!)
-                        loadCorrectionArtifacts(activeSession!)
-                      }}>
-                      {correctionRunning ? '⏳ aligning…' : '⇩ Align floor'}
-                    </button>
-                  </div>
+      <MeshingDialog open={showTsdfModal} onClose={() => setShowTsdfModal(false)} segments={segments} selected={tsdfSelected}
+        onToggle={id => setTsdfSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}
+        tsdfStatus={tsdfStatus} tsdfProgress={tsdfProgress} tsdfOverall={tsdfOverall} tsdfRunning={tsdfRunning} shapeRunning={shapeRunning} shapeOverall={shapeOverall}
+        onObject={runObjectMeshing} onMesh={runMesh} />
 
-                  {/* ── geometric revisit detection + loop closure (no marking needed) ── */}
-                  <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border-color)' }}>
-                    <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>
-                      <b>🔁 Revisits</b> — finds from the poses and the depth where the walk
-                      saw the same place twice, measures the offset, solves one closure per
-                      revisit and distributes it over the reconstruction chunks.
-                    </div>
-                    <button className="bim-action-btn upload" style={{ width: '100%' }}
-                      disabled={correctionRunning}
-                      onClick={async () => {
-                        setCorrectionRunning(true)
-                        setCorrectionReport(null)
-                        setStatusMessage('🔁 detecting revisits and closing loops...')
-                        try {
-                          const headers: HeadersInit = { 'Content-Type': 'application/json' }
-                          if (token) headers['Authorization'] = `Bearer ${token}`
-                          const r = await fetch('/api/correction/revisit', {
-                            method: 'POST', headers,
-                            body: JSON.stringify({ session_id: activeSession }),
-                          })
-                          const d = await r.json().catch(() => ({}))
-                          setCorrectionReport(d.report || null)
-                          if (r.ok && d.status === 'pending') setShowCorrectionModal(false)
-                          setStatusMessage(r.ok
-                            ? (d.status === 'pending'
-                              ? `🔁 ${d.report?.solutions?.length || 0} closure(s) applied — Approve or Undo`
-                              : `🔁 revisit closure rejected: ${d.report?.rejection_reason || 'see the report'}`)
-                            : `🔁 revisit closure failed: ${typeof d.detail === 'string' ? d.detail : 'error'}`)
-                        } catch { setStatusMessage('🔁 revisit closure failed') }
-                        setCorrectionRunning(false)
-                        refreshCorrectionStatus(activeSession!)
-                        loadCorrectionLedger(activeSession!)
-                        loadCorrectionArtifacts(activeSession!)
-                      }}>
-                      {correctionRunning ? '⏳ closing…' : '🔁 Detect & close revisits'}
-                    </button>
-                  </div>
-
-                  {/* ── derived artifacts vs the current geometry epoch ── */}
-                  {correctionArtifacts && correctionArtifacts.length > 0 && (
-                    <div style={{ marginTop: 14 }}>
-                      <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 4 }}><b>Derived artifacts</b></div>
-                      {correctionArtifacts.map((a: any) => (
-                        <div key={a.path} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)', padding: '2px 0' }}>
-                          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.kind}: {a.name}</span>
-                          {a.stale
-                            ? <span title={`built on epoch ${a.geometry_epoch}, current is newer — regenerate it (🧩 Meshing / surface fit / BIM compare)`} style={{ color: '#e0a030' }}>⚠ stale (epoch {a.geometry_epoch})</span>
-                            : <span style={{ color: '#4caf7d' }}>✓ epoch {a.geometry_epoch}</span>}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* ── correction history (append-only ledger) ── */}
-                  {correctionLedger && correctionLedger.length > 0 && (
-                    <div style={{ marginTop: 14 }}>
-                      <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 4 }}><b>History</b></div>
-                      {correctionLedger.slice().reverse().map((e: any) => (
-                        <div key={e.correction_id} style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '3px 0', borderBottom: '1px solid var(--border-color)' }}>
-                          <b style={{ color: 'var(--text-primary)' }}>{e.kind}</b>
-                          {' '}epoch {e.epoch_from}→{e.epoch_to} · {e.operator} · {e.created_at}
-                          {' '}· <span style={{ color: e.verdict === 'approved' ? '#4caf7d' : e.verdict === 'pending' ? '#e0a030' : '#c05555' }}>{e.verdict}</span>
-                          {e.overrides && Object.keys(e.overrides).length > 0 && <span> · ⚠ override</span>}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── ✨ Perfect Modal (user 2026-08-31): only meshed segments ── */}
-      {showPerfectModal && (() => {
-        const meshedIds = new Set(
-          tsdfMeshes.filter(m => m.instanceId >= 0 &&
-            (m.folder.endsWith('_poisson') || m.folder.endsWith('_pgsr')))
-            .map(m => m.instanceId))
-        const eligible = segments.filter(s => meshedIds.has(s.id))
-        return (
-          <div className="admin-overlay" style={{ zIndex: 2000 }}>
-            <div className="admin-panel" style={{ maxWidth: 540, maxHeight: '80vh', overflow: 'auto' }}>
-              <div className="admin-header">
-                <h2>✨ Perfect Objects</h2>
-                <button className="admin-close" onClick={() => setShowPerfectModal(false)}>✕</button>
-              </div>
-              <div style={{ padding: 16 }}>
-                <p style={{ color: 'var(--text-secondary)', marginBottom: 12, fontSize: 13 }}>
-                  Recovers each object's geometric intent from its own points —
-                  planes, cylinders (hollow included), spheres — snaps it
-                  (vertical/horizontal, parallel/perpendicular, equal radii),
-                  rebuilds CAD-crisp surfaces trimmed to the evidence, and keeps
-                  the unexplained leftover as measured. Publishes
-                  <code> *_perfect</code> next to the existing meshes.
-                  Only segments with a Poisson/PGSR mesh are listed.
-                </p>
-                {eligible.length === 0 && (
-                  <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
-                    No meshed segments yet — run 🧩 Meshing first.
-                  </p>
-                )}
-                {eligible.map(seg => {
-                  const checked = perfectSelected.has(seg.id)
-                  return (
-                    <div key={seg.key} style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '10px 12px', marginBottom: 8,
-                      background: checked ? 'var(--bg-secondary)' : 'var(--bg-tertiary)',
-                      borderRadius: 8,
-                      border: `2px solid ${checked ? seg.color + '55' : 'transparent'}`,
-                      opacity: checked ? 1 : 0.6,
-                    }}>
-                      <input type="checkbox" checked={checked}
-                        disabled={perfectRunning}
-                        onChange={() => setPerfectSelected(prev => {
-                          const next = new Set(prev)
-                          if (next.has(seg.id)) next.delete(seg.id)
-                          else next.add(seg.id)
-                          return next
-                        })} />
-                      <span style={{ width: 12, height: 12, borderRadius: '50%', background: seg.color, flexShrink: 0 }} />
-                      <strong style={{ flex: 1, color: 'var(--text-primary)', fontSize: 13 }}>{seg.label}</strong>
-                      <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                        {seg.totalPoints.toLocaleString()} pts
-                      </span>
-                      {(() => {
-                        const hasP = tsdfMeshes.some(m => m.instanceId === seg.id && m.folder.endsWith('_poisson'))
-                        const hasG = tsdfMeshes.some(m => m.instanceId === seg.id && m.folder.endsWith('_pgsr'))
-                        const cur = perfectSource[seg.id] || (hasP ? 'poisson' : 'pgsr')
-                        // both sources → user picks which mesh gets perfected
-                        if (hasP && hasG) return (
-                          <span style={{ display: 'flex', gap: 4 }}>
-                            <button className="tool-btn"
-                              style={{ fontSize: 11, padding: '1px 6px', opacity: cur === 'poisson' ? 1 : 0.4 }}
-                              title="Perfect the Poisson mesh"
-                              onClick={() => setPerfectSource(p => ({ ...p, [seg.id]: 'poisson' }))}>🟣</button>
-                            <button className="tool-btn"
-                              style={{ fontSize: 11, padding: '1px 6px', opacity: cur === 'pgsr' ? 1 : 0.4 }}
-                              title="Perfect the PGSR mesh"
-                              onClick={() => setPerfectSource(p => ({ ...p, [seg.id]: 'pgsr' }))}>🔷</button>
-                          </span>
-                        )
-                        return (
-                          <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                            {hasP ? '🟣' : ''}{hasG ? '🔷' : ''}
-                            {tsdfMeshes.some(m => m.instanceId === seg.id && m.folder.endsWith('_perfect')) ? '✨' : ''}
-                          </span>
-                        )
-                      })()}
-                    </div>
-                  )
-                })}
-                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-                  <button className="bim-action-btn upload" style={{ flex: 1 }}
-                    disabled={perfectRunning || perfectSelected.size === 0}
-                    onClick={async () => {
-                      if (!activeSession) return
-                      setPerfectRunning(true)
-                      try {
-                        const r = await fetch('/api/segmentation/perfect/export', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({
-                            session_id: activeSession,
-                            instance_ids: Array.from(perfectSelected),
-                            sources: Object.fromEntries(
-                              Array.from(perfectSelected).map(id => [
-                                id,
-                                perfectSource[id]
-                                || (tsdfMeshes.some(m => m.instanceId === id && m.folder.endsWith('_poisson'))
-                                    ? 'poisson' : 'pgsr'),
-                              ])),
-                          }),
-                        })
-                        const d = await r.json()
-                        setStatusMessage(d.ok
-                          ? `✨ perfecting ${perfectSelected.size} object(s) — meshes will appear when ready`
-                          : `✨ perfect failed: ${d.detail || 'error'}`)
-                        setShowPerfectModal(false)
-                      } catch { setStatusMessage('✨ perfect request failed') }
-                      setPerfectRunning(false)
-                    }}>
-                    {perfectRunning ? '⏳ launching…' : `✨ Perfect (${perfectSelected.size})`}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )
-      })()}
-
-      {/* ── TSDF Reconstruction Modal ── */}
-      {showTsdfModal && (
-        <div className="admin-overlay" style={{ zIndex: 2000 }}>
-          <div className="admin-panel" style={{ maxWidth: 540, maxHeight: '80vh', overflow: 'auto' }}>
-            <div className="admin-header">
-              <h2>🧩 Mesh Generation</h2>
-              <button className="admin-close" onClick={() => setShowTsdfModal(false)}>✕</button>
-            </div>
-            <div style={{ padding: 16 }}>
-              <p style={{ color: 'var(--text-secondary)', marginBottom: 12, fontSize: 13 }}>
-                Select the segments, then choose: <strong>Object</strong> (generative
-                reconstruction, visual asset) or <strong>Mesh</strong> (RANSAC fitted
-                surface + Poisson from the object's own cloud — both, to compare).
-                Existing meshes are overwritten.
-              </p>
-
-              {(() => {
-                const phaseBadge = (phase?: string) => {
-                  if (!phase || phase === 'pending') return null
-                  const styles: Record<string, { bg: string; fg: string; icon: string; label: string }> = {
-                    starting:     { bg: '#3498db33', fg: '#5dade2', icon: '▶️', label: 'starting' },
-                    integrating:  { bg: '#f39c1233', fg: '#f4b656', icon: '🔄', label: 'integrating' },
-                    extracting:   { bg: '#9b59b633', fg: '#bd93d3', icon: '🪄', label: 'extracting' },
-                    done:         { bg: '#2ecc7133', fg: '#52d68d', icon: '🧱', label: 'done' },
-                    error:        { bg: '#e74c3c33', fg: '#ec7063', icon: '❌', label: 'error' },
-                  }
-                  const s = styles[phase]
-                  if (!s) return null
-                  return (
-                    <span style={{
-                      fontSize: 11, background: s.bg, color: s.fg,
-                      padding: '1px 6px', borderRadius: 4, whiteSpace: 'nowrap',
-                    }}>
-                      {s.icon} {s.label}
-                    </span>
-                  )
-                }
-
-                return segments.filter(s => s.label !== 'Unsegmented').map(seg => {
-                  const st = tsdfStatus[seg.id]
-                  const prog = tsdfProgress[seg.id]
-                  const checked = tsdfSelected.has(seg.id)
-                  const livePhase = prog?.phase
-                  return (
-                    <div key={seg.key} style={{
-                      display: 'flex', flexDirection: 'column', gap: 6,
-                      padding: '10px 12px', marginBottom: 8,
-                      background: checked ? 'var(--bg-secondary)' : 'var(--bg-tertiary)',
-                      borderRadius: 8,
-                      border: `2px solid ${checked ? seg.color + '55' : 'transparent'}`,
-                      opacity: checked ? 1 : 0.6,
-                      transition: 'all 0.15s',
-                    }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <input type="checkbox" checked={checked}
-                          disabled={tsdfRunning}
-                          onChange={() => {
-                            setTsdfSelected(prev => {
-                              const next = new Set(prev)
-                              if (next.has(seg.id)) next.delete(seg.id)
-                              else next.add(seg.id)
-                              return next
-                            })
-                          }}
-                          style={{ cursor: tsdfRunning ? 'not-allowed' : 'pointer' }}
-                        />
-                        <span style={{
-                          width: 12, height: 12, borderRadius: '50%',
-                          background: seg.color, flexShrink: 0,
-                        }} />
-                        <strong style={{ flex: 1, color: 'var(--text-primary)', fontSize: 13 }}>{seg.label}</strong>
-                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                          {seg.totalPoints.toLocaleString()} pts
-                        </span>
-                        {livePhase ? phaseBadge(livePhase) :
-                          st?.has_mesh ? phaseBadge('done') : null}
-                      </div>
-                      {prog?.elapsed != null && (livePhase === 'done' || livePhase === 'integrating' || livePhase === 'extracting') && (
-                        <div style={{ fontSize: 11, color: 'var(--text-secondary)', paddingLeft: 24 }}>
-                          {livePhase === 'done' ? `mesh ready · ${prog.elapsed.toFixed(1)}s` : `${prog.elapsed.toFixed(1)}s elapsed`}
-                        </div>
-                      )}
-                      {prog?.error && (
-                        <div style={{ fontSize: 11, color: 'var(--error)', paddingLeft: 24 }}>
-                          {prog.error.slice(0, 140)}
-                        </div>
-                      )}
-                      {checked && !tsdfRunning && st?.has_mesh && (
-                        <div style={{ fontSize: 11, color: 'var(--warning)', padding: '2px 0 0 24px' }}>
-                          ⚠️ This object already has a mesh. Running will overwrite it.
-                        </div>
-                      )}
-                    </div>
-                  )
-                })
-              })()}
-
-              {segments.filter(s => s.label !== 'Unsegmented').length === 0 && (
-                <div style={{
-                  padding: '10px 12px', marginBottom: 4, fontSize: 12.5, lineHeight: 1.5,
-                  background: 'var(--bg-tertiary)', borderRadius: 8,
-                  color: 'var(--text-secondary)',
-                }}>
-                  No segmented objects in this session. Run Segmentation first —
-                  meshing is per object.
-                </div>
-              )}
-
-              {tsdfOverall.phase !== 'idle' && (tsdfRunning || tsdfOverall.phase === 'done' || tsdfOverall.phase === 'error') && (
-                <div style={{
-                  padding: '10px 12px', marginTop: 12, marginBottom: 12,
-                  background: tsdfOverall.phase === 'error' ? 'rgba(231,76,60,.1)' :
-                              tsdfOverall.phase === 'done' ? 'rgba(46,204,113,.1)' :
-                              'rgba(243,156,18,.1)',
-                  borderRadius: 6, fontSize: 13,
-                  border: `1px solid ${tsdfOverall.phase === 'error' ? '#e74c3c' :
-                          tsdfOverall.phase === 'done' ? '#2ecc71' : '#f39c12'}`,
-                  color: tsdfOverall.phase === 'error' ? '#e74c3c' :
-                         tsdfOverall.phase === 'done' ? '#2ecc71' : '#f4b656',
-                }}>
-                  {tsdfOverall.phase === 'integrating' && (
-                    <>🔄 Integrating depth → mesh {tsdfOverall.done || 0}/{tsdfOverall.total || 0}…</>
-                  )}
-                  {tsdfOverall.phase === 'done' && (
-                    <>✅ All done — {tsdfOverall.done || 0}/{tsdfOverall.total || 0} mesh(es) reconstructed</>
-                  )}
-                  {tsdfOverall.phase === 'error' && (
-                    <>❌ Pipeline error — check the console log for details</>
-                  )}
-                </div>
-              )}
-
-              {/* Two ways to mesh the selected segments (user 2026-08-29):
-                  Object = generative MeshFlow asset; Mesh = RANSAC + Poisson
-                  (both, cloud-anchored, so they can be compared). */}
-              <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
-                <button
-                  className="bim-action-btn upload"
-                  style={{
-                    flex: 1, padding: 12, fontWeight: 600, fontSize: 14,
-                    opacity: shapeRunning || tsdfRunning || tsdfSelected.size === 0 ? 0.5 : 1,
-                  }}
-                  disabled={shapeRunning || tsdfRunning || tsdfSelected.size === 0}
-                  title="Generative object reconstruction (MeshFlow) — visual asset, not metric"
-                  onClick={async () => {
-                    if (!activeSession || shapeBusyRef.current) return
-                    shapeBusyRef.current = true
-                    setShapeRunning(true)
-                    setShapeResult(null)
-                    setShapeProgress({})
-                    setShapeOverall({ phase: 'exporting_pkl', total: tsdfSelected.size, done: 0 })
-                    try {
-                      const res = await fetch('/api/segmentation/shape/export', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                          session_id: activeSession,
-                          instance_ids: [...tsdfSelected],
-                          auto_reconstruct: true,
-                        }),
-                      })
-                      const data = await res.json()
-                      if (data.ok) {
-                        setStatusMessage(`Object: reconstructing ${data.count} object(s) in background`)
-                        if (!data.reconstructing) setShapeRunning(false)
-                      } else {
-                        setStatusMessage(`Object error: ${data.detail || 'Unknown'}`)
-                        setShapeRunning(false)
-                      }
-                    } catch (err: any) {
-                      setStatusMessage(`Object error: ${err.message}`)
-                      setShapeRunning(false)
-                    } finally {
-                      shapeBusyRef.current = false
-                    }
-                  }}
-                >
-                  {shapeRunning
-                    ? `🔄 Object ${shapeOverall.done || 0}/${shapeOverall.total || 0}…`
-                    : `🧊 Object (${tsdfSelected.size})`}
-                </button>
-                <button
-                  className="bim-action-btn upload"
-                  style={{
-                    flex: 1, padding: 12, fontWeight: 600, fontSize: 14,
-                    opacity: tsdfRunning || shapeRunning || tsdfSelected.size === 0 ? 0.5 : 1,
-                  }}
-                  disabled={tsdfRunning || shapeRunning || tsdfSelected.size === 0}
-                  title="RANSAC fitted surfaces + Poisson from the object's own cloud — both meshes, for comparison"
-                  onClick={async () => {
-                    if (!activeSession) return
-                    setTsdfRunning(true)
-                    setTsdfProgress({})
-                    setTsdfOverall({ phase: 'surface_fit', total: tsdfSelected.size, done: 0 })
-                    try {
-                      const res = await fetch('/api/segmentation/tsdf/export', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                          session_id: activeSession,
-                          instance_ids: [...tsdfSelected],
-                        }),
-                      })
-                      const data = await res.json()
-                      if (data.ok) {
-                        setStatusMessage(`Mesh: ransac + poisson for ${data.count} object(s) in background`)
-                      } else {
-                        setStatusMessage(`Mesh error: ${data.detail || 'Unknown'}`)
-                        setTsdfRunning(false)
-                      }
-                    } catch (err: any) {
-                      setStatusMessage(`Mesh error: ${err.message}`)
-                      setTsdfRunning(false)
-                    }
-                  }}
-                >
-                  {tsdfRunning
-                    ? `🔄 Mesh ${tsdfOverall.done || 0}/${tsdfOverall.total || 0}…`
-                    : `🧩 Mesh (${tsdfSelected.size})`}
-                </button>
-              </div>
-
-            </div>
-          </div>
-        </div>
-      )}
-
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
+      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       {appDialog}
-    </div >
+    </div>
   )
 }
 

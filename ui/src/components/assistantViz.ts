@@ -33,15 +33,21 @@ export interface UserVolume {
     yaw_deg: number
 }
 
-const ACCENT = 0x4fd1ff      // cyan — measurement primary
-const ACCENT2 = 0xe99d28     // amber — dimensions / emphasis
-const GOOD = 0x3fb950        // green — free / fits
-const BAD = 0xf85149         // red — occupied / no-fit
-const VOL = 0x9d7bff         // violet — user volumes
+// Colours come from the design tokens at runtime (prompt_ui.txt §7): the
+// measurement layer is cyan, dimensions use the warn amber, free/fits is the
+// ok green, occupied/no-fit the err red, user volumes the volume-free tint.
+import { tokenColor, tokenHex, VP } from './viewport/palette'
+import { getFmt, getT } from '../i18n'
+const ACCENT = () => tokenHex(VP.measure)
+const ACCENT2 = () => tokenHex(VP.angle)
+const GOOD = () => tokenHex(VP.ok)
+const BAD = () => tokenHex(VP.err)
+const VOL = () => tokenHex(VP.volumeFree)
+const GUIDE = () => tokenHex(VP.ptSingle)
 
 interface Animator { update: (now: number) => boolean } // returns true when done
 
-function labelSprite(text: string, color = '#e6edf3', bg = 'rgba(13,17,23,0.82)'): THREE.Sprite {
+function labelSprite(text: string, color = tokenColor(VP.text1), bg = tokenColor(VP.labelBg)): THREE.Sprite {
     const pad = 12, font = 44
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')!
@@ -52,8 +58,8 @@ function labelSprite(text: string, color = '#e6edf3', bg = 'rgba(13,17,23,0.82)'
     ctx.font = `600 ${font}px Inter, system-ui, sans-serif`
     ctx.fillStyle = bg
     roundRect(ctx, 0, 0, w, h, 14); ctx.fill()
-    ctx.strokeStyle = 'rgba(79,209,255,0.55)'; ctx.lineWidth = 2
-    roundRect(ctx, 1, 1, w - 2, h - 2, 13); ctx.stroke()
+    ctx.strokeStyle = tokenColor(VP.measure); ctx.globalAlpha = 0.55; ctx.lineWidth = 2
+    roundRect(ctx, 1, 1, w - 2, h - 2, 13); ctx.stroke(); ctx.globalAlpha = 1
     ctx.fillStyle = color
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
     ctx.fillText(text, w / 2, h / 2 + 2)
@@ -127,7 +133,7 @@ export class AssistantViz {
         this.volumes.clear()
     }
 
-    // ── measurement traces → animated geometry ──────────────────────
+    // ── measurement traces  animated geometry ──────────────────────
     /** Returns a bounding box of what was drawn (for optional camera framing). */
     visualizeTrace(trace: TraceEntry[]): THREE.Box3 | null {
         this.clearMeasurements()
@@ -184,17 +190,17 @@ export class AssistantViz {
         if (!pA || !pB) return null
         const dist = (r.clearance_m ?? r.distance_m) as number
         const g = new THREE.Group()
-        g.add(marker(pA, ACCENT)); g.add(marker(pB, ACCENT))
+        g.add(marker(pA, ACCENT())); g.add(marker(pB, ACCENT()))
         const lineGeom = new THREE.BufferGeometry().setFromPoints([pA.clone(), pA.clone()])
-        const line = new THREE.Line(lineGeom, new THREE.LineBasicMaterial({ color: ACCENT, depthTest: false, transparent: true }))
+        const line = new THREE.Line(lineGeom, new THREE.LineBasicMaterial({ color: ACCENT(), depthTest: false, transparent: true }))
         line.renderOrder = 1998
         g.add(line)
-        const label = labelSprite(`${(dist ?? pA.distanceTo(pB)).toFixed(3)} m`, '#4fd1ff')
+        const label = labelSprite(getFmt().lengthText(dist ?? pA.distanceTo(pB)), tokenColor(VP.measure))
         label.position.copy(pA.clone().lerp(pB, 0.5))
         label.visible = false
         g.add(label)
         this.group.add(g)
-        // animate: line grows A→B over 500ms, then label fades in
+        // animate: line grows AB over 500ms, then label fades in
         this.animators.push(revealLine(line, pA, pB, label, now, 550))
         return new THREE.Box3().setFromPoints([pA, pB])
     }
@@ -208,7 +214,7 @@ export class AssistantViz {
         const box = new THREE.BoxGeometry(half[0] * 2, half[1] * 2, half[2] * 2)
         const edges = new THREE.LineSegments(
             new THREE.EdgesGeometry(box),
-            new THREE.LineBasicMaterial({ color: ACCENT2, depthTest: false, transparent: true }))
+            new THREE.LineBasicMaterial({ color: ACCENT2(), depthTest: false, transparent: true }))
         edges.applyMatrix4(M)
         edges.renderOrder = 1998
         const g = new THREE.Group(); g.add(edges)
@@ -217,10 +223,10 @@ export class AssistantViz {
             ? `${r.width_m}×${r.height_m}×${r.depth_m} m`
             : (r.bbox_volume_m3 != null ? `${r.bbox_volume_m3} m³`
                 : (Array.isArray(r.size_m)
-                    ? `${(r.size_m as number[]).map((v) => v.toFixed(2)).join('×')} m`
+                    ? `${(r.size_m as number[]).map((v) => getFmt().number(v, 2)).join(' x ')} m`
                     : `${r.span_m} m`))
         const center = new THREE.Vector3().fromArray(o.obb.center)
-        const label = labelSprite(`${o.label}: ${dims}`, '#f0c674')
+        const label = labelSprite(`${o.label}: ${dims}`, tokenColor(VP.warn))
         label.position.copy(center).y += half[1] + 0.15
         g.add(label)
         this.group.add(g)
@@ -235,7 +241,7 @@ export class AssistantViz {
             : this.objCenter(id)
         if (!pos) return null
         const g = new THREE.Group()
-        const m = marker(pos, ACCENT, 0.03); g.add(m)
+        const m = marker(pos, ACCENT(), 0.03); g.add(m)
         const label = labelSprite(`(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}) m`)
         label.position.copy(pos).y += 0.12
         g.add(label)
@@ -307,19 +313,19 @@ export class AssistantViz {
         const rad = THREE.MathUtils.degToRad(Math.abs(deg))
         const meas = ref.clone().applyAxisAngle(planeN, rad).normalize()
         const ok = Math.abs(deg) <= 3
-        const okCol = ok ? GOOD : BAD
+        const okCol = ok ? GOOD() : BAD()
 
         const g = new THREE.Group()
         const refEnd = c.clone().addScaledVector(ref, len)
         const measEnd = c.clone().addScaledVector(meas, len)
-        g.add(dashed(c, refEnd, 0x8899aa))
-        g.add(marker(c, ACCENT, 0.025))
+        g.add(dashed(c, refEnd, GUIDE()))
+        g.add(marker(c, ACCENT(), 0.025))
         // measured axis grows out of the vertex first
         const measLine = solid(c, c.clone(), okCol)
         g.add(measLine)
         this.animators.push(revealLine(measLine, c, measEnd, null, now, 350))
 
-        // angle arc: wedge fan + arc border, revealed as a sweep ref → meas
+        // angle arc: wedge fan + arc border, revealed as a sweep ref  meas
         const rArc = len * 0.55
         const SEG = 48
         const pts: THREE.Vector3[] = []
@@ -335,12 +341,12 @@ export class AssistantViz {
         fanGeom.setAttribute('position', new THREE.Float32BufferAttribute(fanPos, 3))
         fanGeom.setIndex(fanIdx)
         const wedge = new THREE.Mesh(fanGeom, new THREE.MeshBasicMaterial({
-            color: ACCENT2, transparent: true, opacity: 0.22,
+            color: ACCENT2(), transparent: true, opacity: 0.22,
             side: THREE.DoubleSide, depthTest: false, depthWrite: false }))
         wedge.renderOrder = 1996
         const arcGeom = new THREE.BufferGeometry().setFromPoints(pts)
         const arcLine = new THREE.Line(arcGeom,
-            new THREE.LineBasicMaterial({ color: ACCENT2, depthTest: false, transparent: true }))
+            new THREE.LineBasicMaterial({ color: ACCENT2(), depthTest: false, transparent: true }))
         arcLine.renderOrder = 1998
         fanGeom.setDrawRange(0, 0)
         arcGeom.setDrawRange(0, 0)
@@ -349,7 +355,7 @@ export class AssistantViz {
         // arrowhead at the sweep end (appears when the sweep completes)
         const tip = new THREE.Mesh(
             new THREE.ConeGeometry(Math.max(0.012, rArc * 0.045), Math.max(0.035, rArc * 0.13), 10),
-            new THREE.MeshBasicMaterial({ color: ACCENT2, depthTest: false, transparent: true }))
+            new THREE.MeshBasicMaterial({ color: ACCENT2(), depthTest: false, transparent: true }))
         const tangent = new THREE.Vector3().crossVectors(planeN, meas).normalize()
         tip.position.copy(c).addScaledVector(meas, rArc)
         tip.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tangent)
@@ -357,9 +363,9 @@ export class AssistantViz {
         tip.renderOrder = 1999
         g.add(tip)
 
-        // counting label at the arc bisector: big degrees + kind · mm/m
+        // counting label at the arc bisector: big degrees + kind  mm/m
         const kind = tool === 'get_plumb' ? 'plumb' : 'level'
-        const sub = `${kind} · ${mmm} mm/m`
+        const sub = `${kind}  ${mmm} mm/m`
         const lbl = tiltLabel()
         const mid = ref.clone().applyAxisAngle(planeN, rad / 2)
         lbl.sprite.position.copy(c).addScaledVector(mid, rArc + len * 0.22)
@@ -404,9 +410,9 @@ export class AssistantViz {
         if (!f) return null
         const g = new THREE.Group()
         const freeFrac = (r.free_fraction as number) ?? 1
-        const boxMesh = translucentBox(f.size, freeFrac > 0.5 ? GOOD : BAD, 0.12)
+        const boxMesh = translucentBox(f.size, freeFrac > 0.5 ? GOOD() : BAD(), 0.12)
         boxMesh.applyMatrix4(f.M)
-        const edges = boxEdges(f.size, VOL); edges.applyMatrix4(f.M)
+        const edges = boxEdges(f.size, VOL()); edges.applyMatrix4(f.M)
         g.add(boxMesh); g.add(edges)
         // highlight objects inside
         const inside = (r.objects_inside as Array<{ id: number }> | undefined)
@@ -414,16 +420,16 @@ export class AssistantViz {
         for (const oi of inside) {
             const o = this.objects.get(oi.id)
             if (o?.obb) {
-                const e = boxEdges(o.obb.half_extents.map((x) => x * 2), ACCENT2)
+                const e = boxEdges(o.obb.half_extents.map((x) => x * 2), ACCENT2())
                 e.applyMatrix4(matrixFromStore(o.obb.transform))
                 g.add(e)
             }
         }
         const center = new THREE.Vector3().setFromMatrixPosition(f.M)
         const txt = r.free_volume_m3 != null
-            ? `free ${r.free_volume_m3} m³ · ${Math.round((freeFrac) * 100)}% · ${inside.length} obj`
+            ? getT()('viz.freeVolume', { m3: getFmt().number(Number(r.free_volume_m3), 2), pct: getFmt().percent(freeFrac), n: inside.length })
             : `${inside.length} objects inside`
-        const label = labelSprite(txt, freeFrac > 0.5 ? '#3fb950' : '#f85149')
+        const label = labelSprite(txt, freeFrac > 0.5 ? tokenColor(VP.ok) : tokenColor(VP.err))
         label.position.copy(center).y += f.size[1] / 2 + 0.15
         g.add(label)
         this.group.add(g)
@@ -435,7 +441,7 @@ export class AssistantViz {
         const f = this.volumeFrame(a)
         if (!f) return null
         const g = new THREE.Group()
-        const edges = boxEdges(f.size, VOL); edges.applyMatrix4(f.M); g.add(edges)
+        const edges = boxEdges(f.size, VOL()); edges.applyMatrix4(f.M); g.add(edges)
         const fits = !!r.fits
         if (fits && Array.isArray(r.placement_box_local_m) && Array.isArray(r.item_size_m)) {
             const item = r.item_size_m as number[]
@@ -445,16 +451,16 @@ export class AssistantViz {
                 p[0] + item[0] / 2 - f.size[0] / 2,
                 p[1] + item[1] / 2 - f.size[1] / 2,
                 p[2] + item[2] / 2 - f.size[2] / 2)
-            const itemMesh = translucentBox(item, GOOD, 0.35)
+            const itemMesh = translucentBox(item, GOOD(), 0.35)
             itemMesh.position.copy(localCenter)
             itemMesh.applyMatrix4(f.M)
             g.add(itemMesh)
-            const label = labelSprite(`fits: ${item.map((x) => x.toFixed(2)).join('×')} m`, '#3fb950')
+            const label = labelSprite(getT()('viz.fits', { dims: item.map((x) => getFmt().number(x, 2)).join(' x ') }), tokenColor(VP.ok))
             label.position.copy(new THREE.Vector3().setFromMatrixPosition(f.M)).y += f.size[1] / 2 + 0.15
             g.add(label)
             this.animators.push(growScale(itemMesh, now, 500))
         } else {
-            const label = labelSprite(`does not fit`, '#f85149')
+            const label = labelSprite(getT()('viz.doesNotFit'), tokenColor(VP.err))
             label.position.copy(new THREE.Vector3().setFromMatrixPosition(f.M)).y += f.size[1] / 2 + 0.15
             g.add(label)
         }
@@ -473,11 +479,11 @@ export class AssistantViz {
         g.name = `userVolume_${v.volume_id}`
         g.userData.volumeId = v.volume_id
         g.userData.baseSize = [...v.size]
-        const box = translucentBox(v.size, VOL, 0.08)
+        const box = translucentBox(v.size, VOL(), 0.08)
         box.userData.volumeId = v.volume_id
         box.userData.isVolumeBox = true
-        const edges = boxEdges(v.size, VOL)
-        const label = labelSprite(v.name, '#c4b5ff')
+        const edges = boxEdges(v.size, VOL())
+        const label = labelSprite(v.name, tokenColor(VP.volumeFree))
         label.position.set(0, v.size[1] / 2 + 0.12, 0)
         g.add(box); g.add(edges); g.add(label)
         g.position.fromArray(v.center)
@@ -528,7 +534,7 @@ export class AssistantViz {
     setVolumeStatus(id: number, status: 'free' | 'touching' | 'colliding') {
         const g = this.volumes.get(id)
         if (!g) return
-        const color = status === 'colliding' ? BAD : status === 'touching' ? ACCENT2 : VOL
+        const color = status === 'colliding' ? BAD() : status === 'touching' ? ACCENT2() : VOL()
         g.traverse((c) => {
             const mat = (c as THREE.Mesh).material as THREE.MeshBasicMaterial | THREE.LineBasicMaterial | undefined
             if (mat && 'color' in mat && !(c as THREE.Sprite).isSprite) mat.color.setHex(color)
@@ -606,17 +612,17 @@ function tiltLabel(): { sprite: THREE.Sprite; set: (deg: number, sub: string, ok
     sprite.renderOrder = 2001
     const set = (deg: number, sub: string, ok: boolean) => {
         ctx.clearRect(0, 0, W, H)
-        ctx.fillStyle = 'rgba(13,17,23,0.85)'
+        ctx.fillStyle = tokenColor(VP.labelBg)
         roundRect(ctx, 0, 0, W, H, 18); ctx.fill()
-        ctx.strokeStyle = ok ? 'rgba(63,185,80,0.7)' : 'rgba(248,81,73,0.7)'
+        ctx.strokeStyle = ok ? tokenColor(VP.ok) : tokenColor(VP.err); ctx.globalAlpha = 0.7
         ctx.lineWidth = 3
         roundRect(ctx, 2, 2, W - 4, H - 4, 16); ctx.stroke()
         ctx.textAlign = 'center'
         ctx.textBaseline = 'alphabetic'
-        ctx.fillStyle = ok ? '#3fb950' : '#f85149'
+        ctx.fillStyle = ok ? tokenColor(VP.ok) : tokenColor(VP.err)
         ctx.font = '700 84px Inter, system-ui, sans-serif'
         ctx.fillText(`${deg.toFixed(2)}°`, W / 2, 106)
-        ctx.fillStyle = '#9aa7b8'
+        ctx.fillStyle = tokenColor(VP.text2)
         ctx.font = '500 40px Inter, system-ui, sans-serif'
         ctx.fillText(sub, W / 2, 160)
         tex.needsUpdate = true
