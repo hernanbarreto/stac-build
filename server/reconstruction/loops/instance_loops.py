@@ -461,7 +461,7 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
                 dilate_px=rcfg.dilate_px, max_frames=rcfg.max_frames,
                 min_self_recall=rcfg.min_self_recall,
                 min_cross_recall=rcfg.min_cross_recall,
-                max_shift_dispersion_px=rcfg.max_shift_dispersion_px)
+                min_agreeing_frac=rcfg.min_agreeing_frac)
         except Exception as e:  # noqa: BLE001 — the gate decides alone, declared
             log(f"[instance-loops] reprojection unavailable for instance {iid}: {e}")
             return None

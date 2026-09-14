@@ -134,11 +134,20 @@ def compare_in_frames(ev, mask_of_frame, pts: np.ndarray, frames: Sequence[int],
     """Per frame: how the footprint of ``pts`` sits against the mask — recall
     and IoU as projected, the rigid shift that aligns the two centroids, and
     recall and IoU after it."""
-    out = []
-    for fidx in list(frames)[:max_frames]:
+    # Pick the frames that CARRY evidence, largest mask first, and only then
+    # take max_frames of them. Truncating the raw list first threw the whole
+    # measurement away whenever the first few frames happened to have no mask:
+    # pccr's 1.7 M-point duct has a mask in 140 of its 167 frames and scored
+    # 0.00 because none of the first 8 was among them — while every frame that
+    # does carry one agrees 0.99.
+    usable = []
+    for fidx in frames:
         m = mask_of_frame(fidx)
-        if m is None or not m.any():
-            continue
+        if m is not None and m.any():
+            usable.append((int(m.sum()), int(fidx), m))
+    usable.sort(reverse=True)
+    out = []
+    for _area, fidx, m in usable[:max_frames]:
         fp = _footprint(ev, fidx, pts, mh, mw, dilate_px, occlusion)
         if fp is None:
             continue
@@ -162,7 +171,7 @@ def copy_evidence(output_dir, session_dir, instance_id: int, oid: Optional[int],
                   cloud_to_mask: Optional[Dict[int, int]] = None,
                   dilate_px: int = 3, max_frames: int = 8,
                   min_self_recall: float = 0.40, min_cross_recall: float = 0.40,
-                  max_shift_dispersion_px: float = 40.0) -> dict:
+                  min_agreeing_frac: float = 0.60) -> dict:
     """Do the two clusters of one instance show the SAME object?
 
     Returns the measurements and a verdict ∈ {same_object, distinct, unusable}.
@@ -243,18 +252,30 @@ def copy_evidence(output_dir, session_dir, instance_id: int, oid: Optional[int],
     raw = float(np.median([r["recall"] for r in cross]))
     shifts = np.array([[r["shift_v"], r["shift_u"]] for r in cross], dtype=np.float64)
     dispersion = float(np.hypot(*shifts.std(axis=0))) if len(shifts) > 1 else 0.0
+    # What separates one displaced object from two is not how tightly the shift
+    # vectors cluster — measured on pccr, the scatter relative to the shift is
+    # 1.05 for the chair that IS a duplicate and 0.81 for the duct that is not,
+    # so dispersion ranks them backwards. It is whether MOST frames agree once
+    # aligned. The chair reads 0.38/0.75/0.56/0.69/0.78/0.79 — every frame
+    # moderately high; the duct reads 0.06/0.04/0.04/0.11/0.86/0.91 — bimodal,
+    # two accidental hits among near-zeros, with dv steady while du swings from
+    # -129 to +213. There is no single rigid shift there, and the spread of the
+    # agreements says so where the spread of the shifts does not.
+    agreeing = sum(1 for r in cross if r["recall_aligned"] >= min_cross_recall)
+    frac = agreeing / float(len(cross))
     out.update(cross_recall=raw, cross_recall_aligned=aligned,
                shift_px_median=float(np.median([r["shift_px"] for r in cross])),
-               shift_dispersion_px=dispersion, n_cross_frames=len(cross))
+               shift_dispersion_px=dispersion, agreeing_frames=agreeing,
+               agreeing_frac=frac, n_cross_frames=len(cross))
 
-    if aligned >= min_cross_recall and dispersion <= max_shift_dispersion_px:
+    if aligned >= min_cross_recall and frac >= min_agreeing_frac:
         out.update(verdict="same_object",
-                   reason=(f"one copy lands on the other's mask under a single rigid shift "
-                           f"of {out['shift_px_median']:.0f} px (recall {raw:.2f} → {aligned:.2f}, "
-                           f"shift dispersion {dispersion:.0f} px over {len(cross)} frame(s)) "
-                           f"— the same object, displaced"))
+                   reason=(f"one copy lands on the other's mask under a single rigid shift of "
+                           f"{out['shift_px_median']:.0f} px in {agreeing} of {len(cross)} "
+                           f"frame(s) (agreement {raw:.2f} → {aligned:.2f}) — the same object, "
+                           f"displaced"))
     else:
         out.update(verdict="distinct",
-                   reason=(f"no single shift aligns the copies (recall {raw:.2f} → {aligned:.2f}, "
-                           f"dispersion {dispersion:.0f} px over {len(cross)} frame(s))"))
+                   reason=(f"no single shift aligns the copies: {agreeing} of {len(cross)} "
+                           f"frame(s) agree (median {raw:.2f} → {aligned:.2f})"))
     return out

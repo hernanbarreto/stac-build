@@ -2393,8 +2393,16 @@ loops:                              # candidate detector + spatial gate (§4.4/�
                                     # masked there, and IoU reads 0.00 on a 1.7 M-point duct
                                     # that is placed perfectly.
     min_cross_recall: 0.40          # ...and this much of the OTHER copy's mask after the shift
-    max_shift_dispersion_px: 40     # the shift has to AGREE across frames. A duplicate has one
-                                    # rigid offset; coincidental overlap does not.
+    min_agreeing_frac: 0.60         # ...in at least this fraction of the frames tested. What
+                                    # separates one displaced object from two is not how tightly
+                                    # the shift VECTORS cluster: measured on pccr 2026-09-14 the
+                                    # scatter relative to the shift is 1.05 for the chair that IS
+                                    # a duplicate and 0.81 for the duct that is not, so that
+                                    # ranks them backwards. It is whether MOST frames agree once
+                                    # aligned — the chair reads 0.38/0.75/0.56/0.69/0.78/0.79,
+                                    # every frame moderately high, while the duct reads
+                                    # 0.06/0.04/0.04/0.11/0.86/0.91: two accidental hits among
+                                    # near-zeros, with dv steady while du swings -129 to +213.
   min_gap_keyframes: 30             # two windows of one instance this far apart = revisit
   duplicate_min_sep_m: 0.20         # two disjoint 3-D clusters of one instance, centroids
                                     # farther than this and no bridging points = duplicate

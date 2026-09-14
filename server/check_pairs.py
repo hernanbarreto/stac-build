@@ -29,7 +29,7 @@ def pts_frames(iid):
     gi = gi[(gi >= 0) & (gi < len(xyz))]
     return xyz[gi], sorted({int(f) for f in np.unique(fg[gi])})
 
-print(f"{'par':<12}{'sep':>7}  {'objeto':<12}{'selfA':>6}{'selfB':>6}{'cross':>7}{'align':>7}{'disp':>6}  veredicto")
+print(f"{'par':<12}{'sep':>7}  {'objeto':<12}{'selfA':>6}{'selfB':>6}{'cross':>7}{'align':>7} frames  veredicto")
 print("-" * 88)
 for a, b, sep, what in PAIRS:
     PA, FA = pts_frames(a); PB, FB = pts_frames(b)
@@ -40,4 +40,4 @@ for a, b, sep, what in PAIRS:
     print(f"{a}->{b:<8}{sep:>6.2f}m  {what:<12}"
           f"{ev.get('self_recall_a',0):>6.2f}{ev.get('self_recall_b',0):>6.2f}"
           f"{ev.get('cross_recall',0):>7.2f}{ev.get('cross_recall_aligned',0):>7.2f}"
-          f"{ev.get('shift_dispersion_px',0):>6.0f}  {ev['verdict']}")
+          f"{ev.get('agreeing_frames',0):>3}/{ev.get('n_cross_frames',0):<3} {ev['verdict']}")

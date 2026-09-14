@@ -159,8 +159,8 @@ class ReprojectionConfig:
     min_self_recall: float          # a copy must reach THIS much of its own mask in its own
                                     # frames or no verdict is trustworthy (declared unusable)
     min_cross_recall: float         # ...and this much of the other's, after the shift
-    max_shift_dispersion_px: float  # the shift must AGREE between frames; a duplicate has one
-                                    # rigid offset, coincidence does not
+    min_agreeing_frac: float        # ...in at least this fraction of the frames tested; the
+                                    # scatter of the shift VECTORS ranks the real cases backwards
 
 
 @dataclass(frozen=True)
@@ -572,7 +572,7 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         max_frames=_num(rp, "max_frames", f"{L}.reprojection", lo=1, integer=True),
         min_self_recall=_num(rp, "min_self_recall", f"{L}.reprojection", lo=0),
         min_cross_recall=_num(rp, "min_cross_recall", f"{L}.reprojection", lo=0),
-        max_shift_dispersion_px=_num(rp, "max_shift_dispersion_px", f"{L}.reprojection", lo=0))
+        min_agreeing_frac=_num(rp, "min_agreeing_frac", f"{L}.reprojection", lo=0))
 
     loops = LoopsConfig(
         min_gap_keyframes=_num(ls, "min_gap_keyframes", L, lo=1, integer=True),
