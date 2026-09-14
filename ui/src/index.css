@@ -7,3 +7,4 @@
 @import './styles/base.css';
 @import './styles/layout.css';
 @import './components/ui/index.css';
+@import './layout/regions.css';

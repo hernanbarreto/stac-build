@@ -166,6 +166,13 @@ export function readStoredLang(): Lang {
   return 'es'
 }
 
+// Module-level accessors for non-React code (Three.js helpers, canvas
+// labels). The provider keeps them in sync with the active language.
+let currentT: Translator = makeTranslator(readStoredLang())
+let currentFmt: Formatters = makeFormatters(readStoredLang())
+export function getT(): Translator { return currentT }
+export function getFmt(): Formatters { return currentFmt }
+
 export function I18nProvider({ children, initialLang }: { children: ReactNode; initialLang?: Lang }) {
   const [lang, setLangState] = useState<Lang>(initialLang ?? readStoredLang)
   const setLang = useCallback((l: Lang) => {
@@ -173,7 +180,11 @@ export function I18nProvider({ children, initialLang }: { children: ReactNode; i
     try { localStorage.setItem(STORAGE_KEY, l) } catch { /* storage unavailable */ }
   }, [])
   useEffect(() => { document.documentElement.lang = LOCALES[lang] }, [lang])
-  const value = useMemo<I18nContextValue>(() => ({ lang, setLang, t: makeTranslator(lang), fmt: makeFormatters(lang) }), [lang, setLang])
+  const value = useMemo<I18nContextValue>(() => {
+    const t = makeTranslator(lang), fmt = makeFormatters(lang)
+    currentT = t; currentFmt = fmt
+    return { lang, setLang, t, fmt }
+  }, [lang, setLang])
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>
 }
 
