@@ -441,9 +441,34 @@ class PipelineManager:
             return True
 
         deleted = []
+        # The ledger is the ONE thing a Replace must not take with it: a new
+        # reconstruction is geometry epoch 0 again, but the history of every
+        # human-directed correction survives it and replay re-keys those runs by
+        # frame_global onto the new chain (USER 2026-09-08). Deleting output/
+        # wholesale — which is what this function does, and rightly so — used to
+        # take corrections.jsonl along, against the rule two comments in this
+        # file already stated. Read it out before the wipe, put it back after.
+        from correction.epoch import LEDGER_FILE
+        ledger_bytes = None
+        ledger_path = output_dir / LEDGER_FILE
+        try:
+            if ledger_path.is_file():
+                ledger_bytes = ledger_path.read_bytes()
+        except OSError as e:  # noqa: BLE001 — a Replace must not fail over this
+            logger.warning(f"[Pipeline] Replace: could not preserve {LEDGER_FILE} ({e})")
+
         if _rm_tree(output_dir):
             deleted.append("output/")
         output_dir.mkdir(parents=True, exist_ok=True)
+        if ledger_bytes is not None:
+            try:
+                ledger_path.write_bytes(ledger_bytes)
+                n_records = ledger_bytes.count(b"\n")
+                logger.info(f"[Pipeline] Replace: {LEDGER_FILE} preserved "
+                            f"({n_records} record(s)) — append-only, a new "
+                            f"reconstruction never erases the history")
+            except OSError as e:  # noqa: BLE001
+                logger.warning(f"[Pipeline] Replace: could not restore {LEDGER_FILE} ({e})")
 
         # frame selection + quality: reconstruction rebuilds these
         frames_dir = session_dir / "frames"
