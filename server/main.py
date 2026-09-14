@@ -5,6 +5,7 @@ import asyncio
 import json
 import time
 import logging
+import re
 import gc
 import os
 import sys
@@ -7975,15 +7976,27 @@ async def scan_websocket(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
 
-    # Suppress /health spam from access logs
-    class HealthCheckFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            msg = record.getMessage()
-            if "GET /health" in msg:
-                return False
-            return True
+    # The access log is where a long run is read from, and the UI's polling
+    # buries it: over the pccr run of 2026-09-14, 1,409 of 4,580 lines were
+    # access lines and two endpoints alone — /api/correction/state (514) and
+    # /api/certify/state (388) — were 64 % of them, with the Potree octree
+    # chunk fetches behind. Successful GETs to those poll/asset routes carry no
+    # information a human reads. Anything else stays, and a poll that FAILS
+    # (4xx/5xx) stays too: the point is to lose noise, never diagnostics.
+    POLL_ROUTES = ("/health", "/api/correction/state/", "/api/certify/state/",
+                   "/potree/", "/prefs")
+    _access_re = re.compile(r'"(?P<method>[A-Z]+) (?P<path>\S+) [^"]*"\s+(?P<status>\d{3})')
 
-    logging.getLogger("uvicorn.access").addFilter(HealthCheckFilter())
+    class PollingAccessFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            m = _access_re.search(record.getMessage())
+            if m is None:
+                return True
+            if m.group("method") != "GET" or not m.group("status").startswith(("2", "3")):
+                return True
+            return not any(r in m.group("path") for r in POLL_ROUTES)
+
+    logging.getLogger("uvicorn.access").addFilter(PollingAccessFilter())
 
     uvicorn.run(
         "main:app", host=HOST, port=PORT, log_level="info",
