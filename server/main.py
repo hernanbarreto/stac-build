@@ -6229,21 +6229,18 @@ async def refresh_segmentation(body: dict):
         try:
             import time as _time
             # Content-based freshness: only rebuild if masks have changed
-            masks_file = output_dir / "seg_masks.npz"
+            from segmentation.pipeline import segmentation_result_is_stale
+            stale, why = segmentation_result_is_stale(output_dir)
             if result_path.exists():
-                if masks_file.exists():
-                    masks_mtime = masks_file.stat().st_mtime
-                    result_mtime = result_path.stat().st_mtime
-                    if result_mtime >= masks_mtime:
-                        # Result was generated AFTER the last mask change — still valid
-                        with open(result_path) as f:
-                            result = json.load(f)
-                        age = _time.time() - result_path.stat().st_mtime
-                        print(f"[SegRefresh] Result is up-to-date (masks unchanged, {age:.0f}s old) — skipping rebuild")
-                        task_manager.finish(tid)
-                        return {"instances": result.get("instances", [])}
+                if not stale:
+                    with open(result_path) as f:
+                        result = json.load(f)
+                    age = _time.time() - result_path.stat().st_mtime
+                    print(f"[SegRefresh] Result is up-to-date ({why}, {age:.0f}s old) — skipping rebuild")
+                    task_manager.finish(tid)
+                    return {"instances": result.get("instances", [])}
                 result_path.unlink()
-                print(f"[SegRefresh] Masks changed — deleted stale segmentation_result.json for {session_id}")
+                print(f"[SegRefresh] Stale result deleted for {session_id}: {why}")
             from segmentation_pipeline import _match_and_save_result
             task_manager.update(tid, pct=10, detail="Running DBSCAN + cloud matching...")
             print(f"[SegRefresh] Regenerating segmentation_result.json...")

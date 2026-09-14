@@ -1925,6 +1925,45 @@ def _enforce_exclusive_ownership(instances: list, n_pts: int) -> int:
     return resolved
 
 
+def segmentation_result_is_stale(output_dir) -> tuple:
+    """(stale, reason) — does output/segmentation_result.json still describe the
+    CURRENT cleaned cloud?
+
+    Freshness used to be judged against the masks alone, in two places that
+    then disagreed with each other. That misses the case that actually bit:
+    right after SAM3, before any cloud exists, the matcher runs once, finds no
+    cleaned_cloud.ply, falls back to a raw chunk PLY that carries no origin
+    fields, writes a 2D-ONLY result and caches it. That file is newer than both
+    the masks and segmentation.json, so every mtime test called it fresh and
+    the real mapping never ran — pccr 2026-09-14 certified 212 instances that
+    had no cloud points at all.
+
+    A result is fresh only when it is newer than the masks AND the metadata AND
+    the cloud it claims to describe, and when it carries a coverage figure
+    rather than the 2D-only warning.
+    """
+    from pathlib import Path as _P
+    out = _P(output_dir)
+    res = out / "segmentation_result.json"
+    if not res.exists():
+        return True, "no segmentation_result.json"
+    r_mt = res.stat().st_mtime
+    for name in ("seg_masks.npz", "segmentation.json", "cleaned_cloud.ply"):
+        f = out / name
+        if f.exists() and r_mt < f.stat().st_mtime:
+            return True, f"older than {name}"
+    try:
+        import json as _json
+        data = _json.loads(res.read_text())
+    except Exception as e:  # noqa: BLE001 — unreadable result = remap
+        return True, f"unreadable ({e})"
+    if data.get("warning"):
+        return True, f"2D-only fallback ({data['warning']})"
+    if "coverage" not in data:
+        return True, "no coverage figure — never mapped onto a cloud"
+    return False, "mapped onto the current cloud"
+
+
 def _mask_frame_lookup(output_dir: Path, mask_frames, cloud_frames):
     """Map a cloud frame_global to the frame index the MASKS are keyed by.
 

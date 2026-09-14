@@ -327,17 +327,14 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
             # is whether the result was mapped onto THIS cloud: anything older
             # than cleaned_cloud.ply, or carrying the 2D-only warning, has not
             # been.
-            stale = not res.exists() or res.stat().st_mtime < seg.stat().st_mtime
-            if not stale and cleaned.exists():
-                stale = res.stat().st_mtime < cleaned.stat().st_mtime
-            if not stale and res.exists():
-                try:
-                    import json as _json
-                    _r = _json.loads(res.read_text())
-                    stale = "coverage" not in _r or bool(_r.get("warning"))
-                except Exception:  # noqa: BLE001 — unreadable result = remap
-                    stale = True
+            import sys as _sys
+            _sd = str(Path(__file__).resolve().parent.parent)
+            if _sd not in _sys.path:
+                _sys.path.insert(0, _sd)
+            from segmentation.pipeline import segmentation_result_is_stale
+            stale, why = segmentation_result_is_stale(output_dir)
             if seg.exists() and stale:
+                pipe.send_log(f"mask→cloud mapping needed: {why}")
                 pipe.send_progress(94, "Mapping segmentation to cloud (one-shot)...",
                                    stage="cloudcompy")
                 import sys
