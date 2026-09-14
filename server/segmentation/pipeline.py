@@ -1926,21 +1926,15 @@ def _enforce_exclusive_ownership(instances: list, n_pts: int) -> int:
 
 
 def segmentation_result_is_stale(output_dir) -> tuple:
-    """(stale, reason) — does output/segmentation_result.json still describe the
-    CURRENT cleaned cloud?
+    """(stale, reason) — is output/segmentation_result.json older than any input
+    it was derived from?
 
-    Freshness used to be judged against the masks alone, in two places that
-    then disagreed with each other. That misses the case that actually bit:
-    right after SAM3, before any cloud exists, the matcher runs once, finds no
-    cleaned_cloud.ply, falls back to a raw chunk PLY that carries no origin
-    fields, writes a 2D-ONLY result and caches it. That file is newer than both
-    the masks and segmentation.json, so every mtime test called it fresh and
-    the real mapping never ran — pccr 2026-09-14 certified 212 instances that
-    had no cloud points at all.
+    The result is a function of three files: the masks, the instance metadata
+    and the cloud the masks are projected onto. Freshness used to be judged
+    against the masks alone, in two places that then disagreed with each other,
+    and a result that predated the cloud entirely passed as current.
 
-    A result is fresh only when it is newer than the masks AND the metadata AND
-    the cloud it claims to describe, and when it carries a coverage figure
-    rather than the 2D-only warning.
+    Plain dependency tracking, one answer for every caller.
     """
     from pathlib import Path as _P
     out = _P(output_dir)
@@ -1952,16 +1946,7 @@ def segmentation_result_is_stale(output_dir) -> tuple:
         f = out / name
         if f.exists() and r_mt < f.stat().st_mtime:
             return True, f"older than {name}"
-    try:
-        import json as _json
-        data = _json.loads(res.read_text())
-    except Exception as e:  # noqa: BLE001 — unreadable result = remap
-        return True, f"unreadable ({e})"
-    if data.get("warning"):
-        return True, f"2D-only fallback ({data['warning']})"
-    if "coverage" not in data:
-        return True, "no coverage figure — never mapped onto a cloud"
-    return False, "mapped onto the current cloud"
+    return False, "newer than the masks, the metadata and the cloud"
 
 
 def _mask_frame_lookup(output_dir: Path, mask_frames, cloud_frames):
@@ -2056,11 +2041,18 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     keyframes = masks_data["frames"].tolist()
     scaled_res = masks_data["scaled_res"].tolist()
     
-    # Auto-detect PLY if not provided
+    # The scene cloud, or nothing. A chunk used to stand in for it when it was
+    # missing, which cannot work: a chunk is one seventh of the scene and
+    # carries no per-point provenance, so the match silently degraded to
+    # instances with no points and the caller cached that as the session's
+    # segmentation. Refusing is the only honest answer — the cloud does not
+    # exist yet, so there is nothing to map onto.
     if ply_path is None:
-        cleaned = output_dir / "cleaned_cloud.ply"
-        raw = output_dir / "chunk_000.ply"
-        ply_path = cleaned if cleaned.exists() else raw
+        ply_path = output_dir / "cleaned_cloud.ply"
+        if not ply_path.exists():
+            return {"error": f"no cleaned_cloud.ply in {output_dir} — the cloud "
+                             f"does not exist yet, nothing to map masks onto",
+                    "instances": []}
     ply_path = Path(ply_path)
     
     # Load cloud origins
@@ -3015,8 +3007,14 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
         print(f"[SegPipeline] No cached result, running full mask matching (will cache for next time)...")
         result = _match_masks_to_cloud(output_dir, ply_path)
         
-        # Cache the result so next load is instant
-        if "error" not in result and result.get("instances"):
+        # Cache the result so next load is instant — but ONLY a result that
+        # actually mapped. `coverage` is written by the matching path and by no
+        # other; a degraded result (a cloud without per-point provenance, which
+        # yields instances with empty globalIndices) carries a `warning`
+        # instead, and used to pass this guard because a warning is not an
+        # error. Caching it made it the session's segmentation of record.
+        if ("error" not in result and result.get("instances")
+                and result.get("coverage") is not None):
             try:
                 result_path = output_dir / "segmentation_result.json"
                 # Strip transient flags — only needed for first load after segmentation
