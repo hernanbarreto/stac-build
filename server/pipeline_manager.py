@@ -222,6 +222,20 @@ class PipelineManager:
                 paths = ProjectPaths(str(projects_dir), session_id)
                 ctx = paths.for_source(date, source)
                 session_dir = str(ctx.session_dir)
+                # The scan being reconstructed becomes the project's ACTIVE scan.
+                # Work is per scan (USER 2026-09-06) and everything downstream
+                # that resolves a session without an explicit key — the viewer,
+                # /api/segmentation/refresh, the certify state, the post-pipeline
+                # Potree build — asks for the active one. On pccr 2026-09-14 the
+                # pipeline rebuilt 2026-08-31 while 2026-08-24 stayed active, so
+                # those callers kept looking into a scan with no reconstruction
+                # in it.
+                try:
+                    from project_scans import set_active
+                    set_active(paths, f"{date}/{source}")
+                except Exception as e:  # noqa: BLE001 — never block a run over this
+                    logger.warning(f"[Pipeline] could not set {date}/{source} "
+                                   f"as the active scan: {e}")
             else:
                 # Legacy: scan_key is ignored, use normal resolution
                 ctx = resolve_session(server_dir, session_id)

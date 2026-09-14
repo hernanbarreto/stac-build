@@ -315,8 +315,29 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         try:
             seg = output_dir / "segmentation.json"
             res = output_dir / "segmentation_result.json"
-            if seg.exists() and (
-                    not res.exists() or res.stat().st_mtime < seg.stat().st_mtime):
+            cleaned = output_dir / "cleaned_cloud.ply"
+            # The mtime against segmentation.json is not enough. Right after
+            # SAM3 — before this stage produced any cloud — the matcher runs
+            # once, finds no cleaned_cloud.ply, falls back to chunk_000.ply
+            # (which carries no origin fields), writes a 2D-ONLY result and
+            # CACHES it. That file is newer than segmentation.json, so the gate
+            # read "already mapped" and skipped: pccr 2026-09-14 reached the
+            # certification with 212 instances that had no cloud points at all
+            # and instance-loops found 0 candidates. What the gate has to ask
+            # is whether the result was mapped onto THIS cloud: anything older
+            # than cleaned_cloud.ply, or carrying the 2D-only warning, has not
+            # been.
+            stale = not res.exists() or res.stat().st_mtime < seg.stat().st_mtime
+            if not stale and cleaned.exists():
+                stale = res.stat().st_mtime < cleaned.stat().st_mtime
+            if not stale and res.exists():
+                try:
+                    import json as _json
+                    _r = _json.loads(res.read_text())
+                    stale = "coverage" not in _r or bool(_r.get("warning"))
+                except Exception:  # noqa: BLE001 — unreadable result = remap
+                    stale = True
+            if seg.exists() and stale:
                 pipe.send_progress(94, "Mapping segmentation to cloud (one-shot)...",
                                    stage="cloudcompy")
                 import sys
