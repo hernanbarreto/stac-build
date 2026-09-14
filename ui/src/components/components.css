@@ -1,0 +1,1134 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   Existing feature components migrated to the catalog: the specific rules
+   left after the migration (login, admin, team, call, flythrough,
+   assistant, BIM, deviation report, verdict pill, fatal error).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Login ─────────────────────────────────────────────────────────────── */
+.stac-login {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--surface-brand);
+}
+
+.stac-login__card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-3);
+  width: var(--toast-w);
+  max-width: calc(100vw - var(--sp-8));
+  padding: var(--sp-8);
+  background: var(--surface-1);
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-3);
+  text-align: center;
+}
+
+.stac-login__logo {
+  width: var(--welcome-logo-w);
+  max-width: 80%;
+  margin: 0 auto;
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--text-1);
+  border-radius: var(--r-2);
+}
+
+.stac-login__subtitle {
+  font-size: var(--fs-1);
+  color: var(--text-2);
+}
+
+.stac-login__server {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-1);
+  color: var(--text-2);
+}
+
+.stac-login__form {
+  text-align: left;
+}
+
+.stac-login__footer {
+  font-size: var(--fs-0);
+  color: var(--text-3);
+}
+
+/* ── Fatal (error boundary, outside providers) ─────────────────────────── */
+.stac-fatal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  padding: var(--sp-8);
+  text-align: center;
+  background: var(--surface-0);
+  color: var(--text-1);
+}
+
+.stac-fatal__title {
+  font-size: var(--fs-4);
+  font-weight: var(--fw-semibold);
+}
+
+.stac-fatal__message {
+  max-width: var(--dialog-w-lg);
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-1);
+  color: var(--err-fg);
+}
+
+.stac-fatal__hint {
+  max-width: var(--dialog-w);
+  font-size: var(--fs-1);
+  color: var(--text-2);
+}
+
+/* ── Admin ─────────────────────────────────────────────────────────────── */
+.stac-admin__row {
+  border: var(--bw) solid var(--border-1);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+}
+
+.stac-admin__row--disabled {
+  opacity: var(--opacity-muted);
+}
+
+.stac-admin__head {
+  padding: var(--sp-2) var(--sp-3);
+  min-height: var(--row-h);
+}
+
+.stac-admin__head--clickable {
+  cursor: pointer;
+}
+
+.stac-admin__head--clickable:hover {
+  background: var(--surface-3);
+}
+
+.stac-admin__avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  border-radius: var(--r-circle);
+  background: var(--surface-4);
+  color: var(--text-1);
+  font-weight: var(--fw-semibold);
+  flex-shrink: 0;
+}
+
+.stac-admin__chevron {
+  display: inline-flex;
+  color: var(--text-3);
+}
+
+.stac-admin__chevron svg,
+.stac-admin__icon {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+}
+
+.stac-admin__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.stac-admin__name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: var(--fw-medium);
+}
+
+.stac-admin__meta {
+  font-size: var(--fs-0);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stac-admin__role {
+  width: auto;
+  min-width: var(--scale-bar-max-w);
+}
+
+.stac-admin__edit {
+  padding: var(--sp-3);
+  border-top: var(--bw) solid var(--border-1);
+}
+
+.stac-admin__member {
+  min-height: var(--row-h);
+}
+
+/* ── Team ──────────────────────────────────────────────────────────────── */
+.stac-team__toolbar {
+  width: 100%;
+}
+
+.stac-team__member,
+.stac-team__activity {
+  padding: var(--sp-2) var(--panel-pad);
+  border-bottom: var(--bw) solid var(--border-1);
+  align-items: flex-start;
+}
+
+.stac-team__avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  border-radius: var(--r-circle);
+  background: var(--surface-4);
+  color: var(--text-1);
+  font-weight: var(--fw-semibold);
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+.stac-team__avatar-img {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--r-circle);
+  object-fit: cover;
+}
+
+.stac-team__presence {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  border: var(--bw) solid var(--surface-1);
+}
+
+.stac-team__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: var(--fs-1);
+}
+
+.stac-team__name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-1);
+  font-weight: var(--fw-medium);
+}
+
+.stac-team__task {
+  font-size: var(--fs-0);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stac-team__chat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--panel-pad);
+}
+
+.stac-team__bubble {
+  display: flex;
+  flex-direction: column;
+  max-width: 85%;
+  align-self: flex-start;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  border: var(--bw) solid var(--border-1);
+  font-size: var(--fs-1);
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+.stac-team__bubble--mine {
+  align-self: flex-end;
+  background: var(--brand-orange-soft);
+  border-color: var(--brand-orange);
+}
+
+.stac-team__author {
+  font-size: var(--fs-0);
+  font-weight: var(--fw-medium);
+  color: var(--brand-orange);
+}
+
+.stac-team__time {
+  font-size: var(--fs-0);
+  color: var(--text-3);
+  align-self: flex-end;
+}
+
+.stac-team__chatinput {
+  display: flex;
+  gap: var(--sp-2);
+  width: 100%;
+}
+
+.stac-team__activity-icon {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+  color: var(--text-3);
+  margin-top: var(--sp-half);
+}
+
+/* ── Call ──────────────────────────────────────────────────────────────── */
+.stac-call__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-dialog);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-scrim);
+}
+
+.stac-call__incoming {
+  position: fixed;
+  top: calc(var(--header-h) + var(--sp-4));
+  right: var(--sp-4);
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  min-width: var(--popover-min-w);
+  background: var(--surface-2);
+  border: var(--bw) solid var(--brand-orange);
+  border-radius: var(--r-3);
+  box-shadow: var(--elev-3);
+  text-align: center;
+}
+
+.stac-call__incoming-icon {
+  width: var(--icon-hero);
+  height: var(--icon-hero);
+  color: var(--brand-orange);
+  stroke-width: 1;
+}
+
+.stac-call__name {
+  font-size: var(--fs-3);
+  font-weight: var(--fw-semibold);
+  color: var(--text-1);
+}
+
+.stac-call__label {
+  font-size: var(--fs-1);
+  color: var(--text-2);
+}
+
+.stac-call__actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.stac-call__ringing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-4);
+  text-align: center;
+}
+
+.stac-call__pulse {
+  width: var(--nav-cube-size);
+  height: var(--nav-cube-size);
+  border-radius: var(--r-circle);
+  background: var(--brand-orange);
+  animation: stac-live-pulse 1.5s ease-in-out infinite;
+}
+
+.stac-call__stage {
+  position: relative;
+  width: 80vw;
+  max-width: calc(var(--dialog-w-lg) + var(--dialog-w));
+  aspect-ratio: 16 / 9;
+  border-radius: var(--r-3);
+  overflow: hidden;
+  background: var(--surface-video);
+  box-shadow: var(--elev-3);
+}
+
+.stac-call__remote {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.stac-call__local {
+  position: absolute;
+  right: var(--sp-4);
+  bottom: var(--sp-4);
+  width: var(--legend-h);
+  aspect-ratio: 4 / 3;
+  border-radius: var(--r-2);
+  object-fit: cover;
+  border: var(--bw) solid var(--border-3);
+}
+
+.stac-call__ended {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-scrim);
+  font-size: var(--fs-4);
+  font-weight: var(--fw-semibold);
+  color: var(--text-1);
+}
+
+.stac-call__controls {
+  position: absolute;
+  left: 50%;
+  bottom: var(--sp-5);
+  transform: translateX(-50%);
+  display: flex;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-pill);
+}
+
+/* ── Flythrough (SyncPlayer) ───────────────────────────────────────────── */
+.stac-sync {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-hud);
+  pointer-events: none;
+}
+
+.stac-sync__video {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: var(--ctl-h);
+  width: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-video);
+  pointer-events: auto;
+}
+
+.stac-sync__el {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.stac-sync__error {
+  padding: var(--sp-3);
+  color: var(--err-fg);
+  font-size: var(--fs-1);
+  text-align: center;
+}
+
+.stac-sync__loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  background: var(--surface-scrim);
+  color: var(--text-1);
+  font-size: var(--fs-2);
+  pointer-events: none;
+}
+
+.stac-sync__loading svg {
+  width: var(--icon-xl);
+  height: var(--icon-xl);
+  color: var(--brand-orange);
+}
+
+.stac-sync__loading--3d {
+  left: 50%;
+  bottom: var(--ctl-h);
+}
+
+.stac-sync__controls {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--ctl-h);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  background: var(--surface-1);
+  border-top: var(--bw) solid var(--border-1);
+  pointer-events: auto;
+}
+
+.stac-sync__seek {
+  flex: 1;
+}
+
+/* ── Assistant ─────────────────────────────────────────────────────────── */
+.stac-assistant {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--surface-1);
+}
+
+.stac-assistant__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--panel-pad);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.stac-assistant__empty {
+  margin: auto 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  text-align: center;
+  color: var(--text-2);
+  font-size: var(--fs-1);
+  line-height: var(--lh-body);
+}
+
+.stac-assistant__empty svg {
+  width: var(--icon-xl);
+  height: var(--icon-xl);
+  color: var(--measure);
+}
+
+.stac-assistant__suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sp-1);
+}
+
+.stac-assistant__chip {
+  padding: var(--sp-1) var(--sp-3);
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: var(--fs-0);
+  text-align: left;
+  transition: border-color var(--motion-fast), color var(--motion-fast), background var(--motion-fast);
+}
+
+.stac-assistant__chip:hover {
+  color: var(--text-1);
+  border-color: var(--measure);
+  background: var(--measure-soft);
+}
+
+.stac-assistant__msg {
+  max-width: 92%;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-2);
+  font-size: var(--fs-2);
+  line-height: var(--lh-body);
+}
+
+.stac-assistant__msg--user {
+  align-self: flex-end;
+  background: var(--measure-soft);
+  border: var(--bw) solid var(--measure);
+  color: var(--text-1);
+}
+
+.stac-assistant__msg--assistant {
+  align-self: flex-start;
+  background: var(--surface-2);
+  border: var(--bw) solid var(--border-2);
+}
+
+.stac-assistant__msg--error {
+  border-color: var(--err);
+  color: var(--err-fg);
+}
+
+.stac-assistant__text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.stac-assistant__thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--measure);
+  font-size: var(--fs-1);
+}
+
+.stac-assistant__thinking svg,
+.stac-assistant__trace svg,
+.stac-assistant__icon {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+}
+
+.stac-assistant__trace {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: var(--bw) solid var(--border-1);
+  color: var(--text-3);
+}
+
+.stac-assistant__volumes {
+  max-height: 40%;
+  overflow-y: auto;
+  border-top: var(--bw) solid var(--border-1);
+}
+
+.stac-assistant__volform {
+  padding: var(--sp-2);
+  background: var(--surface-0);
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-2);
+}
+
+.stac-assistant__vollabel {
+  width: var(--sp-12);
+  font-size: var(--fs-0);
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.stac-assistant__vol {
+  min-height: var(--row-h);
+  font-size: var(--fs-1);
+}
+
+.stac-assistant__volname {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+  color: var(--text-1);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stac-assistant__volname svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+  color: var(--measure);
+  flex-shrink: 0;
+}
+
+.stac-assistant__volname:hover {
+  color: var(--measure);
+}
+
+.stac-assistant__voldims {
+  font-size: var(--fs-0);
+  color: var(--text-3);
+}
+
+.stac-assistant__input {
+  display: flex;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--panel-pad);
+  border-top: var(--bw) solid var(--border-1);
+}
+
+/* ── BIM navigator / analysis ──────────────────────────────────────────── */
+.stac-bim__type {
+  color: var(--measure);
+  font-weight: var(--fw-medium);
+}
+
+.stac-bim__opacity {
+  padding: var(--sp-2) var(--panel-pad);
+  border-bottom: var(--bw) solid var(--border-1);
+}
+
+.stac-bap {
+  display: flex;
+  flex-direction: column;
+}
+
+.stac-bap__el {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+  border: var(--bw) solid var(--border-1);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+}
+
+.stac-bap__el--unbuilt {
+  opacity: var(--opacity-muted);
+  min-height: var(--row-h);
+}
+
+.stac-bap__head {
+  font-size: var(--fs-1);
+}
+
+.stac-bap__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--fw-medium);
+}
+
+.stac-bap__type {
+  font-size: var(--fs-0);
+  color: var(--text-3);
+}
+
+.stac-bap__meta {
+  font-size: var(--fs-0);
+  color: var(--text-2);
+}
+
+/* ── Deviation report (dock) ───────────────────────────────────────────── */
+.stac-devrep {
+  display: grid;
+  grid-template-columns: var(--inspector-w) minmax(0, 1fr);
+  gap: var(--sp-4);
+  flex: 1;
+  min-height: 0;
+  padding: var(--sp-3) var(--sp-4);
+  overflow: hidden;
+}
+
+.stac-devrep__side {
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.stac-devrep__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.stac-devrep__hist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.stac-devrep__canvas {
+  width: 100%;
+  height: var(--nav-cube-size);
+  background: var(--surface-0);
+  border: var(--bw) solid var(--border-1);
+  border-radius: var(--r-1);
+}
+
+/* ── Correction verdict pill (collapsed dialog) ────────────────────────── */
+.stac-verdict-pill {
+  position: fixed;
+  top: calc(var(--header-h) + var(--hud-inset));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-banner);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border: var(--bw) solid var(--warn);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--warn-fg);
+  font-size: var(--fs-1);
+  font-weight: var(--fw-medium);
+  box-shadow: var(--elev-2);
+}
+
+.stac-verdict-pill svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+}
+
+/* ── Fuse ──────────────────────────────────────────────────────────────── */
+.stac-fuse__scan {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.stac-fuse__head {
+  width: 100%;
+}
+
+.stac-fuse__pairs {
+  padding-left: var(--sp-6);
+}
+
+.stac-fuse__pair {
+  font-size: var(--fs-1);
+}
+
+.stac-fuse__pairline {
+  padding-left: var(--sp-3);
+  font-size: var(--fs-0);
+  color: var(--text-2);
+}
+
+.stac-fuse__pairline--dropped {
+  color: var(--err-fg);
+  text-decoration: line-through;
+}
+
+.stac-fuse__pairline--suspect {
+  color: var(--warn-fg);
+}
+
+/* ── Segmentation manager (full-screen dialog) ─────────────────────────── */
+.stac-seg .stac-dialog__body {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+.stac-seg__body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.stac-seg__sidebar {
+  width: var(--left-panel-w);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: var(--bw) solid var(--border-1);
+  background: var(--surface-1);
+  overflow: hidden;
+}
+
+.stac-seg__sidebar-head {
+  padding: var(--sp-2) var(--panel-pad);
+  font-size: var(--fs-1);
+  font-weight: var(--fw-medium);
+  color: var(--text-2);
+  border-bottom: var(--bw) solid var(--border-1);
+}
+
+.stac-seg__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.stac-seg__inst {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--row-h);
+  padding: 0 var(--sp-2);
+  border-left: var(--bw-selected) solid transparent;
+  cursor: pointer;
+}
+
+.stac-seg__inst:hover {
+  background: var(--surface-3);
+}
+
+.stac-seg__inst--selected {
+  background: var(--surface-4);
+  border-left-color: var(--brand-orange);
+}
+
+.stac-seg__inst--excluded {
+  opacity: var(--opacity-disabled);
+}
+
+.stac-seg__name {
+  flex: 1;
+  min-width: 0;
+  height: var(--ctl-h-sm);
+  padding: 0 var(--sp-1);
+  background: transparent;
+  border: var(--bw) solid transparent;
+  border-radius: var(--r-1);
+  color: var(--text-1);
+  font-size: var(--fs-1);
+}
+
+.stac-seg__name:hover {
+  border-color: var(--border-2);
+}
+
+.stac-seg__name:focus {
+  border-color: var(--measure);
+  background: var(--surface-0);
+}
+
+.stac-seg__pts {
+  font-size: var(--fs-0);
+  color: var(--text-3);
+}
+
+.stac-seg__actions {
+  display: inline-flex;
+  gap: var(--sp-half);
+}
+
+.stac-seg__viewer {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.stac-seg__status {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-4);
+  border-bottom: var(--bw) solid var(--border-1);
+  font-size: var(--fs-1);
+  color: var(--text-2);
+}
+
+.stac-seg__status-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-0);
+}
+
+.stac-seg__progress {
+  padding: 0 var(--sp-4);
+}
+
+.stac-seg__toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border-bottom: var(--bw) solid var(--border-1);
+  background: var(--surface-1);
+}
+
+.stac-seg__nav {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: var(--scale-bar-max-w);
+  justify-content: center;
+  font-size: var(--fs-1);
+  color: var(--text-1);
+}
+
+.stac-seg__filename {
+  font-size: var(--fs-0);
+  color: var(--text-3);
+}
+
+.stac-seg__zoom {
+  min-width: var(--sp-12);
+  text-align: center;
+  font-size: var(--fs-0);
+  color: var(--text-2);
+}
+
+.stac-seg__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border-bottom: var(--bw) solid var(--border-1);
+  background: var(--surface-2);
+}
+
+.stac-seg__hint {
+  font-size: var(--fs-0);
+  color: var(--text-3);
+  line-height: var(--lh-body);
+}
+
+.stac-seg__hint--grow {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stac-seg__canvas {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: var(--surface-0);
+  overflow: hidden;
+}
+
+.stac-seg__canvas--loading {
+  cursor: wait;
+}
+
+.stac-seg__canvas--loading .stac-seg__transform {
+  opacity: var(--opacity-muted);
+}
+
+.stac-seg__canvas--crosshair {
+  cursor: crosshair;
+}
+
+.stac-seg__transform {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform-origin: center center;
+  transform: translate(var(--pan-x), var(--pan-y)) scale(var(--zoom));
+}
+
+.stac-seg__image-wrap {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.stac-seg__image {
+  display: block;
+  max-width: 100%;
+  max-height: calc(90vh - var(--legend-h) - var(--sp-10));
+  user-select: none;
+  pointer-events: none;
+}
+
+.stac-seg__overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: auto;
+}
+
+.stac-seg__queue {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-3);
+  border-top: var(--bw) solid var(--border-1);
+  background: var(--surface-1);
+}
+
+.stac-seg__footer {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border-top: var(--bw) solid var(--border-1);
+  background: var(--surface-1);
+}
+
+.stac-seg__label {
+  width: var(--legend-h);
+}
+
+.stac-seg__frames {
+  display: flex;
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+  overflow-x: auto;
+  border-top: var(--bw) solid var(--border-1);
+  background: var(--surface-1);
+}
+
+.stac-seg__thumb {
+  position: relative;
+  flex-shrink: 0;
+  cursor: pointer;
+  border: var(--bw-selected) solid transparent;
+  border-radius: var(--r-1);
+}
+
+.stac-seg__thumb-img {
+  height: var(--sp-10);
+  border-radius: var(--r-1);
+}
+
+.stac-seg__thumb--current {
+  border-color: var(--measure);
+}
+
+.stac-seg__thumb--off {
+  opacity: var(--opacity-dim);
+}
+
+.stac-seg__thumb-dot {
+  position: absolute;
+  top: var(--sp-half);
+  left: var(--sp-half);
+  border: var(--bw) solid var(--surface-0);
+}
+
+.stac-seg__thumb-check {
+  position: absolute;
+  top: var(--sp-half);
+  right: var(--sp-half);
+}
+
+.stac-seg__thumb-idx {
+  position: absolute;
+  bottom: var(--sp-half);
+  left: var(--sp-half);
+  padding: 0 var(--sp-half);
+  font-size: var(--fs-0);
+  background: var(--vp-label-bg);
+  color: var(--text-1);
+  border-radius: var(--r-1);
+}
