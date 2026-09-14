@@ -84,9 +84,22 @@ class Agreement:
         opposite rule governs the geometric FILTER in segmentation/mask_filter:
         there, judging a copy by the other visit's frames would delete it. Same
         projection, opposite purpose.)
-      · A FIXED SAMPLE. The same points and the same frames are scored on every
-        trial, so the count is deterministic and any increase is real — which
-        is why no minimum gain has to be invented to protect against noise.
+      · A FIXED SAMPLE **AND A FIXED DENOMINATOR**. The same points, the same
+        frames and the same instances are scored on every trial of every epoch,
+        and a point that lands out of frame, behind the camera or off the mask
+        all count the same way: NOT inside. Both halves are load-bearing, and
+        the known-answer synthetic proved it by making the scene 17× worse
+        while the score went up (recovery −1674 %, 40.79 → 723.69 cm):
+          – scoring only the candidates still in the pool shrinks the measure's
+            scope as the chain grows, so epoch 2 is counted over fewer
+            instances than epoch 1 and the curve stops being comparable to
+            itself;
+          – counting only the points that still project inside the image lets a
+            correction that shoves geometry OUT of view raise the score among
+            the survivors. The measure would then reward destroying the
+            evidence.
+        With the denominator fixed, "more points in their masks" can only be
+        earned by putting more points where the images say they are.
     """
 
     __slots__ = ("inside", "seen", "per_instance", "separations")
@@ -215,6 +228,8 @@ class GreedyLoop:
         self._c2m: Dict[int, int] = {}
         self._kf_of_mask: Dict[int, int] = {}
         self._build_pool(edges)
+        # what the score is measured over, fixed for the whole run
+        self.scored: List[Candidate] = list(self.pool)
 
     # -- setup ------------------------------------------------------------
 
@@ -281,10 +296,32 @@ class GreedyLoop:
         drift-rate model: its closure pins E(d)=ε·d and every keyframe gets
         −E(d_k), the reference copy included."""
         from correction.distribute import distribute
+        from correction.solve import project_solution
         X = np.asarray(c.edge["X"], np.float64)
+        R, t = X[:3, :3].copy(), X[:3, 3].copy()
+        # An edge may only propose the DOF it OBSERVES. A wall is not duplicated
+        # because it was seen twice: the two "copies" are two stretches of ONE
+        # surface, and the ICP that lands one on the other slides it ALONG
+        # itself — metres of translation in the direction the evidence cannot
+        # see. The known-answer synthetic measured exactly that: closures of
+        # 144, 182 and 394 cm on walls and columns in a scene whose true error
+        # is 40 cm, and the mask score cannot veto them because sliding a wall
+        # along itself keeps its points on its own mask. observability says
+        # which directions are real; the rest goes to identity, never a guess.
+        mode = str(c.edge.get("observability") or "full")
+        axis = c.edge.get("observed_axis")
+        if mode != "full":
+            if axis is None:
+                return None
+            proj = {"mode": mode,
+                    ("normal" if mode == "normal" else "axis"): np.asarray(axis, float)}
+            try:
+                R, t = project_solution(R, t, proj)
+            except RuntimeError:
+                return None
         span = c.edge.get("later_kfs") or [c.i, c.i]
         sol = [{"anchor_kf": c.i, "kf_span": [int(span[0]), int(span[-1])],
-                "R": X[:3, :3], "t": X[:3, 3], "k": 1.0}]
+                "R": R, "t": t, "k": 1.0}]
         try:
             R_kf, t_kf, k_kf, _rep = distribute(self.n_kf, self.d_kf, c.j, sol)
         except RuntimeError:
@@ -310,7 +347,10 @@ class GreedyLoop:
                  if R_kf is not None else state.poses)
         inside_tot = seen_tot = 0
         per_inst, seps = {}, {}
-        for c in self.pool:
+        # the SCORED set never shrinks: candidates leave the pool as they are
+        # accepted, and measuring over what is left would compare each epoch
+        # against a smaller scene than the one before it
+        for c in self.scored:
             if R_kf is None:
                 a, b = state.xyz[c.idx_a], state.xyz[c.idx_b]
             else:
@@ -339,11 +379,14 @@ class GreedyLoop:
                 mh, mw = m.shape[:2]
                 mu = (u * mw / ev.kw).astype(np.int64)
                 mv = (v * mh / ev.kh).astype(np.int64)
+                # FIXED denominator: every sampled point counts for this frame,
+                # and out of frame / behind the camera / off the mask are all
+                # simply "not inside". Counting only what still projects would
+                # let a correction score by pushing the scene out of view.
+                seen += len(pts)
                 inb = front & (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
-                if not inb.any():
-                    continue
-                seen += int(inb.sum())
-                ins += int(m[mv[inb], mu[inb]].sum())
+                if inb.any():
+                    ins += int(m[mv[inb], mu[inb]].sum())
             per_inst[c.key] = (ins, seen)
             inside_tot += ins
             seen_tot += seen

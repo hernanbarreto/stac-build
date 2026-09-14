@@ -255,8 +255,16 @@ def test_known_answer_and_envelope_monotone_with_loop_density(tmp_path, truth):
     base = frames_from_arrays(sess.depth, sess.K, sess.poses, sess.frame_numbers)
     kw = dict(device="cpu", base_frames=base, tracks=load_tracks(root / "output"), use_fork_edges=False)
     rep = known_answer(root, cfg, make_correction_cfg(), work=tmp_path / "ka", log=lambda m: None, **kw)
-    assert rep["error_before"]["t_m_max"] > rep["tolerance"]["t_m"]
-    assert rep["recovered_within_tolerance"], rep["error_after"]
+    # §10.10 asks to MEASURE and DECLARE the recovery, not to pass or fail it
+    # against a tolerance nothing derived (USER 2026-09-14: "que mida y
+    # declare, no que falle ... quién dijo que 5 cm es lógico"). So what is
+    # asserted is that the injection landed, that the instrument recovers, and
+    # that the numbers reach the report — all comparisons, no thresholds.
+    assert rep["error_before"]["t_m_max"] > 0.0, rep["error_before"]
+    assert rep["improved"], rep["error_after"]
+    assert rep["error_after"]["t_m_max"] < rep["error_before"]["t_m_max"]
+    assert 0.0 < rep["recovered_fraction"]["t"] <= 1.0, rep["recovered_fraction"]
+    assert rep["provenance"] == "tool_measured"
     env = envelope(root, cfg, make_correction_cfg(), work=tmp_path / "env", log=lambda m: None, **kw)
     assert env["monotone_with_loop_density"], env["per_density"]
     assert env["declared"]["max_correctable_t_m"] is not None

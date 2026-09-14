@@ -272,13 +272,23 @@ segmentation:
                               # the instance and see whether it lands on the mask. Runs BEFORE the
                               # sub-cloud clean and the OBB, so both see the trimmed set. Nothing
                               # leaves the cloud — the point stops belonging to the INSTANCE.
-    visit_gap_kf: 20          # a gap of more than this many keyframes in an instance's masks is
-                              # the camera having LEFT and come back. Points are judged only
-                              # inside their own visit: the two copies a drifted revisit leaves
-                              # are each supported by the masks of their own pass, and judging one
-                              # against the other's frames would delete it — which does not fix
-                              # the duplicate, it hides it, and destroys the closure the
-                              # correction measures.
+    visit_gap_kf: 1           # a visit ends when the object STOPS BEING SEEN — any discontinuity
+                              # in its mask keyframes, however short (USER 2026-09-14: "deja de
+                              # verse cuando se veia de forma continua entre kf, y en un kf deja
+                              # de verse, y luego se vuelve a ver, independientemente de los kf
+                              # que pasaron sin verse, minimo 1, pero nada mas"). 1 = consecutive
+                              # keyframes are one visit and a single missing one opens another;
+                              # anything larger asserts a continuity nothing observed. Points are
+                              # judged only inside their own visit: the two copies a drifted
+                              # revisit leaves are each supported by the masks of their own pass,
+                              # and judging one against the other's frames would delete it —
+                              # which does not fix the duplicate, it hides it, and destroys the
+                              # closure the correction measures.
+                              # Consequence to expect in a real run: a SAM3 masklet that dies for
+                              # one keyframe and recovers splits one pass into two visits. That is
+                              # harmless here (each half judges its own points) but it is why the
+                              # visit count can exceed the number of times the camera really
+                              # passed.
     min_points_per_visit: 50  # below this a visit cannot judge anything
     max_frames_per_visit: 8   # mask keyframes tested per visit, the ones showing MOST of the
                               # object first (a frame with three pixels of mask judges nothing)
@@ -2496,9 +2506,13 @@ certify:                            # §4.8 ensemble witness + §9 certification
     yaw_deg: 1.0
     t_m: 0.20
     scale: 1.03
-    tol_t_m: 0.05
-    tol_deg: 0.30
-    tol_scale: 0.01
+                                    # NO tolerance: §10.10 asks to REPORT the recovery error, and
+                                    # §10.11 says why — "grado industrial no es 'no falla': es saber
+                                    # cuando esta fuera de especificacion y decirlo". The 5 cm this
+                                    # used to be compared against was invented with the harness
+                                    # (6c9e91e); nothing derived it, and it turned a declaration
+                                    # into a verdict. The report now carries recovered_fraction and
+                                    # the envelope stops where the GATES fail, as the spec says.
   envelope:                         # §10.11 collapse experiment → declared operating envelope
     levels_t_m: [0.1, 0.2, 0.4, 0.8, 1.6]
     levels_scale_pct: [1, 2, 5, 10, 20]

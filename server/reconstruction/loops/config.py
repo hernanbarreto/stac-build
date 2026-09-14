@@ -429,9 +429,6 @@ class KnownAnswerConfig:
     yaw_deg: float
     t_m: float
     scale: float
-    tol_t_m: float
-    tol_deg: float
-    tol_scale: float
 
 
 @dataclass(frozen=True)
@@ -888,8 +885,7 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
         chunk=chunk,
         yaw_deg=_num(ka, "yaw_deg", K, lo=0), t_m=_num(ka, "t_m", K, lo=0),
         scale=_num(ka, "scale", K, lo=0, lo_excl=True),
-        tol_t_m=_num(ka, "tol_t_m", K, lo=0, lo_excl=True), tol_deg=_num(ka, "tol_deg", K, lo=0, lo_excl=True),
-        tol_scale=_num(ka, "tol_scale", K, lo=0, lo_excl=True))
+        )
     en = _sub(ce, "envelope", P)
     E = P + ".envelope"
     envelope = EnvelopeConfig(

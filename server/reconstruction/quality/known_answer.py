@@ -7,11 +7,16 @@ exactly the way an epoch would (cloud along the rays, poses, depth sidecar)
 against the unperturbed geometry. The instrument is verified in the field
 (a real session) or on the bench (a synthetic one) by the same code.
 
-Envelope: the perturbation grows level by level until the loop's gates fail
-or the recovery leaves tolerance; the last recovered level is the session's
-DECLARED operating envelope (max correctable drift in m and %, at each loop
-density). Industrial grade is knowing when the system is out of
-specification — and saying so.
+Neither experiment has a pass mark. §10.10 asks to REPORT the recovery error
+and §10.11 says why: industrial grade is not "it does not fail", it is knowing
+when the system is out of specification and saying so. So the known answer
+DECLARES how much of the injected perturbation came back
+(``recovered_fraction``) and the envelope stops where the GATES fail — the
+measured §9 condition "this iteration left the session worse than it found
+it" — and declares the last level that held. Until 2026-09-14 both leaned on
+a recovery tolerance of 5 cm invented with the harness, which turned a
+declaration into a verdict and stood in for the condition the spec names
+(USER: "que mida y declare, no que falle ... quién dijo que 5 cm es lógico").
 """
 
 from __future__ import annotations
@@ -163,34 +168,74 @@ def known_answer(session_dir, cfg=None, correction_cfg=None, chunk: Optional[str
     acta = certify_session(copy, cfg, operator="known_answer", log=log, correction_cfg=correction_cfg,
                            **certify_kw)
     after = recovery_error(out, inj)
-    within = (after["t_m_max"] <= ka.tol_t_m and after["deg_max"] <= ka.tol_deg
-              and abs(after["scale_residual"] - 1.0) <= ka.tol_scale)
+    # §10.10 asks to REPORT the recovery error, not to pass or fail it, and
+    # §10.11 says why: "grado industrial no es 'no falla': es saber cuándo está
+    # fuera de especificación y decirlo". The tolerances this used to compare
+    # against were invented when the harness was first written (6c9e91e) —
+    # nothing derived 5 cm — and turning a declaration into a verdict hid the
+    # measurement behind a boolean. USER 2026-09-14: "que mida y declare, no
+    # que falle ... quién dijo que 5 cm es lógico".
+    # What IS measured, with no threshold: how much of the injected
+    # perturbation came back.
+    def _rec(b, a):
+        return float(1.0 - a / b) if b > 1e-9 else None
+    recovered = {"t": _rec(before["t_m_max"], after["t_m_max"]),
+                 "deg": _rec(before["deg_max"], after["deg_max"]),
+                 "scale": _rec(abs(before["scale_residual"] - 1.0),
+                               abs(after["scale_residual"] - 1.0))}
     rep = {"version": 1, "chunk": inj["chunk"], "n_keyframes": len(inj["keyframes"]),
            "injected": {"yaw_deg": yaw, "t_m": t_m, "scale": s},
            "error_before": before, "error_after": after,
-           "tolerance": {"t_m": ka.tol_t_m, "deg": ka.tol_deg, "scale": ka.tol_scale},
-           "recovered_within_tolerance": bool(within),
+           "recovered_fraction": recovered,
+           "improved": bool(after["t_m_max"] < before["t_m_max"]),
            "loop": {"stopped_at": acta.get("stopped_at"), "stop_reason": acta.get("stop_reason"),
                     "epoch_final": acta.get("epoch_final"),
+                    # §10.11's stopping rule for the collapse experiment is the
+                    # GATES failing — a measured condition — so they travel with
+                    # the report instead of a tolerance standing in for them
+                    "gate_warnings": sorted({w for it in acta.get("iterations", [])
+                                             for w in (it.get("gate_warnings") or [])}),
+                    "regressed": bool(acta.get("regressed")),
                     "iterations": [{"verdict": it.get("verdict"), "reason": it.get("reason"),
-                                    "objective": it.get("objective")} for it in acta.get("iterations", [])]},
+                                    "objective": it.get("objective"),
+                                    "gate_warnings": it.get("gate_warnings") or []}
+                                   for it in acta.get("iterations", [])]},
            "work_dir": str(copy), "elapsed_s": round(time.time() - t0, 1), "provenance": "tool_measured"}
     log(f"[known-answer] t {before['t_m_max'] * 100:.1f} → {after['t_m_max'] * 100:.1f} cm, rot "
         f"{before['deg_max']:.2f} → {after['deg_max']:.2f}°, scale {before['scale_residual']:.4f} → "
-        f"{after['scale_residual']:.4f} → {'RECOVERED' if within else 'NOT within tolerance'}")
+        f"{after['scale_residual']:.4f} → "
+        + (f"{recovered['t'] * 100:.0f}% of the injected translation recovered"
+           if recovered["t"] is not None else "nothing to recover"))
     return rep
 
 
 def envelope(session_dir, cfg=None, correction_cfg=None, chunk: Optional[str] = None,
              work: Optional[Path] = None, log: Callable = print, **certify_kw) -> dict:
     """Increase the injected perturbation level by level (translation, then
-    scale) at each loop density until the loop fails or recovery leaves
-    tolerance; the last recovered level is the declared envelope."""
+    scale) at each loop density UNTIL THE GATES FAIL; the last level the loop
+    got through is the declared envelope.
+
+    §10.11: "aumentar la perturbación inyectada por pasos hasta que los gates
+    fallen; el último nivel recuperado es la envolvente operativa declarada".
+    The gates are measured conditions — loop gain, held-out pairs, authority,
+    the §9 iteration gates — so the collapse experiment stops where the system
+    itself says it is out of specification, which is the point of the
+    experiment. It used to stop on a recovery tolerance instead: a number
+    invented with the harness (5 cm, nothing derived it) standing in for the
+    condition the spec named.
+    """
     from reconstruction.loops.config import load_loops_config
     cfg = cfg or load_loops_config()
     env = cfg.certify.envelope
     ka = cfg.certify.known_answer
     t0 = time.time()
+
+    def _held(rep) -> bool:
+        """Did the loop get through this level? The gates are what say so, and
+        a REGRESSION — the iteration left the session worse than it found it —
+        is the system declaring the same thing."""
+        return not rep["loop"]["gate_warnings"] and not rep["loop"]["regressed"]
+
     results = {}
     for density in env.loop_densities:
         rows_t, rows_s = [], []
@@ -198,18 +243,24 @@ def envelope(session_dir, cfg=None, correction_cfg=None, chunk: Optional[str] = 
         for lvl in env.levels_t_m:
             rep = known_answer(session_dir, cfg, correction_cfg, chunk, (ka.yaw_deg, float(lvl), 1.0),
                                work, log, loop_density=float(density), **certify_kw)
-            rows_t.append({"level_t_m": float(lvl), "recovered": rep["recovered_within_tolerance"],
+            held = _held(rep)
+            rows_t.append({"level_t_m": float(lvl), "held": held,
+                           "gate_warnings": rep["loop"]["gate_warnings"],
+                           "recovered_fraction": rep["recovered_fraction"],
                            "error_after": rep["error_after"], "stop_reason": rep["loop"]["stop_reason"]})
-            if not rep["recovered_within_tolerance"]:
+            if not held:
                 break
             last_t = float(lvl)
         last_s = None
         for pct in env.levels_scale_pct:
             rep = known_answer(session_dir, cfg, correction_cfg, chunk, (0.0, 0.0, 1.0 + float(pct) / 100.0),
                                work, log, loop_density=float(density), **certify_kw)
-            rows_s.append({"level_scale_pct": float(pct), "recovered": rep["recovered_within_tolerance"],
+            held = _held(rep)
+            rows_s.append({"level_scale_pct": float(pct), "held": held,
+                           "gate_warnings": rep["loop"]["gate_warnings"],
+                           "recovered_fraction": rep["recovered_fraction"],
                            "error_after": rep["error_after"], "stop_reason": rep["loop"]["stop_reason"]})
-            if not rep["recovered_within_tolerance"]:
+            if not held:
                 break
             last_s = float(pct)
         results[str(density)] = {"loop_density": float(density), "translation": rows_t, "scale": rows_s,

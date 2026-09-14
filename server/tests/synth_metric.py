@@ -743,8 +743,7 @@ def certify_cfg(**over) -> dict:
                          "window_kf": 15},
          "greedy": {"enabled": True, "max_epochs": 12, "window_kf": 15,
                     "offset_samples": 4000},
-         "known_answer": {"chunk": "last", "yaw_deg": 1.0, "t_m": 0.20, "scale": 1.03, "tol_t_m": 0.05,
-                          "tol_deg": 0.30, "tol_scale": 0.01},
+         "known_answer": {"chunk": "last", "yaw_deg": 1.0, "t_m": 0.20, "scale": 1.03},
          "envelope": {"levels_t_m": [0.1, 0.2, 0.4, 0.8, 1.6], "levels_scale_pct": [1, 2, 5, 10, 20],
                       "loop_densities": [1.0, 0.5, 0.25]},
          "determinism": {"tol_m": 1.0e-4, "tol_frac": 0.01, "seed": 0}}
