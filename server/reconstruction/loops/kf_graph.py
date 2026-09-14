@@ -181,7 +181,107 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     up = -g_down
 
     T0 = session.poses.copy()
-    gcfg = dict(sigma_odo_intra_m=gc.sigma_odo_intra_m, sigma_odo_intra_deg=gc.sigma_odo_intra_deg,
+
+    # ── the odometry σ must be consistent with the drift the loops MEASURE ──
+    # A constant 0.01 m per link asserts the chain is known to a centimetre
+    # between consecutive keyframes: over n links that accumulates σ·√n ≈ 15 cm
+    # on a 216-keyframe walk. pccr 2026-09-14 measured start↔end closures of
+    # 69 to 376 cm on that same walk — the chain is off by 5 to 25 times what
+    # it claims. The graph believed the claim: an odometry weight of 1/0.01²
+    # against a loop weight of 1/0.625² is 4,000 to 1, and with 215 odometry
+    # edges against 19 loop edges the chain simply would not bend. It moved the
+    # cloud 43 cm at the end of the walk where the desks needed 112–215 cm, so
+    # the duplicates the user could see stayed exactly where they were, and the
+    # partial move in a compromise direction left the closure WORSE than
+    # before (0.946 → 1.228).
+    #
+    # So the per-link σ is measured, not asserted. Each loop gives a drift rate
+    # ε = closure / walked-distance; the median over loops is the session's
+    # rate. Requiring the chain's own accumulated 1-σ over the whole walk D to
+    # equal what that rate predicts, σ·√n = ε·D, gives σ = ε·D/√n. The chain
+    # then costs exactly as much to bend as the measurement says it is wrong,
+    # and the loops can speak. Clamped both ways: no session makes the
+    # odometry tighter than the configured floor, and one wild closure cannot
+    # dissolve the chain.
+    sigma_odo_m = gc.sigma_odo_intra_m
+    drift_rate = None
+    drift_consensus = None
+    if loops and N > 2:
+        c0 = T0[:, :3, 3]
+        step = np.linalg.norm(np.diff(c0, axis=0), axis=1)
+        D = float(step.sum())
+        meas = []          # (edge, walked length, implied drift rate)
+        for e in loops:
+            i_e, j_e = int(e["i"]), int(e["j"])
+            if not (0 <= i_e < N and 0 <= j_e < N) or i_e == j_e:
+                continue
+            lo, hi = min(i_e, j_e), max(i_e, j_e)
+            L = float(step[lo:hi].sum())
+            if L <= 1e-6:
+                continue
+            # what the graph must absorb: the measured relative pose against
+            # the one the chain currently holds
+            Zc = se3_inv(T0[i_e]) @ T0[j_e]
+            dt = float(np.linalg.norm((se3_inv(np.asarray(e["Z"], np.float64)) @ Zc)[:3, 3]))
+            meas.append((e, lo, hi, L, dt / L))
+        if meas and D > 1e-6:
+            rates = np.array([m[4] for m in meas], float)
+            drift_rate = float(np.median(rates))
+            if gc.odo_sigma_from_drift:
+                sigma_odo_m = float(np.clip(drift_rate * D / np.sqrt(max(N - 1, 1)),
+                                            gc.odo_sigma_min_m, gc.odo_sigma_max_m))
+                log(f"[kf-graph] odometry σ from the measured drift: "
+                    f"{drift_rate * 100:.2f} cm/m over {D:.1f} m / {N - 1} links → "
+                    f"{sigma_odo_m * 100:.1f} cm per link "
+                    f"(was {gc.sigma_odo_intra_m * 100:.1f} cm, {len(meas)} loop(s))")
+
+            # ── loops that measure the SAME stretch must agree ──────────────
+            # pccr 2026-09-14: ten of eleven loops paired the end of the walk
+            # (kf 198-215) with its start (kf 2-9) — ten redundant measurements
+            # of ONE quantity — and they ranged from 69 to 376 cm, a factor of
+            # five. A least-squares fit over contradictory observations of the
+            # same thing lands on a compromise that satisfies none of them:
+            # the desks never closed and the floor moved the wrong way.
+            #
+            # So each loop is weighed against the CONSENSUS of the loops whose
+            # stretch it overlaps. Deviation is measured in MADs — robust, so
+            # the outliers do not define the centre they are judged against —
+            # and it INFLATES σ, never drops the edge: USER 2026-09-13,
+            # "nunca debe descartarse un duplicado detectado por SAM3". An
+            # outlier keeps its vote, it just stops shouting, and the factor
+            # is recorded per edge in the report.
+            consensus = []
+            for (e, lo, hi, L, r) in meas:
+                peers = [m[4] for m in meas
+                         if min(hi, m[2]) - max(lo, m[1]) >= gc.outlier_overlap_frac * (hi - lo)]
+                if len(peers) < 3:
+                    continue
+                med = float(np.median(peers))
+                mad = float(np.median(np.abs(np.asarray(peers) - med)))
+                scale = max(1.4826 * mad, gc.outlier_mad_floor_m_per_m)
+                dev = abs(r - med) / scale
+                if dev > gc.outlier_mad_k:
+                    f = float(min(dev / gc.outlier_mad_k, gc.outlier_max_sigma_factor))
+                    e["sigma_m"] = float(e.get("sigma_m", sigma_odo_m)) * f
+                    if e.get("info_t") is not None:
+                        e["info_t"] = np.asarray(e["info_t"], np.float64) / (f * f)
+                    consensus.append({"i": int(e["i"]), "j": int(e["j"]),
+                                      "rate_m_per_m": r, "consensus_m_per_m": med,
+                                      "deviation_mad": round(dev, 2),
+                                      "sigma_factor": round(f, 2), "n_peers": len(peers)})
+                    log(f"[kf-graph] loop {int(e['i'])}<->{int(e['j'])}: drift "
+                        f"{r * 100:.1f} cm/m against a consensus of {med * 100:.1f} cm/m "
+                        f"over the same stretch ({dev:.1f} MAD, {len(peers)} peer(s)) — "
+                        f"σ ×{f:.1f}, kept and declared")
+            drift_consensus = consensus
+        else:
+            log("[kf-graph] odometry σ: no loop measures a drift rate — "
+                f"keeping the configured {gc.sigma_odo_intra_m * 100:.1f} cm")
+
+    drift_rep = None
+    X_drift = None
+
+    gcfg = dict(sigma_odo_intra_m=sigma_odo_m, sigma_odo_intra_deg=gc.sigma_odo_intra_deg,
                 loop_sigma_rot_deg=gc.loop_sigma_rot_deg,
                 huber_delta_m=gc.huber_delta_m, huber_delta_deg=gc.huber_delta_deg,
                 dense_max_unknowns=gc.dense_max_unknowns, lambda_init=gc.lambda_init,
@@ -194,7 +294,7 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
         pg = PoseGraph(T0, gcfg)
         for g in range(N - 1):
             Z = se3_inv(T0[g]) @ T0[g + 1]
-            pg.add_relative(g, g + 1, Z, gc.sigma_odo_intra_deg, gc.sigma_odo_intra_m,
+            pg.add_relative(g, g + 1, Z, gc.sigma_odo_intra_deg, sigma_odo_m,
                             huber=False, tag="odo")
         loop_ids = []
         for e in loops:
@@ -247,10 +347,76 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     centres = T0[:, :3, 3]
     pg, loop_ids, srep, plane_nodes = build()
     # residuals in the directions the edges OBSERVE (a floor-only closure has
-    # no in-plane claim): the gain judges those, not fake zeros
+    # no in-plane claim): the gain judges those, not fake zeros. Measured on the
+    # chain as it arrived — BEFORE the drift model touched it — so the gain
+    # judges the whole correction and not only the part the graph had left.
     loop_before = float(np.sum([r["t_obs_m"] for r in pg.edge_residuals("loop").values()]))
     pg.solve(log=log)
     Xc = pg.corrections()[:N]
+
+    # ── the smooth drift model takes what the LOCAL evidence could not ──────
+    # Order matters, and the evidence decides it. The structural constraints
+    # and the stiff chain know WHERE the trajectory is wrong — a yaw bias
+    # confined to one stretch is localised by the walls that stretch crosses.
+    # The smooth model only knows HOW MUCH: fitted first it spreads a localised
+    # bend over the whole walk, including where there was no drift (synthetic
+    # corridor: the lateral bend went 4.15 → 7.97 cm before the walls were even
+    # consulted). So the graph speaks first, and whatever global closure is
+    # still open afterwards is the distributed drift the user's model
+    # describes — E(d) = ε·d, exact at the start, growing along the walk —
+    # which a per-keyframe graph with a stiff chain cannot express at all.
+    # ...and only when the graph could NOT. A per-keyframe graph with local
+    # evidence (walls, columns, a stiff chain) localises a bend where it
+    # happened; re-spreading a smooth model on top of a solution that already
+    # worked undoes that localisation, and no internal judge catches it — the
+    # held-out pairs stay self-consistent while the whole trajectory walks away
+    # from the truth (synthetic corridor: lateral 1.14 → 2.75 cm with the loop
+    # offset improving all the while). The measurement that separates the two
+    # cases is the graph's OWN loop gain: the corridor closes its loops, pccr
+    # 2026-09-14 came out at -3 % with 42 % authority because the correction it
+    # needed is not expressible per keyframe at all.
+    _res_now = pg.edge_residuals("loop")
+    _loop_now = float(np.sum([r["t_obs_m"] for r in _res_now.values()]))
+    _floor_now = float(np.sum([float(e["sigma_m"]) for eid, e in loop_ids
+                               if pg._edges[eid]["active"]]))
+    _gain_now = (1.0 if _loop_now <= _floor_now else
+                 1.0 - max(_loop_now - _floor_now, 0.0) / max(loop_before - _floor_now, 1e-9))
+    if gc.drift_model and loops and N > 2 and _gain_now < gc.min_loop_gain:
+        from reconstruction.loops.drift import fit_drift
+        log(f"[drift] the graph closed {_gain_now * 100:.0f}% of the loop residual "
+            f"(needs {gc.min_loop_gain * 100:.0f}%) — asking the smooth drift model "
+            f"for what it could not express")
+        T_solved = np.einsum("nij,njk->nik", Xc, T0)
+        fd = fit_drift(T_solved, loops, gc.drift_degree, gc.drift_iters,
+                       gc.odo_sigma_min_m, gc.sigma_odo_intra_deg,
+                       gc.drift_max_step, log=log)
+        if fd is not None:
+            drift_rep = {k: v for k, v in fd.items() if k != "corrections"}
+            drift_rep["provenance"] = "tool_measured"
+            Xc_d = np.einsum("nij,njk->nik", fd["corrections"], Xc)
+            # Closing a loop is not proof: the HELD-OUT judge (pairs of the
+            # cloud the graph never saw) is what says whether the geometry
+            # actually got better. A smooth model that spreads a LOCALISED bend
+            # over the whole walk closes the loop and undoes the localisation
+            # the walls just achieved — synthetic corridor, the lateral bend
+            # 1.14 → 2.75 cm with the loop offset improving all the while. So
+            # the drift is accepted only when it reduces the loop offset AND
+            # does not degrade the held-out median.
+            h_graph, h_drift = _held_median(held, Xc), _held_median(held, Xc_d)
+            closes = fd["residual_after_m"] < fd["residual_before_m"]
+            keeps = (not np.isfinite(h_graph)) or (h_drift <= h_graph + gc.max_seam_degradation_m)
+            drift_rep.update(held_out_before_m=h_graph, held_out_after_m=h_drift,
+                             applied=bool(closes and keeps))
+            if closes and keeps:
+                X_drift = fd["corrections"]
+                Xc = Xc_d
+            else:
+                why = ("it does not reduce what the graph left open"
+                       if not closes else
+                       f"the held-out judge degrades {h_graph * 100:.2f} → {h_drift * 100:.2f} cm")
+                log(f"[drift] not applied: {why} "
+                    f"(loop offset {fd['residual_before_m'] * 100:.0f} → "
+                    f"{fd['residual_after_m'] * 100:.0f} cm)")
     # Drift budget δ(L) = max(floor, rate·L) per loop: ADVISORY. USER
     # 2026-09-09 ("siempre debe aplicarse la corrección de duplicados, no
     # importa lo mucho que haya que corregir") and pccr 2026-09-13 21:00: the
@@ -332,6 +498,15 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
               "verdict": verdict, "operator": operator, "n_kf": N,
               "n_loop_edges": len(loop_ids), "n_loop_edges_active": n_active,
               "s_metric_applied": s_metric,
+              # what the chain was allowed to bend, and why (provenance
+              # tool_measured: both come from the loops, not from a constant)
+              "odometry": {"sigma_m": sigma_odo_m,
+                           "sigma_configured_m": gc.sigma_odo_intra_m,
+                           "drift_rate_m_per_m": drift_rate,
+                           "from_drift": bool(gc.odo_sigma_from_drift and drift_rate is not None),
+                           "provenance": "tool_measured"},
+              "drift_consensus": drift_consensus or [],
+              "drift_model": drift_rep,
               "gate_mode": gc.gate_mode, "gate_warnings": gate_warnings,
               "identity_reason": (None if verdict == "APPLY" else
                                   ("no active loop edge and no structural constraint — nothing to close"

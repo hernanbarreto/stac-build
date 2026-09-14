@@ -10,6 +10,11 @@ OUT = SESS / "output"
 
 from segmentation.pipeline import _load_ply_origins, _mask_frame_lookup
 from reconstruction.loops.reprojection import copy_evidence
+from reconstruction.loops.config import load_loops_config as _llc
+_RC = _llc().loops.reprojection
+_RKW = dict(dilate_px=_RC.dilate_px, max_frames=_RC.max_frames,
+            min_self_recall=_RC.min_self_recall, min_cross_recall=_RC.min_cross_recall,
+            min_agreeing_frac=_RC.min_agreeing_frac)
 from reconstruction.loops.instance_loops import disjoint_clusters
 from segmentation.erase import _mask_obj_by_iid
 
@@ -41,7 +46,8 @@ for iid in targets:
     fa = sorted({int(f) for f in np.unique(fg[a])})
     fb = sorted({int(f) for f in np.unique(fg[b])})
     print(f"--- instancia {iid} '{inst['label']}' | {len(a):,} + {len(b):,} pts | separacion {sep:.2f} m")
-    ev = copy_evidence(OUT, SESS, iid, oid_of.get(iid), xyz[a], xyz[b], fa, fb, c2m)
+    ev = copy_evidence(OUT, SESS, iid, oid_of.get(iid), xyz[a], xyz[b], fa, fb,
+                       cloud_to_mask=c2m, **_RKW)
     print(f"    self IoU A/B : {ev.get('self_iou_a', 0):.2f} / {ev.get('self_iou_b', 0):.2f}")
     if "cross_iou" in ev:
         print(f"    cross IoU    : {ev['cross_iou']:.2f} -> alineado {ev['cross_iou_aligned']:.2f}"

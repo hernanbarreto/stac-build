@@ -136,7 +136,26 @@ def _gates(m: dict, prev: Optional[dict], gcfg) -> List[dict]:
     return out
 
 
-def certify_session(session_dir, cfg=None, operator: str = "auto", log: Callable[[str], None] = print,
+def certify_session(session_dir, *args, **kwargs) -> dict:
+    """Run the certification holding the session lock.
+
+    The run rewrites segmentation_result.json, seg_masks.npz,
+    classification.npy and scene_r.db many times (every split does), and it
+    swaps whole epochs. Nothing else may write those files while it does.
+    pccr 2026-09-14: the UI's floor levelling rewrote the 235 MB result in the
+    middle of a split's own write and the run died on the corrupt document —
+    the correction module's lock never saw it because that lock is a dict
+    inside the backend process and the certification is not in it.
+    """
+    from pathlib import Path as _Path
+    from session_lock import session_lock
+    output_dir = _Path(session_dir) / "output"
+    with session_lock(output_dir, "certification",
+                      owner=str(kwargs.get("operator", "auto"))):
+        return _certify_session(session_dir, *args, **kwargs)
+
+
+def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callable[[str], None] = print,
                     correction_cfg=None, device=None, base_frames: Optional[Dict[int, dict]] = None,
                     tracks=None, loop_density: float = 1.0, detect_loops: bool = True,
                     extra_loop_edges: Optional[Sequence[dict]] = None, use_fork_edges: bool = True,

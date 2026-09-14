@@ -59,6 +59,7 @@ from frame_storage import get_frame_storage, FrameStorage
 from alignment_manager import get_alignment_manager, AlignmentManager
 from segmentation.sam3_wrapper import get_sam3_wrapper
 from config import cfg, DATA_DIR, PROJECTS_DIR
+from atomic_io import atomic_write_json
 from pipeline_manager import PipelineManager, PipelineStage, StageId
 from project_paths import resolve_session
 
@@ -2631,6 +2632,12 @@ def _load_floor_transform_srt(output_dir):
     return s, R, t
 
 
+_FLOOR_CFG = (cfg.get("segmentation", {}) or {}).get("floor_level", {}) or {}
+_FLOOR_MIN_SUPPORT_FRAC = float(_FLOOR_CFG.get("min_support_frac", 0.05))
+_FLOOR_MAX_MINOR_TILT_DEG = float(_FLOOR_CFG.get("max_minor_tilt_deg", 25.0))
+_FLOOR_DOMINANT_FRAC = float(_FLOOR_CFG.get("dominant_frac", 0.30))
+
+
 def _floor_candidates_from_result(result_data):
     """Floor instances with their current display height (obb centre Y)."""
     out = []
@@ -2735,6 +2742,19 @@ async def level_floor(request: Request):
         return {"ok": True, "leveled": False,
                 "reason": "no segmentation/cloud yet"}
 
+    # This endpoint REWRITES segmentation_result.json and rebuilds scene_r.db.
+    # A certification (another process) rewrites the same files on every split,
+    # so the two must never overlap — pccr 2026-09-14 lost a run to exactly
+    # this pair of writers landing on the same 235 MB file.
+    from session_lock import holder as _session_holder
+    busy = _session_holder(output_dir)
+    if busy is not None:
+        raise HTTPException(409, detail={
+            "error": f"'{busy.get('label')}' is running on this session — "
+                     f"it rewrites the segmentation, so levelling the floor "
+                     f"now would corrupt it. Try again when it finishes.",
+            "holder": busy})
+
     loop = asyncio.get_event_loop()
 
     def _level():
@@ -2757,49 +2777,109 @@ async def level_floor(request: Request):
             except Exception:
                 pass
         cand_ids = {c["instance_id"] for c in candidates}
-        if mode == "explicit" and req_iid is not None:
-            selected = int(req_iid)
-            if selected not in cand_ids:
-                return {"ok": False, "leveled": False,
-                        "reason": f"instance {selected} is not a floor",
-                        "candidates": candidates}
-        elif remembered in cand_ids:
-            selected = remembered
-        else:
-            with_h = [c for c in candidates if c["height_m"] is not None]
-            selected = (min(with_h, key=lambda c: c["height_m"])
-                        if with_h else candidates[0])["instance_id"]
+        floor_pts = sum(c["n_points"] for c in candidates) or 1
+        pts = np.asarray(o3d.io.read_point_cloud(str(cloud_path)).points)
+        s, R, t = _load_floor_transform_srt(output_dir)
 
-        inst = next(i for i in result_data["instances"]
-                    if i.get("instance_id", i.get("id")) == selected)
-        gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
-        if len(gi) < 100:
+        def _measure(iid):
+            """Fit the floor plane of one candidate. Returns its display-space
+            normal, centre, tilt and share of the floor points, or a refusal."""
+            inst = next((i for i in result_data["instances"]
+                         if i.get("instance_id", i.get("id")) == iid), None)
+            gi = np.asarray((inst or {}).get("globalIndices") or [], dtype=np.int64)
+            if len(gi) < 100:
+                return None, "selected floor has too few points"
+            gi = gi[(gi >= 0) & (gi < len(pts))]
+            seg = pts[gi]
+            if len(seg) > 200_000:
+                seg = seg[np.random.default_rng(0).choice(len(seg), 200_000,
+                                                          replace=False)]
+            pf = fit_plane_ransac(seg, dist_thresh=0.02, iters=400,
+                                  min_inlier_frac=0.2, measure_curvature=False)
+            if pf is None:
+                return None, "floor plane fit failed"
+            n_raw = pf.normal
+            n_disp = R @ n_raw
+            if n_disp[1] < 0:
+                n_raw, n_disp = -n_raw, -n_disp
+            c_disp = s * (R @ seg[pf.inliers].mean(0)) + t
+            tilt = float(np.degrees(np.arccos(np.clip(n_disp[1], -1, 1))))
+            share = next((c["n_points"] for c in candidates
+                          if c["instance_id"] == iid), 0) / floor_pts
+            return {"n_disp": n_disp, "c_disp": c_disp, "tilt": tilt,
+                    "share": share}, None
+
+        def _implausible(m):
+            """A big rotation is only believable from the DOMINANT floor. A
+            scene genuinely lying on its side has its main floor tilted and
+            must stay levelable, so this is not a blanket tilt veto — it is a
+            veto on a MINOR patch demanding a major rotation, which is what
+            put pccr 2026-09-14 on its side (a 389-point sliver, 0.005 % of
+            the floor, fitted 78.4 deg off horizontal)."""
+            return (m["tilt"] > _FLOOR_MAX_MINOR_TILT_DEG
+                    and m["share"] < _FLOOR_DOMINANT_FRAC)
+
+        # selection: explicit > remembered > automatic
+        order, forced = [], False
+        if mode == "explicit" and req_iid is not None:
+            if int(req_iid) not in cand_ids:
+                return {"ok": False, "leveled": False,
+                        "reason": f"instance {req_iid} is not a floor",
+                        "candidates": candidates}
+            order, forced = [int(req_iid)], True
+        elif remembered in cand_ids:
+            order, forced = [remembered], True
+        else:
+            # "the lowest floor" alone is not a floor: a split leaves slivers
+            # carrying the floor's label and the smallest of them is usually
+            # the lowest thing in the scene. Support gates the list, height
+            # orders what survives, and every candidate is TRIED — a bad plane
+            # fit on the first one falls through to the next instead of
+            # leaving the user with no way to level.
+            with_h = [c for c in candidates if c["height_m"] is not None]
+            if with_h:
+                biggest = max(c["n_points"] for c in with_h)
+                eligible = [c for c in with_h
+                            if c["n_points"] >= _FLOOR_MIN_SUPPORT_FRAC * biggest]
+                if not eligible:                     # every candidate is small
+                    eligible = with_h
+                if len(eligible) < len(with_h):
+                    print(f"[FloorLevel]   {len(with_h) - len(eligible)} candidate(s) "
+                          f"below {_FLOOR_MIN_SUPPORT_FRAC:.0%} of the largest floor "
+                          f"({biggest:,} pts) are not eligible for automatic selection")
+                order = [c["instance_id"]
+                         for c in sorted(eligible, key=lambda c: c["height_m"])]
+            else:
+                order = [candidates[0]["instance_id"]]
+
+        selected, meas, why = None, None, "no floor candidate could be measured"
+        for iid in order:
+            m, err = _measure(iid)
+            if m is None:
+                why = err
+                print(f"[FloorLevel]   instance {iid}: {err}")
+                continue
+            if _implausible(m):
+                why = (f"instance {iid} holds only {m['share']:.1%} of the floor "
+                       f"points and its plane is {m['tilt']:.1f}° off horizontal — "
+                       f"too little evidence for a rotation this large")
+                print(f"[FloorLevel]   {why}")
+                continue
+            selected, meas = iid, m
+            break
+
+        if meas is None:
+            print(f"[FloorLevel] {session_id}: REFUSED — {why}")
             return {"ok": False, "leveled": False,
-                    "reason": "selected floor has too few points",
+                    "reason": (why + (". Select the main floor instead."
+                                      if forced else
+                                      ". No floor candidate is trustworthy enough.")),
+                    "selected": order[0] if order else None,
                     "candidates": candidates}
 
-        pts = np.asarray(o3d.io.read_point_cloud(str(cloud_path)).points)
-        gi = gi[(gi >= 0) & (gi < len(pts))]
-        seg = pts[gi]
-        if len(seg) > 200_000:
-            seg = seg[np.random.default_rng(0).choice(len(seg), 200_000,
-                                                      replace=False)]
+        n_disp, c_disp = meas["n_disp"], meas["c_disp"]
+        tilt_deg, height = meas["tilt"], float(meas["c_disp"][1])
 
-        s, R, t = _load_floor_transform_srt(output_dir)
-        pf = fit_plane_ransac(seg, dist_thresh=0.02, iters=400,
-                              min_inlier_frac=0.2, measure_curvature=False)
-        if pf is None:
-            return {"ok": False, "leveled": False,
-                    "reason": "floor plane fit failed", "candidates": candidates}
-        n_raw = pf.normal
-        n_disp = R @ n_raw
-        if n_disp[1] < 0:
-            n_raw, n_disp = -n_raw, -n_disp
-        c_raw = seg[pf.inliers].mean(0)
-        c_disp = s * (R @ c_raw) + t
-
-        tilt_deg = float(np.degrees(np.arccos(np.clip(n_disp[1], -1, 1))))
-        height = float(c_disp[1])
         already = tilt_deg < 0.5 and abs(height) < 0.01
         if mode == "auto_if_needed" and already:
             return {"ok": True, "leveled": True, "changed": False,
@@ -2837,8 +2917,7 @@ async def level_floor(request: Request):
         t_final = np.array([t[0], t_new[1], t[2]])
         n_obb = _recompute_result_obbs(output_dir, result_data, s, R_new, t_final)
         print(f"[FloorLevel]   recomputed {n_obb} OBBs under the new frame")
-        with open(result_path, "w") as f:
-            json.dump(result_data, f)
+        atomic_write_json(result_path, result_data)
         # The instance store (scene_r.db) is display-frame too — rebuild it or
         # every chat measurement/OBB stays in the OLD frame (2026-08-29).
         try:

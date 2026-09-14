@@ -498,17 +498,29 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
         if cls == "dynamic":
             continue
         split_done = False
-        for cand in instance_candidates(session, inst, cfg):
+        cands_now = instance_candidates(session, inst, cfg)
+
+        # The duplicates metric (§12, target 0) is a CENSUS of the scene, so it
+        # cannot depend on which detector spoke first. A split applied on a
+        # `temporal` candidate breaks out of the loop below, and the
+        # `duplicate` candidate describing the SAME two clusters was then never
+        # reached — the synthetic column fused from two 8 m apart reported
+        # 1 split and 0 duplicates. Counted here, before anything acts.
+        for _c in cands_now:
+            if _c.kind != "duplicate":
+                continue
+            _g = _gate_candidate(inst, _c, cls)
+            report["duplicates"].append({
+                "instance_id": iid, "label": _c.label,
+                "separation_m": _g["rules"]["separation"]["distance_m"],
+                "keyframes": [int(_c.i), int(_c.j)], "verdict": _g["verdict"]})
+
+        for cand in cands_now:
             gate = _gate_candidate(inst, cand, cls)
             rec = {"kind": cand.kind, "instance_id": iid, "label": cand.label,
                    "class": cls, "i": int(cand.i), "j": int(cand.j),
                    "n_points": [int(len(cand.idx_a)), int(len(cand.idx_b))],
                    "gate": gate, "verdict": gate["verdict"], "provenance": "tool_measured"}
-            if cand.kind == "duplicate":
-                report["duplicates"].append({
-                    "instance_id": iid, "label": cand.label,
-                    "separation_m": gate["rules"]["separation"]["distance_m"],
-                    "keyframes": [int(cand.i), int(cand.j)], "verdict": gate["verdict"]})
             # ── the images overrule the budget on a split ────────────────
             # A `split` proposes no closure, so it is the one verdict that can
             # silently destroy a duplicate. The drift budget δ(L) is an

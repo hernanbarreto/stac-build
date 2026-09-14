@@ -166,12 +166,12 @@ def compare_in_frames(ev, mask_of_frame, pts: np.ndarray, frames: Sequence[int],
 
 def copy_evidence(output_dir, session_dir, instance_id: int, oid: Optional[int],
                   pts_a: np.ndarray, pts_b: np.ndarray,
-                  frames_a: Sequence[int], frames_b: Sequence[int],
+                  frames_a: Sequence[int], frames_b: Sequence[int], *,
+                  dilate_px: int, max_frames: int,
+                  min_self_recall: float, min_cross_recall: float,
+                  min_agreeing_frac: float,
                   oid_b: Optional[int] = None,
-                  cloud_to_mask: Optional[Dict[int, int]] = None,
-                  dilate_px: int = 3, max_frames: int = 8,
-                  min_self_recall: float = 0.40, min_cross_recall: float = 0.40,
-                  min_agreeing_frac: float = 0.60) -> dict:
+                  cloud_to_mask: Optional[Dict[int, int]] = None) -> dict:
     """Do the two clusters of one instance show the SAME object?
 
     Returns the measurements and a verdict ∈ {same_object, distinct, unusable}.

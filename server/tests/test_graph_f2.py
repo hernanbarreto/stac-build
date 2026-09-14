@@ -194,7 +194,11 @@ def test_f2_config_validation():
     assert cfg.structural.regulated_dims == ()
 
 
-_FLOAT_WHITELIST = {0.0, 1.0, -1.0, 2.0, 0.5, 1e-9, 1e-6, 1e-12, 1e-18, 100.0, 1000.0, 255.0}
+# 1.4826 = 1/Φ⁻¹(0.75): the factor that makes the MAD a consistent estimator of
+# σ for a normal distribution (kf_graph's robust drift consensus). Mathematics,
+# not a decision — like the 1e-9 guards already here.
+_FLOAT_WHITELIST = {0.0, 1.0, -1.0, 2.0, 0.5, 1e-9, 1e-6, 1e-12, 1e-18, 100.0, 1000.0, 255.0,
+                    1.4826}
 
 
 def test_no_decision_literals_in_f2_modules():

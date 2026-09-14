@@ -92,7 +92,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
         "posegraph": {"loop_weight": 100.0, "rot_lever_m": 3.0,
                       "min_blocks_improved": 1.0},
         "apply": {"depth_correction_mode": "sidecar",
-                  "potree_rebuild": False},
+                  "potree_rebuild": False, "reconsolidate": False},
         "runtime": {"workers": 2},
     }}
     for dotted, value in overrides.items():

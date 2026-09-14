@@ -244,6 +244,39 @@ segmentation:
   attach_votes: 3             # the instance most of the k nearest labelled neighbours belong to
                               # wins (ties go to the nearest): one dissenting neighbour cannot
                               # drag a point across a boundary. 1 = plain nearest.
+  obb_core:
+    enabled: true             # the OBB extent comes from where the points CONCENTRATE, not from
+                              # the two most extreme points. min()/max() lets ONE stray point a
+                              # metre off the object inflate the box by a metre — USER 2026-09-14
+                              # reading the segment list: "muchas estan infladas por voladores".
+                              # The box is not cosmetic: the split gate measures the separation
+                              # between copies from it and the floor levelling picks its candidate
+                              # by its height, so an inflated box corrupts both. Nothing is
+                              # deleted: the instance keeps every point, only the EXTENT stops
+                              # being defined by strays.
+    voxel_m: 0.05             # occupancy grid of the concentration test (26-connected components)
+    min_component_frac: 0.02  # a component holding less than this share of the instance is a
+                              # flyer blob and stays out of the extent
+    min_points: 200           # below this an instance is too small to judge — every point counts
+    min_keep_frac: 0.5        # if the test would keep less than this, it does not understand the
+                              # instance: keep every point and say nothing was excluded
+  floor_level:
+    min_support_frac: 0.05    # a floor candidate below this fraction of the LARGEST floor
+                              # candidate's point count is not eligible for AUTOMATIC
+                              # selection. "The lowest floor" alone is not a floor: a split
+                              # leaves slivers carrying the floor's label and the smallest of
+                              # them is usually the lowest thing in the scene. pccr 2026-09-14
+                              # auto-picked a 389-point fragment at 0.127 m over the real
+                              # floor of 5,044,072 points at 0.811 m. An explicit choice from
+                              # the combobox is always honoured.
+    max_minor_tilt_deg: 25.0  # above this tilt the levelling rotation is only accepted from
+                              # the DOMINANT floor (see below). A scene genuinely lying on its
+                              # side must still be levelable, so this is not a blanket veto.
+    dominant_frac: 0.30       # share of all floor points the selected instance must hold for a
+                              # rotation beyond max_minor_tilt_deg to be applied. Below it the
+                              # request is REFUSED and declared: too little evidence to rotate
+                              # the whole scene (the 389-point sliver held 0.005 % and its
+                              # plane was 78.4 deg off horizontal).
   propagate_output_prob_thresh: 0.5   # VENDOR DEFAULT — restored (user 2026-08-29 night).
   propagate_obj_batch: 10             # USER 2026-09-06: interactive propagation ALWAYS
                                       #   runs in batches of at most this many objects —
@@ -2133,6 +2166,60 @@ correction_graph:
     intra_chunk_loops: true         # candidates inside one chunk are pose edges for the
                                     # keyframe graph (no scale row) — still bridged
   graph:                            # keyframe SE(3) graph (§4.3) — replaces sim3loop in vggtomega
+    odo_sigma_from_drift: false     # SUPERSEDED by drift_model below, kept selectable and OFF.
+                                    # Deriving the odometry σ from the measured drift does let the
+                                    # chain bend the metres the closures demand (pccr 2026-09-14:
+                                    # 4,000:1 odometry-to-loop weight became 23:1), but it loosens
+                                    # every link INDEPENDENTLY, which models white noise. Drift is
+                                    # not white noise: it is stiff locally and free over the long
+                                    # run. With a loose chain the per-keyframe wall constraints are
+                                    # satisfied LOCALLY — each keyframe shifts a little so its
+                                    # points land on the plane — and the global bend survives
+                                    # (synthetic corridor: the walls took the lateral bend
+                                    # 4.15 -> 1.14 cm with a stiff chain, only 4.31 -> 3.01 cm with
+                                    # a loose one). drift_model says the same thing with a few
+                                    # coefficients over the chainage and leaves the chain stiff.
+    odo_sigma_min_m: 0.01           # floor of the derived sigma: no session makes the odometry
+                                    # tighter than this (it is the old constant)
+    odo_sigma_max_m: 0.50           # ceiling: one wild closure cannot dissolve the chain
+    outlier_overlap_frac: 0.60      # two loops covering this much of the same walked stretch are
+                                    # measuring the SAME drift and must agree. pccr 2026-09-14:
+                                    # ten of eleven loops paired the end of the walk (kf 198-215)
+                                    # with its start (kf 2-9) — ten redundant measurements of one
+                                    # quantity — and gave 69 to 376 cm, a factor of five apart. A
+                                    # least-squares fit over contradictory observations of the
+                                    # same thing satisfies none of them.
+    outlier_mad_k: 3.0              # deviation from the consensus, in MADs (robust: the outliers
+                                    # do not define the centre that judges them), above which the
+                                    # loop's sigma is inflated in proportion
+    outlier_mad_floor_m_per_m: 0.005  # MAD floor (0.5 cm/m) so a unanimous set does not divide by
+                                    # zero and flag its own noise
+    drift_model: true               # the accumulated drift is a SMOOTH function of the distance
+                                    # walked (USER 2026-09-09: E(0)=0, the start is exact, the
+                                    # error grows along the walk), fitted BEFORE the graph from
+                                    # the loop closures alone and applied to the poses; the graph
+                                    # then runs on the corrected chain with its stiff odometry and
+                                    # its structural constraints intact. A sigma cannot express
+                                    # this: turn the odometry down and the chain will not bend at
+                                    # all (pccr 2026-09-14 applied 43 cm where the desks measured
+                                    # 112-215 cm); turn it up and every link becomes independently
+                                    # free, so the per-keyframe wall constraints are satisfied
+                                    # LOCALLY and the global bend survives (synthetic corridor:
+                                    # the walls took the lateral bend 4.15->1.14 cm with a stiff
+                                    # chain, only 4.31->3.01 cm with a loose one). Drift is stiff
+                                    # locally and free over the long run; one knob cannot say
+                                    # that, a few coefficients over the chainage can. The vendor's
+                                    # own loop optimiser gets the same ramp by stacking sequential
+                                    # and loop residuals with NO weights at all.
+    drift_degree: 2                 # terms: 1 = the pure ramp eps*d (one duplicate observes it),
+                                    # 2 adds the curvature a second duplicate can pin. 6 unknowns
+                                    # per term against a keyframe graph's 6*n.
+    drift_iters: 25
+    drift_max_step: 1.0             # cap of one Gauss-Newton step (coefficient norm)
+    outlier_max_sigma_factor: 10.0  # cap. The edge is NEVER dropped — USER 2026-09-13, "nunca
+                                    # debe descartarse un duplicado detectado por SAM3": an
+                                    # outlier keeps its vote, it just stops shouting, and the
+                                    # factor lands in the report per edge.
     sigma_odo_intra_m: 0.01         # odometry σ between consecutive keyframes of one chunk
     sigma_odo_intra_deg: 0.20       # flat in the post-hoc graph (reconstruction/loops/kf_graph);
                                     # the fork's in-run graph still adds the exact-seam residual

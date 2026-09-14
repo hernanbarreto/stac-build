@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import logging
 
+from atomic_io import atomic_write_json
+
 logger = logging.getLogger("SegPipeline")
 
 
@@ -1141,6 +1143,91 @@ def _write_corrected_ply(src_path: Path, dst_path: Path, xyz_corrected: np.ndarr
     print(f"[SegPipeline] Wrote corrected cloud: {dst_path.name} ({n_pts:,} pts)")
 
 
+def _voxel_components(pts: np.ndarray, voxel_m: float):
+    """Labels of the 26-connected components of the occupied-voxel grid.
+
+    The same test ``reconstruction.loops.instance_loops.disjoint_clusters``
+    uses to tell two copies apart, in one O(N) pass: two points share a label
+    exactly when a chain of occupied voxels joins them.
+    """
+    key = np.floor(np.asarray(pts, np.float64) / float(voxel_m)).astype(np.int64)
+    vox, inv = np.unique(key, axis=0, return_inverse=True)
+    n = len(vox)
+    if n <= 1:
+        return np.zeros(len(pts), np.int64)
+    base = vox.min(axis=0)
+    span = (vox.max(axis=0) - base + 3).astype(np.int64)
+    if float(span[0]) * float(span[1]) * float(span[2]) > 9.0e18:
+        return np.zeros(len(pts), np.int64)
+
+    def _pack(v):
+        d = v - base + 1
+        return (d[:, 0] * span[1] + d[:, 1]) * span[2] + d[:, 2]
+
+    packed = _pack(vox)
+    order = np.argsort(packed, kind="stable")
+    packed_sorted = packed[order]
+    parent = np.arange(n)
+
+    def _find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return int(a)
+
+    for off in [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                for dz in (-1, 0, 1) if (dx, dy, dz) > (0, 0, 0)]:
+        nb = _pack(vox + np.asarray(off, np.int64))
+        pos = np.searchsorted(packed_sorted, nb)
+        ok = pos < n
+        pos = np.where(ok, pos, 0)
+        hit = ok & (packed_sorted[pos] == nb)
+        if not hit.any():
+            continue
+        for a, b in zip(np.flatnonzero(hit), order[pos[hit]]):
+            ra, rb = _find(int(a)), _find(int(b))
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+    roots = np.array([_find(i) for i in range(n)], dtype=np.int64)
+    return roots[inv]
+
+
+def _obb_core_points(points_xyz: np.ndarray, cfg: dict):
+    """The points that actually make up the element, flyers left out.
+
+    An OBB from ``.min()``/``.max()`` is decided by its two most extreme
+    points, so ONE stray point a metre off the object inflates the box by a
+    metre — pccr 2026-09-14, the user reading the segment list: "muchas están
+    infladas por voladores". That box is not cosmetic: the split gate measures
+    the separation between copies from it, and the floor levelling picks its
+    candidate by its height.
+
+    USER's criterion: find where the concentration of points is. A flyer (or a
+    small stray blob) is its own tiny connected component of the occupied-voxel
+    grid, so every component holding less than ``min_component_frac`` of the
+    instance is left out of the EXTENT. Nothing is deleted — the instance keeps
+    all its points, only the box stops being defined by its strays.
+
+    Returns (core_indices, n_dropped). Falls back to every point whenever the
+    filter would keep less than ``min_keep_frac``: that is not a flyer
+    problem, that is an instance the test does not understand.
+    """
+    n = len(points_xyz)
+    if not cfg.get("enabled", True) or n < int(cfg.get("min_points", 200)):
+        return None, 0
+    lab = _voxel_components(points_xyz, float(cfg.get("voxel_m", 0.05)))
+    uniq, counts = np.unique(lab, return_counts=True)
+    if len(uniq) == 1:
+        return None, 0
+    keep_lab = uniq[counts >= float(cfg.get("min_component_frac", 0.02)) * n]
+    if len(keep_lab) == 0:
+        return None, 0
+    core = np.flatnonzero(np.isin(lab, keep_lab))
+    if len(core) < float(cfg.get("min_keep_frac", 0.5)) * n or len(core) < 4:
+        return None, 0
+    return core, int(n - len(core))
+
+
 def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
     """Compute minimum Oriented Bounding Box for floor-aligned coordinates.
     
@@ -1156,7 +1243,17 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
             "half_extents": [0.01, 0.01, 0.01],
             "rotation": [[1,0,0],[0,1,0],[0,0,1]]
         }
-    
+
+    # The EXTENT is taken from where the points concentrate, not from the two
+    # most extreme ones — see _obb_core_points. Everything below reads
+    # points_xyz, so the substitution is the whole change.
+    from config import cfg as _server_cfg
+    _ocfg = ((_server_cfg.get("segmentation", {}) or {}).get("obb_core", {}) or {})
+    _all = points_xyz
+    _core, _n_dropped = _obb_core_points(points_xyz, _ocfg)
+    if _core is not None:
+        points_xyz = points_xyz[_core]
+
     # Y extent (vertical)
     y_min = points_xyz[:, 1].min()
     y_max = points_xyz[:, 1].max()
@@ -1245,7 +1342,12 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
     return {
         "center": center,
         "half_extents": half_extents,
-        "rotation": rotation
+        "rotation": rotation,
+        # what the box was measured on: declared, so an inflated extent is
+        # never mistaken for a measured one
+        "n_points": int(len(_all)),
+        "n_points_used": int(len(points_xyz)),
+        "n_flyers_excluded": int(_n_dropped)
     }
 
 
@@ -2925,8 +3027,7 @@ def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
             "resolution": result.get("resolution", {}),
         }
         
-        with open(result_path, "w") as f:
-            json.dump(merged_result, f)
+        atomic_write_json(result_path, merged_result)
         print(f"[SegPipeline] 💾 Saved segmentation_result.json "
               f"({len(merged)} instances, {coverage*100:.1f}% coverage)")
         return merged_result
@@ -3020,8 +3121,7 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
                 # Strip transient flags — only needed for first load after segmentation
                 cache_result = {k: v for k, v in result.items()
                                 if k not in ("reload_potree", "corrected_is_display_space")}
-                with open(result_path, "w") as f:
-                    json.dump(cache_result, f)
+                atomic_write_json(result_path, cache_result)
                 print(f"[SegPipeline] 💾 Cached result for instant future loads")
             except Exception as e:
                 print(f"[SegPipeline] ⚠️ Failed to cache result: {e}")

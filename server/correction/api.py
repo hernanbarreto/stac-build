@@ -58,7 +58,12 @@ def _operator(credentials: Optional[HTTPAuthorizationCredentials]) -> str:
         return f"invalid-token({e.__class__.__name__})"
 
 
-def _acquire(session_id: str, task_id: str) -> None:
+def _acquire(session_id: str, task_id: str, output_dir=None) -> None:
+    """Take the session. ``output_dir`` adds the on-disk lock, which is what
+    keeps OTHER PROCESSES out — the dict below only knows what this backend
+    runs, and a certification runs in a worker subprocess rewriting the same
+    artifacts (pccr 2026-09-14). Callers that have no session on disk yet pass
+    None and get the in-process lock alone."""
     with _locks_guard:
         holder = _locks.get(session_id)
         if holder is not None:
@@ -66,19 +71,37 @@ def _acquire(session_id: str, task_id: str) -> None:
                 409, detail={"error": "another correction operation is "
                                       "running on this session",
                              "blocking_task_id": holder})
+        if output_dir is not None:
+            from session_lock import acquire as _fs_acquire, SessionBusy
+            try:
+                _fs_acquire(output_dir, "correction", owner=task_id)
+            except SessionBusy as e:
+                raise HTTPException(
+                    409, detail={"error": f"'{e.holder.get('label')}' is running "
+                                          f"on this session — it writes the same "
+                                          f"artifacts. Try again when it finishes.",
+                                 "holder": e.holder})
         _locks[session_id] = task_id
 
 
-def _release(session_id: str) -> None:
+def _release(session_id: str, output_dir=None) -> None:
     with _locks_guard:
         _locks.pop(session_id, None)
+    if output_dir is None:
+        return
+    try:
+        from session_lock import release as _fs_release
+        _fs_release(output_dir)
+    except Exception as e:  # noqa: BLE001 — a failed release is declared, never silent
+        print(f"[Correction] session lock release failed: {e}", flush=True)
 
 
 async def _run_locked(session_id: str, label: str, fn: Callable):
     """Common wrapper: task + lock + executor + viewer notify."""
     from task_manager import task_manager
     tid = task_manager.start(session_id, "correction", label)
-    _acquire(session_id, tid)
+    out_dir = _ctx(session_id).output_dir
+    _acquire(session_id, tid, out_dir)
     loop = asyncio.get_event_loop()
 
     def _progress(pct, msg):
@@ -94,7 +117,7 @@ async def _run_locked(session_id: str, label: str, fn: Callable):
         task_manager.fail(tid, str(e))
         raise HTTPException(500, f"{label} failed: {e}")
     finally:
-        _release(session_id)
+        _release(session_id, out_dir)
     return result
 
 

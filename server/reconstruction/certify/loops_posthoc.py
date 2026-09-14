@@ -242,7 +242,29 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print) -> Lis
         sigma_t = max(float(m["offset_after_m"]), float(vcfg.sigma_floor_m))
         factors = {}
         if cand.get("verdict") == "ambiguous":
-            factors["ambiguous"] = float(cfg.loop.ambiguous_sigma_factor)
+            # The ×ambiguous inflation answers ONE question: "are these two
+            # copies the same object?". When the reprojection answered exactly
+            # that question with evidence — one rigid shift landing copy A on
+            # copy B's mask across the frames that see both — the identity is
+            # MEASURED and the inflation is no longer a statement about this
+            # pair. pccr 2026-09-14 left the chair at σ 25.8 cm although its
+            # copies closed to 4.3 cm, and 14 of 14 frames agreed: evidence
+            # gathered and then discounted.
+            #
+            # The class factor is NOT touched by it. "Is it the same object?"
+            # and "did the object move between the visits?" are different
+            # questions, and a chair that was pushed is still the same chair —
+            # the frames cannot see the difference, so a non-structural
+            # proposer keeps its inflation.
+            rep = cand.get("reprojection") or {}
+            if rep.get("verdict") == "same_object":
+                factors["reprojection:same_object"] = 1.0
+                log(f"[loops-posthoc] instance {label}#{iid}: the frames measured the "
+                    f"identity ({rep.get('agreeing_frames', '?')}/{rep.get('n_cross_frames', '?')} "
+                    f"frame(s), agreement {rep.get('cross_recall', 0):.2f}→"
+                    f"{rep.get('cross_recall_aligned', 0):.2f}) — no ×ambiguous inflation")
+            else:
+                factors["ambiguous"] = float(cfg.loop.ambiguous_sigma_factor)
         if cls != "structural":
             factors[f"class:{cls}"] = float(sem.nonstructural_sigma_factor)
         for f in factors.values():

@@ -19,6 +19,8 @@ from typing import Callable, Dict
 
 import numpy as np
 
+from atomic_io import atomic_write_json
+
 SEG_LEDGER = "segmentation_ledger.jsonl"
 
 
@@ -133,7 +135,9 @@ def split_instance(output_dir, iid: int, idx_new: np.ndarray, reason: dict,
 
     result["segmented_points"] = sum(int(i.get("total_points") or 0) for i in instances)
     result["coverage"] = round(result["segmented_points"] / max(1, int(result.get("total_points") or N)), 4)
-    res_path.write_text(json.dumps(result))
+    # 235 MB streamed onto the live path is a truncate followed by a long
+    # write: the backend reads (and, through the UI, writes) the same file.
+    atomic_write_json(res_path, result)
     _write_classification(output_dir, instances, N)
     from segmentation.pipeline import rebuild_instance_store
     rebuild_instance_store(output_dir)

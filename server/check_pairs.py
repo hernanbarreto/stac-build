@@ -10,6 +10,11 @@ OUT = SESS / "output"
 from segmentation.pipeline import _load_ply_origins, _mask_frame_lookup
 from segmentation.erase import _mask_obj_by_iid
 from reconstruction.loops.reprojection import copy_evidence
+from reconstruction.loops.config import load_loops_config as _llc
+_RC = _llc().loops.reprojection
+_RKW = dict(dilate_px=_RC.dilate_px, max_frames=_RC.max_frames,
+            min_self_recall=_RC.min_self_recall, min_cross_recall=_RC.min_cross_recall,
+            min_agreeing_frac=_RC.min_agreeing_frac)
 
 xyz, fg, _pr, _pc = _load_ply_origins(OUT / "cleaned_cloud.ply")
 res = json.loads((OUT / "segmentation_result.json").read_text())
@@ -36,7 +41,7 @@ for a, b, sep, what in PAIRS:
     if PA is None or PB is None:
         print(f"{a}->{b:<8}{sep:>6.2f}m  {what:<12}  (falta una instancia)"); continue
     ev = copy_evidence(OUT, SESS, a, oid_of.get(a), PA, PB, FA, FB,
-                       oid_b=oid_of.get(b), cloud_to_mask=c2m)
+                       oid_b=oid_of.get(b), cloud_to_mask=c2m, **_RKW)
     print(f"{a}->{b:<8}{sep:>6.2f}m  {what:<12}"
           f"{ev.get('self_recall_a',0):>6.2f}{ev.get('self_recall_b',0):>6.2f}"
           f"{ev.get('cross_recall',0):>7.2f}{ev.get('cross_recall_aligned',0):>7.2f}"

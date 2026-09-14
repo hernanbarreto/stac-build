@@ -201,6 +201,17 @@ class GraphConfig:
     sigma_odo_intra_m: float        # odometry σ between consecutive keyframes inside a chunk
     sigma_odo_intra_deg: float
     loop_sigma_rot_deg: float       # rotation σ of a loop edge (its translation σ is measured)
+    odo_sigma_from_drift: bool      # derive the odometry σ from the MEASURED drift rate
+    odo_sigma_min_m: float          # floor / ceiling of the derived odometry σ
+    odo_sigma_max_m: float
+    outlier_overlap_frac: float     # loops sharing this much of a stretch measure the same drift
+    outlier_mad_k: float            # deviation, in MADs, above which a loop's σ is inflated
+    outlier_mad_floor_m_per_m: float  # MAD floor so a unanimous set does not divide by zero
+    outlier_max_sigma_factor: float # cap of that inflation (the edge is never dropped)
+    drift_model: bool               # fit the accumulated drift as a smooth function of the walk
+    drift_degree: int               # terms of that model (1 = the ramp E(d)=eps*d, 2 adds curvature)
+    drift_iters: int
+    drift_max_step: float           # cap of one Gauss-Newton step, in the coefficient norm
     huber_delta_m: float            # Huber on loop + structural edges (never odometry)
     huber_delta_deg: float
     dense_max_unknowns: int         # 6·n_kf ≤ this → dense Cholesky, else block-Jacobi PCG
@@ -612,6 +623,17 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         sigma_odo_intra_m=_num(gp, "sigma_odo_intra_m", G, lo=0, lo_excl=True),
         sigma_odo_intra_deg=_num(gp, "sigma_odo_intra_deg", G, lo=0, lo_excl=True),
         loop_sigma_rot_deg=_num(gp, "loop_sigma_rot_deg", G, lo=0, lo_excl=True),
+        odo_sigma_from_drift=_bool(gp, "odo_sigma_from_drift", G),
+        odo_sigma_min_m=_num(gp, "odo_sigma_min_m", G, lo=0, lo_excl=True),
+        odo_sigma_max_m=_num(gp, "odo_sigma_max_m", G, lo=0, lo_excl=True),
+        outlier_overlap_frac=_num(gp, "outlier_overlap_frac", G, lo=0, hi=1),
+        outlier_mad_k=_num(gp, "outlier_mad_k", G, lo=0, lo_excl=True),
+        outlier_mad_floor_m_per_m=_num(gp, "outlier_mad_floor_m_per_m", G, lo=0, lo_excl=True),
+        outlier_max_sigma_factor=_num(gp, "outlier_max_sigma_factor", G, lo=1),
+        drift_model=_bool(gp, "drift_model", G),
+        drift_degree=_num(gp, "drift_degree", G, lo=1, integer=True),
+        drift_iters=_num(gp, "drift_iters", G, lo=1, integer=True),
+        drift_max_step=_num(gp, "drift_max_step", G, lo=0, lo_excl=True),
         huber_delta_m=_num(gp, "huber_delta_m", G, lo=0, lo_excl=True),
         huber_delta_deg=_num(gp, "huber_delta_deg", G, lo=0, lo_excl=True),
         dense_max_unknowns=_num(gp, "dense_max_unknowns", G, lo=6, integer=True),
