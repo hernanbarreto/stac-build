@@ -1,0 +1,464 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   Viewport chrome: canvas, floating toolbar, HUD, splash, welcome, overlays
+   (prompt_ui.txt §7). Glass only here; no decorative shadows or gradients.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.viewport-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.viewport-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.viewport-canvas--measure {
+  cursor: crosshair;
+}
+
+/* ── Floating toolbar ───────────────────────────────────────────────── */
+.stac-vptoolbar-wrap {
+  position: absolute;
+  top: var(--hud-inset);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-float);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: calc(100% - var(--sp-8));
+}
+
+.stac-vptoolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  height: var(--toolbar-float-h);
+  padding: 0 var(--sp-2);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-3);
+  box-shadow: var(--elev-2);
+  overflow-x: auto;
+}
+
+.stac-vptoolbar__group {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-half);
+}
+
+.stac-vppopover {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: var(--toast-w);
+  padding: var(--sp-3);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-3);
+  box-shadow: var(--elev-2);
+  color: var(--text-1);
+  font-size: var(--fs-1);
+}
+
+.stac-vppopover--placed {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.stac-vppopover__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.stac-vppopover__row .stac-slider {
+  flex: 1;
+}
+
+.stac-vppopover__title {
+  font-weight: var(--fw-semibold);
+  padding: 0 var(--sp-2);
+  white-space: nowrap;
+}
+
+.stac-vppopover__hint {
+  color: var(--text-3);
+  font-size: var(--fs-0);
+}
+
+.stac-vppopover__select {
+  width: auto;
+  min-width: var(--scale-bar-max-w);
+}
+
+/* ── HUD ────────────────────────────────────────────────────────────── */
+.stac-hud__banner {
+  position: absolute;
+  top: calc(var(--hud-inset) + var(--toolbar-float-h) + var(--sp-2));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-hud);
+  width: min(100% - var(--sp-8), var(--dialog-w-lg));
+}
+
+.stac-hud__cube {
+  position: absolute;
+  top: var(--hud-inset);
+  right: var(--hud-inset);
+  z-index: var(--z-hud);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-half);
+  width: calc(var(--nav-cube-size) + var(--sp-2));
+  padding: var(--sp-half);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-2);
+}
+
+.stac-hud__face {
+  height: var(--ctl-h-sm);
+  border-radius: var(--r-1);
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-0);
+  font-weight: var(--fw-medium);
+  transition: background var(--motion-fast), color var(--motion-fast);
+}
+
+.stac-hud__face:hover {
+  background: var(--surface-4);
+  color: var(--text-1);
+}
+
+.stac-hud__face--iso {
+  color: var(--brand-orange);
+}
+
+.stac-hud__bottomleft {
+  position: absolute;
+  left: var(--hud-inset);
+  bottom: var(--hud-inset);
+  z-index: var(--z-hud);
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-3);
+  pointer-events: none;
+}
+
+.stac-hud__gravity {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-half) var(--sp-2);
+  background: var(--glass-bg);
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-1);
+  color: var(--text-2);
+  font-size: var(--fs-0);
+  pointer-events: auto;
+}
+
+.stac-hud__gravity svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+  color: var(--measure);
+}
+
+.stac-hud__scale {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-half);
+  color: var(--text-2);
+  font-size: var(--fs-0);
+}
+
+.stac-hud__scale-bar {
+  width: var(--scale-px);
+  height: var(--sp-1);
+  border: var(--bw) solid var(--text-2);
+  border-top: none;
+}
+
+.stac-hud__legend {
+  position: absolute;
+  right: var(--hud-inset);
+  top: calc(var(--hud-inset) + var(--nav-cube-size) + var(--sp-8));
+  z-index: var(--z-hud);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  max-width: var(--inspector-w);
+}
+
+.stac-hud__guides {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: var(--z-hud);
+}
+
+.stac-hud__guide {
+  stroke: var(--measure);
+  stroke-width: var(--bw);
+}
+
+.stac-hud__readout {
+  position: absolute;
+  left: var(--rx);
+  top: var(--ry);
+  transform: translate(var(--sp-2), calc(-100% - var(--sp-2)));
+  z-index: var(--z-hud);
+  pointer-events: none;
+}
+
+/* ── Overlays inside the viewport (Viewport.tsx) ────────────────────── */
+.stac-vpcard {
+  position: absolute;
+  z-index: var(--z-popover);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-3);
+  box-shadow: var(--elev-2);
+  color: var(--text-1);
+  font-size: var(--fs-1);
+}
+
+.stac-vpcard--topright {
+  top: calc(var(--hud-inset) + var(--nav-cube-size) + var(--sp-8));
+  right: var(--hud-inset);
+  min-width: var(--popover-min-w);
+}
+
+.stac-vpcard--topcenter {
+  top: calc(var(--hud-inset) + var(--toolbar-float-h) + var(--sp-2));
+  left: 50%;
+  transform: translateX(-50%);
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.stac-vpcard__title {
+  font-weight: var(--fw-semibold);
+  font-size: var(--fs-2);
+}
+
+.stac-vpcard__row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+.stac-vpcard__row .stac-btn {
+  flex: 1;
+}
+
+/* pointer-anchored tooltip / context menu */
+.stac-vptip {
+  position: absolute;
+  left: var(--tip-x);
+  top: var(--tip-y);
+  z-index: var(--z-popover);
+  max-width: var(--tooltip-max-w);
+  padding: var(--sp-2);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-2);
+  color: var(--text-1);
+  font-size: var(--fs-0);
+  pointer-events: none;
+  overflow-wrap: anywhere;
+}
+
+.stac-vptip__type {
+  color: var(--measure);
+  font-weight: var(--fw-semibold);
+}
+
+.stac-vptip__name {
+  color: var(--text-2);
+  margin-left: var(--sp-1);
+}
+
+.stac-vptip__thumb {
+  width: 100%;
+  border-radius: var(--r-1);
+  margin-top: var(--sp-1);
+}
+
+.stac-vpctx {
+  position: absolute;
+  left: var(--tip-x);
+  top: var(--tip-y);
+  z-index: var(--z-popover);
+  min-width: var(--popover-min-w);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-2);
+  color: var(--text-1);
+  font-size: var(--fs-1);
+  overflow: hidden;
+}
+
+.stac-vpctx__header {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: var(--bw) solid var(--border-1);
+  font-size: var(--fs-0);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.stac-vpctx__row {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: var(--bw) solid var(--border-1);
+}
+
+.stac-vpctx__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--text-1);
+  text-align: left;
+  border-bottom: var(--bw) solid var(--border-1);
+}
+
+.stac-vpctx__item:last-child {
+  border-bottom: none;
+}
+
+.stac-vpctx__item:hover {
+  background: var(--surface-3);
+}
+
+.stac-vpctx__item svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+}
+
+/* WebGL context lost */
+.stac-vplost {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-splash);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: var(--sp-6);
+  text-align: center;
+  background: var(--surface-0);
+  color: var(--text-1);
+}
+
+/* ── Splash ─────────────────────────────────────────────────────────── */
+.stac-splash {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-splash);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-brand);
+}
+
+.stac-splash__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-4);
+  width: var(--dialog-w);
+  max-width: calc(100% - var(--sp-8));
+  text-align: center;
+}
+
+.stac-splash__logo {
+  width: var(--splash-logo-w);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--text-1);
+  border-radius: var(--r-3);
+}
+
+.stac-splash__title {
+  font-size: var(--fs-3);
+  font-weight: var(--fw-semibold);
+  color: var(--text-1);
+}
+
+.stac-splash__status {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
+.stac-splash__status svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+  color: var(--brand-orange);
+}
+
+.stac-splash__progress {
+  width: 100%;
+}
+
+/* ── Welcome ────────────────────────────────────────────────────────── */
+.stac-welcome {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-panel);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  background: var(--surface-0);
+  text-align: center;
+}
+
+.stac-welcome__logo {
+  width: var(--welcome-logo-w);
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--text-1);
+  border-radius: var(--r-3);
+}
+
+.stac-welcome__text {
+  color: var(--text-2);
+  font-size: var(--fs-2);
+  max-width: var(--toast-w);
+  line-height: var(--lh-body);
+}
+
+.stac-welcome__hint {
+  color: var(--text-3);
+  font-size: var(--fs-0);
+}
