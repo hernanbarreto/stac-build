@@ -99,10 +99,10 @@ export function InstancesPanel(p: InstancesPanelProps) {
       toolbar={<SearchInput size="sm" value={search} onChange={e => setSearch(e.target.value)} onClear={() => setSearch('')} placeholder={t('instances.search')} />}
       footer={
         <div className="stac-instances__footer">
-          <Button icon={<Crosshair aria-hidden />} onClick={p.onOpenSegmentation}>{t('instances.segmentation')}</Button>
-          <Button icon={<Puzzle aria-hidden />} onClick={p.onOpenMeshing} title={t('instances.meshingHint')}>{t('instances.meshing')}</Button>
-          <Button icon={<Wrench aria-hidden />} onClick={p.onOpenCorrection} title={t('instances.correctionHint')}>{t('instances.correction')}</Button>
-          <Button icon={<Layers aria-hidden />} disabled={!p.canFuse} onClick={p.onOpenFuse} title={p.canFuse ? t('instances.fuseHint') : t('instances.fuseNeedsTwo')}>{t('instances.fuse')}</Button>
+          <Button size="sm" icon={<Crosshair aria-hidden />} onClick={p.onOpenSegmentation}>{t('instances.segmentation')}</Button>
+          <Button size="sm" icon={<Puzzle aria-hidden />} onClick={p.onOpenMeshing} title={t('instances.meshingHint')}>{t('instances.meshing')}</Button>
+          <Button size="sm" icon={<Wrench aria-hidden />} onClick={p.onOpenCorrection} title={t('instances.correctionHint')}>{t('instances.correction')}</Button>
+          <Button size="sm" icon={<Layers aria-hidden />} disabled={!p.canFuse} onClick={p.onOpenFuse} title={p.canFuse ? t('instances.fuseHint') : t('instances.fuseNeedsTwo')}>{t('instances.fuse')}</Button>
         </div>
       }>
       <Stack gap={1}>

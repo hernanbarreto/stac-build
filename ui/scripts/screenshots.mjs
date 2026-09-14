@@ -80,6 +80,11 @@ async function openApp(page, port, { density, loggedIn = true, layout = {} } = {
 
 async function shot(page, name, state, density, phase) {
   const file = `${name}__${state}__${density}__${phase}.png`
+  // Park the pointer on the brand block (no hover affordance there) and wait
+  // out the tooltip delay: otherwise the tooltip of whatever control the
+  // capture last clicked stays open and covers the panel underneath.
+  await page.mouse.move(8, 8)
+  await page.waitForTimeout(250)
   await page.screenshot({ path: path.join(OUT, file) })
   shots.push(file)
 }
@@ -108,6 +113,13 @@ for (const size of SIZES) {
     await setScenario('sessions')
     await openApp(page, AFTER_PORT, { density })
     await shot(page, 'sessions', 'list', tag, 'after')
+    if (await clickIf(byText(page, 'sessions.new'))) {
+      await page.keyboard.type('galeria-demo')
+      await page.keyboard.press('Enter')
+      await page.waitForTimeout(700)
+      await shot(page, 'toast', 'session-created', tag, 'after')
+      await page.waitForTimeout(200)
+    }
     await clickIf(byText(page, 'menu.settings'))
     await page.keyboard.press('Escape')
     await clickIf(page.getByLabel(T('menu.settings'), { exact: true }).last())
@@ -156,6 +168,15 @@ for (const size of SIZES) {
     await clickIf(byLabel(page, 'instances.title'))
     await page.waitForTimeout(400)
     await shot(page, 'instances', 'populated', tag, 'after')
+    await clickIf(byLabel(page, 'sessions.title'))
+    await clickIf(page.getByRole('treeitem').filter({ hasText: 'estacion-sur' }).first())
+    await clickIf(byLabel(page, 'instances.title'))
+    await page.waitForTimeout(400)
+    await shot(page, 'instances', 'no-segmentation', tag, 'after')
+    await clickIf(byLabel(page, 'sessions.title'))
+    await clickIf(page.getByRole('treeitem').filter({ hasText: 'tunel-norte' }).first())
+    await clickIf(byLabel(page, 'instances.title'))
+    await page.waitForTimeout(400)
     await clickIf(page.getByRole('treeitem').filter({ hasText: 'column' }).first())
     await page.waitForTimeout(300)
     await shot(page, 'instances', 'selected-properties', tag, 'after')
