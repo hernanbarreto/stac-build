@@ -1,0 +1,104 @@
+.stac-iconbtn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  flex-shrink: 0;
+  border: var(--bw) solid transparent;
+  border-radius: var(--r-1);
+  color: var(--text-2);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
+}
+
+.stac-iconbtn svg {
+  width: var(--icon-md);
+  height: var(--icon-md);
+  stroke-width: var(--icon-stroke);
+}
+
+.stac-iconbtn--sm {
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+}
+
+.stac-iconbtn--lg svg {
+  width: var(--icon-lg);
+  height: var(--icon-lg);
+}
+
+.stac-iconbtn:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text-1);
+}
+
+.stac-iconbtn:active:not(:disabled) {
+  background: var(--surface-4);
+}
+
+.stac-iconbtn:disabled {
+  opacity: var(--opacity-disabled);
+  cursor: default;
+}
+
+.stac-iconbtn--active,
+.stac-iconbtn--active:hover:not(:disabled) {
+  background: var(--brand-orange-soft);
+  color: var(--brand-orange);
+}
+
+.stac-iconbtn--secondary {
+  background: var(--surface-2);
+  border-color: var(--border-ctl);
+  color: var(--text-1);
+}
+
+.stac-iconbtn--primary {
+  background: var(--brand-orange);
+  color: var(--text-inverse);
+}
+
+.stac-iconbtn--primary:hover:not(:disabled) {
+  background: var(--brand-orange-deep);
+  color: var(--text-inverse);
+}
+
+.stac-iconbtn--danger:hover:not(:disabled) {
+  background: var(--err-soft);
+  color: var(--err-fg);
+}
+
+.stac-iconbtn--measure {
+  color: var(--measure);
+}
+
+.stac-iconbtn--measure.stac-iconbtn--active {
+  background: var(--measure-soft);
+  color: var(--measure);
+}
+
+.stac-iconbtn--brand {
+  color: var(--brand-orange);
+}
+
+.stac-iconbtn__badge {
+  position: absolute;
+  top: var(--sp-half);
+  right: var(--sp-half);
+  min-width: var(--icon-sm);
+  height: var(--icon-sm);
+  padding: 0 var(--sp-1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-pill);
+  background: var(--brand-orange);
+  color: var(--text-inverse);
+  font-family: var(--font-mono);
+  font-size: var(--fs-0);
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+}

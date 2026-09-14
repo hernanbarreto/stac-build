@@ -1,0 +1,127 @@
+.stac-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  height: var(--ctl-h);
+  padding: 0 var(--sp-3);
+  border: var(--bw) solid transparent;
+  border-radius: var(--r-1);
+  font-size: var(--fs-2);
+  font-weight: var(--fw-medium);
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--text-1);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast), box-shadow var(--motion-fast);
+  user-select: none;
+}
+
+.stac-btn--sm {
+  height: var(--ctl-h-sm);
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-1);
+}
+
+.stac-btn--block {
+  width: 100%;
+}
+
+.stac-btn--icon-only {
+  width: var(--ctl-h);
+  padding: 0;
+}
+
+.stac-btn--icon-only.stac-btn--sm {
+  width: var(--ctl-h-sm);
+}
+
+.stac-btn__icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.stac-btn__icon svg {
+  width: var(--icon-md);
+  height: var(--icon-md);
+  stroke-width: var(--icon-stroke);
+}
+
+.stac-btn__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stac-btn:disabled {
+  opacity: var(--opacity-disabled);
+  cursor: default;
+}
+
+/* primary: brand orange, inverse text, the single reserved glow */
+.stac-btn--primary {
+  background: var(--brand-orange);
+  color: var(--text-inverse);
+  font-weight: var(--fw-semibold);
+}
+
+.stac-btn--primary:hover:not(:disabled) {
+  background: var(--brand-orange-deep);
+  box-shadow: var(--glow-primary);
+}
+
+.stac-btn--primary:active:not(:disabled) {
+  background: var(--brand-orange-deep);
+  box-shadow: none;
+}
+
+/* secondary: elevated surface + control border */
+.stac-btn--secondary {
+  background: var(--surface-2);
+  border-color: var(--border-ctl);
+  color: var(--text-1);
+}
+
+.stac-btn--secondary:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+
+.stac-btn--secondary:active:not(:disabled),
+.stac-btn--secondary.stac-btn--active {
+  background: var(--surface-4);
+  border-color: var(--brand-orange);
+}
+
+/* ghost: text only until hovered */
+.stac-btn--ghost {
+  color: var(--text-2);
+}
+
+.stac-btn--ghost:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text-1);
+}
+
+.stac-btn--ghost:active:not(:disabled) {
+  background: var(--surface-4);
+}
+
+.stac-btn--ghost.stac-btn--active {
+  background: var(--brand-orange-soft);
+  color: var(--brand-orange);
+}
+
+/* danger: filled state red, inverse text (5.8:1) */
+.stac-btn--danger {
+  background: var(--err);
+  color: var(--text-inverse);
+  font-weight: var(--fw-semibold);
+}
+
+.stac-btn--danger:hover:not(:disabled) {
+  background: var(--err-fg);
+}
+
+.stac-btn--loading {
+  cursor: progress;
+}

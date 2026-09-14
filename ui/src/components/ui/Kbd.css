@@ -1,0 +1,22 @@
+.stac-kbd {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-half);
+  flex-shrink: 0;
+}
+
+.stac-kbd__key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--icon-lg);
+  height: var(--icon-lg);
+  padding: 0 var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-0);
+  line-height: 1;
+  color: var(--text-2);
+  background: var(--surface-1);
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-1);
+}

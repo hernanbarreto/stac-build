@@ -1,0 +1,83 @@
+.stac-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  height: var(--icon-lg);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-1);
+  font-size: var(--fs-0);
+  font-weight: var(--fw-medium);
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--text-2);
+  background: var(--surface-3);
+  flex-shrink: 0;
+}
+
+.stac-badge--sm {
+  height: var(--icon-md);
+  padding: 0 var(--sp-1);
+}
+
+.stac-badge--ok {
+  background: var(--ok-soft);
+  color: var(--ok-fg);
+}
+
+.stac-badge--warn {
+  background: var(--warn-soft);
+  color: var(--warn-fg);
+}
+
+.stac-badge--err {
+  background: var(--err-soft);
+  color: var(--err-fg);
+}
+
+.stac-badge--info {
+  background: var(--info-soft);
+  color: var(--info-fg);
+}
+
+.stac-badge--measure {
+  background: var(--measure-soft);
+  color: var(--measure);
+}
+
+.stac-badge--brand {
+  background: var(--brand-orange-soft);
+  color: var(--brand-orange);
+}
+
+.stac-badge--cat {
+  background: var(--surface-2);
+  border: var(--bw) solid var(--border-2);
+  color: var(--text-1);
+}
+
+.stac-badge__dot {
+  width: var(--dot);
+  height: var(--dot);
+  border-radius: var(--r-circle);
+  background: var(--badge-color, currentColor);
+  flex-shrink: 0;
+}
+
+.stac-colordot {
+  display: inline-block;
+  width: var(--dot);
+  height: var(--dot);
+  border-radius: var(--r-circle);
+  background: var(--dot-color);
+  flex-shrink: 0;
+}
+
+.stac-colordot--sm {
+  width: var(--sp-1);
+  height: var(--sp-1);
+}
+
+.stac-colordot--lg {
+  width: var(--dot-lg);
+  height: var(--dot-lg);
+}

@@ -1,0 +1,40 @@
+.stac-tooltip {
+  position: fixed;
+  left: var(--tip-x);
+  top: var(--tip-y);
+  z-index: var(--z-tooltip);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: var(--tooltip-max-w);
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--surface-2);
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-1);
+  box-shadow: var(--elev-1);
+  color: var(--text-1);
+  font-size: var(--fs-0);
+  line-height: var(--lh-body);
+  pointer-events: none;
+  white-space: normal;
+}
+
+.stac-tooltip--bottom {
+  transform: translate(-50%, 0);
+}
+
+.stac-tooltip--top {
+  transform: translate(-50%, -100%);
+}
+
+.stac-tooltip--left {
+  transform: translate(-100%, -50%);
+}
+
+.stac-tooltip--right {
+  transform: translate(0, -50%);
+}
+
+.stac-tooltip__label {
+  color: var(--text-1);
+}

@@ -1,0 +1,33 @@
+{
+  "common": {
+    "ok": "OK",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "delete": "Delete",
+    "close": "Close",
+    "closeTab": "Close tab",
+    "dismiss": "Dismiss",
+    "clear": "Clear",
+    "apply": "Apply",
+    "save": "Save",
+    "undo": "Undo",
+    "approve": "Approve",
+    "retry": "Retry",
+    "loading": "Loading",
+    "search": "Search",
+    "none": "None",
+    "yes": "Yes",
+    "no": "No"
+  },
+  "dialog": {
+    "confirmTitle": "Confirm action",
+    "confirmDeleteTitle": "Confirm deletion",
+    "noticeTitle": "Notice"
+  },
+  "provenance": {
+    "tool_measured": "tool measured",
+    "vlm_proposed": "VLM proposed",
+    "human_directed": "operator directed",
+    "human_validated": "operator validated"
+  }
+}

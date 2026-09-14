@@ -1,0 +1,33 @@
+{
+  "common": {
+    "ok": "Aceptar",
+    "cancel": "Cancelar",
+    "confirm": "Confirmar",
+    "delete": "Eliminar",
+    "close": "Cerrar",
+    "closeTab": "Cerrar pestaña",
+    "dismiss": "Descartar",
+    "clear": "Limpiar",
+    "apply": "Aplicar",
+    "save": "Guardar",
+    "undo": "Deshacer",
+    "approve": "Aprobar",
+    "retry": "Reintentar",
+    "loading": "Cargando",
+    "search": "Buscar",
+    "none": "Ninguno",
+    "yes": "Sí",
+    "no": "No"
+  },
+  "dialog": {
+    "confirmTitle": "Confirmar acción",
+    "confirmDeleteTitle": "Confirmar eliminación",
+    "noticeTitle": "Aviso"
+  },
+  "provenance": {
+    "tool_measured": "medido por herramienta",
+    "vlm_proposed": "propuesto por VLM",
+    "human_directed": "dirigido por operador",
+    "human_validated": "validado por operador"
+  }
+}

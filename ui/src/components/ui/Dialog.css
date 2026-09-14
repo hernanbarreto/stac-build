@@ -1,0 +1,150 @@
+.stac-dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-dialog);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-6);
+  background: var(--surface-scrim);
+}
+
+.stac-dialog-layer--top {
+  align-items: flex-start;
+  padding-top: calc(var(--header-h) + var(--sp-6));
+}
+
+.stac-dialog-layer--right {
+  justify-content: flex-end;
+  align-items: flex-start;
+  padding-top: calc(var(--header-h) + var(--sp-6));
+}
+
+.stac-dialog-layer--passthrough {
+  background: transparent;
+  pointer-events: none;
+}
+
+.stac-dialog-layer--passthrough .stac-dialog {
+  pointer-events: auto;
+}
+
+.stac-dialog {
+  display: flex;
+  flex-direction: column;
+  width: var(--dialog-w);
+  max-width: 100%;
+  max-height: 100%;
+  background: var(--surface-2);
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-3);
+  box-shadow: var(--elev-3);
+  color: var(--text-1);
+  overflow: hidden;
+}
+
+.stac-dialog--sm {
+  width: var(--toast-w);
+}
+
+.stac-dialog--lg {
+  width: var(--dialog-w-lg);
+}
+
+.stac-dialog--full {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--r-0);
+  border: none;
+}
+
+.stac-dialog--danger {
+  border-color: var(--err);
+}
+
+.stac-dialog--warn {
+  border-color: var(--warn);
+}
+
+.stac-dialog--measure {
+  border-color: var(--measure);
+}
+
+.stac-dialog__header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: var(--bw) solid var(--border-1);
+  flex-shrink: 0;
+}
+
+.stac-dialog__icon {
+  display: inline-flex;
+  color: var(--text-2);
+}
+
+.stac-dialog--danger .stac-dialog__icon {
+  color: var(--err-fg);
+}
+
+.stac-dialog--warn .stac-dialog__icon {
+  color: var(--warn-fg);
+}
+
+.stac-dialog--measure .stac-dialog__icon {
+  color: var(--measure);
+}
+
+.stac-dialog__icon svg {
+  width: var(--icon-xl);
+  height: var(--icon-xl);
+  stroke-width: var(--icon-stroke);
+}
+
+.stac-dialog__titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.stac-dialog__title {
+  font-size: var(--fs-3);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-title);
+}
+
+.stac-dialog__subtitle {
+  font-size: var(--fs-1);
+  color: var(--text-2);
+  margin-top: var(--sp-half);
+}
+
+.stac-dialog__close {
+  flex-shrink: 0;
+}
+
+.stac-dialog__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  font-size: var(--fs-2);
+  line-height: var(--lh-body);
+}
+
+.stac-dialog__message {
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.stac-dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-top: var(--bw) solid var(--border-1);
+  flex-shrink: 0;
+}

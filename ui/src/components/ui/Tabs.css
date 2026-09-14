@@ -1,0 +1,109 @@
+.stac-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-half);
+  min-height: var(--tabs-h);
+  border-bottom: var(--bw) solid var(--border-1);
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+}
+
+.stac-tabs--fill .stac-tab {
+  flex: 1;
+}
+
+.stac-tab {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  border-bottom: var(--bw-selected) solid transparent;
+  margin-bottom: calc(-1 * var(--bw));
+  transition: border-color var(--motion-fast);
+}
+
+.stac-tab--active {
+  border-bottom-color: var(--brand-orange);
+}
+
+.stac-tab__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  color: var(--text-2);
+  font-size: var(--fs-2);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-0);
+  flex: 1;
+  transition: color var(--motion-fast), background var(--motion-fast);
+}
+
+.stac-tabs--sm .stac-tab__button {
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-1);
+}
+
+.stac-tab__button:hover:not(:disabled) {
+  color: var(--text-1);
+  background: var(--surface-3);
+}
+
+.stac-tab--active .stac-tab__button {
+  color: var(--text-1);
+}
+
+.stac-tab--disabled .stac-tab__button {
+  opacity: var(--opacity-disabled);
+  cursor: default;
+}
+
+.stac-tab__icon {
+  display: inline-flex;
+}
+
+.stac-tab__icon svg {
+  width: var(--icon-md);
+  height: var(--icon-md);
+  stroke-width: var(--icon-stroke);
+}
+
+.stac-tab__badge {
+  font-family: var(--font-mono);
+  font-size: var(--fs-0);
+  color: var(--text-3);
+}
+
+.stac-tab__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h-sm);
+  color: var(--text-3);
+  border-radius: var(--r-1);
+  margin-right: var(--sp-1);
+}
+
+.stac-tab__close svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+}
+
+.stac-tab__close:hover {
+  color: var(--text-1);
+  background: var(--surface-4);
+}
+
+/* chrome variant: filled tabs for the scan strip above the viewport */
+.stac-tabs--chrome {
+  background: var(--surface-1);
+  padding: 0 var(--sp-2);
+}
+
+.stac-tabs--chrome .stac-tab--active .stac-tab__button {
+  background: var(--surface-0);
+}
