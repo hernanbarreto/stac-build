@@ -154,6 +154,21 @@ def _create_isolated_crop(image: Image.Image, mask: np.ndarray,
     img_np = np.array(image)
     h, w = img_np.shape[:2]
 
+    # The bbox is taken from the mask and applied to the IMAGE, so the two have
+    # to live on the same grid. SAM3 saves its masks at its own resolution
+    # (832x464 on pccr) while the frames on disk are at another, and the
+    # mismatch surfaced as "index 255 is out of bounds for axis 0 with size
+    # 100" out of the boolean indexing below — 32 of 61 instances lost their
+    # crops that way and fell to the default class.
+    if mask.shape[:2] != (h, w):
+        import cv2 as _cv2
+        m2 = mask.astype(np.uint8)
+        if m2.ndim == 3:
+            m2 = m2[..., 0]
+        m2 = _cv2.resize(m2, (w, h), interpolation=_cv2.INTER_NEAREST).astype(bool)
+        mask = np.repeat(m2[..., None], img_np.shape[2], axis=2) if img_np.ndim == 3 else m2
+    mask = mask.astype(bool)
+
     rows = np.any(mask, axis=1)
     cols = np.any(mask, axis=0)
     if not rows.any() or not cols.any():
