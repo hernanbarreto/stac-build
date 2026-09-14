@@ -113,6 +113,14 @@ class PipelineJob:
     stages: List[StageState]
     status: JobStatus = JobStatus.QUEUED
     current_stage_idx: int = -1
+    # The scan this job resolved to. A project has several scans and the ACTIVE
+    # one is not necessarily the one being reconstructed: on pccr 2026-09-14 the
+    # pipeline rebuilt 2026-08-31 while the active scan was 2026-08-24, and the
+    # completion handler — which asked the session for its active scan instead
+    # of asking the job — pointed the Potree build at an output/ with no cloud
+    # in it, declared "Potree conversion failed" over a perfectly good octree
+    # and fell through to the raw-cloud broadcast.
+    session_dir: Optional[str] = None
     _process: Optional[Process] = field(default=None, repr=False)
     _server_conn: Optional[Connection] = field(default=None, repr=False)
     _task: Optional[asyncio.Task] = field(default=None, repr=False)
@@ -120,6 +128,7 @@ class PipelineJob:
     def to_dict(self) -> dict:
         return {
             "session_id": self.session_id,
+            "session_dir": self.session_dir,
             "status": self.status.value,
             "current_stage_idx": self.current_stage_idx,
             "stages": [
@@ -221,6 +230,8 @@ class PipelineManager:
             ctx = resolve_session(server_dir, session_id)
             session_dir = str(ctx.session_dir)
 
+        job.session_dir = session_dir
+
         # Start the orchestration loop as an asyncio task
         job._task = asyncio.create_task(
             self._run_pipeline(job, session_dir, config, on_progress, on_complete, replace)
@@ -303,6 +314,13 @@ class PipelineManager:
         """Get current status of a pipeline job."""
         job = self._jobs.get(session_id)
         return job.to_dict() if job else None
+
+    def job_session_dir(self, session_id: str) -> Optional[str]:
+        """The scan directory the running/last job resolved to — the one whose
+        output/ it wrote. Callers must prefer this over the session's ACTIVE
+        scan, which can be a different scan entirely."""
+        job = self._jobs.get(session_id)
+        return job.session_dir if job else None
 
     def get_all_jobs(self) -> Dict[str, dict]:
         """Get status of all pipeline jobs."""

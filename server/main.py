@@ -680,30 +680,43 @@ async def _send_cleaned_cloud_broadcast(session_id: str):
     try:
         file_size_mb = cleaned_ply.stat().st_size / (1024 * 1024)
         
+        # The dtype is READ FROM THE HEADER, never assumed. It used to be one of
+        # two hardcoded layouts (x,y,z,rgb[,frame_global,pixel_row,pixel_col] =
+        # 23 bytes) while the cleaned cloud has carried confidence and the four
+        # witness fields for a while now — 31 bytes on pccr 2026-09-14 — so
+        # np.frombuffer died with "buffer size must be a multiple of element
+        # size" the one time this fallback was actually needed.
+        _PLY_NP = {"float": "<f4", "float32": "<f4", "float64": "<f8", "double": "<f8",
+                   "uchar": "u1", "uint8": "u1", "char": "i1", "int8": "i1",
+                   "ushort": "<u2", "uint16": "<u2", "short": "<i2", "int16": "<i2",
+                   "uint": "<u4", "uint32": "<u4", "int": "<i4", "int32": "<i4"}
         with open(cleaned_ply, "rb") as f:
             n_pts = 0
             has_origins = False
+            fields = []
             while True:
                 line = f.readline()
+                if not line:
+                    break
                 if line.startswith(b"element vertex"):
                     n_pts = int(line.split()[-1])
                 if b"frame_global" in line:
                     has_origins = True
+                if line.startswith(b"property "):
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[1].decode() in _PLY_NP:
+                        # the header spells the colours red/green/blue; the
+                        # reader below asks for r/g/b
+                        name = parts[2].decode()
+                        name = {"red": "r", "green": "g", "blue": "b"}.get(name, name)
+                        fields.append((name, _PLY_NP[parts[1].decode()]))
                 if line.startswith(b"end_header"):
                     break
-            
-            if has_origins:
-                ply_dtype = np.dtype([
-                    ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-                    ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
-                    ('frame_global', '<i4'),
-                    ('pixel_row', '<i2'), ('pixel_col', '<i2')
-                ])
-            else:
-                ply_dtype = np.dtype([
-                    ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
-                    ('r', 'u1'), ('g', 'u1'), ('b', 'u1')
-                ])
+
+            if not fields:
+                print(f"[SendCloud] ⚠️ no vertex properties in the PLY header")
+                return False
+            ply_dtype = np.dtype(fields)
             raw_data = np.frombuffer(f.read(), dtype=ply_dtype)
         
         point_count = len(raw_data)
@@ -1823,6 +1836,7 @@ async def rename_session(
     try:
         from db.team import SessionAssignment, ActivityLog
         from db.project import Project
+        from db import async_session_factory
         from sqlalchemy import update
         async with async_session_factory() as db:
             # SessionAssignment
@@ -3362,8 +3376,9 @@ async def get_instance_mask(session_id: str, instance_id: int, frame: str = "", 
     if not masks_path.exists():
         # Return transparent 1x1 PNG instead of 404 to avoid console spam
         import io as _io
+        from PIL import Image as _Image
         buf = _io.BytesIO()
-        Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(buf, format="PNG")
+        _Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(buf, format="PNG")
         buf.seek(0)
         return Response(content=buf.getvalue(), media_type="image/png")
 
@@ -7449,7 +7464,15 @@ async def viewer_websocket(websocket: WebSocket):
                 async def _notify_cloud_ready(sid):
                     # Convert to Potree octree and notify viewer
                     try:
-                        session_path = _ctx(sid).session_dir
+                        # The scan the JOB ran on, not the session's ACTIVE scan:
+                        # a project holds several and they are not the same. On
+                        # pccr 2026-09-14 the pipeline rebuilt 2026-08-31 while
+                        # 2026-08-24 was active, so this pointed the converter at
+                        # an output/ with no cleaned_cloud.ply, got False back and
+                        # declared "Potree conversion failed" over an octree that
+                        # had just been built correctly.
+                        _job_dir = pipeline_manager.job_session_dir(sid)
+                        session_path = Path(_job_dir) if _job_dir else _ctx(sid).session_dir
                         await viewer_manager.broadcast_text(json.dumps({
                             "type": "status",
                             "message": "Building LOD octree..."
