@@ -98,9 +98,20 @@ def split_instance(output_dir, iid: int, idx_new: np.ndarray, reason: dict,
         sr = masks.get("scaled_res")
         mh0, mw0 = ((int(sr[0]), int(sr[1])) if sr is not None
                     else next(m.shape[:2] for k, m in masks.items() if k.startswith("f")))
+        # fg is the cloud's REAL video frame number; seg_masks.npz is keyed by
+        # KEYFRAME POSITION. Writing the new object's masks under the raw number
+        # left TWO index spaces inside one file — pccr 2026-09-14 ended with
+        # oid 110 keyed 0,1,2,3… and oid 213 keyed 1,60,97,… — so every later
+        # reader took the wrong mask for a split instance, or none. It also
+        # meant src_key never matched, and the parent kept the pixels this
+        # split was supposed to take from it.
+        from segmentation.pipeline import _mask_frame_lookup
+        c2m = _mask_frame_lookup(output_dir, list(masks.get("frames", [])),
+                                 sorted({int(x) for x in np.unique(fg)}))
         for f in np.unique(fg[moving]):
             sel = moving[fg[moving] == f]
-            dst_key = f"f{int(f)}_o{int(new_oid)}"
+            mf = c2m.get(int(f), int(f))
+            dst_key = f"f{mf}_o{int(new_oid)}"
             m_new = masks.get(dst_key)
             if m_new is None:
                 m_new = np.zeros((mh0, mw0), dtype=np.uint8)
@@ -112,7 +123,7 @@ def split_instance(output_dir, iid: int, idx_new: np.ndarray, reason: dict,
             masks[dst_key] = m_new
             n_px += int(len(rr))
             if src_oid is not None:
-                src_key = f"f{int(f)}_o{int(src_oid)}"
+                src_key = f"f{mf}_o{int(src_oid)}"
                 m_src = masks.get(src_key)
                 if m_src is not None:
                     m_src = m_src.copy()
