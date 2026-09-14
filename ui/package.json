@@ -10,7 +10,13 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
     "build:xr": "npm run provision:xr8 && WEB_ONLY=true vite build --base=/app/",
-    "provision:xr8": "mkdir -p ../static/xr8 && cp -r node_modules/@8thwall/engine-binary/dist/* ../static/xr8/"
+    "provision:xr8": "mkdir -p ../static/xr8 && cp -r node_modules/@8thwall/engine-binary/dist/* ../static/xr8/",
+    "build:web": "WEB_ONLY=true vite build",
+    "typecheck": "tsc --noEmit",
+    "verify:design": "node scripts/check-tokens.mjs && node scripts/check-contrast.mjs && node scripts/check-inline.mjs && node scripts/check-strings.mjs && npm run lint && npm run typecheck && npm run build:web",
+    "mock": "node scripts/mock-server.mjs",
+    "screenshots": "node scripts/screenshots.mjs",
+    "purgecss:report": "node scripts/purgecss-report.mjs"
   },
   "dependencies": {
     "@types/three": "^0.182.0",
@@ -35,6 +41,8 @@
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.5",
+    "playwright": "^1.63.0",
+    "purgecss": "^8.0.0",
     "typescript": "^5.2.2",
     "vite": "^5.1.6",
     "vite-plugin-electron": "^0.28.6",

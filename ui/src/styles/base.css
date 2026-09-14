@@ -1,0 +1,227 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   STAC Build — Base: reset, typography, scrollbars, focus, motion
+   ═══════════════════════════════════════════════════════════════════════
+   No literals here: everything comes from tokens.css. Decisions (§4.2, §4.4):
+   - `user-select: none` stays on the shell (an instrument, not a document);
+     inputs, textareas and `.stac-selectable` opt back in.
+   - Every number is tabular by default (`font-variant-numeric` on html) so no
+     component has to remember it; the mono family is applied per readout.
+   - `prefers-reduced-motion` kills every non-user-triggered transition and
+     the progress spinners keep only a slow opacity pulse.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+html {
+  font-family: var(--font-sans);
+  line-height: var(--lh-body);
+  font-weight: var(--fw-regular);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-1);
+  background: var(--surface-0);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+}
+
+body {
+  font-size: var(--fs-2);
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+}
+
+input,
+textarea,
+.stac-selectable {
+  user-select: text;
+}
+
+button {
+  cursor: pointer;
+  background: none;
+  border: none;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+a {
+  color: var(--measure);
+  text-decoration: none;
+}
+
+img,
+video,
+canvas {
+  display: block;
+  max-width: 100%;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-title);
+  font-size: var(--fs-3);
+}
+
+code,
+kbd,
+samp,
+.stac-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Scrollbars: thin, transparent track ─────────────────────────────── */
+::-webkit-scrollbar {
+  width: var(--scrollbar-w);
+  height: var(--scrollbar-w);
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-3);
+  border-radius: var(--r-pill);
+  border: var(--bw-selected) solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-3);
+  background-clip: padding-box;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-3) transparent;
+}
+
+/* ── Selection + focus ───────────────────────────────────────────────── */
+::selection {
+  background: var(--measure-soft);
+  color: var(--text-1);
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+  border-radius: var(--r-1);
+}
+
+/* ── Utilities (the only global helpers) ─────────────────────────────── */
+.stac-hidden {
+  display: none;
+}
+
+.stac-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.stac-spin {
+  animation: stac-spin 0.9s linear infinite;
+}
+
+@keyframes stac-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.stac-live-dot {
+  width: var(--dot);
+  height: var(--dot);
+  border-radius: var(--r-circle);
+  background: var(--text-3);
+  flex-shrink: 0;
+}
+
+.stac-live-dot--ok {
+  background: var(--ok);
+}
+
+.stac-live-dot--warn {
+  background: var(--warn);
+}
+
+.stac-live-dot--err {
+  background: var(--err);
+}
+
+.stac-live-dot--brand {
+  background: var(--brand-orange);
+}
+
+.stac-live-dot--pulse {
+  animation: stac-live-pulse 2.4s ease-out infinite;
+}
+
+@keyframes stac-live-pulse {
+  0% {
+    box-shadow: var(--elev-0);
+    opacity: 1;
+  }
+
+  70% {
+    opacity: 0.55;
+  }
+
+  100% {
+    box-shadow: var(--elev-0);
+    opacity: 1;
+  }
+}
+
+/* ── Reduced motion (§4.4) ───────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
+    scroll-behavior: auto;
+  }
+
+  .stac-spin,
+  .stac-live-dot--pulse {
+    animation: stac-live-pulse 2.4s ease-out infinite;
+  }
+}

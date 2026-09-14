@@ -1,0 +1,344 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   STAC Build — Design tokens (the ONLY file with literal values)
+   ═══════════════════════════════════════════════════════════════════════
+   Every colour, size, radius, shadow and duration used by the UI is declared
+   here and consumed everywhere else through var(--token). `check-tokens.mjs`
+   fails the build when a literal appears anywhere else under ui/src.
+
+   Decisions taken while implementing prompt_ui.txt §4 (recorded here because
+   the prompt asks for decisions to live in the header of the file they touch):
+   - Font sizes are declared per density in px (not rem): the whole app sets
+     `html { font-size }` per density anyway, and px tokens let the contrast /
+     token scripts read the exact size without evaluating rem math.
+   - Extra radius tokens `--r-0` (square corners for tabs/flush controls) and
+     `--r-circle` (dots, avatars, knobs) exist because a 50% radius cannot be
+     expressed with the 4/6/10/pill scale; both are still tokens.
+   - `--ring-focus` is the only box-shadow allowed besides `--elev-*`
+     (focus ring = 2px cyan, §4.3). `--glow-primary` is the single reserved
+     glow for the primary action (§3).
+   - The brand navy never appears as text or button: only `--surface-brand`
+     (header, activity bar, splash) is derived from it.
+   - Legacy aliases (--bg-primary, --accent, …) point at the new tokens until
+     the last consumer migrates; `check-tokens.mjs` fails on any remaining use
+     and the block is deleted at the close of F7 (see the end of this file).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Brand (from public/logo.png) ─────────────────────────────────── */
+  --brand-orange: #f28b34;        /* primary action, selection, brand */
+  --brand-orange-deep: #b86020;   /* hover / active of primary, emphasis */
+  --brand-orange-soft: rgba(242, 139, 52, 0.16);
+  --brand-navy: #0e1541;          /* surface tint only — never text */
+
+  /* ── Surfaces (dark; the stack leans slightly towards the navy) ────── */
+  --surface-0: #0a0d14;           /* base: viewport, app background */
+  --surface-1: #10141e;           /* panels */
+  --surface-2: #161b27;           /* elevated: cards, popovers */
+  --surface-3: #1e2431;           /* hover */
+  --surface-4: #283041;           /* active / selected */
+  --surface-brand: color-mix(in srgb, var(--brand-navy) 55%, var(--surface-1));
+  --surface-scrim: rgba(10, 13, 20, 0.6);   /* modal backdrop */
+  --surface-video: #000000;                 /* video / call letterbox */
+
+  /* ── Text ──────────────────────────────────────────────────────────── */
+  --text-1: #e9eef5;
+  --text-2: #a4adba;
+  --text-3: #838e9d;              /* lifted from the draft #6e7887: 4.5:1 on hover rows */
+  --text-inverse: #0a0d14;
+
+  /* ── Borders (always 1px) ──────────────────────────────────────────── */
+  --border-1: #1b212c;            /* separators (decorative) */
+  --border-2: #262d3a;            /* card / popover outlines (decorative) */
+  --border-3: #364052;            /* hover outline of cards and rows */
+  --border-ctl: #5e697f;          /* outline of inputs, selects, checkboxes,
+                                     switches and secondary buttons: the one
+                                     boundary that must read at ≥ 3:1 (WCAG
+                                     1.4.11) on surface-1 and surface-2 */
+
+  /* ── Measurement / AI layer (cyan) ─────────────────────────────────── */
+  --measure: #4fd1ff;
+  --measure-soft: rgba(79, 209, 255, 0.14);
+
+  /* ── State (never reused for brand) ────────────────────────────────── */
+  --ok: #3fb950;
+  --warn: #f5b041;                /* more yellow than the brand orange */
+  --err: #f85149;
+  --info: #4fd1ff;
+  --ok-soft: rgba(63, 185, 80, 0.12);
+  --warn-soft: rgba(245, 176, 65, 0.12);
+  --err-soft: rgba(248, 81, 73, 0.12);
+  --info-soft: rgba(79, 209, 255, 0.12);
+  /* text-safe variants (≥ 4.5:1 on panels AND on the -soft fills): the
+     base state colours are for fills, icons and borders (≥ 3:1) */
+  --ok-fg: #62d072;
+  --warn-fg: #f7bf62;
+  --err-fg: #ff7b74;
+  --info-fg: #6fdaff;
+
+  /* ── Point semantics (viewport) ────────────────────────────────────── */
+  --pt-verified: #7fd18a;
+  --pt-single: #9aa4b2;
+  --pt-conflict: #f5b041;
+  --pt-dynamic: #c678dd;
+  --pt-unobserved: #4a5363;
+
+  /* ── Trajectory graph edges (viewport) ─────────────────────────────── */
+  --edge-odo: #6e7887;
+  --edge-loop: #3fb950;
+  --edge-scale-break: #f5b041;
+  --edge-rejected: #f85149;
+  --edge-ambiguous: #4fd1ff;
+
+  /* ── Categorical instance palette (12) ──────────────────────────────
+     Found by simulated annealing (scripts/check-contrast.mjs verifies):
+     every entry keeps ΔE00 ≥ 20 against the other eleven, the state
+     colours, the point-semantic colours and the brand orange, reads at
+     ≥ 3:1 on surface-0/1/2, and the minimum pairwise ΔE00 under simulated
+     protanopia / deuteranopia / tritanopia stays ≥ 10 — the measured
+     ceiling for 12 categories sharing the gamut with 8 fixed colours. */
+  --cat-01: #1285ed;
+  --cat-02: #15afa4;
+  --cat-03: #2d757a;
+  --cat-04: #b9fef3;
+  --cat-05: #bdff08;
+  --cat-06: #a6ac05;
+  --cat-07: #5c7448;
+  --cat-08: #f4f2c1;
+  --cat-09: #a08b67;
+  --cat-10: #ab560a;
+  --cat-11: #e4c7f0;
+  --cat-12: #6a65a5;
+
+  /* ── Deviation ramp (heat map: within tolerance → far out) ─────────── */
+  --dev-0: #3fb950;
+  --dev-1: #a3d34d;
+  --dev-2: #f5b041;
+  --dev-3: #ff7a3d;
+  --dev-4: #f85149;
+
+  /* ── Viewport scene colours (Three.js reads these at runtime) ──────── */
+  --vp-clear: #0a0d14;
+  --vp-grid-major: #252d3a;
+  --vp-grid-minor: #1c2333;
+  --vp-light: #ffffff;
+  --vp-axis-x: #f85149;
+  --vp-axis-y: #3fb950;
+  --vp-axis-z: #5aa9ff;
+  --vp-selection: #f28b34;
+  --vp-hover: #283041;
+  --vp-marker: #4fd1ff;
+  --vp-angle: #f5b041;
+  --vp-section-box: #4fd1ff;
+  --vp-erase-mark: #f85149;
+  --vp-erase-box: #f85149;
+  --vp-epoch-tint: #f28b34;
+  --vp-bim-highlight: #4fd1ff;
+  --vp-sabana-unmatched: #6e7887;
+  --vp-sabana-default: #a4adba;
+  --vp-volume-free: #a889ff;
+  --vp-volume-touching: #f5b041;
+  --vp-volume-colliding: #f85149;
+  --vp-label-bg: rgba(10, 13, 20, 0.7);
+
+  /* ── Typography ────────────────────────────────────────────────────── */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --lh-body: 1.45;
+  --lh-title: 1.25;
+  --lh-readout: 1.2;
+
+  /* ── Spacing (4px base) ────────────────────────────────────────────── */
+  --sp-0: 0px;
+  --sp-half: 2px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 28px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* ── Radii ─────────────────────────────────────────────────────────── */
+  --r-0: 0px;
+  --r-1: 4px;                     /* inputs, buttons, chips */
+  --r-2: 6px;                     /* cards, popovers */
+  --r-3: 10px;                    /* dialogs, floating toolbars */
+  --r-pill: 999px;
+  --r-circle: 50%;
+
+  /* ── Borders / focus ───────────────────────────────────────────────── */
+  --bw: 1px;
+  --bw-selected: 2px;             /* selection outline + tab underline */
+  --ring-focus: 0 0 0 2px var(--measure);
+
+  /* ── Elevation (popovers, dialogs, floating toolbars only) ─────────── */
+  --elev-0: none;
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --elev-2: 0 6px 18px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --elev-3: 0 16px 44px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --glow-primary: 0 0 0 1px rgba(242, 139, 52, 0.35), 0 4px 18px rgba(242, 139, 52, 0.18);
+
+  /* ── Glass (only over the viewport) ────────────────────────────────── */
+  --glass-bg: rgba(16, 20, 30, 0.82);
+  --glass-blur: 12px;
+
+  /* ── Motion ────────────────────────────────────────────────────────── */
+  --motion-fast: 150ms ease;
+  --motion-panel: 180ms ease;
+  --motion-progress: 400ms ease;
+
+  /* ── Iconography ───────────────────────────────────────────────────── */
+  --icon-sm: 14px;
+  --icon-md: 16px;                /* chrome, tables */
+  --icon-lg: 18px;                /* viewport toolbars */
+  --icon-xl: 20px;                /* activity bar */
+  --icon-hero: 40px;              /* empty states */
+  --icon-stroke: 1.5;
+
+  /* ── Layout regions ────────────────────────────────────────────────── */
+  --header-h: 36px;
+  --activity-w: 48px;
+  --statusbar-h: 28px;
+  --tabs-h: 30px;
+  --dock-h: 200px;
+  --left-panel-w: 280px;
+  --inspector-w: 320px;
+  --panel-min-w: 200px;
+  --panel-max-w: 640px;
+  --resize-handle-w: 5px;
+  --toolbar-float-h: 40px;
+  --splash-logo-w: 160px;
+  --welcome-logo-w: 200px;
+  --dialog-w: 440px;
+  --dialog-w-lg: 640px;
+  --drawer-w: 560px;
+  --palette-w: 560px;
+  --popover-min-w: 200px;
+  --tooltip-max-w: 280px;
+  --toast-w: 360px;
+  --legend-w: 14px;
+  --legend-h: 160px;
+  --scale-bar-max-w: 120px;
+  --nav-cube-size: 64px;
+  --hud-inset: 12px;
+
+  /* ── Control geometry shared by both densities ─────────────────────── */
+  --slider-track-h: 4px;
+  --slider-thumb: 12px;
+  --switch-w: 32px;
+  --switch-h: 18px;
+  --switch-knob: 14px;
+  --checkbox: 14px;
+  --dot: 8px;
+  --dot-lg: 10px;
+  --progress-h: 4px;
+  --progress-h-lg: 8px;
+  --scrollbar-w: 8px;
+  --z-panel: 5;
+  --z-hud: 20;
+  --z-float: 60;
+  --z-popover: 100;
+  --z-banner: 150;
+  --z-dock: 200;
+  --z-drawer: 900;
+  --z-dialog: 1000;
+  --z-toast: 1100;
+  --z-tooltip: 1200;
+  --z-splash: 1300;
+  --opacity-disabled: 0.45;
+  --opacity-muted: 0.7;
+  --opacity-dim: 0.35;
+}
+
+/* ── Density (§4.5): compact on desktop, comfortable on touch ────────── */
+html[data-density='compact'] {
+  font-size: 13px;
+  --fs-0: 11px;
+  --fs-1: 12px;
+  --fs-2: 13px;
+  --fs-3: 15px;
+  --fs-4: 18px;
+  --fs-5: 24px;
+  --ctl-h: 28px;                  /* buttons, inputs, selects */
+  --ctl-h-sm: 24px;
+  --row-h: 28px;                  /* table / tree rows */
+  --panel-pad: var(--sp-3);
+  --cell-pad-x: var(--sp-2);
+}
+
+html[data-density='comfortable'] {
+  font-size: 14px;
+  --fs-0: 12px;
+  --fs-1: 13px;
+  --fs-2: 14px;
+  --fs-3: 16px;
+  --fs-4: 20px;
+  --fs-5: 26px;
+  --ctl-h: 32px;
+  --ctl-h-sm: 28px;
+  --row-h: 36px;
+  --panel-pad: var(--sp-4);
+  --cell-pad-x: var(--sp-3);
+}
+
+/* ── Theme hook (§4.5): dark is the only implemented theme; a light theme
+      is one more block overriding the semantic colours above. ───────── */
+html[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+/* ── Legacy aliases — deleted at the close of F7 ─────────────────────── */
+:root {
+  --bg-base: var(--surface-0);
+  --bg-surface: var(--surface-1);
+  --bg-elevated: var(--surface-2);
+  --bg-hover: var(--surface-3);
+  --bg-active: var(--surface-4);
+  --bg-primary: var(--surface-0);
+  --bg-secondary: var(--surface-1);
+  --bg-tertiary: var(--surface-2);
+  --bg-input: var(--surface-0);
+  --bg-panel: var(--surface-1);
+  --glass-border: var(--border-2);
+  --accent: var(--brand-orange);
+  --accent-hover: var(--brand-orange-deep);
+  --accent-muted: var(--brand-orange-soft);
+  --accent-2: var(--measure);
+  --accent-2-hover: var(--measure);
+  --accent-2-muted: var(--measure-soft);
+  --success: var(--ok);
+  --warning: var(--warn);
+  --error: var(--err);
+  --status-green: var(--ok);
+  --status-amber: var(--warn);
+  --status-red: var(--err);
+  --text-primary: var(--text-1);
+  --text-secondary: var(--text-2);
+  --text-muted: var(--text-3);
+  --text: var(--text-1);
+  --border: var(--border-2);
+  --border-light: var(--border-1);
+  --border-strong: var(--border-3);
+  --focus-ring: var(--ring-focus);
+  --font-family: var(--font-sans);
+  --radius-xs: var(--r-1);
+  --radius-sm: var(--r-2);
+  --radius-md: var(--r-3);
+  --radius-lg: var(--r-3);
+  --radius-pill: var(--r-pill);
+  --transition-fast: var(--motion-fast);
+  --transition-normal: var(--motion-panel);
+  --shadow-sm: var(--elev-1);
+  --shadow-md: var(--elev-2);
+  --shadow-lg: var(--elev-3);
+  --glow-accent: var(--glow-primary);
+  --activity-bar-width: var(--activity-w);
+  --sidebar-width: var(--left-panel-w);
+  --statusbar-height: var(--statusbar-h);
+}
