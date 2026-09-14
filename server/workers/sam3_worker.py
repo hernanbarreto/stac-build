@@ -106,17 +106,28 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # Apply to cleaned cloud
     pipe.send_progress(80, "Applying to point cloud...", stage="sam3")
 
+    # The mask→cloud projection belongs HERE, not downstream: CloudCompy runs
+    # before the semantic stages now, so the scene cloud is on disk and the
+    # masks can be projected onto it the moment they exist. It used to be
+    # deferred to CloudCompy because the cloud did not exist yet at this point,
+    # and the "apply to the viewer" call that ran here anyway found no cloud,
+    # degraded to instances with no points and cached that as the session's
+    # segmentation.
     try:
-        from segmentation_pipeline import apply_segmentation_to_cloud
-        seg_data = apply_segmentation_to_cloud(output_dir)
+        from segmentation_pipeline import map_segmentation_to_cloud
+        seg_data = map_segmentation_to_cloud(output_dir)
+        if seg_data.get("error"):
+            raise RuntimeError(seg_data["error"])
         n_applied = len(seg_data.get("instances", []))
-        pipe.send_log(f"Applied {n_applied} instances to cloud")
+        cov = seg_data.get("coverage")
+        pipe.send_log(f"Mapped {n_applied} instances onto the cloud"
+                      + (f" ({cov * 100:.1f}% coverage)" if cov is not None else ""))
 
         # Save seg_data for broadcast
         seg_broadcast_path = output_dir / "seg_broadcast.json"
         seg_broadcast_path.write_text(json.dumps(seg_data))
     except Exception as e:
-        pipe.send_log(f"Apply to cloud failed (non-fatal): {e}", level="warning")
+        pipe.send_log(f"mask→cloud mapping failed (non-fatal): {e}", level="warning")
 
     # ── Per-object textured TSDF mesh ──
     # Just as the cloud is split per instance above, carve each instance's

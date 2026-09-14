@@ -2,7 +2,7 @@
 Dynamic-class masks for the PGSR photometric loss (precision task, Phase D).
 ================================================================================
 The SAM3 stage runs BEFORE the PGSR stage in the pipeline (RECONSTRUCTION →
-VLM → SAM3 → CLOUDCOMPY → [PGSR] → TSDF), so its masks are available when the
+CLOUDCOMPY → VLM → SAM3 → [PGSR] → TSDF), so its masks are available when the
 photometric optimization starts. This module unions, per keyframe, the SAM3
 masks of every instance whose canonical label is a DYNAMIC class in the
 segmentation vocabulary (person / mobile equipment / train, …) and writes one

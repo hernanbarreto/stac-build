@@ -49,10 +49,12 @@ pipeline:
                         # true = old behaviour (pipeline ends with PGSR+TSDF stages).
   # Full semantic chain inside the reconstruct pipeline (USER 2026-09-13: ONE
   # command — "Reconstruir" — delivers the finished cloud; nothing is manual):
-  #   RECONSTRUCTION → VLM (Qwen3-VL scene understanding) → SAM3 (segment
-  #   everything) → CLOUDCOMPY (cleaned cloud + witnesses + mask→cloud) →
-  #   CERTIFY (claude_stac.txt §9: instance + revisit loops → scale → keyframe
-  #   pose graph → depth → witnesses, epochs Approve/Undo in the kit).
+  #   RECONSTRUCTION → CLOUDCOMPY (cleaned cloud + witnesses; on screen here,
+  #   and before the semantic stages so SAM3 can project its masks onto it the
+  #   moment they exist) → VLM (Qwen3-VL scene understanding) → SAM3 (segment
+  #   everything + mask→cloud) → CERTIFY (claude_stac.txt §9: instance +
+  #   revisit loops → scale → keyframe pose graph → depth → witnesses, epochs
+  #   Approve/Undo in the kit).
   # false = RECONSTRUCTION → CLOUDCOMPY only: no segmentation, no instance
   # loops, no certification — the duplicates of a drifted revisit stay
   # (the pccr run of 2026-09-13 17:04 ran exactly that and changed nothing).

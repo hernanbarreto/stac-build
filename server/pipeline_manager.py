@@ -61,9 +61,15 @@ STAGE_REGISTRY = {
 # under phase_r/ as the data layer for phases 2-6.
 DEFAULT_STAGE_ORDER: List[StageId] = [
     StageId.RECONSTRUCTION,
+    StageId.CLOUDCOMPY,    # BEFORE the semantic stages: SAM3 has to project its
+                           # masks onto the scene cloud the moment it finishes,
+                           # and with CloudCompy downstream that cloud did not
+                           # exist yet — the match was structurally impossible
+                           # and degraded to instances with no points. It also
+                           # means a SAM3 failure no longer costs the user the
+                           # cloud: it is on screen before segmentation starts.
     StageId.VLM,
     StageId.SAM3,
-    StageId.CLOUDCOMPY,
     StageId.CERTIFY,
     StageId.PGSR,          # precision mode only: no-ops unless backend is
                            # vggtomega_pgsr (seeds from cleaned_cloud, so it runs
@@ -364,17 +370,17 @@ class PipelineManager:
                       # orient skip on every re-run → cloud not metric, scene upside down.
         StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "cleaned_cloud_raw.ply",
                              "floor_transform.npz", "scene_consolidate_report.json",
-                             # the deferred mask→cloud mapping runs IN this stage
-                             # → its products are THIS stage's outputs, not SAM3's
-                             "segmentation_result.json", "seg_broadcast.json",
-                             "classification.npy", "corrected_cloud.ply"],
+                             "corrected_cloud.ply"],
         StageId.PGSR: ["pgsr_scene", "pgsr_model", "pgsr_render"],
         StageId.TSDF: ["tsdf/scene"],
         StageId.VLM: ["scene_analysis.json", "vlm_analysis.json",
                       "scene_understanding.json", "autoprompt_instances.json",
                       "autoprompt_review_queue.json"],
+        # the mask→cloud mapping now runs inside SAM3 (the cloud already
+        # exists when it finishes) → its products are SAM3's outputs
         StageId.SAM3: ["segmentation.json", "segmentation_result.json",
-                       "seg_masks.npz", "seg_broadcast.json", "scene_r.db"],
+                       "seg_masks.npz", "seg_broadcast.json", "scene_r.db",
+                       "classification.npy"],
         # the certification's records (the acta, the per-epoch quality reports,
         # the post-hoc graph, the candidates/duplicates lists). Its epochs are
         # correction artifacts: a NEW reconstruction wipes output/ (epoch 0
@@ -397,16 +403,16 @@ class PipelineManager:
 
     # Cascade: when a stage re-runs, these DOWNSTREAM stages' outputs are ALSO
     # invalidated. MUST mirror DEFAULT_STAGE_ORDER:
-    #   RECONSTRUCTION → VLM → SAM3 → CLOUDCOMPY → CERTIFY → TSDF
+    #   RECONSTRUCTION → CLOUDCOMPY → VLM → SAM3 → CERTIFY → TSDF
     # A cascade edge pointing UPSTREAM deletes freshly produced artifacts
     # mid-pipeline — that exact bug (CLOUDCOMPY → SAM3, a relic of the old
     # cloudcompy-before-sam3 order) silently erased segmentation.json +
     # seg_masks.npz right after SAM3 wrote them (test2, 2026-07-08).
     CASCADE_INVALIDATION: Dict[StageId, List[StageId]] = {
         StageId.RECONSTRUCTION: [
+            StageId.CLOUDCOMPY,       # cleaned_cloud depends on chunks
             StageId.VLM,              # scene analysis ran on old keyframes
             StageId.SAM3,             # segmentation ran on old frames
-            StageId.CLOUDCOMPY,       # cleaned_cloud depends on chunks
             StageId.CERTIFY,          # the acta certified the old geometry
             StageId.PGSR,             # PGSR trained on old poses/cloud
             StageId.TSDF,             # TSDF mesh integrated old depth/poses
@@ -423,6 +429,8 @@ class PipelineManager:
             StageId.INSTANCE_CLEANER, # instances depend on segmentation
         ],
         StageId.CLOUDCOMPY: [
+            StageId.VLM,              # the semantic stages read THIS cloud
+            StageId.SAM3,             # masks are projected onto THIS cloud
             StageId.CERTIFY,          # the loop certifies THIS cleaned cloud
             StageId.PGSR,             # the Gaussian seed is the cleaned cloud
             StageId.TSDF,             # TSDF masks to the old cleaned_cloud

@@ -31,7 +31,7 @@ def test_production_pipeline_runs_the_whole_chain():
     stages = build_pipeline_stages(backend=str(raw["reconstruction"]["backend"]))
     enabled = [s.id for s in stages if s.enabled]
     # reconstruction → VLM → SAM3 → cleaned cloud → certification, in this order
-    want = [StageId.RECONSTRUCTION, StageId.VLM, StageId.SAM3, StageId.CLOUDCOMPY, StageId.CERTIFY]
+    want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.VLM, StageId.SAM3, StageId.CERTIFY]
     assert enabled[:len(want)] == want, enabled
     if raw["pipeline"]["auto_tsdf"] is False:
         assert StageId.TSDF not in enabled and StageId.PGSR not in enabled
@@ -64,6 +64,10 @@ def test_certify_stage_registered_and_cascaded():
     from pipeline_manager import (DEFAULT_STAGE_ORDER, STAGE_REGISTRY, PipelineManager, StageId)
     assert StageId.CERTIFY in DEFAULT_STAGE_ORDER
     assert DEFAULT_STAGE_ORDER.index(StageId.CERTIFY) > DEFAULT_STAGE_ORDER.index(StageId.CLOUDCOMPY)
+    # the cloud must exist BEFORE the semantic stages: SAM3 projects its masks
+    # onto it the moment they exist, and a SAM3 failure must not cost the cloud
+    assert DEFAULT_STAGE_ORDER.index(StageId.CLOUDCOMPY) < DEFAULT_STAGE_ORDER.index(StageId.VLM)
+    assert DEFAULT_STAGE_ORDER.index(StageId.CLOUDCOMPY) < DEFAULT_STAGE_ORDER.index(StageId.SAM3)
     assert STAGE_REGISTRY[StageId.CERTIFY]["module"] == "workers.certify_worker"
     import importlib
     mod = importlib.import_module(STAGE_REGISTRY[StageId.CERTIFY]["module"])

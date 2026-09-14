@@ -301,56 +301,11 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
             except Exception as e:
                 pipe.send_log(f"Floor alignment computation failed: {e}", level="warning")
 
-        # ── Deferred mask→cloud mapping (anchored pipeline order) ──
-        # SAM3 ran BEFORE this stage and only wrote masklets; now that the
-        # (corrected) merged cloud exists, run the ONE-SHOT matching + per-
-        # instance cleaning and refresh the store's canonical OBBs. Also
-        # refreshes when the segmentation is newer than the last mapping.
-        # Runs AFTER floor alignment (a newer floor_transform.npz would
-        # invalidate the freshly written segmentation_result.json) and BEFORE
-        # the Potree build, so the octree is built ONCE, already carrying the
-        # per-point classification — instead of a plain build here + a forced
-        # classification rebuild inside the matching. Non-fatal.
-        _mapping_rebuilt_potree = False
-        try:
-            seg = output_dir / "segmentation.json"
-            res = output_dir / "segmentation_result.json"
-            cleaned = output_dir / "cleaned_cloud.ply"
-            # The mtime against segmentation.json is not enough. Right after
-            # SAM3 — before this stage produced any cloud — the matcher runs
-            # once, finds no cleaned_cloud.ply, falls back to chunk_000.ply
-            # (which carries no origin fields), writes a 2D-ONLY result and
-            # CACHES it. That file is newer than segmentation.json, so the gate
-            # read "already mapped" and skipped: pccr 2026-09-14 reached the
-            # certification with 212 instances that had no cloud points at all
-            # and instance-loops found 0 candidates. What the gate has to ask
-            # is whether the result was mapped onto THIS cloud: anything older
-            # than cleaned_cloud.ply, or carrying the 2D-only warning, has not
-            # been.
-            import sys as _sys
-            _sd = str(Path(__file__).resolve().parent.parent)
-            if _sd not in _sys.path:
-                _sys.path.insert(0, _sd)
-            from segmentation.pipeline import segmentation_result_is_stale
-            stale, why = segmentation_result_is_stale(output_dir)
-            if seg.exists() and stale:
-                pipe.send_log(f"mask→cloud mapping needed: {why}")
-                pipe.send_progress(94, "Mapping segmentation to cloud (one-shot)...",
-                                   stage="cloudcompy")
-                import sys
-                server_dir_str = str(Path(__file__).resolve().parent.parent)
-                if server_dir_str not in sys.path:
-                    sys.path.insert(0, server_dir_str)
-                from segmentation.pipeline import map_segmentation_to_cloud
-                r = map_segmentation_to_cloud(output_dir)
-                n = len(r.get("instances", []))
-                _mapping_rebuilt_potree = bool(r.get("reload_potree"))
-                pipe.send_log(f"Deferred mask→cloud mapping: {n} instances matched"
-                              + (" (octree rebuilt with classification)"
-                                 if _mapping_rebuilt_potree else ""))
-        except Exception as e:  # noqa: BLE001
-            pipe.send_log(f"Deferred mask→cloud mapping failed (non-fatal): {e}",
-                          level="warning")
+        # NOTE: the mask→cloud mapping used to run here, because SAM3 came
+        # first and could only write masklets — the cloud it needed did not
+        # exist yet. The stage order now puts CloudCompy BEFORE the semantic
+        # stages, so SAM3 finds the cloud on disk and does the projection
+        # itself, the moment it finishes. Nothing to defer any more.
 
         # ── Build Potree LOD octree (so the first viewer load is instant) ──
         # Runs as the final reconstruction step. Carries the per-point
@@ -393,13 +348,7 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
                              or _oct.stat().st_mtime < output_ply.stat().st_mtime)
             if not _potree_stale:
                 pipe.send_log("Potree octree up to date — skipped (light resume)")
-        if _mapping_rebuilt_potree:
-            # the matching just rebuilt the octree (with classification) from the
-            # corrected cloud — a second forced build here would only redo it
-            pipe.send_log("Potree octree already rebuilt by the mask→cloud mapping — "
-                          "skipping duplicate build")
-            _mirror_merged_potree()
-        elif postproc.get("build_potree", True) and _potree_stale:
+        if postproc.get("build_potree", True) and _potree_stale:
             pipe.send_progress(96, "Building Potree LOD octree...", stage="cloudcompy")
             try:
                 import sys
