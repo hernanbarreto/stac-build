@@ -2366,6 +2366,35 @@ loops:                              # candidate detector + spatial gate (§4.4/�
                                     # silence whole revisits — 3 keyframes ≈ the vendor's span
     image_size: [336, 336]          # SALAD input (vendor)
     batch_size: 32
+  reprojection:                     # §4.5 — the FRAMES arbitrate a `split`, not the budget
+    enabled: true                   # A `split` proposes no closure, so it is the one verdict
+                                    # that can silently destroy a duplicate. The drift budget
+                                    # δ(L) is an estimate and on pccr 2026-09-14 it was 0.90 m
+                                    # while the measured revisit demanded 2.59 m: a chair and
+                                    # three desks whose copies sat 1.04-1.29 m apart were torn
+                                    # in two — the very objects the user had identified by eye
+                                    # as drift copies. Before splitting, project one copy into
+                                    # the keyframes where the other was OBSERVED and compare
+                                    # with the mask: the same object lands under ONE consistent
+                                    # rigid shift (that shift is the drift, in pixels), two
+                                    # objects under none. Only `same_object` overrules, and it
+                                    # lands on `ambiguous` — the closure is proposed with an
+                                    # inflated σ and every later stage still measures it.
+    dilate_px: 3                    # the projection is a sparse point set and the mask a
+                                    # filled region: close the gaps so the overlap is measured
+                                    # between AREAS, not between samples
+    max_frames: 8                   # keyframes tested per direction
+    min_self_recall: 0.40           # SANITY: each copy must reach this much of its OWN mask in
+                                    # its own frames. Below it the poses, the geometry or the
+                                    # grid scaling are off and the pair is declared `unusable`
+                                    # — never quietly `distinct`, which is the same wrong
+                                    # answer the threshold gives. Recall, not IoU: a large
+                                    # instance projects over far more of a frame than SAM3
+                                    # masked there, and IoU reads 0.00 on a 1.7 M-point duct
+                                    # that is placed perfectly.
+    min_cross_recall: 0.40          # ...and this much of the OTHER copy's mask after the shift
+    max_shift_dispersion_px: 40     # the shift has to AGREE across frames. A duplicate has one
+                                    # rigid offset; coincidental overlap does not.
   min_gap_keyframes: 30             # two windows of one instance this far apart = revisit
   duplicate_min_sep_m: 0.20         # two disjoint 3-D clusters of one instance, centroids
                                     # farther than this and no bridging points = duplicate

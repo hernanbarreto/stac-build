@@ -147,7 +147,25 @@ class SaladConfig:
 
 
 @dataclass(frozen=True)
+class ReprojectionConfig:
+    """§4.5 — the frames arbitrate a `split`. Project one copy of an instance
+    into the keyframes where the other was observed and compare with the mask
+    there: the same object displaced by drift lands under a single consistent
+    rigid shift, two objects under none."""
+    enabled: bool
+    dilate_px: int                  # the projection is a point set, the mask a filled
+                                    # region: close the gaps so the overlap is between AREAS
+    max_frames: int                 # keyframes tested per direction
+    min_self_recall: float          # a copy must reach THIS much of its own mask in its own
+                                    # frames or no verdict is trustworthy (declared unusable)
+    min_cross_recall: float         # ...and this much of the other's, after the shift
+    max_shift_dispersion_px: float  # the shift must AGREE between frames; a duplicate has one
+                                    # rigid offset, coincidence does not
+
+
+@dataclass(frozen=True)
 class LoopsConfig:
+    reprojection: "ReprojectionConfig"
     min_gap_keyframes: int          # two windows of one instance must be this far apart
     duplicate_min_sep_m: float      # centroid separation of two 3-D clusters = duplicate
     dbscan_eps_m: float
@@ -547,6 +565,15 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         batch_size=_num(sa, "batch_size", A, lo=1, integer=True),
     )
     L = "loops"
+    rp = _sub(ls, "reprojection", L)
+    reprojection = ReprojectionConfig(
+        enabled=_bool(rp, "enabled", f"{L}.reprojection"),
+        dilate_px=_num(rp, "dilate_px", f"{L}.reprojection", lo=0, integer=True),
+        max_frames=_num(rp, "max_frames", f"{L}.reprojection", lo=1, integer=True),
+        min_self_recall=_num(rp, "min_self_recall", f"{L}.reprojection", lo=0),
+        min_cross_recall=_num(rp, "min_cross_recall", f"{L}.reprojection", lo=0),
+        max_shift_dispersion_px=_num(rp, "max_shift_dispersion_px", f"{L}.reprojection", lo=0))
+
     loops = LoopsConfig(
         min_gap_keyframes=_num(ls, "min_gap_keyframes", L, lo=1, integer=True),
         duplicate_min_sep_m=_num(ls, "duplicate_min_sep_m", L, lo=0, lo_excl=True),
@@ -556,7 +583,7 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         bridge_extra_frames=_num(ls, "bridge_extra_frames", L, lo=0, integer=True),
         coverage_radius_m=_num(ls, "coverage_radius_m", L, lo=0, lo_excl=True),
         min_coverage=_num(ls, "min_coverage", L, lo=0, hi=1.0),
-        spatial=spatial, semantic=semantic, salad=salad,
+        spatial=spatial, semantic=semantic, salad=salad, reprojection=reprojection,
     )
 
     sc = raw.get("scale")

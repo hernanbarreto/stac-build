@@ -441,6 +441,31 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
                                          budget_override=budget_override)
         return gate
 
+    rcfg = getattr(cfg.loops, "reprojection", None)
+
+    def _reproject_verdict(inst, cand, iid):
+        """Ask the frames whether the candidate's two clusters are one object.
+        Never raises: a measurement that cannot be made returns None and the
+        gate's own verdict stands."""
+        try:
+            from reconstruction.loops.reprojection import copy_evidence
+            oid = oid_of.get(iid)
+            if oid is None:
+                return None
+            fa = sorted({int(f) for f in np.unique(session.fg[cand.idx_a])})
+            fb = sorted({int(f) for f in np.unique(session.fg[cand.idx_b])})
+            return copy_evidence(
+                output_dir, session_dir, iid, oid,
+                session.xyz[cand.idx_a], session.xyz[cand.idx_b], fa, fb,
+                cloud_to_mask=cloud_to_mask,
+                dilate_px=rcfg.dilate_px, max_frames=rcfg.max_frames,
+                min_self_recall=rcfg.min_self_recall,
+                min_cross_recall=rcfg.min_cross_recall,
+                max_shift_dispersion_px=rcfg.max_shift_dispersion_px)
+        except Exception as e:  # noqa: BLE001 — the gate decides alone, declared
+            log(f"[instance-loops] reprojection unavailable for instance {iid}: {e}")
+            return None
+
     queue = list(instances)
     n_rounds = 0
     while queue:
@@ -461,6 +486,32 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
                     "instance_id": iid, "label": cand.label,
                     "separation_m": gate["rules"]["separation"]["distance_m"],
                     "keyframes": [int(cand.i), int(cand.j)], "verdict": gate["verdict"]})
+            # ── the images overrule the budget on a split ────────────────
+            # A `split` proposes no closure, so it is the one verdict that can
+            # silently destroy a duplicate. The drift budget δ(L) is an
+            # estimate: pccr 2026-09-14 measured a revisit demanding 2.59 m
+            # against a 0.90 m budget and tore apart a chair and three desks
+            # 1.04-1.29 m apart — the very objects the user had identified by
+            # eye as drift copies. Before splitting, ask the frames: project
+            # one copy into the other's keyframes and see whether a single
+            # rigid shift lands it on the mask (reprojection.copy_evidence).
+            # Only `same_object` overrules, and it lands on `ambiguous`, not
+            # `loop`: the closure is proposed with an inflated σ and every
+            # downstream stage still measures it. `distinct` and `unusable`
+            # leave the gate's verdict standing, declared either way.
+            if gate["verdict"] == "split" and rcfg is not None and rcfg.enabled:
+                ev_r = _reproject_verdict(inst, cand, iid)
+                if ev_r is not None:
+                    rec["reprojection"] = {k: v for k, v in ev_r.items()
+                                           if k not in ("self_a", "self_b", "cross")}
+                    if ev_r.get("verdict") == "same_object":
+                        log(f"[instance-loops] instance {iid} ({cand.label}): the frames "
+                            f"overrule the split — {ev_r['reason']}")
+                        gate = dict(gate, verdict="ambiguous",
+                                    reason=f"reprojection: {ev_r['reason']}",
+                                    overruled_split=True)
+                        rec["gate"], rec["verdict"] = gate, "ambiguous"
+
             if gate["verdict"] in ("loop", "ambiguous"):
                 # USER 2026-09-13: "nunca debe descartarse un duplicado detectado
                 # por SAM3" — geometry decided; the class only tags the source
