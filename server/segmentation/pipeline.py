@@ -87,7 +87,7 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
         # ── Step 2: Run SAM3 in batches with IoU matching (per category) ──
         all_masks, obj_labels = _run_sam3_batched(
             seg_frames_dir, frame_files, categories,
-            batch_size, batch_overlap, iou_threshold,
+            batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
             output_dir=output_dir, cfg=cfg,
             frame_map=frame_map,
             on_progress=on_progress,
@@ -238,7 +238,7 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
 
 def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List[str],
                       batch_size: int, batch_overlap: int,
-                      iou_threshold: float,
+                      iou_threshold: float, mask_dedupe_iou: float,
                       output_dir: Path = None, cfg: dict = None,
                       frame_map: dict = None,
                       on_progress=None,
