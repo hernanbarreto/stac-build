@@ -166,7 +166,8 @@ def certify_session(session_dir, cfg=None, operator: str = "auto", log: Callable
              "ambiguous_sigma_factor": cfg.loop.ambiguous_sigma_factor}
     acta = {"version": 1, "started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "operator": operator,
             "max_iters": n_iters, "eps": ccert.eps, "loop_density": float(loop_density),
-            "iterations": [], "stopped_at": None, "stop_reason": None, "provenance": "tool_measured"}
+            "iterations": [], "stopped_at": None, "stop_reason": None, "regressed": False,
+            "provenance": "tool_measured"}
 
     def _instances():
         p = output_dir / "segmentation_result.json"
@@ -305,14 +306,26 @@ def certify_session(session_dir, cfg=None, operator: str = "auto", log: Callable
                 g["advisory"] = True
             log(f"[certify] ⚠ advisory gate(s) failed — declared, iteration applied (USER 2026-09-13): "
                 f"{'; '.join(gate_warnings)}")
+        improvement = ((prev["objective"] - m["objective"]) / prev["objective"]
+                       if prev["objective"] > 0 else 0.0)
+        # An objective that GREW is a regression, never convergence: the iteration
+        # left the session worse than it found it. Declared here so the acta, the
+        # attention list and the kit all carry it; advisory mode still applies the
+        # epoch and leaves Approve/Undo as the verdict (USER 2026-09-13).
+        regressed = improvement < -ccert.regression_eps
+        if regressed:
+            gate_warnings.append(
+                f"objective_regressed: {prev['objective']:.4f} → {m['objective']:.4f} "
+                f"({improvement * 100:+.1f}%, tolerance {ccert.regression_eps * 100:.1f}%)")
+            log(f"[certify] ⚠ REGRESSION: objective {prev['objective']:.4f} → "
+                f"{m['objective']:.4f} ({improvement * 100:+.1f}%)")
         rec.update({"stages": {"scale": srep,
                                "poses": {k: v for k, v in prep.items() if k not in ("xi", "solver")},
                                "depth": {k: v for k, v in drep.items() if k not in ("a", "b")}},
                     "metrics": m, "gates": gates, "gate_mode": ccert.gates.mode,
                     "gate_warnings": gate_warnings, "geometry_moved": moved,
                     "objective": m["objective"], "objective_prev": prev["objective"],
-                    "improvement": ((prev["objective"] - m["objective"]) / prev["objective"]
-                                    if prev["objective"] > 0 else 0.0),
+                    "improvement": improvement, "regressed": regressed,
                     "elapsed_s": round(time.time() - t_it, 1)})
         if failed and not advisory:
             rec["verdict"] = "rejected"
@@ -380,8 +393,15 @@ def certify_session(session_dir, cfg=None, operator: str = "auto", log: Callable
             f"{m['closure']['median_m']} | duplicates {m['duplicates']['n']} | verified "
             f"{m['witnesses']['status_fraction']['verified']:.3f} → epoch {rec.get('epoch_to')}"
             + (f" | ⚠ {len(gate_warnings)} advisory gate warning(s)" if gate_warnings else ""))
-        improvement = rec["improvement"]
         prev = m
+        if regressed:
+            acta["stopped_at"] = it
+            acta["regressed"] = True
+            acta["stop_reason"] = (
+                f"iteration {it} REGRESSED: objective {rec['objective_prev']:.4f} → "
+                f"{rec['objective']:.4f} ({improvement * 100:+.1f}%) — the epoch was applied "
+                f"under gates.mode advisory; Approve/Undo is the verdict")
+            break
         if improvement < ccert.eps:
             acta["stopped_at"] = it
             acta["stop_reason"] = f"improvement {improvement:.4f} below eps {ccert.eps} — converged"

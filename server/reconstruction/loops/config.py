@@ -86,6 +86,10 @@ class LoopEdgeConfig:
 
 @dataclass(frozen=True)
 class SpatialGateConfig:
+    min_walk_m: float               # a pair whose keyframes are closer than this ALONG THE WALK
+                                    # is odometry, not a revisit: the camera never left, so
+                                    # "returning" observes nothing the chain does not already
+                                    # know. Rejected before any frustum work
     drift_floor_m: float
     drift_rate_m_per_m: float
     drift_floor_deg: float
@@ -131,7 +135,12 @@ class SaladConfig:
     keyframes (written into the Omega config's ``Loop.SALAD``)."""
     similarity_threshold: float     # cosine similarity a keyframe pair needs to be proposed
     top_k: int                      # retrieved neighbours per keyframe
-    min_gap_keyframes: int          # pairs closer than this (in keyframes) are odometry
+    min_gap_keyframes: int          # floor: pairs closer than this (in keyframes) are odometry
+    min_gap_frac: float             # and so are pairs closer than this FRACTION of the keyframe
+                                    # count — the detector ranks its top-k among the frames
+                                    # outside the band, so a band that is too narrow spends
+                                    # every slot on near-odometry neighbours. The fork takes
+                                    # max(min_gap_keyframes, ceil(min_gap_frac × n_keyframes))
     nms_threshold: int              # keyframes suppressed around an accepted pair (0 = off)
     image_size: Tuple[int, int]     # SALAD input (h, w)
     batch_size: int
@@ -411,6 +420,11 @@ class CertifyConfig:
                                     # the certification loop read them)
     max_iters: int
     eps: float                      # relative objective improvement below this → converged
+    regression_eps: float           # an improvement BELOW -regression_eps is a REGRESSION, not
+                                    # convergence: the iteration left the session worse than it
+                                    # found it. Declared in the acta and in the attention list;
+                                    # under gates.mode advisory the epoch is still applied and
+                                    # Approve/Undo remains the verdict (USER 2026-09-13)
     auto_after_segmentation: bool
     objective: ObjectiveWeights
     gates: CertifyGates
@@ -474,6 +488,7 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         raise LoopsConfigError("config section loops.spatial is missing")
     S = "loops.spatial"
     spatial = SpatialGateConfig(
+        min_walk_m=_num(sp, "min_walk_m", S, lo=0),
         drift_floor_m=_num(sp, "drift_floor_m", S, lo=0),
         drift_rate_m_per_m=_num(sp, "drift_rate_m_per_m", S, lo=0),
         drift_floor_deg=_num(sp, "drift_floor_deg", S, lo=0),
@@ -526,6 +541,7 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         similarity_threshold=_num(sa, "similarity_threshold", A, lo=-1.0, hi=1.0),
         top_k=_num(sa, "top_k", A, lo=1, integer=True),
         min_gap_keyframes=_num(sa, "min_gap_keyframes", A, lo=1, integer=True),
+        min_gap_frac=_num(sa, "min_gap_frac", A, lo=0),
         nms_threshold=_num(sa, "nms_threshold", A, lo=0, integer=True),
         image_size=(int(isz[0]), int(isz[1])),
         batch_size=_num(sa, "batch_size", A, lo=1, integer=True),
@@ -813,6 +829,7 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
         keep_aligned_chunks=_bool(ce, "keep_aligned_chunks", P),
         max_iters=_num(ce, "max_iters", P, lo=1, integer=True),
         eps=_num(ce, "eps", P, lo=0),
+        regression_eps=_num(ce, "regression_eps", P, lo=0),
         auto_after_segmentation=_bool(ce, "auto_after_segmentation", P),
         objective=objective, gates=gates, scale=scale, visit_loops=visit_loops,
         known_answer=known, envelope=envelope, determinism=determinism)
@@ -852,7 +869,8 @@ def fork_loop_salad(cfg: MetricGraphConfig) -> Dict[str, Any]:
             "top_k": int(s.top_k),
             "use_nms": bool(s.nms_threshold > 0),
             "nms_threshold": int(s.nms_threshold),
-            "min_gap": int(s.min_gap_keyframes)}
+            "min_gap": int(s.min_gap_keyframes),
+            "min_gap_frac": float(s.min_gap_frac)}
 
 
 def fork_model_graph(cfg: MetricGraphConfig) -> Dict[str, Any]:

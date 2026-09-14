@@ -58,6 +58,9 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
     batch_size = seg_cfg.get("batch_size", 50)
     batch_overlap = seg_cfg.get("batch_overlap", 10)
     iou_threshold = seg_cfg.get("iou_match_threshold", 0.3)
+    # SAM3 sometimes hands out several object ids for ONE observation; masks that
+    # agree above this IoU inside a frame are collapsed (segmentation.mask_dedupe_iou)
+    mask_dedupe_iou = float((cfg.get("segmentation", {}) or {}).get("mask_dedupe_iou", 0.90))
     
     # Split prompt by ';' for multi-category support
     categories = [c.strip() for c in prompt.split(";") if c.strip()]
@@ -127,8 +130,15 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
 def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
                           frame_sel_cfg: dict = None):
     """
-    Copy valid frames to frames_valid/ with sequential numbering
-    matching reconstruction's frame_global indexing.
+    Copy valid frames to frames_valid/ with sequential numbering.
+
+    The sequence number is the KEYFRAME POSITION (0, 1, 2 …) and it is the
+    index SAM3's masks are keyed by, together with camera_poses.txt and the
+    hole audit. It is NOT the cloud's ``frame_global``, which carries the REAL
+    video frame number (1, 60, 97 … ) — this docstring used to claim the two
+    matched, and the mask→cloud matcher believed it: on pccr 2026-09-14 only
+    13 of 216 keyframes lined up, by numeric accident, and those 13 took the
+    wrong keyframe's mask. ``_mask_frame_lookup`` translates between the two.
     
     Frame selection priority:
       1. selected_frames.json (visual novelty H/F filter) — if available
@@ -202,7 +212,8 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
         shutil.rmtree(str(frames_valid_dir))
     frames_valid_dir.mkdir()
     
-    # Copy valid frames with sequential numbering (matching reconstruction's frame_global)
+    # Copy valid frames with sequential numbering (the KEYFRAME POSITION — see
+    # the docstring: it is not the cloud's frame_global)
     index_mapping = {}
     seq_frame_files = []
     
@@ -385,7 +396,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         
         def _process_category(category, batches, frames_dir, frame_files, sam3,
                               batch_size, batch_overlap, iou_threshold,
-                              boxes_by_pos=None):
+                              mask_dedupe_iou, boxes_by_pos=None):
             """Process all batches for a single category. Raises on OOM.
             boxes_by_pos: {category-local frame position: [xywh boxes]} from the
             Phase 1 auto-prompter — seeded into SAM3 alongside the text prompt."""
@@ -427,10 +438,15 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                         continue
                     
                     batch_masks = _parse_raw_masks(raw_results)
-                    
+
                     if not batch_masks:
                         print(f"[SegPipeline] Batch {batch_idx}: no valid masks after parsing")
                         continue
+
+                    batch_masks, n_dup_ids = _dedupe_masks_per_frame(batch_masks, mask_dedupe_iou)
+                    if n_dup_ids:
+                        print(f"[SegPipeline] Batch {batch_idx}: {n_dup_ids} object id(s) were "
+                              f"the same observation (IoU ≥ {mask_dedupe_iou:g}) — collapsed")
                     
                     if batch_idx == 0:
                         id_remap = {}
@@ -501,7 +517,8 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         try:
             cat_masks = _process_category(
                 category, cat_batches, frames_dir, cat_frame_files, sam3,
-                batch_size, batch_overlap, iou_threshold, boxes_by_pos=cat_boxes
+                batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
+                boxes_by_pos=cat_boxes
             )
         except Exception as e:
             if "out of memory" in str(e).lower():
@@ -510,7 +527,8 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                 try:
                     cat_masks = _process_category(
                         category, cat_batches, frames_dir, cat_frame_files, sam3,
-                        batch_size, batch_overlap, iou_threshold, boxes_by_pos=cat_boxes
+                        batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
+                        boxes_by_pos=cat_boxes
                     )
                 except Exception as e2:
                     if "out of memory" in str(e2).lower():
@@ -1591,12 +1609,223 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
     return result_indices, voxel_data, face_normals_summary, face_planes, local_face_id
 
 
+def _dedupe_masks_per_frame(batch_masks, iou_threshold: float):
+    """Collapse object ids that SAM3 handed out for the SAME observation.
+
+    The tracker occasionally returns one region under several ids: on pccr
+    2026-09-14 frame 120 carried two 'white tiled floor' masks of 109,786
+    pixels each, IoU 1.0, and frame 0 carried a second identical pair. Each
+    copy then became its own 3-D instance and stole points from the other.
+
+    Two ids whose masks coincide in ANY frame are the same object: the union
+    is taken over the whole batch (so the tracks stay consistent frame to
+    frame) and the lowest id survives. Masks that merely overlap — a monitor
+    inside a desk, a sign against a wall — have a low IoU and are untouched;
+    an IoU of 0.9 already demands the areas agree within 10%, which is used
+    to skip almost every pair without touching the pixels.
+
+    Returns (deduped_masks, n_ids_collapsed); the input is not mutated.
+    """
+    if iou_threshold <= 0 or iou_threshold > 1:
+        return batch_masks, 0
+    parent = {}
+
+    def find(a):
+        while parent.get(a, a) != a:
+            parent[a] = parent.get(parent[a], parent[a])
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    for frame_masks in batch_masks.values():
+        items = []
+        for oid, m in frame_masks.items():
+            mb = m.astype(bool, copy=False)
+            items.append((int(mb.sum()), oid, mb))
+        items.sort()                                  # by area: IoU >= t needs areas within t
+        for a in range(len(items)):
+            area_a, oid_a, mask_a = items[a]
+            if area_a == 0:
+                continue
+            for b in range(a + 1, len(items)):
+                area_b, oid_b, mask_b = items[b]
+                if area_a < iou_threshold * area_b:    # areas too far apart — and sorted, so
+                    break                              # every later b is farther still
+                if mask_a.shape != mask_b.shape:
+                    continue
+                inter = int(np.logical_and(mask_a, mask_b).sum())
+                if inter and inter / float(area_a + area_b - inter) >= iou_threshold:
+                    union(oid_a, oid_b)
+
+    if not parent:
+        return batch_masks, 0
+    collapsed = {}
+    for frame_idx, frame_masks in batch_masks.items():
+        out = {}
+        for oid, m in frame_masks.items():
+            root = find(oid)
+            prev = out.get(root)
+            # the survivor keeps the LARGER mask: the copies agree by IoU, so
+            # this only picks up the few pixels one of them saw and the other missed
+            if prev is None or m.astype(bool).sum() > prev.astype(bool).sum():
+                out[root] = m
+        collapsed[frame_idx] = out
+    n_collapsed = sum(1 for oid in parent if find(oid) != oid)
+    return collapsed, n_collapsed
+
+
+def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float):
+    """Consolidate instances of the SAME label whose points are contiguous.
+
+    SAM3 returns one mask per visually separable region, so one physical
+    surface arrives as many instances carrying one label: pccr 2026-09-14 had
+    48 'white_tiled_floor' instances for a single floor — one of 244k points
+    and 47 fragments of 4–20k — and test3 had 9 'green_decorative_tile_border'.
+    That is what the user sees as "el mismo objeto muchas veces", and it is
+    also why no instance can carry two copies of itself, which leaves the
+    duplicate detector with nothing to find.
+
+    Geometry decides, as everywhere else: two instances with the SAME label
+    whose occupied voxels touch within ``gap_m`` are one object. Two rules
+    keep this away from the containment merge that ``merge_duplicates``
+    disabled after it collapsed 147 instances to 3:
+      * different labels are NEVER merged, so a wall cannot swallow the signs
+        resting against it;
+      * the test is CONTIGUITY, not containment, so nothing is absorbed for
+        sitting inside somebody else's envelope.
+    Two copies of one object left apart by drift are not contiguous either, so
+    they survive as separate instances for the duplicate machinery.
+
+    Mutates ``instances`` in place; returns the number of instances absorbed.
+    """
+    if gap_m <= 0 or len(instances) < 2:
+        return 0
+    from collections import defaultdict
+
+    by_label = defaultdict(list)
+    for k, inst in enumerate(instances):
+        by_label[inst.get("label", "object")].append(k)
+
+    parent = list(range(len(instances)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    offsets = np.array([[dx, dy, dz]
+                        for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)],
+                       dtype=np.int64)
+
+    for label, members in by_label.items():
+        if len(members) < 2:
+            continue
+        keys, owners = [], []
+        for k in members:
+            gi = np.asarray(instances[k].get("globalIndices") or [], dtype=np.int64)
+            gi = gi[(gi >= 0) & (gi < len(xyz_display))]
+            if not len(gi):
+                continue
+            v = np.unique(np.floor(xyz_display[gi] / gap_m).astype(np.int64), axis=0)
+            keys.append(v)
+            owners.append(np.full(len(v), k, dtype=np.int64))
+        if len(keys) < 2:
+            continue
+        allv = np.concatenate(keys)
+        allo = np.concatenate(owners)
+        # pack (i,j,k) into one int64 so the neighbour lookup is a searchsorted
+        base = allv.min(axis=0)
+        span = (allv.max(axis=0) - base + 3).astype(np.int64)
+        if np.prod(span.astype(float)) > 9.0e18:       # degenerate extent — skip this label
+            continue
+
+        def pack(v):
+            d = v - base + 1
+            return (d[:, 0] * span[1] + d[:, 1]) * span[2] + d[:, 2]
+
+        packed = pack(allv)
+        order = np.argsort(packed, kind="stable")
+        packed_sorted, owner_sorted = packed[order], allo[order]
+        pairs = []
+        for off in offsets:
+            if not off.any():
+                continue
+            nb = pack(allv + off)
+            pos = np.searchsorted(packed_sorted, nb)
+            ok = pos < len(packed_sorted)
+            pos = np.where(ok, pos, 0)
+            hit = ok & (packed_sorted[pos] == nb)
+            if not hit.any():
+                continue
+            a, b = allo[hit], owner_sorted[pos[hit]]
+            diff = a != b
+            if diff.any():
+                pairs.append(np.stack([np.minimum(a[diff], b[diff]),
+                                       np.maximum(a[diff], b[diff])], axis=1))
+        if pairs:
+            # millions of voxel adjacencies collapse to a handful of instance
+            # pairs — unique them before touching the union-find
+            for a, b in np.unique(np.concatenate(pairs), axis=0):
+                ra, rb = find(int(a)), find(int(b))
+                if ra != rb:
+                    parent[max(ra, rb)] = min(ra, rb)
+
+    groups = defaultdict(list)
+    for k in range(len(instances)):
+        groups[find(k)].append(k)
+    absorbed = 0
+    for root, members in groups.items():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda k: -len(instances[k].get("globalIndices") or []))
+        keep = members[0]
+        idx = set(instances[keep].get("globalIndices") or [])
+        for k in members[1:]:
+            idx |= set(instances[k].get("globalIndices") or [])
+            instances[k]["_absorbed_into"] = keep
+            absorbed += 1
+        merged = sorted(idx)
+        instances[keep]["globalIndices"] = merged
+        instances[keep]["total_points"] = len(merged)
+        print(f"[SegPipeline]   🧩 fragments: '{instances[keep].get('label')}' "
+              f"#{instances[keep].get('id')} absorbed {len(members) - 1} contiguous "
+              f"fragment(s) of the same label → {len(merged):,} pts")
+    if absorbed:
+        instances[:] = [i for i in instances if "_absorbed_into" not in i]
+    return absorbed
+
+
 def _attach_unsegmented(instances, xyz_display: np.ndarray,
-                        attach_dist_m: float = 0.03):
-    """Attach unsegmented cloud points to the NEAREST instance whose existing
-    points lie within ``attach_dist_m`` (see the call site for the doctrine).
-    Returns (n_attached, grown_instance_positions). Conflicts resolve by
-    smallest distance across instances."""
+                        attach_dist_m: float, rounds: int, votes: int,
+                        block: int = 4_000_000):
+    """Grow every instance into the unsegmented cloud around it.
+
+    SAM3 runs on the KEYFRAMES, and the mask→cloud step only labels a point
+    whose OWN origin frame carries a mask (exact match, on purpose: a mask
+    from another timestamp maps background onto the wrong surface). A cloud
+    built from 3,047 frames and segmented on 216 of them can therefore never
+    exceed ~7% coverage no matter how good the masks are — pccr 2026-09-14
+    measured 5.35%, test3 11.5%. The surface is the same surface; only its
+    birth certificate differs.
+
+    So the label travels through SPACE instead: a point within
+    ``attach_dist_m`` of labelled points adopts the instance that the
+    majority of its ``votes`` nearest labelled neighbours belong to (ties go
+    to the nearest). ``rounds`` passes let a surface grow outwards a few
+    centimetres at a time, each round starting from what the previous one
+    labelled, so a wall is walked across rather than jumped across. Points
+    nobody reaches stay unsegmented: nothing is invented.
+
+    One KD-tree per round over ALL labelled points, not one per instance —
+    the old shape was 105 trees × 26 M queries and was never affordable.
+
+    Mutates ``instances`` in place; returns (n_attached, grown_positions).
+    """
     from scipy.spatial import cKDTree
 
     N = len(xyz_display)
@@ -1604,37 +1833,67 @@ def _attach_unsegmented(instances, xyz_display: np.ndarray,
     for k, inst in enumerate(instances):
         gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
         owner[gi[(gi >= 0) & (gi < N)]] = k
-    un_idx = np.nonzero(owner < 0)[0]
-    if not len(un_idx):
+    n_before = int((owner >= 0).sum())
+    if not n_before:
         return 0, []
-    un_pts = xyz_display[un_idx]
-    best_d = np.full(len(un_idx), np.inf)
-    best_k = np.full(len(un_idx), -1, dtype=np.int64)
-    for k, inst in enumerate(instances):
-        gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
-        gi = gi[(gi >= 0) & (gi < N)]
-        if len(gi) < 50:
-            continue
-        sub = gi[::max(1, len(gi) // 400_000)]
-        d, _ = cKDTree(xyz_display[sub]).query(
-            un_pts, k=1, distance_upper_bound=float(attach_dist_m))
-        better = d < best_d
-        best_d[better] = d[better]
-        best_k[better] = k
-    hit = best_k >= 0
+    votes = max(1, int(votes))
+    rounds = max(1, int(rounds))
+
+    for r in range(rounds):
+        lab_idx = np.nonzero(owner >= 0)[0]
+        un_idx = np.nonzero(owner < 0)[0]
+        if not len(un_idx):
+            break
+        tree = cKDTree(xyz_display[lab_idx])
+        lab_owner = owner[lab_idx]
+        miss = len(lab_idx)
+        new_owner = np.full(len(un_idx), -1, dtype=np.int64)
+        for s in range(0, len(un_idx), block):
+            sl = slice(s, min(s + block, len(un_idx)))
+            _, nb = tree.query(xyz_display[un_idx[sl]], k=votes,
+                               distance_upper_bound=float(attach_dist_m), workers=-1)
+            if votes == 1:
+                nb = nb[:, None]
+            hit = nb < miss
+            cand = np.where(hit, lab_owner[np.where(hit, nb, 0)], -1)
+            # the instance most of the k nearest labelled neighbours belong to;
+            # the columns are ordered by distance, so a tie falls to the nearest.
+            # A single dissenting neighbour cannot drag a point across a boundary.
+            if votes < 3:
+                win = cand[:, 0]
+            else:
+                agree = np.zeros(cand.shape, dtype=np.int16)
+                for c in range(votes):
+                    agree[:, c] = (((cand == cand[:, c][:, None]) & hit).sum(1)
+                                   * hit[:, c].astype(np.int16))
+                win = cand[np.arange(len(cand)), agree.argmax(1)]
+            new_owner[sl] = win
+        got = new_owner >= 0
+        if not got.any():
+            break
+        owner[un_idx[got]] = new_owner[got]
+        print(f"[SegPipeline]     📎 round {r + 1}/{rounds}: "
+              f"+{int(got.sum()):,} point(s) within {attach_dist_m * 100:.0f} cm")
+
+    n_attached = int((owner >= 0).sum()) - n_before
+    if n_attached <= 0:
+        return 0, []
+    # rebuild every instance's index list in ONE pass: 105 scans over 27 M
+    # points is not affordable, one argsort is
+    order = np.argsort(owner, kind="stable")
+    sorted_owner = owner[order]
+    first = int(np.searchsorted(sorted_owner, 0))
+    counts = np.bincount(sorted_owner[first:], minlength=len(instances))
+    bounds = np.concatenate([[0], np.cumsum(counts)])
     grown = []
     for k in range(len(instances)):
-        add = un_idx[hit & (best_k == k)]
-        if not len(add):
-            continue
-        gi = np.asarray(instances[k].get("globalIndices") or [], dtype=np.int64)
-        merged = np.union1d(gi, add)
-        instances[k]["globalIndices"] = merged.tolist()
-        instances[k]["total_points"] = int(len(merged))
-        grown.append(k)
-        print(f"[SegPipeline]     📎 '{instances[k].get('label')}' "
-              f"#{instances[k].get('id')}: +{len(add):,} pts")
-    return int(hit.sum()), grown
+        gi = np.sort(order[first + bounds[k]: first + bounds[k + 1]])
+        was = int(instances[k].get("total_points") or 0)
+        instances[k]["globalIndices"] = gi.tolist()
+        instances[k]["total_points"] = int(len(gi))
+        if len(gi) > was:
+            grown.append(k)
+    return n_attached, grown
 
 
 def _enforce_exclusive_ownership(instances: list, n_pts: int) -> int:
@@ -1664,6 +1923,58 @@ def _enforce_exclusive_ownership(instances: list, n_pts: int) -> int:
             inst["globalIndices"] = kept.tolist()
             inst["total_points"] = int(len(kept))
     return resolved
+
+
+def _mask_frame_lookup(output_dir: Path, mask_frames, cloud_frames):
+    """Map a cloud frame_global to the frame index the MASKS are keyed by.
+
+    The two live in different index spaces and nothing used to translate
+    between them. ``_prepare_valid_frames`` copies the keyframes into
+    frames_valid/ renumbered 000000, 000001, … and SAM3 keys its masks by
+    that POSITION, while the reconstruction stamps every point with the REAL
+    video frame number (1, 60, 97, … 3026). Comparing them directly only ever
+    matched the handful of keyframes whose video number happens to fall below
+    the keyframe count — pccr 2026-09-14: 13 of 216, and those 13 took the
+    mask of the wrong keyframe. Coverage was 5.35% for that reason alone, and
+    the patchwork it produced is what shattered one floor into 48 instances.
+
+    Both spaces list the SAME frames in the SAME order, so the i-th smallest
+    frame_global is keyframe i. The identity is still measured against that
+    translation and whichever explains more of the cloud's frames wins, so a
+    session whose masks were already written in video-frame numbers keeps
+    working.
+
+    Returns {cloud_frame: mask_frame} — empty when the identity is right.
+    """
+    mask_set = {int(f) for f in mask_frames}
+    cloud_sorted = sorted(int(f) for f in cloud_frames)
+    if not mask_set or not cloud_sorted:
+        return {}
+    identity_hits = len(mask_set & set(cloud_sorted))
+
+    # the keyframe order, preferring the selector's own list when it is there
+    ordered = None
+    try:
+        from frame_selector import load_selected_frames
+        sel = load_selected_frames(str(Path(output_dir).parent / "frames"))
+        if sel and len(sel) == len(cloud_sorted):
+            ordered = [int(Path(name).stem) for name in sel]
+    except Exception:
+        ordered = None
+    if ordered is None:
+        ordered = cloud_sorted
+    if len(ordered) != len(cloud_sorted):
+        return {}
+
+    translated = {g: i for i, g in enumerate(ordered) if i in mask_set}
+    if len(translated) <= identity_hits:
+        print(f"[SegPipeline]   mask frame space: identity ({identity_hits}/{len(cloud_sorted)} "
+              f"frames matched) — masks are keyed by video frame number")
+        return {}
+    print(f"[SegPipeline]   mask frame space: keyframe POSITION → video frame number "
+          f"({len(translated)}/{len(cloud_sorted)} frames matched, identity would match "
+          f"{identity_hits})")
+    return translated
 
 
 def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_obj_ids=None) -> dict:
@@ -1810,6 +2121,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         frame_groups[f] = np.array(frame_groups[f], dtype=np.int64)
     
     print(f"[SegPipeline]   {len(frame_groups)} unique frames in cloud")
+    # the masks and the cloud index their frames differently — translate
+    cloud_to_mask = _mask_frame_lookup(output_dir, keyframes, frame_groups.keys())
     
     # Match each object's masks against cloud points
     # Uses erosion for tighter boundaries + deconfliction (each point → one obj_id)
@@ -1936,7 +2249,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             # EXACT MATCH ONLY: if SAM3 didn't generate a mask for this exact frame, skip these points.
             # No fuzzy "nearest frame" matching, because that maps background points from unsegmented frames 
             # to masks from completely different timestamps.
-            mask_key = f"f{cloud_frame}_o{obj_id}"
+            mask_frame = cloud_to_mask.get(cloud_frame, cloud_frame)
+            mask_key = f"f{mask_frame}_o{obj_id}"
             if mask_key not in masks_data:
                 continue
             
@@ -2189,6 +2503,29 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                     inst["obb"] = _compute_obb(xyz_display[m])
             print(f"[SegPipeline]   Space-dedupe: {pre} → {len(instances)} instances")
 
+    # ── Same-label fragment consolidation ──────────────────────────────
+    # SAM3 returns one mask per visually separable region, so one physical
+    # surface arrives as many instances of ONE label (pccr 2026-09-14: 48
+    # 'white_tiled_floor' for a single floor). Geometry decides: same label +
+    # contiguous points = one object. Runs BEFORE the attach so the growth
+    # starts from consolidated surfaces instead of 48 competing fragments.
+    _frag_on = bool(_dd.get("merge_label_fragments", True))
+    _frag_gap = float(_dd.get("fragment_gap_m", 0.10))
+    if _frag_on and len(instances) > 1:
+        try:
+            pre = len(instances)
+            n_abs = _merge_label_fragments(instances, xyz_display, gap_m=_frag_gap)
+            if n_abs:
+                for inst in instances:
+                    m = np.asarray(inst["globalIndices"], dtype=np.int64)
+                    if len(m) >= 4:
+                        inst["obb"] = _compute_obb(xyz_display[m])
+                print(f"[SegPipeline]   🧩 Fragment consolidation: {pre} → "
+                      f"{len(instances)} instances (same label, contiguous "
+                      f"within {_frag_gap*100:.0f} cm)")
+        except Exception as e:
+            print(f"[SegPipeline] fragment consolidation failed (non-fatal): {e}")
+
     if _min_pts > 0:
         tiny = [inst for inst in instances if inst["total_points"] < _min_pts]
         if tiny:
@@ -2199,25 +2536,30 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             instances = [inst for inst in instances if inst["total_points"] >= _min_pts]
 
     # ── Geometric completion — "pegar los puntos al lugar correcto" (USER
-    # 2026-08-29): SAM3 leaves ~30% of the cloud unsegmented even where the
-    # surface clearly belongs to a segmented object (masklets die frames away
-    # from the prompt; masks under-cover inside their own frames). A point
-    # within attach_dist_m of an instance's EXISTING points is part of that
-    # surface → attached to the NEAREST instance. Purely geometric and
+    # 2026-08-29): SAM3 runs on the KEYFRAMES and the mask→cloud step only
+    # labels a point whose own origin frame carries a mask, so coverage is
+    # capped at keyframes/frames however good the masks are (pccr 2026-09-14:
+    # 5.35% over 216 of 3,047 frames). A point within attach_dist_m of
+    # labelled points adopts the instance most of its nearest labelled
+    # neighbours belong to, over several rounds. Purely geometric and
     # conservative: points nobody reaches stay unsegmented (never invent).
     _att_on = bool(_dd.get("attach_unsegmented", True))
     _att_d = float(_dd.get("attach_dist_m", 0.03))
+    _att_rounds = int(_dd.get("attach_rounds", 4))
+    _att_votes = int(_dd.get("attach_votes", 3))
     if _att_on and instances:
         try:
             n_att, grown = _attach_unsegmented(instances, xyz_display,
-                                               attach_dist_m=_att_d)
+                                               attach_dist_m=_att_d,
+                                               rounds=_att_rounds, votes=_att_votes)
             for k in grown:   # OBBs must include the attached points
                 m = np.asarray(instances[k]["globalIndices"], dtype=np.int64)
                 if len(m) >= 4:
                     instances[k]["obb"] = _compute_obb(xyz_display[m])
             if n_att:
                 print(f"[SegPipeline]   📎 attach: {n_att:,} unsegmented points "
-                      f"glued to their surfaces (≤{_att_d*100:.0f} cm)")
+                      f"glued to their surfaces ({_att_rounds} round(s) of "
+                      f"≤{_att_d*100:.0f} cm, {_att_votes}-neighbour vote)")
         except Exception as e:
             print(f"[SegPipeline] attach step failed (non-fatal): {e}")
 

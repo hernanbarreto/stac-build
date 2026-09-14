@@ -195,14 +195,53 @@ segmentation:
                               # stay distinct; SAM3's tracking is the identity.
   dedupe_voxel_m: 0.05        # voxel size, only used when merge_duplicates is true
   dedupe_overlap: 0.5         # overlap fraction, only used when merge_duplicates is true
-  min_instance_points: 300    # drop mask slivers below this point count (not objects)
+  min_instance_points: 300    # drop mask slivers below this point count (not objects) — applied
+                              # AFTER the fragment consolidation, so a 287-point piece of a wall
+                              # joins the wall instead of being thrown away
+  mask_dedupe_iou: 0.90       # SAM3 occasionally returns ONE observation under several object
+                              # ids (pccr 2026-09-14: two 'white tiled floor' masks of 109,786
+                              # pixels each, IoU 1.0, in the same frame). Ids whose masks agree
+                              # above this IoU in any frame are the same object and are collapsed
+                              # across the whole batch. 0.90 already demands the areas agree
+                              # within 10 %, so a monitor inside a desk is never absorbed.
+                              # 0 disables it.
+  merge_label_fragments: true # SAM3 returns one mask per visually separable REGION, so one
+                              # physical surface arrives as many instances of ONE label: pccr
+                              # 2026-09-14 had 48 'white_tiled_floor' for a single floor (one of
+                              # 244k points and 47 fragments of 4-20k), test3 had 9
+                              # 'green_decorative_tile_border'. That is the "same object many
+                              # times" the user sees, and it is also why no instance can carry
+                              # two copies of itself — which leaves the duplicate detector with
+                              # nothing to find. Same label + contiguous points = one object.
+                              # Unlike merge_duplicates below this is CONTIGUITY, not
+                              # containment, and it never crosses labels, so a wall cannot
+                              # swallow the signs resting against it. Two copies left apart by
+                              # drift are not contiguous, so they survive for the duplicate
+                              # machinery.
+  fragment_gap_m: 0.10        # occupied voxels of two same-label instances closer than this are
+                              # touching. Also the voxel size of the test.
   mask_erosion_iterations: 0  # USER ORDER 2026-08-29: no erosion at all (was 2; ate 131k
                               # mask-covered points on test3 — the #1 eater). Raise to 1-2
                               # if boundary bleed between neighbours returns.
-  attach_unsegmented: false   # OFF (user 2026-08-29 night): the 3 cm nearest-instance glue
-                              # amplified the bad masks of the thresh-0.0 experiment below —
-                              # reverted together with it until segmentation is healthy again.
-  attach_dist_m: 0.03
+  attach_unsegmented: true    # ON again 2026-09-14. It was turned off on 2026-08-29 night
+                              # because the 3 cm glue amplified the bad masks of the thresh-0.0
+                              # experiment, "until segmentation is healthy again" — the mask
+                              # dedupe and the fragment consolidation above are that repair.
+                              # Why it matters: SAM3 runs on the KEYFRAMES and the mask->cloud
+                              # step only labels a point whose OWN origin frame carries a mask
+                              # (exact match, deliberately: a mask from another timestamp maps
+                              # background onto the wrong surface). A cloud built from 3,047
+                              # frames and segmented on 216 of them is therefore capped at ~7 %
+                              # coverage however good the masks are — pccr measured 5.35 %,
+                              # test3 11.5 %. The surface is the same surface; only its birth
+                              # certificate differs, so the label travels through SPACE instead.
+  attach_dist_m: 0.03         # a point this close to labelled points adopts their instance
+  attach_rounds: 4            # passes; each one starts from what the previous one labelled, so
+                              # a surface is walked across a few centimetres at a time instead
+                              # of jumped across. Points nobody reaches stay unsegmented.
+  attach_votes: 3             # the instance most of the k nearest labelled neighbours belong to
+                              # wins (ties go to the nearest): one dissenting neighbour cannot
+                              # drag a point across a boundary. 1 = plain nearest.
   propagate_output_prob_thresh: 0.5   # VENDOR DEFAULT — restored (user 2026-08-29 night).
   propagate_obj_batch: 10             # USER 2026-09-06: interactive propagation ALWAYS
                                       #   runs in batches of at most this many objects —
@@ -2167,6 +2206,13 @@ certify:                            # §4.8 ensemble witness + §9 certification
   # ── §9 certification loop (post-hoc over the session: scale → poses → depth → witnesses)
   max_iters: 3                      # iterations; each one is an epoch (Approve/Undo in the kit)
   eps: 0.05                         # relative objective improvement below this → converged
+  regression_eps: 0.01              # ...and an improvement below MINUS this is a REGRESSION, not
+                                    # convergence: the iteration left the session worse than it
+                                    # found it. pccr 2026-09-14 went 2.0593 → 3.6349 (-76.5 %) and
+                                    # the acta called it "converged". It is now declared in the
+                                    # acta (regressed: true), in the attention list at severity 4
+                                    # and in the kit; under gates.mode advisory the epoch is still
+                                    # applied and Approve/Undo stays the verdict (USER 2026-09-13).
   auto_after_segmentation: true     # the ONE switch of the automatic certification: (a) the
                                     # pipeline's CERTIFY stage after the cleaned cloud
                                     # (USER 2026-09-13: no button, no manual trigger) and (b) a
@@ -2305,7 +2351,14 @@ loops:                              # candidate detector + spatial gate (§4.4/�
                                     # with margin and ~60 proposals in total (≈ p99.7); the
                                     # exact bridge + spatial gate reject the false ones.
     top_k: 5                        # retrieved neighbours per keyframe
-    min_gap_keyframes: 11           # closer pairs are odometry, not a revisit (vendor: > 10)
+    min_gap_keyframes: 11           # FLOOR of the non-local band, in keyframes (vendor: > 10)
+    min_gap_frac: 0.10              # ...and this fraction of the keyframe count; the band is the
+                                    # larger of the two. The detector ranks its top-k AMONG the
+                                    # frames outside the band, so a band that does not scale with
+                                    # the walk spends the slots on near-odometry pairs: pccr
+                                    # 2026-09-14 proposed 6 pairs of which 4 sat on the band edge
+                                    # (gaps 11, 11, 11, 13 over 216 keyframes) and only 2 were the
+                                    # real return to the start. 0.10 x 216 = 22 keyframes.
     nms_threshold: 3                # keyframes suppressed around an accepted pair: the vendor's
                                     # 25 video frames ≈ 1 s; 25 KEYFRAMES ≈ 350 frames would
                                     # silence whole revisits — 3 keyframes ≈ the vendor's span
@@ -2323,6 +2376,13 @@ loops:                              # candidate detector + spatial gate (§4.4/�
                                     # of an accepted loop endpoint counts as covered
   min_coverage: 0.5                 # below this the acta declares it and the kit shows it
   spatial:                          # §4.5 — SAM3/SALAD propose, geometry decides
+    min_walk_m: 5.0                 # rule 0: a pair whose two keyframes are closer than this
+                                    # ALONG THE TRAJECTORY is odometry, not a revisit — the camera
+                                    # never left, so closing it stiffens a stretch that was never
+                                    # in doubt while the real long-range closure is absorbed. The
+                                    # keyframe band above is a prefilter over indices; this is the
+                                    # same rule measured in metres, once the provisional chain
+                                    # exists. Rejected before any frustum work.
     drift_floor_m: 0.30             # δ(L) = max(floor, rate·L): measured Omega drift 1.3 cm/m
     drift_rate_m_per_m: 0.013
     drift_floor_deg: 2.0            # θ(L) = max(floor, rate·L)

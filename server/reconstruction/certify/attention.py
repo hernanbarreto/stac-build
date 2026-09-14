@@ -78,6 +78,16 @@ def attention_list(output_dir, n_low_votes_keyframes: int = 5) -> dict:
     for it in acta.get("iterations", []):
         if it.get("verdict") != "applied":
             continue
+        if it.get("regressed"):
+            items.append({"kind": "objective_regressed", "severity": 4,
+                          "text": f"epoch {it.get('epoch_to')} left the session WORSE than it found it: "
+                                  f"objective {it.get('objective_prev', 0):.4f} → {it.get('objective', 0):.4f} "
+                                  f"({it.get('improvement', 0) * 100:+.1f}%) — applied (advisory); "
+                                  f"look at it before approving",
+                          "anchor": None, "evidence": {"iteration": it.get("iteration"),
+                                                       "objective_prev": it.get("objective_prev"),
+                                                       "objective": it.get("objective"),
+                                                       "improvement": it.get("improvement")}})
         for w in it.get("gate_warnings", []):
             items.append({"kind": "gate_warning", "severity": 3,
                           "text": f"epoch {it.get('epoch_to')}: gate ⚠ {w} — applied (advisory), "

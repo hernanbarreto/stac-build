@@ -407,6 +407,18 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
             print(f"[Erase] seg_masks.npz unreadable ({e}) — erasing points "
                   "only (masks not edited)")
             masks = {}
+    # The cloud stamps every point with the REAL video frame number while the
+    # masks are keyed by KEYFRAME POSITION — the two spaces only ever coincided
+    # by accident. Same translation the matcher uses, or the pixels of an erased
+    # point are cleared in the wrong frame's mask (or in none at all).
+    cloud_to_mask: Dict[int, int] = {}
+    if masks:
+        try:
+            from segmentation.pipeline import _mask_frame_lookup
+            cloud_to_mask = _mask_frame_lookup(
+                output_dir, masks.get("frames", []), np.unique(fg).tolist())
+        except Exception as e:  # noqa: BLE001 — mask edit is best-effort
+            print(f"[Erase] mask frame lookup unavailable ({e}) — masks keyed as-is")
     orig_h = float(pr.max() + 1)
     orig_w = float(pc.max() + 1)
 
@@ -536,7 +548,7 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
         if oid is None or not masks:
             continue
         for f in np.unique(fg[removed]):
-            key = f"f{int(f)}_o{int(oid)}"
+            key = f"f{cloud_to_mask.get(int(f), int(f))}_o{int(oid)}"
             m = masks.get(key)
             if m is None:
                 continue
@@ -592,7 +604,7 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
                         else next(m.shape[:2] for k, m in masks.items()
                                   if k.startswith("f"))
                     for f in np.unique(fg[added]):
-                        key = f"f{int(f)}_o{int(toid)}"
+                        key = f"f{cloud_to_mask.get(int(f), int(f))}_o{int(toid)}"
                         m = masks.get(key)
                         if m is None:
                             m = np.zeros((mh0, mw0), dtype=np.uint8)

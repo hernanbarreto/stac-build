@@ -313,10 +313,24 @@ def gate_frame_pair(i: int, j: int, view, cfg,
     c = _cfg(cfg)
     L = walked_length_m(view.centres(), i, j)
     budget = drift_budget(L, c, budget_override)
+    # Rule 0 — the walk itself. A retrieval pair whose two keyframes are only
+    # metres apart ALONG THE TRAJECTORY is odometry wearing a revisit's clothes:
+    # the camera never left, so the pair observes nothing the chain does not
+    # already carry, and closing it stiffens a stretch that was never in doubt
+    # while the real long-range closure is absorbed. Measured alongside the
+    # others so every rule's numbers are in the record, whichever one fires.
+    min_walk = float(c["min_walk_m"])
+    walk_ok = L >= min_walk
     fr = frustum_reciprocal(i, j, view, c, budget["delta_m"], budget["theta_deg"])
     cor = corridor_between(i, j, view, c)
     out = {"candidate": [int(i), int(j)], "budget": budget,
-           "rules": {"frustum": fr, "corridor": cor}}
+           "rules": {"walk": {"walked_m": L, "min_walk_m": min_walk, "passed": walk_ok},
+                     "frustum": fr, "corridor": cor}}
+    if not walk_ok:
+        out["verdict"] = "reject"
+        out["reason"] = (f"only {L:.1f} m walked between the two keyframes "
+                         f"(< {min_walk:.1f} m) — odometry, not a revisit")
+        return out
     if not fr["passed"]:
         out["verdict"] = "reject"
         out["reason"] = (f"not co-visible even with a {budget['delta_m']*100:.0f} cm / "

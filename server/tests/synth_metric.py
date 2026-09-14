@@ -480,7 +480,7 @@ def fork_loops_cfg(stac_server_dir: Optional[str] = None, **over) -> dict:
          "ambiguous_sigma_factor": 3.0, "nonstructural_sigma_factor": 2.0,
          "movable_labels": ["box", "person"], "min_shared_structural_labels": 1,
          "intra_chunk_loops": True, "bridge_extra_frames": 0,
-         "spatial": {"drift_floor_m": 0.30, "drift_rate_m_per_m": 0.013,
+         "spatial": {"min_walk_m": 5.0, "drift_floor_m": 0.30, "drift_rate_m_per_m": 0.013,
                      "drift_floor_deg": 2.0, "drift_rate_deg_per_m": 0.10,
                      "identity_reject_factor": 3.0, "frustum_margin_px": 4.0, "occlusion_tol_m": 0.30,
                      "min_depth_m": 0.3, "max_depth_m": 15.0, "min_frustum_frames": 2,
@@ -564,7 +564,8 @@ def raw_server_cfg(**over) -> dict:
                   "semantic": {"enabled": False, "max_tokens": 256, "crops_per_instance": 1,
                                "default_class": "structural", "nonstructural_sigma_factor": 2.0},
                   "salad": {"similarity_threshold": 0.65, "top_k": 5, "min_gap_keyframes": 11,
-                            "nms_threshold": 3, "image_size": [336, 336], "batch_size": 32}},
+                            "min_gap_frac": 0.10, "nms_threshold": 3,
+                            "image_size": [336, 336], "batch_size": 32}},
         "scale": fork_scale_cfg(),
     }
     for dotted, val in over.items():
@@ -717,7 +718,7 @@ def witness_cfg(**over) -> dict:
 def certify_cfg(**over) -> dict:
     """Mirror of config.yaml ``certify:``."""
     d = {"ensemble_offset_frames": 0, "keep_aligned_chunks": True,
-         "max_iters": 3, "eps": 0.05, "auto_after_segmentation": True,
+         "max_iters": 3, "eps": 0.05, "regression_eps": 0.01, "auto_after_segmentation": True,
          "objective_weights": {"loop_residual_m": 1.0, "seam_residual_m": 1.0, "closure_m": 1.0,
                                "depth_disagreement_frac": 5.0, "duplicates": 0.1},
          "gates": {"mode": "advisory", "max_seam_degradation_m": 0.005,
