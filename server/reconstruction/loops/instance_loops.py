@@ -118,17 +118,76 @@ class SessionView:
 # ── clusters ────────────────────────────────────────────────────────────────
 
 def disjoint_clusters(pts: np.ndarray, cfg) -> List[np.ndarray]:
-    """DBSCAN labels of an instance's points (indices into pts), clusters
-    below cluster_min_points dropped, largest first."""
-    from sklearn.cluster import DBSCAN
+    """Spatially separated groups of an instance's points (indices into pts),
+    groups below cluster_min_points dropped, largest first.
+
+    The question is whether the instance's points form two blobs with empty
+    space between them — a copy of one object left in two places. Answering it
+    with DBSCAN over every point does not survive contact with a real instance:
+    at eps 15 cm on a surface sampled every 7.6 mm each point has thousands of
+    neighbours, and sklearn materialises that neighbourhood graph. The floor of
+    pccr 2026-09-14, 5,696,387 points, took the process past the container's
+    109 GB and it was killed with no traceback. It never showed before because
+    the instances had no points at all to cluster.
+
+    Connected components over an occupied-voxel grid at the same eps answer the
+    same question in one pass and a few MB: two points fall in the same group
+    exactly when a chain of occupied voxels joins them. ``dbscan_min_samples``
+    no longer marks stragglers as noise — ``cluster_min_points`` already drops
+    anything too small to be a copy.
+    """
     if len(pts) < cfg.cluster_min_points:
         return []
-    lab = DBSCAN(eps=cfg.dbscan_eps_m, min_samples=cfg.dbscan_min_samples).fit_predict(pts)
-    out = []
-    for c in np.unique(lab):
-        if c < 0:
+    eps = float(cfg.dbscan_eps_m)
+    key = np.floor(np.asarray(pts, np.float64) / eps).astype(np.int64)
+    vox, inv = np.unique(key, axis=0, return_inverse=True)
+    n_vox = len(vox)
+    if n_vox == 1:
+        return [np.arange(len(pts))] if len(pts) >= cfg.cluster_min_points else []
+
+    base = vox.min(axis=0)
+    span = (vox.max(axis=0) - base + 3).astype(np.int64)
+    if float(span[0]) * float(span[1]) * float(span[2]) > 9.0e18:
+        return [np.arange(len(pts))]
+
+    def _pack(v):
+        d = v - base + 1
+        return (d[:, 0] * span[1] + d[:, 1]) * span[2] + d[:, 2]
+
+    packed = _pack(vox)
+    order = np.argsort(packed, kind="stable")
+    packed_sorted = packed[order]
+
+    parent = np.arange(n_vox)
+
+    def _find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return int(a)
+
+    # 26-neighbourhood, each offset once (the mirrored half is redundant)
+    offsets = [(dx, dy, dz)
+               for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+               if (dx, dy, dz) > (0, 0, 0)]
+    for off in offsets:
+        nb = _pack(vox + np.asarray(off, np.int64))
+        pos = np.searchsorted(packed_sorted, nb)
+        ok = pos < n_vox
+        pos = np.where(ok, pos, 0)
+        hit = ok & (packed_sorted[pos] == nb)
+        if not hit.any():
             continue
-        idx = np.flatnonzero(lab == c)
+        for a, b in zip(np.flatnonzero(hit), order[pos[hit]]):
+            ra, rb = _find(int(a)), _find(int(b))
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+
+    roots = np.array([_find(i) for i in range(n_vox)], dtype=np.int64)
+    labels = roots[inv]
+    out = []
+    for c in np.unique(labels):
+        idx = np.flatnonzero(labels == c)
         if len(idx) >= cfg.cluster_min_points:
             out.append(idx)
     out.sort(key=len, reverse=True)
