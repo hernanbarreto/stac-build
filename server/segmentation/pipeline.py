@@ -2448,13 +2448,39 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     instances = []
     total_segmented = 0
     
+    # ── Geometric filter: the FRAMES decide what belongs (USER 2026-09-14) ──
+    # Runs before the statistical clean and the OBB so both see the trimmed
+    # set — "debe correr antes de medir todo, porque su OBB debe estar
+    # perfectamente ajustado". Nothing leaves the cloud.
+    mask_filter = None
+    mf_cfg = (cfg.get("segmentation", {}) or {}).get("mask_filter", {}) or {}
+    if mf_cfg.get("enabled"):
+        try:
+            from segmentation.mask_filter import MaskFilter
+            mask_filter = MaskFilter(output_dir, Path(output_dir).parent, mf_cfg,
+                                     cloud_to_mask=cloud_to_mask,
+                                     log=lambda m: print(f"[SegPipeline] {m}"))
+            if not mask_filter.ok:
+                mask_filter = None
+        except Exception as e:  # noqa: BLE001 — declared, the run continues
+            print(f"[SegPipeline] ⚠️ geometric mask filter unavailable: {e}")
+            mask_filter = None
+
     for iid, group_obj_ids in instance_groups.items():
         # Merge all points assigned to any obj_id in this instance group
         all_matched = np.where(np.isin(point_obj_id, group_obj_ids))[0].astype(np.int64)
-        
+
         if len(all_matched) == 0:
             continue
-        
+
+        if mask_filter is not None:
+            keep_geo, _st = mask_filter.judge(int(iid), xyz[all_matched],
+                                              frame_arr[all_matched])
+            if not keep_geo.all():
+                all_matched = all_matched[keep_geo]
+            if len(all_matched) == 0:
+                continue
+
         # ── Per-instance DBSCAN outlier removal ──
         # Skip if already filtered in a previous incremental run
         pre_filter_count = len(all_matched)
@@ -2524,10 +2550,12 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # ── Phase 3: Cross-category Re-ID — merge instances with high 3D overlap ──
     # If VLM produced synonyms (e.g., "chair" + "wooden chair"), SAM3 may have
     # segmented the same physical object twice. Detect and merge by 3D point overlap.
-    # OFF by default: the test is `intersection / smaller`, i.e. CONTAINMENT, so a
-    # large instance absorbs anything lying inside it — distinct objects, not synonyms.
+    # The test is MUTUAL (segmentation.dedupe_mutual): both instances must be
+    # mostly the intersection. `intersection / smaller` alone is CONTAINMENT and
+    # lets a large instance absorb anything lying inside it.
     if _merge_on and len(instances) > 1:
-        merge_threshold = 0.5  # If >50% of smaller set overlaps → merge
+        merge_threshold = float(_dd.get("dedupe_overlap", 0.8))
+        _mutual_idx = bool(_dd.get("dedupe_mutual", True))
         merged_away = set()  # indices of instances absorbed by others
         
         for i in range(len(instances)):
@@ -2544,9 +2572,10 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                 if intersection == 0:
                     continue
                 
-                smaller_size = min(len(set_i), len(set_j))
-                overlap_ratio = intersection / smaller_size
-                
+                overlap_ratio = intersection / min(len(set_i), len(set_j))
+                if _mutual_idx:
+                    overlap_ratio = intersection / max(len(set_i), len(set_j))
+
                 if overlap_ratio >= merge_threshold:
                     # Merge: smaller into larger
                     if len(set_i) >= len(set_j):
@@ -2592,6 +2621,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # (tiny instances below min_instance_points — mask slivers, not objects).
     _vox = float(_dd.get("dedupe_voxel_m", 0.05))
     _dup_thr = float(_dd.get("dedupe_overlap", 0.5))
+    _mutual = bool(_dd.get("dedupe_mutual", True))
     _min_pts = int(_dd.get("min_instance_points", 300))
     if not _merge_on:
         print("[SegPipeline]   Instance merging DISABLED "
@@ -2615,8 +2645,19 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                 if j in absorbed or not vox_sets[j]:
                     continue
                 inter = len(vox_sets[i] & vox_sets[j])
-                if inter and inter / len(vox_sets[j]) >= _dup_thr:
-                    # j (smaller) is the same physical object as i → absorb
+                if not inter:
+                    continue
+                share_i = inter / len(vox_sets[i])
+                share_j = inter / len(vox_sets[j])
+                # IDENTITY, not containment (USER 2026-09-14: "que ambas
+                # instancias compartan mas del 80% de los puntos"). Dividing
+                # only by the smaller asks "is B inside A", which every sign
+                # resting on a wall answers yes — that is what collapsed 147
+                # instances to 3. Asking BOTH to be mostly the intersection
+                # separates "the same object under two names" from "one object
+                # standing on another".
+                if (min(share_i, share_j) if _mutual else share_j) >= _dup_thr:
+                    # j is the same physical object as i → absorb
                     merged_idx = sorted(set(instances[i]["globalIndices"])
                                         | set(instances[j]["globalIndices"]))
                     instances[i]["globalIndices"] = merged_idx
@@ -2626,7 +2667,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                     print(f"[SegPipeline]   🔗 Space-dedupe: '{instances[j]['label']}' "
                           f"#{instances[j]['id']} is the same object as "
                           f"'{instances[i]['label']}' #{instances[i]['id']} "
-                          f"({inter / len(vox_sets[j]):.0%} of its space) — merged")
+                          f"(they share {share_j:.0%} / {share_i:.0%} of their "
+                          f"space) — merged")
         if absorbed:
             pre = len(instances)
             instances = [inst for k, inst in enumerate(instances) if k not in absorbed]
@@ -2719,9 +2761,28 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     except Exception as e:
         print(f"[SegPipeline] instance store build failed (non-fatal): {e}")
 
+    if mask_filter is not None:
+        try:
+            rep = mask_filter.report()
+            try:    # every derived artifact carries the geometry epoch it was
+                from correction.epoch import stamp   # measured on
+                stamp(rep, output_dir)
+            except Exception:  # noqa: BLE001 — a session with no epoch machinery
+                pass
+            atomic_write_json(output_dir / "mask_filter.json", rep, indent=1)
+            ib, ia = rep.get("inside_frac_before"), rep.get("inside_frac_after")
+            print(f"[SegPipeline] 🎯 geometric mask filter: "
+                  f"{rep['points_dropped']:,}/{rep['points']:,} points dropped "
+                  f"({rep['drop_frac']*100:.1f}%) on {rep['instances_trimmed']}/"
+                  f"{rep['instances']} instances"
+                  + (f"; agreement with the masks {ib*100:.0f}% → {ia*100:.0f}%"
+                     if ib is not None and ia is not None else ""))
+        except Exception as e:  # noqa: BLE001 — the report is not the run
+            print(f"[SegPipeline] mask filter report failed (non-fatal): {e}")
+
     total_segmented = sum(inst["total_points"] for inst in instances)
     coverage = round(total_segmented / max(1, n_pts), 4)
-    
+
     result = {
         "type": "segmentation",
         "version": "3.0",

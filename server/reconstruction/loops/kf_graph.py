@@ -389,7 +389,9 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
         T_solved = np.einsum("nij,njk->nik", Xc, T0)
         fd = fit_drift(T_solved, loops, gc.drift_degree, gc.drift_iters,
                        gc.odo_sigma_min_m, gc.sigma_odo_intra_deg,
-                       gc.drift_max_step, log=log)
+                       gc.drift_max_step, gc.outlier_overlap_frac,
+                       gc.drift_prior_rot_deg, gc.drift_prior_trans_m,
+                       gc.drift_rel_tol, log=log)
         if fd is not None:
             drift_rep = {k: v for k, v in fd.items() if k != "corrections"}
             drift_rep["provenance"] = "tool_measured"
@@ -402,16 +404,29 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
             # 1.14 → 2.75 cm with the loop offset improving all the while. So
             # the drift is accepted only when it reduces the loop offset AND
             # does not degrade the held-out median.
+            # ...and it must EXPLAIN what it moves. Closing a hair is not a
+            # drift model, it is fitting noise: the known-answer synthetic's
+            # second iteration moved every keyframe 10 cm to reduce the loop
+            # offset 288 → 280 cm (2.8 %), passed both tests below, and took
+            # the recovery of a perturbation that is LOCALISED in one chunk
+            # from 5.83 to 8.13 cm. The consensus of the loop rates cannot
+            # separate the two cases by then — the first iteration already
+            # absorbed the disagreement (30 % of the loops contradicting
+            # became 6 %) while the error stayed exactly as localised.
+            gain = (1.0 - fd["residual_after_m"] / fd["residual_before_m"]
+                    if fd["residual_before_m"] > 1e-9 else 0.0)
             h_graph, h_drift = _held_median(held, Xc), _held_median(held, Xc_d)
-            closes = fd["residual_after_m"] < fd["residual_before_m"]
+            closes = gain >= gc.drift_min_gain
             keeps = (not np.isfinite(h_graph)) or (h_drift <= h_graph + gc.max_seam_degradation_m)
             drift_rep.update(held_out_before_m=h_graph, held_out_after_m=h_drift,
-                             applied=bool(closes and keeps))
+                             gain=gain, applied=bool(closes and keeps))
             if closes and keeps:
                 X_drift = fd["corrections"]
                 Xc = Xc_d
             else:
-                why = ("it does not reduce what the graph left open"
+                why = (f"it explains only {gain * 100:.0f}% of what the graph left "
+                       f"open (needs {gc.drift_min_gain * 100:.0f}%) while moving "
+                       f"keyframes up to {fd['peak_move_m'] * 100:.0f} cm"
                        if not closes else
                        f"the held-out judge degrades {h_graph * 100:.2f} → {h_drift * 100:.2f} cm")
                 log(f"[drift] not applied: {why} "

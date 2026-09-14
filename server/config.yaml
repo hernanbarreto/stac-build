@@ -188,15 +188,32 @@ phase6:
 # (as the default inventory path) workers/vlm_worker.py.
 # ── Instance post-processing (mask→cloud stage) ──────────────────────────
 segmentation:
-  merge_duplicates: false     # OFF. Both merges (index overlap + same-space voxel dedupe)
-                              # test CONTAINMENT, not identity: they divide the intersection
-                              # by the SMALLER instance's size, so a wall/floor/train body
-                              # absorbs every sign, panel and wheel resting against it, and
-                              # the absorber's envelope keeps growing (largest-first cascade).
-                              # That is what collapsed 147 instances to 3-4. Distinct objects
-                              # stay distinct; SAM3's tracking is the identity.
+  merge_duplicates: true      # ON again 2026-09-14 with a MUTUAL criterion (USER: "hay segmentos
+                              # con nombres diferentes que son el mismo objeto ... sobre el mismo
+                              # objeto tengo mas de un OBB, eso deberia colapsar en un unico
+                              # segmento"). It was OFF because both merges tested CONTAINMENT:
+                              # dividing the intersection by the SMALLER instance asks "is B
+                              # inside A", which every sign, panel and wheel resting against a
+                              # wall answers yes — the absorber's envelope then keeps growing
+                              # (largest-first cascade) and 147 instances collapsed to 3-4.
+                              # dedupe_mutual below asks the question that means IDENTITY.
+  dedupe_mutual: true         # the intersection must be dedupe_overlap of BOTH instances, not
+                              # just of the smaller one. Measured on pccr 2026-09-14 over all
+                              # 2,926 instance pairs: at 0.5 the mutual test collapses 5 pairs
+                              # and the containment test 54; at 0.8, 0 and 25.
   dedupe_voxel_m: 0.05        # voxel size, only used when merge_duplicates is true
-  dedupe_overlap: 0.5         # overlap fraction, only used when merge_duplicates is true
+  dedupe_overlap: 0.5         # shared fraction, only used when merge_duplicates is true. NOT the
+                              # 0.8 the request suggested: two instances naming ONE object almost
+                              # never cover the same points, because each SAM3 mask claims
+                              # different frames and the attach grows them differently. pccr's
+                              # highest mutual overlap in the whole session is 61 % — the desk
+                              # that arrives as 'computer_workstation_desk' #157 (86,092 pts) and
+                              # 'workstation_desk_with_computer' #185 (15,924 pts) shares 91 % of
+                              # the SMALLER but only 60 % mutually, so 0.8 would collapse nothing
+                              # at all. At 0.5 the pairs it merges are the VLM synonyms the rule
+                              # is for: that desk, the fire extinguisher with and without its
+                              # coil, the white wall with and without its electrical outlet, and
+                              # the server cabinet with and without its glass door.
   min_instance_points: 300    # drop mask slivers below this point count (not objects) — applied
                               # AFTER the fragment consolidation, so a 287-point piece of a wall
                               # joins the wall instead of being thrown away
@@ -244,6 +261,41 @@ segmentation:
   attach_votes: 3             # the instance most of the k nearest labelled neighbours belong to
                               # wins (ties go to the nearest): one dissenting neighbour cannot
                               # drag a point across a boundary. 1 = plain nearest.
+  mask_filter:
+    enabled: true             # GEOMETRIC filter, on top of the statistical one (USER 2026-09-14:
+                              # "quiero filtrado geometrico por reproyeccion de todas las mascaras
+                              # ... los puntos que pasan son solo los que caen en la mascara y los
+                              # de afuera son outliers o ruido ... debe correr antes de medir todo,
+                              # porque su OBB debe estar perfectamente ajustado"). DBSCAN asks
+                              # whether a point sits where the others sit; this asks the question
+                              # that has a WITNESS: project it into the keyframes where SAM3 drew
+                              # the instance and see whether it lands on the mask. Runs BEFORE the
+                              # sub-cloud clean and the OBB, so both see the trimmed set. Nothing
+                              # leaves the cloud — the point stops belonging to the INSTANCE.
+    visit_gap_kf: 20          # a gap of more than this many keyframes in an instance's masks is
+                              # the camera having LEFT and come back. Points are judged only
+                              # inside their own visit: the two copies a drifted revisit leaves
+                              # are each supported by the masks of their own pass, and judging one
+                              # against the other's frames would delete it — which does not fix
+                              # the duplicate, it hides it, and destroys the closure the
+                              # correction measures.
+    min_points_per_visit: 50  # below this a visit cannot judge anything
+    max_frames_per_visit: 8   # mask keyframes tested per visit, the ones showing MOST of the
+                              # object first (a frame with three pixels of mask judges nothing)
+    min_votes: 2              # frames that must SEE a point (in bounds, in front, unoccluded)
+                              # before it may be judged at all. Below it the point is KEPT:
+                              # no evidence is not evidence of absence
+    min_inside_frac: 0.5      # of the frames that see it, this fraction must land ON the mask
+    dilate_px: 2              # SAM3 silhouettes are not pixel-exact and the cloud is sparse at
+                              # mask resolution: without this the rim of every object is judged
+                              # an outlier by its own mask
+    depth_tol_m: 0.15         # external occlusion (hole_audit's convention): measured geometry
+                              # this far IN FRONT means the camera cannot see the point, so its
+                              # landing off the mask says nothing
+    self_tol_m: 0.10          # self-occlusion against the instance's OWN unfiltered Z-buffer
+    max_drop_frac: 0.5        # dropping most of an instance is not a clean object with noise, it
+                              # is the evidence not being about this instance (a wrong oid, masks
+                              # from another pass): declare it and change nothing
   obb_core:
     enabled: true             # the OBB extent comes from where the points CONCENTRATE, not from
                               # the two most extreme points. min()/max() lets ONE stray point a
@@ -2196,10 +2248,18 @@ correction_graph:
                                     # zero and flag its own noise
     drift_model: true               # the accumulated drift is a SMOOTH function of the distance
                                     # walked (USER 2026-09-09: E(0)=0, the start is exact, the
-                                    # error grows along the walk), fitted BEFORE the graph from
-                                    # the loop closures alone and applied to the poses; the graph
-                                    # then runs on the corrected chain with its stiff odometry and
-                                    # its structural constraints intact. A sigma cannot express
+                                    # error grows along the walk), fitted from the loop closures
+                                    # alone and applied AFTER the graph — and only when the graph
+                                    # could not close its loops (its own gain below min_loop_gain).
+                                    # Order matters and the evidence decides it: the walls and the
+                                    # stiff chain know WHERE a bend happened, the smooth model only
+                                    # knows HOW MUCH, so fitted first it spreads a localised bend
+                                    # over the whole walk (synthetic corridor: lateral 4.15->7.97 cm
+                                    # before the walls were even consulted; and re-spread on top of
+                                    # a solution that already worked, 1.14->2.75 cm with the loop
+                                    # offset improving all the while). It is accepted only when it
+                                    # reduces the loop offset AND the held-out judge does not
+                                    # degrade. A sigma cannot express
                                     # this: turn the odometry down and the chain will not bend at
                                     # all (pccr 2026-09-14 applied 43 cm where the desks measured
                                     # 112-215 cm); turn it up and every link becomes independently
@@ -2216,6 +2276,41 @@ correction_graph:
                                     # per term against a keyframe graph's 6*n.
     drift_iters: 25
     drift_max_step: 1.0             # cap of one Gauss-Newton step (coefficient norm)
+    drift_prior_rot_deg: 30.0       # sigma of the prior on each coefficient: among the models
+    drift_prior_trans_m: 5.0        # that explain the closures equally well, keep the SMALLEST
+                                    # (which is the user's ramp). The loops look at the two ends
+                                    # of the walk, so the whole interior is a flat valley in the
+                                    # cost, and an unregularised Gauss-Newton walks down it: each
+                                    # step is minimum-norm from the CURRENT point, so drift_iters
+                                    # steps capped at drift_max_step add up to a coefficient norm
+                                    # of drift_iters. pccr 2026-09-14 measured |c| ~ 24 with the
+                                    # linear and quadratic terms cancelling — ~0 at both ends
+                                    # where the loops look, 2 rad (115 deg) in the middle where
+                                    # nothing does — while the loop residual improved 4 %. The
+                                    # held-out judge caught it (2.6 -> 42 cm) and refused the
+                                    # model, so the session kept its under-correction. These are
+                                    # deliberately generous: pccr's real demand is ~3 m of
+                                    # translation at the end of an 18 m walk, and 458 deg is still
+                                    # crushed by (458/30)^2 in the cost.
+    drift_rel_tol: 1.0e-3           # a step buying less than this fraction of the cost is the
+                                    # valley, not convergence towards an answer: stop there
+    drift_min_gain: 0.2             # the model must EXPLAIN what it moves: this share of the loop
+                                    # offset the graph left open, or it is fitting noise and is not
+                                    # applied. Measured on the known-answer synthetic, whose
+                                    # perturbation is ONE chunk: its second iteration moved every
+                                    # keyframe 10 cm to reduce the loop offset 288 -> 280 cm
+                                    # (2.8 %), passed "closes" and the held-out judge, and took the
+                                    # recovery of the injected perturbation from 5.83 to 8.13 cm.
+                                    # A smooth model spread over a LOCALISED error undoes the
+                                    # localisation the walls and the stiff chain achieved, and no
+                                    # internal judge sees it — the loop offset even improves. The
+                                    # consensus of the loop rates cannot separate the two cases
+                                    # either: by that second iteration the first had already
+                                    # absorbed the disagreement (30 % of the loops contradicting
+                                    # became 6 %) while the error stayed exactly as localised.
+                                    # How much it explains is the measurement that survives both.
+                                    # This is model VALIDITY, not a veto — the graph applies its
+                                    # own correction either way, so the advisory doctrine stands.
     outlier_max_sigma_factor: 10.0  # cap. The edge is NEVER dropped — USER 2026-09-13, "nunca
                                     # debe descartarse un duplicado detectado por SAM3": an
                                     # outlier keeps its vote, it just stops shouting, and the
@@ -2358,6 +2453,42 @@ certify:                            # §4.8 ensemble witness + §9 certification
     unobserved_sigma_m: 5.0         # a direction the visit does not observe (a floor's in-plane) — huge σ
     unobserved_sigma_deg: 30.0      # roll / pitch of a yaw-only closure — huge σ
     window_kf: 15                   # an instance's copy = its points within ± this of the visit keyframe
+  greedy:                           # §9 GREEDY loop — USER's mechanic 2026-09-14: "empezamos epoca 1
+                                    # mejora, sigo con epoca 2, no mejora, pruebo con otra no mejora,
+                                    # pruebo con otra mejora, epoca 3 ... ninguna mejora, ok".
+                                    # ONE duplicate at a time and the MEASUREMENT decides: a trial that
+                                    # improves stays and becomes the next epoch of the chain, one that
+                                    # does not is discarded and the next candidate is tried. A failed
+                                    # candidate goes BACK into the pool — the state moved under it, and
+                                    # a correction that did not help before can help now — so
+                                    # convergence is a FULL PASS over what remains with no improvement.
+                                    # Why not a batch fit: pccr 2026-09-14 has sixteen closures that
+                                    # contradict each other by a factor of five (69 to 376 cm for the
+                                    # same quantity); least squares over contradictory observations
+                                    # lands on a compromise that satisfies none — 43 cm applied where
+                                    # the desks asked 112-215, closure 0.946 -> 1.228 m. Applying one
+                                    # and looking is the only thing that separates them. The trials
+                                    # never touch disk: the correction is per keyframe, so a trial
+                                    # warps the INSTANCES' points and the cameras (tens of thousands
+                                    # of points, not 28 million) and only the accepted chain is
+                                    # materialised, once, at the end.
+                                    # WHAT "BETTER" MEANS (USER 2026-09-14): "mejorar es que mas
+                                    # puntos de nube caigan en las mascaras desde donde se vio, es
+                                    # eso. Y empeorar es justamente eso, menos puntos en su
+                                    # mascara." One count of points, no weighted objective and no
+                                    # invented percentage. Two things make the count mean it:
+                                    # (1) every point is projected into EVERY keyframe of its
+                                    # instance, BOTH visits — a point seen from its own keyframe is
+                                    # blind to the correction, because the point and its camera move
+                                    # together, so only the CROSS projection moves, and that is
+                                    # exactly where a duplicate shows itself; (2) the sample is
+                                    # FIXED across trials, so the count is exact and any increase is
+                                    # real, which is why no minimum gain has to be invented.
+    enabled: true
+    max_epochs: 12                  # cap of the ACCEPTED chain, not of the trials
+    window_kf: 15                   # an instance's copy = its points within ± this of its visit kf
+    offset_samples: 4000            # points scored per copy. Fixed across trials by construction;
+                                    # raising it costs every trial linearly
   known_answer:                     # §10.10 field check of the instrument
     chunk: last                     # the perturbed chunk: the revisited one — where the loops see it
                                     # (a kink in a chunk no loop covers is the §4.6 corridor case:

@@ -260,6 +260,23 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         # 3) the loops re-measured on the closed scale → SE(3) edges → pose graph
         edges_s = _all_edges(session_s, cands, quiet=True) if srep.get("applied") else edges_now
         edges = [m for m in edges_s if "Z" in m and m.get("trusted")] + extra
+        # 3a) the GREEDY loop first (USER 2026-09-14): one duplicate at a time,
+        #     and the measurement — points landing inside their masks — decides.
+        #     A batch fit over closures that contradict each other by a factor
+        #     of five lands on a compromise satisfying none of them; applying
+        #     one and looking is what separates the right ones from the wrong.
+        #     It falls through to the graph when it accepts nothing.
+        greedy_rep = None
+        R_g = t_g = None
+        if ccert.greedy.enabled and edges:
+            from reconstruction.certify.iterate import GreedyLoop
+            gl = GreedyLoop(session_s, edges, ccfg, cfg, output_dir, session_dir,
+                            instances, ccert.greedy, log=log)
+            greedy_rep = gl.run()
+            comp = gl.composed()
+            if comp is not None:
+                R_g, t_g, _k_g = comp
+            rec["greedy"] = greedy_rep
         prep = run_keyframe_graph(output_dir, session_dir, cfg, operator=operator, apply=False,
                                   extra_loop_edges=edges, use_structural=True, log=log,
                                   session=session_s, use_fork_edges=use_fork_edges)
@@ -268,7 +285,20 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
             X = np.stack([se3_exp(np.asarray(x)) for x in prep["xi"]])
             # a correction inside the closures' own σ floor is noise, not a move
             pose_moved = bool(np.max(np.linalg.norm(X[:, :3, 3], axis=1)) > float(ccert.visit_loops.sigma_floor_m))
-        if pose_moved:
+        if R_g is not None:
+            # the greedy chain is the pose correction: every step of it was
+            # accepted because MORE points landed in their masks, which the
+            # graph's own judges cannot see
+            R2, t2 = R_g, t_g
+            pose_moved = bool(np.max(np.linalg.norm(t2, axis=1))
+                              > float(ccert.visit_loops.sigma_floor_m))
+            prep = dict(prep, verdict="APPLY" if pose_moved else "IDENTITY",
+                        source="greedy", greedy=greedy_rep)
+            log(f"[certify] pose correction from the greedy chain: "
+                f"{greedy_rep['epochs']} step(s) over {greedy_rep['trials']} trial(s), "
+                f"points in mask {greedy_rep['points_in_mask_before']:,} → "
+                f"{greedy_rep['points_in_mask_after']:,}")
+        elif pose_moved:
             R2, t2 = X[:, :3, :3].copy(), X[:, :3, 3].copy()
         else:
             R2, t2 = I3.copy(), np.zeros((N, 3))

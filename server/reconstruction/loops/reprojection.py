@@ -171,7 +171,9 @@ def copy_evidence(output_dir, session_dir, instance_id: int, oid: Optional[int],
                   min_self_recall: float, min_cross_recall: float,
                   min_agreeing_frac: float,
                   oid_b: Optional[int] = None,
-                  cloud_to_mask: Optional[Dict[int, int]] = None) -> dict:
+                  cloud_to_mask: Optional[Dict[int, int]] = None,
+                  ev=None,
+                  poses: Optional[Dict[int, np.ndarray]] = None) -> dict:
     """Do the two clusters of one instance show the SAME object?
 
     Returns the measurements and a verdict ∈ {same_object, distinct, unusable}.
@@ -179,9 +181,20 @@ def copy_evidence(output_dir, session_dir, instance_id: int, oid: Optional[int],
     reach the instance's own mask in its own frames, so the geometry, the poses
     or the grid scaling are off and NO verdict here can be trusted. It is
     reported, never quietly turned into ``distinct``.
+
+    ``ev`` reuses a caller's ``_Evidence`` instead of building one: the object
+    loads the whole mask store and the camera source, so a loop that measures
+    hundreds of trial states must build it ONCE. ``poses`` overrides the camera
+    poses by REAL frame number (``session.frames[k]``, not the keyframe index)
+    so a state corrected in memory can be scored without writing it to disk —
+    the projection is the only thing in this module that reads a pose.
     """
     from reconstruction.surface_fit.hole_audit import _Evidence
-    ev = _Evidence(Path(output_dir), Path(session_dir))
+    if ev is None:
+        ev = _Evidence(Path(output_dir), Path(session_dir))
+    if poses and getattr(ev, "cam", None) is not None:
+        ev.cam.pose_map.update({int(f): np.asarray(P, np.float64)
+                                for f, P in poses.items()})
     if not ev.ok or oid is None:
         return {"verdict": "unusable", "reason": "no mask/camera evidence for this session"}
 

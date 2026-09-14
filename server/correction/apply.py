@@ -292,7 +292,7 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
         _p(68, "tx: re-consolidating the warped cloud...")
         try:
             from reconstruction.surface_fit.consolidate import scene_consolidate
-            rep = scene_consolidate(tx)
+            rep = scene_consolidate(tx, artifacts_dir=output_dir)
             if rep:
                 log(f"  re-consolidated {rep.get('n_points', 0):,} pts, "
                     f"mean move {rep.get('mean_move_mm', 0):.2f} mm "

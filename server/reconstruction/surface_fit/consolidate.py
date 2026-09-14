@@ -526,7 +526,8 @@ def scene_consolidate(output_dir: Path,
                       iterations: int = 2,
                       normal_gate: float = 0.25,
                       k: int = 24,
-                      excluded_statuses=None) -> Optional[dict]:
+                      excluded_statuses=None,
+                      artifacts_dir: Optional[Path] = None) -> Optional[dict]:
     """Stage-1 at SCENE level: consolidate cleaned_cloud.ply IN PLACE with
     normal-aware robust MLS so TSDF masking, Potree, segmentation and every
     fit see the thin surface instead of onion layers.
@@ -585,11 +586,19 @@ def scene_consolidate(output_dir: Path,
            ("frame_global", "pixel_row", "pixel_col")):
         try:
             from reconstruction.trace_normals import normals_from_trace
+            # the depth maps, intrinsics and frame list live in the SESSION,
+            # not in the staging directory a correction epoch consolidates in
+            # (the transaction stages nine geometry artifacts and none of
+            # them). Without this the fast path can never fire inside an epoch
+            # and every certification pays the KDTree-PCA fallback — which on
+            # pccr 2026-09-14 asked the GPU for 7.73 GiB while vLLM held 24,
+            # got an OOM and fell to CPU kNN-PCA over 28 M points.
             normals = normals_from_trace(
                 pts, np.asarray(data["frame_global"], np.int64),
                 np.asarray(data["pixel_row"], np.int64),
                 np.asarray(data["pixel_col"], np.int64),
-                output_dir, log=lambda m: logger.info("scene_consolidate: %s", m))
+                Path(artifacts_dir or output_dir),
+                log=lambda m: logger.info("scene_consolidate: %s", m))
         except Exception as _e:  # noqa: BLE001
             logger.info("scene_consolidate: trace normals unavailable (%s)", _e)
     if normals is None:

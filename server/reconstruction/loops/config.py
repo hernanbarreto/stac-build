@@ -212,6 +212,13 @@ class GraphConfig:
     drift_degree: int               # terms of that model (1 = the ramp E(d)=eps*d, 2 adds curvature)
     drift_iters: int
     drift_max_step: float           # cap of one Gauss-Newton step, in the coefficient norm
+    drift_prior_rot_deg: float      # σ of the prior on each coefficient's rotation half
+    drift_prior_trans_m: float      # ...and its translation half: the unobserved directions
+                                    # stay at zero instead of walking the flat valley
+    drift_rel_tol: float            # a step buying less than this fraction of the cost is the
+                                    # valley, not convergence — stop
+    drift_min_gain: float           # the model must explain this share of what the graph left
+                                    # open, or it is fitting noise and is not applied
     huber_delta_m: float            # Huber on loop + structural edges (never odometry)
     huber_delta_deg: float
     dense_max_unknowns: int         # 6·n_kf ≤ this → dense Cholesky, else block-Jacobi PCG
@@ -442,6 +449,17 @@ class DeterminismConfig:
 
 
 @dataclass(frozen=True)
+class GreedyConfig:
+    """§9 greedy loop — one duplicate at a time, the measurement decides."""
+    enabled: bool
+    max_epochs: int                 # cap of the accepted chain, not of the trials
+    window_kf: int                  # an instance's copy = its points within ± this of its
+                                    # visit keyframe (mirrors visit_loops.window_kf)
+    offset_samples: int             # points sampled per copy — FIXED across trials, which is
+                                    # what makes the count exact and a threshold unnecessary
+
+
+@dataclass(frozen=True)
 class CertifyConfig:
     ensemble_offset_frames: int     # >0 → a second Omega pass with shifted chunk boundaries
     keep_aligned_chunks: bool       # keep maplong_run/_tmp_results_aligned + _tmp_results_loop
@@ -459,6 +477,7 @@ class CertifyConfig:
     gates: CertifyGates
     scale: CertifyScale
     visit_loops: VisitLoopsConfig
+    greedy: GreedyConfig
     known_answer: KnownAnswerConfig
     envelope: EnvelopeConfig
     determinism: DeterminismConfig
@@ -634,6 +653,10 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         drift_degree=_num(gp, "drift_degree", G, lo=1, integer=True),
         drift_iters=_num(gp, "drift_iters", G, lo=1, integer=True),
         drift_max_step=_num(gp, "drift_max_step", G, lo=0, lo_excl=True),
+        drift_prior_rot_deg=_num(gp, "drift_prior_rot_deg", G, lo=0, lo_excl=True),
+        drift_prior_trans_m=_num(gp, "drift_prior_trans_m", G, lo=0, lo_excl=True),
+        drift_rel_tol=_num(gp, "drift_rel_tol", G, lo=0, lo_excl=True),
+        drift_min_gain=_num(gp, "drift_min_gain", G, lo=0, hi=1),
         huber_delta_m=_num(gp, "huber_delta_m", G, lo=0, lo_excl=True),
         huber_delta_deg=_num(gp, "huber_delta_deg", G, lo=0, lo_excl=True),
         dense_max_unknowns=_num(gp, "dense_max_unknowns", G, lo=6, integer=True),
@@ -849,6 +872,13 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
         unobserved_sigma_m=_num(vl, "unobserved_sigma_m", V, lo=0, lo_excl=True),
         unobserved_sigma_deg=_num(vl, "unobserved_sigma_deg", V, lo=0, lo_excl=True),
         window_kf=_num(vl, "window_kf", V, lo=1, integer=True))
+    gr = _sub(ce, "greedy", P)
+    G = P + ".greedy"
+    greedy = GreedyConfig(
+        enabled=_bool(gr, "enabled", G),
+        max_epochs=_num(gr, "max_epochs", G, lo=1, integer=True),
+        window_kf=_num(gr, "window_kf", G, lo=1, integer=True),
+        offset_samples=_num(gr, "offset_samples", G, lo=100, integer=True))
     ka = _sub(ce, "known_answer", P)
     K = P + ".known_answer"
     chunk = str(_require(ka, "chunk", K))
@@ -881,7 +911,7 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
         regression_eps=_num(ce, "regression_eps", P, lo=0),
         auto_after_segmentation=_bool(ce, "auto_after_segmentation", P),
         objective=objective, gates=gates, scale=scale, visit_loops=visit_loops,
-        known_answer=known, envelope=envelope, determinism=determinism)
+        greedy=greedy, known_answer=known, envelope=envelope, determinism=determinism)
 
 
 # ── fork-facing dicts ────────────────────────────────────────────────────────

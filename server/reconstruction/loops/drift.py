@@ -38,6 +38,17 @@ The fit consumes ONLY the loop edges: the smooth basis IS the motion prior, so
 there is no odometry term to fight it. What the model cannot explain is left to
 the graph, which still runs afterwards with its stiff chain and its structural
 constraints.
+
+Two things keep the fit honest, both learned from pccr 2026-09-14, where the
+model was refused by its own held-out judge after inventing 115° of rotation in
+the middle of the walk:
+
+  · the DEGREE is capped by the stretches of the walk the loops actually pin
+    (``independent_spans``), not by how many keyframe pairs they connect;
+  · a PRIOR on the coefficients keeps the unobserved directions at zero. The
+    loops look at the ends, so the interior lives in a flat valley, and an
+    unregularised Gauss-Newton with a step cap walks down it for as many
+    iterations as it is given.
 """
 
 from __future__ import annotations
@@ -58,6 +69,36 @@ def _basis(u: np.ndarray, degree: int) -> np.ndarray:
     return np.stack([u ** (m + 1) for m in range(int(degree))], axis=1)
 
 
+def independent_spans(intervals: Sequence[tuple], overlap_frac: float) -> int:
+    """How many DISTINCT stretches of the walk the loops pin.
+
+    A loop observes the drift accumulated between its two ends, so what makes
+    two loops independent evidence is covering different stretches — not
+    connecting different keyframes. pccr 2026-09-14: eleven loops joined
+    211↔4, 212↔6, 215↔5, 207↔7, 208↔6 … eleven distinct keyframe PAIRS and
+    exactly one quantity, the end of the walk against its start. Counting the
+    pairs granted the fit a curvature nothing measured, and it spent it: the
+    quadratic came out as c·(u − u²), ~zero at both ends where the loops look
+    and 2 rad in the middle where nothing does.
+
+    Two stretches are the same when they overlap by ``overlap_frac`` of the
+    shorter one — the same criterion the σ consensus uses for "these loops
+    measure the same drift".
+    """
+    clusters: List[List[float]] = []
+    for lo, hi in sorted((min(a, b), max(a, b)) for a, b in intervals):
+        for c in clusters:
+            ov = min(hi, c[1]) - max(lo, c[0])
+            shorter = min(hi - lo, c[1] - c[0])
+            same = (ov >= overlap_frac * shorter) if shorter > 0 else (ov >= 0.0)
+            if same:
+                c[0], c[1] = min(c[0], lo), max(c[1], hi)
+                break
+        else:
+            clusters.append([lo, hi])
+    return len(clusters)
+
+
 def _edge_weights(e: dict, sigma_floor_m: float, sigma_floor_deg: float):
     """(W_rot, W_t) 3×3 weight matrices of one loop edge — the anisotropic
     information when the edge carries it (a floor observes its normal and
@@ -72,7 +113,9 @@ def _edge_weights(e: dict, sigma_floor_m: float, sigma_floor_deg: float):
 
 def fit_drift(poses: np.ndarray, loops: Sequence[dict], degree: int,
               iters: int, sigma_floor_m: float, sigma_floor_deg: float,
-              max_step: float, log: Callable[[str], None] = print) -> Optional[dict]:
+              max_step: float, overlap_frac: float, prior_rot_deg: float,
+              prior_trans_m: float, rel_tol: float,
+              log: Callable[[str], None] = print) -> Optional[dict]:
     """Least-squares fit of ξ(u) to the loop closures.
 
     ``poses``: (n, 4, 4) keyframe poses. ``loops``: edges {i, j, Z, sigma_m,
@@ -101,11 +144,25 @@ def fit_drift(poses: np.ndarray, loops: Sequence[dict], degree: int,
     # synthetic corridor that took the lateral bend from 4.15 cm to 7.97 cm
     # before the walls were even consulted. Lowest order that the loops can
     # actually pin, and the report says which.
-    n_span = len({(min(int(e["i"]), int(e["j"])), max(int(e["i"]), int(e["j"])))
-                  for e in edges})
+    n_span = independent_spans([(float(u[int(e["i"])]), float(u[int(e["j"])]))
+                                for e in edges], overlap_frac)
     M = max(1, min(int(degree), n_span))
     B = _basis(u, M)                           # (n, M)
     W = [_edge_weights(e, sigma_floor_m, sigma_floor_deg) for e in edges]
+    # Prior: among the models that explain the closures equally well, the
+    # SMALLEST one — which is the user's ramp. Without it the cost has a flat
+    # valley along everything the loops do not see (they look at u≈0 and u≈1,
+    # so the whole interior is free), and Gauss-Newton walks down it: each step
+    # is minimum-norm from the CURRENT point, not from the origin, so 25 steps
+    # capped at max_step add up to a coefficient norm of 25. pccr measured
+    # ‖c‖ ≈ 24 with the two terms cancelling, 115° of rotation mid-walk, and
+    # the loop residual improving by 4 % all the while — the held-out judge
+    # caught it (2.6 → 42 cm) and refused the model, so the session kept its
+    # under-correction. σ per coefficient, rotation and translation apart:
+    # they are radians and metres and cannot share one scale.
+    w_prior = np.tile(
+        np.concatenate([np.full(3, 1.0 / max(np.radians(prior_rot_deg), 1e-9)),
+                        np.full(3, 1.0 / max(prior_trans_m, 1e-9))]), M)
 
     def corrections(c: np.ndarray) -> np.ndarray:
         """exp(ξ(u_k)) for every keyframe, world frame."""
@@ -114,7 +171,8 @@ def fit_drift(poses: np.ndarray, loops: Sequence[dict], degree: int,
 
     def residuals(c: np.ndarray) -> np.ndarray:
         X = corrections(c)
-        out = np.empty(6 * len(edges))
+        out = np.empty(6 * len(edges) + len(c))
+        out[6 * len(edges):] = w_prior * c
         for k, e in enumerate(edges):
             i, j = int(e["i"]), int(e["j"])
             Zc = se3_inv(X[i] @ poses[i]) @ (X[j] @ poses[j])
@@ -151,8 +209,11 @@ def fit_drift(poses: np.ndarray, loops: Sequence[dict], degree: int,
         cost_new = float(r_new @ r_new)
         if not np.isfinite(cost_new) or cost_new >= cost:
             break
+        gained = (cost - cost_new) / max(cost, 1e-12)
         c, cost = c_new, cost_new
-        if nrm < 1e-9:
+        # a step that buys a negligible fraction of the cost is the flat valley,
+        # not convergence towards an answer: stop instead of walking it
+        if nrm < 1e-9 or gained < rel_tol:
             break
 
     X = corrections(c)
@@ -170,15 +231,20 @@ def fit_drift(poses: np.ndarray, loops: Sequence[dict], degree: int,
     before, after = _edge_offset(eye), _edge_offset(X)
     moved = np.linalg.norm(X[:, :3, 3], axis=1)
     rate = float(moved[-1] / D) if D > 0 else 0.0
+    # the biggest excursion, not the endpoint: a model that cancels at both
+    # ends and blows up in the middle reads as harmless at u = 1
+    peak = float(moved.max())
     log(f"[drift] {M}-term model (degree {degree} asked, {n_span} independent "
         f"loop span(s)) over {D:.1f} m / {n} keyframes, {len(edges)} loop(s): "
         f"loop offset {before * 100:.0f} → {after * 100:.0f} cm, "
-        f"keyframes moved 0 → {moved.max() * 100:.0f} cm "
-        f"({rate * 100:.2f} cm/m at the end)")
+        f"keyframes moved 0 → {peak * 100:.0f} cm peak / "
+        f"{moved[-1] * 100:.0f} cm at the end ({rate * 100:.2f} cm/m), "
+        f"‖c‖ {float(np.linalg.norm(c)):.2f}")
     return {"coeffs": c.reshape(M, 6).tolist(), "u": u.tolist(), "corrections": X,
             "residual_before_m": before, "residual_after_m": after,
             "rate_m_per_m": rate, "degree": M, "degree_requested": int(degree),
-            "n_independent_spans": n_span, "walk_m": D, "n_loops": len(edges)}
+            "n_independent_spans": n_span, "walk_m": D, "n_loops": len(edges),
+            "peak_move_m": peak, "coeff_norm": float(np.linalg.norm(c))}
 
 
 def _chol(W: np.ndarray) -> np.ndarray:
