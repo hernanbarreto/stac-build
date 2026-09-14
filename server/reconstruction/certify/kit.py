@@ -4,7 +4,8 @@ comes from the session's own records — no new measurement here.
   * trajectory + edges: keyframe positions (camera_poses.txt), the odometry
     chain, the loop edges the graphs used (keyframe_graph.json, the
     certification acta, the reconstruction's own loop_edges.json) with their
-    verdict — accepted (green), vetoed / rejected (red, with the reason),
+    verdict — accepted (green; a closure beyond the drift budget is accepted
+    and carries the demand as its reason), rejected (red, with the reason),
     scale_break (orange), ambiguous candidates (amber);
   * duplicates: instances still written twice (duplicates.json) and the
     revisited places' offsets before / after the last iteration;
@@ -58,11 +59,14 @@ def kit_edges(output_dir) -> dict:
         loops.append({"i": int(i), "j": int(j), "kind": kind, "source": source, "reason": reason,
                       "residual_m": residual_m, **(extra or {})})
 
-    # the post-hoc keyframe graph (last solve): used vs vetoed
+    # the post-hoc keyframe graph (last solve): closures beyond the drift
+    # budget are APPLIED and declared (USER 2026-09-09: duplicates are always
+    # corrected) — drawn accepted, with the demand vs budget as the reason
     kg = _load(output_dir / "keyframe_graph.json") or {}
-    for v in kg.get("vetoed", []):
-        _add(v.get("i"), v.get("j"), "vetoed", "keyframe_graph",
-             reason=f"demanded {v.get('correction_m', 0):.2f} m > budget {v.get('budget_m', 0):.2f} m",
+    for v in kg.get("over_budget", []):
+        _add(v.get("i"), v.get("j"), "accepted", "keyframe_graph",
+             reason=f"closure {v.get('correction_m', 0):.2f} m beyond the drift budget "
+                    f"{v.get('budget_m', 0):.2f} m (walk {v.get('walk_m', 0):.1f} m) — applied",
              residual_m=v.get("correction_m"))
     # the certification acta: every iteration's measured loops with their verdict
     acta = _load(output_dir / "certify_acta.json") or {}
@@ -111,7 +115,7 @@ def kit_edges(output_dir) -> dict:
             d[k + "_pos"] = pos[int(kk)].tolist() if kk is not None and 0 <= int(kk) < n else None
     return {"n_keyframes": int(n), "positions": pos.tolist(), "frames": frames,
             "odometry": [[k, k + 1] for k in range(n - 1)], "loops": loops, "duplicates": dups,
-            "legend": {"accepted": "green", "scale_break": "orange", "vetoed": "red", "rejected": "red",
+            "legend": {"accepted": "green", "scale_break": "orange", "rejected": "red",
                        "ambiguous": "amber", "odometry": "grey"}}
 
 

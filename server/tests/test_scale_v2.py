@@ -169,26 +169,6 @@ def test_residual_profile_flags_depth_structure(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Anchor depth-coverage top-up
-# ──────────────────────────────────────────────────────────────────────────────
-
-def test_topup_plans_uncovered_depth_bins(tmp_path):
-    out = build_session(tmp_path, n_frames=12, s_true=2.0)
-    da = out / "da3_run" / "results_output"
-    # keep DA3 only on the 4 SHALLOWEST frames → deep bins uncovered
-    for i in range(4, 12):
-        (da / f"frame_{10 * i}.npz").unlink()
-    sel_files = [f"{10 * i}.jpg" for i in range(12)]
-    plan = sm.plan_depth_coverage_topup(out, sel_files, max_topup=8)
-    assert plan, "expected top-up extractions for uncovered deep bins"
-    nums = {int(f.split(".")[0]) // 10 for f in plan}
-    assert all(i >= 4 for i in nums)  # planned frames are the deep ones
-    # full coverage → nothing to plan
-    out2 = build_session(tmp_path / "full", n_frames=12, s_true=2.0)
-    assert sm.plan_depth_coverage_topup(out2, sel_files, max_topup=8) == []
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # VIO
 # ──────────────────────────────────────────────────────────────────────────────
 

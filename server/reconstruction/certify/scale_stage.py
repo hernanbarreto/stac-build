@@ -1,9 +1,11 @@
 """§5 on the finished session: the scale GRAPH re-solved with what the
 reconstruction could not measure yet — the copies of every revisited
 instance (loop rows, §5.1) and the regulated dimensions (absolute rows,
-§5.2) — against the chunks' DA3 agreement (anchor rows) and the glued seams
-(the current chain is consistent: a correction that differs between
-neighbouring chunks pays a seam residual).
+§5.2) — against the chunks' DA3 agreement RELATIVE to the metric lock
+(anchor rows: how much the geometry moved against the anchors since the
+lock, 1 = nothing new) and the glued seams (the current chain is
+consistent: a correction that differs between neighbouring chunks pays a
+seam residual).
 
 Unknowns: one correction factor r_k per reconstruction chunk. Applied per
 keyframe through the correction package: depth × r_k about the keyframe's
@@ -45,25 +47,45 @@ def chunk_of_keyframes(output_dir, n_kf: int) -> Tuple[List[Tuple[int, int]], np
     return ranges, owner
 
 
+def _baseline_agreements(diag: dict) -> Optional[Dict[int, float]]:
+    """The per-anchor agreement the METRIC LOCK consumed (epoch 0: the
+    original estimate, preserved untouched across epochs — s_f / s_applied)."""
+    s_applied = diag.get("s_applied")
+    frames = ((diag.get("anchors") or {}).get("frames")) or []
+    if not s_applied or not frames:
+        return None
+    return {int(fr["num"]): float(fr["s_f"]) / float(s_applied) for fr in frames if fr.get("s_f")}
+
+
 def anchor_rows(output_dir, owner: np.ndarray, frames: List[int]) -> Tuple[Dict[int, float], Dict[int, int]]:
-    """Per-chunk DA3 agreement (median ratio metric/current) from
-    scale_diagnostics.json's per-anchor agreements → (s_da3, n_anchors).
-    A ratio of 1 means the chunk already agrees with the anchors."""
+    """Per-chunk DA3 evidence RELATIVE to the metric lock: median over the
+    chunk's anchors of agreement_now / agreement_at_lock → (s_da3, n_anchors).
+
+    The lock already weighed the raw anchors against the seams and chose;
+    re-solving the raw ratios post-hoc only pulled the chunks back toward
+    the DA3 medians the lock had overruled (pccr 2026-09-13 21:03: 0 loop
+    rows, r down to 0.87, the start↔end revisit went from 20 cm to 1.15 m).
+    What the anchors can still say is whether the geometry MOVED against
+    them since the lock — an injected or accumulated scale error changes
+    the agreement by 1/k (known-answer §10.10), an untouched session leaves
+    every ratio at 1 → identity. A ratio of 1 means: nothing new."""
     p = Path(output_dir) / "scale_diagnostics.json"
     if not p.exists():
         return {}, {}
     from correction.diagnose import _current_agreements
     diag = json.loads(p.read_text())
-    agreements = _current_agreements(diag)
-    if not agreements:
+    now = _current_agreements(diag)
+    base = _baseline_agreements(diag)
+    if not now or not base:
         return {}, {}
     kf_of = {int(f): k for k, f in enumerate(frames)}
     per_chunk: Dict[int, List[float]] = {}
-    for frame, ratio in agreements.items():
+    for frame, ratio in now.items():
         k = kf_of.get(int(frame))
-        if k is None or not np.isfinite(ratio) or ratio <= 0:
+        b = base.get(int(frame))
+        if k is None or b is None or not np.isfinite(ratio) or ratio <= 0 or not np.isfinite(b) or b <= 0:
             continue
-        per_chunk.setdefault(int(owner[k]), []).append(float(ratio))
+        per_chunk.setdefault(int(owner[k]), []).append(float(ratio) / float(b))
     s = {k: float(np.median(v)) for k, v in per_chunk.items()}
     n = {k: len(v) for k, v in per_chunk.items()}
     return s, n
@@ -116,15 +138,26 @@ def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, 
            "loop_rows": rows_used, "anchor_rows": {str(k): {"s": s_da3[k], "n": n_anch[k]} for k in s_da3},
            "absolute_rows": [{"chunk": k, "log_s": ls, "sigma": sg, "source": src} for k, ls, sg, src in abs_rows],
            "sigma_seam_log": float(scfg.sigma_seam_log), "sigma_anchor_log": float(scfg.sigma_anchor_log)}
-    if not loop_rel and not abs_rows and not s_da3:
+    # Every row is RELATIVE to the metric lock's state: anchors = how much the
+    # geometry moved against DA3 since the lock (1 = nothing new), seams = the
+    # chain is glued (1), loop rows = the copies' s_ab, absolute rows = the
+    # regulated dimensions. An untouched session with no loop row solves to
+    # r ≡ 1 and stays identity below the row σ; nothing pulls the chunks back
+    # toward the raw DA3 medians the lock overruled (pccr 2026-09-13).
+    if not s_da3 and not loop_rel and not abs_rows:
         rep.update({"r": [1.0] * n_chunks, "applied": False,
-                    "reason": "no scale row (no trusted copy pair, no absolute row, no anchor agreement)"})
+                    "reason": "no anchor, loop or absolute row — nothing to solve (identity)"})
         log(f"[scale-posthoc] IDENTITY — {rep['reason']}")
         return rep
-    r = solve_scale_graph(s_da3, n_anch, seam_rel, n_chunks, sigma_seam=float(scfg.sigma_seam_log),
-                          sigma_anchor=float(scfg.sigma_anchor_log), loop_rel=loop_rel or None,
-                          absolute=[(k, ls, sg) for k, ls, sg, _ in abs_rows] or None)
-    r = np.asarray(r, np.float64)
+    r = np.asarray(solve_scale_graph(
+        s_da3, n_anch, seam_rel, n_chunks, sigma_seam=float(scfg.sigma_seam_log),
+        sigma_anchor=float(scfg.sigma_anchor_log), loop_rel=loop_rel or None,
+        absolute=[(k, ls, sg) for k, ls, sg, _ in abs_rows] or None), np.float64)
+    if not np.all(np.isfinite(r)) or np.any(r <= 0):
+        rep.update({"r": [1.0] * n_chunks, "applied": False,
+                    "reason": "scale graph solution not finite/positive — declared, identity"})
+        log(f"[scale-posthoc] IDENTITY — {rep['reason']}")
+        return rep
     max_log = float(np.max(np.abs(np.log(r))))
     rep["r"] = [float(x) for x in r]
     rep["max_abs_log_r"] = max_log

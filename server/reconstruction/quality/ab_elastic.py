@@ -32,7 +32,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, List, Optional
 
 import numpy as np
 
@@ -193,7 +193,7 @@ def run_ab_session(session_dir, log: Callable[[str], None] = print) -> dict:
     cfg_path = output_dir / "vggt_omega_config.yaml"
     if not cfg_path.exists():
         raise RuntimeError(f"{cfg_path} is missing")
-    model_cfg = yaml.safe_load(cfg_path.read_text())["Model"]
+    model_cfg = yaml.full_load(cfg_path.read_text())["Model"]   # our own artifact (older files carry tuple tags)
     names = json.loads((run_dir / "frame_list.json").read_text())
     frames_dir = session_dir / "frames"
     img_list = [str(frames_dir / n) for n in names]

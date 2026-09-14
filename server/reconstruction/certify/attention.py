@@ -1,9 +1,11 @@
 """§11 attention list: the N places where the system is LEAST sure — the
 operator looks there first, not where the cloud looks nice. Built from the
-session's own records: loops judged ambiguous, vetoed or scale_break edges,
-saturated stages, keyframes with the lowest mv_votes, stretches without
-loop coverage, split instances, remaining duplicates. Every entry carries
-a "fly to" anchor (a point or a keyframe) and its evidence.
+session's own records: loops judged ambiguous, closures beyond the drift
+budget, scale_break edges, advisory gate warnings of the applied epochs
+(the certification applies and declares — USER 2026-09-13), saturated
+stages, keyframes with the lowest mv_votes, stretches without loop
+coverage, split instances, remaining duplicates. Every entry carries a "fly
+to" anchor (a point or a keyframe) and its evidence.
 """
 
 from __future__ import annotations
@@ -72,11 +74,26 @@ def attention_list(output_dir, n_low_votes_keyframes: int = 5) -> dict:
             items.append({"kind": "loop_rejected", "severity": 1,
                           "text": f"loop candidate {ke.get('i')}↔{ke.get('j')} rejected: {e.get('reason')}",
                           "anchor": _kf_anchor(ke.get("i")), "evidence": {"reason": e.get("reason")}})
+    acta = _load(output_dir / "certify_acta.json") or {}
+    for it in acta.get("iterations", []):
+        if it.get("verdict") != "applied":
+            continue
+        for w in it.get("gate_warnings", []):
+            items.append({"kind": "gate_warning", "severity": 3,
+                          "text": f"epoch {it.get('epoch_to')}: gate ⚠ {w} — applied (advisory), "
+                                  f"judge it: Approve or Undo",
+                          "anchor": None, "evidence": {"iteration": it.get("iteration"),
+                                                       "gates": [g for g in it.get("gates", []) if not g.get("passed")]}})
+        for w in ((it.get("stages") or {}).get("poses") or {}).get("gate_warnings", []) or []:
+            items.append({"kind": "gate_warning", "severity": 2,
+                          "text": f"epoch {it.get('epoch_to')}: pose graph ⚠ {w} — applied (advisory)",
+                          "anchor": None, "evidence": {"iteration": it.get("iteration")}})
     kg = _load(output_dir / "keyframe_graph.json") or {}
-    for v in kg.get("vetoed", []):
-        items.append({"kind": "loop_vetoed", "severity": 3,
-                      "text": f"loop {v.get('i')}↔{v.get('j')} vetoed: demanded {v.get('correction_m', 0):.2f} m "
-                              f"> budget {v.get('budget_m', 0):.2f} m",
+    for v in kg.get("over_budget", []):
+        items.append({"kind": "loop_over_budget", "severity": 2,
+                      "text": f"loop {v.get('i')}↔{v.get('j')}: closure {v.get('correction_m', 0):.2f} m "
+                              f"beyond the drift budget {v.get('budget_m', 0):.2f} m over a "
+                              f"{v.get('walk_m', 0):.1f} m walk — applied; look here",
                       "anchor": _kf_anchor(v.get("i")), "anchor_b": _kf_anchor(v.get("j")), "evidence": v})
     cov = kg.get("loop_coverage") or {}
     for u in cov.get("uncovered", []):

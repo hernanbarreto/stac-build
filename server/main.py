@@ -7018,6 +7018,32 @@ async def viewer_websocket(websocket: WebSocket):
                     _load_ctx = _ctx(session_id, cmd.get("scan_key"))
                     output_dir = _load_ctx.output_dir
 
+                    # USER 2026-09-13: the scan that IS reconstructed must open.
+                    # When no scan was named and the active/reference scan has
+                    # no cloud (its reconstruction was wiped or never ran) but
+                    # another scan of the project has one, open THAT scan, make
+                    # it the active one and say so — never refuse the project.
+                    if not cmd.get("scan_key") and not (output_dir / "cleaned_cloud.ply").exists():
+                        try:
+                            from project_paths import ProjectPaths as _PP
+                            from project_scans import (get_active as _get_active,
+                                                       loadable_scan as _loadable_scan,
+                                                       set_active as _set_active)
+                            _pp2 = _PP(str(PROJECTS_DIR), session_id)
+                            if _pp2.project_json.exists():
+                                _cur = _get_active(_pp2)
+                                _alt = _loadable_scan(_pp2, _cur)
+                                if _alt and _alt != _cur:
+                                    _set_active(_pp2, _alt)
+                                    _load_ctx = _ctx(session_id, _alt)
+                                    output_dir = _load_ctx.output_dir
+                                    _msg = (f"Scan {_cur or '(none)'} has no reconstruction — "
+                                            f"opening the reconstructed scan {_alt}")
+                                    print(f"[Viewer] {_msg}")
+                                    await websocket.send_text(json.dumps({"type": "status", "message": _msg}))
+                        except Exception as _e:  # noqa: BLE001
+                            print(f"[Viewer] loadable-scan fallback skipped: {_e}")
+
                     # Auto-cleanup: stale display-space data from previous code version
                     display_marker = output_dir / ".display_space"
                     if display_marker.exists():
@@ -7512,8 +7538,28 @@ async def viewer_websocket(websocket: WebSocket):
                             pass
                         return
 
-                    if sid in _cloud_ready_sent:
+                    # did the CERTIFY stage produce a new geometry epoch? Its
+                    # transactional swap replaced cleaned_cloud.ply + the octree
+                    # AFTER the early delivery → the viewer must reload the
+                    # certified cloud (the acta says which epoch it left)
+                    _certified = False
+                    try:
+                        _acta_p = _ctx(sid).output_dir / "certify_acta.json"
+                        if _acta_p.exists():
+                            _acta = json.loads(_acta_p.read_text())
+                            _certified = (_acta.get("epoch_final") is not None
+                                          and _acta.get("epoch_final") != _acta.get("epoch_initial"))
+                    except Exception as _e:  # noqa: BLE001
+                        print(f"[Pipeline] certify acta lookup failed (non-fatal): {_e}")
+
+                    if sid in _cloud_ready_sent and not _certified:
                         print(f"[Pipeline] cloud already sent after cloudcompy — skipping rebuild")
+                    elif sid in _cloud_ready_sent and _certified:
+                        # the certification's transactional swap already built the
+                        # octree of the new epoch — broadcast it, do not rebuild
+                        print(f"[Pipeline] certification produced epoch {_acta.get('epoch_final')} — "
+                              f"reloading the viewer with the corrected cloud")
+                        await _correction_notify_viewer(sid, _ctx(sid).output_dir)
                     else:
                         _cloud_ready_sent.add(sid)
                         await _notify_cloud_ready(sid)

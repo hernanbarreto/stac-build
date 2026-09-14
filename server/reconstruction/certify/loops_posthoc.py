@@ -83,7 +83,12 @@ def rigid_icp(src: np.ndarray, dst: np.ndarray, iters: int, trim: float):
 def measure_copy(pts_a: np.ndarray, pts_b: np.ndarray, scfg, seed: int = 0,
                  max_points: int = 20000) -> Optional[dict]:
     """Sim3 of copy A onto copy B. None when starved; else {"s_ab",
-    "residual_m", "n", "coverage_a", "coverage_b", "trusted", "scale_trusted"}."""
+    "residual_m", "n", "coverage_a", "coverage_b", "trusted", "scale_trusted",
+    "R", "t", "centroid_a", "offset_before_m", "offset_after_m"} — (R, t) is
+    the RIGID closure of A onto B (world, p_b = R·p_a + t), exact at A's
+    centroid: the Sim3 fit p_b = s·R·p_a + t_s and the rigid map agree there
+    when t = t_s + (s − 1)·R·c_a. The scale goes to the scale graph as its
+    own row; the pose graph takes the rigid part (``instance_edges``)."""
     _vendor_on_path()
     from loop_utils.loop_bridges import robust_sim3
     from scipy.spatial import cKDTree
@@ -109,11 +114,26 @@ def measure_copy(pts_a: np.ndarray, pts_b: np.ndarray, scfg, seed: int = 0,
     fit = robust_sim3(a[ok], b[j[ok]], min_points=int(scfg.min_copy_points))
     if fit is None:
         return None
-    s, _R, _t, med, n = fit
+    s, R_s, t_s, med, n = fit
     trusted = bool(med <= float(scfg.max_copy_residual_m))
+    c_a = a.mean(0)
+    t_r = np.asarray(t_s, np.float64) + (float(s) - 1.0) * (np.asarray(R_s, np.float64) @ c_a)
+    d_before, _ = tree_b.query(a, k=1)
+    d_after, _ = tree_b.query(a @ np.asarray(R_s, np.float64).T + t_r, k=1)
     return {"s_ab": float(s), "residual_m": float(med), "n": int(n), "coverage_a": cov_a,
             "coverage_b": cov_b, "rigid_rms": float(rms), "trusted": trusted,
-            "scale_trusted": bool(trusted and cov_a >= 0.8 and cov_b >= 0.8)}
+            "scale_trusted": bool(trusted and cov_a >= 0.8 and cov_b >= 0.8),
+            "R": np.asarray(R_s, np.float64).tolist(), "t": t_r.tolist(), "centroid_a": c_a.tolist(),
+            "offset_before_m": float(np.median(d_before)), "offset_after_m": float(np.median(d_after))}
+
+
+def _copy_indices(session, inst: dict, i: int, j: int, window_kf: int):
+    """Point indices of the two copies of an instance: around keyframe i
+    (copy A, the later visit) and around keyframe j (copy B, the earlier)."""
+    gi = np.asarray(inst.get("globalIndices") or [], np.int64)
+    gi = gi[(gi >= 0) & (gi < session.n_points)]
+    ks = session.ks[gi]
+    return gi[np.abs(ks - i) <= int(window_kf)], gi[np.abs(ks - j) <= int(window_kf)], ks
 
 
 def copy_scale_rows(session, candidates: List[dict], scfg, window_kf: int, log=print) -> List[dict]:
@@ -137,22 +157,127 @@ def copy_scale_rows(session, candidates: List[dict], scfg, window_kf: int, log=p
         if abs(i - j) <= 2 * int(window_kf):
             rec["reason"] = "not a revisit (the two copies come from overlapping keyframe windows)"
             out.append(rec); continue
-        gi = np.asarray(inst.get("globalIndices") or [], np.int64)
-        gi = gi[(gi >= 0) & (gi < session.n_points)]
-        ks = session.ks[gi]
-        idx_a = gi[np.abs(ks - i) <= int(window_kf)]
-        idx_b = gi[np.abs(ks - j) <= int(window_kf)]
+        idx_a, idx_b, _ks = _copy_indices(session, inst, i, j, window_kf)
         m = measure_copy(session.xyz[idx_a], session.xyz[idx_b], scfg, seed=iid)
         if m is None:
             rec["reason"] = f"copies starved ({len(idx_a)} / {len(idx_b)} points)"
             out.append(rec); continue
-        rec.update(m)
+        rec.update({k: v for k, v in m.items() if k not in ("R", "t", "centroid_a")})
         rec["extent_m"] = float(np.linalg.norm(np.ptp(session.xyz[idx_a], axis=0)))
         out.append(rec)
         log(f"[loops-posthoc] copies {cand.get('label')}#{iid} kf {i}<->{j}: s_ab {m['s_ab']:.4f}, residual "
             f"{m['residual_m'] * 100:.1f} cm, coverage {m['coverage_a']:.2f}/{m['coverage_b']:.2f} → "
             f"{'scale row' if m['scale_trusted'] else 'no scale row'}")
     return out
+
+
+# ── instance copies → pose-graph edges (§4.4: SAM3 as loop detector) ────────
+
+def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print) -> List[dict]:
+    """Pose-graph loop edges from the two copies of a SAM3 instance
+    (USER 2026-09-13: the loop closures SAM3 detects are applied inside the
+    pipeline, not only proposed). Every candidate the spatial gate judged
+    loop | ambiguous — whatever the VLM class, a movable instance may have
+    moved so its σ is inflated, never dropped — is measured on the CURRENT
+    geometry: rigid closure of copy A (later visit, keyframe i) onto copy B
+    (earlier, keyframe j) from ``measure_copy``; the edge Z_ij = T_i⁻¹ X⁻¹ T_j
+    between the two visits' keyframes with a per-DOF information matrix from
+    the copy's PCA shape (a wall patch observes its normal, a column the
+    plane across its axis, a compact object everything). An edge is
+    ``trusted`` when the closure REDUCED the copies' offset; its σ is the
+    residual after the closure × the ambiguity / class factors. The same
+    record shape as ``visit_edges`` so the graph, the metrics (closure,
+    duplicates) and the kit treat both sources alike; unmeasurable
+    candidates are returned ``accepted: False`` with the reason."""
+    from correction import observability as obs_mod
+    res_path = Path(session.output_dir) / "segmentation_result.json"
+    instances = {int(x.get("instance_id", x.get("id"))): x
+                 for x in (json.loads(res_path.read_text()).get("instances") or [])} if res_path.exists() else {}
+    scfg, vcfg = cfg.certify.scale, cfg.certify.visit_loops
+    sem = cfg.loops.semantic
+    up = -session.poses[:, :3, 1].mean(0); up = up / (np.linalg.norm(up) + 1e-12)
+    Pu = np.outer(up, up)
+    wb_rot = 1.0 / np.radians(vcfg.unobserved_sigma_deg) ** 2
+    wy_rot = 1.0 / np.radians(cfg.graph.loop_sigma_rot_deg) ** 2
+    out, skipped = [], []
+    for cand in candidates:
+        if cand.get("verdict") not in ("loop", "ambiguous"):
+            continue
+        iid = int(cand["instance_id"])
+        i, j = int(cand["i"]), int(cand["j"])
+        label = str(cand.get("label", "segment"))
+        cls = str(cand.get("class") or sem.default_class)
+        base = {"i": i, "j": j, "instance_id": iid, "label": label, "class": cls, "kind": cand.get("kind"),
+                "gate_verdict": cand.get("verdict"), "source": "instance", "bridge": -1}
+        if cls == "dynamic":
+            skipped.append(dict(base, reason="dynamic instance (never a loop)"))
+            continue
+        inst = instances.get(iid)
+        if inst is None:
+            skipped.append(dict(base, reason="instance no longer in the segmentation"))
+            continue
+        if abs(i - j) <= 2 * int(vcfg.window_kf):
+            skipped.append(dict(base, reason="not a revisit (overlapping keyframe windows)"))
+            continue
+        idx_a, idx_b, ks = _copy_indices(session, inst, i, j, vcfg.window_kf)
+        m = measure_copy(session.xyz[idx_a], session.xyz[idx_b], scfg, seed=iid)
+        if m is None:
+            skipped.append(dict(base, reason=f"copies starved ({len(idx_a)} / {len(idx_b)} points)"))
+            continue
+        if not (m["offset_after_m"] < m["offset_before_m"]):
+            skipped.append(dict(base, reason="the rigid closure did not reduce the copies' offset",
+                                offset_before_m=m["offset_before_m"], offset_after_m=m["offset_after_m"]))
+            continue
+        shape = obs_mod.classify_object(session.xyz[idx_a], iid, label, ccfg)
+        full = shape.shape == obs_mod.SHAPE_COMPACT or (
+            shape.shape == obs_mod.SHAPE_PLANAR and shape.eig_ratios[0] <= ccfg.observability.yaw_anisotropy_max)
+        if full:
+            mode, axis = "full", None
+        elif shape.shape == obs_mod.SHAPE_PLANAR and shape.normal is not None:
+            mode, axis = "normal", np.asarray(shape.normal, np.float64)
+        elif shape.shape == obs_mod.SHAPE_LINEAR and shape.axis is not None:
+            mode, axis = "perp_axis", np.asarray(shape.axis, np.float64)
+        else:
+            mode, axis = "full", None
+        sigma_t = max(float(m["offset_after_m"]), float(vcfg.sigma_floor_m))
+        factors = {}
+        if cand.get("verdict") == "ambiguous":
+            factors["ambiguous"] = float(cfg.loop.ambiguous_sigma_factor)
+        if cls != "structural":
+            factors[f"class:{cls}"] = float(sem.nonstructural_sigma_factor)
+        for f in factors.values():
+            sigma_t *= f
+        R = np.asarray(m["R"], np.float64); t = np.asarray(m["t"], np.float64)
+        X = np.eye(4); X[:3, :3] = R; X[:3, 3] = t
+        Ti, Tj = session.poses[i], session.poses[j]
+        Z = np.linalg.inv(Ti) @ np.linalg.inv(X) @ Tj
+        R_i = Ti[:3, :3]
+        info_t = _info_from_projection(sigma_t, float(vcfg.unobserved_sigma_m), mode, axis, R_i)
+        wy = wy_rot if full else wb_rot
+        info_rot = R_i.T @ (wy * Pu + wb_rot * (np.eye(3) - Pu)) @ R_i
+        rot_deg = float(np.degrees(np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))))
+        ks_a, ks_b = ks[np.abs(ks - i) <= int(vcfg.window_kf)], ks[np.abs(ks - j) <= int(vcfg.window_kf)]
+        out.append(dict(base, earlier_kfs=[int(ks_b.min()), int(ks_b.max())],
+                        later_kfs=[int(ks_a.min()), int(ks_a.max())], accepted=True, trusted=True,
+                        rot_deg=rot_deg, t_norm_m=float(np.linalg.norm(t)), icp_rms_m=sigma_t,
+                        n_hits=int(m["n"]), offset_before_m=float(m["offset_before_m"]),
+                        offset_after_m=float(m["offset_after_m"]),
+                        duplicated=bool(m["offset_before_m"] > float(cfg.loops.duplicate_min_sep_m)),
+                        shape=shape.shape, observability=mode,
+                        observed_axis=(axis.tolist() if axis is not None else None), yaw_observed=bool(full),
+                        s_ab=float(m["s_ab"]), copy_residual_m=float(m["residual_m"]), sigma_factors=factors,
+                        Z=Z, X=X, sigma_m=float(sigma_t), sigma_deg=float(cfg.graph.loop_sigma_rot_deg),
+                        info_t=info_t, info_rot=info_rot))
+        log(f"[loops-posthoc] instance {label}#{iid} ({cls}, {cand.get('verdict')}) kf {i}<->{j}: copies "
+            f"{m['offset_before_m'] * 100:.1f} → {m['offset_after_m'] * 100:.1f} cm, closure |t| "
+            f"{np.linalg.norm(t) * 100:.0f} cm / {rot_deg:.1f}°, {mode}, σ {sigma_t * 100:.1f} cm"
+            + (f" (×{', '.join(f'{k} {v:g}' for k, v in factors.items())})" if factors else ""))
+    for s in skipped:
+        s.update({"accepted": False})
+    if out or skipped:
+        log(f"[loops-posthoc] {len(out)} instance loop edge(s) from {len(out) + len(skipped)} "
+            f"candidate(s) ({sum(1 for e in out if e['duplicated'])} duplicated), {len(skipped)} not measurable")
+    return out + skipped
 
 
 # ── visits → pose-graph edges ────────────────────────────────────────────────

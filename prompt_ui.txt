@@ -1,0 +1,222 @@
+PROMPT — Sistema de diseño y ajuste visual completo de STAC Build (UI industrial de grado profesional)
+
+Pegar íntegro en Claude Code en la raíz del repo stac-build. Leer primero: ui/src/index.css (tokens actuales), ui/src/App.css (4.681 líneas), ui/src/App.tsx, ui/src/components/*.tsx y *.css, ui/src/pages/*.tsx, ui/index.html, ui/public/logo.png, ui/vite.config.ts, ui/package.json. Ejecutar npm run dev y abrir la app antes de tocar nada: el diseño se ajusta sobre lo que existe, no sobre una idea de lo que existe.
+
+ESTE PROMPT PIDE IMPLEMENTACIÓN DE CÓDIGO COMPLETA (CSS, TSX, tokens, strings, scripts de verificación, capturas). No escribas ni modifiques ningún archivo .md. La validación visual la hace el usuario: vos entregás la app ajustada, las verificaciones automáticas y una galería de capturas antes/después (PNG) para que él juzgue. Nunca escribas "validado" ni "se ve bien". No termines hasta cumplir la Definition of Done (§14) o chocar con un bloqueo real (§15).
+
+0. Rol, entregable, reglas
+
+Actuás como diseñador-desarrollador senior responsable de la interfaz de un instrumento de medición para obra e infraestructura ferroviaria: STAC Build reconstruye nubes métricas desde video, segmenta, mide, compara campañas, corrige con acta y certifica. Sus usuarios son ingenieros de supervisión, topógrafos y gerentes de obra, en jornadas largas, muchas veces con luz de oficina baja y monitores grandes; en campo, en tablet. La interfaz debe leerse como las herramientas que ellos ya respetan (Navisworks, ReCap, ACC, Cyclone, iTwin), no como un dashboard de startup ni como un juego.
+
+Entregable: la UI existente ajustada al sistema de diseño de §4–§9, con funcionalidad idéntica (checklist de regresión §12), App.css descompuesto, inline styles eliminados, strings centralizados, scripts de verificación (§11) verdes, npm run build verde, y ui/design-review/ con capturas PNG antes/después de cada pantalla y estado. Ningún .md.
+
+Reglas: entrega completa por fases (§13), sin pedir permiso entre fases; sin "TODO"; sin valores literales de color, tamaño o espaciado fuera de los tokens; sin nuevas librerías de UI (se conserva React + CSS con variables + lucide-react; no Tailwind, no MUI, no iTwinUI como dependencia); sin cambiar lógica de negocio, llamadas a API ni estado; sin emojis en ninguna cadena de la UI. Ante un test/verificación que no pasa tras 3 intentos: detenerse y reportar. Convenciones del repo: código y comentarios en inglés.
+
+1. Diagnóstico de partida (verificado el 2026-09-13)
+#	Hallazgo	Dónde	Consecuencia
+U1	Los tokens de index.css son buenos (stack de superficies frías, ámbar + cian, radios 4/6/10/14, Inter + JetBrains Mono, focus ring, tabular nums) pero la mayoría de App.css no los usa: 679 reglas con hex sueltos y 15 tamaños de fuente distintos (8, 9, 10, 10.5, 11, 11.5, 12, 12.5, 13, 14, 16, 18, 20, 24, 36 px).	ui/src/App.css	Sin escala tipográfica real; 8–10.5 px es ilegible en monitor estándar y viola cualquier estándar industrial.
+U2	App.css es un monolito de 4.681 líneas; App.tsx 4.685 y Viewport.tsx 4.941 líneas con estilos inline (style={{ flex: 1, overflowY: 'auto' }}).	ui/src/	Imposible de mantener consistente; cada panel reinventa su espaciado.
+U3	El acento de la UI es ámbar 
+#f0a839; el logo institucional es naranja 
+#f28b34 con naranja profundo 
+#b86020 y azul marino 
+#0e1541 que la UI no usa en ningún lado.	index.css, public/logo.png	La marca no está en la interfaz; el ámbar se confunde con el color de warning.
+U4	Emojis y símbolos como iconografía (⚙️ rebuilding, · como separador), micro-etiquetas en mayúsculas con tracking (--label-tracking).	App.tsx, CSS	Lectura de app amateur; inconsistente con lucide.
+U5	Strings de UI dispersos en los componentes, en inglés, sin capa de idioma; el producto se usa en México con clientes hispanohablantes.	todos los .tsx	Sin posibilidad de entregar la UI en español sin tocar cada componente.
+U6	No hay verificación automática de contraste, ni de uso de tokens, ni capturas.	—	La calidad visual depende del ojo del último que tocó el CSS.
+U7	Los overlays del viewport (mediciones, leyendas, HUD) usan estilos ad hoc; no hay convención para lecturas numéricas (valor + unidad + σ), ni para colores categóricos de instancias vs. colores de estado de punto vs. colores de aristas.	Viewport.tsx, DeviationOverlay.css	El viewport, que es el héroe de la app, es lo menos sistematizado.
+2. Referencias del mercado y qué se toma de cada una (patrones, no dependencias)
+Autodesk Weave (HIG) / Autodesk Construction Cloud / Navisworks / ReCap: esquemas de color dark gray y dark blue con dos densidades (alta y baja); componentes canónicos (Surface, Table, Tabs, Tag, Badge, Banner, Flyout, Side nav, Skeleton); panel de propiedades a la derecha, árbol/selección a la izquierda, viewport dominante; cubo de navegación; barra de estado con unidades. Se toma: la estructura de regiones, la densidad conmutable y el catálogo de componentes.
+Bentley iTwinUI (iTwin.js): escala tipográfica numerada (0–5) en rem, escala de espaciado en tallas, elevaciones 0–5, un solo radio base + pill, temas claro/oscuro y alto contraste con WCAG AA garantizado para todo color aplicado correctamente, y la regla "nunca hardcodear: siempre variables". Se toma: la disciplina de tokens y la garantía de contraste verificable.
+Leica Cyclone / FARO Sphere / NavVis IVION / ReCap (visores de nube): el viewport es el 80 % de la pantalla; toolbars flotantes traslúcidas sobre el 3D; lecturas de medición en monoespaciada con fondo; leyenda de mapa de color siempre visible cuando hay desviaciones; indicador de gravedad/norte; coordenadas y unidades en la barra de estado. Se toma: las convenciones del HUD y de las lecturas numéricas.
+
+Nada de esto se instala. Se implementa con los tokens y componentes de §4–§8.
+
+3. Principio rector
+
+El viewport es el instrumento; el chrome es el bisel. Todo lo que no es la nube se apaga visualmente: superficies neutras y frías, bordes de un píxel, texto secundario atenuado, sin sombras decorativas, sin degradados, sin brillos salvo en el único lugar reservado (acción primaria y estado en vivo). El color se gasta en tres cosas y solo tres: marca (naranja), medición/IA (cian) y estado (verde/ámbar/rojo). El acento azul marino de la marca aparece como tinte de superficie, no como color de texto ni de botón.
+
+4. Tokens (ui/src/styles/tokens.css, único lugar con valores literales)
+4.1 Color — institucional y neutros
+css
+/* Marca (del logo) */
+--brand-orange:      #f28b34;   /* acción primaria, selección, marca */
+--brand-orange-deep: #b86020;   /* hover/active de primaria, énfasis */
+--brand-orange-soft: rgba(242,139,52,.16);
+--brand-navy:        #0e1541;   /* tinte de superficie de marca; nunca texto */
+
+/* Superficies (oscuro por defecto; el stack se tiñe levemente hacia el navy) */
+--surface-0: #0a0d14;   /* base: viewport, fondo de app */
+--surface-1: #10141e;   /* paneles */
+--surface-2: #161b27;   /* elevado: cards, popovers */
+--surface-3: #1e2431;   /* hover */
+--surface-4: #283041;   /* active / seleccionado */
+--surface-brand: color-mix(in srgb, var(--brand-navy) 55%, var(--surface-1));
+                          /* cabeceras de app, activity bar, splash */
+
+/* Texto */
+--text-1: #e9eef5;  --text-2: #a4adba;  --text-3: #6e7887;  --text-inverse: #0a0d14;
+
+/* Bordes */
+--border-1: #1b212c;  --border-2: #262d3a;  --border-3: #364052;
+
+/* Capa de medición / IA (cian) — solo lecturas, herramientas de medición, asistente */
+--measure: #4fd1ff;  --measure-soft: rgba(79,209,255,.14);
+
+/* Estado — nunca reutilizar para marca */
+--ok: #3fb950;  --warn: #f5b041;  --err: #f85149;  --info: #4fd1ff;
+--ok-soft / --warn-soft / --err-soft / --info-soft: rgba(...,.14)
+
+/* Semántica de punto (viewport) */
+--pt-verified: #7fd18a;  --pt-single: #9aa4b2;  --pt-conflict: #f5b041;
+--pt-dynamic: #c678dd;   --pt-unobserved: #4a5363;
+
+/* Aristas de grafo (viewport) */
+--edge-odo: #6e7887;  --edge-loop: #3fb950;  --edge-scale-break: #f5b041;
+--edge-rejected: #f85149;  --edge-ambiguous: #4fd1ff;
+
+/* Paleta categórica de instancias (12, distinguibles entre sí y de los estados;
+   basada en Okabe-Ito + extensiones; verificar ΔE y daltonismo con el script §11) */
+--cat-01 … --cat-12
+
+Reglas: --warn se aleja del naranja de marca (más amarillo) para que "advertencia" y "seleccionado" no se confundan. El cian queda exclusivo de medición e IA. Ningún color categórico coincide con un color de estado ni con el naranja de marca. --brand-navy solo en --surface-brand y en el splash.
+
+Todos los alias legados de index.css (--bg-primary, --accent, --accent-2, …) se mantienen apuntando a los nuevos tokens hasta que el último uso migre; el script de verificación (§11) falla si queda algún uso legado al cierre.
+
+4.2 Tipografía
+
+Familias: Inter (UI) y JetBrains Mono (lecturas numéricas, coordenadas, IDs, logs). Base 14px en densidad comfortable, 13px en compact (ver §4.5). Escala en rem sobre la base, con nombre y uso; no existen otros tamaños:
+
+Token	Compact	Comfortable	Uso
+--fs-0	11px	12px	metadatos, unidades junto a números, pies de tabla; mínimo absoluto
+--fs-1	12px	13px	texto de tabla, ítems de árbol, labels de formulario
+--fs-2	13px	14px	cuerpo, botones, inputs, menús
+--fs-3	15px	16px	títulos de panel, nombres de sesión
+--fs-4	18px	20px	título de vista, cifras de resumen
+--fs-5	24px	26px	valor de medición destacado, splash
+
+Pesos: 400 cuerpo, 500 labels e ítems activos, 600 títulos y botones primarios; nunca 300 ni 700 en UI. Line-height 1.45 cuerpo, 1.25 títulos, 1.2 lecturas numéricas. font-variant-numeric: tabular-nums en todo número. Sin mayúsculas con tracking: las cabeceras de sección van en sentence case, --fs-1, peso 500, --text-2. Se elimina --label-tracking.
+
+4.3 Espaciado, radios, bordes, elevación
+Espaciado base 4px: --sp-1: 4px … --sp-8: 32px (4, 8, 12, 16, 20, 24, 28, 32). Padding de panel --sp-4; gap entre controles --sp-2; entre grupos --sp-4; entre secciones --sp-6.
+Radios: --r-1: 4px (inputs, botones, chips), --r-2: 6px (cards, popovers), --r-3: 10px (diálogos, toolbars flotantes), --r-pill. Nada más.
+Bordes: 1px siempre. Separadores: --border-1. Contornos de control: --border-2. Contorno de foco: 0 0 0 2px var(--measure).
+Elevación (solo popovers, diálogos y toolbars flotantes; los paneles anclados no tienen sombra): --elev-1: 0 1px 2px rgba(0,0,0,.4), --elev-2: 0 6px 18px rgba(0,0,0,.45), --elev-3: 0 16px 44px rgba(0,0,0,.55). Highlight interior de 1px conservado.
+Vidrio (solo sobre el viewport): --glass-bg: rgba(16,20,30,.82), blur 12px, --border-2.
+4.4 Iconografía y motion
+lucide-react exclusivamente; 16px en chrome y tablas, 18px en toolbars de viewport, 20px en la activity bar; stroke-width: 1.5; color currentColor. Prohibido emoji y caracteres tipográficos como icono.
+Transiciones 150ms (--motion-fast) para estados de control; 180ms para paneles; cero animación no disparada por el usuario salvo indicadores de progreso. prefers-reduced-motion respetado globalmente.
+4.5 Densidad y tema
+data-density="compact" | "comfortable" en <html>, conmutable en Ajustes y persistido; por defecto compact en desktop, comfortable en pantallas táctiles (pointer: coarse). Cambia base tipográfica, alturas de control (28/32px), alturas de fila (28/36px) y padding.
+data-theme="dark" único tema implementado; los tokens se estructuran para que un tema claro sea agregar un bloque, no reescribir componentes (todo color semántico, ningún color por su valor).
+5. Arquitectura de layout (ui/src/layout/)
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ AppHeader (36px, surface-brand): logo · proyecto ▾ · sesión ▾ · buscar ⌘K · usuario │
+├──┬───────────────┬────────────────────────────────────────┬──────────────────┤
+│AB│ LeftPanel     │ Viewport (héroe)                       │ Inspector        │
+│48│ 280px, resize │  ┌ FloatingToolbar (glass) ┐           │ 320px, resize    │
+│  │ tabs:         │  │ nav · select · measure  │           │ tabs:            │
+│  │ Sesiones      │  └─────────────────────────┘           │ Propiedades      │
+│  │ Instancias    │        HUD: nav cube ▸ leyenda ▸       │ Acta / Calidad   │
+│  │ Escaneos      │        escala ▸ gravedad ▸ lecturas    │ Asistente        │
+│  │ BIM           │                                        │                  │
+├──┴───────────────┴────────────────────────────────────────┴──────────────────┤
+│ BottomDock (colapsable, 200px): Consola · Trabajos · Línea de tiempo · Reporte │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ StatusBar (28px): unidades · época geométrica · X Y Z cursor · GPU/job · conexión │
+└──────────────────────────────────────────────────────────────────────────────┘
+Regiones como componentes propios (AppHeader, ActivityBar, SidePanel, Inspector, BottomDock, StatusBar, FloatingToolbar), con anchos y estados (colapsado/abierto/tamaño) en un LayoutContext persistido en localStorage — este sí está permitido (app Electron/desktop; ver nota en §15).
+App.tsx conserva toda su lógica y estado; solo se extrae la cáscara (JSX de layout) a estos componentes. No se mueve ninguna función de negocio.
+Paleta de comandos (⌘K / Ctrl+K): acciones existentes de menús y toolbar, navegación a sesiones e instancias, con atajos mostrados como <Kbd>.
+Todo panel tiene: título (--fs-3), acciones a la derecha (icon buttons), cuerpo con scroll propio, estado vacío con instrucción (§9), y estado de carga con skeleton.
+6. Catálogo de componentes (ui/src/components/ui/, uno por archivo, solo tokens)
+
+Cada componente: tamaños sm/md ligados a densidad, estados hover/active/focus-visible/ disabled/loading, aria-* correctos, sin estilos inline. Lista mínima:
+
+Button — primary (naranja, texto inverso, único con leve glow), secondary (surface-2 + border-2), ghost, danger; con icono opcional; loading con spinner que sustituye el icono, no el texto.
+IconButton — 28/32px, tooltip obligatorio.
+Tabs — subrayado de 2px en naranja; tab activo --text-1, inactivo --text-2.
+Panel / Section — cabecera sentence case, acciones, cuerpo.
+Table — densa, cabecera pegajosa, ordenable, filas 28/36px, números a la derecha en mono tabular, selección por fila con --surface-4 + borde izquierdo naranja de 2px, estado vacío integrado, virtualización simple para > 500 filas.
+Tree — sesiones/instancias/escaneos; indent 16px, chevrons, badge de conteo, checkbox de visibilidad, color-dot categórico.
+Badge / Tag — estado (ok/warn/err/info) y categórico (instancias); nunca texto en color puro sobre fondo puro: fondo -soft + texto del color.
+Banner — aviso inline con icono, texto y acción; nunca solo texto.
+Toast — abajo a la derecha, 4 s, con acción "Deshacer" cuando aplique.
+Dialog — confirmación y destructiva (botón danger, foco inicial en cancelar).
+Drawer — para actas y reportes largos.
+Tooltip — 150ms delay, --fs-0, sin flechas decorativas.
+Kbd — atajos, mono --fs-0.
+Input, NumberInput (con unidad como sufijo fijo), Select, Slider (valor numérico visible en mono), SegmentedControl, Checkbox, Switch.
+Progress — barra con etapas nombradas (pipeline: reconstrucción → segmentación → …), porcentaje en mono.
+Readout — componente propio del producto: valor en mono --fs-4, unidad en --fs-0 --text-2, incertidumbre ± σ en --fs-0, fuente (tool_measured, human_directed) como tag; variante compacta para overlays del viewport.
+Legend — mapa de color (desviaciones, votos de testigos) con rango y unidad, vertical en el viewport, horizontal en reportes.
+EmptyState — icono, una línea de qué es esto, un botón con el primer paso.
+Skeleton.
+
+Los componentes existentes (ConfirmDialog, BIMAnalysisPanel, DeviationOverlay, FuseScansModal, CorrectionVerdictDialog, AssistantPanel, TeamPanel, SyncPlayer, InteractiveSegmentation, BIMNavigator, WebRTCCall, AdminPage, LoginPage) se migran a este catálogo sin cambiar su comportamiento; sus .css propios se reducen a lo específico.
+
+7. Viewport y HUD (ui/src/components/viewport/)
+FloatingToolbar (glass, --r-3, --elev-2) arriba-centro: grupos navegar (orbit/pan/fly/fit), seleccionar (punto, instancia, caja), medir (distancia, ángulo, área, entre primitivas), ver (color por: RGB / instancia / estado de punto / votos / desviación / época). Un solo modo activo, resaltado con --brand-orange-soft.
+HUD: cubo de navegación arriba-derecha; indicador de gravedad (flecha "abajo" del orient) y barra de escala abajo-izquierda; leyenda vertical derecha cuando el modo de color lo requiere; lecturas (Readout compacto) ancladas al punto medido con línea de guía de 1px --measure.
+Selección: contorno naranja de 2px + relleno --brand-orange-soft; hover --surface-4. Instancias: paleta categórica --cat-*. Estado de punto: --pt-*. Aristas de trayectoria: --edge-* (odometría gris, loop verde, ruptura de escala ámbar, rechazado rojo, ambiguo cian).
+Cursor: crosshair en modo medir; coordenadas y unidad del cursor en la barra de estado, mono tabular, 3 decimales en metros.
+Overlays de trabajo (pipeline corriendo, corrección pendiente): banner superior dentro del viewport, no un modal; el 3D sigue navegable.
+Ninguna sombra, degradado ni animación decorativa en el viewport; el splash de carga (session-loading-overlay) se rediseña sobre --surface-brand con el logo y una barra de progreso por etapas, sin partículas.
+8. Strings e idioma (ui/src/i18n/)
+Todas las cadenas visibles migran a es.json y en.json; hook useT(); idioma por defecto español (México) con cambio en Ajustes, persistido. Formato de números y unidades con Intl.NumberFormat (es-MX / en-US), fechas con Intl.DateTimeFormat.
+Terminología fija y única en ambos idiomas (glosario en glossary.ts, usado por ambos JSON): sesión, escaneo, campaña, instancia, época geométrica, acta, corrección, fusión, testigo, desviación, tolerancia, primitiva. Un concepto, una palabra, en toda la app.
+9. Contenido y voz
+Sentence case en todo; nada en mayúsculas sostenidas.
+Botones con verbo y resultado: "Aplicar corrección", "Fusionar escaneos", "Aprobar época"; el toast repite el verbo: "Corrección aplicada".
+Errores: qué pasó + qué hacer, en voz de la interfaz, sin disculpas: "No se pudo cargar la nube: el archivo no existe en la sesión. Volvé a ejecutar la reconstrucción."
+Estados vacíos como invitación: "Todavía no hay instancias. Segmentá un objeto en el viewport o ejecutá la segmentación automática."
+Toda cifra medida lleva unidad; toda cifra medida por el sistema lleva σ cuando existe y su fuente; nada se muestra sin unidad.
+10. Refactor de CSS y TSX
+App.css → styles/tokens.css, styles/base.css (reset, tipografía, scrollbars, foco), styles/layout.css, y un .css por componente de ui/ y de viewport/. index.css importa en ese orden. Se eliminan reglas duplicadas y muertas (verificar con PurgeCSS en modo reporte, sin borrar automáticamente).
+Cero style={{ … }} salvo transformaciones dinámicas calculadas (posición de overlays, anchos de resize), y esas van por variables CSS inline (style={{'--w': …}}) con la regla en el .css.
+Viewport.tsx y App.tsx: se extraen únicamente componentes presentacionales (toolbar, HUD, lecturas, regiones); la lógica Three.js/Potree y el estado no se mueven.
+Especificidad plana: una clase por componente (.stac-btn, .stac-btn--primary), sin selectores por etiqueta anidados, sin !important.
+11. Verificación automática (ui/scripts/, todos en npm run verify:design)
+check-tokens.mjs: falla si en cualquier .css/.tsx fuera de tokens.css aparece un color literal (#…, rgb(, hsl(), un font-size que no sea var(--fs-*), un border-radius que no sea var(--r-*), un box-shadow que no sea var(--elev-*), o un alias legado (--bg-primary, --accent, …).
+check-contrast.mjs: para cada par texto/superficie usado (extraído de los tokens y de una tabla de pares declarada), contraste ≥ 4.5:1 (texto) y ≥ 3:1 (iconos, bordes de control, texto ≥ --fs-4), en ambas densidades; también --cat-* entre sí y contra --pt-*/estado (ΔE₀₀ ≥ 20) y simulación de deuteranopia/protanopia/tritanopia con separación mínima declarada.
+check-inline.mjs: falla ante style={{ con propiedades que no sean variables CSS.
+check-strings.mjs: falla ante texto visible literal en JSX fuera de i18n/ y ante claves presentes en un idioma y ausentes en el otro; falla ante cualquier emoji.
+eslint + tsc --noEmit + npm run build.
+screenshots.mjs (Playwright, ya instalable como devDependency): levanta la app contra un backend mock mínimo (ui/scripts/mock-server.mjs con respuestas grabadas de los endpoints que usa cada vista), captura antes (commit base) y después cada vista y estado de la lista §12 a 1440×900 y 1024×768, en ambas densidades, y guarda ui/design-review/<vista>__<estado>__<densidad>__{before,after}.png más un contact-sheet.png con todas en grilla. Sin .md.
+12. Checklist de regresión funcional (vistas y estados a capturar y verificar a mano por vos antes de entregar)
+
+Login; Admin; Proyectos vacío / con sesiones / pipeline corriendo; Viewport con nube / con instancias / modo medir con una lectura / color por estado de punto / con desviaciones y leyenda / con trayectoria y aristas; panel Instancias vacío / poblado / con instancia dividida; Escaneos con validación métrica y fusión (modal rediseñado con acta); BIM cargado y comparación (DeviationOverlay); Corrección: diálogo de veredicto y acta; Asistente; Equipo y llamada; Consola; Ajustes (densidad, idioma); Paleta de comandos; Toasts y Banners; Diálogo destructivo; estados de carga y vacíos de cada panel. Cada acción que existía sigue existiendo con el mismo endpoint y el mismo efecto.
+
+13. Fases (estructura, no permisos; commit por fase)
+Fase	Contenido	Cierra con
+F1	tokens.css, base.css, escala tipográfica, densidad, alias legados, check-tokens y check-contrast en verde sobre los tokens	scripts 1–2
+F2	Catálogo components/ui/ completo con estados	build + scripts 1–3
+F3	Layout: regiones, LayoutContext, paleta de comandos, barra de estado, header con --surface-brand	build + capturas parciales
+F4	Migración de todos los componentes existentes al catálogo; descomposición de App.css; eliminación de inline styles	scripts 1–3, regresión §12
+F5	Viewport y HUD (§7)	capturas de viewport
+F6	i18n (§8) y contenido (§9)	script 4
+F7	verify:design completo, galería antes/después, mensaje final	todo verde
+
+Si el contexto se agota, cada commit deja npm run build verde y el mensaje final dice en qué fase y paso se retoma.
+
+14. Definition of Done
+ Un único archivo con valores literales (tokens.css); check-tokens verde en todo ui/src.
+ Escala tipográfica de 6 tamaños, mínimo 11px, tabular nums en todo número; sin mayúsculas con tracking; sin emoji.
+ Marca en la interfaz: naranja 
+#f28b34 como acción/selección, navy como --surface-brand; cian exclusivo de medición/IA; --warn distinto del naranja.
+ Contraste WCAG AA verificado por script para todos los pares y ambas densidades; paleta categórica verificada contra estados y daltonismo.
+ Layout en regiones propias con LayoutContext, densidad conmutable, paleta de comandos, barra de estado con unidades/época/cursor.
+ Catálogo ui/ completo y todos los componentes existentes migrados; App.css descompuesto; cero inline styles no dinámicos; especificidad plana.
+ Viewport con toolbar flotante, HUD, Readout, Legend, colores semánticos de selección/instancia/estado/aristas; splash rediseñado.
+ i18n es-MX/en con glosario único; formato de números y unidades por Intl.
+ npm run verify:design y npm run build verdes; galería ui/design-review/ antes/después de todas las vistas y estados de §12 en dos resoluciones y dos densidades, más contact-sheet.png.
+ Funcionalidad idéntica según §12; ningún endpoint ni estado cambiado.
+ Ningún .md creado ni modificado; ninguna frase que declare el resultado validado.
+ Mensaje final: qué cambió por fase, resultados de los scripts, ruta de la galería y los 5 lugares donde el usuario debería mirar primero.
+15. Restricciones
+Sin nuevas librerías de UI ni de estilos; Playwright y PurgeCSS solo como devDependencies de verificación.
+localStorage se usa únicamente para preferencias de layout, densidad e idioma (app Electron/desktop; no aplican las restricciones de artefactos web).
+No cambiar lógica de negocio, endpoints, estado, ni el código Three.js/Potree más allá de extraer presentación.
+No inventar pantallas nuevas: se ajustan las que existen (la paleta de comandos, la barra de estado y el dock inferior son contenedores de acciones que ya existen).
+No crear ni editar archivos .md. No declarar validación visual.
+Preguntar solo ante un bloqueo real; lo demás se decide, se implementa y se justifica en el comentario de cabecera del archivo correspondiente.

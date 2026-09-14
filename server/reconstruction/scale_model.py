@@ -35,7 +35,6 @@ Everything here is numpy-only and read-only over the output artifacts.
 """
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -444,67 +443,3 @@ def scale_confidence(mad_rel: Optional[float], n_anchors: int,
     conf = sum(terms[k] * weights[k] for k in terms) / wsum if wsum else 0.0
     return float(conf), terms
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Anchor top-up: depth-range coverage (Phase A.2)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def plan_depth_coverage_topup(output_dir: Path, sel_files: List[str],
-                              max_topup: int = 8, n_bins: int = 6) -> List[str]:
-    """Anchors are picked uniformly in TIME before any depth exists. After the
-    omega pass the per-keyframe omega depth is on disk — check that the anchors
-    also cover the scene's DEPTH RANGE and plan extra DA3 extractions for the
-    uncovered bins (greedy: the keyframe whose median depth is closest to each
-    empty bin's center). Returns frame FILE names to extract (may be empty).
-    Deterministic; read-only."""
-    from reconstruction.scale_align import _da3_npz_dir, _omega_depth
-    import os as _os
-
-    omega = _omega_depth(output_dir)
-    if not omega or max_topup <= 0:
-        return []
-    da3_dir = _da3_npz_dir(output_dir)
-    have = set()
-    if da3_dir is not None:
-        for p in da3_dir.glob("frame_*.npz"):
-            try:
-                have.add(int(p.stem.split("_")[1]))
-            except Exception:
-                continue
-    num_by_file = {}
-    for f in sel_files:
-        try:
-            num_by_file[int(_os.path.splitext(f)[0])] = f
-        except Exception:
-            continue
-
-    med = {}
-    for n, dep in omega.items():
-        v = dep[np.isfinite(dep) & (dep > 1e-3)]
-        if v.size >= 100:
-            med[n] = float(np.median(v[:: max(1, v.size // 5000)]))
-    if len(med) < n_bins:
-        return []
-    vals = np.array(list(med.values()))
-    lo, hi = np.percentile(vals, [5, 95])
-    if hi <= lo:
-        return []
-    edges = np.linspace(lo, hi, n_bins + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-
-    def _bin(x):
-        return int(np.clip(np.searchsorted(edges, x, side="right") - 1, 0, n_bins - 1))
-
-    covered = {_bin(med[n]) for n in have if n in med}
-    plan: List[str] = []
-    for bi in range(n_bins):
-        if bi in covered or len(plan) >= max_topup:
-            continue
-        cands = [(abs(med[n] - centers[bi]), n) for n in med
-                 if n not in have and n in num_by_file and _bin(med[n]) == bi]
-        if not cands:
-            continue
-        _, best = min(cands)
-        plan.append(num_by_file[best])
-        have.add(best)
-    return plan

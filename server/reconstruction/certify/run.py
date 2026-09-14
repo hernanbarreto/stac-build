@@ -1,19 +1,29 @@
-"""§9 certification loop on a finished session.
+"""§9 certification loop on a finished session — a STAGE of the reconstruction
+pipeline (workers/certify_worker.py; USER 2026-09-13: every loop closure —
+SALAD/exact bridges inside the fork, SAM3 instance copies, geometric
+revisits — is applied inside "Reconstruir", the cloud the UI receives is the
+corrected one).
 
     for it in range(certify.max_iters):
-        loops   = instance candidates (§4.4/§4.5) measured on the copies (Sim3: s_ab)
-        scales  = scale graph (§5): loop rows + absolute rows + anchors → r_k per chunk
+        cands   = SAM3 instance candidates (§4.4/§4.5, the spatial gate decides)
+        loops   = the copies of every candidate measured on the CURRENT cloud
+                  (rigid closure → SE(3) edge; Sim3 → scale row s_ab)
+                + the geometric revisit regions (correction.revisit) → SE(3) edges
+        scales  = scale graph (§5): loop rows + absolute rows → r_k per chunk
         apply(scales)                        in memory: depth × r_k, chain-continuous shift
-        loops   = the copies re-measured on the scaled geometry → exact SE(3) edges
+        loops   = re-measured on the scaled geometry → exact SE(3) edges
         poses   = keyframe graph (§4.3 + §4.6, structural constraints) → X_g
         depth   = depth by correspondences (§6.4): tracks + contours + pairwise sensor
         cloud   = the composed state + witnesses (§6.1–6.3)
         m       = metrics (§10) on that state
-        gates(m, prev) fail → the iteration is rejected (recorded with its
-                              cause; the previous epoch stays bit-for-bit) → stop
-        else → ONE epoch (transaction + swap + ledger, kind "certify") holding
-               the composed per-keyframe transform (depth k·z+b along the ray,
-               then rigid) and the witness fields; report per epoch
+        gates(m, prev): MEASURED against the previous state. certify.gates.mode
+                  advisory (production) → a failed gate is a ⚠ warning in the
+                  acta / the kit, the iteration is APPLIED and the visual
+                  Approve/Undo is the verdict; veto (evaluation) → the
+                  iteration is rejected, the previous epoch stays bit-for-bit
+        → ONE epoch (transaction + swap + ledger, kind "certify") holding the
+          composed per-keyframe transform (depth k·z+b along the ray, then
+          rigid) and the witness fields; report per epoch
         improvement(m, prev) < eps → stop
 
 Order inside an iteration: scale → poses → depth (poses on an open scale do
@@ -36,7 +46,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from reconstruction.certify.loops_posthoc import copy_scale_rows, visit_edges
+from reconstruction.certify.loops_posthoc import copy_scale_rows, instance_edges, visit_edges
 from reconstruction.certify.scale_stage import chunk_of_keyframes, scale_transforms, solve_scale_stage
 from reconstruction.quality.report import compute_metrics, write_epoch_report
 from reconstruction.witness.fields import WITNESS_FIELDS, add_fields
@@ -165,6 +175,15 @@ def certify_session(session_dir, cfg=None, operator: str = "auto", log: Callable
     def _state_metrics(session, frames, loops, stages, instances, fields):
         return compute_metrics(session, fields, loops, stages, cfg, output_dir, instances, frames=frames)
 
+    def _all_edges(sess, cands_now, quiet=False):
+        """Every loop edge measurable on a state: the SAM3 instance copies
+        (§4.4 — the detector's loop|ambiguous candidates, any class but
+        dynamic) and the geometric revisit regions, subsampled alike."""
+        _log = (lambda m: None) if quiet else log
+        inst = instance_edges(sess, cands_now, ccfg, cfg, log=_log) if cands_now else []
+        vis = visit_edges(sess, ccfg, ccert.visit_loops, cfg.graph.loop_sigma_rot_deg, log=_log)
+        return _subsample(inst, loop_density) + _subsample(vis, loop_density)
+
     base = base_frames if base_frames is not None else load_session_frames(output_dir, log)
     from correction.epoch import current_epoch
     acta["epoch_initial"] = current_epoch(output_dir)
@@ -193,8 +212,7 @@ def certify_session(session_dir, cfg=None, operator: str = "auto", log: Callable
                                  "n_duplicates": len(det.get("duplicates", []))}
         cands = _subsample([c for c in cands if c.get("verdict") in ("loop", "ambiguous")], loop_density)
         scale_meas = copy_scale_rows(session, cands, ccert.scale, ccert.visit_loops.window_kf, log=log)
-        edges_now = _subsample(visit_edges(session, ccfg, ccert.visit_loops, cfg.graph.loop_sigma_rot_deg,
-                                           log=log), loop_density)
+        edges_now = _all_edges(session, cands)
         extra = [dict(e) for e in (extra_loop_edges or [])]
         rec["loops"] = [{k: v for k, v in m.items() if k not in ("Z", "X", "info_t", "info_rot")}
                         for m in edges_now]
@@ -219,10 +237,8 @@ def certify_session(session_dir, cfg=None, operator: str = "auto", log: Callable
             k1, t1 = np.ones(N), np.zeros((N, 3))
         session_s = transformed_session(session, I3, t1, k1) if srep.get("applied") else session
         k1_by_frame = {int(f): float(k1[k]) for f, k in session.kf_index.items()}
-        # 3) the visits re-measured on the closed scale → SE(3) edges → pose graph
-        edges_s = (_subsample(visit_edges(session_s, ccfg, ccert.visit_loops, cfg.graph.loop_sigma_rot_deg,
-                                          log=lambda m: None), loop_density)
-                   if srep.get("applied") else edges_now)
+        # 3) the loops re-measured on the closed scale → SE(3) edges → pose graph
+        edges_s = _all_edges(session_s, cands, quiet=True) if srep.get("applied") else edges_now
         edges = [m for m in edges_s if "Z" in m and m.get("trusted")] + extra
         prep = run_keyframe_graph(output_dir, session_dir, cfg, operator=operator, apply=False,
                                   extra_loop_edges=edges, use_structural=True, log=log,
@@ -276,22 +292,29 @@ def certify_session(session_dir, cfg=None, operator: str = "auto", log: Callable
         fields = witness_fields(session_d.xyz, session_d.fg, session_d.data["pixel_row"],
                                 session_d.data["pixel_col"], frames_d, cfg.witness, instances, store, dyn,
                                 device=device)
-        edges_d = (_subsample(visit_edges(session_d, ccfg, ccert.visit_loops, cfg.graph.loop_sigma_rot_deg,
-                                          log=lambda m: None), loop_density) if moved else edges_now)
+        edges_d = _all_edges(session_d, cands, quiet=True) if moved else edges_now
         # 6) metrics + gates
         stages = {"scale": srep, "poses": {k: v for k, v in prep.items() if k not in ("xi",)}, "depth": drep}
         m = _state_metrics(session_d, frames_d, edges_d, stages, instances, fields)
         gates = _gates(m, prev, ccert.gates)
         failed = [g for g in gates if not g["passed"]]
+        advisory = ccert.gates.mode == "advisory"
+        gate_warnings = [f"{g['name']}: {g['value']} vs {g['threshold']} ({g['detail']})" for g in failed]
+        if failed and advisory:
+            for g in failed:
+                g["advisory"] = True
+            log(f"[certify] ⚠ advisory gate(s) failed — declared, iteration applied (USER 2026-09-13): "
+                f"{'; '.join(gate_warnings)}")
         rec.update({"stages": {"scale": srep,
                                "poses": {k: v for k, v in prep.items() if k not in ("xi", "solver")},
                                "depth": {k: v for k, v in drep.items() if k not in ("a", "b")}},
-                    "metrics": m, "gates": gates, "geometry_moved": moved,
+                    "metrics": m, "gates": gates, "gate_mode": ccert.gates.mode,
+                    "gate_warnings": gate_warnings, "geometry_moved": moved,
                     "objective": m["objective"], "objective_prev": prev["objective"],
                     "improvement": ((prev["objective"] - m["objective"]) / prev["objective"]
                                     if prev["objective"] > 0 else 0.0),
                     "elapsed_s": round(time.time() - t_it, 1)})
-        if failed:
+        if failed and not advisory:
             rec["verdict"] = "rejected"
             rec["reason"] = "; ".join(f"{g['name']}: {g['value']} vs {g['threshold']}" for g in failed)
             cid = ledger.new_correction_id()
@@ -354,8 +377,9 @@ def certify_session(session_dir, cfg=None, operator: str = "auto", log: Callable
         acta["iterations"].append(rec)
         log(f"[certify] iteration {it}: objective {prev['objective']:.4f} → {m['objective']:.4f} "
             f"({rec['improvement'] * 100:+.1f}%) | seams {m['seam_residual']['median_m']} | closure "
-            f"{m['closure']['median_m']} | verified {m['witnesses']['status_fraction']['verified']:.3f} → "
-            f"epoch {rec.get('epoch_to')}")
+            f"{m['closure']['median_m']} | duplicates {m['duplicates']['n']} | verified "
+            f"{m['witnesses']['status_fraction']['verified']:.3f} → epoch {rec.get('epoch_to')}"
+            + (f" | ⚠ {len(gate_warnings)} advisory gate warning(s)" if gate_warnings else ""))
         improvement = rec["improvement"]
         prev = m
         if improvement < ccert.eps:

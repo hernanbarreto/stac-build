@@ -36,8 +36,8 @@ def test_kit_edges_duplicates_and_attention(certified):
     assert "accepted" in kinds, kinds
     for e in k["loops"]:
         assert 0 <= e["i"] < N_KF and 0 <= e["j"] < N_KF
-        assert e["kind"] in ("accepted", "rejected", "vetoed", "scale_break", "ambiguous")
-        if e["kind"] in ("rejected", "vetoed"):
+        assert e["kind"] in ("accepted", "rejected", "scale_break", "ambiguous")
+        if e["kind"] == "rejected":
             assert e["reason"], e                      # every red edge says why
     revisit = [e for e in k["loops"] if e["source"].startswith("revisit")]
     assert revisit and all(e.get("offset_before_m") is not None for e in revisit if e["kind"] == "accepted")
@@ -45,7 +45,7 @@ def test_kit_edges_duplicates_and_attention(certified):
     for d in k["duplicates"]:
         if d["i"] is not None:
             assert len(d["i_pos"]) == 3
-    assert set(k["legend"]) >= {"accepted", "vetoed", "scale_break", "ambiguous", "odometry"}
+    assert set(k["legend"]) >= {"accepted", "rejected", "scale_break", "ambiguous", "odometry"}
     # attention list: sorted by severity, every item with text (+ anchor when it has a place)
     att = attention_list(out)
     assert att["n"] == len(att["items"])

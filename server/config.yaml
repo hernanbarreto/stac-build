@@ -47,12 +47,16 @@ pipeline:
                         # (TSDF + texrecon: /api/segmentation/tsdf/export bakes the
                         # scene mesh once if missing, then carves the instances).
                         # true = old behaviour (pipeline ends with PGSR+TSDF stages).
-  # Full semantic chain inside the reconstruct pipeline:
-  # VLM scene understanding → SAM3 segment-everything. false = the pipeline runs
-  # RECONSTRUCTION → CLOUDCOMPY → TSDF only, and segmentation stays on-demand.
-  # TEMPORARILY OFF while the SAM3 session handling is being reworked: a
-  # reconstruction re-run must not burn 1h40 in a segmentation we know is wrong.
-  auto_segment: false
+  # Full semantic chain inside the reconstruct pipeline (USER 2026-09-13: ONE
+  # command — "Reconstruir" — delivers the finished cloud; nothing is manual):
+  #   RECONSTRUCTION → VLM (Qwen3-VL scene understanding) → SAM3 (segment
+  #   everything) → CLOUDCOMPY (cleaned cloud + witnesses + mask→cloud) →
+  #   CERTIFY (claude_stac.txt §9: instance + revisit loops → scale → keyframe
+  #   pose graph → depth → witnesses, epochs Approve/Undo in the kit).
+  # false = RECONSTRUCTION → CLOUDCOMPY only: no segmentation, no instance
+  # loops, no certification — the duplicates of a drifted revisit stay
+  # (the pccr run of 2026-09-13 17:04 ran exactly that and changed nothing).
+  auto_segment: true
 
 # ── Paths ──────────────────────────────────────────────────────────
 paths:
@@ -976,30 +980,26 @@ reconstruction:
     vio_min_segments: 8                 # fewer usable segments than this → abort (fail-hard)
     vio_min_coverage: 0.5               # segments must span ≥ this fraction of the keyframe
                                         # time range → else abort (fail-hard)
-    scale_anchor_depth_coverage: false  # Phase A: after the omega pass, top-up DA3 anchors
-                                        # so the anchor set covers the scene's DEPTH RANGE
-                                        # (time-uniform picking alone can miss depth bins).
-                                        # A/B 2026-08-11 (test2/4/7): the top-up triggers
-                                        # (1-2 uncovered bins per scene) but the effect is
-                                        # NEUTRAL — pair-reprojection ±0.002 pts, jackknife
-                                        # mixed, s moves ≤0.5% — so it stays OFF per the
-                                        # evidence rule (implemented, flag-gated, documented).
-    scale_anchor_topup_max: 8           # cap on extra DA3 extractions for depth coverage
-    # ── USER ORDER 2026-09-04 (after pccr_v1): "deja omegalong como
-    # corresponde, sin agregados adicionales de ajustes; la escala de DA3
-    # queda; si se detecta zoom se corrige la escala". Every adjustment stage
-    # below is OFF by default (code kept, selectable). What remains active:
-    # vendor baseline (chunked align + loop closure), DA3 metric_lock + seam
-    # scale graph, zoom_scale_fix (zoomed chunk: DA3 anchors excluded, scale
-    # from the seam graph), health flags DIAGNOSTIC-ONLY (chunks always
-    # write — no declared holes). Context: on pccr_v1 the stack compounded on
-    # an unstable-scale capture — 3 declared holes, 33.7% of far points
-    # dropped as "contradictions", 189 elastic fits capped at 30 cm.
+    # ── Adjustment stages of the chunked-metric pass. USER ORDER 2026-09-04
+    # (after pccr_v1): "deja omegalong como corresponde ... la escala de DA3
+    # queda; si se detecta zoom se corrige la escala" — since then each stage
+    # below was measured on real scans (A2/A3/A4 2026-07-11, pccr runs) and
+    # kept ON on its evidence. USER 2026-09-13 ("lo que no debe estar
+    # encendido, eliminado"): every stage that stayed OFF was DELETED from
+    # the code — the write-blocking gate on sick chunks (declared holes), the
+    # DA3 depth-shape substitution (layered drift, E2 verdict), the anchor
+    # depth-coverage top-up (neutral A/B), the static-ends coverage trim
+    # (user order 2026-08-30) and the loop attention verification (never
+    # A/B'd). What runs: the vendor baseline (chunked align + SALAD
+    # candidates), DA3 metric_lock + seam scale graph, the exact seams, the
+    # F1 loop bridges / scale graph, the F2 keyframe SE(3) graph, and the
+    # stages below. Chunk health flags stay DIAGNOSTIC-ONLY (chunk_health.json;
+    # every chunk writes).
     zoom_scale_fix: true                # zoom chunk → correct the scale, keep the chunk
-    health_gate: false                  # true = sick chunks write nothing (pre-2026-09-04)
     exact_seam_align: true              # rigid seams from exact pixel correspondences
     frame_ownership: true               # one frame → one writer in overlaps
-    depth_graph: true                   # cross-frame depth agreement stage
+    depth_graph: true                   # cross-frame depth agreement stage (in-run, per-frame
+                                        # affine along rays, model ladder + authority bound)
     blend_copies: true                  # two-copy consensus on overlap frames
     scale_drift: true                   # per-chunk LINEAR scale drift. (Pre-order note: A3
                                         # 2026-07-11 tested false on test4: serpenteado
@@ -1014,35 +1014,17 @@ reconstruction:
                                         # on data it never saw). test4 2026-07-10: 48% anchor
                                         # spread inside chunk 3, adjacent scale jumps 18-29% —
                                         # the leftover warp was the chimney/cones z-drift.
-    # suspect_spread: 0.30              # soft health tier: anchor IQR/median beyond this ⇒
+    suspect_spread: 0.30                # soft health tier: anchor IQR/median beyond this ⇒
                                         # SUSPECT — the chunk keeps writing points but argues
                                         # more quietly (elastic consensus biased toward the
-                                        # trusted side; finereg down-weights its planes 0.5).
+                                        # trusted side). Diagnostic + weighting only.
     elastic_seam: true                  # per-frame seam consensus (run-6 behaviour). A2
                                         # 2026-07-11 tested false on test4: NO visible change
                                         # in serpenteado or duplicates — acquitted as the
                                         # visible-warp culprit despite its unsmoothed
                                         # per-frame fits (|t| up to 159 cm at seam 7->8).
-    hybrid_da3: false                   # E2 2026-07-11 VERDICT: the DA3 shape DOES reduce
-                                        # serpenteado (bet validated) but naive per-frame
-                                        # substitution is mutually inconsistent between frames
-                                        # (depth-graph disagreement 0.72->2.17%) -> layered
-                                        # drift dominates. OFF: multi-view consistency now
-                                        # comes from pose_refine (E-full); DA3 stays a scale
-                                        # anchor. Original E-lite doc: each
-                                        # keyframe adopts DA3's per-pixel depth SHAPE at
-                                        # omega's scale and pose, right after metric-lock —
-                                        # Phase A proved the serpenteado is intrinsic to
-                                        # omega's feed-forward output, and DA3's isolated
-                                        # depth is locally straight. Per-frame median ratio
-                                        # pins DA3 to omega's scale (kills DA3's absolute
-                                        # metric jitter); shape corrections beyond 35% or
-                                        # farther than hybrid_da3_far_m keep omega. Extracts
-                                        # isolated DA3 for ALL keyframes (denser scale
-                                        # anchors too — metric-lock numbers WILL shift).
-    hybrid_da3_far_m: 15.0              # beyond this omega depth the pixel keeps omega
-                                        # (isolated DA3 degrades at range — user-observed;
-                                        # onion risk is at distance, straightness is near).
+                                        # §7 harness: reconstruction/quality/ab_elastic.py
+                                        # measures ON vs OFF on a session's aligned chunks.
     ownership_backfill: true            # Phase D: in overlap zones the non-owner copy writes
                                         # EXACTLY the pixels the owner drops (frozen write
                                         # thresholds → owner-writes and backfill are disjoint
@@ -1154,10 +1136,6 @@ reconstruction:
                                         # input amplifies feed-forward drift — FastVGGT / the
                                         # VGGT-Long README's own drift note); fast stretches
                                         # get more (no 9 m jumps). "fps" = plain time sampling.
-    coverage_trim: false                # USER ORDER 2026-08-30: do NOT drop keyframes on
-                                        # detected rotation/static (or zoom) ends — every
-                                        # selected view is kept. true restores the probe-informed
-                                        # static-ends trim (chunked phase 2 only).
     keyframe_motion_quantum: 60.0       # USER 2026-08-30: "muy muy pocas" keyframes — 250 gave
                                         # 12 views on a 300-frame scan; 60 ≈ 45. Context changed
                                         # since the 08-16 densify-worse verdict: PGSR is out of
@@ -2097,9 +2075,6 @@ correction_graph:
                                     # measured tolerance is 25–30 cm) — low confidence, never
                                     # silent, never in the optimizer (> max_edge_sigma_m)
     ambiguous_sigma_factor: 3.0     # σ inflation when the spatial gate says 'ambiguous'
-    attention_verify: false         # §4.2.3 aggregator-token agreement — implemented, OFF
-                                    # until an A/B shows fewer false positives
-    attention_min_score: 0.5
     movable_labels: [person, worker, cart, vehicle, ladder, box, chair, table, door,
                      equipment, tool, persona, carro, escalera, caja, silla, mesa, puerta]
     min_shared_structural_labels: 1 # semantic check when BOTH frames carry SAM3 instances
@@ -2107,11 +2082,10 @@ correction_graph:
                                     # keyframe graph (no scale row) — still bridged
   graph:                            # keyframe SE(3) graph (§4.3) — replaces sim3loop in vggtomega
     sigma_odo_intra_m: 0.01         # odometry σ between consecutive keyframes of one chunk
-    sigma_odo_intra_deg: 0.20       # (the exact-seam residual + the two-copy uncertainty are
-                                    # added in quadrature where the chain crosses a seam)
+    sigma_odo_intra_deg: 0.20       # flat in the post-hoc graph (reconstruction/loops/kf_graph);
+                                    # the fork's in-run graph still adds the exact-seam residual
+                                    # and the two-copy uncertainty in quadrature at a seam
     loop_sigma_rot_deg: 1.0         # rotation σ of a loop edge (translation σ is measured)
-    sigma_gravity_deg: 2.0          # weak per-node prior: camera-down stays the chain consensus
-                                    # — the graph cannot tilt the world
     huber_delta_m: 0.10             # Huber on loop + structural edges (odometry stays quadratic)
     huber_delta_deg: 2.0
     dense_max_unknowns: 12000       # 6·n_kf ≤ this (≈2000 keyframes) → dense Cholesky; beyond,
@@ -2128,12 +2102,21 @@ correction_graph:
                                     # ≥ 50 % of what the edges can deliver (their σ floor excluded)
     max_seam_degradation_m: 0.005   # gate: held-out surface pairs (chunk_field_verdict strategy)
                                     # may not worsen by more than 5 mm
+    gate_mode: advisory             # advisory | veto. USER 2026-09-09 ("siempre debe aplicarse la
+                                    # corrección de duplicados, no importa lo mucho que haya que
+                                    # corregir") + pccr 2026-09-13 19:25: the four measured
+                                    # start↔end closures (36–57 cm over an 18 m walk) were vetoed
+                                    # one by one by the drift budget, then the solve went IDENTITY
+                                    # on held-out/authority and the duplicates stayed. advisory =
+                                    # the gates above (loop gain, held-out, authority, drift budget)
+                                    # are MEASURED and declared in keyframe_graph.json / the acta /
+                                    # the kit, the measured closure is APPLIED and Approve/Undo is
+                                    # the verdict; veto = any failed gate keeps identity (evaluation)
     holdout_offsets: [4, 10]        # frame offsets of the held-out pairs (never fitted)
     holdout_stride: 3
     holdout_samples: 4000
     holdout_max_nn_m: 0.10          # post-hoc (cloud) judge: NN pairs farther apart are not
                                     # the same surface — they never enter the held-out median
-    run_without_loops: false        # no verified loop → identity (nothing to close)
 
 authority:                          # §4.7 — every corrective stage declares its maximum
   saturation_warn: 0.8              # fraction used above this → flag in the acta + kit visual
@@ -2145,19 +2128,6 @@ authority:                          # §4.7 — every corrective stage declares 
   intra_chunk_max_m: 0.15           # per-frame intra-chunk field
 
 structural:                         # §4.6 — the work as its own control (server-side graph)
-  floor_datum:
-    enabled: true
-    sigma_angle_deg: 1.0
-    sigma_offset_m: 0.02
-    max_tilt_deg: 10.0              # a low-band plane tilted beyond this is a wall band, not floor
-    reference_span_kf: 15           # datum plane = floor of the first N keyframes (drift-free start;
-                                    # correction.floor.reference_span_kf precedent)
-    step_demote_m: 0.15             # a patch this far from the datum is a REAL step → no edge
-    low_band_pct: 5.0
-    band_m: 0.5
-    min_points: 500
-    ransac_tol_m: 0.02
-    ransac_iters: 200
   wall_planarity:
     enabled: true
     wall_tol_m: 0.02                # Huber width on the wall-plane residual (real walls are not perfect)
@@ -2197,14 +2167,30 @@ certify:                            # §4.8 ensemble witness + §9 certification
   # ── §9 certification loop (post-hoc over the session: scale → poses → depth → witnesses)
   max_iters: 3                      # iterations; each one is an epoch (Approve/Undo in the kit)
   eps: 0.05                         # relative objective improvement below this → converged
-  auto_after_segmentation: true     # run when the Segmentation Manager closes (instances exist)
+  auto_after_segmentation: true     # the ONE switch of the automatic certification: (a) the
+                                    # pipeline's CERTIFY stage after the cleaned cloud
+                                    # (USER 2026-09-13: no button, no manual trigger) and (b) a
+                                    # re-run when the Segmentation Manager closes (instances
+                                    # changed). false = neither fires: the pipeline skips the
+                                    # CERTIFY stage and a session is delivered uncertified.
   objective_weights:                # objective = Σ weight × metric (metres; fractions × zref)
     loop_residual_m: 1.0
     seam_residual_m: 1.0
     closure_m: 1.0
     depth_disagreement_frac: 5.0
     duplicates: 0.1
-  gates:                            # an iteration that fails a gate is ROLLED BACK (§9)
+  gates:                            # §9 gates of one iteration, measured against the previous state
+    mode: advisory                  # advisory | veto. USER 2026-09-13 ("todas las correcciones no
+                                    # se aplican ... la nube que llega al UI debe ser la corregida
+                                    # final"): every gate below is MEASURED and lands in the acta
+                                    # (gate_warnings) and the kit as a ⚠ warning, the iteration is
+                                    # APPLIED as an epoch and the visual Approve/Undo is the verdict.
+                                    # pccr 2026-09-13 19:25: the only failed gate was
+                                    # loop_residual_not_worse (0.46 vs 0.40 m) — caused by the
+                                    # post-hoc scale stage re-solving the anchors without a loop row
+                                    # (fixed) — and it rolled the whole iteration back: epoch 0, the
+                                    # duplicates untouched. veto = a failed gate rejects the
+                                    # iteration and keeps the previous epoch bit for bit (evaluation)
     max_seam_degradation_m: 0.005   # held-out surface pairs may not worsen beyond this
     max_loop_residual_increase_m: 0.005   # what the revisits still demand (median) — noise floor of
                                           # a region closure (ICP on pixel-quantised points)
@@ -2301,6 +2287,30 @@ witness:                            # §6 witnesses on the cloud (F3): evidence,
                                     # counts against the row, an occlusion mismatch does not
 
 loops:                              # candidate detector + spatial gate (§4.4/§4.5/§4.9)
+  salad:                            # §4.4 VISUAL candidates: DINOv2-SALAD retrieval over the
+                                    # KEYFRAMES inside the fork (written into the Omega config's
+                                    # Loop.SALAD — the fork has no thresholds of its own here).
+                                    # A candidate is only a proposal: the exact bridge (§4.1) and
+                                    # the spatial gate (§4.5) decide, so false proposals cost
+                                    # compute, never geometry — missed ones cost a closure.
+    similarity_threshold: 0.65      # cosine similarity a pair needs to become a candidate.
+                                    # The vendor's 0.85 is a driving-video value (one frame per
+                                    # video frame, near-identical revisits): on pccr's 216
+                                    # keyframes (one every ~14 frames, revisits from other
+                                    # viewpoints) it proposed ZERO pairs → no bridge, no loop.
+                                    # MEASURED on those 216 keyframes (2026-09-13, all pairs
+                                    # ≥ 11 kf apart): p50 0.27, p99 0.57, max 0.73 — the walk's
+                                    # start↔end revisit (kf 1–6 ↔ 207–214) scores 0.69–0.73,
+                                    # nothing anywhere reaches 0.78. 0.65 admits that revisit
+                                    # with margin and ~60 proposals in total (≈ p99.7); the
+                                    # exact bridge + spatial gate reject the false ones.
+    top_k: 5                        # retrieved neighbours per keyframe
+    min_gap_keyframes: 11           # closer pairs are odometry, not a revisit (vendor: > 10)
+    nms_threshold: 3                # keyframes suppressed around an accepted pair: the vendor's
+                                    # 25 video frames ≈ 1 s; 25 KEYFRAMES ≈ 350 frames would
+                                    # silence whole revisits — 3 keyframes ≈ the vendor's span
+    image_size: [336, 336]          # SALAD input (vendor)
+    batch_size: 32
   min_gap_keyframes: 30             # two windows of one instance this far apart = revisit
   duplicate_min_sep_m: 0.20         # two disjoint 3-D clusters of one instance, centroids
                                     # farther than this and no bridging points = duplicate
@@ -2348,6 +2358,15 @@ loops:                              # candidate detector + spatial gate (§4.4/�
     crops_per_instance: 1
     default_class: movable          # class recorded when the VLM is unavailable (never counts
                                     # as structural evidence)
+    nonstructural_sigma_factor: 2.0 # USER 2026-09-13 ("nunca debe descartarse un duplicado
+                                    # detectado por SAM3"): the class never discards a candidate —
+                                    # geometry (the spatial gate) decides loop|ambiguous|split. A
+                                    # loop proposed by a movable/dynamic-classed instance (or by one
+                                    # the VLM could not classify) still becomes a bridge candidate
+                                    # and a post-hoc pose edge, with its σ inflated by this factor
+                                    # (a chair may have MOVED between the visits: less weight, never
+                                    # zero). pccr 2026-09-13 21:03: vLLM was down, all 105 instances
+                                    # fell to the default class and 0 candidates were written.
 
 scale:                              # scale graph sources beyond DA3 + seams (§5)
   sigma_loop: 0.005                 # σ (log) of an exact-bridge loop row — calibrated on the

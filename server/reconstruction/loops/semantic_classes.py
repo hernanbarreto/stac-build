@@ -87,10 +87,18 @@ def classify_instances(output_dir, session_dir, instances: List[dict], cfg,
     client = None
     if cfg.enabled:
         try:
+            # the service may be DOWN here (SAM3 stops vLLM for its exclusive
+            # window): bring it up and wait, exactly as the VLM stage does —
+            # pccr 2026-09-13 21:03: with it down every instance fell to the
+            # default class → 0 instance loops, 0 structural constraints
+            from config import cfg as _server_cfg
+            from semantic.service import ensure_service
+            if not ensure_service(_server_cfg, log=log):
+                raise RuntimeError("semantic service did not come up")
             from semantic.client import get_semantic_client
             client = get_semantic_client(consumer="loops.classify")
             if not client.health().get("ok", True):
-                client = None
+                raise RuntimeError("semantic service unhealthy after start")
         except Exception as e:  # noqa: BLE001 — declared below, never silent
             log(f"[loop-class] semantic service unavailable ({e}) — default class "
                 f"'{cfg.default_class}' recorded for unclassified instances")

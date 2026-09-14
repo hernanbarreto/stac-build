@@ -9,14 +9,20 @@ Two signals per instance, both proposals until the spatial gate (§4.5) rules:
     points) is a candidate AND the duplicate metric of §10.4.
 
 Every candidate is gated: ``loop`` → written to ``maplong_run/loop_closures.txt``
-(source ``instance``) for the exact-bridge machinery of the fork;
-``ambiguous`` → same, flagged (σ inflated downstream); ``split`` → the fused
-instance is divided (:mod:`reconstruction.loops.split`) — no loop; ``reject``
-→ recorded. The full evidence lands in ``output/loop_candidates.json`` and the
-duplicates in ``output/duplicates.json``; instance classes (Qwen,
-structural | movable | dynamic) in ``output/loop_semantics.json`` for the
-verifier's semantic check (§4.2.4). A manual correction (marked objects) is
-the SAME candidate kind, source ``manual``.
+(source ``instance``, or ``instance:<class>`` when the proposer is not a
+structural instance — σ inflated by ``loops.semantic.nonstructural_sigma_factor``
+wherever the edge is measured, never dropped: USER 2026-09-13 "nunca debe
+descartarse un duplicado detectado por SAM3") for the exact-bridge machinery
+of the fork AND measured post-hoc as a pose edge by
+:func:`reconstruction.certify.loops_posthoc.instance_edges` inside the
+certification stage of the pipeline; ``ambiguous`` → same, flagged (σ
+inflated downstream); ``split`` → the fused instance is divided
+(:mod:`reconstruction.loops.split`) — no loop; ``reject`` → recorded. The
+full evidence lands in ``output/loop_candidates.json`` and the duplicates in
+``output/duplicates.json``; instance classes (Qwen, structural | movable |
+dynamic) in ``output/loop_semantics.json`` for the verifier's semantic check
+(§4.2.4) — only ``dynamic`` (people, vehicles) never proposes. A manual
+correction (marked objects) is the SAME candidate kind, source ``manual``.
 """
 
 from __future__ import annotations
@@ -290,7 +296,8 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
     instances = json.loads(res_path.read_text()).get("instances") or []
     view = SessionView(session, session_dir)
 
-    # classes (Qwen) → structural instances propose; movable ignored; dynamic excluded
+    # classes (Qwen) → recorded with every candidate; dynamic instances excluded,
+    # every other class proposes (non-structural ones with an inflated σ)
     oid_of = _mask_obj_by_iid(output_dir)
     frames_of = {}
     for inst in instances:
@@ -381,9 +388,14 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
                     "instance_id": iid, "label": cand.label,
                     "separation_m": gate["rules"]["separation"]["distance_m"],
                     "keyframes": [int(cand.i), int(cand.j)], "verdict": gate["verdict"]})
-            if gate["verdict"] in ("loop", "ambiguous") and cls == "structural":
+            if gate["verdict"] in ("loop", "ambiguous"):
+                # USER 2026-09-13: "nunca debe descartarse un duplicado detectado
+                # por SAM3" — geometry decided; the class only tags the source
+                # (the bridge verifier and the post-hoc instance edge inflate σ
+                # for a non-structural proposer: loops.semantic.nonstructural_
+                # sigma_factor). dynamic instances left the queue above.
                 to_write.append({"i": int(cand.i), "j": int(cand.j), "sim": None,
-                                 "source": "instance"})
+                                 "source": "instance" if cls == "structural" else f"instance:{cls}"})
                 rec["written"] = True
             elif gate["verdict"] == "split" and apply_splits:
                 smaller = cand.idx_a if len(cand.idx_a) <= len(cand.idx_b) else cand.idx_b

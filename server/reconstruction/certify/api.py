@@ -5,13 +5,16 @@ operator from the bearer token, Approve/Undo through the correction
 package (a certification leaves a CHAIN of pending epochs: Undo pops the
 last one, Approve accepts them all).
 
-    POST /api/certify/run        {session_id, max_iters?}      → acta
     GET  /api/certify/state/{session_id}                        → epoch, pending chain, acta summary
     GET  /api/certify/acta/{session_id}                         → the acta
     GET  /api/certify/report/{session_id}[?epoch=N]             → quality report (§10)
     GET  /api/certify/attention/{session_id}                    → §11 attention list
     POST /api/certify/approve|undo  {session_id}                → verdict (correction.run)
-    POST /api/certify/witnesses  {session_id}                   → witness epoch only
+
+The certification itself RUNS INSIDE the reconstruction pipeline (stage
+``certify``, workers/certify_worker.py — USER 2026-09-13: nothing manual) and
+again through ``auto_run`` when the Segmentation Manager closes; there is no
+endpoint to trigger it by hand.
 """
 
 from __future__ import annotations
@@ -98,40 +101,6 @@ async def _run_locked(session_id: str, label: str, fn: Callable, output_dir=None
         # the same potree_ready broadcast the correction module sends (async)
         await _notify_viewer(session_id, Path(output_dir))
     return result
-
-
-@router.post("/run")
-async def run(body: dict, credentials: HTTPAuthorizationCredentials = Depends(_security)):
-    session_id = body.get("session_id")
-    if not session_id:
-        raise HTTPException(400, "session_id required")
-    ctx = _ctx(session_id)
-    operator = _operator(credentials)
-    max_iters = body.get("max_iters")
-    from reconstruction.certify.run import certify_session
-
-    def _work():
-        return certify_session(_session_dir(ctx), operator=operator, log=_log,
-                               max_iters=(int(max_iters) if max_iters else None))
-
-    acta = await _run_locked(session_id, "certification loop", _work, ctx.output_dir)
-    return {"ok": True, "acta": _acta_summary(acta)}
-
-
-@router.post("/witnesses")
-async def witnesses(body: dict, credentials: HTTPAuthorizationCredentials = Depends(_security)):
-    session_id = body.get("session_id")
-    if not session_id:
-        raise HTTPException(400, "session_id required")
-    ctx = _ctx(session_id)
-    operator = _operator(credentials)
-    from reconstruction.witness.run import run_witnesses
-
-    def _work():
-        return run_witnesses(ctx.output_dir, operator=operator, log=_log)
-
-    rep = await _run_locked(session_id, "witness epoch", _work, ctx.output_dir)
-    return {"ok": True, "report": rep}
 
 
 def auto_run(session_id: str, loop=None) -> None:

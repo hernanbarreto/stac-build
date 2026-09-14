@@ -6,7 +6,6 @@
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
 import asyncio
-import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -28,6 +27,7 @@ class StageId(str, Enum):
     TSDF = "tsdf"
     VLM = "vlm"
     SAM3 = "sam3"
+    CERTIFY = "certify"
     INSTANCE_CLEANER = "instance_cleaner"
 
 
@@ -38,6 +38,7 @@ STAGE_REGISTRY = {
     StageId.TSDF:             {"label": "TSDF Mesh",         "icon": "🧊", "module": "workers.tsdf_worker"},
     StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker"},
     StageId.SAM3:             {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
+    StageId.CERTIFY:          {"label": "Certification",     "icon": "📐", "module": "workers.certify_worker"},
     StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
 }
 
@@ -47,7 +48,12 @@ STAGE_REGISTRY = {
 #   → VLM   (Qwen3-VL understands the scene → RICH concept phrases, no boxes)
 #   → SAM3  (one concept session per phrase — SAM3's tracking IS the identity;
 #            instance store scene_r.db rebuilt from the clean instances)
-#   → CloudCompy (merge/clean → cleaned cloud + Potree + mask→cloud mapping)
+#   → CloudCompy (merge/clean → cleaned cloud + witnesses + Potree + mask→cloud)
+#   → Certify (claude_stac.txt §9, USER 2026-09-13 "todo automático": instance +
+#            revisit loops → closed scale → keyframe SE(3) graph → depth by
+#            correspondences → witnesses; one pending epoch per iteration,
+#            Approve/Undo in the kit — the duplicates of a drifted revisit
+#            are closed HERE, so the stage is part of "Reconstruir")
 #   → scene TSDF (fusion + texrecon photo texture).
 # The former Phase R (semantic anchoring) was REMOVED 2026-07-09: the one-pass
 # reconstruction has no window seams to anchor, and the anchoring never beat
@@ -58,6 +64,7 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
     StageId.VLM,
     StageId.SAM3,
     StageId.CLOUDCOMPY,
+    StageId.CERTIFY,
     StageId.PGSR,          # precision mode only: no-ops unless backend is
                            # vggtomega_pgsr (seeds from cleaned_cloud, so it runs
                            # after CloudCompy; the TSDF then integrates its
@@ -336,6 +343,12 @@ class PipelineManager:
                       "autoprompt_review_queue.json"],
         StageId.SAM3: ["segmentation.json", "segmentation_result.json",
                        "seg_masks.npz", "seg_broadcast.json", "scene_r.db"],
+        # the certification's records (the acta, the per-epoch quality reports,
+        # the post-hoc graph, the candidates/duplicates lists). Its epochs are
+        # correction artifacts: a NEW reconstruction wipes output/ (epoch 0
+        # again) — the ledger corrections.jsonl is never deleted.
+        StageId.CERTIFY: ["certify_acta.json", "quality", "keyframe_graph.json",
+                          "loop_candidates.json", "duplicates.json", "loop_semantics.json"],
         StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
     }
 
@@ -352,7 +365,7 @@ class PipelineManager:
 
     # Cascade: when a stage re-runs, these DOWNSTREAM stages' outputs are ALSO
     # invalidated. MUST mirror DEFAULT_STAGE_ORDER:
-    #   RECONSTRUCTION → VLM → SAM3 → CLOUDCOMPY → TSDF
+    #   RECONSTRUCTION → VLM → SAM3 → CLOUDCOMPY → CERTIFY → TSDF
     # A cascade edge pointing UPSTREAM deletes freshly produced artifacts
     # mid-pipeline — that exact bug (CLOUDCOMPY → SAM3, a relic of the old
     # cloudcompy-before-sam3 order) silently erased segmentation.json +
@@ -362,22 +375,30 @@ class PipelineManager:
             StageId.VLM,              # scene analysis ran on old keyframes
             StageId.SAM3,             # segmentation ran on old frames
             StageId.CLOUDCOMPY,       # cleaned_cloud depends on chunks
+            StageId.CERTIFY,          # the acta certified the old geometry
             StageId.PGSR,             # PGSR trained on old poses/cloud
             StageId.TSDF,             # TSDF mesh integrated old depth/poses
             StageId.INSTANCE_CLEANER, # instance PLYs from old segmentation
         ],
         StageId.VLM: [
             StageId.SAM3,             # SAM3 uses VLM categories
+            StageId.CERTIFY,          # instance loops come from the segmentation
             StageId.INSTANCE_CLEANER,
         ],
         StageId.SAM3: [
+            StageId.CERTIFY,          # instance loops come from the segmentation
             StageId.PGSR,             # dynamic masks come from SAM3 artifacts
             StageId.INSTANCE_CLEANER, # instances depend on segmentation
         ],
         StageId.CLOUDCOMPY: [
+            StageId.CERTIFY,          # the loop certifies THIS cleaned cloud
             StageId.PGSR,             # the Gaussian seed is the cleaned cloud
             StageId.TSDF,             # TSDF masks to the old cleaned_cloud
             StageId.INSTANCE_CLEANER,
+        ],
+        StageId.CERTIFY: [
+            StageId.PGSR,             # a mesh is built on the certified geometry
+            StageId.TSDF,
         ],
         StageId.PGSR: [
             StageId.TSDF,             # precision TSDF integrates pgsr_render depths
@@ -879,6 +900,22 @@ class PipelineManager:
                 return False, "no scene TSDF mesh"
             return True, "scene mesh on disk"
 
+        if stage_id == StageId.CERTIFY:
+            acta = output_dir / "certify_acta.json"
+            if not acta.exists():
+                return False, "no certification acta"
+            cloud = output_dir / "cleaned_cloud.ply"
+            # the acta certifies ONE cloud + ONE segmentation: an older acta
+            # than either of them is stale (the cloud may already be a later
+            # epoch the acta itself produced — its mtime is then older than
+            # the acta's, which is what this compares)
+            for src in (output_dir / "segmentation_result.json", output_dir / "segmentation.json"):
+                if src.exists() and mt(acta) < mt(src):
+                    return False, f"acta older than {src.name}"
+            if cloud.exists() and mt(acta) < mt(cloud) and not (output_dir / "geometry_epoch.json").exists():
+                return False, "acta older than cleaned_cloud.ply"
+            return True, "certification acta on disk"
+
         return False, "no probe for stage"
 
 
@@ -925,11 +962,27 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
     if not auto_tsdf:
         logger.info("[Pipeline] auto_tsdf off — pipeline ends at the cleaned cloud")
 
+    # `certify.auto_after_segmentation` is the ONE switch of the automatic
+    # certification, and it has to gate BOTH of its triggers: the CERTIFY stage
+    # here and the re-run when the Segmentation Manager closes (certify.api
+    # auto_run). Without this the stage ran whatever the switch said.
+    auto_certify = True
+    try:
+        from config import cfg as _c3
+        auto_certify = bool(_c3.get("certify", {}).get("auto_after_segmentation", True))
+    except Exception:
+        pass
+    if not auto_certify:
+        logger.info("[Pipeline] auto_after_segmentation off — CERTIFY stage disabled")
+
     def _enabled(stage_id: StageId) -> bool:
         if skip_cloudcompy and stage_id == StageId.CLOUDCOMPY:
             return False
         if not auto_segment and stage_id in _semantic_stages:
             return False
+        if stage_id == StageId.CERTIFY and not (auto_certify and auto_segment):
+            return False   # config.yaml documents auto_segment:false as "no
+                           # segmentation, no instance loops, no certification" 
         if not auto_tsdf and stage_id in (StageId.TSDF, StageId.PGSR):
             return False   # no mesh requested → the 2h PGSR stage has no consumer
         return True

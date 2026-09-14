@@ -38,10 +38,8 @@ def _instances(sess):
 
 def _cfg(**over):
     base = {"loops.cluster_min_points": 150,
-            "structural.floor_datum.min_points": 60,
             # the synthetic planes are exact: their patch normals carry the
             # precision of a plane fitted on hundreds of noise-free points
-            "structural.floor_datum.sigma_angle_deg": 0.2,
             "structural.wall_planarity.sigma_angle_deg": 0.2,
             "structural.wall_planarity.min_points_per_kf": 60,
             "structural.column_vertical.min_points_per_kf": 30,
@@ -127,15 +125,8 @@ def test_loop_converges_stops_and_the_chain_undoes_bit_for_bit(tmp_path, truth):
         assert snap_back.get(rel) == snap0.get(rel), f"{rel} not restored bit for bit"
 
 
-def test_rejected_iteration_keeps_the_previous_epoch_bit_for_bit(tmp_path, truth, monkeypatch):
-    sess = truth
-    root = _write(tmp_path / "s", sess, _drift(sess))
-    out = root / "output"
-    cfg = _cfg()
-    acta1 = _run(root, sess, cfg, max_iters=1)
-    assert acta1["iterations"][0]["verdict"] == "applied"
-    snap1 = session_files_snapshot(out)
-    # a depth stage that lies: a 10 % compression of every frame "applied"
+def _liar_depth_stage(monkeypatch):
+    """A depth stage that lies: a 10 % compression of every frame 'applied'."""
     import reconstruction.witness.depth_tracks as dt
     real = dt.depth_stage
 
@@ -148,9 +139,23 @@ def test_rejected_iteration_keeps_the_previous_epoch_bit_for_bit(tmp_path, truth
         return rep
 
     monkeypatch.setattr(dt, "depth_stage", liar)
+
+
+def test_veto_mode_rejected_iteration_keeps_the_previous_epoch_bit_for_bit(tmp_path, truth, monkeypatch):
+    """certify.gates.mode = veto (evaluation): a failed gate rejects the
+    iteration and the previous epoch stays bit for bit."""
+    sess = truth
+    root = _write(tmp_path / "s", sess, _drift(sess))
+    out = root / "output"
+    cfg = _cfg(**{"certify.gates.mode": "veto"})
+    acta1 = _run(root, sess, cfg, max_iters=1)
+    assert acta1["iterations"][0]["verdict"] == "applied"
+    snap1 = session_files_snapshot(out)
+    _liar_depth_stage(monkeypatch)
     acta2 = _run(root, sess, cfg, max_iters=1)
     it = acta2["iterations"][0]
     assert it["verdict"] == "rejected", it
+    assert it["gate_mode"] == "veto"
     assert "vs" in it["reason"] and any(not g["passed"] for g in it["gates"])
     assert "rejected" in acta2["stop_reason"]
     snap2 = session_files_snapshot(out)
@@ -159,6 +164,84 @@ def test_rejected_iteration_keeps_the_previous_epoch_bit_for_bit(tmp_path, truth
     from correction import ledger
     rows = ledger.ledger_view(out)
     assert rows[-1]["kind"] == "certify" and rows[-1]["verdict"] == "rejected"
+
+
+def test_advisory_mode_failed_gate_is_applied_and_declared(tmp_path, truth, monkeypatch):
+    """Production (certify.gates.mode = advisory, USER 2026-09-13: the cloud
+    the UI receives is the corrected one): the same lying depth stage fails
+    a gate, the gate is DECLARED (acta warning, kit ⚠, attention list) and the
+    iteration is still applied as a pending epoch — Approve/Undo judges."""
+    sess = truth
+    root = _write(tmp_path / "s", sess, _drift(sess))
+    out = root / "output"
+    cfg = _cfg()
+    assert cfg.certify.gates.mode == "advisory"
+    acta1 = _run(root, sess, cfg, max_iters=1)
+    assert acta1["iterations"][0]["verdict"] == "applied"
+    snap1 = session_files_snapshot(out)
+    _liar_depth_stage(monkeypatch)
+    acta2 = _run(root, sess, cfg, max_iters=1)
+    it = acta2["iterations"][0]
+    assert it["verdict"] == "applied", it
+    assert it["gate_mode"] == "advisory" and it["gate_warnings"], it["gates"]
+    failed = [g for g in it["gates"] if not g["passed"]]
+    assert failed and all(g.get("advisory") for g in failed)
+    assert acta2["epoch_final"] == acta1["epoch_final"] + 1
+    snap2 = session_files_snapshot(out)
+    assert snap2.get("cleaned_cloud.ply") != snap1.get("cleaned_cloud.ply")
+    from correction import ledger
+    rows = ledger.ledger_view(out)
+    assert rows[-1]["kind"] == "certify" and rows[-1]["verdict"] == "pending"
+    from reconstruction.certify.attention import attention_list
+    att = attention_list(out)
+    warn = [a for a in att["items"] if a["kind"] == "gate_warning"]
+    assert warn and all("advisory" in a["text"] for a in warn)
+    # the kit still undoes the declared epoch
+    from correction.run import run_verdict
+    from correction.epoch import current_epoch
+    run_verdict(out, "undone", "test")
+    assert current_epoch(out) == acta1["epoch_final"]
+    for rel in GEOMETRY_FILES:
+        assert session_files_snapshot(out).get(rel) == snap1.get(rel), rel
+
+
+def test_instance_copies_become_pose_edges_whatever_the_class(tmp_path, truth):
+    """§4.4 (USER 2026-09-13: "nunca debe descartarse un duplicado detectado
+    por SAM3"): the copies of a revisited SAM3 instance are measured on the
+    cloud and become pose-graph edges; a non-structural class (here the
+    default when the VLM is unavailable) only inflates σ, never drops the
+    candidate; the certification closes the duplicates."""
+    from reconstruction.loops.instance_loops import detect_instance_loops
+    from reconstruction.certify.loops_posthoc import instance_edges
+    from correction.session import load_session
+    sess = truth
+    root = _write(tmp_path / "s", sess, _drift(sess))
+    out = root / "output"
+    cfg = _cfg(**{"loops.semantic.default_class": "movable"})
+    det = detect_instance_loops(out, root, cfg, log=lambda m: None, apply_splits=True)
+    cands = [c for c in det["candidates"] if c["verdict"] in ("loop", "ambiguous")]
+    assert cands, det["candidates"]
+    assert all(c["class"] == "movable" for c in cands)
+    assert det["n_written"] == len(cands)
+    txt = (out / "maplong_run" / "loop_closures.txt").read_text()
+    assert "instance:movable" in txt
+    session = load_session(out)
+    edges = instance_edges(session, cands, make_correction_cfg(), cfg, log=lambda m: None)
+    ok = [e for e in edges if e.get("accepted")]
+    assert ok, edges
+    for e in ok:
+        assert e["source"] == "instance" and "Z" in e and e["info_t"].shape == (3, 3)
+        assert e["offset_after_m"] < e["offset_before_m"]
+        assert e["sigma_factors"].get("class:movable") == cfg.loops.semantic.nonstructural_sigma_factor
+        assert e["sigma_m"] >= cfg.certify.visit_loops.sigma_floor_m * cfg.loops.semantic.nonstructural_sigma_factor
+    # the loop applies them: the acta records instance edges and the
+    # duplicates go down
+    acta = _run(root, sess, cfg, max_iters=2)
+    it0 = acta["iterations"][0]
+    assert it0["verdict"] == "applied", it0
+    assert any(l.get("source") == "instance" and l.get("accepted") for l in it0["loops"])
+    assert acta["metrics_final"]["duplicates"]["n"] <= acta["metrics_initial"]["duplicates"]["n"]
+    assert acta["metrics_final"]["closure"]["median_m"] < acta["metrics_initial"]["closure"]["median_m"]
 
 
 def test_known_answer_and_envelope_monotone_with_loop_density(tmp_path, truth):

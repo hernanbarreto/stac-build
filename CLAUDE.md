@@ -124,6 +124,34 @@ geométrica obligatoria en todo artefacto derivado."
   enforced by test). Tests: `server/tests/test_correction_*.py` + shared
   generator `tests/synth_correction.py` (30 tests, no GPU).
 
+## ⭐ ONE COMMAND — USER DECISION 2026-09-13/14 ("Reconstruir" delivers the
+## corrected cloud; nothing manual, nothing OFF left in the code)
+- Pipeline: RECONSTRUCTION → VLM → SAM3 → CLOUDCOMPY → CERTIFY
+  (`pipeline.auto_segment: true`, `workers/certify_worker.py`, resume probe +
+  cascade in `pipeline_manager`). The certification applies its epochs
+  (transactional, own octree) and the viewer reloads the corrected cloud when
+  the acta shows a new epoch; the kit opens by itself with pending epochs —
+  Approve/Undo is the only human verdict. No "Run certification" button, no
+  `/api/certify/run`.
+- EVERY loop closure is applied inside the pipeline: SALAD candidates (fork
+  `LoopModel` searches top-k among NON-local keyframes; thresholds from
+  `loops.salad`), exact bridges + in-run keyframe graph (fork), SAM3 instance
+  copies (`instance_edges`) + geometric revisits (`visit_edges`) in the
+  post-hoc graph. "nunca debe descartarse un duplicado detectado por SAM3":
+  any VLM class except dynamic proposes; a non-structural proposer only
+  inflates σ (`loops.semantic.nonstructural_sigma_factor`).
+- GATES ARE ADVISORY everywhere (`correction.gates.mode`,
+  `correction_graph.graph.gate_mode`, `certify.gates.mode` = advisory): drift
+  budget, loop gain, held-out pairs, authority, the §9 iteration gates are
+  MEASURED and declared (acta `gate_warnings`, kit ⚠, attention list), the
+  correction is applied. `veto` exists for evaluation only. No gravity prior,
+  no floor datum in the pose graphs (both bent the chain on pccr).
+- Post-hoc scale rows are RELATIVE to the metric lock (anchor agreement now /
+  at lock): an untouched session is identity, an injected/accumulated scale
+  error is recovered. Raw DA3 medians are never re-solved post-hoc.
+- User rules: I never launch the backend, vLLM, a pipeline, NOR TESTS — I
+  write the code and tell him what to restart/test; he runs everything.
+
 ## ⭐ FLOW CHANGE — USER DECISION 2026-08-28 (supersedes auto-mesh mandate)
 The automatic end-of-pipeline mesh worked on some scenes and not others, so:
 - **Reconstruction ends at the CLEANED CLOUD** (`pipeline.auto_tsdf: false`);

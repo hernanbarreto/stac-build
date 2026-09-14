@@ -260,65 +260,6 @@ def _synthetic_frame(H=24, W=32, z_true=None, fx=40.0):
     return wp, z_true, c2w
 
 
-def test_hybrid_substitute_recovers_straight_wall():
-    """Omega sees a WAVY wall (sinusoidal depth ripple on a flat surface); DA3
-    sees it straight but at a jittered absolute scale. The hybrid must return
-    the straight shape AT omega's scale, moving points along their own rays."""
-    from loop_utils.metric_lock import hybrid_substitute, anchor_ratio
-    H, W = 24, 32
-    flat = np.full((H, W), 4.0, np.float32)
-    ripple = flat + 0.15 * np.sin(np.linspace(0, 6 * np.pi, W))[None, :].astype(np.float32)
-    wp, zo, c2w = _synthetic_frame(H, W, z_true=ripple)
-    conf = np.ones((H, W), np.float32)
-    da3 = flat * 1.18                               # straight, wrong absolute scale
-    r = anchor_ratio(zo, da3, conf=conf)
-    wp_new, z_new, n, med = hybrid_substitute(wp, conf, zo, c2w, da3, r)
-    assert n > H * W * 0.9
-    # depth is now flat (shape from DA3) and scale-consistent with omega
-    inner = z_new[:, 2:-2]
-    assert float(inner.std()) < 0.01, float(inner.std())
-    # scale stays in omega's neighbourhood (the NEAR-band ratio biases toward
-    # ripple troughs on this synthetic — chunk-level scale graph owns precision)
-    assert abs(float(np.median(z_new)) / 4.0 - 1.0) < 0.06
-    # points moved along their own rays: direction from camera unchanged
-    C = c2w[:3, 3]
-    d_old = wp.reshape(-1, 3) - C
-    d_new = wp_new.reshape(-1, 3) - C
-    cos = np.sum(d_old * d_new, axis=1) / (
-        np.linalg.norm(d_old, axis=1) * np.linalg.norm(d_new, axis=1))
-    assert np.all(cos > 1 - 1e-9)
-
-
-def test_hybrid_substitute_gates():
-    """Far pixels, sky pixels and gross-disagreement pixels keep omega."""
-    from loop_utils.metric_lock import hybrid_substitute
-    H, W = 10, 12
-    zo = np.full((H, W), 4.0, np.float32)
-    zo[0, :] = 30.0                                  # far row
-    wp, _, c2w = _synthetic_frame(H, W, z_true=zo)
-    conf = np.ones((H, W), np.float32)
-    conf[1, :] = 0.0                                 # sky row
-    da3 = np.full((H, W), 4.0, np.float32)
-    da3[2, :] = 40.0                                 # gross disagreement row
-    wp_new, z_new, n, _ = hybrid_substitute(wp, conf, zo, c2w, da3, 1.0,
-                                            far_m=15.0)
-    assert np.allclose(wp_new[0], wp[0]) and np.allclose(z_new[0], zo[0])   # far
-    assert np.allclose(wp_new[1], wp[1])                                    # sky
-    assert np.allclose(wp_new[2], wp[2])                                    # gated
-    assert n == (H - 3) * W
-
-
-def test_hybrid_substitute_starved_is_identity():
-    from loop_utils.metric_lock import hybrid_substitute
-    H, W = 6, 8
-    zo = np.full((H, W), 4.0, np.float32)
-    wp, _, c2w = _synthetic_frame(H, W, z_true=zo)
-    conf = np.zeros((H, W), np.float32)              # nothing valid
-    wp_new, z_new, n, med = hybrid_substitute(wp, conf, zo, c2w, zo, 1.0)
-    assert n == 0 and med == 0.0
-    assert np.allclose(wp_new, wp) and np.allclose(z_new, zo)
-
-
 def test_backfill_mask_complements_owner_writes():
     """The write mask of the owner and the backfill mask of the non-owner are
     exact complements over the pixel grid: every pixel is written by exactly one
@@ -561,43 +502,6 @@ def test_chunk_tri_angle_scale_invariant():
     assert abs(a1 - 0.1) < 1e-9 and abs(a1 - a2) / a1 < 1e-6   # float32 depth rounding
 
 
-def test_elastic_corrections_sick_side_pinned():
-    """A healthy chunk never bends toward a sick neighbour: its side of the seam
-    stays identity, the sick side adopts the healthy copy fully."""
-    from loop_utils.metric_lock import elastic_corrections, rigid_mat
-    rng7 = np.random.default_rng(21)
-    ci = [(0, 28), (14, 42), (28, 56)]
-    fits = {j: {g: _small_rigid(rng7, 0.3, 0.03)
-                for g in range(ci[j + 1][0], ci[j][1])} for j in range(2)}
-    # chunk 2 sick: seam 1 (chunks 1-2) pins to chunk 1's copy
-    c1 = elastic_corrections(ci, 1, fits, sick={2})
-    c2 = elastic_corrections(ci, 2, fits, sick={2})
-    for g in range(28, 42):
-        T = rigid_mat(*fits[1][g])
-        assert np.allclose(c1[g - 14], np.eye(4), atol=1e-12), g   # healthy: untouched
-        assert np.allclose(c2[g - 28], T, atol=1e-10)              # sick: adopts healthy
-    # seam 0 (both healthy) keeps the normal blend + exact consensus
-    c0 = elastic_corrections(ci, 0, fits, sick={2})
-    for g in range(14, 28):
-        T = rigid_mat(*fits[0][g])
-        assert np.allclose(c0[g] @ T, c1[g - 14], atol=1e-10)
-
-
-def test_trim_static_ends():
-    from reconstruction.chunk_plan import trim_static_ends
-    rng8 = np.random.default_rng(30)
-    walk = np.cumsum(rng8.uniform(0.3, 0.5, (40, 1)) * np.array([[1, 0, 0]]), axis=0)
-    still_tail = walk[-1] + rng8.normal(0, 0.003, (10, 3))   # turning in place: ~mm steps
-    still_head = walk[0] + rng8.normal(0, 0.003, (5, 3))
-    centers = np.vstack([still_head, walk, still_tail])
-    lo, hi = trim_static_ends(centers)
-    assert 4 <= lo <= 6 and len(centers) - 11 <= hi <= len(centers) - 9, (lo, hi)
-    # healthy walk untrimmed; degenerate all-static untouched
-    assert trim_static_ends(walk) == (0, len(walk))
-    static = np.zeros((20, 3)) + rng8.normal(0, 0.001, (20, 3))
-    assert trim_static_ends(static) == (0, 20)
-
-
 # ── per-frame depth graph ────────────────────────────────────────────
 
 def test_pair_depth_relation_robust():
@@ -766,21 +670,6 @@ def test_flag_sick_chunks_zoom():
     sick = flag_sick_chunks(tri, {}, fx_median=fx)
     assert set(sick) == {10, 11, 12}, sick
     assert all(any("ZOOM" in r for r in sick[k]) for k in sick)
-
-
-def test_trim_zoom_tail_with_jumpy_poses():
-    """test4's actual failure mode: the zoomed tail's garbage poses JUMP metres
-    (not static), so the step criterion alone misses it — fx must catch it."""
-    from reconstruction.chunk_plan import trim_static_ends
-    rng11 = np.random.default_rng(50)
-    walk = np.cumsum(rng11.uniform(0.3, 0.5, (50, 1)) * np.array([[1, 0, 0]]), axis=0)
-    jumpy = walk[-1] + rng11.uniform(-2, 2, (12, 3))          # metre-scale garbage jumps
-    centers = np.vstack([walk, jumpy])
-    fx = np.concatenate([550 + rng11.normal(0, 5, 50), rng11.uniform(700, 1330, 12)])
-    lo, hi = trim_static_ends(centers)                        # steps alone: misses it
-    assert hi == len(centers)
-    lo, hi = trim_static_ends(centers, fx=fx)                 # fx: catches it
-    assert lo == 0 and 49 <= hi <= 51, (lo, hi)
 
 
 # ── per-chunk scale DRIFT (linear log-scale model, self-gated) ───────

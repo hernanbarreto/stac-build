@@ -102,93 +102,12 @@ def weighted_plane(P: np.ndarray, w: np.ndarray):
     return n, float(n @ c)
 
 
-def ransac_plane(P: np.ndarray, tol_m: float, iters: int, rng: np.random.Generator):
-    """(n, d, inlier_mask) with n·p = d; SVD refit on the inliers."""
-    best_inl, best = None, None
-    n_pts = len(P)
-    if n_pts < 3:
-        return None
-    for _ in range(int(iters)):
-        idx = rng.choice(n_pts, 3, replace=False)
-        p0, p1, p2 = P[idx]
-        n = np.cross(p1 - p0, p2 - p0)
-        nn = np.linalg.norm(n)
-        if nn < 1e-12:
-            continue
-        n = n / nn
-        d = float(n @ p0)
-        inl = np.abs(P @ n - d) <= tol_m
-        if best_inl is None or inl.sum() > best_inl.sum():
-            best_inl, best = inl, (n, d)
-    if best is None or best_inl.sum() < 3:
-        return None
-    n, d, _ = _plane_svd(P[best_inl])
-    inl = np.abs(P @ n - d) <= tol_m
-    return n, d, inl
-
-
 def _to_local(T: np.ndarray, n_w: np.ndarray, d_w: float):
     """World plane n·p = d → camera-frame plane of pose T (c2w)."""
     R, t = T[:3, :3], T[:3, 3]
     n_l = R.T @ n_w
     d_l = float(d_w - n_w @ t)
     return n_l, d_l
-
-
-# ── floor datum ──────────────────────────────────────────────────────────────
-
-def floor_datum_edges(session, per_kf_points, up: np.ndarray, cfg, seed: int = 0):
-    """Per-keyframe floor patch (low height band, RANSAC plane) → edge onto the
-    datum plane fitted on the first ``reference_span_kf`` patches. Returns
-    (edges, report); edges = [(kf, n_local, d_local, n_target, d_target)]."""
-    c = _cfg(cfg)
-    rng = np.random.default_rng(seed)
-    up = np.asarray(up, np.float64); up = up / (np.linalg.norm(up) + 1e-12)
-    patches: Dict[int, Tuple[np.ndarray, float, int]] = {}
-    for k in range(session.n_kf):
-        P = per_kf_points(k)
-        if len(P) < int(c["min_points"]):
-            continue
-        h = P @ up
-        lo = np.percentile(h, float(c["low_band_pct"]))
-        band = P[(h >= lo - float(c["band_m"])) & (h <= lo + float(c["band_m"]))]
-        if len(band) < int(c["min_points"]):
-            continue
-        fit = ransac_plane(band, float(c["ransac_tol_m"]), int(c["ransac_iters"]), rng)
-        if fit is None:
-            continue
-        n, d, inl = fit
-        if n @ up < 0:
-            n, d = -n, -d
-        if float(n @ up) < np.cos(np.radians(float(c["max_tilt_deg"]))):
-            continue          # not a floor (a wall band) — the patch is not horizontal
-        if inl.sum() < int(c["min_points"]):
-            continue
-        patches[k] = (n, d, int(inl.sum()))
-    if not patches:
-        return [], {"n_patches": 0, "reason": "no floor patch on any keyframe"}
-    ref_kfs = sorted(k for k in patches if k < int(c["reference_span_kf"]))
-    if not ref_kfs:
-        ref_kfs = sorted(patches)[:int(c["reference_span_kf"])]
-    # datum: weighted mean of the reference patches (normal + offset)
-    w = np.array([patches[k][2] for k in ref_kfs], np.float64)
-    n_star = np.sum([patches[k][0] * w[i] for i, k in enumerate(ref_kfs)], axis=0)
-    n_star = n_star / (np.linalg.norm(n_star) + 1e-12)
-    d_star = float(np.sum([patches[k][1] * w[i] for i, k in enumerate(ref_kfs)]) / w.sum())
-    edges, demoted = [], []
-    for k, (n, d, npts) in sorted(patches.items()):
-        # the patch's offset measured along the DATUM normal
-        off = abs(d - d_star) if float(n @ n_star) > 0 else abs(-d - d_star)
-        if off > float(c["step_demote_m"]):
-            demoted.append({"kf": int(k), "offset_m": float(off),
-                            "reason": "real step / level change (kept, no edge)"})
-            continue
-        n_l, d_l = _to_local(session.poses[k], n, d)
-        edges.append((int(k), n_l, d_l, n_star, d_star))
-    rep = {"n_patches": len(patches), "n_edges": len(edges), "reference_kfs": ref_kfs,
-           "datum_normal": n_star.tolist(), "datum_offset_m": d_star,
-           "demoted": demoted}
-    return edges, rep
 
 
 # ── wall planarity ───────────────────────────────────────────────────────────

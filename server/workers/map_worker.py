@@ -12,7 +12,6 @@ import re
 import shutil
 import glob
 import tempfile
-import time
 from pathlib import Path
 from multiprocessing.connection import Connection
 
@@ -1541,7 +1540,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # to DA3 anchors BEFORE alignment, glued SE(3) (scale is not negotiable — the Sim3
     # scale freedom is what produced the onion), SALAD loop closure + pose graph on.
     from reconstruction.chunk_plan import (walk_length_m, plan_chunks,
-                                           plan_anchor_indices, trim_static_ends,
+                                           plan_anchor_indices,
                                            chunk_ranges)
     vggt_config = _build_vggtomega_config(config)
     _va_cfg = recon_cfg.get("vggtomega", {}) or {}
@@ -1612,8 +1611,6 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             "suspect_spread": float(_va_cfg.get("suspect_spread", 0.30)),
             # zoom → correct the scale (anchor exclusion + seam graph)
             "zoom_scale_fix": bool(_va_cfg.get("zoom_scale_fix", True)),
-            # sick chunks write anyway; flags stay in chunk_health.json
-            "health_gate": bool(_va_cfg.get("health_gate", False)),
         }
         cfg_v["Model"]["exact_seam_align"] = bool(
             _va_cfg.get("exact_seam_align", False))
@@ -1629,10 +1626,6 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             _va_cfg.get("elastic_max_t_m", 0.30))
         cfg_v["Model"]["intra_chunk"] = bool(
             _va_cfg.get("intra_chunk", False))
-        cfg_v["Model"]["hybrid_da3"] = bool(
-            _va_cfg.get("hybrid_da3", False))
-        cfg_v["Model"]["hybrid_da3_far_m"] = float(
-            _va_cfg.get("hybrid_da3_far_m", 15.0))
         cfg_v["Model"]["depth_graph"] = bool(
             _va_cfg.get("depth_graph", False))
         cfg_v["Model"]["blend_copies"] = bool(
@@ -1645,11 +1638,21 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # dimensions, a user measurement) join the same solve.
         from reconstruction.loops.config import (load_loops_config, fork_model_loops,
                                                  fork_model_scale, fork_model_graph,
-                                                 fork_model_authority, fork_model_certify)
+                                                 fork_model_authority, fork_model_certify,
+                                                 fork_loop_salad)
         _mg = load_loops_config(config)
         _server_dir = str(Path(__file__).resolve().parent.parent)
         cfg_v["Model"]["loops"] = fork_model_loops(_mg, _server_dir)
         cfg_v["Model"]["scale"] = fork_model_scale(_mg)
+        # §4.4 visual candidates: the SALAD retrieval thresholds come from
+        # config.yaml loops.salad — the fork's base_config carries the
+        # vendor's per-video-frame values (0.85 / NMS 25), which over 216
+        # KEYFRAMES proposed zero pairs on pccr (2026-09-13) → no bridge, no
+        # loop, duplicates untouched.
+        cfg_v.setdefault("Loop", {})["SALAD"] = fork_loop_salad(_mg)
+        pipe.send_log(f"[loops] SALAD candidates over keyframes: similarity ≥ "
+                      f"{_mg.loops.salad.similarity_threshold:g}, top-{_mg.loops.salad.top_k}, "
+                      f"gap ≥ {_mg.loops.salad.min_gap_keyframes} kf, NMS {_mg.loops.salad.nms_threshold} kf")
         # F2: keyframe SE(3) graph replaces the vendor sim3loop; authority
         # budgets per stage; optional ensemble witness (§4.3/§4.7/§4.8)
         cfg_v["Model"]["graph"] = fork_model_graph(_mg)
@@ -1683,12 +1686,11 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                               f"absolute scale rows (σ {_mg.scale.sigma_vio})")
         _adj = [k for k in ("exact_seam_align", "frame_ownership",
                             "ownership_backfill", "elastic_seam", "intra_chunk",
-                            "hybrid_da3", "depth_graph", "blend_copies")
+                            "depth_graph", "blend_copies")
                 if cfg_v["Model"].get(k)]
         pipe.send_log(f"CHUNKED-METRIC: chunks {int(_chunk)}/{int(_ov)}, DA3 metric "
                       f"scale (anchors + seam graph; zoom chunks: anchors excluded, "
-                      f"scale from seams), health gate "
-                      f"{'ON' if cfg_v['Model']['metric_lock']['health_gate'] else 'diagnostic-only'}; "
+                      f"scale from seams), chunk health flags diagnostic-only; "
                       f"adjustment stages ON: {_adj if _adj else 'NONE (clean omegalong)'}")
 
     def _ensure_anchors(_files):
@@ -1785,18 +1787,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             _chunk = _chunk_cfg if _chunk_cfg else max(24, min(60, _fits))
             _ov = _chunk // 2
             _chunked_already = True
-            if bool(_va_cfg.get("hybrid_da3", True)):
-                # Phase E-lite: EVERY keyframe needs its isolated DA3 depth map
-                # (the hybrid write re-shapes each frame on DA3) — the anchor
-                # subset alone would leave most frames on raw omega depth
-                pipe.send_log(f"HYBRID-DA3: extracting isolated DA3 depth for all "
-                              f"{_n_selected} keyframes (shape source for the "
-                              f"hybrid write)")
-                _ensure_anchors(list(_sel_files))
-            else:
-                _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov,
-                                                  _anch_per_chunk)
-                _ensure_anchors([_sel_files[i] for i in _anchor_idx])
+            _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov,
+                                              _anch_per_chunk)
+            _ensure_anchors([_sel_files[i] for i in _anchor_idx])
             _apply_chunked_metric(vggt_config, _chunk, _ov)
             _persist_chunk_plan(_chunk, _ov, _n_selected, "direct-chunked")
         else:
@@ -1830,21 +1823,6 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                           int(cfg_v["Model"]["chunk_size"]),
                           int(cfg_v["Model"]["overlap"]),
                           selected_frames_path, pipe)
-        # ── Phase A: anchor DEPTH-RANGE coverage top-up. Anchors were picked
-        # uniformly in time BEFORE any depth existed; now that the omega depth is
-        # on disk, extract DA3 for keyframes in depth bins no anchor covers
-        # (the scale model must see the whole depth range it will correct).
-        if _sel_files and bool(_va_cfg.get("scale_anchor_depth_coverage", False)):
-            from reconstruction.scale_model import plan_depth_coverage_topup
-            _topup = plan_depth_coverage_topup(
-                output_dir, list(_sel_files),
-                max_topup=int(_va_cfg.get("scale_anchor_topup_max", 8)))
-            if _topup:
-                pipe.send_log(f"[scale-align] anchor depth-coverage top-up: extracting "
-                              f"DA3 on {len(_topup)} extra keyframes "
-                              f"({', '.join(os.path.splitext(f)[0] for f in _topup)}) — "
-                              f"uncovered depth bins")
-                _ensure_anchors(_topup)
         from reconstruction.scale_align import run as _scale_run
         _s = _scale_run(output_dir, dry_run=False,
                         log=lambda m: pipe.send_log(f"[scale-align] {m}"),
@@ -1922,89 +1900,6 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # excellent on short walks and drifts ~1.3 cm/m past them (measured, test4).
     if (_simple_on and not _chunked_already and _walk_m > _max_walk
             and _n_selected >= 24):
-        # ── coverage trim (probe-informed): drop rotation-only ENDS before chunking ──
-        # The probe already walked the scene: keyframes whose camera does not move
-        # hold no parallax, so their chunks would be born rotten at ANY chunking
-        # (test4: 3/13 chunks — 23% of the phase-2 GPU — spent on a tail with
-        # 0.24 m of walk in 24 kf, geometry garbage by construction) and their
-        # anchors/seams pollute the scale graph. Static HEAD/TAIL are trimmed in
-        # real-frame space and declared as ranges WITHOUT 3D coverage; mid-walk
-        # weak stretches stay — cutting them would split the sequence into islands
-        # with no shared frames to glue, and the vendor's chunk health gate covers
-        # them. Trim failure falls open (no trim) LOUDLY: the health gate is the
-        # safety net either way.
-        _trim_lo_num = _trim_hi_num = None
-        try:
-            import numpy as _np
-            _probe_frames = json.loads(
-                (output_dir / "maplong_run" / "frame_list.json").read_text())
-            _rows = [l.split() for l in open(output_dir / "camera_poses.txt") if l.strip()]
-            _ctr = _np.array([[float(x) for x in r] for r in _rows]).reshape(-1, 4, 4)[:, :3, 3]
-            # per-keyframe estimated focal: the ZOOM detector's direct signal
-            _fx = None
-            for _ip in (output_dir / "intrinsic.txt",
-                        output_dir / "maplong_run" / "intrinsic.txt"):
-                if _ip.exists():
-                    _fx = _np.array([float(l.split()[0]) for l in
-                                     _ip.read_text().splitlines() if l.strip()])
-                    break
-            if _fx is not None and len(_fx) != len(_ctr):
-                pipe.send_log(f"[coverage-trim] intrinsic.txt has {len(_fx)} rows vs "
-                              f"{len(_ctr)} poses — zoom detection skipped", level="warning")
-                _fx = None
-            if len(_ctr) != len(_probe_frames):
-                pipe.send_log(f"[coverage-trim] probe poses ({len(_ctr)}) != frame list "
-                              f"({len(_probe_frames)}) — trim skipped", level="warning")
-            if not bool(_simple_cfg.get("coverage_trim", False)):
-                # USER ORDER 2026-08-30: never drop keyframes on detected
-                # rotation/static ends — keep every selected view
-                pipe.send_log("[coverage-trim] disabled "
-                              "(simple.coverage_trim: false) — keeping all "
-                              "keyframes, rotation-only ends included")
-            elif len(_ctr) == len(_probe_frames) and len(_ctr) >= 3:
-                _plo, _phi = trim_static_ends(_ctr, fx=_fx)
-                if (_plo, _phi) != (0, len(_ctr)):
-                    _pnums = [int(os.path.splitext(f)[0]) for f in _probe_frames]
-                    _trim_lo_num, _trim_hi_num = _pnums[_plo], _pnums[_phi - 1]
-                    _kept = [f for f in _sel_files
-                             if _trim_lo_num <= int(os.path.splitext(f)[0]) <= _trim_hi_num]
-                    _walk_kept = float(_np.linalg.norm(
-                        _np.diff(_ctr[_plo:_phi], axis=0), axis=1).sum())
-                    with open(output_dir / "coverage_trim.json", "w") as _f:
-                        json.dump({"frame_lo": _trim_lo_num, "frame_hi": _trim_hi_num,
-                                   "probe_kf_trimmed_head": int(_plo),
-                                   "probe_kf_trimmed_tail": int(len(_ctr) - _phi),
-                                   "keyframes_dropped": _n_selected - len(_kept),
-                                   "walk_m_total": _walk_m, "walk_m_kept": _walk_kept,
-                                   "reason": "static and/or optical-zoom ends: neither "
-                                             "adds baseline -> no parallax -> no 3D "
-                                             "information (steps a decade below the "
-                                             "walking pace, or focal at robust z>3.5)"},
-                                  _f, indent=1)
-                    pipe.send_log(f"[coverage-trim] static ends: keeping real frames "
-                                  f"[{_trim_lo_num}, {_trim_hi_num}] — dropped "
-                                  f"{_n_selected - len(_kept)} keyframe(s) "
-                                  f"({int(_plo)} head / {int(len(_ctr) - _phi)} tail probe kf); "
-                                  f"those ranges are declared WITHOUT 3D coverage",
-                                  level="warning")
-                    _sel_files = _kept
-                    _n_selected = len(_kept)
-                    _walk_m = _walk_kept
-                    try:
-                        _prev_sel = json.load(open(selected_frames_path))
-                        _tot = int(_prev_sel.get("total_frames", len(_kept)))
-                        _meth = str(_prev_sel.get("method", "motion")) + "+trim"
-                    except Exception:
-                        _tot, _meth = len(_kept), "motion+trim"
-                    with open(selected_frames_path, "w") as _f:
-                        json.dump({"version": "2.0", "method": _meth,
-                                   "total_frames": _tot,
-                                   "selected_count": len(_kept),
-                                   "selected_files": _kept}, _f)
-        except Exception as _e:  # noqa: BLE001
-            pipe.send_log(f"[coverage-trim] SKIPPED ({_e}) — the chunk health gate "
-                          f"remains the safety net for parallax-starved chunks",
-                          level="warning")
 
         # Re-select keyframes DENSER for the chunked pass: with sparse keyframes
         # (big m/kf) a minimum-size chunk covers far more walk than chunk_walk_m —
@@ -2027,11 +1922,6 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             _q1 = float(_simple_cfg.get("keyframe_motion_quantum", 250.0))
             _q2 = max(20.0, _q1 * _desired_m_per_kf / _m_per_kf)
             _chosen2, _n_total2, _ = _motion_keyframes(frames_dir, _q2)
-            if _trim_lo_num is not None:
-                # the dense re-selection sweeps the WHOLE video — keep it inside
-                # the trimmed coverage window
-                _chosen2 = [f for f in _chosen2
-                            if _trim_lo_num <= int(os.path.splitext(f)[0]) <= _trim_hi_num]
             if len(_chosen2) > _n_selected:
                 with open(selected_frames_path, "w") as _f:
                     json.dump({"version": "2.0", "method": f"motion_{_q2:g}_chunked",
@@ -2051,19 +1941,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > comfort "
                           f"{_max_walk:g} m → phase 2: chunked-metric re-run "
                           f"({_chunk} kf/chunk, overlap {_ov})")
-            if bool(_va_cfg.get("hybrid_da3", True)):
-                # Phase E-lite (SAME rule as the direct-chunked path — E1 bug:
-                # this re-run path kept the 25-anchor subset, so only 5-8/42
-                # frames per chunk had a DA3 map to re-shape on): EVERY keyframe
-                # needs its isolated DA3 depth for the hybrid write
-                pipe.send_log(f"HYBRID-DA3: extracting isolated DA3 depth for all "
-                              f"{_n_selected} keyframes (shape source for the "
-                              f"hybrid write)")
-                _ensure_anchors(list(_sel_files))
-            else:
-                _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov,
-                                                  _anch_per_chunk)
-                _ensure_anchors([_sel_files[i] for i in _anchor_idx])
+            _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov,
+                                              _anch_per_chunk)
+            _ensure_anchors([_sel_files[i] for i in _anchor_idx])
             # wipe phase-1 reconstruction artifacts (NOT da3_run — the anchors live there)
             for _pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
                 for _f in output_dir.glob(_pat):

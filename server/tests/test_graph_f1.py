@@ -205,6 +205,18 @@ def test_instance_detector_two_clusters_then_zero_after_correction(tmp_path, ses
     # loop_closures.txt carries the instance candidate with its source
     txt = (root / "output" / "maplong_run" / "loop_closures.txt").read_text()
     assert "instance" in txt
+    # a non-structural class never drops the candidate (USER 2026-09-13): the
+    # same session with the default class 'movable' writes the same pairs,
+    # tagged with the class so the verifier inflates σ instead
+    root_m = write_session_dir(tmp_path / "s1m", sess, instances, point_stride=2,
+                               drift_by_kf=_drift_field(sess.n_kf, total_m=0.9))
+    cfg_m = load_loops_config(raw_server_cfg(**{"loops.cluster_min_points": 150,
+                                                "loops.dbscan_min_samples": 8,
+                                                "loops.semantic.default_class": "movable"}))
+    rep_m = detect_instance_loops(root_m / "output", root_m, cfg=cfg_m, log=lambda m: None)
+    assert rep_m["n_written"] == rep["n_written"] >= 1
+    txt_m = (root_m / "output" / "maplong_run" / "loop_closures.txt").read_text()
+    assert "instance:movable" in txt_m
     # duplicates metric present
     dup = json.loads((root / "output" / "duplicates.json").read_text())
     assert dup["n_duplicates"] >= 1

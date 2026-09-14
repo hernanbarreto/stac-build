@@ -3,7 +3,7 @@
 The fork runs the graph once inside the reconstruction (loops from SALAD);
 this runner re-solves it on the finished session with everything the
 reconstruction could not know yet — the SAM3 instance loops (§4.4), the
-structural constraints (§4.6), the measured chain uncertainty — and applies
+geometric revisit closures, the structural constraints (§4.6) — and applies
 the result through the correction package's transactional machinery: an
 EPOCH (geometry_epoch.json), the ledger, ``corrections/epoch_<N>.npz``,
 Approve/Undo in the UI. Nothing here is silent: every gate lands in the
@@ -12,8 +12,18 @@ report with value / threshold / verdict; identity is a verdict too.
 Inputs: cleaned_cloud.ply (+ provenance), camera_poses.txt, camera_frames.txt,
 segmentation_result.json (structural edges), maplong_run/loop_edges.json
 (keyframe loop edges, translations rescaled by the residual metric s),
-uncertainty.json (σ per frame), loop_semantics.json / the instance store
-(classes). Solver: vendor/VGGT-Long/loop_utils/pose_graph.py.
+loop_semantics.json / the instance store (classes). Solver:
+vendor/VGGT-Long/loop_utils/pose_graph.py.
+
+Priors (pccr 2026-09-13 21:00 lesson): the graph holds ODOMETRY (σ from
+config — Omega's adjacent keyframe poses are precise, the two-copy point
+disagreement is NOT a pose uncertainty), the measured LOOP closures, and the
+structural constraints that come from segmented, VLM-classified structural
+instances (walls, columns, parallel members). No per-pose gravity prior (a
+handheld camera pitches; "camera down = consensus down" bent the chain) and
+no floor datum from the per-keyframe low band (USER 2026-09-09: that band is
+not a validated floor). With those two and σ_odo inflated to the point
+disagreement, 0 loops still moved poses 3.2 m / 15.6°.
 """
 
 from __future__ import annotations
@@ -67,17 +77,6 @@ def _loop_edges(output_dir: Path, s_metric: float) -> List[dict]:
                     "sigma_deg": float(ke["sigma_deg"]), "bridge": int(ke["bridge"]),
                     "status": e["status"], "source": e.get("candidate", {}).get("source", "salad")})
     return out
-
-
-def _uncertainty(output_dir: Path, frames: List[int]):
-    p = output_dir / "maplong_run" / "uncertainty.json"
-    if not p.exists():
-        return {}, 0.0
-    rep = json.loads(p.read_text())
-    by_frame = {int(v["frame"]): float(v["median_m"]) for v in rep.get("frames", {}).values()
-                if v.get("median_m") is not None}
-    per_kf = {k: by_frame[f] for k, f in enumerate(frames) if f in by_frame}
-    return per_kf, float(rep.get("session_median_m", 0.0) or 0.0)
 
 
 def _classes(output_dir: Path, instances: List[dict], default_class: str) -> Dict[int, str]:
@@ -170,20 +169,20 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     per_kf = _per_kf_points_fn(session)
     s_metric = _metric_scale_applied(output_dir)
     loops = (_loop_edges(output_dir, s_metric) if use_fork_edges else []) + list(extra_loop_edges or [])
-    unc, unc_med = _uncertainty(output_dir, session.frames)
     res_path = output_dir / "segmentation_result.json"
     instances = json.loads(res_path.read_text()).get("instances", []) if res_path.exists() else []
     classes = _classes(output_dir, instances, cfg.loops.semantic.default_class)
 
-    # gravity: the session is Y-up after orient (floor at y=0); the consensus
-    # camera-down of the poses says which way "down" is in THIS frame
+    # the world vertical for the axis constraints: the session is Y-up after
+    # orient (floor at y=0); the consensus camera-down of the poses says which
+    # way "down" is in THIS frame (only the structural axis edges use it)
     downs = session.poses[:, :3, 1]
     g_down = downs.mean(0); g_down = g_down / (np.linalg.norm(g_down) + 1e-12)
     up = -g_down
 
     T0 = session.poses.copy()
     gcfg = dict(sigma_odo_intra_m=gc.sigma_odo_intra_m, sigma_odo_intra_deg=gc.sigma_odo_intra_deg,
-                loop_sigma_rot_deg=gc.loop_sigma_rot_deg, sigma_gravity_deg=gc.sigma_gravity_deg,
+                loop_sigma_rot_deg=gc.loop_sigma_rot_deg,
                 huber_delta_m=gc.huber_delta_m, huber_delta_deg=gc.huber_delta_deg,
                 dense_max_unknowns=gc.dense_max_unknowns, lambda_init=gc.lambda_init,
                 lambda_max=gc.lambda_max, lm_diag_floor=gc.lm_diag_floor, tol=gc.tol,
@@ -191,13 +190,12 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
                 pcg_max_iters=gc.pcg_max_iters)
 
     def build():
-        """Poses + PLANE nodes (walls, floor datum) solved jointly."""
+        """Poses + PLANE nodes (walls) solved jointly."""
         pg = PoseGraph(T0, gcfg)
         for g in range(N - 1):
             Z = se3_inv(T0[g]) @ T0[g + 1]
-            s_t = float(np.sqrt(gc.sigma_odo_intra_m ** 2 + unc.get(g, unc_med) ** 2
-                                + unc.get(g + 1, unc_med) ** 2))
-            pg.add_relative(g, g + 1, Z, gc.sigma_odo_intra_deg, s_t, huber=False, tag="odo")
+            pg.add_relative(g, g + 1, Z, gc.sigma_odo_intra_deg, gc.sigma_odo_intra_m,
+                            huber=False, tag="odo")
         loop_ids = []
         for e in loops:
             eid = pg.add_relative(int(e["i"]), int(e["j"]), np.asarray(e["Z"]),
@@ -205,22 +203,10 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
                                   tag=f"loop:{e.get('bridge', -1)}",
                                   info_t=e.get("info_t"), info_rot=e.get("info_rot"))
             loop_ids.append((eid, e))
-        for g in range(N):
-            pg.add_gravity(g, g_down, gc.sigma_gravity_deg)
         srep = {}
         plane_nodes = {}
         if use_structural:
             sc = cfg.structural
-            if sc.floor_datum.enabled:
-                fe, frep = st.floor_datum_edges(session, per_kf, up, sc.floor_datum)
-                if fe:
-                    n_star, d_star = np.asarray(frep["datum_normal"]), float(frep["datum_offset_m"])
-                    node = pg.add_plane_node(n_star, n_star * d_star)
-                    plane_nodes["floor"] = node
-                    for k, n_l, d_l, _n_t, _d_t in fe:
-                        pg.add_plane_edge(k, node, n_l, d_l, sc.floor_datum.sigma_angle_deg,
-                                          sc.floor_datum.sigma_offset_m, huber=True, tag="floor")
-                srep["floor_datum"] = frep
             if sc.wall_planarity.enabled:
                 we, wrep = st.wall_edges(session, instances, classes, sc.wall_planarity)
                 by_wall = {}
@@ -257,42 +243,38 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     I = np.tile(np.eye(4), (N, 1, 1))
     held_before = _held_median(held, I)
 
-    vetoed = []
     budget = cfg.loops.spatial
     centres = T0[:, :3, 3]
     pg, loop_ids, srep, plane_nodes = build()
     # residuals in the directions the edges OBSERVE (a floor-only closure has
-    # no in-plane claim): the gain and the veto judge those, not fake zeros
+    # no in-plane claim): the gain judges those, not fake zeros
     loop_before = float(np.sum([r["t_obs_m"] for r in pg.edge_residuals("loop").values()]))
-    while True:
-        pg.solve(log=log)
-        Xc_all = pg.corrections()
-        Xc = Xc_all[:N]
-        edge_res = pg.edge_residuals("loop")
-        offenders = []
-        for eid, e in loop_ids:
-            if not pg._edges[eid]["active"]:
-                continue
-            i, j = int(e["i"]), int(e["j"])
-            lo, hi = min(i, j), max(i, j)
-            L = float(np.linalg.norm(np.diff(centres[lo:hi + 1], axis=0), axis=1).sum())
-            delta = max(budget.drift_floor_m, budget.drift_rate_m_per_m * L)
-            # what the edge DEMANDS: obtained correction + what it still asks for
-            need = max(float(np.linalg.norm(Xc[i][:3, 3])), float(np.linalg.norm(Xc[j][:3, 3])),
-                       float(edge_res.get(eid, {}).get("t_obs_m", 0.0)))
-            if need > delta:
-                offenders.append((need - delta, eid, e, need, delta))
-        if not offenders:
-            break
-        offenders.sort(key=lambda x: x[0], reverse=True)
-        _, eid, e, need, delta = offenders[0]
-        pg.deactivate(eid)
-        vetoed.append({"edge": e, "i": e["i"], "j": e["j"], "correction_m": need,
-                       "budget_m": delta, "bridge": e.get("bridge", -1),
-                       "reason": "loop edge demands a correction beyond the drift budget (§4.7)"})
-        log(f"[kf-graph] VETO loop {e['i']}<->{e['j']}: {need * 100:.0f} cm > budget "
-            f"{delta * 100:.0f} cm — re-solving")
+    pg.solve(log=log)
     Xc = pg.corrections()[:N]
+    # Drift budget δ(L) = max(floor, rate·L) per loop: ADVISORY. USER
+    # 2026-09-09 ("siempre debe aplicarse la corrección de duplicados, no
+    # importa lo mucho que haya que corregir") and pccr 2026-09-13 21:00: the
+    # four measured start↔end closures (36–57 cm over an 18 m walk, Omega
+    # drifting 3 cm/m against the 1.3 cm/m the budget assumed) were vetoed
+    # one by one and the duplicates stayed. A closure is a MEASUREMENT (joint
+    # ICP of the two copies, per-DOF information); the budget is a prior on
+    # how much Omega usually drifts. When they disagree the measurement
+    # stands and the acta/attention list says by how much.
+    edge_res = pg.edge_residuals("loop")
+    over_budget = []
+    for eid, e in loop_ids:
+        i, j = int(e["i"]), int(e["j"])
+        lo, hi = min(i, j), max(i, j)
+        L = float(np.linalg.norm(np.diff(centres[lo:hi + 1], axis=0), axis=1).sum())
+        delta = max(budget.drift_floor_m, budget.drift_rate_m_per_m * L)
+        need = max(float(np.linalg.norm(Xc[i][:3, 3])), float(np.linalg.norm(Xc[j][:3, 3])),
+                   float(edge_res.get(eid, {}).get("t_obs_m", 0.0)))
+        if need > delta:
+            over_budget.append({"i": i, "j": j, "correction_m": need, "budget_m": delta,
+                                "walk_m": L, "bridge": e.get("bridge", -1),
+                                "reason": "closure beyond the drift budget (§4.7) — applied, declared"})
+            log(f"[kf-graph] loop {i}<->{j}: {need * 100:.0f} cm > drift budget {delta * 100:.0f} cm "
+                f"(walk {L:.1f} m) — the measured closure stands, declared in the acta")
     planes_solved = {name: {"normal": pg.plane_of(node)[0].tolist(), "offset_m": pg.plane_of(node)[1]}
                      for name, node in plane_nodes.items()}
     after = pg.edge_residuals("loop")
@@ -315,9 +297,34 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     frac = max(float(t_mag.max()) / cfg.authority.pose_graph_max_m,
                float(r_mag.max()) / cfg.authority.pose_graph_max_deg)
     saturated = frac > cfg.authority.saturation_warn
-    verdict = "APPLY" if (ok_gain and ok_held and frac <= 1.0) else "IDENTITY"
+    # The verdict (USER 2026-09-13, pccr: "nunca debe descartarse un
+    # duplicado detectado ... aunque haya que corregir 1000 km"): a measured
+    # closure IS applied. The gates below (loop gain, held-out pairs,
+    # authority) are MEASURED and declared — in ``advisory`` mode they are
+    # warnings in the report/acta and the visual Approve/Undo is the verdict;
+    # in ``veto`` mode (evaluation only) any failed gate keeps identity. The
+    # pccr run of 2026-09-13 19:25 vetoed four real start↔end closures
+    # (36–57 cm) and then went IDENTITY on held-out (2.7→8.6 cm) + authority
+    # (319 %): the duplicates stayed. IDENTITY now only when there is
+    # nothing to close: no active loop edge and no structural constraint.
+    has_evidence = n_active > 0 or (use_structural and bool(srep))
+    gate_warnings = []
+    if not ok_gain:
+        gate_warnings.append(f"loop gain {gain * 100:.0f}% < {gc.min_loop_gain * 100:.0f}%")
+    if not ok_held:
+        gate_warnings.append(f"held-out {held_before * 100:.2f}→{held_after * 100:.2f} cm "
+                             f"(> +{gc.max_seam_degradation_m * 100:.1f} cm)")
+    if frac > 1.0:
+        gate_warnings.append(f"authority {frac * 100:.0f}% (max {cfg.authority.pose_graph_max_m} m / "
+                             f"{cfg.authority.pose_graph_max_deg}°)")
+    if gc.gate_mode == "veto":
+        verdict = "APPLY" if (has_evidence and not gate_warnings) else "IDENTITY"
+    else:
+        verdict = "APPLY" if has_evidence else "IDENTITY"
+    for w in gate_warnings:
+        log(f"[kf-graph] ⚠ gate: {w} — {'declared, correction applied' if gc.gate_mode == 'advisory' else 'veto'}")
     struct_res = {tag: v for tag, v in pg.edge_residuals().items()
-                  if not str(v.get("tag", "")).startswith(("odo", "loop", "gravity"))}
+                  if not str(v.get("tag", "")).startswith(("odo", "loop"))}
     cov = st.loop_coverage(centres, [(e["i"], e["j"]) for eid, e in loop_ids
                                      if pg._edges[eid]["active"]],
                            cfg.loops.coverage_radius_m)
@@ -325,6 +332,10 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
               "verdict": verdict, "operator": operator, "n_kf": N,
               "n_loop_edges": len(loop_ids), "n_loop_edges_active": n_active,
               "s_metric_applied": s_metric,
+              "gate_mode": gc.gate_mode, "gate_warnings": gate_warnings,
+              "identity_reason": (None if verdict == "APPLY" else
+                                  ("no active loop edge and no structural constraint — nothing to close"
+                                   if not has_evidence else "; ".join(gate_warnings))),
               "gates": {"loop_gain": {"value": gain, "min": gc.min_loop_gain, "passed": ok_gain,
                                       "loop_residual_before_m": loop_before,
                                       "loop_residual_after_m": loop_after,
@@ -339,7 +350,7 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
                                       "max_deg": cfg.authority.pose_graph_max_deg,
                                       "used_max_m": float(t_mag.max()),
                                       "used_max_deg": float(r_mag.max())}},
-              "vetoed": [{k: v for k, v in e.items() if k != "edge"} for e in vetoed],
+              "over_budget": over_budget,
               "structural": srep, "structural_residuals_n": len(struct_res),
               "planes_solved": planes_solved,
               "loop_coverage": cov,

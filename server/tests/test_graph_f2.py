@@ -112,8 +112,7 @@ def corridor():
 
 def _cfg(**over):
     base = {"loops.cluster_min_points": 150,
-            "structural.floor_datum.min_points": 60,   # synthetic 40x56 px keyframes
-            "structural.wall_planarity.min_points_per_kf": 60,
+            "structural.wall_planarity.min_points_per_kf": 60,   # synthetic 40x56 px keyframes
             "structural.column_vertical.min_points_per_kf": 30,
             "structural.repeated_parallel.min_points_per_kf": 30}
     base.update(over)
@@ -132,18 +131,15 @@ def test_end_loop_alone_leaves_a_lateral_bend_structural_removes_it(tmp_path, co
     lateral_loop = float(np.abs(b_loop[:, 2]).max())
     rep_st = _run(root, cfg, sess, structural=True, extra=[edge])
     assert rep_st["verdict"] == "APPLY", rep_st["gates"]
-    assert rep_st["structural"]["floor_datum"]["n_edges"] > 20
     assert any(w["used"] for w in rep_st["structural"]["wall_planarity"])
     b_st = _bend_errors(sess, rep_st, D)
     lateral_st = float(np.abs(b_st[:, 2]).max())
-    vertical_st = float(np.abs(b_st[:, 1]).max())
     wall_tol = cfg.structural.wall_planarity.wall_tol_m
     # the end closure alone leaves the middle of the walk bent by more than the
-    # wall tolerance; the walls + floor datum bring the bend under it
+    # wall tolerance; the walls bring the lateral bend under it
     assert lateral_loop > wall_tol, lateral_loop
     assert lateral_st < 0.5 * lateral_loop, (lateral_loop, lateral_st)
     assert lateral_st < wall_tol, lateral_st
-    assert vertical_st < cfg.structural.floor_datum.sigma_offset_m, vertical_st
     # the solved walls are one plane each, parallel to the corridor within the
     # angle the patches observe, at the true half-width (the corridor's width
     # is what the walls measure absolutely)
@@ -153,25 +149,6 @@ def test_end_loop_alone_leaves_a_lateral_bend_structural_removes_it(tmp_path, co
     width = abs(abs(walls[0]["offset_m"]) + abs(walls[1]["offset_m"]))
     assert abs(width - 4.0) < 2 * wall_tol, width
     assert rep_st["loop_coverage"]["n_anchors"] == 2
-
-
-def test_real_step_is_not_flattened(tmp_path):
-    sess = make_session(H=40, W=56, scene=corridor_scene(step_at_x=22.0, step_h=0.30),
-                        poses=out_and_back_trajectory(N_KF))
-    D = _bend_field(sess.poses, yaw_deg_per_kf=0.03)
-    root = write_session_dir(tmp_path / "s", sess, _instances(sess), point_stride=2, drift_by_kf=D)
-    cfg = _cfg()
-    rep = _run(root, cfg, sess, structural=True, extra=[_end_loop_edge(sess)])
-    fd = rep["structural"]["floor_datum"]
-    assert fd["demoted"], "the raised floor patches must be demoted (real step)"
-    demoted = {d["kf"] for d in fd["demoted"]}
-    # keyframes over the raised part (x > 22) are the demoted ones
-    raised = {g for g in range(sess.n_kf) if sess.poses[g][0, 3] > 23.0}
-    assert demoted <= raised or len(demoted & raised) > 0.8 * len(demoted)
-    if rep["verdict"] == "APPLY":
-        e = _pose_errors(sess, rep, D)
-        # the vertical correction over the step is NOT the step height
-        assert float(np.abs(e[list(raised), 1]).max()) < 0.15
 
 
 def test_loop_coverage_metric():
@@ -206,8 +183,8 @@ def test_f2_config_validation():
         load_loops_config(raw_server_cfg(**{"correction_graph.graph.min_loop_gain": 2.0}))
     with pytest.raises(LoopsConfigError, match="authority.saturation_warn"):
         load_loops_config(raw_server_cfg(**{"authority.saturation_warn": None}))
-    with pytest.raises(LoopsConfigError, match="structural.floor_datum.step_demote_m"):
-        load_loops_config(raw_server_cfg(**{"structural.floor_datum.step_demote_m": -1}))
+    with pytest.raises(LoopsConfigError, match="structural.wall_planarity.wall_tol_m"):
+        load_loops_config(raw_server_cfg(**{"structural.wall_planarity.wall_tol_m": -1}))
     with pytest.raises(LoopsConfigError, match="regulated_dims"):
         load_loops_config(raw_server_cfg(**{"structural.regulated_dims": [{"label": "x"}]}))
     import yaml

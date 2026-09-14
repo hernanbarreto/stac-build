@@ -477,7 +477,7 @@ def fork_loops_cfg(stac_server_dir: Optional[str] = None, **over) -> dict:
     d = {"anchors_per_bridge": 3, "max_edge_sigma_m": 0.05, "max_residual_m": 0.10,
          "min_correspondences": 500, "corr_per_frame": 2000, "fit_sample": 200000,
          "scale_tol_log": 0.05, "scale_break_sigma_factor": 4.0, "starved_sigma_m": 0.30,
-         "ambiguous_sigma_factor": 3.0, "attention_verify": False, "attention_min_score": 0.5,
+         "ambiguous_sigma_factor": 3.0, "nonstructural_sigma_factor": 2.0,
          "movable_labels": ["box", "person"], "min_shared_structural_labels": 1,
          "intra_chunk_loops": True, "bridge_extra_frames": 0,
          "spatial": {"drift_floor_m": 0.30, "drift_rate_m_per_m": 0.013,
@@ -505,12 +505,13 @@ def fork_scale_cfg(**over) -> dict:
 
 def fork_graph_cfg(**over) -> dict:
     d = {"sigma_odo_intra_m": 0.01, "sigma_odo_intra_deg": 0.2, "loop_sigma_rot_deg": 1.0,
-         "sigma_gravity_deg": 2.0, "huber_delta_m": 0.10, "huber_delta_deg": 2.0,
+         "huber_delta_m": 0.10, "huber_delta_deg": 2.0,
          "dense_max_unknowns": 12000, "lambda_init": 1e-4, "lambda_max": 1e12,
          "lm_diag_floor": 1e-9, "tol": 1e-8, "rel_tol": 1e-6, "max_iters": 50,
          "pcg_tol": 1e-10, "pcg_max_iters": 2000, "min_loop_gain": 0.5,
-         "max_seam_degradation_m": 0.005, "holdout_offsets": [4, 10], "holdout_stride": 3,
-         "holdout_samples": 4000, "holdout_max_nn_m": 0.10, "run_without_loops": False}
+         "max_seam_degradation_m": 0.005, "gate_mode": "advisory",
+         "holdout_offsets": [4, 10], "holdout_stride": 3,
+         "holdout_samples": 4000, "holdout_max_nn_m": 0.10}
     d.update(over)
     return d
 
@@ -524,11 +525,7 @@ def fork_authority_cfg(**over) -> dict:
 
 
 def structural_cfg(**over) -> dict:
-    d = {"floor_datum": {"enabled": True, "sigma_angle_deg": 1.0, "sigma_offset_m": 0.02,
-                         "max_tilt_deg": 10.0, "reference_span_kf": 15, "step_demote_m": 0.15, "low_band_pct": 5.0,
-                         "band_m": 0.5, "min_points": 200, "ransac_tol_m": 0.02,
-                         "ransac_iters": 200},
-         "wall_planarity": {"enabled": True, "wall_tol_m": 0.02, "sigma_angle_deg": 1.0,
+    d = {"wall_planarity": {"enabled": True, "wall_tol_m": 0.02, "sigma_angle_deg": 1.0,
                             "sigma_offset_m": 0.02, "min_span_m": 4.0, "min_points_per_kf": 100,
                             "labels": ["wall"], "reference_span_kf": 15,
                             "planar_ratio": 0.05, "min_patch_extent_m": 1.0},
@@ -553,6 +550,7 @@ def raw_server_cfg(**over) -> dict:
     sp = lp.pop("spatial")
     lp.pop("stac_server_dir")
     lp.pop("bridge_extra_frames")
+    lp.pop("nonstructural_sigma_factor")      # lives in loops.semantic server-side
     raw = {
         "correction_graph": {"loop": lp, "graph": fork_graph_cfg()},
         "authority": fork_authority_cfg(),
@@ -564,7 +562,9 @@ def raw_server_cfg(**over) -> dict:
                   "coverage_radius_m": 5.0, "min_coverage": 0.5,
                   "spatial": sp,
                   "semantic": {"enabled": False, "max_tokens": 256, "crops_per_instance": 1,
-                               "default_class": "structural"}},
+                               "default_class": "structural", "nonstructural_sigma_factor": 2.0},
+                  "salad": {"similarity_threshold": 0.65, "top_k": 5, "min_gap_keyframes": 11,
+                            "nms_threshold": 3, "image_size": [336, 336], "batch_size": 32}},
         "scale": fork_scale_cfg(),
     }
     for dotted, val in over.items():
@@ -720,7 +720,8 @@ def certify_cfg(**over) -> dict:
          "max_iters": 3, "eps": 0.05, "auto_after_segmentation": True,
          "objective_weights": {"loop_residual_m": 1.0, "seam_residual_m": 1.0, "closure_m": 1.0,
                                "depth_disagreement_frac": 5.0, "duplicates": 0.1},
-         "gates": {"max_seam_degradation_m": 0.005, "max_loop_residual_increase_m": 0.005,
+         "gates": {"mode": "advisory", "max_seam_degradation_m": 0.005,
+                   "max_loop_residual_increase_m": 0.005,
                    "max_depth_disagreement_increase": 0.001, "max_verified_drop_frac": 0.05,
                    "duplicates_must_not_increase": True},
          "scale": {"sigma_loop_min_log": 0.01, "sigma_seam_log": 0.02, "sigma_anchor_log": 0.03,

@@ -122,6 +122,35 @@ def set_active(paths: ProjectPaths, key: str) -> dict:
     return meta
 
 
+def scan_has_cloud(paths: ProjectPaths, key: str) -> bool:
+    """A scan is LOADABLE when its cleaned cloud exists on disk."""
+    date, source = split_key(key)
+    return (paths.for_source(date, source).output_dir / "cleaned_cloud.ply").exists()
+
+
+def loadable_scan(paths: ProjectPaths, requested: Optional[str]) -> Optional[str]:
+    """The scan the viewer should open: ``requested`` when it has a cloud,
+    else the most recently reconstructed scan of the project (newest
+    cleaned_cloud.ply), else None (nothing reconstructed anywhere).
+
+    USER 2026-09-13: a project whose active scan lost its reconstruction
+    (wiped by a Reconstruir that did not finish) must still open the scan
+    that IS reconstructed instead of refusing to load."""
+    if requested and scan_has_cloud(paths, requested):
+        return requested
+    best, best_mtime = None, -1.0
+    for s in discover_scans(paths):
+        if s["kind"] != "scan":
+            continue
+        date, source = split_key(s["key"])
+        cloud = paths.for_source(date, source).output_dir / "cleaned_cloud.ply"
+        if cloud.exists():
+            mt = cloud.stat().st_mtime
+            if mt > best_mtime:
+                best, best_mtime = s["key"], mt
+    return best
+
+
 def display_matrix(paths: ProjectPaths, key: Optional[str],
                    floor_M: np.ndarray) -> np.ndarray:
     """Display transform of a scan's main cloud in the REFERENCE frame:

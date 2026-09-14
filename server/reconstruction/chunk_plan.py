@@ -32,57 +32,6 @@ def walk_length_m(poses_txt: Path) -> float:
     return float(np.linalg.norm(np.diff(centers, axis=0), axis=1).sum())
 
 
-def trim_static_ends(centers: np.ndarray, fx: np.ndarray = None,
-                     floor_ratio: float = 10.0, zoom_z_cut: float = 3.5) -> Tuple[int, int]:
-    """(lo, hi): the slice of keyframes that actually WALKS (and does not ZOOM),
-    per the probe trajectory.
-
-    Two per-keyframe 'no 3D information' conditions, trimmed only as maximal runs
-    at the HEAD and TAIL (cutting a mid-walk stretch would split the sequence into
-    islands with no shared frames to glue — mid-walk weakness is the chunk health
-    gate's job):
-
-    1. STATIC: step an order of magnitude below the session's own walking pace
-       (median step / floor_ratio — the same physical decade criterion as the
-       health gate; measured on test4: body steps 29-47 cm vs tail 1-5.5 cm).
-       Rotation in place holds no parallax. Scale-invariant.
-    2. ZOOM (when `fx` per keyframe is given, from the probe's intrinsic.txt):
-       robust z (Iglewicz-Hoaglin, cut 3.5) of the estimated focal against the
-       trajectory's median. Optical zoom magnifies without adding baseline — no
-       parallax no matter how the poses come out (on test4 the zoomed tail's
-       garbage poses JUMPED metres instead of standing still, which is exactly
-       why the step criterion alone missed it: fx 550 body vs 704-1334 tail).
-
-    Returns keyframe indices with centers[lo:hi] kept; (0, len) when nothing trims.
-    """
-    centers = np.asarray(centers, np.float64)
-    n = len(centers)
-    if n < 3:
-        return 0, n
-    steps = np.linalg.norm(np.diff(centers, axis=0), axis=1)   # steps[i]: kf i -> i+1
-    med = float(np.median(steps))
-    if med <= 0:
-        return 0, n
-    bad_kf = np.zeros(n, bool)
-    if fx is not None and len(np.asarray(fx)) == n:
-        f = np.asarray(fx, np.float64)
-        fmed = float(np.median(f))
-        fmad = float(np.median(np.abs(f - fmed)))
-        if fmad > 0:
-            bad_kf |= np.abs(f - fmed) / (1.4826 * fmad) > float(zoom_z_cut)
-    # a step is unusable when it is static OR touches a zoomed keyframe
-    bad = (steps < med / float(floor_ratio)) | bad_kf[:-1] | bad_kf[1:]
-    lo = 0
-    while lo < len(bad) and bad[lo]:
-        lo += 1
-    hi = n
-    while hi - 2 >= lo and bad[hi - 2]:
-        hi -= 1
-    if hi - lo < 2:            # degenerate (everything static/zoomed) — untouched:
-        return 0, n            # phase 2 would not even trigger on a ~0 m walk
-    return lo, hi
-
-
 def plan_chunks(n_keyframes: int, walk_m: float, chunk_walk_m: float,
                 min_size: int = 24, max_size: int = 150) -> Tuple[int, int]:
     """(chunk_size, overlap) in KEYFRAMES so each chunk covers ~chunk_walk_m of walk.

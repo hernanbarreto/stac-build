@@ -13,7 +13,7 @@ VGGT-Long fork consumes as ``Model.loops`` / ``Model.scale``.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 class LoopsConfigError(RuntimeError):
@@ -56,6 +56,13 @@ def _str_list(section, key, path) -> Tuple[str, ...]:
     return tuple(str(x).lower() for x in v)
 
 
+def _choice(section, key, path, allowed: Tuple[str, ...]) -> str:
+    v = _require(section, key, path)
+    if not isinstance(v, str) or v not in allowed:
+        raise LoopsConfigError(f"config key {path}.{key} must be one of {'|'.join(allowed)}, got {v!r}")
+    return v
+
+
 # ── correction_graph.loop — bridge measurement + verification (§4.1/§4.2) ─
 
 @dataclass(frozen=True)
@@ -70,8 +77,6 @@ class LoopEdgeConfig:
     scale_break_sigma_factor: float
     starved_sigma_m: float          # σ of the vendor coarse-fit fallback (recorded, low confidence)
     ambiguous_sigma_factor: float   # σ inflation for a spatially ambiguous candidate
-    attention_verify: bool          # §4.2.3 (OFF until an A/B shows fewer false positives)
-    attention_min_score: float
     movable_labels: Tuple[str, ...]  # labels that never count for/against a semantic match
     min_shared_structural_labels: int
     intra_chunk_loops: bool         # keep candidates inside one chunk (pose edges, no scale row)
@@ -113,6 +118,23 @@ class SemanticClassConfig:
     max_tokens: int
     crops_per_instance: int
     default_class: str              # class when the VLM is unavailable (recorded, never silent)
+    # The class NEVER discards a candidate (USER 2026-09-13: "nunca debe
+    # descartarse un duplicado detectado por SAM3"): geometry (the spatial
+    # gate) decides loop|ambiguous|split; the class is recorded with the
+    # candidate and only sets the σ inflation below for non-structural ones.
+    nonstructural_sigma_factor: float   # σ inflation of a loop proposed by a movable/dynamic instance (≥ 1)
+
+
+@dataclass(frozen=True)
+class SaladConfig:
+    """§4.4 visual candidates: the DINOv2-SALAD retrieval the fork runs over the
+    keyframes (written into the Omega config's ``Loop.SALAD``)."""
+    similarity_threshold: float     # cosine similarity a keyframe pair needs to be proposed
+    top_k: int                      # retrieved neighbours per keyframe
+    min_gap_keyframes: int          # pairs closer than this (in keyframes) are odometry
+    nms_threshold: int              # keyframes suppressed around an accepted pair (0 = off)
+    image_size: Tuple[int, int]     # SALAD input (h, w)
+    batch_size: int
 
 
 @dataclass(frozen=True)
@@ -127,6 +149,7 @@ class LoopsConfig:
     min_coverage: float             # below this the acta declares the loop density insufficient
     spatial: SpatialGateConfig
     semantic: SemanticClassConfig
+    salad: SaladConfig
 
 
 # ── scale — the scale graph's extra sources (§5) ────────────────────────────
@@ -151,7 +174,6 @@ class GraphConfig:
     sigma_odo_intra_m: float        # odometry σ between consecutive keyframes inside a chunk
     sigma_odo_intra_deg: float
     loop_sigma_rot_deg: float       # rotation σ of a loop edge (its translation σ is measured)
-    sigma_gravity_deg: float        # weak per-node prior: camera down stays the chain consensus
     huber_delta_m: float            # Huber on loop + structural edges (never odometry)
     huber_delta_deg: float
     dense_max_unknowns: int         # 6·n_kf ≤ this → dense Cholesky, else block-Jacobi PCG
@@ -165,11 +187,13 @@ class GraphConfig:
     pcg_max_iters: int
     min_loop_gain: float            # gate: total loop residual must drop by this fraction
     max_seam_degradation_m: float   # gate: held-out surface pairs may not worsen beyond this
+    gate_mode: str                  # advisory | veto — advisory: the gates (gain, held-out,
+                                    # authority) are measured and declared, the closure is
+                                    # APPLIED (USER 2026-09-13); veto: a failed gate → identity
     holdout_offsets: Tuple[int, ...]  # frame offsets of the held-out pairs (chunk_field_verdict)
     holdout_stride: int
     holdout_samples: int
     holdout_max_nn_m: float         # cloud held-out judge: a NN pair beyond this is not a correspondence
-    run_without_loops: bool         # solve with odometry + priors only (no loop edge)
 
 
 # ── authority (§4.7) ───────────────────────────────────────────────────────
@@ -186,21 +210,6 @@ class AuthorityConfig:
 
 
 # ── structural (§4.6) ──────────────────────────────────────────────────────
-
-@dataclass(frozen=True)
-class FloorDatumConfig:
-    enabled: bool
-    sigma_angle_deg: float
-    sigma_offset_m: float
-    max_tilt_deg: float             # a low-band plane tilted more than this is not a floor patch
-    reference_span_kf: int          # the datum plane is fitted on the first N keyframes' patches
-    step_demote_m: float            # a patch farther than this from the datum is a real step
-    low_band_pct: float             # per-keyframe low height percentile that seeds the patch
-    band_m: float                   # patch band half-height
-    min_points: int
-    ransac_tol_m: float
-    ransac_iters: int
-
 
 @dataclass(frozen=True)
 class WallPlanarityConfig:
@@ -244,7 +253,6 @@ class RegulatedDim:
 
 @dataclass(frozen=True)
 class StructuralConfig:
-    floor_datum: FloorDatumConfig
     wall_planarity: WallPlanarityConfig
     column_vertical: ColumnVerticalConfig
     repeated_parallel: RepeatedParallelConfig
@@ -337,6 +345,10 @@ class ObjectiveWeights:
 
 @dataclass(frozen=True)
 class CertifyGates:
+    mode: str                       # advisory | veto — advisory: every gate is measured and
+                                    # recorded as a warning in the acta, the epoch is APPLIED
+                                    # and Approve/Undo is the verdict (USER 2026-09-13);
+                                    # veto: a failed gate rejects the iteration (evaluation)
     max_seam_degradation_m: float
     max_loop_residual_increase_m: float
     max_depth_disagreement_increase: float
@@ -353,7 +365,8 @@ class CertifyScale:
     max_copy_residual_m: float
     icp_iters: int
     icp_trim: float
-    max_correction_log: float
+    max_correction_log: float       # |log r_k| beyond this is DECLARED (gate in the report);
+                                    # it blocks the apply only under certify.gates.mode veto
 
 
 @dataclass(frozen=True)
@@ -444,8 +457,6 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         scale_break_sigma_factor=_num(lp, "scale_break_sigma_factor", P, lo=1.0),
         starved_sigma_m=_num(lp, "starved_sigma_m", P, lo=0, lo_excl=True),
         ambiguous_sigma_factor=_num(lp, "ambiguous_sigma_factor", P, lo=1.0),
-        attention_verify=_bool(lp, "attention_verify", P),
-        attention_min_score=_num(lp, "attention_min_score", P, lo=-1.0, hi=1.0),
         movable_labels=_str_list(lp, "movable_labels", P),
         min_shared_structural_labels=_num(lp, "min_shared_structural_labels", P, lo=0, integer=True),
         intra_chunk_loops=_bool(lp, "intra_chunk_loops", P),
@@ -501,9 +512,24 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         max_tokens=_num(sm, "max_tokens", M, lo=1, integer=True),
         crops_per_instance=_num(sm, "crops_per_instance", M, lo=1, integer=True),
         default_class=str(_require(sm, "default_class", M)),
+        nonstructural_sigma_factor=_num(sm, "nonstructural_sigma_factor", M, lo=1.0),
     )
     if semantic.default_class not in ("structural", "movable", "dynamic"):
         raise LoopsConfigError("loops.semantic.default_class must be structural|movable|dynamic")
+    sa = _sub(ls, "salad", "loops")
+    A = "loops.salad"
+    isz = _require(sa, "image_size", A)
+    if (not isinstance(isz, (list, tuple)) or len(isz) != 2
+            or not all(isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in isz)):
+        raise LoopsConfigError("config key loops.salad.image_size must be [h, w] positive integers")
+    salad = SaladConfig(
+        similarity_threshold=_num(sa, "similarity_threshold", A, lo=-1.0, hi=1.0),
+        top_k=_num(sa, "top_k", A, lo=1, integer=True),
+        min_gap_keyframes=_num(sa, "min_gap_keyframes", A, lo=1, integer=True),
+        nms_threshold=_num(sa, "nms_threshold", A, lo=0, integer=True),
+        image_size=(int(isz[0]), int(isz[1])),
+        batch_size=_num(sa, "batch_size", A, lo=1, integer=True),
+    )
     L = "loops"
     loops = LoopsConfig(
         min_gap_keyframes=_num(ls, "min_gap_keyframes", L, lo=1, integer=True),
@@ -514,7 +540,7 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         bridge_extra_frames=_num(ls, "bridge_extra_frames", L, lo=0, integer=True),
         coverage_radius_m=_num(ls, "coverage_radius_m", L, lo=0, lo_excl=True),
         min_coverage=_num(ls, "min_coverage", L, lo=0, hi=1.0),
-        spatial=spatial, semantic=semantic,
+        spatial=spatial, semantic=semantic, salad=salad,
     )
 
     sc = raw.get("scale")
@@ -543,7 +569,6 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         sigma_odo_intra_m=_num(gp, "sigma_odo_intra_m", G, lo=0, lo_excl=True),
         sigma_odo_intra_deg=_num(gp, "sigma_odo_intra_deg", G, lo=0, lo_excl=True),
         loop_sigma_rot_deg=_num(gp, "loop_sigma_rot_deg", G, lo=0, lo_excl=True),
-        sigma_gravity_deg=_num(gp, "sigma_gravity_deg", G, lo=0, lo_excl=True),
         huber_delta_m=_num(gp, "huber_delta_m", G, lo=0, lo_excl=True),
         huber_delta_deg=_num(gp, "huber_delta_deg", G, lo=0, lo_excl=True),
         dense_max_unknowns=_num(gp, "dense_max_unknowns", G, lo=6, integer=True),
@@ -557,11 +582,11 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         pcg_max_iters=_num(gp, "pcg_max_iters", G, lo=1, integer=True),
         min_loop_gain=_num(gp, "min_loop_gain", G, lo=0, hi=1.0),
         max_seam_degradation_m=_num(gp, "max_seam_degradation_m", G, lo=0),
+        gate_mode=_choice(gp, "gate_mode", G, ("advisory", "veto")),
         holdout_offsets=tuple(int(x) for x in ho),
         holdout_stride=_num(gp, "holdout_stride", G, lo=1, integer=True),
         holdout_samples=_num(gp, "holdout_samples", G, lo=100, integer=True),
         holdout_max_nn_m=_num(gp, "holdout_max_nn_m", G, lo=0, lo_excl=True),
-        run_without_loops=_bool(gp, "run_without_loops", G),
     )
 
     au = raw.get("authority")
@@ -581,23 +606,6 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
     st = raw.get("structural")
     if not isinstance(st, dict):
         raise LoopsConfigError("config section structural is missing")
-    fd = st.get("floor_datum")
-    if not isinstance(fd, dict):
-        raise LoopsConfigError("config section structural.floor_datum is missing")
-    F = "structural.floor_datum"
-    floor = FloorDatumConfig(
-        enabled=_bool(fd, "enabled", F),
-        sigma_angle_deg=_num(fd, "sigma_angle_deg", F, lo=0, lo_excl=True),
-        sigma_offset_m=_num(fd, "sigma_offset_m", F, lo=0, lo_excl=True),
-        max_tilt_deg=_num(fd, "max_tilt_deg", F, lo=0, hi=90.0),
-        reference_span_kf=_num(fd, "reference_span_kf", F, lo=1, integer=True),
-        step_demote_m=_num(fd, "step_demote_m", F, lo=0, lo_excl=True),
-        low_band_pct=_num(fd, "low_band_pct", F, lo=0, hi=100.0),
-        band_m=_num(fd, "band_m", F, lo=0, lo_excl=True),
-        min_points=_num(fd, "min_points", F, lo=3, integer=True),
-        ransac_tol_m=_num(fd, "ransac_tol_m", F, lo=0, lo_excl=True),
-        ransac_iters=_num(fd, "ransac_iters", F, lo=1, integer=True),
-    )
     wp = st.get("wall_planarity")
     if not isinstance(wp, dict):
         raise LoopsConfigError("config section structural.wall_planarity is missing")
@@ -650,7 +658,7 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         dims.append(RegulatedDim(label=str(_require(e, "label", D)).lower(), dimension=dim,
                                  value_m=_num(e, "value_m", D, lo=0, lo_excl=True),
                                  tol_m=_num(e, "tol_m", D, lo=0, lo_excl=True)))
-    structural = StructuralConfig(floor_datum=floor, wall_planarity=wall, column_vertical=column,
+    structural = StructuralConfig(wall_planarity=wall, column_vertical=column,
                                   repeated_parallel=repeated, regulated_dims=tuple(dims))
 
     ce = raw.get("certify")
@@ -752,6 +760,7 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
     ga = _sub(ce, "gates", P)
     G = P + ".gates"
     gates = CertifyGates(
+        mode=_choice(ga, "mode", G, ("advisory", "veto")),
         max_seam_degradation_m=_num(ga, "max_seam_degradation_m", G, lo=0),
         max_loop_residual_increase_m=_num(ga, "max_loop_residual_increase_m", G, lo=0),
         max_depth_disagreement_increase=_num(ga, "max_depth_disagreement_increase", G, lo=0),
@@ -818,6 +827,9 @@ def fork_model_loops(cfg: MetricGraphConfig, stac_server_dir: str) -> Dict[str, 
     d = asdict(cfg.loop)
     d["movable_labels"] = list(cfg.loop.movable_labels)
     d["bridge_extra_frames"] = cfg.loops.bridge_extra_frames
+    # σ inflation of a bridge proposed by a non-structural SAM3 instance
+    # (candidate source ``instance:<class>``) — the class tags, never drops
+    d["nonstructural_sigma_factor"] = float(cfg.loops.semantic.nonstructural_sigma_factor)
     sp = asdict(cfg.loops.spatial)
     sp["repetitive_labels"] = list(cfg.loops.spatial.repetitive_labels)
     d["spatial"] = sp
@@ -827,6 +839,20 @@ def fork_model_loops(cfg: MetricGraphConfig, stac_server_dir: str) -> Dict[str, 
 
 def fork_model_scale(cfg: MetricGraphConfig) -> Dict[str, Any]:
     return asdict(cfg.scale)
+
+
+def fork_loop_salad(cfg: MetricGraphConfig) -> Dict[str, Any]:
+    """``Loop.SALAD`` for vendor/VGGT-Long's LoopDetector (its own keys; the
+    fork's base_config carries the vendor's driving-video values, this
+    overrides every one of them from config.yaml)."""
+    s = cfg.loops.salad
+    return {"image_size": [int(s.image_size[0]), int(s.image_size[1])],
+            "batch_size": int(s.batch_size),
+            "similarity_threshold": float(s.similarity_threshold),
+            "top_k": int(s.top_k),
+            "use_nms": bool(s.nms_threshold > 0),
+            "nms_threshold": int(s.nms_threshold),
+            "min_gap": int(s.min_gap_keyframes)}
 
 
 def fork_model_graph(cfg: MetricGraphConfig) -> Dict[str, Any]:
@@ -839,5 +865,16 @@ def fork_model_authority(cfg: MetricGraphConfig) -> Dict[str, Any]:
     return asdict(cfg.authority)
 
 
+def _plain(obj):
+    """Tuples → lists recursively: the Omega config is written with yaml.dump
+    and read back by every consumer with safe_load — a tuple would land as a
+    ``!!python/tuple`` tag (the elastic A/B harness died on it, pccr 2026-09-13)."""
+    if isinstance(obj, dict):
+        return {k: _plain(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_plain(v) for v in obj]
+    return obj
+
+
 def fork_model_certify(cfg: MetricGraphConfig) -> Dict[str, Any]:
-    return asdict(cfg.certify)
+    return _plain(asdict(cfg.certify))
