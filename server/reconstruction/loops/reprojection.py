@@ -85,18 +85,29 @@ def _iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.logical_and(a, b).sum() / u) if u else 0.0
 
 
-def _recall(fp: np.ndarray, mask: np.ndarray) -> float:
-    """Fraction of the MASK covered by the projection.
+def _agree(fp: np.ndarray, mask: np.ndarray) -> float:
+    """How well a projected footprint and a mask agree: max(precision, recall).
 
-    IoU is the wrong measure for the self-check. A large instance projects over
-    far more of the frame than SAM3 masked there — a ceiling duct crossing the
-    room masks a slice and projects the whole run — so IoU reads near zero on
-    geometry that is perfectly placed: 0.00 on a 1.7 M-point duct in the first
-    trial. What the check has to ask is whether the projection REACHES the mask,
-    and that is recall.
+    Neither one alone survives the range of sizes in play, and IoU survives
+    neither. A ceiling duct crossing the room projects its whole run into a
+    frame where SAM3 masked one slice: precision is low, recall high, IoU near
+    zero on geometry that is perfectly placed (measured: 0.00 on 1.7 M points).
+    The far copy of a chair is 634 points against a 1,500-pixel mask: it cannot
+    cover the mask however well placed, so recall is low — 0.00 in the run of
+    2026-09-14, which declared the pair `unusable` and let the split through —
+    while precision is high.
+
+    One containing the other is agreement in both directions, so the measure is
+    the larger of the two: the projection covers the mask, OR it falls inside
+    it.
     """
-    d = mask.sum()
-    return float(np.logical_and(fp, mask).sum() / d) if d else 0.0
+    inter = float(np.logical_and(fp, mask).sum())
+    if inter == 0.0:
+        return 0.0
+    d_mask, d_fp = float(mask.sum()), float(fp.sum())
+    recall = inter / d_mask if d_mask else 0.0
+    precision = inter / d_fp if d_fp else 0.0
+    return max(recall, precision)
 
 
 def _shift(fp: np.ndarray, dv: int, du: int) -> np.ndarray:
@@ -137,8 +148,8 @@ def compare_in_frames(ev, mask_of_frame, pts: np.ndarray, frames: Sequence[int],
         dv, du = int(round(c_m[0] - c_fp[0])), int(round(c_m[1] - c_fp[1]))
         fp_s = _shift(fp, dv, du)
         out.append({"frame": int(fidx),
-                    "recall": _recall(fp, m), "iou": _iou(fp, m),
-                    "recall_aligned": _recall(fp_s, m), "iou_aligned": _iou(fp_s, m),
+                    "recall": _agree(fp, m), "iou": _iou(fp, m),
+                    "recall_aligned": _agree(fp_s, m), "iou_aligned": _iou(fp_s, m),
                     "shift_v": dv, "shift_u": du,
                     "shift_px": float(np.hypot(dv, du))})
     return out
@@ -192,10 +203,17 @@ def copy_evidence(output_dir, session_dir, instance_id: int, oid: Optional[int],
                 "reason": f"no mask of object {oid_a}/{oid_b} in the copies' frames"}
     mh, mw = probe.shape[:2]
 
-    # ── sanity: each cluster must REACH its own mask in its own frames ───
-    # occlusion ON: here we ask what the camera actually saw.
-    self_a = compare_in_frames(ev, mask_a, pts_a, frames_a, mh, mw, dilate_px, max_frames, True)
-    self_b = compare_in_frames(ev, mask_b, pts_b, frames_b, mh, mw, dilate_px, max_frames, True)
+    # ── sanity: each cluster must land on its own mask in its own frames ──
+    # Occlusion OFF here too. The self-check exists to prove the grids and the
+    # poses, and its own mask IS by definition where the cluster was seen — but
+    # a copy displaced by drift sits inside geometry that does not belong to it,
+    # so the scene Z-buffer culls it entirely. In the run of 2026-09-14 the far
+    # copy of the chair projected to 732-858 px agreeing 1.00 with its mask
+    # without occlusion, and to NOTHING with it: the pair was declared
+    # `unusable` and the split went through. Culling the evidence of drift is
+    # exactly what this check must not do.
+    self_a = compare_in_frames(ev, mask_a, pts_a, frames_a, mh, mw, dilate_px, max_frames, False)
+    self_b = compare_in_frames(ev, mask_b, pts_b, frames_b, mh, mw, dilate_px, max_frames, False)
     sa = float(np.median([r["recall"] for r in self_a])) if self_a else 0.0
     sb = float(np.median([r["recall"] for r in self_b])) if self_b else 0.0
     out = {"instance_id": int(instance_id), "obj_id": oid_a, "obj_id_b": oid_b,

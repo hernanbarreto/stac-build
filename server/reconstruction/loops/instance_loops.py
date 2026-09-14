@@ -504,9 +504,19 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
                 if ev_r is not None:
                     rec["reprojection"] = {k: v for k, v in ev_r.items()
                                            if k not in ("self_a", "self_b", "cross")}
+                    # Logged whatever it says: a silent `distinct` is
+                    # indistinguishable from a measurement that never ran, which
+                    # is how the run of 2026-09-14 hid a threshold it had chosen
+                    # badly (a 634-point copy scored 0.00 recall against a
+                    # 1,500-pixel mask and the pair came back `unusable`).
+                    log(f"[instance-loops] instance {iid} ({cand.label}) "
+                        f"reprojection → {ev_r.get('verdict')}: {ev_r.get('reason','')} "
+                        f"[self {ev_r.get('self_recall_a', 0):.2f}/{ev_r.get('self_recall_b', 0):.2f}, "
+                        f"cross {ev_r.get('cross_recall', 0):.2f}→{ev_r.get('cross_recall_aligned', 0):.2f}, "
+                        f"{ev_r.get('n_cross_frames', 0)} frame(s)]")
                     if ev_r.get("verdict") == "same_object":
                         log(f"[instance-loops] instance {iid} ({cand.label}): the frames "
-                            f"overrule the split — {ev_r['reason']}")
+                            f"overrule the split")
                         gate = dict(gate, verdict="ambiguous",
                                     reason=f"reprojection: {ev_r['reason']}",
                                     overruled_split=True)
