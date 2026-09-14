@@ -52,8 +52,19 @@ print()
 print("=" * 70)
 print("2/2  mapeo mascara -> nube")
 print("=" * 70)
-from segmentation.pipeline import map_segmentation_to_cloud
-r = map_segmentation_to_cloud(OUT)
+# run_segmentation already maps at the end now that CloudCompy runs before the
+# semantic stages and the cloud is on disk when SAM3 finishes. Mapping again
+# repeated the fragment consolidation, the attach and the octree rebuild for an
+# identical result — about four minutes of duplicated work per run.
+from segmentation.pipeline import map_segmentation_to_cloud, segmentation_result_is_stale
+stale, why = segmentation_result_is_stale(OUT)
+if stale:
+    print(f"remapeo: {why}")
+    r = map_segmentation_to_cloud(OUT)
+else:
+    import json as _json
+    r = _json.loads((OUT / "segmentation_result.json").read_text())
+    print(f"ya mapeado por SAM3 ({why}) — no se repite")
 print()
 print("=" * 70)
 print("ERROR      :", r.get("error"))

@@ -278,6 +278,30 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
         np.savez(tx / "floor_transform.npz", **floor_npz)
         _art("floor_transform.npz")
 
+    # 9b) re-consolidate the WARPED cloud ---------------------------------
+    # The warp moves every point by its own keyframe's correction and nothing
+    # cleans up afterwards. Where a duplicate finally closes, the two copies
+    # land on top of each other and stay TWO point sets: the geometry is right
+    # and the user still sees double density on the object he was promised
+    # would become one. Consolidation moves points without adding or removing
+    # any — same count, same order — so globalIndices, colours and per-point
+    # provenance survive it, which is why it is safe here and a re-run of the
+    # SOR would not be. Runs BEFORE the octree so the build carries it. Never
+    # fatal: a transaction that could not consolidate is still a valid epoch.
+    if getattr(cfg.apply, "reconsolidate", False):
+        _p(68, "tx: re-consolidating the warped cloud...")
+        try:
+            from reconstruction.surface_fit.consolidate import scene_consolidate
+            rep = scene_consolidate(tx)
+            if rep:
+                log(f"  re-consolidated {rep.get('n_points', 0):,} pts, "
+                    f"mean move {rep.get('mean_move_mm', 0):.2f} mm "
+                    f"(p95 {rep.get('p95_move_mm', 0):.2f} mm)")
+            else:
+                log("  re-consolidation returned nothing — cloud left as warped")
+        except Exception as e:  # noqa: BLE001 — declared, never fatal
+            log(f"  re-consolidation failed ({e}) — cloud left as warped")
+
     # 10) Potree inside the transaction -----------------------------------
     if cfg.apply.potree_rebuild:
         _p(70, "tx: building Potree octree inside the transaction...")

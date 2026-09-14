@@ -348,6 +348,29 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
     cfg = cfg or load_loops_config()
     output_dir, session_dir = Path(output_dir), Path(session_dir)
     t0 = time.time()
+
+    # A split rewrites segmentation.json and seg_masks.npz in place — points
+    # moved into a new instance, mask pixels repainted — and there is no undo.
+    # A run whose verdicts turn out wrong therefore costs a full SAM3 pass to
+    # get a clean input back: 45 minutes, paid twice on 2026-09-14. One copy
+    # before the first split makes that a file restore
+    # (restore_segmentation.py). Taken once: an existing snapshot is the state
+    # BEFORE any split and must never be overwritten by a split one.
+    if apply_splits:
+        try:
+            snap = output_dir / "_presplit"
+            if not snap.exists():
+                import shutil as _sh
+                snap.mkdir(parents=True, exist_ok=True)
+                for _n in ("segmentation.json", "seg_masks.npz",
+                           "segmentation_result.json", "scene_r.db", "classification.npy"):
+                    _src = output_dir / _n
+                    if _src.exists():
+                        _sh.copy2(_src, snap / _n)
+                log(f"[instance-loops] pre-split snapshot in {snap.name}/ "
+                    f"(restore with restore_segmentation.py)")
+        except Exception as e:  # noqa: BLE001 — never block the run over the copy
+            log(f"[instance-loops] could not take the pre-split snapshot: {e}")
     session = load_session(output_dir)
     res_path = output_dir / "segmentation_result.json"
     if not res_path.exists():

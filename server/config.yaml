@@ -2012,6 +2012,17 @@ correction:
                                     # via segmentation/session_io.correct_depth) |
                                     # rewrite (NOT implemented — selecting it fails loudly)
     potree_rebuild: true          # build the octree inside the transaction
+    reconsolidate: true           # re-run the scene consolidation on the WARPED cloud, inside
+                                  # the transaction and BEFORE the octree. The epoch moves each
+                                  # point by its own keyframe's correction and nothing cleans
+                                  # afterwards, so where a duplicate finally closes the two
+                                  # copies land on top of each other and remain two point sets:
+                                  # the geometry is right and the user still sees double
+                                  # density where he was promised one surface. Consolidation
+                                  # moves points without adding or removing any (same count,
+                                  # same order), so globalIndices, colours and per-point
+                                  # provenance all survive it — which is why this is safe here
+                                  # and a re-run of the SOR would not be.
   runtime:
     workers: auto                 # auto = min(8, affinity) — NEVER a fixed count
                                   # (252-core box lesson, CLAUDE.md); or an integer

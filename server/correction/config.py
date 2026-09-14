@@ -157,6 +157,14 @@ class PoseGraphConfig:
 class ApplyConfig:
     depth_correction_mode: str
     potree_rebuild: bool
+    reconsolidate: bool   # re-run the scene consolidation on the WARPED cloud inside the
+                          # transaction. The epoch moves each point by its keyframe's
+                          # correction and nobody cleans afterwards, so where a duplicate
+                          # closes the two copies land on top of each other and stay two
+                          # point sets: geometrically right, visually double density — the
+                          # user still sees the object twice. Consolidation moves points
+                          # without adding or removing any, so globalIndices, colours and
+                          # provenance all survive it.
 
 
 @dataclass(frozen=True)
@@ -454,8 +462,14 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
         raise CorrectionConfigError(
             f"'correction.apply.potree_rebuild' must be a boolean, got "
             f"{potree_rebuild!r}")
+    reconsolidate = _require(ap, "reconsolidate", "apply")
+    if not isinstance(reconsolidate, bool):
+        raise CorrectionConfigError(
+            f"'correction.apply.reconsolidate' must be a boolean, got "
+            f"{reconsolidate!r}")
     apply_cfg = ApplyConfig(depth_correction_mode=depth_mode,
-                            potree_rebuild=potree_rebuild)
+                            potree_rebuild=potree_rebuild,
+                            reconsolidate=reconsolidate)
 
     rt = section.get("runtime")
     runtime = RuntimeConfig(
