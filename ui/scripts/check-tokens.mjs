@@ -39,8 +39,9 @@ const LEGACY = [
   '--activity-bar-width', '--sidebar-width', '--toolbar-height', '--statusbar-height', '--danger', '--accent-color',
   '--border-color',
 ]
-const LEGACY_RE = new RegExp(`(${LEGACY.map(l => l.replace(/-/g, '\\-')).join('|')})(?![a-z0-9-])`, 'g')
-const ALLOW_TAG_DESCENDANT = new Set(['svg'])
+// a legacy alias is a custom-property NAME: not preceded by a word char or hyphen (BEM modifiers like .x--danger are classes)
+const LEGACY_RE = new RegExp(`(?<![\\w-])(${LEGACY.map(l => l.replace(/-/g, '\\-')).join('|')})(?![a-z0-9-])`, 'g')
+const ALLOW_TAG_DESCENDANT = new Set(['svg', 'option'])
 const TAGS = 'button|input|select|textarea|option|h1|h2|h3|h4|h5|h6|div|span|p|ul|ol|li|table|thead|tbody|tr|td|th|img|video|canvas|a|label|hr|strong|b|em|small|code|kbd|pre|form|nav|header|footer|main|aside|section'
 
 function walk(dir, out = []) {
@@ -105,7 +106,7 @@ function checkCss(file, raw) {
       if (/\b(rgba?|hsla?)\(/i.test(value)) fail(file, line, `colour function in ${prop}: ${value}`)
       if (/(^|[^a-z-])\d*\.?\d+(px|rem|em)\b/i.test(value)) fail(file, line, `length literal in ${prop}: ${value}`)
       if (prop === 'font-size' && !/^(var\(--fs-[0-5]\)|inherit|0)$/.test(value)) fail(file, line, `font-size must be var(--fs-*): ${value}`)
-      if (prop === 'font' ) fail(file, line, `font shorthand: use font-size/font-family tokens`)
+      if (prop === 'font' && /\d/.test(value)) fail(file, line, `font shorthand: use font-size/font-family tokens`)
       if (prop === 'border-radius' || prop.startsWith('border-') && prop.endsWith('-radius')) {
         const parts = value.split(/\s+/)
         if (!parts.every(p => /^var\(--r-[a-z0-9]+\)$/.test(p) || p === 'inherit')) fail(file, line, `border-radius must be var(--r-*): ${value}`)

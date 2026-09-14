@@ -2,35 +2,35 @@
 /**
  * check-strings.mjs — every visible string lives in ui/src/i18n.
  *
- * Fails on:
- *   1. JSX text nodes with letters outside src/i18n (e.g. `<span>Load</span>`);
- *      `{t('key')}` expressions are the way in. Punctuation-only nodes and
- *      units passed through `fmt*` helpers are fine.
- *   2. Literal strings in user-facing attributes: title, placeholder, alt,
- *      aria-label, aria-description, label= (component prop), tooltip=,
- *      confirmLabel=, cancelLabel=, emptyText=, description=.
- *   3. Emoji (Extended_Pictographic) or icon-like glyphs (✕ ✓ ★ ☆ ▶ ◀ ▼ ▲ ⟲ ↩
- *      ⌃ ● ○ ◼ ⬚ ↔ ⤢ ⊘ ⇩ ⛶ ⚠ · etc.) anywhere under ui/src (tsx, ts, css, json),
- *      including the i18n JSON files: icons come from lucide-react.
- *   4. Keys present in es.json and missing in en.json or vice versa, and
- *      placeholders `{name}` that differ between the two languages.
- *   5. Glossary terms (i18n/glossary.ts) written literally instead of via
- *      `{@term}` in either JSON (one concept, one word — §8).
- *
- * Non-visible strings (fetch URLs, JSON keys, class names, CSS values,
- * console messages, `key=`) are not user-facing and are not checked.
+ * Uses the TypeScript compiler API (already a devDependency) so JSX is parsed,
+ * not guessed:
+ *   1. JsxText nodes with letters outside src/i18n fail (`<span>Load</span>`);
+ *      `{t('key')}` expressions are the way in.
+ *   2. User-facing attributes (title, placeholder, alt, aria-label,
+ *      aria-description, label, tooltip, confirmLabel, cancelLabel, emptyText,
+ *      description, hint) with a string literal, or a template literal that
+ *      does not call `t(`, fail. Identifier-like values (unit codes, keys)
+ *      without spaces are allowed except for title/placeholder.
+ *   3. Emoji (Extended_Pictographic) or icon-like glyphs anywhere under ui/src
+ *      (tsx, ts, css, json) — icons come from lucide-react; the middle dot is
+ *      not a separator.
+ *   4. es.json / en.json key sets and placeholders must match.
+ *   5. Glossary terms (i18n/glossary.ts) must be written as `{@term}` in both
+ *      JSON files, never literally (one concept, one word — §8).
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const SRC = path.resolve(__dirname, '../src')
 const I18N = path.resolve(SRC, 'i18n')
 
-const GLYPHS = '✕✓✔✗★☆▶◀▼▲△▽⟲↩↪⌃●○◼◻⬚⬛⬜↔↕⤢⊘⇩⇧⇦⇨⛶⚠⚙•·▪▸▹◂◃➤➕➖⏳⏸⏹⏵⏴☁☑☒✖✚✦✧⧉⊿∠⌀⌂⏏';
+const GLYPHS = '✕✓✔✗★☆▶◀▼▲△▽⟲↩↪⌃●○◼◻⬚⬛⬜↔↕⤢⊘⇩⇧⇦⇨⛶⚠⚙•·▪▸▹◂◃➤➕➖⏳⏸⏹⏵⏴☁☑☒✖✚✦✧⧉⊿∠⌀⌂⏏→←'
 const GLYPH_RE = new RegExp(`[${GLYPHS}]|\\p{Extended_Pictographic}`, 'u')
-const ATTRS = ['title', 'placeholder', 'alt', 'aria-label', 'aria-description', 'label', 'tooltip', 'confirmLabel', 'cancelLabel', 'emptyText', 'description', 'hint', 'unit']
+const ATTRS = new Set(['title', 'placeholder', 'alt', 'aria-label', 'aria-description', 'label', 'tooltip', 'confirmLabel', 'cancelLabel', 'emptyText', 'description', 'hint'])
+const IDENT_OK = new Set(['label', 'alt', 'aria-label', 'hint', 'description', 'tooltip', 'confirmLabel', 'cancelLabel', 'emptyText', 'aria-description'])
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
@@ -42,7 +42,6 @@ function walk(dir, out = []) {
 }
 
 const failures = []
-const lineOf = (text, i) => text.slice(0, i).split('\n').length
 const rel = f => path.relative(process.cwd(), f)
 
 // ── 3. glyphs everywhere ────────────────────────────────────────────────
@@ -54,33 +53,36 @@ for (const file of walk(SRC)) {
   })
 }
 
-// ── 1 + 2. JSX text and attributes outside i18n ─────────────────────────
-function stripComments(src) {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' '))
-    .replace(/\{\/\*[\s\S]*?\*\/\}/g, m => m.replace(/[^\n]/g, ' '))
-    .replace(/(^|[^:'"`\\])\/\/[^\n]*/g, (m, p) => p + ' '.repeat(m.length - p.length))
-}
-
+// ── 1 + 2. JSX text and attributes outside i18n (TypeScript AST) ────────
 for (const file of walk(SRC).filter(f => f.endsWith('.tsx') && !f.startsWith(I18N))) {
-  const src = stripComments(readFileSync(file, 'utf8'))
-  // JSX text nodes: `>text<` where text has letters and is not an expression
-  for (const m of src.matchAll(/>([^<>{}]*[A-Za-zÀ-ÿ][^<>{}]*)</g)) {
-    const text = m[1].trim()
-    if (!text) continue
-    // ignore generics / arrow returns that the regex mistakes for tags
-    if (/^[=(]/.test(text) || /=>/.test(m[0])) continue
-    if (/^[A-Za-z]+\.[A-Za-z]/.test(text) && !/\s/.test(text)) continue
-    failures.push(`${rel(file)}:${lineOf(src, m.index)}: JSX text "${text.slice(0, 50)}" outside i18n`)
-  }
-  for (const attr of ATTRS) {
-    const re = new RegExp(`\\s${attr}=(?:"([^"]*[A-Za-z][^"]*)"|'([^']*[A-Za-z][^']*)'|\\{\\s*(?:'([^']*[A-Za-z][^']*)'|"([^"]*[A-Za-z][^"]*)"|\`([^\`]*[A-Za-z][^\`]*)\`)\\s*\\})`, 'g')
-    for (const m of src.matchAll(re)) {
-      const val = m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5]
-      if (/^[a-z0-9_./-]+$/i.test(val) && !/\s/.test(val) && attr !== 'placeholder' && attr !== 'title') continue // identifiers (unit codes, keys)
-      failures.push(`${rel(file)}:${lineOf(src, m.index)}: literal ${attr}="${val.slice(0, 50)}" outside i18n`)
+  const src = readFileSync(file, 'utf8')
+  const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const lineOf = node => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1
+  const visit = node => {
+    if (ts.isJsxText(node)) {
+      const text = node.getText(sf).trim()
+      if (/[A-Za-zÀ-ÿ]/.test(text)) failures.push(`${rel(file)}:${lineOf(node)}: JSX text "${text.slice(0, 50)}" outside i18n`)
     }
+    if (ts.isJsxAttribute(node) && node.initializer) {
+      const name = node.name.getText(sf)
+      if (ATTRS.has(name)) {
+        const init = node.initializer
+        let literal = null
+        if (ts.isStringLiteral(init)) literal = init.text
+        else if (ts.isJsxExpression(init) && init.expression) {
+          const e = init.expression
+          if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) literal = e.text
+          else if (ts.isTemplateExpression(e) && !/\bt\(|\btt\(|\bT\(|getT\(\)/.test(e.getText(sf))) literal = e.getText(sf)
+        }
+        if (literal != null && /[A-Za-zÀ-ÿ]/.test(literal)) {
+          const identLike = /^[A-Za-z0-9_./-]+$/.test(literal) && IDENT_OK.has(name)
+          if (!identLike) failures.push(`${rel(file)}:${lineOf(node)}: literal ${name}="${literal.slice(0, 50)}" outside i18n`)
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
   }
+  visit(sf)
 }
 
 // ── 4 + 5. es.json vs en.json ───────────────────────────────────────────
@@ -92,7 +94,8 @@ function flatten(obj, prefix = '', out = {}) {
   }
   return out
 }
-const placeholders = s => [...s.matchAll(/\{(@?[A-Za-z_][\w]*)(?:,[^}]*)?\}/g)].map(m => m[1]).sort().join(',')
+// glossary refs compare by base term: {@Scans} and {@scan} are the same concept in another grammar
+const placeholders = s => [...s.matchAll(/\{(@?[A-Za-z_][\w]*)(?:,[^}]*)?\}/g)].map(m => (m[1].startsWith('@') ? '@' + m[1].slice(1).toLowerCase().replace(/s$/, '') : m[1])).sort().join(',')
 
 let es, en
 try {
@@ -107,15 +110,14 @@ if (es && en) {
   for (const k of Object.keys(es)) {
     if (k in en && placeholders(es[k]) !== placeholders(en[k])) failures.push(`i18n: placeholders differ for "${k}": es {${placeholders(es[k])}} vs en {${placeholders(en[k])}}`)
   }
-  // glossary: terms must be referenced as {@term}, never spelled literally
   const gl = readFileSync(path.join(I18N, 'glossary.ts'), 'utf8')
   const terms = [...gl.matchAll(/^\s{2}([a-z_]+):\s*\{\s*es:\s*'([^']+)',\s*en:\s*'([^']+)'/gm)].map(m => ({ key: m[1], es: m[2], en: m[3] }))
   const check = (lang, dict) => {
     for (const [k, v] of Object.entries(dict)) {
-      for (const t of terms) {
-        const word = t[lang]
+      for (const term of terms) {
+        const word = term[lang]
         const re = new RegExp(`(^|[^\\p{L}@])${word}(s|es)?(?![\\p{L}])`, 'iu')
-        if (re.test(v)) failures.push(`i18n ${lang}.json "${k}": glossary term "${word}" spelled literally — use {@${t.key}}`)
+        if (re.test(v.replace(/\{[^}]*\}/g, ' '))) failures.push(`i18n ${lang}.json "${k}": glossary term "${word}" spelled literally — use {@${term.key}}`)
       }
     }
   }

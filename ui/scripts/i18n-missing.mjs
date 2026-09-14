@@ -38,19 +38,29 @@ const used = new Set()
 const missing = []
 for (const f of walk(SRC)) {
   const src = readFileSync(f, 'utf8')
-  for (const m of src.matchAll(/\bt(?:\.plural)?\(\s*'([^']+)'/g)) {
+  for (const m of src.matchAll(/\b(?:t|tt|T|getT\(\))(?:\.plural)?\(\s*'([^']+)'/g)) {
     used.add(m[1])
     const plural = m[0].includes('.plural')
     const ok = plural ? (keys.has(`${m[1]}_other`)) : keys.has(m[1])
     if (!ok) missing.push(`${path.relative(process.cwd(), f)}: ${m[1]}${plural ? ' (plural)' : ''}`)
   }
-  for (const m of src.matchAll(/\bt\(\s*`([^`$]+)\$\{/g)) {
+  for (const m of src.matchAll(/\b(?:t|tt|T|getT\(\))\(\s*`([^`$]+)\$\{/g)) {
     const prefix = m[1]
     const any = [...keys].some(k => k.startsWith(prefix))
     for (const k of keys) if (k.startsWith(prefix)) used.add(k)
     if (!any) missing.push(`${path.relative(process.cwd(), f)}: ${prefix}* (template)`)
   }
 }
+// Some keys are referenced as bare string literals held in lookup tables
+// (XR tool labels/hints, certify verdicts) and handed to t() later; count a
+// quoted literal that matches a known key as a reference.
+const literals = new Set()
+for (const f of walk(SRC)) {
+  const src = readFileSync(f, 'utf8')
+  for (const m of src.matchAll(/['"`]([a-zA-Z][\w]*(?:\.[\w]+)+)['"`]/g)) literals.add(m[1])
+}
+for (const k of keys) if (literals.has(k)) used.add(k)
+
 const unused = [...keys].filter(k => !used.has(k) && !/_(one|other)$/.test(k) && !/^(provenance|witness|edgeKind|pipelineStage|role|toolLabel)\./.test(k))
 if (missing.length) console.log(`missing (${missing.length}):\n  ${missing.join('\n  ')}`)
 if (unused.length) console.log(`unreferenced es.json keys (${unused.length}):\n  ${unused.join('\n  ')}`)
