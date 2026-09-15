@@ -124,6 +124,60 @@ geométrica obligatoria en todo artefacto derivado."
   enforced by test). Tests: `server/tests/test_correction_*.py` + shared
   generator `tests/synth_correction.py` (30 tests, no GPU).
 
+## ⭐ ARBITRARY NUMBERS LEDGER — USER 2026-09-14 ("en algún momento nos va a
+## joder seguro")
+Every value below GATES a decision — it accepts, rejects, stops or caps
+something. The list exists because most of them were INVENTED when the code
+around them was written, and an invented number that decides is a bug waiting
+for the scene that exposes it. Two already did, both on 2026-09-14: the
+known-answer tolerance (5 cm, see below) turned a declaration into a verdict
+against §10.10, and `mask_filter.visit_gap_kf: 20` asserted a continuity
+nothing observed. **When one of these misbehaves, the fix is to replace it
+with a measurement, not to retune it.**
+
+- **DERIVED — leave alone, the evidence is in the YAML comment**
+  - `segmentation.dedupe_overlap: 0.5` — from all 2,926 instance pairs of pccr
+    (max mutual overlap in the whole session is 61 %; at 0.5 the mutual test
+    merges 5 pairs, the old containment test 54).
+  - `segmentation.mask_filter.visit_gap_kf: 1` — the USER's definition, not a
+    threshold: a visit ends at ANY discontinuity.
+- **INVENTED AND IT DECIDES — the ones to replace first**
+  - `correction_graph.graph.drift_min_gain: 0.2` — the only one that REJECTS a
+    correction by a made-up threshold. The replacement already exists: the
+    greedy loop's measure (points landing inside their masks, up or down).
+    Not urgent only because the drift model runs solely when the greedy loop
+    accepts nothing.
+  - `segmentation.mask_filter.min_inside_frac: 0.5` (a point is noise below
+    this share of frames), `min_votes: 2` (frames needed to judge at all),
+    `max_drop_frac: 0.5` (refuses the whole filter).
+  - `loops.reprojection.min_self_recall / min_cross_recall: 0.4`,
+    `min_agreeing_frac: 0.6` — decide `same_object | distinct | unusable`.
+  - `loops.duplicate_min_sep_m: 0.20` — what counts as a duplicate at all.
+  - `loops.spatial.identity_reject_factor: 3.0` — separation above
+    factor × δ(L) → split instead of drift.
+- **INVENTED BUT ONLY WARNS (gates.mode advisory everywhere — they are
+  MEASURED and declared, the correction is applied)**
+  - `graph.min_loop_gain: 0.5`, `authority.pose_graph_max_m: 1.0` /
+    `_max_deg: 5.0` / `saturation_warn: 0.8`, the drift budget
+    (`spatial.drift_floor_m: 0.3`, `drift_rate_m_per_m: 0.013`), and the five
+    §9 iteration gates (`certify.gates.*`). None of them clamps anything —
+    verified 2026-09-14. The drift budget line in the log reads
+    "144 cm > 75 cm": the closure MEASURED vs what drift over that walk would
+    predict, applied anyway.
+- **INVENTED, BOUNDS NOT DECISIONS** — `drift_prior_rot_deg: 30` /
+  `drift_prior_trans_m: 5` (deliberately generous: pccr demands ~3 m and the
+  blow-up they stop measured 458°), `greedy.max_epochs: 12`,
+  `certify.max_iters: 3`, `scale.max_correction_log: 0.2`,
+  `visit_loops.sigma_floor_m: 0.01`, `outlier_mad_k: 3.0`,
+  `outlier_max_sigma_factor: 10.0`, `outlier_overlap_frac: 0.6`.
+- **REMOVED, do not bring back** — `certify.known_answer.tol_t_m/tol_deg/
+  tol_scale` (the 5 cm and friends: §10.10 asks to REPORT the recovery error,
+  §10.11 says "grado industrial no es 'no falla': es saber cuándo está fuera
+  de especificación y decirlo"; the envelope now stops where the §9 gates
+  fail, as the spec names). `correction_graph.graph.min_gain` of the greedy
+  loop (USER rejected 5 % as arbitrary; the fixed sample makes any threshold
+  unnecessary and a test fails if it returns).
+
 ## ⭐ ONE COMMAND — USER DECISION 2026-09-13/14 ("Reconstruir" delivers the
 ## corrected cloud; nothing manual, nothing OFF left in the code)
 - Pipeline: RECONSTRUCTION → VLM → SAM3 → CLOUDCOMPY → CERTIFY
