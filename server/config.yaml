@@ -289,13 +289,10 @@ segmentation:
                               # harmless here (each half judges its own points) but it is why the
                               # visit count can exceed the number of times the camera really
                               # passed.
-    min_points_per_visit: 50  # below this a visit cannot judge anything
-    max_frames_per_visit: 8   # mask keyframes tested per visit, the ones showing MOST of the
-                              # object first (a frame with three pixels of mask judges nothing)
-    min_votes: 2              # frames that must SEE a point (in bounds, in front, unoccluded)
-                              # before it may be judged at all. Below it the point is KEPT:
-                              # no evidence is not evidence of absence
-    min_inside_frac: 0.5      # of the frames that see it, this fraction must land ON the mask
+    min_points_per_visit: 50  # below this a visit carries no weight worth reporting
+    max_frames_per_visit: 8   # mask keyframes measured per visit, the ones showing MOST of the
+                              # object first (a frame with three pixels of mask measures nothing).
+                              # COST, not a decision: raising it costs time, never a verdict
     dilate_px: 2              # SAM3 silhouettes are not pixel-exact and the cloud is sparse at
                               # mask resolution: without this the rim of every object is judged
                               # an outlier by its own mask
@@ -303,9 +300,13 @@ segmentation:
                               # this far IN FRONT means the camera cannot see the point, so its
                               # landing off the mask says nothing
     self_tol_m: 0.10          # self-occlusion against the instance's OWN unfiltered Z-buffer
-    max_drop_frac: 0.5        # dropping most of an instance is not a clean object with noise, it
-                              # is the evidence not being about this instance (a wrong oid, masks
-                              # from another pass): declare it and change nothing
+                              # REMOVED 2026-09-15, and do not bring them back: min_votes,
+                              # min_inside_frac and max_drop_frac all existed to decide WHICH
+                              # POINTS TO DELETE. Nothing is deleted any more — the audit weighs
+                              # where an instance's mass falls and reports it, and the only
+                              # comparison it makes is across visits (off the mask here, on it
+                              # there = drift duplicate; off everywhere = attached junk), which
+                              # needs no threshold at all.
   obb_core:
     enabled: true             # the OBB extent comes from where the points CONCENTRATE, not from
                               # the two most extreme points. min()/max() lets ONE stray point a

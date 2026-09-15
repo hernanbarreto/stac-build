@@ -296,8 +296,9 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                         source="greedy", greedy=greedy_rep)
             log(f"[certify] pose correction from the greedy chain: "
                 f"{greedy_rep['epochs']} step(s) over {greedy_rep['trials']} trial(s), "
-                f"points in mask {greedy_rep['points_in_mask_before']:,} → "
-                f"{greedy_rep['points_in_mask_after']:,}")
+                f"observations off their mask "
+                f"{greedy_rep['points_off_mask_before']:,} → "
+                f"{greedy_rep['points_off_mask_after']:,}")
         elif pose_moved:
             R2, t2 = X[:, :3, :3].copy(), X[:, :3, 3].copy()
         else:

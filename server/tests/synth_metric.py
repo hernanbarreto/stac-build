@@ -667,19 +667,31 @@ def write_session_dir(root: Path, sess: Session, instances: Dict[int, dict],
     masks["scaled_res"] = np.array([H, W], np.int32)
     masks["frames"] = sess.frame_numbers.astype(np.int32)
     masks["obj_ids"] = np.array([int(i) - 1 for i in instances], np.int32)
+    # SAM3 gives ONE mask object id per object it segments; an instance that
+    # holds several of them is a FUSION that happened downstream, and that
+    # count is the only ground on which an instance may be separated again
+    # (USER 2026-09-15). So a spec listing several scene oids writes one
+    # seg_insts entry and one mask series PER object, all sharing the instance
+    # id — the way production records it. The first keeps the historical
+    # ``instance_id - 1`` mask id so single-object instances are unchanged.
+    _next_mask_oid = max([int(i) for i in instances] or [1])
     for iid, spec in instances.items():
         sel = np.isin(oid_pts, np.asarray(spec["oids"]))
         gi = np.flatnonzero(sel)
         res_insts.append({"id": int(iid), "instance_id": int(iid), "label": spec["label"],
                           "color": [200, 100, 50], "total_points": int(len(gi)),
                           "globalIndices": gi.tolist()})
-        seg_insts.append({"id": int(iid) - 1, "instance_id": int(iid), "label": spec["label"],
-                          "color": [200, 100, 50]})
-        if write_masks:
-            for g in range(N):
-                m = np.isin(sess.oid[g], np.asarray(spec["oids"])).astype(np.uint8)
-                if m.any():
-                    masks[f"f{int(sess.frame_numbers[g])}_o{int(iid) - 1}"] = m
+        for q, scene_oid in enumerate(spec["oids"]):
+            mask_oid = int(iid) - 1 if q == 0 else _next_mask_oid
+            if q > 0:
+                _next_mask_oid += 1
+            seg_insts.append({"id": mask_oid, "instance_id": int(iid),
+                              "label": spec["label"], "color": [200, 100, 50]})
+            if write_masks:
+                for g in range(N):
+                    m = (sess.oid[g] == scene_oid).astype(np.uint8)
+                    if m.any():
+                        masks[f"f{int(sess.frame_numbers[g])}_o{mask_oid}"] = m
     (out / "segmentation_result.json").write_text(json.dumps(
         {"type": "segmentation", "version": "3.0", "cloud_source": "cleaned_cloud",
          "total_points": n, "segmented_points": sum(i["total_points"] for i in res_insts),

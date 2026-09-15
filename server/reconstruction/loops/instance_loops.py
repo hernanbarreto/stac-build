@@ -341,7 +341,7 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
     """Run the detector over every instance of the session. Returns the
     report written to output/loop_candidates.json."""
     from correction.session import load_session
-    from segmentation.erase import _mask_obj_by_iid
+    from segmentation.erase import _mask_obj_by_iid, _mask_oids_by_iid
     from reconstruction.loops.semantic_classes import classify_instances
     from reconstruction.loops.split import split_instance
 
@@ -381,6 +381,7 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
     # classes (Qwen) → recorded with every candidate; dynamic instances excluded,
     # every other class proposes (non-structural ones with an inflated σ)
     oid_of = _mask_obj_by_iid(output_dir)
+    oids_of = _mask_oids_by_iid(output_dir)
     frames_of = {}
     for inst in instances:
         iid = int(inst.get("instance_id", inst.get("id")))
@@ -567,15 +568,43 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
                                  "source": "instance" if cls == "structural" else f"instance:{cls}"})
                 rec["written"] = True
             elif gate["verdict"] == "split" and apply_splits:
-                smaller = cand.idx_a if len(cand.idx_a) <= len(cand.idx_b) else cand.idx_b
-                try:
-                    sp = split_instance(output_dir, iid, smaller,
-                                        {"reason": gate["reason"], "candidate": rec}, log=log)
-                    report["splits"].append({"instance_id": iid, **sp["ledger"]})
-                    rec["split"] = sp["new_instance_id"]
-                    split_done = True
-                except ValueError as e:
-                    rec["split_error"] = str(e)
+                # An instance is separated only when SAM3 ITSELF says it holds
+                # more than one object — several mask oids fused under one
+                # instance id downstream. USER 2026-09-15: "no hay que
+                # desconfiar tanto de SAM3", and the masks are the ground
+                # truth, so their own count is the evidence.
+                #
+                # What is NOT evidence, and used to fire here: separation >
+                # identity_reject_factor × δ(L), "not drift, two fused
+                # objects". An invented multiple of an invented drift floor,
+                # which on pccr 2026-09-14 cut the floor into four instances
+                # and the ceiling into six, repainting their masks each time —
+                # a floor is one surface however far apart two of its clusters
+                # sit. Geometry in the wrong place is not a reason to cut
+                # anything: segmentation/mask_filter.py AUDITS where an
+                # instance's mass falls against its mask, and the correction
+                # moves it.
+                many = len(oids_of.get(iid, [])) > 1
+                if not many:
+                    rec["split_declined"] = gate.get("reason")
+                    log(f"[instance-loops] instance {iid} ({cand.label}): the gate "
+                        f"says split ({gate.get('reason')}) — DECLARED, not cut: "
+                        f"SAM3 gave it ONE object id, so this is geometry in the "
+                        f"wrong place, not two objects")
+                else:
+                    smaller = cand.idx_a if len(cand.idx_a) <= len(cand.idx_b) else cand.idx_b
+                    try:
+                        sp = split_instance(output_dir, iid, smaller,
+                                            {"reason": gate["reason"], "candidate": rec,
+                                             "sam3_oids": oids_of.get(iid, [])}, log=log)
+                        report["splits"].append({"instance_id": iid, **sp["ledger"]})
+                        rec["split"] = sp["new_instance_id"]
+                        split_done = True
+                        log(f"[instance-loops] instance {iid} ({cand.label}): separated — "
+                            f"SAM3 segmented {len(oids_of[iid])} objects here "
+                            f"(oids {oids_of[iid]}) and they were fused into one instance")
+                    except ValueError as e:
+                        rec["split_error"] = str(e)
             report["candidates"].append(rec)
             if split_done:
                 break

@@ -179,6 +179,27 @@ def _mask_obj_by_iid(output_dir: Path) -> Dict[int, int]:
     return out
 
 
+def _mask_oids_by_iid(output_dir: Path) -> Dict[int, List[int]]:
+    """instance_id → EVERY seg_masks obj id filed under it.
+
+    More than one means SAM3 segmented several objects and they were fused into
+    one instance downstream. That is SAM3's own evidence that they are
+    different things, and the only ground on which an instance may be separated
+    (USER 2026-09-15: "no hay que desconfiar tanto de SAM3").
+    """
+    out: Dict[int, List[int]] = {}
+    seg_json = output_dir / "segmentation.json"
+    if not seg_json.exists():
+        return out
+    try:
+        for e in (json.loads(seg_json.read_text()).get("instances") or []):
+            if e.get("id") is not None and e.get("instance_id") is not None:
+                out.setdefault(int(e["instance_id"]), []).append(int(e["id"]))
+    except Exception:  # noqa: BLE001
+        pass
+    return {k: sorted(set(v)) for k, v in out.items()}
+
+
 def published_mesh_path(output_dir: Path, label: str, iid: int) -> Optional[Path]:
     from segmentation.tsdf_export import _safe_label
     safe = _safe_label(label or "segment", int(iid))

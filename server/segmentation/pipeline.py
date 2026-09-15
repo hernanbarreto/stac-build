@@ -2448,22 +2448,23 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     instances = []
     total_segmented = 0
     
-    # ── Geometric filter: the FRAMES decide what belongs (USER 2026-09-14) ──
-    # Runs before the statistical clean and the OBB so both see the trimmed
-    # set — "debe correr antes de medir todo, porque su OBB debe estar
-    # perfectamente ajustado". Nothing leaves the cloud.
+    # ── AUDIT of the cloud against the masks (USER 2026-09-15) ──────────────
+    # "no hay nada que cortar, es la auditoría de tu propia nube contra el
+    # ground truth de la máscara". It MEASURES where each instance's mass falls
+    # relative to its mask and removes nothing — the numbers travel to whoever
+    # corrects the geometry.
     mask_filter = None
     mf_cfg = (cfg.get("segmentation", {}) or {}).get("mask_filter", {}) or {}
     if mf_cfg.get("enabled"):
         try:
-            from segmentation.mask_filter import MaskFilter
-            mask_filter = MaskFilter(output_dir, Path(output_dir).parent, mf_cfg,
-                                     cloud_to_mask=cloud_to_mask,
-                                     log=lambda m: print(f"[SegPipeline] {m}"))
+            from segmentation.mask_filter import MaskAudit
+            mask_filter = MaskAudit(output_dir, Path(output_dir).parent, mf_cfg,
+                                    cloud_to_mask=cloud_to_mask,
+                                    log=lambda m: print(f"[SegPipeline] {m}"))
             if not mask_filter.ok:
                 mask_filter = None
         except Exception as e:  # noqa: BLE001 — declared, the run continues
-            print(f"[SegPipeline] ⚠️ geometric mask filter unavailable: {e}")
+            print(f"[SegPipeline] ⚠️ mask audit unavailable: {e}")
             mask_filter = None
 
     for iid, group_obj_ids in instance_groups.items():
@@ -2474,12 +2475,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             continue
 
         if mask_filter is not None:
-            keep_geo, _st = mask_filter.judge(int(iid), xyz[all_matched],
-                                              frame_arr[all_matched])
-            if not keep_geo.all():
-                all_matched = all_matched[keep_geo]
-            if len(all_matched) == 0:
-                continue
+            mask_filter.audit(int(iid), xyz[all_matched], frame_arr[all_matched])
 
         # ── Per-instance DBSCAN outlier removal ──
         # Skip if already filtered in a previous incremental run
@@ -2769,16 +2765,19 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                 stamp(rep, output_dir)
             except Exception:  # noqa: BLE001 — a session with no epoch machinery
                 pass
-            atomic_write_json(output_dir / "mask_filter.json", rep, indent=1)
-            ib, ia = rep.get("inside_frac_before"), rep.get("inside_frac_after")
-            print(f"[SegPipeline] 🎯 geometric mask filter: "
-                  f"{rep['points_dropped']:,}/{rep['points']:,} points dropped "
-                  f"({rep['drop_frac']*100:.1f}%) on {rep['instances_trimmed']}/"
-                  f"{rep['instances']} instances"
-                  + (f"; agreement with the masks {ib*100:.0f}% → {ia*100:.0f}%"
-                     if ib is not None and ia is not None else ""))
+            atomic_write_json(output_dir / "mask_audit.json", rep, indent=1)
+            byv = rep.get("instances_by_verdict") or {}
+            frac = rep.get("on_mask_fraction")
+            print(f"[SegPipeline] 🔍 mask audit: "
+                  + (f"{frac*100:.1f}% of the observations land on their mask; "
+                     if frac is not None else "")
+                  + ", ".join(f"{len(v)} {k}" for k, v in sorted(byv.items()))
+                  + f" (of {rep['instances']} instances) — nothing removed")
+            for k in ("drift_duplicate", "unsupported"):
+                if byv.get(k):
+                    print(f"[SegPipeline]    {k}: instances {byv[k]}")
         except Exception as e:  # noqa: BLE001 — the report is not the run
-            print(f"[SegPipeline] mask filter report failed (non-fatal): {e}")
+            print(f"[SegPipeline] mask audit report failed (non-fatal): {e}")
 
     total_segmented = sum(inst["total_points"] for inst in instances)
     coverage = round(total_segmented / max(1, n_pts), 4)

@@ -64,14 +64,18 @@ def _offset_m(a: np.ndarray, b: np.ndarray, max_points: int = 4000,
 
 
 class Agreement:
-    """THE measurement (USER 2026-09-14): "mejorar es que más puntos de nube
-    caigan en las máscaras desde donde se vio, es eso. Y empeorar es justamente
-    eso, menos puntos en su máscara."
+    """THE measurement: the audit of the cloud against the masks.
 
-    How many of an instance's points land inside its mask, over every keyframe
-    where the instance was segmented. No separation threshold, no weighted
-    objective, no arbitrary percentage: one count of points, and a trial
-    improves when the count goes UP.
+    USER 2026-09-14: "mejorar es que más puntos de nube caigan en las máscaras
+    desde donde se vio". Refined 2026-09-15, once a duplicate was described
+    exactly — "una concentración en la máscara y otra fuera de la máscara o
+    desplazada, eso está mal" — into what the trial must REDUCE: the mass an
+    instance puts where its mask is not. Counting the points inside is blind to
+    a copy that lands in the wrong place but still inside a large mask; mass
+    off the mask is what a misplaced copy always produces.
+
+    No separation threshold, no weighted objective, no percentage: one count of
+    observations, and a trial improves when it goes DOWN.
 
     Two things make that count mean what it says:
 
@@ -98,8 +102,8 @@ class Agreement:
             correction that shoves geometry OUT of view raise the score among
             the survivors. The measure would then reward destroying the
             evidence.
-        With the denominator fixed, "more points in their masks" can only be
-        earned by putting more points where the images say they are.
+        With the denominator fixed, less mass off the mask can only be earned
+        by putting geometry where the images say it is.
     """
 
     __slots__ = ("inside", "seen", "per_instance", "separations")
@@ -111,6 +115,13 @@ class Agreement:
         self.separations = separations
 
     @property
+    def outside(self) -> int:
+        """Observations that landed anywhere but on the mask — off it, out of
+        frame or behind the camera, which are the same thing: not where the
+        images say the object is."""
+        return self.seen - self.inside
+
+    @property
     def frac(self) -> float:
         return self.inside / self.seen if self.seen else float("nan")
 
@@ -120,11 +131,22 @@ class Agreement:
         return float(np.median(v)) if v else float("nan")
 
     def better_than(self, other: "Agreement") -> bool:
-        """More points in their masks. That is the whole rule."""
-        return self.inside > other.inside
+        """LESS mass off its mask. That is the whole rule.
+
+        Counting the points INSIDE is blind to the case that matters: a copy
+        landing in the wrong place can still fall inside a large mask and add
+        to the count. What a misplaced copy always does is put mass where the
+        mask is NOT, so that is what the trial has to reduce (USER 2026-09-15:
+        the audit of the cloud against the mask, and a duplicate is "una
+        concentración en la máscara y otra fuera de la máscara o desplazada").
+        The denominator is fixed and the sample is fixed, so fewer off-mask
+        observations is a fact, not a ratio.
+        """
+        return self.outside < other.outside
 
     def as_dict(self) -> dict:
         return {"points_in_mask": self.inside, "points_seen": self.seen,
+                "points_off_mask": self.outside,
                 "agreement": self.frac, "median_separation_m": self.median_sep_m,
                 "per_instance": {str(k): {"inside": v[0], "seen": v[1]}
                                  for k, v in self.per_instance.items()}}
@@ -399,8 +421,9 @@ class GreedyLoop:
         max_epochs = int(max_epochs if max_epochs is not None else self.gcfg.max_epochs)
         ag = self._agreement(self.state)
         self.history.append({"epoch": 0, "accepted": None, **ag.as_dict()})
-        self.log(f"[greedy] start: {ag.inside:,}/{ag.seen:,} points in their masks "
-                 f"({ag.frac * 100:.2f}%), copies {ag.median_sep_m * 100:.1f} cm apart")
+        self.log(f"[greedy] start: {ag.outside:,}/{ag.seen:,} observations OFF their "
+                 f"mask ({(1 - ag.frac) * 100:.2f}%), copies "
+                 f"{ag.median_sep_m * 100:.1f} cm apart")
         n_trials = 0
         while len(self.chain) < max_epochs and self.pool:
             accepted = None
@@ -413,13 +436,13 @@ class GreedyLoop:
                     continue
                 R_kf, t_kf, k_kf = sol
                 ag_t = self._agreement(self.state, R_kf, t_kf, k_kf)
-                # THE rule (USER 2026-09-14): more points in their masks is
-                # better, fewer is worse. Nothing else, and no threshold — the
-                # sample is fixed, so the count is exact and any change is real.
+                # THE rule: less mass off its mask is better. Nothing else, and
+                # no threshold — the sample and the denominator are fixed, so
+                # the count is exact and any change is real.
                 if not ag_t.better_than(ag):
                     c.failures += 1
-                    self.log(f"[greedy]   trial {c}: {ag_t.inside:,} points in mask "
-                             f"vs {ag.inside:,} — worse, discarded")
+                    self.log(f"[greedy]   trial {c}: {ag_t.outside:,} points OFF their "
+                             f"mask vs {ag.outside:,} — worse, discarded")
                     continue
                 self.state = self._advance(R_kf, t_kf, k_kf)
                 self.pool.remove(c)
@@ -431,8 +454,9 @@ class GreedyLoop:
                 self.history.append({"epoch": len(self.chain), "accepted": repr(c),
                                      **ag.as_dict()})
                 self.log(f"[greedy] epoch {len(self.chain)}: {c} accepted — "
-                         f"{ag.inside:,}/{ag.seen:,} points in their masks "
-                         f"({ag.frac * 100:.2f}%), copies {ag.median_sep_m * 100:.1f} cm apart, "
+                         f"{ag.outside:,}/{ag.seen:,} observations off their mask "
+                         f"({(1 - ag.frac) * 100:.2f}%), copies "
+                         f"{ag.median_sep_m * 100:.1f} cm apart, "
                          f"{len(self.pool)} candidate(s) left")
                 break
             if accepted is None:
@@ -481,8 +505,8 @@ class GreedyLoop:
                             "no improvement is convergence",
                 "epochs": len(self.chain), "trials": n_trials,
                 "candidates_left": len(self.pool),
-                "points_in_mask_before": first["points_in_mask"],
-                "points_in_mask_after": last["points_in_mask"],
+                "points_off_mask_before": first["points_off_mask"],
+                "points_off_mask_after": last["points_off_mask"],
                 "agreement_before": first["agreement"],
                 "agreement_after": last["agreement"],
                 "separation_before_m": first["median_separation_m"],

@@ -19,10 +19,10 @@ from reconstruction.certify.iterate import (Agreement, Candidate, GreedyLoop,   
 
 # ── the rule itself ──────────────────────────────────────────────────────
 
-def test_more_points_in_mask_is_better_and_fewer_is_worse():
-    base = Agreement(1000, 2000, {}, {})
-    assert Agreement(1400, 2000, {}, {}).better_than(base)
-    assert not Agreement(600, 2000, {}, {}).better_than(base)
+def test_less_mass_off_the_mask_is_better_and_more_is_worse():
+    base = Agreement(1000, 2000, {}, {})          # 1000 off the mask
+    assert Agreement(1400, 2000, {}, {}).better_than(base)     # 600 off
+    assert not Agreement(600, 2000, {}, {}).better_than(base)  # 1400 off
 
 
 def test_a_tie_is_not_an_improvement():
@@ -30,13 +30,19 @@ def test_a_tie_is_not_an_improvement():
     consume a candidate, or the loop would 'converge' by exhausting the pool."""
     base = Agreement(1000, 2000, {}, {})
     assert not Agreement(1000, 2000, {}, {}).better_than(base)
+    assert Agreement(1000, 2000, {}, {}).outside == 1000
 
 
-def test_the_measure_is_the_count_not_the_fraction():
-    """Seeing more of the object must not be punished: a state where 1400 of
-    2500 points land in their masks is better than 1000 of 2000 even though the
-    FRACTION fell, because more of the cloud is where the images say it is."""
-    assert Agreement(1400, 2500, {}, {}).better_than(Agreement(1000, 2000, {}, {}))
+def test_a_copy_inside_a_big_mask_does_not_buy_an_epoch():
+    """Why the measure is mass OFF the mask and not points inside it: a
+    misplaced copy can land inside a large mask and ADD to the inside count
+    while the geometry is wrong. What it cannot do is stop putting mass where
+    the mask is not. Here the inside count rises (1000 → 1400) and the trial is
+    still refused, because so does the mass outside (1000 → 1100)."""
+    base = Agreement(1000, 2000, {}, {})
+    tempting = Agreement(1400, 2500, {}, {})
+    assert tempting.inside > base.inside
+    assert not tempting.better_than(base)
 
 
 # ── the sample is fixed, which is what removes the threshold ─────────────
