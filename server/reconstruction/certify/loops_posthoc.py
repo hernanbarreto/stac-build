@@ -190,7 +190,7 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print,
     record shape as ``visit_edges`` so the graph, the metrics (closure,
     duplicates) and the kit treat both sources alike; unmeasurable
     candidates are returned ``accepted: False`` with the reason."""
-    from correction import observability as obs_mod
+    from correction import observability as obs_mod, solve
     res_path = Path(session.output_dir) / "segmentation_result.json"
     instances = {int(x.get("instance_id", x.get("id"))): x
                  for x in (json.loads(res_path.read_text()).get("instances") or [])} if res_path.exists() else {}
@@ -274,6 +274,28 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print,
         for f in factors.values():
             sigma_t *= f
         R = np.asarray(m["R"], np.float64); t = np.asarray(m["t"], np.float64)
+        # The edge may only CARRY the DOF it observes. info_t below is already
+        # built from `mode`/`axis`, so the graph is told the edge observes one
+        # direction — and until 2026-09-17 it was then handed a Z built from the
+        # unprojected fit, which is a different statement. A Sim3 between two
+        # copies of a near-symmetric object lands on rotations drift cannot
+        # produce (pccr: desk#201 165.3 deg, floor#44 40.9 deg, over a 19.3 m
+        # walk) and a rotation about a distant centre moves the object 60 cm
+        # while moving a camera 10 m away by TEN METRES. That is where the
+        # "drift rates" of 4 to 110 cm/m came from — kf_graph reads them as
+        # |(inv(Z) @ Zc).t| / walked, so a 10 m Z reads as a metre-per-metre
+        # drift, the consensus compares nonsense and the graph closes 0%.
+        #
+        # Projecting about the copy's own centroid is what the greedy loop
+        # already applies before it tries the same closure; the edge now states
+        # the same thing the loop applies.
+        if mode != "full":
+            spec = {"mode": mode, ("normal" if mode == "normal" else "axis"): axis}
+            try:
+                R, t = solve.project_solution(R, t, spec,
+                                              about=np.asarray(m["centroid_a"], np.float64))
+            except RuntimeError:
+                pass
         X = np.eye(4); X[:3, :3] = R; X[:3, 3] = t
         Ti, Tj = session.poses[i], session.poses[j]
         Z = np.linalg.inv(Ti) @ np.linalg.inv(X) @ Tj
