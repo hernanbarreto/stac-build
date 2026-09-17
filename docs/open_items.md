@@ -298,3 +298,32 @@ to run the witness a second time after segmentation (the module already
 supports it, `reconstruction.witness.run`) and drop then, at the cost of the
 OBBs being computed on the unfiltered cloud — which is exactly what the user
 did not want.
+
+## 13. The known-answer envelope stopped being monotone with loop density
+
+`test_certify_f3.py::test_known_answer_and_envelope_monotone_with_loop_density`
+passes at 2a63e53 and fails at 4eac771. Reverting the drift-consensus change
+did NOT fix it, so the cause is one of the two corrections to how a closure is
+applied: the SE(3) screw distribution (`correction/distribute.py`) or the
+projection about the object's centroid (`correction/solve.py`).
+
+What still passes is the part that matters most: the injected error lands, the
+instrument recovers it, the error after is smaller than before and the
+recovered fraction is in (0, 1]. What fails is
+`env["monotone_with_loop_density"]` — the envelope of correctable error is
+supposed to GROW as more loops are available, and with the new maths the
+ordering across densities broke.
+
+Both changes are load-bearing and measured: the projection turned a 60 cm
+correction that asked for 14 m into one that asks for 17 cm, and it is what
+finally produced an epoch on pccr after three days at epoch 0. So the envelope
+regression is not a reason to revert them — it is a reason to find out which
+density inverted and why. The per-density dict is truncated in pytest's
+assertion repr; run the test with `-vv` (or print `env["per_density"]`) to get
+the numbers.
+
+Hypothesis to test first: the envelope is probed by injecting increasing error
+until the §9 gates fail, and the screw distribution changes the SHAPE of what a
+given closure applies at intermediate keyframes. A denser loop set may now hit
+a gate earlier for a reason that has nothing to do with how much error is
+correctable.
