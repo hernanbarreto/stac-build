@@ -1,15 +1,16 @@
 """HTTP surface of the certification loop (§9) and its acta (§10) — what the
 visual validation kit (§11) calls. Mirrors correction/api.py: a per-session
 lock (409 with the blocking task id), the work in an executor thread, the
-operator from the bearer token, Approve/Undo through the correction
-package (a certification leaves a CHAIN of pending epochs: Undo pops the
-last one, Approve accepts them all).
+operator from the bearer token, and epoch SELECTION through the correction
+package (a certification leaves one epoch per applied iteration; USER
+2026-09-16: every one of them stays on disk and the user picks which is
+shown — there is no approving and no undoing).
 
-    GET  /api/certify/state/{session_id}                        → epoch, pending chain, acta summary
+    GET  /api/certify/state/{session_id}                        → epoch, epochs on disk, acta summary
     GET  /api/certify/acta/{session_id}                         → the acta
     GET  /api/certify/report/{session_id}[?epoch=N]             → quality report (§10)
     GET  /api/certify/attention/{session_id}                    → §11 attention list
-    POST /api/certify/approve|undo  {session_id}                → verdict (correction.run)
+    POST /api/certify/select  {session_id, epoch}               → show that epoch (correction.run)
 
 The certification itself RUNS INSIDE the reconstruction pipeline (stage
 ``certify``, workers/certify_worker.py — USER 2026-09-13: nothing manual) and
@@ -149,7 +150,7 @@ async def state(session_id: str):
     ctx = _ctx(session_id)
     out = Path(ctx.output_dir)
     from correction.epoch import current_epoch
-    from correction.apply import pending_prev_dirs
+    from correction.apply import available_epochs
     from correction import ledger
     from reconstruction.certify.run import ACTA_JSON
     from reconstruction.witness.fields import WITNESS_FIELDS
@@ -163,10 +164,10 @@ async def state(session_id: str):
         has_fields = all(f"property uchar {n}" in head for n in WITNESS_FIELDS)
     with _locks_guard:
         running = _locks.get(session_id)
-    return {"epoch": current_epoch(out), "pending_epochs": len(pending_prev_dirs(out)),
-            "pending_runs": [{"correction_id": r["correction_id"], "kind": r["kind"],
+    return {"epoch": current_epoch(out), "epochs": available_epochs(out),
+            "applied_runs": [{"correction_id": r["correction_id"], "kind": r["kind"],
                               "epoch_to": r["epoch_to"], "operator": r["operator"]}
-                             for r in ledger.pending_runs(out)],
+                             for r in ledger.applied_runs(out)],
             "witness_fields": has_fields, "running_task": running,
             "acta": _acta_summary(acta) if acta else None}
 
@@ -209,6 +210,23 @@ async def edges(session_id: str):
     return kit_edges(Path(ctx.output_dir))
 
 
+@router.get("/votes/{session_id}")
+async def votes(session_id: str):
+    """§11 Votes mode: how many points sit below each threshold, exactly.
+
+    The kit paints a point red when fewer than N keyframes agreed with its
+    depth; this is the same column the shader reads, counted, so the panel can
+    say what a threshold would take before anything is removed.
+    """
+    ctx = _ctx(session_id)
+    from reconstruction.witness.histogram import below, cached
+    hist = cached(Path(ctx.output_dir))
+    if hist is None:
+        raise HTTPException(404, "the cloud of this session carries no witness fields")
+    hist["bands"] = [below(hist, t) for t in range(len(hist.get("counts") or []) + 1)]
+    return hist
+
+
 @router.get("/epochs/{session_id}")
 async def epochs(session_id: str):
     """§11 before/after: the epoch chain and which epochs carry an octree."""
@@ -217,25 +235,23 @@ async def epochs(session_id: str):
     return epoch_layers(Path(ctx.output_dir))
 
 
-@router.post("/approve")
-async def approve(body: dict, credentials: HTTPAuthorizationCredentials = Depends(_security)):
-    return await _verdict(body, "approved", credentials)
-
-
-@router.post("/undo")
-async def undo(body: dict, credentials: HTTPAuthorizationCredentials = Depends(_security)):
-    return await _verdict(body, "undone", credentials)
-
-
-async def _verdict(body: dict, verdict: str, credentials):
+@router.post("/select")
+async def select(body: dict, credentials: HTTPAuthorizationCredentials = Depends(_security)):
+    """Show the session in one of its epochs (USER 2026-09-16: *"todas viven,
+    solo se seleccionan y la que se selecciona se muestra"*). Replaces
+    /approve and /undo, which deleted the epochs they did not choose — on pccr
+    two accidental Undos cost the epochs 2 and 3."""
     session_id = body.get("session_id")
     if not session_id:
         raise HTTPException(400, "session_id required")
+    if body.get("epoch") is None:
+        raise HTTPException(400, "epoch required")
+    epoch = int(body["epoch"])
     ctx = _ctx(session_id)
     operator = _operator(credentials)
-    from correction.run import run_verdict
+    from correction.run import run_select
 
     def _work():
-        return run_verdict(ctx.output_dir, verdict, operator, log=_log)
+        return run_select(ctx.output_dir, epoch, operator, log=_log)
 
-    return await _run_locked(session_id, f"epoch {verdict}", _work, ctx.output_dir)
+    return await _run_locked(session_id, f"show epoch {epoch}", _work, ctx.output_dir)

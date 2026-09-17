@@ -16,7 +16,7 @@ export interface StatusBarProps {
   message: string
   messageTone?: 'neutral' | 'ok' | 'warn' | 'err'
   epoch: number | null
-  pendingEpochs?: number
+  storedEpochs?: number
   cursor: { x: number; y: number; z: number } | null
   job: string | null
   jobPct?: number | null
@@ -26,7 +26,7 @@ export interface StatusBarProps {
   consoleOpen: boolean
 }
 
-export function StatusBar({ serverAlive, connected, sessionLabel, scanLabel, message, messageTone = 'neutral', epoch, pendingEpochs = 0, cursor, job, jobPct, points, fps, onToggleConsole, consoleOpen }: StatusBarProps) {
+export function StatusBar({ serverAlive, connected, sessionLabel, scanLabel, message, messageTone = 'neutral', epoch, storedEpochs = 0, cursor, job, jobPct, points, fps, onToggleConsole, consoleOpen }: StatusBarProps) {
   const t = useT()
   const fmt = useFmt()
   const coord = (v: number) => fmt.number(v, 3)
@@ -52,7 +52,7 @@ export function StatusBar({ serverAlive, connected, sessionLabel, scanLabel, mes
       <Sep />
       <span className="stac-status__item stac-mono" title={t('status.epochTitle')}>
         {t('status.epoch')} {epoch != null ? fmt.integer(epoch) : t('status.dash')}
-        {pendingEpochs > 0 && <Badge tone="warn" size="sm">{t('status.pending', { count: pendingEpochs })}</Badge>}
+        {storedEpochs > 0 && <Badge tone="info" size="sm">{t('status.storedEpochs', { count: storedEpochs })}</Badge>}
       </span>
       <Sep />
       <span className="stac-status__item stac-status__cursor stac-mono" title={t('status.cursorTitle')} aria-live="off">

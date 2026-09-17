@@ -52,7 +52,7 @@ STAGE_REGISTRY = {
 #   → Certify (claude_stac.txt §9, USER 2026-09-13 "todo automático": instance +
 #            revisit loops → closed scale → keyframe SE(3) graph → depth by
 #            correspondences → witnesses; one pending epoch per iteration,
-#            Approve/Undo in the kit — the duplicates of a drifted revisit
+#            the epoch selector in the kit — the duplicates of a drifted revisit
 #            are closed HERE, so the stage is part of "Reconstruir")
 #   → scene TSDF (fusion + texrecon photo texture).
 # The former Phase R (semantic anchoring) was REMOVED 2026-07-09: the one-pass

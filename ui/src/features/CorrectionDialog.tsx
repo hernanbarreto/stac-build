@@ -1,10 +1,11 @@
 /**
  * CorrectionDialog — mark duplicated instances -> Analyze & correct; floor
  * alignment; revisit detection; derived artifacts with their epoch; the
- * append-only ledger. When a correction is pending it shows the verdict
- * controls (Approve / Undo). Same four endpoints as before.
+ * append-only ledger. When the session holds more than one epoch it shows the
+ * epoch selector (USER 2026-09-16: every epoch lives, you only choose which
+ * one is on screen — there is no approving and no undoing).
  */
-import { AlertTriangle, ArrowDownToLine, CheckCircle2, Repeat, Undo2, Wrench, XCircle } from 'lucide-react'
+import { AlertTriangle, ArrowDownToLine, CheckCircle2, Repeat, Wrench, XCircle } from 'lucide-react'
 import type { SegmentInstance } from '../components/Viewport'
 import { Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/ui/Button'
@@ -36,8 +37,9 @@ interface CorrectionDialogProps {
   onRun: () => void
   onFloor: () => void
   onRevisit: () => void
-  onApprove: () => void
-  onUndo: () => void
+  /** Every epoch the session holds, and which one is on screen. */
+  epochs?: { epoch: number; live: boolean; potree: boolean }[]
+  onSelectEpoch: (epoch: number) => void
 }
 
 export function GateList({ gates, compact = false }: { gates: GateRow[]; compact?: boolean }) {
@@ -60,20 +62,39 @@ export function GateList({ gates, compact = false }: { gates: GateRow[]; compact
 export function CorrectionDialog(p: CorrectionDialogProps) {
   const t = useT()
   const fmt = useFmt()
-  const pending = p.state?.status === 'pending'
   const rep = p.state?.report
+  const epochs = p.epochs || []
   return (
     <Dialog open={p.open} title={t('correction.title')} onClose={p.onClose} icon={<Wrench aria-hidden />} size="lg">
-      {pending ? (
+      {/* USER 2026-09-16: "todas viven, solo se seleccionan y la que se
+          selecciona se muestra". Approve used to delete every other epoch and
+          Undo the current one, so the session could only hold two states and
+          one wrong click destroyed the other. Nothing is destroyed here: every
+          epoch is a button, and the live one is marked. */}
+      {epochs.length > 1 ? (
         <Stack gap={3}>
-          <Banner tone="warn" title={t('correction.pendingTitle', { epoch: rep?.epoch_to ?? p.state.epoch, kind: p.state.kind || rep?.kind || 'objects' })}>
-            {t('correction.pendingDesc', { points: fmt.integer(rep?.points_moved || 0) })}
+          <Banner tone="info" title={t('correction.epochsTitle', { n: epochs.length })}>
+            {t('correction.epochsDesc')}
           </Banner>
           {(rep?.gates || []).length > 0 && <GateList gates={rep.gates} />}
-          <Row>
-            <Button block variant="primary" icon={<CheckCircle2 aria-hidden />} disabled={p.running} onClick={p.onApprove}>{t('common.approve')}</Button>
-            <Button block icon={<Undo2 aria-hidden />} disabled={p.running} onClick={p.onUndo}>{t('common.undo')}</Button>
-          </Row>
+          <ul className="stac-list stac-epochs">
+            {epochs.map(e => (
+              <li key={e.epoch} className={e.live ? 'is-live' : undefined}>
+                <Button
+                  block
+                  variant={e.live ? 'primary' : undefined}
+                  icon={e.live ? <CheckCircle2 aria-hidden /> : undefined}
+                  disabled={p.running || e.live}
+                  onClick={() => p.onSelectEpoch(e.epoch)}
+                >
+                  {e.epoch === 0
+                    ? t('correction.epochOriginal')
+                    : t('correction.epochN', { epoch: e.epoch })}
+                  {e.live ? ` — ${t('correction.epochLive')}` : ''}
+                </Button>
+              </li>
+            ))}
+          </ul>
         </Stack>
       ) : (
         <Stack gap={4}>
@@ -133,7 +154,8 @@ export function CorrectionDialog(p: CorrectionDialogProps) {
                     <span className="stac-mono">{t('correction.epochRange', { from: e.epoch_from, to: e.epoch_to })}</span>
                     <span className="stac-ledger__meta">{e.operator}</span>
                     <span className="stac-ledger__meta stac-mono">{fmt.dateTime(e.created_at)}</span>
-                    <Badge size="sm" tone={e.verdict === 'approved' ? 'ok' : e.verdict === 'pending' ? 'warn' : 'err'}>{t(`verdict.${e.verdict}`)}</Badge>
+                    {/* 'approved'/'undone' only appear in a ledger written before 2026-09-16 */}
+                    <Badge size="sm" tone={e.verdict === 'rejected' ? 'err' : e.verdict === 'undone' ? 'warn' : 'ok'}>{t(`verdict.${e.verdict}`)}</Badge>
                     {e.overrides && Object.keys(e.overrides).length > 0 && <Badge tone="warn" size="sm">{t('correction.override')}</Badge>}
                   </li>
                 ))}

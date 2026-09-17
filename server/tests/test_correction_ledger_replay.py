@@ -1,5 +1,5 @@
-"""Ledger + replay: N corrections (one undone) → the replay reproduces the
-final epoch from the epoch-0 artifacts; the ledger keeps everything."""
+"""Ledger + replay: N corrections → the replay reproduces the final epoch from
+the epoch-0 artifacts; the ledger keeps everything and every epoch stays."""
 
 import shutil
 import sys
@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from correction.ledger import ledger_view                    # noqa: E402
 from correction.replay import replay                         # noqa: E402
-from correction.run import run_floor, run_objects, run_verdict  # noqa: E402
+from correction.run import run_floor, run_objects, run_select   # noqa: E402
 from correction.session import read_ply, read_poses          # noqa: E402
 from tests.synth_correction import build_scene, make_correction_cfg  # noqa: E402
 
@@ -27,24 +27,20 @@ def test_ledger_and_replay(tmp_path):
     shutil.copy2(out / "camera_poses.txt", epoch0 / "camera_poses.txt")
 
     cfg = make_correction_cfg()
-    # epoch 1: objects correction, approved
+    # epoch 1: objects correction
     rep1 = run_objects(out, [1, 2], "op", cfg=cfg)
-    assert rep1["status"] == "pending"
-    run_verdict(out, "approved", "op")
-    # a floor alignment applied then UNDONE (stays in the ledger)
-    repu = run_floor(out, "level", None, "op", cfg=cfg)
-    assert repu["status"] == "pending", repu.get("rejection_reason")
-    run_verdict(out, "undone", "op")
-    # epoch 2: floor alignment (plane), approved
+    assert rep1["status"] == "applied"
+    # epoch 2: floor alignment (plane). No approving in between — every epoch
+    # stays and the next correction runs on top of the one being shown
+    # (USER 2026-09-16).
     rep2 = run_floor(out, "plane", None, "op", cfg=cfg)
-    assert rep2["status"] == "pending", rep2.get("rejection_reason")
-    run_verdict(out, "approved", "op")
+    assert rep2["status"] == "applied", rep2.get("rejection_reason")
 
     rows = ledger_view(out)
-    assert [r["verdict"] for r in rows] == ["approved", "undone", "approved"]
-    assert [r["kind"] for r in rows] == ["objects", "floor", "floor"]
-    # the undone run is preserved with its verdict — history is never erased
-    assert rows[1]["epoch_to"] == 2 and rows[1]["verdict"] == "undone"
+    assert [r["kind"] for r in rows] == ["objects", "floor"]
+    # every epoch is selectable and none was destroyed
+    from correction.apply import available_epochs
+    assert [e["epoch"] for e in available_epochs(out)] == [0, 1, 2]
 
     # replay epoch 0 → 2 reproduces the current cloud and poses
     res = replay(out, 2, cloud_path=epoch0 / "cleaned_cloud.ply",

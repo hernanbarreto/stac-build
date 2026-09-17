@@ -7,8 +7,9 @@ transactionally under a geometry epoch + append-only ledger.
 
 Doctrine (CLAUDE.md + USER 2026-09-06):
   * The cloud is the truth; only this module modifies it, through
-    apply → validate → approve/undo.
-  * An approved correction IS the cloud; the next one runs on top of it.
+    apply → validate → select the epoch to show.
+  * An applied correction IS the cloud; the next one runs on top of it, and
+    every epoch stays selectable (USER 2026-09-16).
   * The person proposes, the geometry measures (everything tool_measured,
     applications tagged human_directed).
   * The rest of the scene is the exam; a failed gate applies NOTHING.

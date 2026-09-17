@@ -6,7 +6,7 @@ segmentation OBBs, depth-correction sidecar, regenerated scale diagnostics,
 geometry epoch, exact per-keyframe transform, and the Potree octree built
 right there. Integrity is verified on the staged files, and only then the
 journaled atomic swap runs: current versions move to ``output/_epoch_<N-1>/``
-(kept until approve), staged versions move into place. ANY failure before the
+(kept and selectable), staged versions move into place. ANY failure before the
 swap discards the transaction and the session is byte-identical to before;
 a failure mid-swap rolls the completed renames back. There is no state where
 the cloud changed but Potree did not.
@@ -27,26 +27,20 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from correction.config import CorrectionConfig
-from correction.epoch import EPOCH_FILE, current_epoch, make_epoch_record
+from correction.epoch import (EPOCH_DIR_PREFIX, EPOCH_FILE, current_epoch,
+                              make_epoch_record)
 from correction.ledger import EPOCH_NPZ_DIR, save_epoch_npz
 from correction.session import (CorrectionSession, read_poses, write_ply,
                                 write_poses)
 
 TX_PREFIX = "_tx_epoch_"
-PREV_PREFIX = "_epoch_"
+PREV_PREFIX = EPOCH_DIR_PREFIX
 SWAP_JOURNAL = "_tx_swap_journal.json"
 MANIFEST_NAME = "_manifest.json"
 
 _SERVER_DIR = str(Path(__file__).resolve().parents[1])
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
-
-
-def prev_dir_for(output_dir: Path) -> Optional[Path]:
-    """The pending previous-epoch directory (None when nothing is pending)."""
-    cur = current_epoch(output_dir)
-    p = Path(output_dir) / f"{PREV_PREFIX}{cur - 1}"
-    return p if cur > 0 and p.exists() else None
 
 
 def assert_no_interrupted_swap(output_dir: Path) -> None:
@@ -155,7 +149,7 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     output_dir = session.output_dir
     assert_no_interrupted_swap(output_dir)
     epoch_from = current_epoch(output_dir)
-    epoch_to = epoch_from + 1
+    epoch_to = next_epoch(output_dir)
     tx = output_dir / f"{TX_PREFIX}{epoch_to}"
     if tx.exists():
         log(f"  removing stale transaction dir {tx.name} (crashed run)")
@@ -351,11 +345,12 @@ def swap_transaction(output_dir: Path, tx_info: dict, log=print) -> None:
     prev = output_dir / f"{PREV_PREFIX}{tx_info['epoch_from']}"
     if prev.exists():
         raise RuntimeError(
-            f"{prev} already exists — a previous correction is still "
-            f"pending; approve or undo it first")
+            f"{prev} already exists — epoch {tx_info['epoch_from']} is already "
+            f"stored; the session is inconsistent")
     prev.mkdir(parents=True)
     journal_path = output_dir / SWAP_JOURNAL
-    journal = {"epoch_from": tx_info["epoch_from"],
+    journal = {"epoch": tx_info["epoch_from"],      # the state kept in prev/
+               "epoch_from": tx_info["epoch_from"],
                "epoch_to": tx_info["epoch_to"],
                "artifacts": tx_info["artifacts"]}
     journal_path.write_text(json.dumps(journal, indent=1))
@@ -391,85 +386,180 @@ def swap_transaction(output_dir: Path, tx_info: dict, log=print) -> None:
     shutil.rmtree(tx, ignore_errors=True)
     log(f"  swap complete: epoch {tx_info['epoch_from']} → "
         f"{tx_info['epoch_to']} ({len(tx_info['artifacts'])} artifact(s); "
-        f"previous epoch kept in {prev.name}/ until approve)")
+        f"epoch {tx_info['epoch_from']} kept in {prev.name}/, selectable)")
 
 
-def undo_swap(output_dir: Path, log=print) -> dict:
-    """Inverse swap: restore the previous epoch exactly. The undone epoch's
-    files are discarded (the ledger keeps its record and verdict)."""
+def next_epoch(output_dir: Path) -> int:
+    """The number the next correction gets: one past the HIGHEST epoch this
+    session has ever held, not one past the live one.
+
+    Since the epochs are selected (USER 2026-09-16), a correction can run on
+    top of an older epoch while newer ones sit on disk. `current + 1` would
+    then re-use a number that already names a different state — colliding
+    directory `_epoch_<N>/`, colliding `corrections/epoch_<N>.npz`, and a
+    ledger that says two things about the same epoch. Numbers are never
+    recycled; the branch point is recorded as `parent_epoch` in
+    ``geometry_epoch.json``.
+    """
+    output_dir = Path(output_dir)
+    highest = current_epoch(output_dir)
+    for d in output_dir.glob(f"{PREV_PREFIX}*"):
+        if not d.is_dir():
+            continue
+        try:
+            highest = max(highest, int(d.name[len(PREV_PREFIX):]))
+        except ValueError:
+            continue
+    npz_dir = output_dir / EPOCH_NPZ_DIR
+    for q in npz_dir.glob("epoch_*.npz") if npz_dir.is_dir() else ():
+        try:
+            highest = max(highest, int(q.stem.split("_")[-1]))
+        except ValueError:
+            continue
+    return highest + 1
+
+
+def session_artifacts(output_dir: Path) -> List[dict]:
+    """Every artifact rel any epoch of this session ever staged, in a stable
+    order, WITHOUT the per-epoch transforms.
+
+    The manifest kept in ``_epoch_<N>/`` is the journal of the swap that
+    produced epoch N+1, so the union over the stored manifests is the complete
+    file set the session has moved through. Selecting an epoch has to move all
+    of them: the artifacts of ONE manifest leave behind whatever a later epoch
+    introduced (`depth_correction.json`, `floor_transform.npz`).
+
+    `corrections/epoch_<N>.npz` is excluded on purpose — the transforms are
+    HISTORY, not state: they are what lets the instance store follow the
+    geometry and `correction.replay` reproduce any epoch, so they stay live
+    whichever epoch is shown.
+    """
+    output_dir = Path(output_dir)
+    seen, arts = set(), []
+    for d in sorted(output_dir.glob(f"{PREV_PREFIX}*"),
+                    key=lambda q: (len(q.name), q.name)):
+        man = d / MANIFEST_NAME
+        if not man.is_file():
+            continue
+        try:
+            entries = json.loads(man.read_text()).get("artifacts", [])
+        except (OSError, ValueError):
+            continue
+        for a in entries:
+            rel = str(a.get("rel", ""))
+            if not rel or rel in seen or rel.startswith(EPOCH_NPZ_DIR + "/"):
+                continue
+            seen.add(rel)
+            arts.append({"rel": rel})
+    return arts
+
+
+def available_epochs(output_dir: Path) -> List[dict]:
+    """Every epoch this session holds, oldest first, and which one is live.
+
+    USER 2026-09-16: *"todas viven, solo se seleccionan y la que se selecciona
+    se muestra"*. There is no approving and no undoing: an epoch is a state the
+    session can be shown in, and every one of them stays on disk until a new
+    reconstruction replaces the session.
+    """
+    output_dir = Path(output_dir)
+    cur = current_epoch(output_dir)
+    out = []
+    # EVERY _epoch_* directory, not a contiguous walk down from the current
+    # one: once an epoch can be SELECTED the stored ones stop being a chain
+    # below the live state. Showing epoch 1 while 2 and 3 exist leaves them
+    # above it, and a walk from cur-1 downwards would hide them.
+    for d in sorted(output_dir.glob(f"{PREV_PREFIX}*")):
+        if not d.is_dir() or not (d / MANIFEST_NAME).is_file():
+            continue
+        try:
+            e = int(d.name[len(PREV_PREFIX):])
+        except ValueError:
+            continue
+        if e == cur:
+            continue
+        out.append({"epoch": e, "live": False, "dir": d.name,
+                    "potree": (d / "potree" / "metadata.json").exists()})
+    out.append({"epoch": cur, "live": True, "dir": None,
+                "potree": (output_dir / "potree" / "metadata.json").exists()})
+    return sorted(out, key=lambda r: r["epoch"])
+
+
+def select_epoch(output_dir: Path, epoch: int, log=print) -> dict:
+    """Show the session in the state of ``epoch``. Nothing is destroyed.
+
+    The live artifacts are filed under their own epoch's directory and the
+    chosen epoch's are moved into place — the same journaled rename dance as
+    the swap, so an interruption rolls back to exactly where it started.
+
+    This REPLACES approve/undo (USER 2026-09-16: *"el accept y undo no sirven
+    para nada, en realidad deben quedar épocas que deben ser seleccionables
+    para verificación visual, nada más"*). Approve used to delete every
+    previous epoch and Undo used to delete the current one; between them a
+    session could only ever hold two states, and choosing wrong destroyed the
+    other. Now every epoch survives and selecting is free.
+    """
     output_dir = Path(output_dir)
     assert_no_interrupted_swap(output_dir)
-    prev = prev_dir_for(output_dir)
-    if prev is None:
-        raise RuntimeError("no pending correction to undo — there is no "
-                           "previous-epoch directory")
-    manifest = json.loads((prev / MANIFEST_NAME).read_text())
-    discard = output_dir / f"_undo_discard_{manifest['epoch_to']}"
-    if discard.exists():
-        shutil.rmtree(discard)
-    discard.mkdir()
+    epoch = int(epoch)
+    cur = current_epoch(output_dir)
+    if epoch == cur:
+        return {"epoch": cur, "changed": False}
+    src = output_dir / f"{PREV_PREFIX}{epoch}"
+    if not src.is_dir() or not (src / MANIFEST_NAME).is_file():
+        raise RuntimeError(f"epoch {epoch} is not in this session "
+                           f"({[e['epoch'] for e in available_epochs(output_dir)]})")
+    # Every artifact any epoch of this session ever staged, not just the ones
+    # in the chosen epoch's manifest: an epoch that came later may have created
+    # a file the chosen one never had (`depth_correction.json` of a depth
+    # correction, `floor_transform.npz` of a floor alignment). Swapping only
+    # the destination's list left that file live over older geometry — the
+    # cloud of epoch 1 with the depth sidecar of epoch 3.
+    arts = session_artifacts(output_dir)
+    if not arts:
+        raise RuntimeError(f"epoch {epoch} has no artifact manifest to restore")
+    dst = output_dir / f"{PREV_PREFIX}{cur}"
+    if dst.exists():
+        raise RuntimeError(f"{dst} already exists — the session is inconsistent")
+    dst.mkdir(parents=True)
     journal_path = output_dir / SWAP_JOURNAL
-    journal_path.write_text(json.dumps({"undo_of": manifest}, indent=1))
+    journal_path.write_text(json.dumps(
+        {"select": epoch, "from": cur, "artifacts": arts}, indent=1))
     done: List[dict] = []
+    stored: List[dict] = []
     try:
-        for art in reversed(manifest["artifacts"]):
+        for art in arts:
             rel = art["rel"]
-            cur = output_dir / rel
-            if cur.exists():
-                target = discard / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                cur.rename(target)
-            if art["existed_before"]:
-                cur.parent.mkdir(parents=True, exist_ok=True)
-                (prev / rel).rename(cur)
+            live = output_dir / rel
+            if live.exists():
+                (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+                live.rename(dst / rel)
+                stored.append({"rel": rel, "existed_before": True})
+            keep = src / rel
+            if keep.exists():
+                live.parent.mkdir(parents=True, exist_ok=True)
+                keep.rename(live)
             done.append(art)
     except BaseException:
         for art in reversed(done):
             rel = art["rel"]
-            cur = output_dir / rel
-            if art["existed_before"] and cur.exists():
-                (prev / rel).parent.mkdir(parents=True, exist_ok=True)
-                cur.rename(prev / rel)
-            if (discard / rel).exists():
-                (discard / rel).rename(cur)
+            live = output_dir / rel
+            if live.exists():
+                (src / rel).parent.mkdir(parents=True, exist_ok=True)
+                live.rename(src / rel)
+            back = dst / rel
+            if back.exists():
+                back.rename(live)
+        shutil.rmtree(dst, ignore_errors=True)
         journal_path.unlink(missing_ok=True)
         raise
+    # the directory that held the chosen epoch now holds the one we left, and
+    # its manifest describes what actually landed there
+    (dst / MANIFEST_NAME).write_text(json.dumps(
+        {"epoch": cur, "artifacts": stored}, indent=1))
+    shutil.rmtree(src, ignore_errors=True)
     journal_path.unlink()
-    shutil.rmtree(discard, ignore_errors=True)
-    shutil.rmtree(prev, ignore_errors=True)
-    log(f"  undo complete: epoch {manifest['epoch_to']} discarded, epoch "
-        f"{manifest['epoch_from']} restored")
-    return manifest
-
-
-def pending_prev_dirs(output_dir: Path) -> List[Path]:
-    """The chain of pending previous-epoch directories, newest first
-    (_epoch_<cur-1>, _epoch_<cur-2>, … while they exist)."""
-    output_dir = Path(output_dir)
-    cur = current_epoch(output_dir)
-    out = []
-    e = cur - 1
-    while e >= 0:
-        p = output_dir / f"{PREV_PREFIX}{e}"
-        if not p.exists():
-            break
-        out.append(p)
-        e -= 1
-    return out
-
-
-def approve_swap(output_dir: Path, log=print) -> dict:
-    """Approve: the current epoch IS the session; every pending previous
-    epoch of the chain is removed (USER: approval leaves no remains — the
-    ledger keeps the record). Returns the newest manifest."""
-    output_dir = Path(output_dir)
-    assert_no_interrupted_swap(output_dir)
-    chain = pending_prev_dirs(output_dir)
-    if not chain:
-        raise RuntimeError("no pending correction to approve")
-    manifest = json.loads((chain[0] / MANIFEST_NAME).read_text())
-    for prev in chain:
-        shutil.rmtree(prev)
-    log(f"  approved: epoch {manifest['epoch_to']} is now the session; "
-        f"{len(chain)} pending epoch dir(s) removed")
-    return manifest
+    log(f"  showing epoch {epoch} (was {cur}); every epoch of this session is "
+        f"still on disk")
+    return {"epoch": epoch, "previous": cur, "changed": True,
+            "available": [e["epoch"] for e in available_epochs(output_dir)]}

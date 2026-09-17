@@ -99,12 +99,6 @@ def attention_list(output_dir, n_low_votes_keyframes: int = 5) -> dict:
                           "text": f"epoch {it.get('epoch_to')}: pose graph ⚠ {w} — applied (advisory)",
                           "anchor": None, "evidence": {"iteration": it.get("iteration")}})
     kg = _load(output_dir / "keyframe_graph.json") or {}
-    for v in kg.get("over_budget", []):
-        items.append({"kind": "loop_over_budget", "severity": 2,
-                      "text": f"loop {v.get('i')}↔{v.get('j')}: closure {v.get('correction_m', 0):.2f} m "
-                              f"beyond the drift budget {v.get('budget_m', 0):.2f} m over a "
-                              f"{v.get('walk_m', 0):.1f} m walk — applied; look here",
-                      "anchor": _kf_anchor(v.get("i")), "anchor_b": _kf_anchor(v.get("j")), "evidence": v})
     cov = kg.get("loop_coverage") or {}
     for u in cov.get("uncovered", []):
         items.append({"kind": "no_loop_coverage", "severity": 2,

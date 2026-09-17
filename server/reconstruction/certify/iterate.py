@@ -152,6 +152,27 @@ class Agreement:
                                  for k, v in self.per_instance.items()}}
 
 
+def greedy_is_the_correction(t_kf: Optional[np.ndarray], sigma_floor_m: float) -> bool:
+    """Does the greedy chain carry a MOVE, or only the session's own noise?
+
+    The greedy loop runs before the keyframe pose graph and, when it carries a
+    correction, replaces it: every step of it was accepted because more points
+    landed in their masks, which the graph's judges cannot see. The design says
+    it "falls through to the graph when it accepts nothing", and a chain whose
+    largest keyframe displacement lands inside the σ floor this session
+    MEASURES is exactly that — nothing. pccr 2026-09-16: a chain of one step (a
+    ceiling light, 2 cm, floor 4.77 cm) silenced a graph that had just measured
+    the loop residual down 94.50 → 89.46 m over 23 edges at coverage 1.00, and
+    the certification reported "no stage moved geometry".
+
+    The floor is measured (repeatability of the reconstruction), never a
+    threshold chosen here, and it is the same floor the graph is held to.
+    """
+    if t_kf is None or not len(t_kf):
+        return False
+    return bool(np.max(np.linalg.norm(np.asarray(t_kf, float), axis=1)) > float(sigma_floor_m))
+
+
 # ── the candidates ───────────────────────────────────────────────────────
 
 class Candidate:
@@ -425,6 +446,7 @@ class GreedyLoop:
                  f"mask ({(1 - ag.frac) * 100:.2f}%), copies "
                  f"{ag.median_sep_m * 100:.1f} cm apart")
         n_trials = 0
+        rejected: List[dict] = []
         while len(self.chain) < max_epochs and self.pool:
             accepted = None
             for c in _rate_order(self.pool, self.d_kf):
@@ -441,8 +463,30 @@ class GreedyLoop:
                 # the count is exact and any change is real.
                 if not ag_t.better_than(ag):
                     c.failures += 1
+                    # WHERE the trial lost is the whole question a rejection
+                    # leaves open (pccr 2026-09-16: the desks' own copies close
+                    # from 59 cm to 1 cm and the global count still rises). The
+                    # per-candidate split is already measured — it is written
+                    # down instead of discarded, own share first.
+                    split = self._split(ag, ag_t)
+                    own = split.get(c.key)
+                    worst = sorted((v for k, v in split.items() if k != c.key),
+                                   key=lambda r: -r["delta_off"])[:3]
+                    rejected.append({"candidate": repr(c), "key": c.key,
+                                     "instance_id": c.instance_id, "label": c.label,
+                                     "i": c.i, "j": c.j,
+                                     "off_before": ag.outside, "off_after": ag_t.outside,
+                                     "separation_before_m": ag.separations.get(c.key),
+                                     "separation_after_m": ag_t.separations.get(c.key),
+                                     "own": own, "worst_others": worst})
+                    own_s = (f"its own copies {(ag.separations.get(c.key) or 0) * 100:.1f}"
+                             f"→{(ag_t.separations.get(c.key) or 0) * 100:.1f} cm, "
+                             f"own off-mask {own['delta_off']:+,}" if own else "no own share")
+                    others = ", ".join(f"{r['label']}#{r['instance_id']} {r['delta_off']:+,}"
+                                       for r in worst) or "none"
                     self.log(f"[greedy]   trial {c}: {ag_t.outside:,} points OFF their "
-                             f"mask vs {ag.outside:,} — worse, discarded")
+                             f"mask vs {ag.outside:,} — worse, discarded "
+                             f"({own_s}; worst others: {others})")
                     continue
                 self.state = self._advance(R_kf, t_kf, k_kf)
                 self.pool.remove(c)
@@ -467,7 +511,7 @@ class GreedyLoop:
             # under it (USER 2026-09-14)
             for c in self.pool:
                 c.failures = 0
-        return self._report(n_trials, time.time() - t0)
+        return self._report(n_trials, time.time() - t0, rejected)
 
     def _advance(self, R_kf, t_kf, k_kf):
         from reconstruction.certify.run import transformed_session
@@ -493,7 +537,23 @@ class GreedyLoop:
             k = k * ks
         return R, t, k
 
-    def _report(self, n_trials: int, elapsed: float) -> dict:
+    def _split(self, ag: "Agreement", ag_t: "Agreement") -> Dict[int, dict]:
+        """Per-candidate off-mask change of one trial: which object the trial
+        put where the images say it is, and which one it took away."""
+        out = {}
+        by_key = {c.key: c for c in self.scored}
+        for k, (ins_t, seen_t) in ag_t.per_instance.items():
+            ins0, seen0 = ag.per_instance.get(k, (0, 0))
+            c = by_key.get(k)
+            out[k] = {"key": int(k),
+                      "instance_id": int(c.instance_id) if c else -1,
+                      "label": c.label if c else "?",
+                      "off_before": int(seen0 - ins0), "off_after": int(seen_t - ins_t),
+                      "delta_off": int((seen_t - ins_t) - (seen0 - ins0))}
+        return out
+
+    def _report(self, n_trials: int, elapsed: float,
+                rejected: Optional[List[dict]] = None) -> dict:
         first, last = self.history[0], self.history[-1]
         return {"version": 1, "provenance": "tool_measured",
                 "measure": "points of an instance landing inside its mask, over every "
@@ -511,8 +571,8 @@ class GreedyLoop:
                 "agreement_after": last["agreement"],
                 "separation_before_m": first["median_separation_m"],
                 "separation_after_m": last["median_separation_m"],
-                "curve": [{k: v for k, v in h.items() if k != "per_instance"}
-                          for h in self.history],
+                "curve": self.history,
+                "rejected": rejected or [],
                 "chain": [{k: v for k, v in s.items()
                            if k not in ("R_kf", "t_kf", "k_kf")} for s in self.chain],
                 "elapsed_s": round(elapsed, 1)}

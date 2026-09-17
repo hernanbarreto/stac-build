@@ -200,6 +200,17 @@ class MaskAudit:
         vis_of = self._assign_visits(fg, visits)
         max_frames = int(self.cfg["max_frames_per_visit"])
 
+        # PER POINT, over EVERY view of the instance — not per visit and not by
+        # majority. USER 2026-09-15: "si es correcto el objeto, no hay puntos
+        # que caen bien en una toma y mal en otra". Landing off its own mask in
+        # a SINGLE view that sees it unoccluded already proves the point sits in
+        # the wrong place. It is marked here and removed nowhere: a drift orphan
+        # falls badly today and correctly once the certification has moved it,
+        # and removal is the last resort, after that chance
+        # (`out_of_place` → the second pass decides).
+        off_views = np.zeros(n, np.int32)
+        seen_views = np.zeros(n, np.int32)
+
         for vi, vframes in enumerate(visits):
             sel = np.flatnonzero(vis_of == vi)
             pts = pts_raw[sel]
@@ -229,9 +240,13 @@ class MaskAudit:
                     continue
                 vrec["frames"] += 1
                 vrec["seen"] += int(vis.sum())
-                on = int(m[mv[vis], mu[vis]].sum())
+                inside = np.zeros(len(pts), bool)
+                inside[vis] = m[mv[vis], mu[vis]]
+                on = int(inside.sum())
                 vrec["on_mask"] += on
                 vrec["off_mask"] += int(vis.sum()) - on
+                seen_views[sel[vis]] += 1
+                off_views[sel[vis & ~inside]] += 1
             rec["visits"].append(vrec)
             rec["on_mask"] += vrec["on_mask"]
             rec["off_mask"] += vrec["off_mask"]
@@ -244,10 +259,26 @@ class MaskAudit:
         rec["placed_visits"] = [v["visit"] for v in on]
         rec["verdict"] = ("correct" if not off else
                           "drift_duplicate" if on else "unsupported")
+        # `judged` travels with the verdict: a point NO mask frame saw was not
+        # found clean, it was not asked. The second moment of the cycle
+        # (segmentation/geometric_cleanup) needs that distinction — it may only
+        # call a marked point CURED when the masks looked at it again.
+        rec["judged"] = judged = seen_views > 0
+        rec["out_of_place"] = out = judged & (off_views > 0)
+        rec["n_judged"] = int(judged.sum())
+        rec["n_out_of_place"] = int(out.sum())
         self.stats.append(rec)
         return rec
 
     # ── report ───────────────────────────────────────────────────────────
+
+    # the per-point marks are the CALLER's business, not the report's: they are
+    # arrays as long as the instance, they do not serialize, and the counts
+    # beside them (n_judged / n_out_of_place) say everything a report needs.
+    # Leaving them in cost pccr its whole second moment on 2026-09-15 — the
+    # report raised "Object of type ndarray is not JSON serializable", the
+    # writer caught it as non-fatal, and out_of_place.npy was never saved.
+    _PER_POINT = ("out_of_place", "judged")
 
     def report(self) -> dict:
         """What the audit found, per instance and in total. No verdict of the
@@ -255,11 +286,14 @@ class MaskAudit:
         on = int(sum(r.get("on_mask", 0) for r in self.stats))
         off = int(sum(r.get("off_mask", 0) for r in self.stats))
         by = {}
+        per_instance = []
         for r in self.stats:
             by.setdefault(r.get("verdict", "unmeasured"), []).append(r["instance_id"])
+            per_instance.append({k: v for k, v in r.items()
+                                 if k not in self._PER_POINT})
         return {"version": 1, "provenance": "tool_measured",
                 "instances": len(self.stats),
                 "observations_on_mask": on, "observations_off_mask": off,
                 "on_mask_fraction": (on / (on + off)) if (on + off) else None,
                 "instances_by_verdict": {k: sorted(v) for k, v in by.items()},
-                "per_instance": self.stats}
+                "per_instance": per_instance}

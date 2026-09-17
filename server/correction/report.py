@@ -32,7 +32,7 @@ def build_report(*, correction_id: str, kind: str, operator: str,
         "correction_id": correction_id,
         "kind": kind,
         "operator": operator,
-        "status": status,                    # pending | rejected
+        "status": status,                    # applied | rejected
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "instance_ids": instance_ids,
         "visits": visits,

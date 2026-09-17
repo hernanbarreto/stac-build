@@ -384,6 +384,37 @@ def main() -> int:
               f"{s['status_counts']} | mv_votes mean {s['mv_votes_mean']:.2f} | net eligible "
               f"{int(eligible.sum()):,} ({wcfg.clean_statuses}) ({time.time() - tw:.1f}s)\n")
 
+        # ── Step 1d: the statuses the session does not want in the cloud ──
+        # USER 2026-09-17, looking at the kit's Votes view on pccr: "la
+        # eliminacion quiero que sea real porque no quiero que esos voladores
+        # se usen para computar nada, ni para comparar ni para siquiera
+        # calcular el OBB". This is the earliest point at which that is true:
+        # the masks, the mask↔cloud matching, the OBBs, the reprojection
+        # verdicts and the certification all read the cloud this step writes.
+        #
+        # What goes is named by STATUS, never by a number invented here:
+        # `single_witness` is "observed, and fewer than
+        # witness.rules.verified_min_mv_votes neighbouring keyframes agreed
+        # with its depth" — a measurement that contradicts the point, not a
+        # threshold. `unobserved` is NOT dropped by asking for it: no witness
+        # could be computed there, and §6 is explicit that a zero would be a
+        # claim. Whoever lists it in witness.drop_statuses says so on purpose.
+        drop_names = tuple(wcfg.drop_statuses)
+        if drop_names:
+            from reconstruction.witness.status import STATUS_CODES
+            doomed = status_mask(wit["status"], drop_names)
+            n_drop = int(doomed.sum())
+            if n_drop:
+                shares = {n: int((wit["status"] == STATUS_CODES[n]).sum()) for n in drop_names}
+                _apply(~doomed)
+                eligible = status_mask(wit["status"], wcfg.clean_statuses)
+                print(f"[Step 1d] Dropped {n_drop:,} pt(s) ({100 * n_drop / total_input:.2f}%) "
+                      f"by status {shares} — witness.drop_statuses; "
+                      f"{len(xyz):,} remain, net eligible {int(eligible.sum()):,}")
+            else:
+                print(f"[Step 1d] witness.drop_statuses={list(drop_names)}: no point carries "
+                      f"those statuses — nothing dropped")
+
     def _net(fn_keep_idx):
         """Run a keep-index filter on the net-ELIGIBLE points only; the rest
         survive untouched. Returns a global boolean mask."""
@@ -411,8 +442,10 @@ def main() -> int:
         if not m.any():
             print("[GPU-clean] ❌ Confidence gate dropped everything")
             return 1
+        # the count BEFORE this gate is the live one — Step 1d may already have
+        # removed points, and total_input is the merged input for the summary
         print(f"[Step 1c] Confidence gate: norm>={args.conf_min_norm} → "
-              f"raw>={thr:.1f}  {total_input:,} → {int(m.sum()):,} "
+              f"raw>={thr:.1f}  {len(xyz):,} → {int(m.sum()):,} "
               f"({time.time() - t1c:.1f}s)\n")
         _apply(m)
         if eligible is not None:

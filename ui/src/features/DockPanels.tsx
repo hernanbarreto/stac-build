@@ -84,7 +84,7 @@ export interface PropertiesState {
   pointCount: number
   fps: number
   epoch: number | null
-  pendingEpochs: number
+  storedEpochs: number
   segments: SegmentInstance[]
   selected: SegmentInstance | null
   unsegmentedCount: number | null
@@ -102,7 +102,7 @@ export function PropertiesPanel(s: PropertiesState) {
         <KeyValue label={t('properties.name')} mono>{s.sessionId}</KeyValue>
         <KeyValue label={t('header.scanMenu')}>{s.scanLabel ?? t('status.dash')}{s.isReference && <Badge tone="brand" size="sm">{t('header.reference')}</Badge>}</KeyValue>
         <KeyValue label={t('properties.pointsRendered')} mono>{s.pointCount > 0 ? fmt.integer(s.pointCount) : t('status.dash')}</KeyValue>
-        <KeyValue label={t('status.epoch')} mono>{s.epoch != null ? fmt.integer(s.epoch) : t('status.dash')}{s.pendingEpochs > 0 && <Badge tone="warn" size="sm">{t('status.pending', { count: s.pendingEpochs })}</Badge>}</KeyValue>
+        <KeyValue label={t('status.epoch')} mono>{s.epoch != null ? fmt.integer(s.epoch) : t('status.dash')}{s.storedEpochs > 0 && <Badge tone="info" size="sm">{t('status.storedEpochs', { count: s.storedEpochs })}</Badge>}</KeyValue>
         <KeyValue label={t('instances.title')} mono>{fmt.integer(s.segments.length)}</KeyValue>
         <KeyValue label={t('instances.unsegmented')} mono>{s.unsegmentedCount != null ? fmt.integer(s.unsegmentedCount) : t('status.dash')}</KeyValue>
         <KeyValue label={t('properties.bimModels')} mono>{fmt.integer(s.bimCount)}</KeyValue>

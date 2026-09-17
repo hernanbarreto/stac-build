@@ -81,6 +81,11 @@ class AutoPrompter:
         self.backend_name = cfg.get("backend", backend)
         self.understand_enabled = cfg.get("understand", True)
         self.understand_sample = cfg.get("understand_sample", 8)
+        self.understand_cover = bool(cfg.get("understand_cover", True))
+        self.understand_cover_voxel_m = float(cfg.get("understand_cover_voxel_m", 0.10))
+        self.understand_cover_overlap = float(cfg.get("understand_cover_overlap", 0.50))
+        self.consolidate_prompts = bool(cfg.get("consolidate_prompts", True))
+        self.consolidate_passes = int(cfg.get("consolidate_passes", 3))
         self.confidence_threshold = cfg.get("confidence_threshold", 0.5)
         self.iou_threshold = cfg.get("association_iou_threshold", 0.25)
         self.assumed_depth_m = cfg.get("assumed_depth_m", 5.0)
@@ -234,10 +239,36 @@ class AutoPrompter:
         targets: list[str] | None = None
         if self.understand_enabled:
             from .scene_understanding import understand_frame, aggregate
-            sample = kf
-            if self.understand_sample and len(kf) > self.understand_sample:
-                idx = np.linspace(0, len(kf) - 1, self.understand_sample).astype(int)
-                sample = [kf[i] for i in idx]
+            # WHAT THE VLM NEVER SEES, IT CANNOT NAME — and in the SIMPLE
+            # pipeline these phrases ARE the SAM3 prompts, so a frame left out
+            # here is an object left out of the segmentation entirely.
+            #
+            # The frames are chosen by COVERAGE of the scene, measured on the
+            # cloud's own per-point provenance: keep adding the keyframe that
+            # shows the most scene nobody has shown yet, until there is none
+            # left (USER 2026-09-16). The COUNT comes out of the place instead
+            # of going in — a small room needs few, a corridor needs many.
+            #
+            # It used to be `understand_sample`, a fixed 8 picked by linspace
+            # whatever the walk: 8 for 80 keyframes and 8 for 2000. pccr's main
+            # door was in none of them.
+            sample = None
+            if self.understand_cover:
+                from .coverage_sample import cover_keyframes
+                sample = cover_keyframes(
+                    self.output_dir, self.session_dir, kf, _frame_num,
+                    voxel_m=self.understand_cover_voxel_m,
+                    max_overlap=self.understand_cover_overlap,
+                    log=lambda m: print(f"[autoprompt] {m}"))
+            if sample is None:
+                # no cloud yet (or no provenance): fall back to the old even
+                # subsample, declared as the degraded path it is
+                sample = kf
+                if self.understand_sample and len(kf) > self.understand_sample:
+                    idx = np.linspace(0, len(kf) - 1, self.understand_sample).astype(int)
+                    sample = [kf[i] for i in idx]
+                print(f"[autoprompt] coverage unavailable — falling back to "
+                      f"{len(sample)} evenly spaced keyframe(s)")
             fus = []
             for j, fn in enumerate(sample):
                 img = Image.open(self.frames_dir / fn).convert("RGB")
@@ -264,12 +295,34 @@ class AutoPrompter:
             if not phrases:
                 raise RuntimeError("scene understanding produced no objects — "
                                    "cannot build SAM3 prompts")
+            # ── the CONSOLIDATION pass (USER 2026-09-16) ─────────────────
+            # The understanding ran frame by frame and no frame ever saw the
+            # others' answers, so the union carries the same object under
+            # several names and entries that are only PARTS of another. Each
+            # phrase becomes one SAM3 session and one segment, so both cost a
+            # duplicate or an unsegmentable fragment. Deciding which words name
+            # one thing is a language judgement over the WHOLE list, which is
+            # exactly what a per-frame prompt can never have.
+            consolidation = None
+            if self.consolidate_prompts and len(phrases) > 1:
+                from .consolidate_prompts import consolidate
+                prog(23, f"consolidating {len(phrases)} concepts")
+                consolidation = consolidate(
+                    client, understanding.scene_type if understanding else "",
+                    phrases, max_passes=self.consolidate_passes,
+                    log=lambda m: print(f"[autoprompt] {m}"))
+                phrases = consolidation.objects
+                (self.output_dir).mkdir(parents=True, exist_ok=True)
+                (self.output_dir / "prompt_consolidation.json").write_text(
+                    json.dumps(consolidation.to_dict(), indent=2, ensure_ascii=False))
+                prog(25, f"consolidated to {len(phrases)} concepts")
             prompt = ";".join(phrases)
             self.output_dir.mkdir(parents=True, exist_ok=True)
             vlm_analysis = {
                 "source": "qwen3vl_autoprompt_simple",
                 "backend": self.backend_name,
                 "scene_understanding": understanding.to_dict() if understanding else None,
+                "consolidation": consolidation.to_dict() if consolidation else None,
                 "prompt": prompt,
                 "frame_map": {},          # empty → SAM3 runs every phrase on ALL frames
                 "boxes": {},              # NO box seeds, ever, in this mode

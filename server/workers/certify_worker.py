@@ -4,7 +4,7 @@
 # no manual trigger). Runs after the cleaned cloud + the automatic
 # segmentation: instance + revisit loops → closed scale → keyframe SE(3)
 # graph → depth by correspondences → witnesses; one pending epoch per
-# iteration (Approve/Undo in the kit), acta in output/certify_acta.json.
+# iteration (selectable in the kit), acta in output/certify_acta.json.
 #
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 

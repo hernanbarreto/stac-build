@@ -96,9 +96,13 @@ def test_fused_identity_splits_drifted_copy_loops(sess):
         return [g for g in range(sess.n_kf) if (sess.oid[g] == oid).sum() > 30]
     ka, kb = kf_seeing(col_a.oid), kf_seeing(col_b.oid)
     assert ka and kb
-    # (a) fused: two different columns 16 m apart under one id → split
+    # (a) two different columns 16 m apart under one id. NOTHING IS CUT
+    # (USER 2026-09-16: "no debe cortar objetos, no debe existir") — the pair
+    # is declared ambiguous and the mask audit decides where the mass belongs.
     g = sg.gate_instance_pair(kb[0], ka[0], view, c, pts_far, pts_a, "column")
-    assert g["verdict"] == "split" and g["rules"]["separation"]["verdict"] == "split"
+    assert g["verdict"] != "split"
+    assert g["rules"]["separation"]["verdict"] == "ambiguous"
+    assert g["rules"]["separation"]["passed"] is True
     # (b) the same column seen again at the end of the lap, displaced by drift
     # within budget → loop
     later = [g_ for g_ in ka if g_ > 120]
@@ -111,7 +115,7 @@ def test_fused_identity_splits_drifted_copy_loops(sess):
     # every frustum) → rejected
     pts_hidden = pts_a + np.array([0.0, 0.0, -30.0])
     g3 = sg.gate_instance_pair(later[0], ka[0], view, c, pts_hidden, pts_a, "column")
-    assert g3["verdict"] in ("reject", "split")
+    assert g3["verdict"] == "reject"
     # (d) size rule (compact objects): a box-like object and a copy twice its
     # size 0.4 m away are two objects — partial views of a plane/axis are
     # exempt (their extents are not observable), recorded as skipped
@@ -120,7 +124,9 @@ def test_fused_identity_splits_drifted_copy_loops(sess):
     blob_big = col_a.c + np.array([1.4, 1.0, 0.0]) + rng.uniform(-1.0, 1.0, (400, 3)) * [1.0, 1.0, 1.0]
     g4 = sg.gate_instance_pair(later[0], ka[0], view, c, blob_big, blob, "cabinet")
     assert g4["rules"]["geometry"]["kind"] == "centroid"
-    assert g4["verdict"] == "split" and g4["rules"]["size"]["passed"] is False
+    # differing dimensions are DECLARED, never cut
+    assert g4["verdict"] == "ambiguous" and g4["rules"]["size"]["passed"] is False
+    assert "nothing is cut" in g4["reason"]
     g5 = sg.gate_instance_pair(later[0], ka[0], view, c, pts_drift, pts_a, "column")
     assert g5["rules"]["size"].get("skipped")
 

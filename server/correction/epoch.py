@@ -15,9 +15,11 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 EPOCH_FILE = "geometry_epoch.json"
+# a stored epoch lives in output/_epoch_<N>/ (correction.apply re-exports this)
+EPOCH_DIR_PREFIX = "_epoch_"
 LEDGER_FILE = "corrections.jsonl"
 
 
@@ -51,29 +53,85 @@ def make_epoch_record(epoch: int, correction_id: str,
             "parent_epoch": int(parent_epoch)}
 
 
+def epoch_lineage(output_dir, epoch: int,
+                  live: Optional[int] = None) -> List[int]:
+    """The ancestry of ``epoch``, root first — [0, …, epoch].
+
+    Each state carries its own ``geometry_epoch.json`` (the live one in the
+    session, a stored one inside ``_epoch_<N>/``), and that record names the
+    ``parent_epoch`` the correction ran on top of. A session that never
+    branched gives the plain [0, 1, …, N]; one where a correction ran on top of
+    a re-selected older epoch gives the real line.
+    """
+    output_dir = Path(output_dir)
+    live = current_epoch(output_dir) if live is None else int(live)
+    chain: List[int] = []
+    e: Optional[int] = int(epoch)
+    seen = set()
+    while e is not None and e not in seen:
+        seen.add(e)
+        chain.append(e)
+        if e == 0:
+            break
+        rec_p = ((output_dir / EPOCH_FILE) if e == live
+                 else (output_dir / f"{EPOCH_DIR_PREFIX}{e}" / EPOCH_FILE))
+        parent: Optional[int] = e - 1          # a session written before the
+        if rec_p.is_file():                    # parent was recorded is linear
+            try:
+                data = json.loads(rec_p.read_text())
+                if data.get("parent_epoch") is not None:
+                    parent = int(data["parent_epoch"])
+            except (OSError, ValueError, TypeError):
+                pass
+        e = parent
+    return list(reversed(chain))
+
+
+def epoch_path(output_dir, frm: int, to: int) -> List[Tuple[int, bool]]:
+    """The edges to travel from epoch ``frm`` to epoch ``to``, in order.
+
+    Each edge is ``(epoch, inverse)``: the transform stored as
+    ``corrections/epoch_<epoch>.npz``, applied inverted while climbing from
+    ``frm`` to the common ancestor and forward while descending to ``to``.
+    On a session that never branched this is exactly the old arithmetic
+    (cur…to+1 inverted, or cur+1…to forward).
+    """
+    live = current_epoch(output_dir)
+    a = epoch_lineage(output_dir, frm, live)
+    b = epoch_lineage(output_dir, to, live)
+    i = 0
+    while i < min(len(a), len(b)) and a[i] == b[i]:
+        i += 1
+    up = [(e, True) for e in reversed(a[i:])]     # undo frm → ancestor
+    down = [(e, False) for e in b[i:]]            # apply ancestor → to
+    return up + down
+
+
 def corrections_summary(output_dir) -> Dict[str, Any]:
-    """{approved: N, overridden: [correction_id…]} from the ledger (approved
-    runs only; used by stamp())."""
+    """{applied: N, overridden: [correction_id…]} from the ledger.
+
+    It used to count only the runs whose verdict was "approved". There is no
+    approving any more (USER 2026-09-16: every epoch stays on disk and is
+    selected, never approved or undone), so what a derived artifact needs to
+    know is how many corrections REACHED the session — every run that was
+    applied, which is every run the ledger holds with an epoch of its own.
+    """
     p = Path(output_dir) / LEDGER_FILE
-    approved = 0
+    applied = 0
     overridden: List[str] = []
     if p.exists():
-        runs: Dict[str, Dict[str, Any]] = {}
-        verdicts: Dict[str, str] = {}
         for line in p.read_text().splitlines():
             if not line.strip():
                 continue
             entry = json.loads(line)
-            if entry.get("type") == "run":
-                runs[entry["correction_id"]] = entry
-            elif entry.get("type") == "verdict":
-                verdicts[entry["correction_id"]] = entry["verdict"]
-        for cid, run in runs.items():
-            if verdicts.get(cid) == "approved":
-                approved += 1
-                if run.get("overrides"):
-                    overridden.append(cid)
-    return {"approved": approved, "overridden": overridden}
+            if entry.get("type") != "run":
+                continue
+            if entry.get("verdict") == "rejected":
+                continue          # never touched a byte of the session
+            applied += 1
+            if entry.get("overrides"):
+                overridden.append(entry["correction_id"])
+    return {"applied": applied, "approved": applied, "overridden": overridden}
 
 
 def stamp(meta: Dict[str, Any], output_dir) -> Dict[str, Any]:
@@ -83,7 +141,7 @@ def stamp(meta: Dict[str, Any], output_dir) -> Dict[str, Any]:
     must carry these — a supervision report never hides human intervention."""
     summary = corrections_summary(output_dir)
     meta["geometry_epoch"] = current_epoch(output_dir)
-    meta["human_directed_corrections"] = summary["approved"]
+    meta["human_directed_corrections"] = summary["applied"]
     meta["corrections_overridden"] = summary["overridden"]
     return meta
 

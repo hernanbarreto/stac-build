@@ -38,6 +38,34 @@ server:
   port: 8765
   static_dir: "../static"   # Relative to server/
 
+  # Access-log lines the UI generates by POLLING, dropped from console AND file
+  # (both come from the same stream — scripts/start.sh tees it). USER
+  # 2026-09-16: "que no aparezcan estos INFO: 127.0.0.1:xxxxx - GET /api/".
+  # MEASURED on the first minutes of the 09-30 run: 102 access lines, of which
+  # 60 were two polls (certify/state 34, correction/state 26) and 24 more the
+  # kit's periodic set — the pipeline's own output was the minority of its log.
+  # Prefix match on 'METHOD /path'. A 4xx/5xx is NEVER silenced (see
+  # main.py:_HealthCheckFilter): only the successful poll disappears.
+  access_log_quiet:
+    - "GET /health"
+    - "GET /status"
+    - "GET /api/tasks/"
+    - "GET /api/pipelines/active"
+    - "GET /api/semantic/status"        # chat-model warmup poll (user 2026-08-30)
+    - "GET /api/correction/state/"
+    - "GET /api/correction/epochs/"     # the epoch selector refreshes with the state
+    - "GET /api/certify/state/"
+    - "GET /api/certify/epochs/"
+    - "GET /api/certify/edges/"
+    - "GET /api/certify/attention/"
+    - "GET /api/certify/report/"
+    - "GET /api/segmentation/shape/progress/"
+    - "GET /api/segmentation/reconstruct/progress/"
+    - "GET /api/segmentation/tsdf/progress/"
+    - "GET /api/segmentation/erase/status"
+    - "GET /potree/"                    # octree nodes: hundreds per cloud load
+    - "GET /potree_epoch/"
+
 # ── Pipeline ───────────────────────────────────────────────────────
 pipeline:
   auto_tsdf: false      # USER DECISION 2026-08-28 (supersedes the 2026-08-11 mandate):
@@ -214,7 +242,7 @@ segmentation:
                               # is for: that desk, the fire extinguisher with and without its
                               # coil, the white wall with and without its electrical outlet, and
                               # the server cabinet with and without its glass door.
-  min_instance_points: 300    # drop mask slivers below this point count (not objects) — applied
+  min_instance_points: 0    # drop mask slivers below this point count (not objects) — applied  # 0 = SIN MÍNIMO (USER 2026-09-16)
                               # AFTER the fragment consolidation, so a 287-point piece of a wall
                               # joins the wall instead of being thrown away
   mask_dedupe_iou: 0.90       # SAM3 occasionally returns ONE observation under several object
@@ -292,7 +320,15 @@ segmentation:
     min_points_per_visit: 50  # below this a visit carries no weight worth reporting
     max_frames_per_visit: 8   # mask keyframes measured per visit, the ones showing MOST of the
                               # object first (a frame with three pixels of mask measures nothing).
-                              # COST, not a decision: raising it costs time, never a verdict
+                              # COST, not a decision: raising it costs time, never a verdict.
+                              # RESTORED 2026-09-17: the working tree had dropped the line and
+                              # mask_filter.py:201 requires it — the mask->cloud matching died with
+                              # KeyError on the pccr run and the session lost its instance points.
+                              # REMOVED 2026-09-16 — `max_frames_per_visit: 8`. It measured only
+                              # the 8 keyframes showing most of the object, so an instance seen in
+                              # 150 keyframes was judged on the same evidence as one seen in 4
+                              # (USER: "deben usarse todos"). Every frame of the visit is measured
+                              # now; it costs time, never a verdict.
     dilate_px: 2              # SAM3 silhouettes are not pixel-exact and the cloud is sparse at
                               # mask resolution: without this the rim of every object is judged
                               # an outlier by its own mask
@@ -355,7 +391,43 @@ autoprompt:
   enabled: true                       # default path; false -> InternVL3 fallback
   backend: "qwen_local"               # semantic-service backend
   understand: true                    # comprehend the scene first; drives detection
-  understand_sample: 8                # keyframes sampled for scene understanding
+  understand_cover: true              # WHICH keyframes the VLM sees, measured instead of counted
+                                      # (USER 2026-09-16). Each keyframe wrote its own points into
+                                      # the cloud, so what it contributed to the scene is on disk:
+                                      # voxelise, then keep adding the keyframe that shows the most
+                                      # scene nobody has shown yet, until none is left. The COUNT
+                                      # comes out of the place — a small room needs few frames, a
+                                      # corridor many — and the stop is "no unseen scene left", not
+                                      # a threshold. Seeing a thing once is enough to NAME it, so
+                                      # this is a simple cover and not a redundant one.
+  understand_cover_overlap: 0.50      # a keyframe is kept while at most this share of what it
+                                      # sees is already covered. MEASURED on pccr: the total
+                                      # barely moves (68/67/67/71 keyframes for 10/25/50/75 %)
+                                      # because the count is fixed by covering the scene, not by
+                                      # this; all it moves is how many come from the walk and how
+                                      # many from the gap-closing pass (9+59 vs 16+51). Not
+                                      # load-bearing — do not spend time tuning it.
+  understand_cover_voxel_m: 0.10      # at what size two points are the same piece of scene. A
+                                      # PHYSICAL size, declared: at 10 cm a doorway, an extinguisher
+                                      # and a column are each several voxels wide.
+  understand_sample: 8                # FALLBACK ONLY — used when there is no cloud yet or it
+                                      # carries no per-point provenance, so coverage cannot be
+                                      # measured. It is the old rule and its flaw is why the cover
+                                      # exists: a fixed 8 by linspace, 8 for 80 keyframes and 8 for
+                                      # 2000, and pccr's main door appeared in none of them.
+  consolidate_prompts: true           # second VLM pass over the ASSEMBLED concept list (USER
+                                      # 2026-09-16: "una segunda pasada para que fusione conceptos
+                                      # en un único prompt"). The understanding runs frame by frame
+                                      # and no frame sees the others' answers, so the union carries
+                                      # one object under several names plus entries that are only
+                                      # PARTS of another. Each phrase costs one SAM3 session and one
+                                      # segment. Measured on pccr: 84 -> 37 concepts in 2 passes,
+                                      # the floor from 5 names to 1, the rack from 14 entries to 1,
+                                      # the main door kept.
+  consolidate_passes: 3               # BOUND, not a decision: the pass repeats while it still
+                                      # changes the list and stops when it changes nothing
+                                      # (convergence). This only caps a model that oscillates, and
+                                      # reaching it is declared in output/prompt_consolidation.json.
   vocabulary_path: null               # null -> segmentation/autoprompt/vocabulary.yaml
                                       # (canonicalization/routing overlay, NOT a filter)
   confidence_threshold: 0.5           # below (per-class overridable) -> review queue
@@ -1151,10 +1223,15 @@ reconstruction:
                                         # on data it never saw). test4 2026-07-10: 48% anchor
                                         # spread inside chunk 3, adjacent scale jumps 18-29% —
                                         # the leftover warp was the chimney/cones z-drift.
-    suspect_spread: 0.30                # soft health tier: anchor IQR/median beyond this ⇒
-                                        # SUSPECT — the chunk keeps writing points but argues
-                                        # more quietly (elastic consensus biased toward the
-                                        # trusted side). Diagnostic + weighting only.
+    suspect_spread: 0.30                # REPORT LABEL ONLY since 2026-09-16. It used to
+                                        # decide how loudly a chunk argues in the elastic
+                                        # consensus, and on pccr it fired at 0.311 — a
+                                        # verdict settled by 0.011. The consensus is now
+                                        # weighted by metric_lock.chunk_trust, continuous in
+                                        # the measured spread and RELATIVE to the session's
+                                        # own median: equally spread chunks weigh the same,
+                                        # whatever the absolute number. This only chooses
+                                        # which chunks the log calls SUSPECT.
     elastic_seam: true                  # per-frame seam consensus (run-6 behaviour). A2
                                         # 2026-07-11 tested false on test4: NO visible change
                                         # in serpenteado or duplicates — acquitted as the
@@ -1171,10 +1248,17 @@ reconstruction:
     elastic_smooth_win: 5               # Phase B: moving-average window (frames) over the
                                         # per-frame seam fits — adjacent shared frames stop
                                         # receiving uncorrelated rigid moves. 1 = raw fits.
-    elastic_max_t_m: 0.30               # Phase B: per-fit translation cap (m). A fit beyond
-                                        # this is scaled down as a whole twist — bounded
-                                        # authority, not faked closure (seam 7->8 fitted up
-                                        # to 1.59 m to close an 8 cm gap). 0/null = no cap.
+    elastic_max_t_m: null               # Phase B: RETIRED as a decision (USER 2026-09-16:
+                                        # "podría haber una corrección de más de 30 cm y ser
+                                        # perfectamente correcta" — true, and the 30 cm cap
+                                        # shrank those too). What the cap really caught was
+                                        # DISPROPORTION, as its own evidence said: seam 7->8
+                                        # moved 1.59 m to close an 8 cm gap. That is now
+                                        # measured per frame — the fit may move the points as
+                                        # far as (the disagreement it removes + that seam's
+                                        # own residual floor), whatever the absolute size —
+                                        # in metric_lock.demote_disproportionate_fits.
+                                        # A number here still applies the old |t| cap on top.
     intra_chunk: true                   # (KEEP ON) A4 2026-07-11 tested false on test4:
                                         # serpenteado unchanged (it is intrinsic to omega's
                                         # feed-forward output, not our stages) and duplicates
@@ -2209,10 +2293,23 @@ correction_graph:
     anchors_per_bridge: 3           # DA3 anchor frames planned INSIDE each bridge window
                                     # (own metric lock; without them the bridge takes the
                                     # scale graph's value for its parents — recorded)
-    max_edge_sigma_m: 0.05          # a pose edge whose exact residual σ exceeds this never
-                                    # enters the optimizer (the chain seams sit at mm–cm)
-    max_residual_m: 0.10            # geometric acceptance of a bridge fit (median residual
-                                    # of the exact correspondences on one side)
+    max_edge_sigma_m: 0.05          # NO LONGER A VETO (USER 2026-09-16). It selects which
+                                    # edges the VENDOR per-chunk Sim3 optimizer takes; the
+                                    # §4.3 keyframe pose graph takes EVERY accepted edge and
+                                    # weighs it by its own measured σ. An edge above this is
+                                    # weak evidence, not absent evidence.
+    max_residual_m: 0.10            # FALLBACK REFERENCE ONLY. A bridge is judged against
+                                    # what THIS session achieves where the geometry is known
+                                    # to be the same (the median of its own exact-seam
+                                    # residuals); this constant is used only until that
+                                    # measurement exists. It no longer rejects anything:
+                                    # on pccr 2026-09-16 it dropped both bridges of a 44 m
+                                    # walk at 17 cm and the pose graph fell back to IDENTITY
+                                    # ("nothing closes"). σ is now the SPLIT-HALF held-out
+                                    # residual — fit on half the correspondences, measure on
+                                    # the other half — widened to the disagreement between
+                                    # independent bridges over the same chunk pair when
+                                    # there is more than one (on that run: 0.2 cm apart).
     min_correspondences: 20000      # ...and at least this many exact correspondences per side
     corr_per_frame: 20000           # exact correspondences kept per shared frame (equal voice)
     fit_sample: 200000              # IRLS sample per fit (robust_rigid / robust_sim3)
@@ -2539,6 +2636,23 @@ witness:                            # §6 witnesses on the cloud (F3): evidence,
     conflict_min: 1                 # mask_conflict: conflicts > votes and ≥ this
   clean_statuses: [verified, unobserved]                 # voxel + SOR (final net) only on these
   mls_excluded_statuses: [mask_conflict, single_witness] # scene_consolidate never moves these
+  drop_statuses: [single_witness]   # USER 2026-09-17, after reading the kit's Votes view on
+                                    # pccr: points with these statuses are REMOVED from the
+                                    # cloud at merge time — before the masks, the mask<->cloud
+                                    # matching, the OBBs, the reprojection verdicts and the
+                                    # certification, so they compute nothing ("no quiero que
+                                    # esos voladores se usen para computar nada, ni para
+                                    # comparar ni para siquiera calcular el OBB").
+                                    # single_witness = OBSERVED and fewer than
+                                    # rules.verified_min_mv_votes neighbouring keyframes
+                                    # agreed with its depth: a measurement against the point,
+                                    # not a threshold invented here. Measured on pccr
+                                    # 2026-09-16: 5,469,400 of 46,489,778 merged points
+                                    # (11.8%), which were 5,284,714 of 27,522,544 (19.20%) of
+                                    # the delivered cloud because the net never thinned them.
+                                    # `unobserved` is deliberately NOT here: no witness could
+                                    # be computed there and a zero would be a claim (§6).
+                                    # [] removes nothing.
   tracks:                           # §6.4 depth by correspondences (vendored VGGSfM tracker)
     enabled: true
     python: /workspace/miniforge3/envs/mapanything/bin/python
@@ -2670,7 +2784,19 @@ loops:                              # candidate detector + spatial gate (§4.4/�
     drift_rate_m_per_m: 0.013
     drift_floor_deg: 2.0            # θ(L) = max(floor, rate·L)
     drift_rate_deg_per_m: 0.10
-    identity_reject_factor: 3.0     # separation > factor·δ(L) is NOT drift → instance split
+    frustum_tolerance_factor: 3.0   # how much displacement the FRUSTUM rule tolerates when asking
+                                    # "could the other visit have seen this object at all":
+                                    # factor × δ(L). Kept at the value it always had (USER
+                                    # 2026-09-16: "dejemos la misma que teníamos antes").
+                                    # It is no longer `identity_reject_factor` and no longer cuts
+                                    # anything: that key made separation > 3·δ mean "two fused
+                                    # objects" and SPLIT the instance, which cut pccr's floor into
+                                    # four pieces and its ceiling into six. Nothing is ever split
+                                    # now; this only bounds a visibility question.
+                                    # Still a chosen number: too small rejects legitimately drifted
+                                    # copies, too large makes the rule vacuous (with the observed
+                                    # separation as the bound, an object 30 m BEHIND the camera
+                                    # passed). No measurement has replaced it yet.
     frustum_margin_px: 20.0
     occlusion_tol_m: 0.30           # a copy farther than δ + this BEHIND the frame's own
                                     # measured surface is occluded (inside the frustum, not

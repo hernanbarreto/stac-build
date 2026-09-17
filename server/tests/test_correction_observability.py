@@ -24,7 +24,7 @@ def test_planar_only_solves_normal_translation(tmp_path):
     rep = run_objects(scene.output_dir, [1], "test",
                       cfg=make_correction_cfg(
                           **{"observability.bounded_extent_tol": 1e-9}))
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     obs = rep["observability"][0]
     assert obs["dof"] == ["t_normal"]
     assert "yaw" in obs["unrestrained"]
@@ -51,7 +51,7 @@ def test_cylinder_only_no_along_axis(tmp_path):
     rep = run_objects(scene.output_dir, [3], "test",
                       cfg=make_correction_cfg(
                           **{"observability.bounded_extent_tol": 1e-9}))
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     obs = rep["observability"][0]
     assert obs["dof"] == ["t_perp_axis(2)"]
     assert "t_along_axis" in obs["unrestrained"]
@@ -70,7 +70,7 @@ def test_no_depth_without_evidence(tmp_path):
     # whatever the verdict, no k may be proposed
     for d in rep.get("diagnosis") or []:
         assert not d["depth_needed"], d
-    if rep["status"] == "pending":
+    if rep["status"] == "applied":
         assert rep["distribution"]["depth_keyframes"] == 0
 
 
@@ -82,7 +82,7 @@ def test_bounded_planar_object_observes_full_translation(tmp_path):
                         drift_t=(0.30, 0.0, 0.12))
     rep = run_objects(scene.output_dir, [1], "test",
                       cfg=make_correction_cfg())
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     obs = rep["observability"][0]
     assert obs["dof"] == ["tx", "ty", "tz"] and obs["unrestrained"] == ["yaw"]
     npz = load_epoch_npz(scene.output_dir, 1)

@@ -6,7 +6,7 @@ Every mutating endpoint:
   * decodes the operator from the JWT the UI attaches (a missing token is
     recorded as the explicit literal "unauthenticated" — visible, never
     guessed);
-  * takes the per-session correction LOCK — a second correction/floor/verdict
+  * takes the per-session correction LOCK — a second correction/floor/select
     while one runs gets 409 with the blocking task id (prompt §7);
   * runs in the default executor with task_manager progress
     (``task_type="correction"``) so the UI can poll ``/api/tasks/{sid}``.
@@ -144,7 +144,7 @@ async def correction_run(request: Request,
         lambda progress: run_objects(
             ctx.output_dir, [int(i) for i in instance_ids], operator,
             override_scale_check=override, log=_log, progress=progress))
-    if report.get("status") == "pending" and _notify_viewer:
+    if report.get("status") == "applied" and _notify_viewer:
         await _notify_viewer(session_id, ctx.output_dir)
     return {"ok": True, "status": report.get("status"), "report": report}
 
@@ -172,7 +172,7 @@ async def correction_floor(request: Request,
             ctx.output_dir, model,
             [int(k) for k in keyframes] if keyframes else None,
             operator, log=_log, progress=progress))
-    if report.get("status") == "pending" and _notify_viewer:
+    if report.get("status") == "applied" and _notify_viewer:
         await _notify_viewer(session_id, ctx.output_dir)
     return {"ok": True, "status": report.get("status"), "report": report}
 
@@ -194,51 +194,49 @@ async def correction_revisit(request: Request,
         session_id, "Revisit detection + loop closure",
         lambda progress: run_revisit(ctx.output_dir, operator, log=_log,
                                      progress=progress))
-    if report.get("status") == "pending" and _notify_viewer:
+    if report.get("status") == "applied" and _notify_viewer:
         await _notify_viewer(session_id, ctx.output_dir)
     return {"ok": True, "status": report.get("status"), "report": report}
 
 
-@router.post("/approve")
-async def correction_approve(request: Request,
-                             credentials: Optional[
-                                 HTTPAuthorizationCredentials]
-                             = Depends(_security)):
+@router.post("/select")
+async def correction_select(request: Request,
+                            credentials: Optional[
+                                HTTPAuthorizationCredentials]
+                            = Depends(_security)):
+    """Show the session in one of its epochs. Nothing is approved or undone.
+
+    USER 2026-09-16: *"todas viven, solo se seleccionan y la que se selecciona
+    se muestra"*. This replaces /approve and /undo, which deleted the epochs
+    they did not choose.
+    """
     body = await request.json()
     session_id = body.get("session_id")
     if not session_id:
         raise HTTPException(400, "session_id required")
+    if body.get("epoch") is None:
+        raise HTTPException(400, "epoch required")
+    epoch = int(body["epoch"])
     operator = _operator(credentials)
     ctx = _ctx(session_id)
-    from correction.run import run_verdict
+    from correction.run import run_select
 
     res = await _run_locked(
-        session_id, "Approve correction",
-        lambda progress: run_verdict(ctx.output_dir, "approved", operator,
-                                     log=_log))
-    return {**res, "status": "approved"}
-
-
-@router.post("/undo")
-async def correction_undo(request: Request,
-                          credentials: Optional[
-                              HTTPAuthorizationCredentials]
-                          = Depends(_security)):
-    body = await request.json()
-    session_id = body.get("session_id")
-    if not session_id:
-        raise HTTPException(400, "session_id required")
-    operator = _operator(credentials)
-    ctx = _ctx(session_id)
-    from correction.run import run_verdict
-
-    res = await _run_locked(
-        session_id, "Undo correction",
-        lambda progress: run_verdict(ctx.output_dir, "undone", operator,
-                                     log=_log))
+        session_id, f"Show epoch {epoch}",
+        lambda progress: run_select(ctx.output_dir, epoch, operator, log=_log))
     if _notify_viewer:
         await _notify_viewer(session_id, ctx.output_dir)
-    return {**res, "status": "none"}
+    return res
+
+
+@router.get("/epochs/{session_id}")
+async def correction_epochs(session_id: str):
+    """Every epoch this session holds, and which one is on screen."""
+    ctx = _ctx(session_id)
+    from correction.apply import available_epochs
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, lambda: {"epochs": available_epochs(ctx.output_dir)})
 
 
 @router.get("/state/{session_id}")

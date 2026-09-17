@@ -165,3 +165,136 @@ under "INVENTED BUT ONLY WARNS". In the pose graph it does only warn. In the
 split path it **decides**, and it cut the floor and the ceiling. Move it, and
 re-check the rest of that section the same way: for each number, find every
 call site before classifying it.
+
+---
+
+## 6. `coverage_sample.cover_keyframes` can never run where it is called
+
+OBSERVED on the pccr run of 2026-09-16 23:04: the VLM stage logs
+
+```
+[cover] no camera evidence — coverage cannot be measured
+coverage unavailable — falling back to 8 evenly spaced keyframe(s)
+```
+
+**The message is wrong and the dependency is wrong.** `cover_keyframes` asks
+`surface_fit.hole_audit._evidence`, whose `__init__` returns on its second line
+when `output/seg_masks.npz` is missing — the SAM3 MASKS. The coverage sampler
+runs in the VLM stage, which is BEFORE SAM3, so that file cannot exist yet and
+the fallback fires on every run. The cameras were there the whole time
+(`camera_poses.txt`, `intrinsic.txt` written by the reconstruction).
+
+Coverage is a purely geometric question — which cameras see the whole cloud —
+and needs the cloud, the poses and K, never a mask. Fix: call
+`segmentation.session_io._load_camera_source(session_dir, output_dir)` directly
+(what `_Evidence` uses internally for the cameras) and leave `_evidence` to the
+post-SAM3 hole audit. And say which file is missing, not "no camera evidence".
+
+## 7. The σ floor's third tier measures something looser than the other two
+
+`certify/repeatability.py` (2026-09-16) reads, in order: `uncertainty.json`
+(two copies of the SAME frame), `elastic_seams.json` (per-shared-frame residual)
+and `intra_chunk.json` (held-out agreement between DIFFERENT frames of one
+chunk). The third exists so a SINGLE-CHUNK session can still measure itself —
+but it is not the same question, and on pccr the numbers differ by 6x:
+
+```
+uncertainty.json   4.77 cm      elastic_seams  ~3.5 cm      intra_chunk  ~29 cm
+```
+
+A single-chunk session would therefore get a σ floor six times looser than a
+chunked one — not because it is less precise, but because the only measurement
+available is laxer. The acta declares the source, so nothing is hidden, but σ
+floors are NOT comparable across sessions of different shape. Fix: find a
+single-chunk measurement of the same tightness (frames vs their own copies, not
+frames vs each other) or declare the tier explicitly as a different quantity.
+
+## 8. USER VERDICT 2026-09-16 — the closed cloud is much better
+
+After the run above (loop closure applied for the first time: 74.6 -> 1.0 cm
+over a 44 m walk, scale verification passing at 0.9844): *"la nube es mucho
+mejor que antes, aunque sí le falta para ser perfecta, pero está mucho mejor"*.
+
+What made it possible, in order: the bridge verdict stopped rejecting by an
+invented 10 cm and started measuring σ by split-half held-out (0.170 m, judged
+against the session's OWN 5.1 cm seam agreement); and the shared per-frame
+field stopped being overwritten by the elastic stage, so the closure survived
+on the camera side. Both are in the 2026-09-16 commits; the second is the bug
+that made the first look destructive.
+
+## 9. A copy pair with a 5.5x scale ratio wrote a scale row
+
+pccr 2026-09-17, certification: `exposed_metal_wiring#185 kf 202<->1` measured
+`s_ab 0.1805` — one copy 5.5x the size of the other — and the pair WROTE a
+scale row. Two runs of wiring of different lengths matched as one object; the
+ICP residual (2.4 cm) does not betray it because the fit absorbs the scale.
+
+The aggregate then came out at `|log r| 0.283` and only `scale.max_correction_log:
+0.2` stopped it: **a single poisoned row nearly applied a 33 % scale correction
+to a session that had just verified at 1.6 %**. The limit declared and applied
+identity, which is the right failure — but it is a blunt backstop, not a fix.
+
+A copy pair whose measured scale ratio is that far from 1 is not evidence of
+scale, it is evidence of a MIS-MATCH, and it should be declared as such where it
+is measured (loops_posthoc.copy_scale_rows) instead of travelling to the solver.
+
+## 10. The reprojection verdict passed two false duplicates the greedy caught
+
+Same run: `desk#137` (kf 197<->1, 48 cm apart, s_ab 1.12) and
+`exposed_metal_wiring#185` both came out `ambiguous` from the reprojection
+verdict — kept with σ×3 — and BOTH were then rejected by the greedy loop for
+the only reason that matters: applying them pushes points OFF their masks
+(7,413,187 and 7,232,317 against a 7,079,933 baseline).
+
+So the σ inflation and the greedy did their job, but the verdict that exists to
+answer "are these two copies the same object?" answered "maybe" for two pairs
+that are demonstrably not. Every one of the 21 pairs except one came out
+`ambiguous` (`min_self_recall` / `min_cross_recall: 0.4`, `min_agreeing_frac:
+0.6` — all three in the CLAUDE.md ledger as invented and deciding). A verdict
+that says "maybe" to everything carries no information: it should be measured
+against what the session itself achieves, the way the loop bridges now are.
+
+## 11. The geometric revisit detector found 37 co-visible pairs and ZERO regions
+
+pccr 2026-09-16 (`output/corrections/revisits.json`): `n_pairs: 37`,
+`regions: []`. On 2026-09-14 04:00 — the run that produced the epoch chain the
+user judged good — the same detector reported `4 revisit region(s) → 2 loop
+edge(s) (2 full, 2 duplicated)`, and those geometric edges are what the pose
+graph closed into epoch 1. Today's 23 loop edges are ALL instance loops; the
+geometric source contributed nothing.
+
+`revisit.py` is unchanged since that run (`git log` on the file stops at
+458fa28, 2026-09-14 04:52), so the collapse comes from the data, not the code.
+A region survives three gates in `_regions_from_hits`: a `region_cell_m` voxel
+block with ≥ `evidence.min_object_points_solve` (300) hits, ≥2 visits separated
+by `revisit.min_gap_kf` (30), and ≥300 hits in the (early, late) cross subset.
+Which of the three empties is NOT measured — `detect_revisits` writes only the
+surviving regions, never the histogram of what the blocks held. It should
+report the counts per gate, the way every other stage declares what it dropped.
+
+Until then it is unknown whether the new reconstruction genuinely revisits less
+(it walks the same 19.3 m) or whether one of the three gates now fires on a
+scene it did not fire on two days ago.
+
+## 12. The single-witness drop runs before the masks exist — declared limit
+
+`witness.drop_statuses: [single_witness]` (USER 2026-09-17) removes the points
+inside `gpu_cloud_clean`, which is the earliest place where "no quiero que esos
+voladores se usen para computar nada, ni para comparar ni para siquiera
+calcular el OBB" is actually true: the VLM, SAM3, the mask↔cloud matching, the
+OBBs, the reprojection verdicts and the certification all read the cloud that
+step writes.
+
+The price is stated, not hidden: at that moment there is no segmentation, so
+`mask_votes` and `mask_conflicts` are zero for every point (verified on pccr
+2026-09-16 — both columns are all-zero in the delivered cloud) and the status
+is the PROVISIONAL, multi-view-only one. A point that fewer than two
+neighbouring keyframes agreed with, but whose own SAM3 mask would later have
+confirmed it, is removed and never gets that second chance. The criterion is
+purely geometric by construction, which is what was asked for.
+
+If a scene ever loses real surface to this, the fix is not a threshold: it is
+to run the witness a second time after segmentation (the module already
+supports it, `reconstruction.witness.run`) and drop then, at the cost of the
+OBBs being computed on the unfiltered cloud — which is exactly what the user
+did not want.

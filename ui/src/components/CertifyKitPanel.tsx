@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { CheckCircle2, Crosshair, Undo2, AlertTriangle } from 'lucide-react'
+import { CheckCircle2, Crosshair, AlertTriangle } from 'lucide-react'
 import { Section, Row, Stack, KeyValue } from './ui/Panel'
 import { Button } from './ui/Button'
 import { Checkbox, SegmentedControl, Slider } from './ui/Field'
@@ -15,17 +15,17 @@ import type { ColorMode } from './viewport/FloatingToolbar'
 
 /** Visual validation kit (claude_stac.txt §11) — what the user needs to look
  *  where it matters. Nothing here decides: the certification loop measured,
- *  the acta says what and why; the user judges with his eyes and the
- *  Approve/Undo buttons (same flow as the correction module — a certification
- *  leaves a CHAIN of pending epochs: Undo pops the last one, Approve accepts
- *  them all).
+ *  the acta says what and why; the user judges with his eyes by SELECTING
+ *  epochs (same flow as the correction module — a certification leaves one
+ *  epoch per applied iteration and USER 2026-09-16 keeps them all on disk:
+ *  "todas viven, solo se seleccionan y la que se selecciona se muestra").
  *
  *  Lives in the Inspector's "Acta / Quality" tab (prompt_ui.txt §5). The
  *  colour mode (rgb / status / votes) is owned by App and shared with the
  *  viewport toolbar, so the two controls never fight over the viewer. */
 
 export interface KitViewport {
-  setWitnessColorMode: (mode: 'rgb' | 'status' | 'mv_votes', mvThreshold: number) => void
+  setWitnessColorMode: (mode: 'rgb' | 'status' | 'mv_votes', mvThreshold: number, mvHide?: boolean) => void
   setEpochLayer: (url: string | null) => void
   setEpochLayerVisible: (visible: boolean) => void
   setCloudObjectVisible: (visible: boolean) => void
@@ -35,7 +35,7 @@ export interface KitViewport {
 
 type KitTab = 'attention' | 'edges' | 'duplicates' | 'acta'
 
-export default function CertifyKitPanel({ session, token, viewport, onStatus, refreshKey = 0, colorMode, onColorMode, mvThreshold, onMvThreshold, onStateLoaded }: {
+export default function CertifyKitPanel({ session, token, viewport, onStatus, refreshKey = 0, colorMode, onColorMode, mvThreshold, onMvThreshold, mvHide, onMvHide, hasWitness, onStateLoaded }: {
   session: string
   token: string | null
   viewport: KitViewport | null
@@ -47,6 +47,10 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, re
   onColorMode: (m: ColorMode) => void
   mvThreshold: number
   onMvThreshold: (v: number) => void
+  /** hide the red band in the viewer instead of painting it */
+  mvHide: boolean
+  onMvHide: (v: boolean) => void
+  hasWitness: boolean
   onStateLoaded?: (state: any) => void
 }) {
   const t = useT()
@@ -56,12 +60,17 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, re
   const [edges, setEdges] = useState<any>(null)
   const [attention, setAttention] = useState<any>(null)
   const [report, setReport] = useState<any>(null)
+  // exact counts behind the Votes view: how many points each threshold takes
+  // (server-side over the cloud's own mv_votes column — never an estimate)
+  const [votes, setVotes] = useState<any>(null)
   const [busy, setBusy] = useState(false)
   const [showOdometry, setShowOdometry] = useState(true)
   const [showLoops, setShowLoops] = useState(true)
   const [beforeOn, setBeforeOn] = useState(false)
   const [afterOn, setAfterOn] = useState(true)
   const [tab, setTab] = useState<KitTab>('attention')
+
+  const kitMode = colorMode === 'status' || colorMode === 'mv_votes' ? colorMode : 'rgb'
 
   const headers = useCallback((): HeadersInit => {
     const h: HeadersInit = { 'Content-Type': 'application/json' }
@@ -82,6 +91,19 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, re
 
   useEffect(() => { load() }, [load, refreshKey])
 
+  // The histogram costs one pass over the cloud the first time (it is cached
+  // next to it, keyed by size+mtime), so it is asked for only when the Votes
+  // view is actually open.
+  useEffect(() => {
+    if (kitMode !== 'mv_votes' || !hasWitness) return
+    let cancelled = false
+    fetch(`/api/certify/votes/${session}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(v => { if (!cancelled) setVotes(v) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [session, kitMode, hasWitness, refreshKey])
+
   // the trajectory + edges live in the viewer while the panel is open
   useEffect(() => {
     if (!viewport) return
@@ -89,7 +111,7 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, re
     return () => viewport.setTrajectoryEdges(null, { odometry: false, loops: false })
   }, [viewport, edges, showOdometry, showLoops])
 
-  // before/after: the previous pending epoch's octree as a tinted layer
+  // before/after: another epoch's octree as a tinted layer over the live one
   useEffect(() => {
     if (!viewport) return
     const prev = epochs?.previous?.find((p: any) => p.potree)
@@ -99,15 +121,17 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, re
     return () => { viewport.setEpochLayer(null); viewport.setCloudObjectVisible(true) }
   }, [viewport, epochs, beforeOn, afterOn, session])
 
-  const verdict = async (kind: 'approve' | 'undo') => {
+  /** Show the session in another epoch. Nothing is approved and nothing is
+   *  undone — every epoch stays on disk (USER 2026-09-16). */
+  const selectEpoch = async (epoch: number) => {
     setBusy(true)
-    onStatus(kind === 'approve' ? t('certify.approving') : t('certify.undoing'))
+    onStatus(t('certify.selecting', { epoch }))
     try {
-      const r = await fetch(`/api/certify/${kind}`, { method: 'POST', headers: headers(), body: JSON.stringify({ session_id: session }) })
+      const r = await fetch('/api/certify/select', { method: 'POST', headers: headers(), body: JSON.stringify({ session_id: session, epoch }) })
       const d = await r.json().catch(() => ({}))
-      onStatus(r.ok ? t(kind === 'approve' ? 'certify.approved' : 'certify.undone', { epoch: d.epoch ?? '' })
-        : t('certify.verdictFailed', { detail: typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail || d) }))
-    } catch { onStatus(t('certify.verdictFailed', { detail: '' })) }
+      onStatus(r.ok ? t('certify.selected', { epoch: d.epoch ?? epoch })
+        : t('certify.selectFailed', { detail: typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail || d) }))
+    } catch { onStatus(t('certify.selectFailed', { detail: '' })) }
     setBusy(false)
     load()
   }
@@ -117,11 +141,26 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, re
   const acta = state?.acta
   const metrics = report?.metrics
   const prevWithPotree = epochs?.previous?.find((p: any) => p.potree)
-  const pending = state?.pending_epochs ?? 0
+  const epochList: any[] = epochs?.epochs || state?.epochs || []
   const iterations: any[] = acta?.iterations || []
   const dupList: any[] = edges?.duplicates || []
   const loopList: any[] = edges?.loops || []
-  const kitMode = colorMode === 'status' || colorMode === 'mv_votes' ? colorMode : 'rgb'
+
+  // What the current threshold takes, straight from the server's count of the
+  // cloud's own mv_votes column — and WHICH status it is, because a point the
+  // session never observed is red too and is NOT what gets removed.
+  const votesBand = votes?.bands?.[Math.min(mvThreshold, (votes?.bands?.length || 1) - 1)] || null
+  const votesStatus = (() => {
+    if (!votes?.table) return null
+    const acc: Record<string, number> = {}
+    for (const row of votes.table) {
+      if (row.votes >= mvThreshold) continue
+      for (const [k, v] of Object.entries(row.status || {})) acc[k] = (acc[k] || 0) + (v as number)
+    }
+    const parts = Object.entries(acc).sort((a, b) => b[1] - a[1])
+    if (!parts.length) return null
+    return parts.map(([k, v]) => `${t(`witness.${k}`)} ${fmt.integer(v)}`).join(' · ')
+  })()
 
   const edgeColumns: Column<any>[] = [
     { id: 'kind', header: t('edges.kind'), cell: e => <Badge size="sm" tone={e.kind === 'accepted' ? 'ok' : e.kind === 'scale_break' ? 'warn' : e.kind === 'rejected' || e.kind === 'vetoed' ? 'err' : 'info'}>{t(`edgeKind.${e.kind}`)}</Badge> },
@@ -155,17 +194,23 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, re
       <Section title={t('certify.epochTitle', { epoch: epochs?.epoch ?? state?.epoch ?? t('status.dash') })}
         actions={state?.running_task ? <Badge tone="brand" dot size="sm">{t('certify.running')}</Badge> : undefined}>
         <p className="stac-section__hint">
-          {pending > 0 ? t.plural('certify.pendingEpochs', pending) : t('certify.nothingPending')} {state?.witness_fields ? t('certify.witnessesPresent') : t('certify.noWitnesses')}
+          {epochList.length > 1 ? t.plural('certify.epochsOnDisk', epochList.length) : t('certify.singleEpoch')} {state?.witness_fields ? t('certify.witnessesPresent') : t('certify.noWitnesses')}
         </p>
         <Row wrap>
           <Checkbox checked={beforeOn} disabled={!prevWithPotree} onChange={setBeforeOn} label={t('certify.before', { epoch: prevWithPotree?.epoch ?? t('status.dash') })}
             description={prevWithPotree ? undefined : t('certify.noPreviousOctree')} />
           <Checkbox checked={afterOn} onChange={setAfterOn} label={t('certify.after')} />
         </Row>
-        <Row>
-          <Button block variant="primary" icon={<CheckCircle2 aria-hidden />} disabled={busy || pending === 0} loading={busy} onClick={() => verdict('approve')}>{t('certify.approveChain')}</Button>
-          <Button block icon={<Undo2 aria-hidden />} disabled={busy || pending === 0} onClick={() => verdict('undo')}>{t('certify.undoEpoch')}</Button>
-        </Row>
+        {epochList.length > 1 && (
+          <Row wrap>
+            {epochList.map((e: any) => (
+              <Button key={e.epoch} variant={e.live ? 'primary' : undefined} icon={e.live ? <CheckCircle2 aria-hidden /> : undefined}
+                loading={busy && e.live} disabled={busy || e.live} onClick={() => selectEpoch(e.epoch)}>
+                {e.epoch === 0 ? t('certify.epochOriginal') : t('certify.epochN', { epoch: e.epoch })}
+              </Button>
+            ))}
+          </Row>
+        )}
         {!acta && !state?.running_task && <p className="stac-section__hint">{t('certify.noActa')}</p>}
         {acta && (
           <KeyValue label={t('certify.stopped')} mono>{acta.stop_reason} ({fmt.duration(acta.elapsed_s || 0)})</KeyValue>
@@ -182,7 +227,22 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, re
             color: tok, label: t(`witness.${k}`), value: metrics?.witnesses?.status_fraction?.[k] != null ? fmt.percent(metrics.witnesses.status_fraction[k], 1) : undefined,
           }))} />
         )}
-        {kitMode === 'mv_votes' && <p className="stac-section__hint">{t('colorMode.votesHint', { n: fmt.integer(mvThreshold) })}</p>}
+        {kitMode === 'mv_votes' && (
+          <>
+            <Checkbox checked={mvHide} onChange={onMvHide} disabled={!hasWitness}
+                      label={t('colorMode.hideBelow', { n: fmt.integer(mvThreshold) })} />
+            {votesBand && (
+              <KeyValue label={t('colorMode.wouldRemove')} mono>
+                {t('colorMode.wouldRemoveValue', {
+                  n: fmt.integer(votesBand.points), pct: fmt.percent(votesBand.fraction, 2),
+                  rest: fmt.integer(votesBand.remaining),
+                })}
+              </KeyValue>
+            )}
+            {votesStatus && <p className="stac-section__hint">{votesStatus}</p>}
+            <p className="stac-section__hint">{t('colorMode.votesHint', { n: fmt.integer(mvThreshold) })}</p>
+          </>
+        )}
       </Section>
 
       <Section title={t('edges.trajectory')}>

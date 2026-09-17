@@ -20,17 +20,22 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const [serverUp, setServerUp] = useState<boolean | null>(null) // null = checking
 
-  // Poll server health
+  // Poll server health — 5 s while it answers, backing off to 30 s while it
+  // does not (the login screen sat here for hours against a dead backend,
+  // polling every 8 s next to App's own poll)
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null
+    let fails = 0
     const check = async () => {
       try {
         const r = await fetch('/health', { signal: AbortSignal.timeout(15000) })
         setServerUp(r.ok)
+        fails = r.ok ? 0 : fails + 1
       } catch {
         setServerUp(false)
+        fails++
       }
-      timer = setTimeout(check, serverUp === false ? 8000 : 5000)
+      timer = setTimeout(check, fails ? Math.min(30000, 5000 * 2 ** (fails - 1)) : 5000)
     }
     check()
     return () => { if (timer) clearTimeout(timer) }

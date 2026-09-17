@@ -482,7 +482,7 @@ def fork_loops_cfg(stac_server_dir: Optional[str] = None, **over) -> dict:
          "intra_chunk_loops": True, "bridge_extra_frames": 0,
          "spatial": {"min_walk_m": 5.0, "drift_floor_m": 0.30, "drift_rate_m_per_m": 0.013,
                      "drift_floor_deg": 2.0, "drift_rate_deg_per_m": 0.10,
-                     "identity_reject_factor": 3.0, "frustum_margin_px": 4.0, "occlusion_tol_m": 0.30,
+                     "frustum_tolerance_factor": 3.0, "frustum_margin_px": 4.0, "occlusion_tol_m": 0.30,
                      "min_depth_m": 0.3, "max_depth_m": 15.0, "min_frustum_frames": 2,
                      "frustum_window_kf": 3, "frustum_points": 800, "min_visible_frac": 0.30,
                      "size_tol": 0.15, "repetitive_labels": ["column"],

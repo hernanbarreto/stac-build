@@ -35,7 +35,7 @@ def test_scale_gate_passes_when_da3_agrees(tmp_path):
                         da3_agrees_with_truth=True)
     rep = run_objects(scene.output_dir, [1, 2], "test",
                       cfg=make_correction_cfg())
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     g = next(g for g in rep["gates"] if g["name"] == "scale_vs_da3")
     assert g["passed"]
 
@@ -47,7 +47,7 @@ def test_override_applies_and_is_recorded(tmp_path):
     rep = run_objects(scene.output_dir, [1, 2], "operator-x",
                       override_scale_check=True,
                       cfg=make_correction_cfg())
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     assert rep["overrides"]["scale_check"]["overridden_by"] == "operator-x"
     rows = ledger_view(scene.output_dir)
     assert rows[-1]["overrides"].get("scale_check"), "ledger must record it"

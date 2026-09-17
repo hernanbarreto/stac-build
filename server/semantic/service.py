@@ -94,6 +94,13 @@ def ensure_service(config: Optional[dict] = None,
 
     if timeout_s is None:
         timeout_s = float(_service_cfg(config).get("startup_timeout_s", 900))
+    if timeout_s <= 0:
+        # main.py kicks the launcher at boot ON PURPOSE without waiting, so the
+        # server never blocks on a model load. Saying "did not come up within
+        # 0s" made a deliberate non-wait read as a failure (USER 2026-09-16).
+        _log("Semantic service launched — not waiting for it (loads in the "
+             "background; the chat reloads when it is ready)")
+        return False
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if cancelled and cancelled():

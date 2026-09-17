@@ -172,7 +172,7 @@ export interface ViewportHandle {
     // Validation kit (claude_stac.txt §11): colour by witness status /
     // mv_votes, the previous epoch's octree as a tinted layer (before/after),
     // the trajectory with its loop edges, fly-to anchors.
-    setWitnessColorMode: (mode: 'rgb' | 'status' | 'mv_votes', mvThreshold: number) => void
+    setWitnessColorMode: (mode: 'rgb' | 'status' | 'mv_votes', mvThreshold: number, mvHide?: boolean) => void
     setEpochLayer: (url: string | null) => void
     setEpochLayerVisible: (visible: boolean) => void
     setTrajectoryEdges: (data: any | null, show: { odometry: boolean; loops: boolean }) => void
@@ -271,6 +271,11 @@ const fragmentShader = `
   // previous epoch's octree in the before/after toggle)
   uniform int uColorMode;
   uniform float uMvThreshold;
+  // the kit's red band, hidden instead of painted: a point whose depth fewer
+  // than uMvThreshold neighbouring keyframes agreed with is dropped from the
+  // view. Nothing is deleted — this is the look of the cloud WITHOUT the
+  // single-witness mass, before deciding to remove it (USER 2026-09-17).
+  uniform bool uMvHide;
   uniform vec3 uTint;
   uniform float uTintMix;
   uniform bool sectionBoxEnabled;
@@ -291,6 +296,14 @@ const fragmentShader = `
     // Confidence filter: discard points below threshold
     // vConfidence defaults to 0.0 when attribute is absent; threshold 0.0 shows everything
     if (uConfidenceThreshold > 0.0 && vConfidence < uConfidenceThreshold) {
+      discard;
+    }
+
+    // Votes filter: the preview of what witness.drop_statuses removes, so the
+    // rule has to be the SAME one — below the threshold AND observed. An
+    // unobserved point (status 0) has no witness at all and its zero is not a
+    // vote against it, so it stays even though the colour paints it red.
+    if (uMvHide && uMvThreshold > 0.0 && vMvVotes < uMvThreshold && vStatus > 0.5) {
       discard;
     }
 
@@ -2117,15 +2130,20 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             assistantVizRef.current?.setVolumeStatus(volumeId, status),
         setVolumeSolid: (volumeId: number, solid: boolean) =>
             assistantVizRef.current?.setVolumeSolid(volumeId, solid),
-        setWitnessColorMode: (mode, mvThreshold) => {
+        setWitnessColorMode: (mode, mvThreshold, mvHide = false) => {
             const mat = materialRef.current
             if (!mat) return
             mat.uniforms.uColorMode.value = mode === 'status' ? 1 : mode === 'mv_votes' ? 2 : 0
             mat.uniforms.uMvThreshold.value = mvThreshold
+            // the hide survives a switch back to RGB on purpose: the point of
+            // it is to look at the CLOUD without the red band, not at the
+            // votes view without it
+            mat.uniforms.uMvHide.value = mvHide
             const ep = epochLayerRef.current
             if (ep) {
                 ep.material.uniforms.uColorMode.value = mat.uniforms.uColorMode.value
                 ep.material.uniforms.uMvThreshold.value = mvThreshold
+                ep.material.uniforms.uMvHide.value = mvHide
             }
         },
         setEpochLayer: (url) => {
@@ -3034,6 +3052,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 uConfidenceThreshold: { value: 0.0 },
                 uColorMode: { value: 0 },
                 uMvThreshold: { value: 0.0 },
+                uMvHide: { value: false },
                 uTint: { value: new THREE.Color(tokenHex(VP.epochTint)) },
                 uTintMix: { value: 0.0 },
                 uConfHl: { value: -1.0 },

@@ -150,14 +150,17 @@ def test_witness_epoch_keeps_provenance_and_global_indices(tmp_path, base_sessio
             continue                      # an object the walk never saw
         assert gi.min() >= 0 and gi.max() < len(after)
         assert np.all(after["frame_global"][gi] == before["frame_global"][gi])
-    # the epoch is real: ledger record, previous epoch kept until the verdict
+    # the epoch is real: ledger record, and the previous epoch kept on disk
     ledger = [json.loads(l) for l in (out / "corrections.jsonl").read_text().splitlines()]
-    assert ledger[-1]["kind"] == "witness" and ledger[-1]["verdict"] == "pending"
+    assert ledger[-1]["kind"] == "witness" and ledger[-1]["verdict"] == "applied"
     assert (out / "_epoch_0").exists()
     assert json.loads((out / "geometry_epoch.json").read_text())["epoch"] == 1
-    from correction.run import run_verdict
-    res_v = run_verdict(out, "undone", "test")
-    assert res_v["verdict"] == "undone"
+    # selecting epoch 0 shows the cloud as it was, and epoch 1 is NOT destroyed
+    from correction.run import run_select
+    from correction.apply import available_epochs
+    res_v = run_select(out, 0, "test")
+    assert res_v["epoch"] == 0 and res_v["changed"]
+    assert [e["epoch"] for e in available_epochs(out)] == [0, 1]
     _, restored = read_ply(out / "cleaned_cloud.ply")
     assert restored.dtype.names == before.dtype.names
     assert np.array_equal(restored["x"], before["x"])

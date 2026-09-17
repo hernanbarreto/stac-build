@@ -1622,8 +1622,12 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             _va_cfg.get("elastic_seam", False))
         cfg_v["Model"]["elastic_smooth_win"] = int(
             _va_cfg.get("elastic_smooth_win", 5))
-        cfg_v["Model"]["elastic_max_t_m"] = float(
-            _va_cfg.get("elastic_max_t_m", 0.30))
+        # null/0 = NO absolute cap (USER 2026-09-16: proportion decides, not
+        # size — metric_lock.demote_disproportionate_fits). Only a real number
+        # still applies the legacy |t| ceiling on top of it.
+        _emt = _va_cfg.get("elastic_max_t_m", None)
+        cfg_v["Model"]["elastic_max_t_m"] = (float(_emt) if _emt not in (None, "", False)
+                                             else None)
         cfg_v["Model"]["intra_chunk"] = bool(
             _va_cfg.get("intra_chunk", False))
         cfg_v["Model"]["depth_graph"] = bool(

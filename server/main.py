@@ -16,36 +16,14 @@ from pathlib import Path
 from typing import Set, Optional, Dict, List, Any
 from contextlib import asynccontextmanager
 
-# Suppress polling spam from access logs (applies to all uvicorn start modes).
-# These endpoints are hit on a tight interval by the UI and bury useful logs.
-_POLLING_NOISE = (
-    "GET /health",
-    "GET /api/tasks/",
-    "GET /api/segmentation/shape/progress/",
-    "GET /api/segmentation/reconstruct/progress/",
-    "GET /api/segmentation/tsdf/progress/",
-    "GET /api/semantic/status",   # chat-model status poll (user 2026-08-30:
-                                  # "lista tremenda de warmup=false")
-    "GET /api/segmentation/erase/status",
-)
-class _HealthCheckFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        if any(p in msg for p in _POLLING_NOISE):
-            return False
-        # 206 Partial Content range-request spam (Potree octree nodes, video).
-        # uvicorn adds the phrase "Partial Content" in the FORMATTER, not the
-        # message, so we match the STATUS CODE 206 (last positional arg of the
-        # access record), not the text. Fallback: the raw '" 206' in the message.
-        try:
-            args = record.args
-            if isinstance(args, (tuple, list)) and args and int(args[-1]) == 206:
-                return False
-        except (ValueError, TypeError, IndexError):
-            pass
-        return '" 206' not in msg
+# Access-log noise: the UI's polls never reach the log, a 4xx/5xx always does.
+# The list of poll prefixes is config.yaml `server.access_log_quiet`; the logic
+# and its tests live in access_log.py (imported before uvicorn configures its
+# own logging, and re-installed from the lifespan because uvicorn's dictConfig
+# can drop a filter that was attached earlier).
+from access_log import install as _install_access_filter
 
-logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
+_install_access_filter()
 
 from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, HTTPException, UploadFile, File
@@ -1088,14 +1066,11 @@ async def lifespan(app: FastAPI):
     from db import init_db
     await init_db()
 
-    # Re-apply the access-log noise filter AFTER uvicorn configured its logging.
-    # uvicorn's startup dictConfig can drop the module-import-time filter (line ~33),
-    # which is why "Partial Content" (206 range requests for Potree/video) kept
-    # printing. Re-adding here (post-config) makes it stick.
-    _ua = logging.getLogger("uvicorn.access")
-    if not any(isinstance(f, _HealthCheckFilter) for f in _ua.filters):
-        _ua.addFilter(_HealthCheckFilter())
-        print("[Server] access-log noise filter re-applied (206/health/polling)")
+    # Re-apply the access-log noise filter AFTER uvicorn configured its logging:
+    # its startup dictConfig can drop the one installed at import time, which is
+    # why "Partial Content" (206 range requests for Potree/video) kept printing.
+    if _install_access_filter():
+        print("[Server] access-log noise filter re-applied (polling/206)")
 
     # Chat ALWAYS up (user decision 2026-08-28): start the vLLM semantic service
     # at server boot instead of waiting for the first chat request. Fire-and-forget
@@ -1144,9 +1119,10 @@ async def serve_scan_potree_files(project: str, date: str, source: str,
 
 @app.get("/potree_epoch/{session_id}/{epoch}/{file_path:path}")
 async def serve_epoch_potree_files(session_id: str, epoch: int, file_path: str):
-    """Serve the Potree octree of a PENDING previous epoch (claude_stac.txt
-    §11 before/after toggle): output/_epoch_<N>/potree/… kept by the
-    transactional apply until Approve/Undo."""
+    """Serve the Potree octree of a STORED epoch (claude_stac.txt §11
+    before/after toggle): output/_epoch_<N>/potree/… kept by the transactional
+    apply. Every epoch of the session has one and any of them can be asked for
+    — they are selectable, not a chain below the live state (USER 2026-09-16)."""
     from fastapi.responses import FileResponse
     ctx = _ctx(session_id)
     full_path = ctx.output_dir / f"_epoch_{int(epoch)}" / "potree" / file_path
@@ -3389,22 +3365,21 @@ async def get_segmentation_instances(session_id: str):
             except Exception:
                 pass  # if it's malformed, just skip enrichment
 
-        merged: List[Dict[str, Any]] = []
-        for inst in raw_instances:
-            # Cross-reference by instance_id, NOT id: segmentation.json uses
-            # 0-based ``id`` while segmentation_result.json uses 1-based ``id``;
-            # only ``instance_id`` is consistent across both. Matching on ``id``
-            # mis-aligns the enrichment by one (door inherits the ladder's label
-            # + points, ladder shows 0). See enriched_by_id above (also by iid).
-            iid = inst.get("instance_id", inst.get("id"))
-            if iid is not None and int(iid) in enriched_by_id:
-                # Enriched fields (OBB, globalIndices, total_points) override
-                # bare fields from segmentation.json; raw entries that don't
-                # have a match yet (just-propagated, no cloud-match yet) pass
-                # through unchanged so the UI list still includes them.
-                merged.append({**inst, **enriched_by_id[int(iid)]})
-            else:
-                merged.append(inst)
+        # Masks the matching pass resolved into ANOTHER object (same space, or
+        # same label and contiguous), or that matched no cloud point at all.
+        # They are provenance, not objects: no points, no OBB, nothing to
+        # select — and they used to sit in this list forever showing 0 (USER
+        # 2026-09-17: "aparecen muchisimos en cero ... deben ser los que
+        # despues se fusionaron"). A mask with no record is NOT hidden; that
+        # is the just-propagated case this list source exists to serve.
+        from segmentation.mask_fates import by_reason, resolve_absorbed, split_list
+        try:
+            result_is_newer = (result_path.exists()
+                               and result_path.stat().st_mtime >= seg_path.stat().st_mtime)
+        except OSError:
+            result_is_newer = False
+        absorbed = resolve_absorbed(result_data, raw_instances, result_is_newer)
+        merged, hidden = split_list(raw_instances, enriched_by_id, absorbed)
 
         # Cloud totals so the panel can show the unsegmented count too
         # (user 2026-08-31: every segment shows its points except Unsegmented)
@@ -3425,6 +3400,11 @@ async def get_segmentation_instances(session_id: str):
             "instances": merged,
             "prompts": prompts,
             "resolution": resolution,
+            # what the list is NOT showing, and why — the count the panel can
+            # display as "216 masks → 77 objects" without re-reading anything
+            "absorbed": hidden,
+            "absorbed_by_reason": by_reason(hidden),
+            "mask_count": len(raw_instances),
             "total_points": total_pts,
             "unsegmented_points": (max(0, total_pts - segmented_pts)
                                    if total_pts is not None
@@ -6366,7 +6346,7 @@ async def refresh_segmentation(body: dict):
             None, _session_intel_when_chat_up, session_id, True)
         # claude_stac.txt §9: the instances exist now — the certification
         # loop (instance loops → scale → poses → depth → witnesses, one
-        # pending epoch per iteration, Approve/Undo in the kit) runs in the
+        # one epoch per iteration, selectable in the kit) runs in the
         # background when certify.auto_after_segmentation is on.
         from reconstruction.loops.config import load_loops_config as _llc_cert
         if _llc_cert().certify.auto_after_segmentation:

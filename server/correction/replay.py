@@ -1,13 +1,15 @@
-"""Replay approved corrections from the ledger — bit-faithful, no slerp
+"""Replay applied corrections from the ledger — bit-faithful, no slerp
 recompute.
 
 ``python -m correction.replay --session <session_dir> --to-epoch N
 [--cloud <ply>] [--poses <txt>] [--out <dir>]``
 
 Rebuilds the cloud and poses at epoch N by applying the persisted
-``corrections/epoch_<i>.npz`` transforms (i = 1..N, approved epochs only —
-an undone epoch has no npz and is skipped by construction because the epoch
-chain renumbers) starting from an epoch-0 cloud/poses pair. Transforms are
+``corrections/epoch_<i>.npz`` transforms of N's ANCESTRY (a rejected run has no
+npz and never gets an epoch; since 2026-09-16 a correction can also run on top
+of a re-selected older epoch, which branches the history — replay follows the
+`parent_epoch` line to N and ignores the epochs of another branch) starting
+from an epoch-0 cloud/poses pair. Transforms are
 keyed by REAL frame numbers, so the same ledger can be re-applied to a
 re-reconstruction of the same scene whose keyframe set differs: keyframes are
 matched by frame_global, unmatched frames inherit interpolation implicitly
@@ -32,6 +34,7 @@ if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
 from correction.ledger import load_epoch_npz  # noqa: E402
+from correction.epoch import epoch_lineage  # noqa: E402
 from correction.session import read_ply, read_poses, write_ply, \
     write_poses  # noqa: E402
 from segmentation.session_io import _load_frame_index_map  # noqa: E402
@@ -116,7 +119,8 @@ def replay(session_dir: Path, to_epoch: int,
         raise RuntimeError("camera_frames.txt does not match the pose file — "
                            "cannot key the replay by real frame numbers")
 
-    for ep in range(1, int(to_epoch) + 1):
+    lineage = epoch_lineage(output_dir, int(to_epoch))
+    for ep in lineage[1:]:            # lineage[0] is epoch 0, the starting point
         npz = load_epoch_npz(output_dir, ep)
         apply_epoch_to_arrays(xyz, fg, poses, frames, npz)
         log(f"  replayed epoch {ep} "
@@ -132,7 +136,7 @@ def replay(session_dir: Path, to_epoch: int,
     write_poses(poses_out, poses)
     log(f"  replay written: {cloud_out}, {poses_out}")
     return {"cloud": str(cloud_out), "poses": str(poses_out),
-            "epochs_applied": int(to_epoch)}
+            "epochs_applied": len(lineage) - 1, "lineage": lineage}
 
 
 def main(argv=None) -> int:

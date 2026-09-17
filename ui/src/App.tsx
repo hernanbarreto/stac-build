@@ -124,7 +124,7 @@ function App() {
   const [eraseConfArmed, setEraseConfArmed] = useState(false)
   //  Correction Analysis (USER 2026-09-06, replaces Perfect in the
   // toolbar): user marks the segments with the parallel-copies error; the
-  // algorithm does the rest. One pending correction at a time  Approve/Undo.
+  // algorithm does the rest. Every epoch stays and is selected in the modal.
   // Object library (user 2026-08-31): collection + every project GLB,
   // insertable as scene REFERENCES (delete never touches the source)
   const [showObjectLibrary, setShowObjectLibrary] = useState(false)
@@ -136,7 +136,7 @@ function App() {
   const [showCorrectionModal, setShowCorrectionModal] = useState(false)
   //  Certification kit (claude_stac.txt §11): epochs before/after, colour by
   // witness status / mv_votes, trajectory with loop edges, duplicates,
-  // attention list, acta — the user judges; Approve/Undo per epoch chain.
+  // attention list, acta — the user judges by selecting between the epochs.
   const [showCertifyKit, setShowCertifyKit] = useState(false)
   // bumped when a pipeline finishes: the certification stage ran inside it,
   // so an open kit re-reads the acta / epochs / edges
@@ -151,7 +151,7 @@ function App() {
       .then(r => (r.ok ? r.json() : null))
       .then(st => {
         if (cancelled || !st) return
-        if (st.acta && (st.pending_epochs ?? 0) > 0) setShowCertifyKit(true)
+        if (st.acta && (st.epochs?.length ?? 0) > 1) setShowCertifyKit(true)
       })
       .catch(() => {})
     return () => { cancelled = true }
@@ -160,13 +160,17 @@ function App() {
   const [correctionRunning, setCorrectionRunning] = useState(false)
   const [correctionState, setCorrectionState] = useState<any>(null)
   const [pendingSession, setPendingSession] = useState<string | null>(null)
+  const [correctionEpochs, setCorrectionEpochs] = useState<{ epoch: number; live: boolean; potree: boolean }[]>([])
   const refreshCorrectionStatus = useCallback(async (sid: string) => {
     try {
       const r = await fetch(`/api/correction/state/${sid}`)
       if (r.ok) {
         const st = await r.json()
         setCorrectionState(st)
-        if (st?.status === 'pending') setPendingSession(sid)
+        // the state carries the epochs the session holds, so the selector is
+        // populated on load and not only after a selection (USER 2026-09-16)
+        if (Array.isArray(st?.epochs)) setCorrectionEpochs(st.epochs)
+        if (st?.status === 'applied') setPendingSession(sid)
         else if (pendingSessionRef.current === sid) setPendingSession(null)
       }
     } catch { /* non-fatal */ }
@@ -188,46 +192,43 @@ function App() {
   const [correctionOverrideScale, setCorrectionOverrideScale] = useState(false)
   const [correctionLedger, setCorrectionLedger] = useState<any[] | null>(null)
   const [correctionArtifacts, setCorrectionArtifacts] = useState<any[] | null>(null)
-  // shared Approve/Undo handlers — used by the  modal AND the pending
-  // banner (USER 2026-09-06: a pending correction MUST be visible).
-  const approveCorrection = useCallback(async () => {
+  // shared epoch-selection handlers — used by the  modal AND the banner
+  // (USER 2026-09-06: an applied correction MUST be visible).
+  // EPOCHS ARE SELECTED, NEVER APPROVED (USER 2026-09-16: "todas viven, solo
+  // se seleccionan y la que se selecciona se muestra"). Approve deleted every
+  // other epoch and Undo the current one, so the session could only hold two
+  // states and one wrong click destroyed the other — pccr 2026-09-15 lost
+  // epochs 2 and 3 to two accidental Undos.
+  const refreshCorrectionEpochs = useCallback(async (sid?: string | null) => {
+    const s = sid || pendingSessionRef.current || activeSession
+    if (!s) return
+    try {
+      const r = await fetch(`/api/correction/epochs/${encodeURIComponent(s)}`)
+      if (r.ok) setCorrectionEpochs((await r.json()).epochs || [])
+    } catch { /* the list is a convenience; a failure leaves the last one */ }
+  }, [activeSession])
+  const selectCorrectionEpoch = useCallback(async (epoch: number) => {
     const sid = pendingSessionRef.current || activeSession
     if (!sid) return
     setCorrectionRunning(true)
-    setCorrectionState({ status: 'working' })   // banner hides immediately
+    setStatusMessage(tt('correction.selecting', { epoch }))
     try {
       const headers: HeadersInit = { 'Content-Type': 'application/json' }
       if (token) headers['Authorization'] = `Bearer ${token}`
-      const r = await fetch('/api/correction/approve', {
+      const r = await fetch('/api/correction/select', {
         method: 'POST', headers,
-        body: JSON.stringify({ session_id: sid }),
+        body: JSON.stringify({ session_id: sid, epoch }),
       })
-      setStatusMessage(r.ok ? tt('correction.approved') : tt('correction.approveFailed'))
-    } catch { setStatusMessage(tt('correction.approveFailed')) }
+      setStatusMessage(r.ok ? tt('correction.selected', { epoch })
+                            : tt('correction.selectFailed'))
+    } catch { setStatusMessage(tt('correction.selectFailed')) }
     setCorrectionRunning(false)
     refreshCorrectionStatus(pendingSessionRef.current || activeSession!)
-  }, [activeSession, refreshCorrectionStatus, token])
-  const undoCorrection = useCallback(async () => {
-    const sid = pendingSessionRef.current || activeSession
-    if (!sid) return
-    setCorrectionRunning(true)
-    setCorrectionState({ status: 'working' })   // banner hides immediately
-    setStatusMessage(tt('correction.undoing'))
-    try {
-      const headers: HeadersInit = { 'Content-Type': 'application/json' }
-      if (token) headers['Authorization'] = `Bearer ${token}`
-      const r = await fetch('/api/correction/undo', {
-        method: 'POST', headers,
-        body: JSON.stringify({ session_id: sid }),
-      })
-      setStatusMessage(r.ok ? tt('correction.undone') : tt('correction.undoFailed'))
-    } catch { setStatusMessage(tt('correction.undoFailed')) }
-    setCorrectionRunning(false)
-    refreshCorrectionStatus(pendingSessionRef.current || activeSession!)
-  }, [activeSession, refreshCorrectionStatus, token])
+    refreshCorrectionEpochs(pendingSessionRef.current || activeSession!)
+  }, [activeSession, refreshCorrectionStatus, refreshCorrectionEpochs, token])
   // pending state must surface ALWAYS (USER 2026-09-06: the banner appears
   // as soon as the potree loads and stays — across session switches too —
-  // until the correction is approved or rejected). A long-running
+  // while the session holds more than one epoch). A long-running
   // correction POST can outlive the browser request, so the truth is
   // POLLED from the backend, not inferred from the fetch result.
   useEffect(() => {
@@ -533,9 +534,16 @@ function App() {
     check()
     return () => { cancelled = true }
   }, [interactiveSessionId, resumeCheckedFor])
+  // Health poll: 5 s while the server answers, BACKING OFF to 30 s once it is
+  // declared down. A dead backend used to be polled forever at 5-10 s by this
+  // loop and by the login page at the same time — pure noise in the proxy log
+  // and in the server's own access log, and the status bar already says it is
+  // down. The first failure still reacts at full speed.
   useEffect(() => {
     let intervalMs = 5000
     let timerId: ReturnType<typeof setTimeout> | null = null
+    const downDelay = () =>
+      Math.min(30000, 5000 * 2 ** Math.max(0, failCountRef.current - FAIL_THRESHOLD))
     const checkHealth = async () => {
       try {
         const resp = await fetch('/health', { signal: AbortSignal.timeout(60000) })
@@ -546,12 +554,12 @@ function App() {
         } else {
           failCountRef.current++
           if (failCountRef.current >= FAIL_THRESHOLD) setServerAlive(false)
-          intervalMs = 5000
+          intervalMs = failCountRef.current >= FAIL_THRESHOLD ? downDelay() : 5000
         }
       } catch {
         failCountRef.current++
         if (failCountRef.current >= FAIL_THRESHOLD) setServerAlive(false)
-        intervalMs = failCountRef.current >= FAIL_THRESHOLD ? 10000 : 5000
+        intervalMs = failCountRef.current >= FAIL_THRESHOLD ? downDelay() : 5000
       }
       timerId = setTimeout(checkHealth, intervalMs)
     }
@@ -608,6 +616,11 @@ function App() {
   // Unsegmented point count for the panel (user 2026-08-31: every segment
   // shows its count except Unsegmented). null = unknown  hidden.
   const [unsegmentedCount, setUnsegmentedCount] = useState<number | null>(null)
+  // Masks that are NOT objects: the matching resolved them into another
+  // instance (same space, or same label and contiguous) or they matched no
+  // cloud point. They are kept out of the list — but the panel says how many,
+  // so the fusion is visible instead of silent (USER 2026-09-17).
+  const [absorbedCount, setAbsorbedCount] = useState<number | null>(null)
   const refreshUnsegmentedCount = useCallback(async (sid: string | null) => {
     if (!sid) { setUnsegmentedCount(null); return }
     try {
@@ -615,6 +628,7 @@ function App() {
       if (r.ok) {
         const d = await r.json()
         setUnsegmentedCount(typeof d.unsegmented_points === 'number' ? d.unsegmented_points : null)
+        setAbsorbedCount(Array.isArray(d.absorbed) ? d.absorbed.length : null)
       }
     } catch { /* silent */ }
   }, [])
@@ -629,6 +643,7 @@ function App() {
       if (!r.ok) return
       const d = await r.json()
       if (typeof d.unsegmented_points === 'number') setUnsegmentedCount(d.unsegmented_points)
+      setAbsorbedCount(Array.isArray(d.absorbed) ? d.absorbed.length : null)
       if (Array.isArray(d.instances)) {
         setSegments(prev => {
           const vis = new Map(prev.map(s => [s.id, s.visible]))
@@ -1548,6 +1563,9 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [colorMode, setColorMode] = useState<ColorMode>('rgb')
   const [mvThreshold, setMvThreshold] = useState(2)
+  // hide the red band instead of painting it (kit "Votes"): the cloud
+  // as it would look without its single-witness mass. Nothing is deleted.
+  const [mvHide, setMvHide] = useState(false)
   const [selectedSegmentId, setSelectedSegmentId] = useState<number | null>(null)
   const [cursor, setCursor] = useState<{ x: number; y: number; z: number } | null>(null)
   const [readouts, setReadouts] = useState<ReadoutAnchor[]>([])
@@ -1560,8 +1578,8 @@ function App() {
   // witness colour mode -> viewer (the certification kit shares this state)
   useEffect(() => {
     const mode = colorMode === 'status' || colorMode === 'mv_votes' ? colorMode : 'rgb'
-    viewportRef.current?.setWitnessColorMode(mode, mvThreshold)
-  }, [colorMode, mvThreshold, pointCount])
+    viewportRef.current?.setWitnessColorMode(mode, mvThreshold, mvHide && hasWitness)
+  }, [colorMode, mvThreshold, mvHide, hasWitness, pointCount])
   useEffect(() => { if (colorMode === 'deviation' && !sabanaVisible) setColorMode('rgb') }, [sabanaVisible, colorMode])
   useEffect(() => { setColorMode('rgb'); setSelectedSegmentId(null); setReadouts([]) }, [activeSession])
   // geometry epoch for the status bar: certify state (re-read with the kit)
@@ -1749,9 +1767,9 @@ function App() {
       const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
       const d = await r.json().catch(() => ({}))
       setCorrectionReport(d.report || null)
-      if (r.ok && d.status === 'pending') setShowCorrectionModal(false)
+      if (r.ok && d.status === 'applied') setShowCorrectionModal(false)
       if (r.status === 409) report(t('correction.busy'), 'warn')
-      else if (r.ok && d.status === 'pending') report(kind === 'revisit' ? t('correction.closuresApplied', { n: d.report?.solutions?.length || 0 }) : t('correction.applied'), 'ok')
+      else if (r.ok && d.status === 'applied') report(kind === 'revisit' ? t('correction.closuresApplied', { n: d.report?.solutions?.length || 0 }) : t('correction.applied'), 'ok')
       else if (r.ok) report(t('correction.rejected', { reason: d.report?.rejection_reason || t('correction.seeReport') }), 'warn')
       else report(t('correction.failed', { detail: typeof d.detail === 'string' ? d.detail : '' }), 'err')
     } catch { report(t('correction.failed', { detail: '' }), 'err') }
@@ -1968,7 +1986,9 @@ function App() {
   const pipelineStages: ProgressStage[] = (pipelineRunning?.stages || []).filter(s => s.enabled).map(s => ({ id: s.id, label: s.label, status: s.status, pct: s.pct, detail: s.message }))
   const currentStage = pipelineRunning?.stages[pipelineRunning.current_stage_idx]
   const epoch: number | null = certifyState?.epoch ?? correctionState?.epoch ?? null
-  const pendingEpochs: number = certifyState?.pending_epochs ?? 0
+  // how many OTHER epochs the session can be shown in — not a pending
+  // verdict (USER 2026-09-16: nothing waits for approval any more)
+  const storedEpochs: number = Math.max((certifyState?.epochs?.length ?? 0) - 1, 0)
   const selectedSegment = segments.find(s => s.id === selectedSegmentId) ?? null
   const hasSabanaResult = !!sessions.find(s => s.id === activeSession)?.hasSabana
 
@@ -2020,7 +2040,7 @@ function App() {
                 onOpenScan={openScanFromTree} onSetReference={setReference} />
             )}
             {layout.state.leftTab === 'instances' && activeSession && (
-              <InstancesPanel segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} floorLevel={floorLevel}
+              <InstancesPanel segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
                 placedObjects={placedObjects} shapeMeshes={shapeMeshes} tsdfMeshes={tsdfMeshes} selectedSegmentId={selectedSegmentId}
                 canFuse={projectScans.filter((sc: any) => sc.kind !== 'fused').length >= 2}
                 onSelectSegment={id => { setSelectedSegmentId(id); if (id != null) layout.openInspector('properties') }}
@@ -2095,7 +2115,7 @@ function App() {
                 id: tab.key, closable: true, title: `${tab.date} ${tab.label}${sc?.is_reference ? ` (${t('header.reference')})` : ''}`,
                 icon: sc?.is_reference ? <Star className="stac-scantabs__ref" aria-hidden /> : tab.kind === 'fused' ? <Layers aria-hidden /> : undefined,
                 label: tab.kind === 'fused' ? tab.label : `${tab.date} ${tab.label}`,
-                badge: isActive && correctionState?.status === 'pending' ? <AlertTriangle className="stac-scantabs__warn" aria-label={t('correction.pendingShort')} /> : undefined,
+                badge: isActive && correctionState?.status === 'applied' ? <AlertTriangle className="stac-scantabs__warn" aria-label={t('correction.pendingShort')} /> : undefined,
               }
             })}
             value={activeScanTab} onChange={key => { const tab = scanTabs.find(x => x.key === key); if (tab && tab.key !== activeScanTab) activateScan(activeSession, tab) }} onClose={closeScanTab} />
@@ -2248,17 +2268,18 @@ function App() {
           <Inspector
             tabs={[
               { id: 'properties', label: t('inspector.properties') },
-              { id: 'acta', label: t('inspector.acta'), badge: pendingEpochs > 0 ? pendingEpochs : undefined },
+              { id: 'acta', label: t('inspector.acta'), badge: storedEpochs > 0 ? storedEpochs : undefined },
               { id: 'assistant', label: t('assistant.title') },
             ]}
             panels={{
               properties: <PropertiesPanel sessionId={activeSession} scanLabel={activeScanRow ? `${activeScanRow.date} ${activeScanRow.label}` : null} isReference={!!activeScanRow?.is_reference}
-                pointCount={pointCount} fps={fps} epoch={epoch} pendingEpochs={pendingEpochs} segments={segments} selected={selectedSegment} unsegmentedCount={unsegmentedCount} bimCount={bimModels.length} hasSabana={hasSabanaResult} />,
+                pointCount={pointCount} fps={fps} epoch={epoch} storedEpochs={storedEpochs} segments={segments} selected={selectedSegment} unsegmentedCount={unsegmentedCount} bimCount={bimModels.length} hasSabana={hasSabanaResult} />,
               acta: (
                 <div className="stac-inspector__stack">
                   {activeSession ? (
                     <CertifyKitPanel session={activeSession} token={token} viewport={viewportRef.current} onStatus={setStatusMessage} refreshKey={certifyRefresh}
-                      colorMode={colorMode} onColorMode={setColorMode} mvThreshold={mvThreshold} onMvThreshold={setMvThreshold} onStateLoaded={setCertifyState} />
+                      colorMode={colorMode} onColorMode={setColorMode} mvThreshold={mvThreshold} onMvThreshold={setMvThreshold}
+                      mvHide={mvHide} onMvHide={setMvHide} hasWitness={hasWitness} onStateLoaded={setCertifyState} />
                   ) : <EmptyState icon={<FileCheck2 aria-hidden />} title={t('properties.noSession')} description={t('welcome.pickSession')} />}
                   {sabanaFullMeta && activeSession && <BIMAnalysisPanel meta={sabanaFullMeta} sessionId={activeSession} />}
                 </div>
@@ -2271,7 +2292,7 @@ function App() {
       <div className="stac-app__status">
         <StatusBar serverAlive={serverAlive} connected={connected} sessionLabel={activeSession}
           scanLabel={activeScanRow ? `${activeScanRow.date} ${activeScanRow.label}` : null}
-          message={statusMessage} epoch={epoch} pendingEpochs={pendingEpochs} cursor={cursor}
+          message={statusMessage} epoch={epoch} storedEpochs={storedEpochs} cursor={cursor}
           job={pipelineActiveHere && currentStage ? currentStage.label : correctionRunning ? t('jobs.correction') : tsdfRunning ? t('jobs.meshing') : null}
           jobPct={pipelineActiveHere && currentStage ? currentStage.pct : correctionRunning ? correctionProgress?.pct ?? null : null}
           points={pointCount} fps={fps} consoleOpen={consoleOpen} onToggleConsole={() => setConsoleOpen(!consoleOpen)} />
@@ -2326,15 +2347,15 @@ function App() {
           } catch { report(t('library.addFailed'), 'err') }
         }} />
 
-      {(correctionState?.status === 'pending' || (pendingSession && pendingSession !== activeSession)) && (
+      {(correctionState?.status === 'applied' || (pendingSession && pendingSession !== activeSession)) && (
         <CorrectionVerdictDialog state={correctionState} session={activeSession} otherSession={pendingSession && pendingSession !== activeSession ? pendingSession : null}
-          busy={correctionRunning} onApprove={approveCorrection} onUndo={undoCorrection} />
+          busy={correctionRunning} epochs={correctionEpochs} onSelectEpoch={selectCorrectionEpoch} />
       )}
 
       <CorrectionDialog open={showCorrectionModal} onClose={() => setShowCorrectionModal(false)} state={correctionState} report={correctionReport} running={correctionRunning} progress={correctionProgress}
         segments={segments} selected={correctionSelected} onToggleSelected={id => setCorrectionSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}
         overrideScale={correctionOverrideScale} onOverrideScale={setCorrectionOverrideScale} ledger={correctionLedger} artifacts={correctionArtifacts}
-        onRun={() => runCorrectionOp('objects')} onFloor={() => runCorrectionOp('floor')} onRevisit={() => runCorrectionOp('revisit')} onApprove={approveCorrection} onUndo={undoCorrection} />
+        onRun={() => runCorrectionOp('objects')} onFloor={() => runCorrectionOp('floor')} onRevisit={() => runCorrectionOp('revisit')} epochs={correctionEpochs} onSelectEpoch={selectCorrectionEpoch} />
 
       <MeshingDialog open={showTsdfModal} onClose={() => setShowTsdfModal(false)} segments={segments} selected={tsdfSelected}
         onToggle={id => setTsdfSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}

@@ -146,11 +146,17 @@ def test_depth_epoch_moves_points_along_rays_and_keeps_provenance(tmp_path, trut
     assert side["version"] == 2 and set(side["k"]) == set(side["b"])
     f0 = str(int(truth.frame_numbers[6]))
     assert abs(side["k"][f0] * 0.95 - 1.0) < 0.01
-    # the ledger has the epoch, and undo restores the corrupted cloud exactly
-    from correction.run import run_verdict
-    run_verdict(out, "undone", "test")
+    # the ledger has the epoch, and SELECTING epoch 0 shows the corrupted cloud
+    # exactly — including the depth sidecar, which only exists from epoch 1 on
+    from correction.run import run_select
+    from correction.apply import available_epochs
+    run_select(out, 0, "test")
     _, restored = read_ply(out / "cleaned_cloud.ply")
     assert np.array_equal(restored["x"], before["x"]) and not (out / "depth_correction.json").exists()
+    # and the depth epoch is still there, sidecar included
+    run_select(out, 1, "test")
+    assert (out / "depth_correction.json").exists()
+    assert [e["epoch"] for e in available_epochs(out)] == [0, 1]
 
 
 def test_mask_contours_give_depth_observations_where_edges_are_sharp(tmp_path, truth):

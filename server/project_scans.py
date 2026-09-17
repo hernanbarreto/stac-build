@@ -2,7 +2,7 @@
 
 A project is ONE place holding N scans from different days
 (`projects/<slug>/scans/<date>/src_<source>/`). Each scan keeps its own
-artifacts untouched (cloud, Potree, segmentation, floor transform, approved
+artifacts untouched (cloud, Potree, segmentation, floor transform, applied
 chunk corrections). The PROJECT adds:
 
   * the scan list with labels,

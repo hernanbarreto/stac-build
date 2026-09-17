@@ -182,17 +182,23 @@ def corridor_between(i: int, j: int, view, cfg) -> Dict[str, Any]:
 # ── rule 1: cluster separation ───────────────────────────────────────────────
 
 def separation_rule(dist_m: float, budget: Dict[str, float], cfg) -> Dict[str, Any]:
-    c = _cfg(cfg)
+    """How far apart the two copies sit — and NOTHING is ever cut over it.
+
+    USER 2026-09-16: *"no debe cortar objetos, no debe existir"*. It used to
+    return "split" past `identity_reject_factor` (3.0) × the drift budget:
+    two copies farther apart than that were declared "not drift, SAM3 fused two
+    objects" and the instance was cut in two. Both numbers were invented, and on
+    pccr the 0.30 m floor won, so the rule that cut the floor into four pieces
+    and the ceiling into six was an invented multiple of an invented floor.
+
+    A floor is one floor however far apart two of its clusters sit. Geometry in
+    the wrong place is not a reason to cut anything: the mask audit says where
+    an instance's mass falls and the correction moves it.
+    """
     d, delta = float(dist_m), float(budget["delta_m"])
-    reject_at = float(c["identity_reject_factor"]) * delta
-    if d <= delta:
-        verdict = "loop"
-    elif d > reject_at:
-        verdict = "split"
-    else:
-        verdict = "ambiguous"
+    verdict = "loop" if d <= delta else "ambiguous"
     return {"rule": "separation", "distance_m": d, "delta_m": delta,
-            "reject_at_m": reject_at, "verdict": verdict, "passed": verdict != "split"}
+            "verdict": verdict, "passed": True}
 
 
 # ── rule 3: size and shape ───────────────────────────────────────────────────
@@ -355,7 +361,7 @@ def gate_instance_pair(i: int, j: int, view, cfg, pts_a: np.ndarray, pts_b: np.n
     (pts_a seen around frame i, pts_b around frame j). ``context_pass`` = number
     of neighbouring structural instances that already passed rules 1–3 (the
     caller computes it only when the label is repetitive and the walk is a
-    corridor). Returns verdict ∈ {loop, ambiguous, split, reject}. The
+    corridor). Returns verdict ∈ {loop, ambiguous, reject}. The
     separation judged is the OBSERVABLE one (plane offset / lateral axis
     offset for clusters sharing a plane / axis, centroid distance otherwise)."""
     c = _cfg(cfg)
@@ -367,7 +373,18 @@ def gate_instance_pair(i: int, j: int, view, cfg, pts_a: np.ndarray, pts_b: np.n
     # the frustum question for an instance pair is "could the other visit have
     # seen this object at all, displaced by anything we would still call
     # drift" — the reject bound of rule 1, not δ itself
-    fr = frustum_reciprocal(i, j, view, c, sep["reject_at_m"], budget["theta_deg"],
+    # The frustum asks "could the other visit have seen this object at all,
+    # displaced by anything we would still call drift": factor × δ(L).
+    #
+    # This factor is what `identity_reject_factor` used to be, and the rename is
+    # the point — there it decided to CUT an instance in two, here it only
+    # bounds a visibility question and nothing is ever split. Using the OBSERVED
+    # separation instead was tried and is worse than a chosen number: a rule
+    # that tolerates exactly what it measures always passes, and an object 30 m
+    # behind the camera stopped being rejected.
+    fr = frustum_reciprocal(i, j, view, c,
+                            float(c["frustum_tolerance_factor"]) * budget["delta_m"],
+                            budget["theta_deg"],
                             pts_i=np.asarray(pts_a), pts_j=np.asarray(pts_b))
     sz = size_rule(model_dims(pts_a, c["dims_pct_lo"], c["dims_pct_hi"]),
                    model_dims(pts_b, c["dims_pct_lo"], c["dims_pct_hi"]), c)
@@ -380,15 +397,18 @@ def gate_instance_pair(i: int, j: int, view, cfg, pts_a: np.ndarray, pts_b: np.n
     out = {"candidate": [int(i), int(j)], "label": label, "budget": budget,
            "rules": {"separation": sep, "frustum": fr, "size": sz, "corridor": cor,
                      "geometry": geom}}
-    if sep["verdict"] == "split":
-        out["verdict"] = "split"
-        out["reason"] = (f"copies {sep['distance_m']:.2f} m apart > "
-                         f"{sep['reject_at_m']:.2f} m: not drift — two objects fused")
-        return out
+    # NOTHING IS EVER SPLIT (USER 2026-09-16: *"no debe cortar objetos, no debe
+    # existir"*). The verdict used to be "split" — the instance was cut in two —
+    # when the copies sat farther apart than an invented multiple of an invented
+    # drift budget, or when their model dimensions differed. Both cut pccr's
+    # floor into four pieces and its ceiling into six, and a floor is one floor
+    # however far apart two of its clusters sit. Differing dimensions are
+    # DECLARED and the pair is left ambiguous: the mask audit says where the
+    # mass actually falls and the correction moves it.
     if not sz["passed"]:
-        out["verdict"] = "split"
+        out["verdict"] = "ambiguous"
         out["reason"] = (f"model dimensions differ {sz['worst_rel_diff']*100:.0f}% > "
-                         f"{sz['size_tol']*100:.0f}%: different objects")
+                         f"{sz['size_tol']*100:.0f}% — declared, nothing is cut")
         return out
     if not fr["passed"]:
         out["verdict"] = "reject"
@@ -409,8 +429,8 @@ def gate_instance_pair(i: int, j: int, view, cfg, pts_a: np.ndarray, pts_b: np.n
             return out
     if sep["verdict"] == "ambiguous":
         out["verdict"] = "ambiguous"
-        out["reason"] = (f"copies {sep['distance_m']:.2f} m apart, between δ "
-                         f"{sep['delta_m']:.2f} m and {sep['reject_at_m']:.2f} m — σ inflated")
+        out["reason"] = (f"copies {sep['distance_m']:.2f} m apart, beyond δ "
+                         f"{sep['delta_m']:.2f} m — σ inflated, nothing is cut")
         return out
     out["verdict"] = "loop"
     out["reason"] = "same object displaced by drift within budget"

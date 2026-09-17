@@ -1780,7 +1780,8 @@ def _dedupe_masks_per_frame(batch_masks, iou_threshold: float):
     return collapsed, n_collapsed
 
 
-def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float):
+def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
+                           record=None):
     """Consolidate instances of the SAME label whose points are contiguous.
 
     SAM3 returns one mask per visually separable region, so one physical
@@ -1803,6 +1804,9 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float):
     they survive as separate instances for the duplicate machinery.
 
     Mutates ``instances`` in place; returns the number of instances absorbed.
+    ``record``, when given, receives ``absorbed_instance_id -> keeper`` so the
+    session can say where every mask ended up instead of leaving it as a
+    zero-point ghost in the list (USER 2026-09-17).
     """
     if gap_m <= 0 or len(instances) < 2:
         return 0
@@ -1890,6 +1894,12 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float):
         for k in members[1:]:
             idx |= set(instances[k].get("globalIndices") or [])
             instances[k]["_absorbed_into"] = keep
+            if record is not None:
+                record[int(instances[k].get("instance_id", instances[k].get("id")))] = {
+                    "into": int(instances[keep].get("instance_id", instances[keep].get("id"))),
+                    "into_label": instances[keep].get("label"),
+                    "reason": "fragment",
+                }
             absorbed += 1
         merged = sorted(idx)
         instances[keep]["globalIndices"] = merged
@@ -2101,6 +2111,57 @@ def _mask_frame_lookup(output_dir: Path, mask_frames, cloud_frames):
           f"({len(translated)}/{len(cloud_sorted)} frames matched, identity would match "
           f"{identity_hits})")
     return translated
+
+
+def _mask_fates(metadata: dict, instances: list, absorbed_into: dict) -> dict:
+    """What happened to every mask in ``segmentation.json`` that is NOT one of
+    the instances the matching produced.
+
+    A mask leaves the object list for one of four reasons, and until now only
+    the first three were even written down — in the log, which nothing reads:
+
+      space_dedupe  another instance occupies the same space (they ARE one
+                    object under two names)
+      fragment      same label, contiguous points: one physical surface SAM3
+                    returned as many masks (pccr: 84 white_tiled_floor masks
+                    for one floor)
+      too_small     fewer points than ``min_instance_points``
+      unmatched     no point of the cloud carries that mask — nothing was
+                    fused, there is simply nothing there to show
+
+    The survivors are the objects; everything here is provenance. Keeping the
+    two apart is the whole point: the list endpoint must be able to tell a mask
+    that was ABSORBED from one that is merely waiting for the next matching
+    pass, and only the second belongs in the list.
+    """
+    survivors = {int(i.get("instance_id", i.get("id")))
+                 for i in instances if i.get("instance_id", i.get("id")) is not None}
+    fates = {}
+    for raw in (metadata.get("instances") or []):
+        iid = raw.get("instance_id", raw.get("id"))
+        if iid is None:
+            continue
+        iid = int(iid)
+        if iid in survivors:
+            continue
+        rec = absorbed_into.get(iid)
+        fates[iid] = dict(rec) if rec else {
+            "into": None, "into_label": None, "reason": "unmatched"}
+        fates[iid].setdefault("label", raw.get("label"))
+    # a keeper that was itself absorbed later (fragment chain) resolves to the
+    # instance that actually survived, so the UI never points at a ghost — and
+    # the label travels with it, or the row would name an object that is gone
+    labels = {int(i.get("instance_id", i.get("id"))): i.get("label")
+              for i in instances if i.get("instance_id", i.get("id")) is not None}
+    for iid, rec in fates.items():
+        seen = {iid}
+        into = rec.get("into")
+        while into is not None and into not in survivors and into not in seen:
+            seen.add(into)
+            into = (fates.get(into) or {}).get("into")
+        rec["into"] = into if into in survivors else None
+        rec["into_label"] = labels.get(rec["into"]) if rec["into"] is not None else None
+    return fates
 
 
 def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_obj_ids=None) -> dict:
@@ -2447,6 +2508,13 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     
     instances = []
     total_segmented = 0
+    # Where every mask of segmentation.json ended up. Without this the list
+    # endpoint cannot tell a mask that was FUSED into another object from one
+    # that is merely waiting for the next matching pass, so the fused ones sat
+    # in the segmentation list forever showing 0 points (USER 2026-09-17:
+    # "aparecen muchisimos en cero ... deben ser los que despues se
+    # fusionaron, pero quedaron en cero y siguen apareciendo en la lista").
+    absorbed_into: Dict[int, dict] = {}
     
     # ── AUDIT of the cloud against the masks (USER 2026-09-15) ──────────────
     # "no hay nada que cortar, es la auditoría de tu propia nube contra el
@@ -2467,6 +2535,15 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             print(f"[SegPipeline] ⚠️ mask audit unavailable: {e}")
             mask_filter = None
 
+    # Marked, never removed. A point landing off its own mask in any view that
+    # sees it is in the wrong PLACE; the certification may still move it there,
+    # and only what is still wrong afterwards has no correction left. USER
+    # 2026-09-15: "sé que ese punto debe estar, no es ruido, es un huérfano mal
+    # ubicado, si no lo puedo corregir, lamentablemente lo voy a tener que
+    # sacar" — the sacar is the SECOND pass, at the tail of the certification,
+    # reading this file.
+    out_of_place = np.zeros(n_pts, bool)
+
     for iid, group_obj_ids in instance_groups.items():
         # Merge all points assigned to any obj_id in this instance group
         all_matched = np.where(np.isin(point_obj_id, group_obj_ids))[0].astype(np.int64)
@@ -2475,7 +2552,10 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             continue
 
         if mask_filter is not None:
-            mask_filter.audit(int(iid), xyz[all_matched], frame_arr[all_matched])
+            _a = mask_filter.audit(int(iid), xyz[all_matched], frame_arr[all_matched])
+            _o = _a.get("out_of_place")
+            if _o is not None and len(_o) == len(all_matched):
+                out_of_place[all_matched[_o]] = True
 
         # ── Per-instance DBSCAN outlier removal ──
         # Skip if already filtered in a previous incremental run
@@ -2618,7 +2698,11 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     _vox = float(_dd.get("dedupe_voxel_m", 0.05))
     _dup_thr = float(_dd.get("dedupe_overlap", 0.5))
     _mutual = bool(_dd.get("dedupe_mutual", True))
-    _min_pts = int(_dd.get("min_instance_points", 300))
+    # NO MINIMUM (USER 2026-09-16: "no debe haber mínimo, mal"). It used to
+    # drop every instance under 300 points as a mask sliver. A distant pipe with
+    # 280 points is not a sliver, it is a pipe, and nothing downstream could
+    # tell it had ever existed. 0 = keep everything.
+    _min_pts = int(_dd.get("min_instance_points", 0))
     if not _merge_on:
         print("[SegPipeline]   Instance merging DISABLED "
               "(segmentation.merge_duplicates: false) — instances kept distinct")
@@ -2660,6 +2744,13 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                     instances[i]["total_points"] = len(merged_idx)
                     vox_sets[i] |= vox_sets[j]
                     absorbed.add(j)
+                    absorbed_into[int(instances[j].get("instance_id", instances[j]["id"]))] = {
+                        "into": int(instances[i].get("instance_id", instances[i]["id"])),
+                        "into_label": instances[i].get("label"),
+                        "reason": "space_dedupe",
+                        "share": round(float(share_j), 3),
+                        "share_other": round(float(share_i), 3),
+                    }
                     print(f"[SegPipeline]   🔗 Space-dedupe: '{instances[j]['label']}' "
                           f"#{instances[j]['id']} is the same object as "
                           f"'{instances[i]['label']}' #{instances[i]['id']} "
@@ -2685,7 +2776,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     if _frag_on and len(instances) > 1:
         try:
             pre = len(instances)
-            n_abs = _merge_label_fragments(instances, xyz_display, gap_m=_frag_gap)
+            n_abs = _merge_label_fragments(instances, xyz_display, gap_m=_frag_gap,
+                                           record=absorbed_into)
             if n_abs:
                 for inst in instances:
                     m = np.asarray(inst["globalIndices"], dtype=np.int64)
@@ -2704,6 +2796,10 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                                    for t in tiny[:10])
             print(f"[SegPipeline]   Dropped {len(tiny)} tiny instance(s) "
                   f"(<{_min_pts} pts): {_tiny_desc}{'...' if len(tiny) > 10 else ''}")
+            for t in tiny:
+                absorbed_into[int(t.get("instance_id", t["id"]))] = {
+                    "into": None, "into_label": None, "reason": "too_small",
+                    "points": int(t["total_points"]), "min_points": int(_min_pts)}
             instances = [inst for inst in instances if inst["total_points"] >= _min_pts]
 
     # ── Geometric completion — "pegar los puntos al lugar correcto" (USER
@@ -2758,6 +2854,19 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         print(f"[SegPipeline] instance store build failed (non-fatal): {e}")
 
     if mask_filter is not None:
+        # The MARKS first, in their own block. They are the first moment of the
+        # geometric cleanup cycle and the second moment cannot run without them,
+        # while the report is only a report — on 2026-09-15 the report raised on
+        # an ndarray, the shared try swallowed it as non-fatal, and pccr lost
+        # out_of_place.npy along with the whole second moment.
+        try:
+            np.save(output_dir / "out_of_place.npy", out_of_place)
+            print(f"[SegPipeline]    {int(out_of_place.sum()):,} point(s) marked out of "
+                  f"place (off their own mask in a view that sees them) — "
+                  f"kept, for the correction to move")
+        except Exception as e:  # noqa: BLE001
+            print(f"[SegPipeline] ⚠ out_of_place.npy NOT saved ({e}) — the "
+                  f"geometric cleanup will have nothing to re-measure")
         try:
             rep = mask_filter.report()
             try:    # every derived artifact carries the geometry epoch it was
@@ -2765,6 +2874,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                 stamp(rep, output_dir)
             except Exception:  # noqa: BLE001 — a session with no epoch machinery
                 pass
+            rep["points_out_of_place"] = int(out_of_place.sum())
             atomic_write_json(output_dir / "mask_audit.json", rep, indent=1)
             byv = rep.get("instances_by_verdict") or {}
             frac = rep.get("on_mask_fraction")
@@ -2793,8 +2903,20 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         "coverage": coverage,
         "instances": instances,
         "resolution": metadata.get("resolution", {}),
+        # The fate of every mask segmentation.json lists. A mask is either one
+        # of the instances above, or it is named here with where it went — it
+        # is never simply absent, because "absent" is what the list endpoint
+        # used to render as a zero-point row (USER 2026-09-17).
+        "absorbed": {str(k): v for k, v in _mask_fates(metadata, instances,
+                                                       absorbed_into).items()},
     }
-    
+    _fates = result["absorbed"]
+    if _fates:
+        from collections import Counter as _C
+        _why = _C(v["reason"] for v in _fates.values())
+        print(f"[SegPipeline]   {len(_fates)} mask(s) of {len(metadata.get('instances') or [])} "
+              f"are not separate objects: {dict(_why)} — recorded, not listed")
+
     print(f"[SegPipeline] ✅ {len(instances)} instances matched against {cloud_label}, "
           f"{total_segmented:,}/{n_pts:,} points ({coverage*100:.1f}% coverage)")
     

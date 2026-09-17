@@ -2,11 +2,12 @@
 
 Persists:
   * ``output/corrections.jsonl`` — one ``run`` record per correction attempt
-    that reached apply, plus ``verdict`` records (approved/undone). History is
-    NEVER deleted; an undone correction stays with its verdict.
+    that reached apply. History is NEVER deleted, and since 2026-09-16 there
+    is nothing to undo: every epoch of the session stays on disk and the user
+    selects which one is shown.
   * ``output/corrections/epoch_<N>.npz`` — the exact per-keyframe transform
     (R_kf, t_kf, k_kf, real frame numbers) for bit-faithful replay without
-    recomputing slerp, and for re-applying approved corrections to a
+    recomputing slerp, and for re-applying corrections to a
     re-reconstruction of the same scene (re-keyed by frame_global).
   * a mirror of the ledger in the instance store's ``scene_meta`` (the jsonl
     stays authoritative; the mirror is refreshed on every append so a store
@@ -88,9 +89,9 @@ def record_run(output_dir, *, correction_id: str, epoch_from: int,
                instance_ids: List[int], visits: list, observability: list,
                diagnosis: list, anchors: list, gates: list,
                overrides: Optional[dict], report_path: str,
-               verdict: str = "pending") -> dict:
-    if verdict not in ("pending", "rejected"):
-        raise RuntimeError(f"invalid initial verdict {verdict!r}")
+               verdict: str = "applied") -> dict:
+    if verdict not in ("applied", "rejected"):
+        raise RuntimeError(f"invalid verdict {verdict!r}")
     entry = {
         "type": "run", "correction_id": correction_id,
         "epoch_from": int(epoch_from), "epoch_to": int(epoch_to),
@@ -106,19 +107,13 @@ def record_run(output_dir, *, correction_id: str, epoch_from: int,
     return entry
 
 
-def record_verdict(output_dir, correction_id: str, verdict: str,
-                   operator: str) -> dict:
-    if verdict not in ("approved", "undone"):
-        raise RuntimeError(f"invalid verdict {verdict!r}")
-    entry = {"type": "verdict", "correction_id": correction_id,
-             "verdict": verdict, "operator": operator,
-             "at": time.strftime("%Y-%m-%d %H:%M:%S")}
-    _append(output_dir, entry)
-    return entry
-
-
 def ledger_view(output_dir) -> List[dict]:
-    """Run records with their final verdict folded in (for the UI history)."""
+    """Run records, with the verdict of a LEGACY session folded in.
+
+    Nothing writes verdicts any more (USER 2026-09-16: every epoch stays and is
+    selected, never approved or undone), but a session recorded before that
+    keeps its approved/undone rows and its history is never rewritten.
+    """
     entries = read_ledger(output_dir)
     verdicts = {e["correction_id"]: e for e in entries
                 if e.get("type") == "verdict"}
@@ -135,17 +130,18 @@ def ledger_view(output_dir) -> List[dict]:
     return view
 
 
-def pending_runs(output_dir) -> List[dict]:
-    """Every run still awaiting a verdict, oldest first (the certification
-    loop leaves one pending epoch per iteration — a chain)."""
-    return [row for row in ledger_view(output_dir) if row["verdict"] == "pending"]
+def applied_runs(output_dir) -> List[dict]:
+    """Every run whose epoch is on disk, oldest first (the certification loop
+    leaves one per applied iteration). "pending" is the legacy spelling of an
+    applied run in sessions written before 2026-09-16."""
+    return [row for row in ledger_view(output_dir)
+            if row["verdict"] in ("applied", "pending")]
 
 
-def pending_run(output_dir) -> Optional[dict]:
-    for row in reversed(ledger_view(output_dir)):
-        if row["verdict"] == "pending":
-            return row
-    return None
+def last_run(output_dir) -> Optional[dict]:
+    """The most recent applied run (what the UI shows as the current report)."""
+    runs = applied_runs(output_dir)
+    return runs[-1] if runs else None
 
 
 def save_epoch_npz(output_dir, epoch: int, R_kf: np.ndarray,
@@ -167,8 +163,8 @@ def load_epoch_npz(output_dir, epoch: int) -> dict:
     p = Path(output_dir) / EPOCH_NPZ_DIR / f"epoch_{int(epoch)}.npz"
     if not p.exists():
         raise RuntimeError(f"{p} does not exist — epoch {epoch} has no "
-                           f"persisted transform (was it undone and its "
-                           f"files removed by approve?)")
+                           f"persisted transform — it cannot be selected "
+                           f"and the store cannot follow it)")
     d = np.load(p)
     return {"R_kf": d["R_kf"], "t_kf": d["t_kf"], "k_kf": d["k_kf"],
             "b_kf": (d["b_kf"] if "b_kf" in d.files else np.zeros(len(d["k_kf"]))),

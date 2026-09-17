@@ -40,8 +40,45 @@ _PROMPT = (
     "'overhead fluorescent light fixture', 'yellow metro train car' — never a "
     "bare word like 'column' when a richer phrase describes it better. One "
     "phrase PER OBJECT TYPE (all wheels are one entry). Base everything ONLY "
-    "on what is visible. Output ONLY the JSON."
+    "on what is visible.\n"
+    # Every phrase here becomes ONE SAM3 text prompt and therefore ONE segment,
+    # so a compound phrase asks the segmenter for a mask spanning two different
+    # things and a second name for the same thing asks for a duplicate of it.
+    # USER 2026-09-15: "son objetos compuestos, eso no está bien".
+    "THREE RULES ABOUT THE LIST, and they matter more than richness:\n"
+    "1. ATOMIC objects only. Never a compound and never a phrase joining two "
+    "things with 'with', 'and', 'containing' or 'on': write 'desk' and "
+    "'monitor' as two entries, never 'desk with computer'; 'server rack' and "
+    "'glass door', never 'server rack with glass doors'. The modifiers may "
+    "describe the object itself (material, colour, shape) but never a "
+    "DIFFERENT object attached to it.\n"
+    "2. ONE name per object. Do not name the same physical thing twice under "
+    "different words: if you already wrote 'white tiled floor', do not also "
+    "write 'checkered floor tiles' or 'tiled floor with dark grout'. Pick the "
+    "one phrase that best describes it and use only that.\n"
+    # USER 2026-09-15: "ojo que Qwen no segmentó una puerta, la puerta
+    # principal por ejemplo, es fundamental; puertas, ventanas, paredes, pisos,
+    # techos, columnas, etc., eso es estructural, debe estar".
+    "3. THE ENVELOPE IS NOT BACKGROUND. The structure that encloses the space "
+    "is the most important thing in the image, not scenery to skip: every "
+    "floor, ceiling, wall, DOOR, window, opening, column, beam and stair you "
+    "can see must appear in the list. A door is an object even when it is "
+    "shut and flush with its wall.\n"
+    "Output ONLY the JSON."
 )
+
+# A phrase becomes a concept by its head noun, and a trailing prepositional
+# phrase moves that head onto the WRONG word: 'desk with monitor' keys on
+# 'monitor', 'floor with dark grout' on 'grout'. Rule 1 above forbids those
+# phrases, but a VLM disobeys sometimes and the cost is a duplicate segment —
+# pccr 2026-09-15 kept three names for one floor for exactly this reason. Cut
+# the phrase at the preposition and the real head comes back.
+# 'and' is deliberately NOT here: it usually joins ADJECTIVES ('white and gray
+# checkered floor tiles'), and cutting there would key the phrase on 'white'.
+_PREPOSITIONS = ("with", "without", "containing", "holding", "in", "on", "of",
+                 "for", "under", "over", "behind", "near", "beside", "atop",
+                 "against", "inside", "beneath", "above", "below", "to", "at",
+                 "from", "along", "around", "leaning", "attached")
 
 
 @dataclass
@@ -108,8 +145,19 @@ def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int 
 def _head_noun(phrase: str) -> str:
     """Concept key of a noun phrase = its (plural-stripped) head noun, e.g.
     'concrete support columns' -> 'column'. Used ONLY to merge near-duplicate
-    phrasings of the same concept across keyframes."""
+    phrasings of the same concept across keyframes.
+
+    A trailing prepositional phrase is cut first: the head of 'desk with
+    monitor' is 'desk', not 'monitor', and keying it on the attached object is
+    what let three phrasings of pccr's floor survive as three prompts.
+    """
     words = phrase.split()
+    if not words:
+        return phrase
+    for i, w in enumerate(words):
+        if i > 0 and w in _PREPOSITIONS:
+            words = words[:i]
+            break
     if not words:
         return phrase
     w = words[-1]

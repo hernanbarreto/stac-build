@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from reconstruction.certify.iterate import (Agreement, Candidate, GreedyLoop,   # noqa: E402
+                                            greedy_is_the_correction,
                                             _offset_m, _rate_order)
 
 
@@ -199,3 +200,52 @@ def test_a_missing_greedy_key_fails_at_load_naming_it():
     ce["greedy"].pop("max_epochs")
     with pytest.raises(LoopsConfigError, match="certify.greedy.max_epochs"):
         load_loops_config(raw_server_cfg(certify=ce))
+
+
+# ── the chain only silences the pose graph when it MOVED ─────────────────
+
+def test_a_chain_inside_the_sigma_floor_is_not_a_correction():
+    """pccr 2026-09-16, the regression this pins: certify accepted exactly one
+    greedy step — a ceiling light whose closure was 2 cm — and that chain
+    replaced a keyframe pose graph which had just measured the loop residual
+    down 94.50 m → 89.46 m over 23 edges at coverage 1.00. The iteration then
+    reported "no stage moved geometry (nothing to close)" and the session
+    stayed at epoch 0. A chain under the session's own repeatability floor is
+    noise, and noise does not get to overrule a measured closure."""
+    t = np.zeros((216, 3))
+    t[8] = [0.02, 0.0, 0.0]                        # the light's 2 cm
+    assert not greedy_is_the_correction(t, 0.0477)  # floor measured that session
+
+
+def test_a_chain_beyond_the_floor_is_the_correction():
+    t = np.zeros((216, 3))
+    t[100] = [0.0, 0.30, 0.0]
+    assert greedy_is_the_correction(t, 0.0477)
+
+
+def test_an_empty_chain_never_silences_the_graph():
+    assert not greedy_is_the_correction(None, 0.0477)
+    assert not greedy_is_the_correction(np.zeros((0, 3)), 0.0477)
+
+
+def test_the_floor_decides_at_the_boundary_both_ways():
+    """Same floor the graph is held to, same comparison: strictly greater."""
+    t = np.zeros((4, 3))
+    t[0] = [0.05, 0.0, 0.0]
+    assert not greedy_is_the_correction(t, 0.05)
+    assert greedy_is_the_correction(t, 0.0499)
+
+
+def test_a_rejected_trial_records_where_it_lost():
+    """A rejection used to leave no trace, so "the desk's own copies close from
+    59 cm to 1 cm and the count still rises" was unanswerable from the acta.
+    The per-candidate split is measured anyway — it must be written down."""
+    ag = Agreement(1000, 4000, {7: (100, 1000), 9: (400, 1000)}, {7: 0.59, 9: 0.1})
+    ag_t = Agreement(900, 4000, {7: (950, 1000), 9: (100, 1000)}, {7: 0.01, 9: 0.1})
+
+    class _L:
+        scored = []
+        _split = GreedyLoop._split
+    split = _L()._split(ag, ag_t)
+    assert split[7]["delta_off"] == -850      # the desk itself improved
+    assert split[9]["delta_off"] == +300      # another object paid for it

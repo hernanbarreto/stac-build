@@ -64,7 +64,7 @@ def test_rate_drift_is_recovered_along_the_whole_walk(tmp_path):
                         drift_t=(0.30, 0.0, 0.12), drift_model="rate")
     rep = run_objects(scene.output_dir, [1, 2], "test",
                       cfg=make_correction_cfg(**{"gates.mode": "advisory"}))
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     _, data = read_ply(scene.output_dir / "cleaned_cloud.ply")
     xyz = np.stack([data["x"], data["y"], data["z"]], 1).astype(np.float64)
     err = np.linalg.norm(xyz - scene.xyz_true, axis=1)

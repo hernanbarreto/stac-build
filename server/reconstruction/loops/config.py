@@ -92,9 +92,9 @@ class SpatialGateConfig:
                                     # know. Rejected before any frustum work
     drift_floor_m: float
     drift_rate_m_per_m: float
+    frustum_tolerance_factor: float  # factor × δ(L) the frustum rule tolerates
     drift_floor_deg: float
     drift_rate_deg_per_m: float
-    identity_reject_factor: float   # separation > factor × δ(L) → not drift: split
     frustum_margin_px: float
     occlusion_tol_m: float          # behind the frame's measured surface by more than δ + this → occluded
     min_depth_m: float
@@ -372,6 +372,9 @@ class WitnessConfig:
     rules: WitnessRules
     clean_statuses: Tuple[str, ...]         # voxel/SOR may only drop these
     mls_excluded_statuses: Tuple[str, ...]  # scene_consolidate never moves these
+    drop_statuses: Tuple[str, ...]          # REMOVED from the cloud at merge time, before
+                                            # the masks, the OBBs and every comparison
+                                            # (USER 2026-09-17); empty = nothing removed
     tracks: TracksConfig
     contours: ContourConfig
     depth: DepthStageConfig
@@ -392,7 +395,7 @@ class ObjectiveWeights:
 class CertifyGates:
     mode: str                       # advisory | veto — advisory: every gate is measured and
                                     # recorded as a warning in the acta, the epoch is APPLIED
-                                    # and Approve/Undo is the verdict (USER 2026-09-13);
+                                    # and the epoch selector is the verdict (USER 2026-09-13);
                                     # veto: a failed gate rejects the iteration (evaluation)
     max_seam_degradation_m: float
     max_loop_residual_increase_m: float
@@ -468,7 +471,7 @@ class CertifyConfig:
                                     # convergence: the iteration left the session worse than it
                                     # found it. Declared in the acta and in the attention list;
                                     # under gates.mode advisory the epoch is still applied and
-                                    # Approve/Undo remains the verdict (USER 2026-09-13)
+                                    # the epoch selector remains the verdict (USER 2026-09-13)
     auto_after_segmentation: bool
     objective: ObjectiveWeights
     gates: CertifyGates
@@ -536,9 +539,9 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         min_walk_m=_num(sp, "min_walk_m", S, lo=0),
         drift_floor_m=_num(sp, "drift_floor_m", S, lo=0),
         drift_rate_m_per_m=_num(sp, "drift_rate_m_per_m", S, lo=0),
+        frustum_tolerance_factor=_num(sp, "frustum_tolerance_factor", S, lo=1.0),
         drift_floor_deg=_num(sp, "drift_floor_deg", S, lo=0),
         drift_rate_deg_per_m=_num(sp, "drift_rate_deg_per_m", S, lo=0),
-        identity_reject_factor=_num(sp, "identity_reject_factor", S, lo=1.0),
         frustum_margin_px=_num(sp, "frustum_margin_px", S, lo=0),
         occlusion_tol_m=_num(sp, "occlusion_tol_m", S, lo=0),
         min_depth_m=_num(sp, "min_depth_m", S, lo=0),
@@ -819,7 +822,13 @@ def _parse_witness(wi: Dict[str, Any]) -> WitnessConfig:
         pair_scatter_clip_sigma=_num(de, "pair_scatter_clip_sigma", D, lo=1.0))
     clean = _str_list(wi, "clean_statuses", P)
     mls = _str_list(wi, "mls_excluded_statuses", P)
-    for name in clean + mls:
+    drop = _str_list(wi, "drop_statuses", P)
+    if set(drop) & set(clean):
+        raise LoopsConfigError(
+            f"witness.drop_statuses {sorted(set(drop) & set(clean))} also listed in "
+            f"clean_statuses: a status cannot both be removed and be what the net is "
+            f"allowed to thin")
+    for name in clean + mls + drop:
         if name not in STATUS_CODES:
             raise LoopsConfigError(f"witness status {name!r} unknown (one of {sorted(STATUS_CODES)})")
     return WitnessConfig(
@@ -829,7 +838,7 @@ def _parse_witness(wi: Dict[str, Any]) -> WitnessConfig:
         at_merge=_bool(wi, "at_merge", P),
         mask_erosion_px=_num(wi, "mask_erosion_px", P, lo=0, integer=True),
         occlusion_tol_rel=_num(wi, "occlusion_tol_rel", P, lo=0),
-        rules=rules, clean_statuses=clean, mls_excluded_statuses=mls,
+        rules=rules, clean_statuses=clean, mls_excluded_statuses=mls, drop_statuses=drop,
         tracks=tracks, contours=contours, depth=depth)
 
 

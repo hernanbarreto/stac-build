@@ -9,7 +9,7 @@ comes from the session's own records — no new measurement here.
     scale_break (orange), ambiguous candidates (amber);
   * duplicates: instances still written twice (duplicates.json) and the
     revisited places' offsets before / after the last iteration;
-  * epochs: the chain of pending epochs, which of them have a Potree octree
+  * epochs: every epoch on disk, which of them have a Potree octree
     for the before/after toggle.
 """
 
@@ -63,12 +63,6 @@ def kit_edges(output_dir) -> dict:
     # budget are APPLIED and declared (USER 2026-09-09: duplicates are always
     # corrected) — drawn accepted, with the demand vs budget as the reason
     kg = _load(output_dir / "keyframe_graph.json") or {}
-    for v in kg.get("over_budget", []):
-        _add(v.get("i"), v.get("j"), "accepted", "keyframe_graph",
-             reason=f"closure {v.get('correction_m', 0):.2f} m beyond the drift budget "
-                    f"{v.get('budget_m', 0):.2f} m (walk {v.get('walk_m', 0):.1f} m) — applied",
-             residual_m=v.get("correction_m"))
-    # the certification acta: every iteration's measured loops with their verdict
     acta = _load(output_dir / "certify_acta.json") or {}
     for it in acta.get("iterations", []):
         for m in it.get("loops", []):
@@ -120,18 +114,20 @@ def kit_edges(output_dir) -> dict:
 
 
 def epoch_layers(output_dir) -> dict:
-    """The current epoch and the pending previous epochs that carry a
-    Potree octree (the before/after toggle needs one per side)."""
-    from correction.epoch import current_epoch
-    from correction.apply import pending_prev_dirs
+    """Every epoch the session holds and which of them carry a Potree octree
+    (the before/after toggle needs one per side).
+
+    USER 2026-09-16: the epochs are SELECTED, so this is no longer a chain
+    below the live state — a stored epoch can sit above the one being shown,
+    and walking down contiguously from the current epoch hid exactly those.
+    """
+    from correction.apply import available_epochs
     output_dir = Path(output_dir)
-    cur = current_epoch(output_dir)
-    prev = []
-    for d in pending_prev_dirs(output_dir):
-        try:
-            ep = int(d.name.split("_")[-1])
-        except ValueError:
-            continue
-        prev.append({"epoch": ep, "potree": (d / "potree" / "metadata.json").exists()})
-    return {"epoch": cur, "current_potree": (output_dir / "potree" / "metadata.json").exists(),
-            "previous": prev}
+    epochs = available_epochs(output_dir)
+    live = next((e for e in epochs if e["live"]), None)
+    return {"epoch": live["epoch"] if live else 0,
+            "current_potree": (output_dir / "potree" / "metadata.json").exists(),
+            "epochs": epochs,
+            # the stored ones, newest first — what the before/after toggle offers
+            "previous": [{"epoch": e["epoch"], "potree": e["potree"]}
+                         for e in reversed(epochs) if not e["live"]]}

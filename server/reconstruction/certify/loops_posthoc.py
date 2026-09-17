@@ -173,7 +173,8 @@ def copy_scale_rows(session, candidates: List[dict], scfg, window_kf: int, log=p
 
 # ── instance copies → pose-graph edges (§4.4: SAM3 as loop detector) ────────
 
-def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print) -> List[dict]:
+def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print,
+                   sigma_floor_m: Optional[float] = None) -> List[dict]:
     """Pose-graph loop edges from the two copies of a SAM3 instance
     (USER 2026-09-13: the loop closures SAM3 detects are applied inside the
     pipeline, not only proposed). Every candidate the spatial gate judged
@@ -194,6 +195,9 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print) -> Lis
     instances = {int(x.get("instance_id", x.get("id"))): x
                  for x in (json.loads(res_path.read_text()).get("instances") or [])} if res_path.exists() else {}
     scfg, vcfg = cfg.certify.scale, cfg.certify.visit_loops
+    # the floor this SESSION measures (certify.repeatability), falling back to
+    # the configured one when nothing was measured — USER 2026-09-16
+    floor_m = float(sigma_floor_m) if sigma_floor_m is not None else float(vcfg.sigma_floor_m)
     sem = cfg.loops.semantic
     up = -session.poses[:, :3, 1].mean(0); up = up / (np.linalg.norm(up) + 1e-12)
     Pu = np.outer(up, up)
@@ -239,7 +243,7 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print) -> Lis
             mode, axis = "perp_axis", np.asarray(shape.axis, np.float64)
         else:
             mode, axis = "full", None
-        sigma_t = max(float(m["offset_after_m"]), float(vcfg.sigma_floor_m))
+        sigma_t = max(float(m["offset_after_m"]), floor_m)
         factors = {}
         if cand.get("verdict") == "ambiguous":
             # The ×ambiguous inflation answers ONE question: "are these two
@@ -399,6 +403,7 @@ def _refine_region(session, rg: dict, joint: dict, ccfg, rng) -> dict:
 
 
 def visit_edges(session, ccfg, vcfg, loop_sigma_rot_deg: float, log=print,
+                sigma_floor_m: Optional[float] = None,
                 revisits: Optional[dict] = None) -> List[dict]:
     """Pose-graph loop edges from the revisited places: one edge per
     REGION (a block both visits wrote, with its own closure and
@@ -453,7 +458,9 @@ def visit_edges(session, ccfg, vcfg, loop_sigma_rot_deg: float, log=print,
         X = np.eye(4); X[:3, :3] = np.asarray(cl["R"], np.float64); X[:3, 3] = np.asarray(cl["t_m"], np.float64)
         Ti, Tj = session.poses[i], session.poses[j]
         Z = np.linalg.inv(Ti) @ np.linalg.inv(X) @ Tj
-        sigma_t = max(float(cl.get("icp_rms_cm", 0.0)) / 100.0, float(vcfg.sigma_floor_m))
+        sigma_t = max(float(cl.get("icp_rms_cm", 0.0)) / 100.0,
+                      float(sigma_floor_m) if sigma_floor_m is not None
+                      else float(vcfg.sigma_floor_m))
         R_i = Ti[:3, :3]
         info_t = _info_from_projection(sigma_t, float(vcfg.unobserved_sigma_m), mode, axis, R_i)
         Pu = np.outer(up, up)

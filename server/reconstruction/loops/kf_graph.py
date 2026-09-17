@@ -6,7 +6,7 @@ reconstruction could not know yet — the SAM3 instance loops (§4.4), the
 geometric revisit closures, the structural constraints (§4.6) — and applies
 the result through the correction package's transactional machinery: an
 EPOCH (geometry_epoch.json), the ledger, ``corrections/epoch_<N>.npz``,
-Approve/Undo in the UI. Nothing here is silent: every gate lands in the
+the epoch selector in the UI. Nothing here is silent: every gate lands in the
 report with value / threshold / verdict; identity is a verdict too.
 
 Inputs: cleaned_cloud.ply (+ provenance), camera_poses.txt, camera_frames.txt,
@@ -432,30 +432,15 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
                 log(f"[drift] not applied: {why} "
                     f"(loop offset {fd['residual_before_m'] * 100:.0f} → "
                     f"{fd['residual_after_m'] * 100:.0f} cm)")
-    # Drift budget δ(L) = max(floor, rate·L) per loop: ADVISORY. USER
-    # 2026-09-09 ("siempre debe aplicarse la corrección de duplicados, no
-    # importa lo mucho que haya que corregir") and pccr 2026-09-13 21:00: the
-    # four measured start↔end closures (36–57 cm over an 18 m walk, Omega
-    # drifting 3 cm/m against the 1.3 cm/m the budget assumed) were vetoed
-    # one by one and the duplicates stayed. A closure is a MEASUREMENT (joint
-    # ICP of the two copies, per-DOF information); the budget is a prior on
-    # how much Omega usually drifts. When they disagree the measurement
-    # stands and the acta/attention list says by how much.
-    edge_res = pg.edge_residuals("loop")
+    # The drift budget was REMOVED 2026-09-16 (USER: *"sacarlo, no sirve para
+    # nada"*). It compared every closure against max(0.30 m, 0.013 × metres
+    # walked) and, when the closure was larger, wrote a warning and applied the
+    # closure anyway — it never rejected anything. The warning was false on top
+    # of that: the 0.013 m/m is presented as measured Omega drift but comes from
+    # ANOTHER scene, and pccr measured 3 cm/m, more than double. A closure is a
+    # MEASUREMENT (joint ICP of the two copies, per-DOF information); there is
+    # nothing for a prior to add to it.
     over_budget = []
-    for eid, e in loop_ids:
-        i, j = int(e["i"]), int(e["j"])
-        lo, hi = min(i, j), max(i, j)
-        L = float(np.linalg.norm(np.diff(centres[lo:hi + 1], axis=0), axis=1).sum())
-        delta = max(budget.drift_floor_m, budget.drift_rate_m_per_m * L)
-        need = max(float(np.linalg.norm(Xc[i][:3, 3])), float(np.linalg.norm(Xc[j][:3, 3])),
-                   float(edge_res.get(eid, {}).get("t_obs_m", 0.0)))
-        if need > delta:
-            over_budget.append({"i": i, "j": j, "correction_m": need, "budget_m": delta,
-                                "walk_m": L, "bridge": e.get("bridge", -1),
-                                "reason": "closure beyond the drift budget (§4.7) — applied, declared"})
-            log(f"[kf-graph] loop {i}<->{j}: {need * 100:.0f} cm > drift budget {delta * 100:.0f} cm "
-                f"(walk {L:.1f} m) — the measured closure stands, declared in the acta")
     planes_solved = {name: {"normal": pg.plane_of(node)[0].tolist(), "offset_m": pg.plane_of(node)[1]}
                      for name, node in plane_nodes.items()}
     after = pg.edge_residuals("loop")
@@ -482,7 +467,7 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     # duplicado detectado ... aunque haya que corregir 1000 km"): a measured
     # closure IS applied. The gates below (loop gain, held-out pairs,
     # authority) are MEASURED and declared — in ``advisory`` mode they are
-    # warnings in the report/acta and the visual Approve/Undo is the verdict;
+    # warnings in the report/acta and the visual epoch comparison is the verdict;
     # in ``veto`` mode (evaluation only) any failed gate keeps identity. The
     # pccr run of 2026-09-13 19:25 vetoed four real start↔end closures
     # (36–57 cm) and then went IDENTITY on held-out (2.7→8.6 cm) + authority
@@ -558,9 +543,11 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
         from correction import ledger, epoch as epoch_mod
         from correction.invalidate import update_instance_store
         assert_no_interrupted_swap(output_dir)
-        if ledger.pending_run(output_dir):
-            raise RuntimeError("a previous correction is still pending Approve/Undo — resolve it "
-                               "before applying the keyframe graph")
+        # No "resolve the pending verdict first" gate any more (USER
+        # 2026-09-16: every epoch stays on disk and is selected, never approved
+        # or undone). It blocked the keyframe graph forever on any session that
+        # had ever applied a correction — the graph simply stacks a new epoch
+        # on the one being shown. A half-finished swap is still fatal.
         ccfg = load_correction_config()
         cid = ledger.new_correction_id()
         R_kf = Xc[:, :3, :3].copy()
@@ -580,7 +567,7 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
                                     "sigma_m": float(e["sigma_m"])} for _, e in loop_ids],
                           gates=[{"name": k, **v} for k, v in report["gates"].items()],
                           overrides={}, report_path=str(rep_path.relative_to(output_dir)),
-                          verdict="pending")
+                          verdict="applied")
         report["correction_id"] = cid
         report["epoch"] = tx["epoch_to"]
     (output_dir / REPORT_JSON).write_text(json.dumps(report, indent=1, default=float))

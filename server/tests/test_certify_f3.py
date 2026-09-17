@@ -1,6 +1,6 @@
 """claude_stac.txt F3 — §12.8 the certification loop converges and stops,
-a rejected iteration leaves the previous epoch bit for bit and the chain of
-epochs undoes one by one; §12.7d known answer recovered within tolerance
+a rejected iteration leaves the previous epoch bit for bit and every epoch of
+the chain stays selectable bit for bit; §12.7d known answer within tolerance
 and an envelope monotone with the loop density; §12.7e determinism;
 §12.9 provenance survives every epoch and the epoch replay is exact;
 §10.12 the adversarial suite declares every failure with its cause."""
@@ -81,7 +81,7 @@ def _pose_errors(root, sess):
     return np.array([np.linalg.norm(P[g][:3, 3] - sess.poses[g][:3, 3]) for g in range(sess.n_kf)])
 
 
-def test_loop_converges_stops_and_the_chain_undoes_bit_for_bit(tmp_path, truth):
+def test_loop_converges_stops_and_every_epoch_is_selectable(tmp_path, truth):
     sess = truth
     D = _drift(sess)
     root = _write(tmp_path / "s", sess, D)
@@ -104,25 +104,32 @@ def test_loop_converges_stops_and_the_chain_undoes_bit_for_bit(tmp_path, truth):
     assert acta["metrics_final"]["objective"] < acta["metrics_initial"]["objective"]
     assert ("converged" in acta["stop_reason"]) or ("max_iters" in acta["stop_reason"]) \
         or ("nothing to close" in acta["stop_reason"])
-    # one epoch per applied iteration, all pending, a chain of previous epochs
+    # one epoch per applied iteration, every one of them on disk and selectable
     n_applied = sum(1 for it in its if it["verdict"] == "applied")
     assert acta["epoch_final"] == n_applied
-    from correction.apply import pending_prev_dirs
+    from correction.apply import available_epochs
     from correction import ledger
-    assert len(pending_prev_dirs(out)) == n_applied
-    assert len(ledger.pending_runs(out)) == n_applied
+    assert [e["epoch"] for e in available_epochs(out)] == list(range(n_applied + 1))
+    assert len(ledger.applied_runs(out)) == n_applied
+    snap_top = session_files_snapshot(out)
     for q in (out / "quality").glob("report_epoch_*.json"):
         rep = json.loads(q.read_text())
         assert rep["metrics"]["witnesses"]["status_counts"] and "seam_residual" in rep["metrics"]
-    # undo pops the chain one epoch at a time; the last undo is the original, bit for bit
-    from correction.run import run_verdict
+    # selecting the original gives it back bit for bit, and the whole chain of
+    # certified epochs is still there to go back up to (USER 2026-09-16)
+    from correction.run import run_select
     from correction.epoch import current_epoch
-    for _ in range(n_applied):
-        run_verdict(out, "undone", "test")
+    run_select(out, 0, "test")
     assert current_epoch(out) == 0
     snap_back = session_files_snapshot(out)
     for rel in GEOMETRY_FILES:
         assert snap_back.get(rel) == snap0.get(rel), f"{rel} not restored bit for bit"
+    assert [e["epoch"] for e in available_epochs(out)] == list(range(n_applied + 1))
+    run_select(out, n_applied, "test")
+    assert current_epoch(out) == n_applied
+    for rel in GEOMETRY_FILES:
+        assert session_files_snapshot(out).get(rel) == snap_top.get(rel), \
+            f"{rel} not restored bit for bit going back up"
 
 
 def _liar_depth_stage(monkeypatch):
@@ -170,7 +177,8 @@ def test_advisory_mode_failed_gate_is_applied_and_declared(tmp_path, truth, monk
     """Production (certify.gates.mode = advisory, USER 2026-09-13: the cloud
     the UI receives is the corrected one): the same lying depth stage fails
     a gate, the gate is DECLARED (acta warning, kit ⚠, attention list) and the
-    iteration is still applied as a pending epoch — Approve/Undo judges."""
+    iteration is still APPLIED as a new epoch — the user judges it by
+    selecting between the epochs, which all stay on disk (USER 2026-09-16)."""
     sess = truth
     root = _write(tmp_path / "s", sess, _drift(sess))
     out = root / "output"
@@ -191,18 +199,24 @@ def test_advisory_mode_failed_gate_is_applied_and_declared(tmp_path, truth, monk
     assert snap2.get("cleaned_cloud.ply") != snap1.get("cleaned_cloud.ply")
     from correction import ledger
     rows = ledger.ledger_view(out)
-    assert rows[-1]["kind"] == "certify" and rows[-1]["verdict"] == "pending"
+    assert rows[-1]["kind"] == "certify" and rows[-1]["verdict"] == "applied"
     from reconstruction.certify.attention import attention_list
     att = attention_list(out)
     warn = [a for a in att["items"] if a["kind"] == "gate_warning"]
     assert warn and all("advisory" in a["text"] for a in warn)
-    # the kit still undoes the declared epoch
-    from correction.run import run_verdict
+    # the kit can still SHOW the previous epoch, bit for bit — and the declared
+    # one stays on disk instead of being destroyed by the comparison
+    from correction.run import run_select
+    from correction.apply import available_epochs
     from correction.epoch import current_epoch
-    run_verdict(out, "undone", "test")
+    run_select(out, acta1["epoch_final"], "test")
     assert current_epoch(out) == acta1["epoch_final"]
     for rel in GEOMETRY_FILES:
         assert session_files_snapshot(out).get(rel) == snap1.get(rel), rel
+    assert acta2["epoch_final"] in [e["epoch"] for e in available_epochs(out)]
+    run_select(out, acta2["epoch_final"], "test")
+    for rel in GEOMETRY_FILES:
+        assert session_files_snapshot(out).get(rel) == snap2.get(rel), rel
 
 
 def test_instance_copies_become_pose_edges_whatever_the_class(tmp_path, truth):

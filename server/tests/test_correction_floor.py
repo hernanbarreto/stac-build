@@ -32,7 +32,7 @@ def test_plane_keeps_ramp_slope_and_removes_drift(tmp_path):
                         drift_yaw_deg=0.0, drift_t=(0.0, 0.10, 0.0))
     rep = run_floor(scene.output_dir, "plane", None, "test",
                     cfg=make_correction_cfg())
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     x, y = _floor_xy(scene)
     got = _fit_slope(x, y)
     # the reference plane is fitted on the DRIFTED floor (the y-drift ramps
@@ -50,7 +50,7 @@ def test_level_flattens_by_design(tmp_path):
     scene = build_scene(tmp_path, floor="ramp", floor_slope=slope)
     rep = run_floor(scene.output_dir, "level", None, "test",
                     cfg=make_correction_cfg(**{"gates.max_step_mm": 120.0}))
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     x, y = _floor_xy(scene)
     got = _fit_slope(x, y)
     assert abs(got) < 0.01, f"level must flatten: slope {got}"
@@ -63,7 +63,7 @@ def test_step_is_preserved_by_demotion(tmp_path):
                         drift_t=(0.0, 0.0, 0.0))
     rep = run_floor(scene.output_dir, "plane", None, "test",
                     cfg=make_correction_cfg())
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     # platform keyframes demoted as a REAL level change
     per_kf = rep["solutions"][0]["per_kf_report"]
     demoted_step = [e for e in per_kf

@@ -24,7 +24,7 @@ def _run_depth_scene(tmp_path):
                         write_omega_npz=True)
     rep = run_objects(scene.output_dir, [1, 2], "test",
                       cfg=make_correction_cfg())
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     return scene, rep, c
 
 
@@ -101,9 +101,9 @@ def test_epoch_stamping(tmp_path):
     assert current_epoch(scene.output_dir) == 1
     meta = stamp({"method": "x"}, scene.output_dir)
     assert meta["geometry_epoch"] == 1
-    assert meta["human_directed_corrections"] == 0   # pending, not approved
-    from correction.run import run_verdict
-    run_verdict(scene.output_dir, "approved", "test")
+    # every applied correction counts — there is no approving any more
+    # (USER 2026-09-16: the epochs are selected, not approved)
+    assert meta["human_directed_corrections"] == 1
     meta2 = stamp({"method": "x"}, scene.output_dir)
     assert meta2["human_directed_corrections"] == 1
     # an artifact stamped before the correction reads as stale

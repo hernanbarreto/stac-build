@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { AlertTriangle, CheckCircle2, ChevronUp, Undo2, Wrench } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronUp, Wrench } from 'lucide-react'
 import { Dialog } from './ui/Dialog'
 import { Button } from './ui/Button'
 import { Table, type Column } from './ui/Table'
@@ -10,15 +10,18 @@ import { useFmt, useT } from '../i18n'
 /** Pending-correction verdict (USER 2026-09-06: centred, like the confirm
  *  dialog, but WITHOUT a blocking backdrop — the user must orbit the cloud
  *  to judge the correction). A collapse button shrinks it to a pill at the
- *  top so the centre of the viewport is free; click reopens. Approve makes
- *  the corrected cloud THE cloud; Undo restores the previous one. */
-export default function CorrectionVerdictDialog({ state, session, otherSession, busy, onApprove, onUndo }: {
+ *  top so the centre of the viewport is free; click reopens.
+ *
+ *  USER 2026-09-16: there is no approving and no undoing — every epoch of the
+ *  session stays on disk and this only picks which one is on screen ("todas
+ *  viven, solo se seleccionan y la que se selecciona se muestra"). */
+export default function CorrectionVerdictDialog({ state, session, otherSession, busy, epochs, onSelectEpoch }: {
   state: any
   session: string | null
   otherSession: string | null
   busy: boolean
-  onApprove: () => void
-  onUndo: () => void
+  epochs?: { epoch: number; live: boolean; potree: boolean }[]
+  onSelectEpoch: (epoch: number) => void
 }) {
   const t = useT()
   const fmt = useFmt()
@@ -53,8 +56,18 @@ export default function CorrectionVerdictDialog({ state, session, otherSession, 
       footer={
         <>
           <Button variant="ghost" size="sm" icon={<ChevronUp aria-hidden />} onClick={() => setCollapsed(true)} title={t('verdict.collapseHint')}>{t('verdict.collapse')}</Button>
-          <Button icon={<Undo2 aria-hidden />} disabled={busy} onClick={onUndo}>{t('common.undo')}</Button>
-          <Button variant="primary" icon={<CheckCircle2 aria-hidden />} disabled={busy} onClick={onApprove} data-autofocus>{t('common.approve')}</Button>
+          {(epochs || []).map(e => (
+            <Button
+              key={e.epoch}
+              variant={e.live ? 'primary' : undefined}
+              icon={e.live ? <CheckCircle2 aria-hidden /> : undefined}
+              disabled={busy || e.live}
+              onClick={() => onSelectEpoch(e.epoch)}
+              data-autofocus={e.live || undefined}
+            >
+              {e.epoch === 0 ? t('correction.epochOriginal') : t('correction.epochN', { epoch: e.epoch })}
+            </Button>
+          ))}
         </>
       }>
       <Stack gap={3}>

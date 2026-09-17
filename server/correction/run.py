@@ -1,7 +1,7 @@
 """Orchestration of a correction run — the flow of prompt §5.3:
 
 mark → evidence → observability → diagnose → solve → gates → distribute →
-apply(tx) → invalidate/regenerate → report → pending → approve | undo.
+apply(tx) → invalidate/regenerate → report → the epoch is selectable.
 
 Every stage's structured output lands in the report, ALSO when the run is
 rejected: the user always receives the numbers and the exact reason. A gate
@@ -12,20 +12,20 @@ transactional apply.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.spatial import cKDTree
 
 from correction import diagnose, distribute, floor as floor_mod, gates, \
     ledger, observability as obs_mod, solve
-from correction.apply import (approve_swap, assert_no_interrupted_swap,
-                              prev_dir_for, stage_transaction,
-                              swap_transaction, undo_swap)
+from correction.apply import (assert_no_interrupted_swap, available_epochs,
+                              stage_transaction, swap_transaction)
 from correction.config import CorrectionConfig, load_correction_config
-from correction.epoch import current_epoch
+from correction.epoch import current_epoch, epoch_path
 from correction.evidence import extract_evidence
 from correction.invalidate import update_instance_store
 from correction.report import build_report, save_report
@@ -37,12 +37,14 @@ def _noop_progress(pct: float, msg: str) -> None:
 
 
 def _check_ready(output_dir: Path) -> None:
+    """A half-finished swap is the only thing that blocks a new correction.
+
+    It used to refuse while a previous epoch was "pending approval". There is
+    no approval any more (USER 2026-09-16: *"todas viven, solo se seleccionan y
+    la que se selecciona se muestra"*): every epoch stays on disk and a new
+    correction simply runs on top of whichever one is being shown.
+    """
     assert_no_interrupted_swap(output_dir)
-    if prev_dir_for(output_dir) is not None:
-        raise RuntimeError(
-            "a correction is pending approval — approve or undo it before "
-            "running a new one (the next correction runs ON TOP of the "
-            "approved cloud, never beside a pending one)")
 
 
 def _group_displaced(evidence) -> List[dict]:
@@ -90,7 +92,7 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
                 progress: Callable = _noop_progress,
                 cfg: Optional[CorrectionConfig] = None) -> dict:
     """The object-marked correction. Returns the full report
-    (status: pending | rejected)."""
+    (status: applied | rejected)."""
     t0 = time.time()
     output_dir = Path(output_dir)
     if cfg is None:
@@ -419,7 +421,7 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
         # USER 2026-09-09: "no debes rechazar correcciones por umbrales
         # arbitrarios ... siempre debe aplicarse" — gates are ADVISORY: the
         # numbers go to the report as warnings, the correction is applied
-        # and the visual Approve/Undo is the verdict.
+        # and the epoch selector is where the user compares them.
         for g in failed:
             g["advisory"] = True
             warnings.append(f"{g['name']}: {g['detail']}")
@@ -444,7 +446,7 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
                        for s in solutions]
     report = build_report(
         correction_id=correction_id, kind="objects", operator=operator,
-        status="pending", instance_ids=instance_ids, visits=visit_summaries,
+        status="applied", instance_ids=instance_ids, visits=visit_summaries,
         observability=obs_reports, diagnosis=diag_reports,
         solutions=solutions_clean, distribution=dist_report,
         gates=gate_results, overrides=overrides, epoch_from=epoch_from,
@@ -466,8 +468,8 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
                  for s in solutions_clean],
         gates=gate_results, overrides=overrides,
         report_path=str(path.relative_to(output_dir)))
-    _p(100, f"✅ correction applied (epoch {tx_info['epoch_to']}) — awaiting "
-            f"your verdict: Approve or Undo")
+    _p(100, f"✅ correction applied (epoch {tx_info['epoch_to']}) — select "
+            f"any epoch to compare")
     return report
 
 
@@ -576,7 +578,7 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
 
     report = build_report(
         correction_id=correction_id, kind="floor", operator=operator,
-        status="pending", instance_ids=None, visits=None,
+        status="applied", instance_ids=None, visits=None,
         observability=None,
         diagnosis=[{"model": model, "model_params": sol["model_params"]}],
         solutions=[{"anchors": sol["anchors"],
@@ -598,7 +600,7 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
         anchors=sol["anchors"], gates=gate_results, overrides=None,
         report_path=str(path.relative_to(output_dir)))
     _p(100, f"✅ floor alignment applied (epoch {tx_info['epoch_to']}, "
-            f"model {model}) — awaiting your verdict: Approve or Undo")
+            f"model {model}) — select any epoch to compare")
     return report
 
 
@@ -610,7 +612,7 @@ def run_revisit(output_dir, operator: str, log: Callable = print,
     revisits from poses + intrinsics + provenance (no segmentation, no
     descriptors), solve ONE joint closure per pair of visits, distribute it
     over the chunk pose graph, apply transactionally — same gates (advisory),
-    same ledger, same Approve/Undo."""
+    same ledger, same epoch selector."""
     from correction import posegraph, revisit as revisit_mod
     from correction.units import load_chunk_plan
     t0 = time.time()
@@ -707,7 +709,7 @@ def run_revisit(output_dir, operator: str, log: Callable = print,
                       for c in closures]
     report = build_report(
         correction_id=correction_id, kind="revisit", operator=operator,
-        status="pending", instance_ids=None, visits=None,
+        status="applied", instance_ids=None, visits=None,
         observability=None, diagnosis=None, solutions=closures_clean,
         distribution=dist_report, gates=gate_results, overrides=None,
         epoch_from=epoch_from, epoch_to=tx_info["epoch_to"],
@@ -728,65 +730,87 @@ def run_revisit(output_dir, operator: str, log: Callable = print,
         gates=gate_results, overrides=None,
         report_path=str(path.relative_to(output_dir)))
     _p(100, f"✅ revisit closure applied (epoch {tx_info['epoch_to']}, "
-            f"{len(closures)} closure(s)) — awaiting your verdict: Approve "
-            f"or Undo")
+            f"{len(closures)} closure(s)) — select any epoch to compare")
     return report
 
 
-def run_verdict(output_dir, verdict: str, operator: str,
-                log: Callable = print) -> dict:
-    """Approve or undo the pending correction. Undo restores the previous
-    epoch exactly; approve removes it. Both land in the ledger."""
+def run_select(output_dir, epoch: int, operator: str = "user",
+               log: Callable = print) -> dict:
+    """Show the session in one of its epochs. Nothing is approved or undone.
+
+    USER 2026-09-16: *"todas viven, solo se seleccionan y la que se selecciona
+    se muestra"*. Approve used to delete every previous epoch and Undo the
+    current one, so a session could only hold two states and choosing wrong
+    destroyed the other. Every epoch now stays on disk and this only decides
+    which one is on screen.
+
+    The geometry is swapped by `select_epoch`; the instance store has to follow
+    it, which means composing the transforms of the epochs BETWEEN the two —
+    inverted while walking UP to their common ancestor, forward while walking
+    DOWN to the chosen one. Ancestry, not arithmetic: a correction run on top
+    of an older epoch branches the history, so cur and epoch are not always on
+    the same line (`epoch_path`).
+    """
+    from correction.apply import select_epoch
     output_dir = Path(output_dir)
-    pend = ledger.pending_run(output_dir)
-    if pend is None:
-        raise RuntimeError(f"no pending correction to {verdict}")
-    if verdict == "approved":
-        manifest = approve_swap(output_dir, log=log)
-        # a certification chain: every pending epoch below the top is
-        # approved with it (their files are gone; the ledger says so)
-        for older in ledger.pending_runs(output_dir):
-            if older["correction_id"] != pend["correction_id"]:
-                ledger.record_verdict(output_dir, older["correction_id"],
-                                      verdict, operator)
-    elif verdict == "undone":
-        # capture the undone epoch's exact transform BEFORE the swap discards
-        # it — the store's findings must be inverse-warped back
-        undone = ledger.load_epoch_npz(output_dir, current_epoch(output_dir))
-        manifest = undo_swap(output_dir, log=log)
-        R_inv = np.transpose(undone["R_kf"], (0, 2, 1))
-        t_inv = -np.einsum('nij,nj->ni', R_inv, undone["t_kf"])
-        k_inv = 1.0 / undone["k_kf"]
-        # inverse of z' = k z + b is z = z'/k − b/k
-        b_inv = -np.asarray(undone["b_kf"]) / undone["k_kf"]
+    epoch = int(epoch)
+    cur = current_epoch(output_dir)
+    if epoch == cur:
+        return {"ok": True, "epoch": cur, "changed": False,
+                "available": [e["epoch"] for e in available_epochs(output_dir)]}
+
+    # (epoch, inverse) for every edge to travel — each transform is stored and
+    # exact, so the store lands on the geometry, never near it
+    moves = []
+    for e, inverse in epoch_path(output_dir, cur, epoch):
         try:
-            update_instance_store(output_dir, R_inv, t_inv, k_inv,
-                                  undone["frames"], log=log, b_kf=b_inv)
+            moves.append((ledger.load_epoch_npz(output_dir, e), inverse))
+        except RuntimeError as err:
+            raise RuntimeError(
+                f"epoch {e} has no persisted transform, so the instance store "
+                f"cannot follow the geometry to epoch {epoch}: {err}")
+
+    res = select_epoch(output_dir, epoch, log=log)
+
+    for mv, inverse in moves:
+        R, t, k, b, frames = (mv["R_kf"], mv["t_kf"], mv["k_kf"],
+                              np.asarray(mv["b_kf"]), mv["frames"])
+        if inverse:
+            R = np.transpose(R, (0, 2, 1))
+            t = -np.einsum('nij,nj->ni', R, mv["t_kf"])
+            k = 1.0 / mv["k_kf"]
+            b = -b / mv["k_kf"]        # inverse of z' = k z + b is z = z'/k − b/k
+        try:
+            update_instance_store(output_dir, R, t, k, frames, log=log, b_kf=b)
         except RuntimeError as e:
-            log(f"  instance-store refresh after undo failed (geometry is "
-                f"restored; store stays stale until the next rebuild): {e}")
-    else:
-        raise RuntimeError(f"invalid verdict {verdict!r}")
-    entry = ledger.record_verdict(output_dir, pend["correction_id"],
-                                  verdict, operator)
-    return {"ok": True, "correction_id": pend["correction_id"],
-            "verdict": verdict, "epoch": current_epoch(output_dir),
-            "manifest": manifest, "ledger": entry}
+            log(f"  instance-store refresh failed (the geometry IS at epoch "
+                f"{epoch}; the store stays stale until the next rebuild): {e}")
+            break
+    res["ok"] = True
+    res["available"] = [e["epoch"] for e in available_epochs(output_dir)]
+    log(f"[correction] session shown at epoch {epoch} "
+        f"(available: {res['available']})")
+    return res
 
 
 def state(output_dir) -> dict:
-    """Current correction state for the UI."""
+    """Current correction state for the UI.
+
+    There is no verdict to wait for any more (USER 2026-09-16): the state is
+    simply which epoch is on screen and which ones the session holds, so the
+    UI can offer them. ``status`` is "applied" while the session has more than
+    the original reconstruction — that is when there is something to compare.
+    """
     output_dir = Path(output_dir)
-    pend = ledger.pending_run(output_dir)
+    epochs = available_epochs(output_dir)
+    last = ledger.last_run(output_dir)
     st = {"epoch": current_epoch(output_dir),
-          "status": "pending" if (pend is not None
-                                  and prev_dir_for(output_dir) is not None)
-          else "none"}
-    if pend is not None:
-        st["correction_id"] = pend["correction_id"]
-        st["kind"] = pend["kind"]
-        rp = output_dir / pend.get("report", "")
+          "epochs": epochs,
+          "status": "applied" if len(epochs) > 1 else "none"}
+    if last is not None:
+        st["correction_id"] = last["correction_id"]
+        st["kind"] = last["kind"]
+        rp = output_dir / last.get("report", "")
         if rp.is_file():
-            import json as _json
-            st["report"] = _json.loads(rp.read_text())
+            st["report"] = json.loads(rp.read_text())
     return st

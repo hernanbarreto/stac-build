@@ -23,6 +23,9 @@ interface InstancesPanelProps {
   segments: SegmentInstance[]
   unsegmentedVisible: boolean
   unsegmentedCount: number | null
+  /** masks the matching resolved into another object (or that matched no
+   *  point): not listed, but counted, so the fusion is never silent */
+  absorbedCount: number | null
   floorLevel: FloorLevelState
   placedObjects: PlacedObject[]
   shapeMeshes: MeshListItem[]
@@ -89,7 +92,10 @@ export function InstancesPanel(p: InstancesPanelProps) {
   }
 
   return (
-    <Panel title={t('instances.title')} subtitle={t.plural('instances.count', p.segments.length)}
+    <Panel title={t('instances.title')}
+      subtitle={p.absorbedCount
+        ? `${t.plural('instances.count', p.segments.length)} · ${t('instances.absorbed', { n: fmt.integer(p.absorbedCount) })}`
+        : t.plural('instances.count', p.segments.length)}
       actions={p.segments.length > 0 ? (
         <>
           <IconButton size="sm" label={t('instances.showAll')} icon={<CheckSquare aria-hidden />} onClick={p.onSelectAll} />

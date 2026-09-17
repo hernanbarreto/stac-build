@@ -29,7 +29,7 @@ def test_advisory_mode_applies_with_warnings(tmp_path):
     rep = run_objects(scene.output_dir, [1, 2], "test",
                       cfg=make_correction_cfg(**{"gates.mode": "advisory",
                                                  "gates.max_step_mm": 5.0}))
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     assert any("continuity" in w for w in rep["warnings"]), rep["warnings"]
     g = next(g for g in rep["gates"] if g["name"] == "continuity")
     assert g["advisory"] is True and g["passed"] is False
@@ -41,7 +41,7 @@ def test_floor_alignment_advisory_applies(tmp_path):
     rep = run_floor(scene.output_dir, "level", None, "test",
                     cfg=make_correction_cfg(**{"gates.mode": "advisory",
                                                "gates.max_step_mm": 1.0}))
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     assert rep["warnings"]
 
 
@@ -65,5 +65,5 @@ def test_single_visit_object_is_ignored_not_rejected(tmp_path):
     res_p.write_text(json.dumps(res))
     rep = run_objects(scene.output_dir, [1, 4], "test",
                       cfg=make_correction_cfg(**{"gates.mode": "advisory"}))
-    assert rep["status"] == "pending", rep.get("rejection_reason")
+    assert rep["status"] == "applied", rep.get("rejection_reason")
     assert any("seen only once" in w for w in rep["warnings"]), rep["warnings"]

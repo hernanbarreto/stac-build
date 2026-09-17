@@ -19,7 +19,7 @@ corrected one).
         gates(m, prev): MEASURED against the previous state. certify.gates.mode
                   advisory (production) → a failed gate is a ⚠ warning in the
                   acta / the kit, the iteration is APPLIED and the visual
-                  Approve/Undo is the verdict; veto (evaluation) → the
+                  the epoch selector is the verdict; veto (evaluation) → the
                   iteration is rejected, the previous epoch stays bit-for-bit
         → ONE epoch (transaction + swap + ledger, kind "certify") holding the
           composed per-keyframe transform (depth k·z+b along the ray, then
@@ -27,8 +27,8 @@ corrected one).
         improvement(m, prev) < eps → stop
 
 Order inside an iteration: scale → poses → depth (poses on an open scale do
-not close). Every epoch stays pending (Approve/Undo in the kit — several
-pending epochs form a chain; Undo pops the last one). The acta
+not close). Every epoch stays on disk and is SELECTABLE in the kit (USER
+2026-09-16: nothing is approved and nothing is undone). The acta
 (output/certify_acta.json) lists the iterations, their metrics, gates and
 where and why the loop stopped.
 """
@@ -180,11 +180,27 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     t_start = time.time()
     assert_no_interrupted_swap(output_dir)
     n_iters = int(max_iters if max_iters is not None else ccert.max_iters)
+    # σ FLOOR — measured, not derived from another constant (USER 2026-09-16).
+    # No edge may claim more precision than this session can repeat; the session
+    # measures exactly that (two copies of a shared frame, the seam residual, or
+    # — in a single-chunk run — the frames of one chunk agreeing with each
+    # other). The old `max_residual_m / 4` gave 2.5 cm while pccr's own
+    # repeatability was 4.77 cm: the edges were claiming certainty the pipeline
+    # could not reproduce.
+    from reconstruction.certify.repeatability import session_repeatability
+    rep_floor = session_repeatability(output_dir,
+                                      fallback_m=ccert.visit_loops.sigma_floor_m,
+                                      log=log)
+    sigma_floor_m = float(rep_floor["sigma_floor_m"])
     gdict = {"window_kf": cfg.loops.min_gap_keyframes // 2,
-             "sigma_floor_m": cfg.loop.max_residual_m / 4.0,
+             "sigma_floor_m": sigma_floor_m,
              "ambiguous_sigma_factor": cfg.loop.ambiguous_sigma_factor}
     acta = {"version": 1, "started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "operator": operator,
             "max_iters": n_iters, "eps": ccert.eps, "loop_density": float(loop_density),
+            # what this session can repeat — every σ in the graph is floored by
+            # it, and the acta says whether it was MEASURED or declared
+            "sigma_floor": {"m": sigma_floor_m, **{k: v for k, v in rep_floor.items()
+                                                   if k != "sigma_floor_m"}},
             "iterations": [], "stopped_at": None, "stop_reason": None, "regressed": False,
             "provenance": "tool_measured"}
 
@@ -200,8 +216,10 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         (§4.4 — the detector's loop|ambiguous candidates, any class but
         dynamic) and the geometric revisit regions, subsampled alike."""
         _log = (lambda m: None) if quiet else log
-        inst = instance_edges(sess, cands_now, ccfg, cfg, log=_log) if cands_now else []
-        vis = visit_edges(sess, ccfg, ccert.visit_loops, cfg.graph.loop_sigma_rot_deg, log=_log)
+        inst = (instance_edges(sess, cands_now, ccfg, cfg, log=_log,
+                               sigma_floor_m=sigma_floor_m) if cands_now else [])
+        vis = visit_edges(sess, ccfg, ccert.visit_loops, cfg.graph.loop_sigma_rot_deg,
+                          log=_log, sigma_floor_m=sigma_floor_m)
         return _subsample(inst, loop_density) + _subsample(vis, loop_density)
 
     base = base_frames if base_frames is not None else load_session_frames(output_dir, log)
@@ -284,29 +302,45 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         if prep.get("verdict") == "APPLY" and prep.get("xi"):
             X = np.stack([se3_exp(np.asarray(x)) for x in prep["xi"]])
             # a correction inside the closures' own σ floor is noise, not a move
-            pose_moved = bool(np.max(np.linalg.norm(X[:, :3, 3], axis=1)) > float(ccert.visit_loops.sigma_floor_m))
-        if R_g is not None:
+            pose_moved = bool(np.max(np.linalg.norm(X[:, :3, 3], axis=1)) > sigma_floor_m)
+        # "It falls through to the graph when it accepts nothing" — and a chain
+        # whose every step lands inside the σ floor this session MEASURES is
+        # nothing: it is the repeatability of the reconstruction, not a move.
+        # pccr 2026-09-16: the chain held one step (a ceiling light, closure
+        # |t| 2 cm < 4.77 cm floor); it replaced a graph that had just measured
+        # the loop residual down 94.50 → 89.46 m over 23 edges at coverage
+        # 1.00, and the iteration reported "no stage moved geometry". The same
+        # floor already decides for the graph two lines above; it decides here.
+        from reconstruction.certify.iterate import greedy_is_the_correction
+        greedy_moved = R_g is not None and greedy_is_the_correction(t_g, sigma_floor_m)
+        if greedy_moved:
             # the greedy chain is the pose correction: every step of it was
             # accepted because MORE points landed in their masks, which the
             # graph's own judges cannot see
             R2, t2 = R_g, t_g
-            pose_moved = bool(np.max(np.linalg.norm(t2, axis=1))
-                              > float(ccert.visit_loops.sigma_floor_m))
-            prep = dict(prep, verdict="APPLY" if pose_moved else "IDENTITY",
-                        source="greedy", greedy=greedy_rep)
+            pose_moved = True
+            prep = dict(prep, verdict="APPLY", source="greedy", greedy=greedy_rep)
             log(f"[certify] pose correction from the greedy chain: "
                 f"{greedy_rep['epochs']} step(s) over {greedy_rep['trials']} trial(s), "
                 f"observations off their mask "
                 f"{greedy_rep['points_off_mask_before']:,} → "
                 f"{greedy_rep['points_off_mask_after']:,}")
         elif pose_moved:
+            if R_g is not None:
+                log(f"[certify] the greedy chain ({greedy_rep['epochs']} step(s)) stays "
+                    f"inside the σ floor this session measures "
+                    f"({sigma_floor_m * 100:.2f} cm) — no evidence of a move; the "
+                    f"keyframe pose graph is the correction")
+                prep = dict(prep, greedy=greedy_rep,
+                            greedy_below_floor_m=float(np.max(np.linalg.norm(t_g, axis=1))))
             R2, t2 = X[:, :3, :3].copy(), X[:, :3, 3].copy()
         else:
             R2, t2 = I3.copy(), np.zeros((N, 3))
             if prep.get("verdict") == "APPLY":
                 prep = dict(prep, verdict="IDENTITY",
-                            identity_reason=f"pose correction within the closure σ floor "
-                                            f"({ccert.visit_loops.sigma_floor_m} m)")
+                            identity_reason=f"pose correction within the σ floor this "
+                                            f"session measures ({sigma_floor_m:.4f} m, "
+                                            f"{rep_floor['source']})")
                 log(f"[certify] pose graph: correction within the σ floor — identity")
         session_p = transformed_session(session_s, R2, t2, np.ones(N)) if pose_moved else session_s
         # 4) depth by correspondences on the closed poses
@@ -361,7 +395,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         # An objective that GREW is a regression, never convergence: the iteration
         # left the session worse than it found it. Declared here so the acta, the
         # attention list and the kit all carry it; advisory mode still applies the
-        # epoch and leaves Approve/Undo as the verdict (USER 2026-09-13).
+        # epoch and leaves the epoch selector as the verdict (USER 2026-09-13).
         regressed = improvement < -ccert.regression_eps
         if regressed:
             gate_warnings.append(
@@ -450,7 +484,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
             acta["stop_reason"] = (
                 f"iteration {it} REGRESSED: objective {rec['objective_prev']:.4f} → "
                 f"{rec['objective']:.4f} ({improvement * 100:+.1f}%) — the epoch was applied "
-                f"under gates.mode advisory; Approve/Undo is the verdict")
+                f"under gates.mode advisory; the epoch selector is the verdict")
             break
         if improvement < ccert.eps:
             acta["stopped_at"] = it
@@ -459,6 +493,23 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     else:
         acta["stopped_at"] = n_iters - 1
         acta["stop_reason"] = f"max_iters {n_iters} reached"
+    # ── the second moment of the geometric cleanup cycle ──────────────────
+    # The mask audit MARKED, at match time, every point landing off its own
+    # mask in a view that saw it, and removed nothing: the certification still
+    # had a chance to move it where it belongs. That chance is now spent. What
+    # lands inside today was a drift orphan and is cured; what still lands
+    # outside has no correction left to wait for, and leaves the cloud (USER
+    # 2026-09-15: "si no lo puedo corregir, lamentablemente lo voy a tener que
+    # sacar"). No gate of its own: the marks only exist when the audit ran.
+    try:
+        from segmentation.geometric_cleanup import geometric_cleanup
+        acta["geometric_cleanup"] = geometric_cleanup(
+            output_dir, session_dir, apply=apply, log=log)
+    except Exception as e:  # noqa: BLE001 — declared, never silent
+        log(f"[certify] ⚠ geometric cleanup failed ({e}) — the cloud keeps the "
+            f"points the audit marked out of place")
+        acta["geometric_cleanup"] = {"applied": False, "reason": str(e)}
+
     acta["metrics_final"] = prev if prev is not None else acta.get("metrics_initial")
     acta["epoch_final"] = current_epoch(output_dir)
     acta["elapsed_s"] = round(time.time() - t_start, 1)
