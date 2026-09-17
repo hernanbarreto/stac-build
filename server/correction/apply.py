@@ -285,6 +285,13 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     if getattr(cfg.apply, "reconsolidate", False):
         _p(68, "tx: re-consolidating the warped cloud...")
         try:
+            # The MLS asks for ~7.7 GB in one allocation and this runs inside a
+            # certification, which started vLLM itself to classify the loops.
+            # pccr 2026-09-17: both consolidations of the day died with 859 MB
+            # free. The loop classification is long done by now, and any later
+            # consumer restarts the service.
+            from workers.base import stop_semantic_service
+            stop_semantic_service(stage="epoch re-consolidation", log=log)
             from reconstruction.surface_fit.consolidate import scene_consolidate
             rep = scene_consolidate(tx, artifacts_dir=output_dir)
             if rep:

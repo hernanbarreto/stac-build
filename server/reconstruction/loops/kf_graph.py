@@ -273,6 +273,44 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
                         f"{r * 100:.1f} cm/m against a consensus of {med * 100:.1f} cm/m "
                         f"over the same stretch ({dev:.1f} MAD, {len(peers)} peer(s)) — "
                         f"σ ×{f:.1f}, kept and declared")
+                    continue
+                # ── and agreement is evidence too ──────────────────────────
+                # The test above only ever PUNISHED. A pair that agrees with
+                # the consensus got nothing, so every instance loop kept the
+                # ×ambiguous inflation the reprojection could not lift, and
+                # with σ of the order of the measurement the graph weighed all
+                # of them as worthless. pccr 2026-09-17: seven independent
+                # objects — two desks, a chair, a monitor, two glass doors and
+                # the floor — each measured the SAME 57-63 cm over the same
+                # stretch of the walk, the graph closed 0%, and the user could
+                # still see the duplicate in the cloud.
+                #
+                # That coincidence IS the answer to the question ×ambiguous
+                # asks. "Are these two copies the same object?" is exactly what
+                # a drift rate matching what OTHER objects measured over the
+                # same stretch corroborates: two different objects would not
+                # agree, and neither would a copy that is not a copy. The
+                # inflation is a statement about a pair nothing could vouch
+                # for, and these peers vouch for it.
+                #
+                # The class factor is NOT touched, for the same reason the
+                # reprojection exemption does not touch it: "is it the same
+                # object?" and "did the object move between the visits?" are
+                # different questions (CLAUDE.md, USER 2026-09-14).
+                amb = float((e.get("sigma_factors") or {}).get("ambiguous", 1.0))
+                if amb > 1.0:
+                    e["sigma_m"] = float(e.get("sigma_m", sigma_odo_m)) / amb
+                    if e.get("info_t") is not None:
+                        e["info_t"] = np.asarray(e["info_t"], np.float64) * (amb * amb)
+                    consensus.append({"i": int(e["i"]), "j": int(e["j"]),
+                                      "rate_m_per_m": r, "consensus_m_per_m": med,
+                                      "deviation_mad": round(dev, 2),
+                                      "sigma_factor": round(1.0 / amb, 3),
+                                      "n_peers": len(peers), "corroborated": True})
+                    log(f"[kf-graph] loop {int(e['i'])}<->{int(e['j'])}: drift "
+                        f"{r * 100:.1f} cm/m AGREES with the consensus {med * 100:.1f} cm/m "
+                        f"({dev:.1f} MAD, {len(peers)} peer(s)) — the peers measured the "
+                        f"identity, ×ambiguous {amb:g} lifted (σ {float(e['sigma_m']) * 100:.1f} cm)")
             drift_consensus = consensus
         else:
             log("[kf-graph] odometry σ: no loop measures a drift rate — "

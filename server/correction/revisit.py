@@ -207,6 +207,13 @@ def build_regions(session: CorrectionSession, hits: Dict[Tuple[int, int], np.nda
         observers = np.concatenate([i_of[m], j_of[m]])
         visits = visits_from_keyframes(observers, cfg.revisit.min_gap_kf)
         if len(visits) < 2:
+            # The block is in view CONTINUOUSLY along the walk, so there is no
+            # temporal gap to split it at — but every pair that put a hit in it
+            # is, by construction of ``covisibility``, two keyframes at least
+            # min_gap_kf apart, which is the detector asserting a revisit. The
+            # pairs are the measurement; the flat observer list threw it away.
+            visits = _visits_from_pairs(i_of[m], j_of[m])
+        if len(visits) < 2:
             continue
         v0 = vox[m][0]
         vol_lo = lo + v0 * cell - cfg.evidence.obb_margin_m
@@ -225,6 +232,44 @@ def build_regions(session: CorrectionSession, hits: Dict[Tuple[int, int], np.nda
 
 
 # ── region measurement ───────────────────────────────────────────────────
+
+def _visits_from_pairs(i_of: np.ndarray, j_of: np.ndarray) -> List[List[int]]:
+    """The two visits a block's OWN pairs assert, when no temporal gap exists.
+
+    ``covisibility`` only keeps keyframe pairs at least ``min_gap_kf`` apart,
+    so every contributing pair states that its two ends belong to DIFFERENT
+    visits. Splitting the flat list of observers by temporal gap discards that:
+    a surface seen continuously along the walk — a long wall, the ceiling, the
+    floor — has no gap anywhere and collapses to ONE visit, so the detector's
+    pair filter says "revisit" and its visit split says "one visit" about the
+    same block. pccr 2026-09-17: both blocks died exactly here, with 2,424 and
+    565 hits against a 300 minimum, and the session reported 0 revisit regions
+    — which is what left the pose graph with no clean edge to close.
+
+    The cut is measured, not chosen: it is the keyframe boundary that the most
+    contributing pairs straddle. No threshold is introduced.
+    """
+    a = np.minimum(i_of, j_of).astype(np.int64)
+    b = np.maximum(i_of, j_of).astype(np.int64)
+    pairs = np.unique(np.stack([a, b], axis=1), axis=0)     # the distinct pairs
+    if not len(pairs):
+        return []
+    pa, pb = pairs[:, 0], pairs[:, 1]
+    obs = np.unique(np.concatenate([pa, pb]))
+    if len(obs) < 2:
+        return []
+    # a cut sits between two consecutive observers; it is the first keyframe of
+    # the LATE side. A pair (a, b) straddles cut c when a < c <= b.
+    cuts = obs[1:]
+    straddle = ((pa[None, :] < cuts[:, None]) & (cuts[:, None] <= pb[None, :])).sum(axis=1)
+    best = int(np.argmax(straddle))
+    if straddle[best] <= 0:
+        return []
+    c = int(cuts[best])
+    early = [int(k) for k in obs if k < c]
+    late = [int(k) for k in obs if k >= c]
+    return [early, late] if early and late else []
+
 
 def _region_points(session, kfs: List[int], vol_lo, vol_hi,
                    rng, n_max: int) -> np.ndarray:

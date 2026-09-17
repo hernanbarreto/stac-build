@@ -358,8 +358,14 @@ class GreedyLoop:
                 return None
             proj = {"mode": mode,
                     ("normal" if mode == "normal" else "axis"): np.asarray(axis, float)}
+            # X is the FULL rigid fit between the two copies, rotation included,
+            # so its t is not a displacement — the projection has to be told
+            # which point the motion is about (this copy's own centroid), or a
+            # 60 cm move projects as a 14 m translation (pccr 2026-09-17).
+            idx = c.idx_a[c.sample_a] if len(c.sample_a) else c.idx_a
+            about = (self.state.xyz[idx].mean(0) if len(idx) else None)
             try:
-                R, t = project_solution(R, t, proj)
+                R, t = project_solution(R, t, proj, about=about)
             except RuntimeError:
                 return None
         span = c.edge.get("later_kfs") or [c.i, c.i]

@@ -126,19 +126,25 @@ def gpu_free_gb() -> Optional[float]:
         return None
 
 
-def stop_semantic_service(pipe: "WorkerPipe", stage: str = "") -> None:
+def stop_semantic_service(pipe: Optional["WorkerPipe"] = None, stage: str = "",
+                          log=None) -> None:
     """EXCLUSIVE GPU for a heavy stage: stop the vLLM semantic service (its ~40 GB
     resident VRAM starves Omega single passes and long SAM3 sessions). Any later
     consumer restarts it (semantic.service.ensure_service — the VLM worker AND the
     spatial-Q&A route), so this is a stage-scoped handover, not a shutdown. No-op
-    when vLLM isn't running."""
+    when vLLM isn't running.
+
+    ``log`` is for callers that are not workers and have no pipe — the epoch
+    transaction's re-consolidation is one (correction/apply.py).
+    """
     import subprocess
+    _say = (pipe.send_log if pipe is not None else (log or (lambda m, **k: None)))
     try:
         if subprocess.run(["pgrep", "-f", "vllm serve"],
                           capture_output=True).returncode != 0:
             return
-        pipe.send_log(f"[gpu] stopping vLLM semantic service — {stage or 'this stage'} "
-                      f"gets the whole GPU (it auto-restarts on next VLM use)")
+        _say(f"[gpu] stopping vLLM semantic service — {stage or 'this stage'} "
+             f"gets the whole GPU (it auto-restarts on next VLM use)")
         subprocess.run(["pkill", "-f", "vllm serve"], capture_output=True)
         for _ in range(30):
             time.sleep(2)
@@ -147,7 +153,6 @@ def stop_semantic_service(pipe: "WorkerPipe", stage: str = "") -> None:
                 break
         free = gpu_free_gb()
         if free is not None:
-            pipe.send_log(f"[gpu] vLLM stopped — {free:.0f} GB VRAM free")
+            _say(f"[gpu] vLLM stopped — {free:.0f} GB VRAM free")
     except Exception as e:  # noqa: BLE001
-        pipe.send_log(f"[gpu] could not stop vLLM ({e}) — continuing with shared GPU",
-                      level="warning")
+        _say(f"[gpu] could not stop vLLM ({e}) — continuing with shared GPU")

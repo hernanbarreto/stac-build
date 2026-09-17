@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from multiprocessing.connection import Connection
 
-from workers.base import WorkerPipe, run_worker_safe
+from workers.base import WorkerPipe, run_worker_safe, stop_semantic_service
 
 
 def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
@@ -53,6 +53,17 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
         pipe.send_progress(0, f"Cleaning {len(chunks)} clouds (voxel={voxel_size*1000:.1f}mm)",
                            stage="cloudcompy")
+
+        # EXCLUSIVE GPU, like the reconstruction and SAM3 stages. This one was
+        # missing it and the cost was silent: the witnesses, the voxel+SOR net
+        # and above all the normal-aware MLS all run on the card, and the MLS
+        # asks for 7.7 GB in one allocation. pccr 2026-09-17 ran with vLLM
+        # resident (23.6 GB) and the consolidation died with 859 MB free —
+        # "scene consolidation failed (non-fatal, cloud kept raw)", so the
+        # session shipped a cloud that still carried its onion layers and
+        # nothing in the run said the quality had dropped. The VLM stage that
+        # follows brings vLLM back up on its own.
+        stop_semantic_service(pipe, stage="cloud cleaning")
 
         # USER ORDER 2026-09-04 ("porta ahora cloudcompy a gpu"): the cleaning
         # stage runs on GPU by default (torch grid-hash voxel+SOR, minutes vs

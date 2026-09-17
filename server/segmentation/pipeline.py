@@ -3132,6 +3132,26 @@ def rebuild_instance_store(output_dir) -> bool:
 # (DINOv3 fase-4 refine DELETED by USER ORDER 2026-09-05)
 
 
+def _merge_absorbed(prev, new, instances) -> dict:
+    """The absorbed record across an incremental merge, keyed by instance_id.
+
+    Newer entries win; a mask that is now one of ``instances`` is not absorbed
+    by anything and is removed from the record.
+    """
+    out = {}
+    for src in (prev or {}, new or {}):
+        for k, v in src.items():
+            try:
+                out[str(int(k))] = dict(v)
+            except (TypeError, ValueError):
+                continue
+    for inst in instances:
+        iid = inst.get("instance_id", inst.get("id"))
+        if iid is not None:
+            out.pop(str(int(iid)), None)
+    return out
+
+
 def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
     """
     Run mask→cloud matching and save to segmentation_result.json.
@@ -3207,6 +3227,15 @@ def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
             "coverage": coverage,
             "instances": merged,
             "resolution": result.get("resolution", {}),
+            # The fate of every mask that is NOT one of the instances above.
+            # This dict is rebuilt key by key, so anything the matcher returns
+            # has to be carried here explicitly or it never reaches disk — the
+            # record printed to the log but vanished from the file on pccr
+            # 2026-09-17. In incremental mode the previous record is kept and
+            # the new one layered on top, then any mask that is now a live
+            # instance is dropped: a survivor is never a fate.
+            "absorbed": _merge_absorbed(prev_result.get("absorbed"),
+                                        result.get("absorbed"), merged),
         }
         
         atomic_write_json(result_path, merged_result)

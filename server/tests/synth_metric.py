@@ -725,6 +725,9 @@ def witness_cfg(**over) -> dict:
          "rules": {"verified_min_mv_votes": 2, "verified_max_mask_conflicts": 1, "conflict_min": 1},
          "clean_statuses": ["verified", "unobserved"],
          "mls_excluded_statuses": ["mask_conflict", "single_witness"],
+         # the synthetic default keeps every point: the tests that exercise the
+         # drop say so explicitly (tests/test_witness_drop.py)
+         "drop_statuses": [],
          "tracks": {"enabled": True, "python": "python", "win": 24, "stride": 12, "loop_window": 8,
                     "min_views": 2, "reproj_max_px": 2.0, "sigma_rel": 0.01, "min_obs_per_frame": 20,
                     "depth_edge_tol_rel": 0.05},

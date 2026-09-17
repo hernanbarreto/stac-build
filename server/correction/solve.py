@@ -107,13 +107,32 @@ def expand_depth(points: np.ndarray, cam_centers: np.ndarray,
     return cam_centers + (points - cam_centers) * k
 
 
-def project_solution(R: np.ndarray, t: np.ndarray,
-                     projection: dict) -> Tuple[np.ndarray, np.ndarray]:
+def project_solution(R: np.ndarray, t: np.ndarray, projection: dict,
+                     about: Optional[np.ndarray] = None
+                     ) -> Tuple[np.ndarray, np.ndarray]:
     """Remove the DOF the evidence does not observe (observability.py spec).
-    Unobservable components go to identity — never a guessed value."""
+    Unobservable components go to identity — never a guessed value.
+
+    What gets projected is the MOTION the solution produces, and ``t`` is that
+    motion only while ``R`` is the identity — which is the case for every
+    caller that runs its ICP with ``rotation=full``: the projection then only
+    ever sees a pure translation. Pass ``about`` (a point of the object) when
+    ``R`` can carry a real rotation: ``t`` is then the translation component of
+    a rotation about a DISTANT origin and is not a displacement at all.
+
+    pccr 2026-09-17, desk#201: a closure of 165.3° that moves its copy 60 cm
+    onto its twin has |t| = 10.1 m. Projecting that raw t perpendicular to the
+    desk's axis asked for a 14 m translation, the greedy loop measured "its own
+    copies 60.7 → 823.5 cm", and with 19 edges like it the pose graph closed 0%
+    and the session stayed at epoch 0. Projecting the displacement about the
+    object's own centroid asks for 17 cm.
+    """
     mode = projection.get("mode")
     if mode == "full":
         return R, t
+    if about is not None:
+        c = np.asarray(about, dtype=np.float64)
+        t = np.asarray(R, np.float64) @ c + np.asarray(t, np.float64) - c
     if mode == "translation":
         return np.eye(3), t
     if mode == "normal":

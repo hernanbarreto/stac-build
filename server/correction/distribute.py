@@ -39,6 +39,144 @@ def chainage(poses: np.ndarray) -> np.ndarray:
     return np.concatenate([[0.0], np.cumsum(steps)])
 
 
+def _V(w: np.ndarray) -> np.ndarray:
+    """Left Jacobian of SO(3): the matrix that turns a screw's linear part into
+    the translation of the rigid motion, t = V(w) @ rho."""
+    th = float(np.linalg.norm(w))
+    W = np.array([[0.0, -w[2], w[1]], [w[2], 0.0, -w[0]], [-w[1], w[0], 0.0]])
+    if th < 1e-9:                       # V -> I + W/2 as th -> 0
+        return np.eye(3) + 0.5 * W
+    return (np.eye(3) + ((1.0 - np.cos(th)) / th ** 2) * W
+            + ((th - np.sin(th)) / th ** 3) * (W @ W))
+
+
+def screw_log(T: np.ndarray) -> np.ndarray:
+    """SE(3) logarithm: the screw [w(3), rho(3)] with exp(xi) == T.
+
+    NOT the small-motion convention used elsewhere in the repo (``R=exp(w)``
+    with the translation taken as-is): that one is exactly the separable model
+    this module had, and it is what broke the distribution (pccr 2026-09-17).
+    """
+    T = np.asarray(T, np.float64)
+    w = Rotation.from_matrix(T[:3, :3]).as_rotvec()
+    rho = np.linalg.solve(_V(w), T[:3, 3])
+    return np.concatenate([w, rho])
+
+
+def screw_exp(xi: np.ndarray) -> np.ndarray:
+    """SE(3) exponential: the rigid motion of the screw ``xi = [w, rho]``."""
+    xi = np.asarray(xi, np.float64)
+    w, rho = xi[:3], xi[3:]
+    T = np.eye(4)
+    T[:3, :3] = Rotation.from_rotvec(w).as_matrix()
+    T[:3, 3] = _V(w) @ rho
+    return T
+
+
+def _screw_interp(x: float, xs: np.ndarray, Ts: np.ndarray) -> np.ndarray:
+    """The correction curve at chainage ``x``, moving between knots along the
+    ONE-PARAMETER SUBGROUP that joins them — the screw motion.
+
+    The old curve interpolated the rotation on the manifold and the translation
+    LINEARLY, as if the rotation were not there. That is only valid for small
+    rotations. pccr 2026-09-17, desk#201: a closure of 148.5 deg that moves its
+    copy 60.6 cm onto its twin was spread over the chain as displacements of
+    up to 6-7 m in the middle of the walk — measured by the greedy loop as
+    "its own copies 60.8 -> 783.2 cm". The two ENDS agreed (at f=1 the model
+    reproduces the closure), which is why loops_posthoc predicted 60.6 -> 1.3
+    cm for the same edge and nothing looked wrong until the frames were asked.
+
+    Both ends are extrapolated with the adjacent segment's screw, which is the
+    drift-rate model's own statement: the error keeps accumulating at the last
+    measured rate.
+    """
+    if len(xs) == 1:
+        return Ts[0].copy()
+    if x <= xs[0]:
+        i, span = 0, max(xs[1] - xs[0], 1e-9)
+        u = (x - xs[0]) / span
+        j = 1
+    elif x >= xs[-1]:
+        i, j = len(xs) - 2, len(xs) - 1
+        span = max(xs[-1] - xs[-2], 1e-9)
+        u = 1.0 + (x - xs[-1]) / span
+    else:
+        i = int(np.searchsorted(xs, x, side="right")) - 1
+        j = i + 1
+        u = (x - xs[i]) / max(xs[j] - xs[i], 1e-9)
+    rel = np.linalg.inv(Ts[i]) @ Ts[j]
+    return Ts[i] @ screw_exp(u * screw_log(rel))
+
+
+def _V(w: np.ndarray) -> np.ndarray:
+    """Left Jacobian of SO(3): the matrix that turns a screw's linear part into
+    the translation of the rigid motion, t = V(w) @ rho."""
+    th = float(np.linalg.norm(w))
+    W = np.array([[0.0, -w[2], w[1]], [w[2], 0.0, -w[0]], [-w[1], w[0], 0.0]])
+    if th < 1e-9:                       # V -> I + W/2 as th -> 0
+        return np.eye(3) + 0.5 * W
+    return (np.eye(3) + ((1.0 - np.cos(th)) / th ** 2) * W
+            + ((th - np.sin(th)) / th ** 3) * (W @ W))
+
+
+def screw_log(T: np.ndarray) -> np.ndarray:
+    """SE(3) logarithm: the screw [w(3), rho(3)] with exp(xi) == T.
+
+    NOT the small-motion convention used elsewhere in the repo (``R=exp(w)``
+    with the translation taken as-is): that one is exactly the separable model
+    this module had, and it is what broke the distribution (pccr 2026-09-17).
+    """
+    T = np.asarray(T, np.float64)
+    w = Rotation.from_matrix(T[:3, :3]).as_rotvec()
+    rho = np.linalg.solve(_V(w), T[:3, 3])
+    return np.concatenate([w, rho])
+
+
+def screw_exp(xi: np.ndarray) -> np.ndarray:
+    """SE(3) exponential: the rigid motion of the screw ``xi = [w, rho]``."""
+    xi = np.asarray(xi, np.float64)
+    w, rho = xi[:3], xi[3:]
+    T = np.eye(4)
+    T[:3, :3] = Rotation.from_rotvec(w).as_matrix()
+    T[:3, 3] = _V(w) @ rho
+    return T
+
+
+def _screw_interp(x: float, xs: np.ndarray, Ts: np.ndarray) -> np.ndarray:
+    """The correction curve at chainage ``x``, moving between knots along the
+    ONE-PARAMETER SUBGROUP that joins them — the screw motion.
+
+    The old curve interpolated the rotation on the manifold and the translation
+    LINEARLY, as if the rotation were not there. That is only valid for small
+    rotations. pccr 2026-09-17, desk#201: a closure of 148.5 deg that moves its
+    copy 60.6 cm onto its twin was spread over the chain as displacements of
+    up to 6-7 m in the middle of the walk — measured by the greedy loop as
+    "its own copies 60.8 -> 783.2 cm". The two ENDS agreed (at f=1 the model
+    reproduces the closure), which is why loops_posthoc predicted 60.6 -> 1.3
+    cm for the same edge and nothing looked wrong until the frames were asked.
+
+    Both ends are extrapolated with the adjacent segment's screw, which is the
+    drift-rate model's own statement: the error keeps accumulating at the last
+    measured rate.
+    """
+    if len(xs) == 1:
+        return Ts[0].copy()
+    if x <= xs[0]:
+        i, span = 0, max(xs[1] - xs[0], 1e-9)
+        u = (x - xs[0]) / span
+        j = 1
+    elif x >= xs[-1]:
+        i, j = len(xs) - 2, len(xs) - 1
+        span = max(xs[-1] - xs[-2], 1e-9)
+        u = 1.0 + (x - xs[-1]) / span
+    else:
+        i = int(np.searchsorted(xs, x, side="right")) - 1
+        j = i + 1
+        u = (x - xs[i]) / max(xs[j] - xs[i], 1e-9)
+    rel = np.linalg.inv(Ts[i]) @ Ts[j]
+    return Ts[i] @ screw_exp(u * screw_log(rel))
+
+
 def _interp_extrap(x: float, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
     """Piecewise-linear interpolation of vector knots ys over xs; linear
     extrapolation with the last (or first) segment's slope."""
@@ -85,32 +223,37 @@ def distribute(n_kf: int, d_kf: np.ndarray, ref_kf: int,
     f_r = d_ref / d1
     R1 = np.asarray(s1["R"], dtype=np.float64)
     t1 = np.asarray(s1["t"], dtype=np.float64)
-    r_full = Rotation.from_matrix(R1).as_rotvec() / (1.0 - f_r)
-    R_refc = Rotation.from_rotvec(f_r * r_full).as_matrix()
-    tau_full = R_refc @ t1 / (1.0 - f_r)
-    C_ref_R, C_ref_t = R_refc, f_r * tau_full
+    T1 = np.eye(4); T1[:3, :3] = R1; T1[:3, 3] = t1
+    # The model is C(d) = exp(f·xi) on SE(3), f = d/d_1. Because exp(a·xi) and
+    # exp(b·xi) share the screw they COMMUTE, so the closed form is one line:
+    #   exp(f_r·xi) ∘ T_1 = exp(xi)  ⇒  T_1 = exp((1−f_r)·xi)
+    #   ⇒  xi = log(T_1) / (1 − f_r)
+    # The old derivation did the same split on (rotvec, t) separately, which
+    # is the separable model — exact only while the rotation is small.
+    xi_full = screw_log(T1) / (1.0 - f_r)
+    C_ref = screw_exp(f_r * xi_full)
+    C_ref_R, C_ref_t = C_ref[:3, :3], C_ref[:3, 3]
     # knots of the CORRECTION curve C(d): C(0)=identity, then every closure
     # composed with the reference's own correction
     ds = [0.0]
-    Ct = [np.zeros(3)]
-    Cr = [np.zeros(3)]
+    Cs = [np.eye(4)]
     for s in sols:
         Rj = np.asarray(s["R"], dtype=np.float64)
         tj = np.asarray(s["t"], dtype=np.float64)
+        Tj = np.eye(4); Tj[:3, :3] = Rj; Tj[:3, 3] = tj
         ds.append(float(d_kf[int(s["anchor_kf"])]))
-        Cr.append(Rotation.from_matrix(C_ref_R @ Rj).as_rotvec())
-        Ct.append(C_ref_R @ tj + C_ref_t)
+        Cs.append(C_ref @ Tj)
     xs = np.array(ds)
-    Ct_a = np.stack(Ct)
-    Cr_a = np.stack(Cr)
+    Cs_a = np.stack(Cs)
     span1 = d1 - d_ref
+    tau_full = screw_exp(xi_full)[:3, 3]      # the full-walk correction, for the report
 
     R_kf = np.tile(np.eye(3), (n_kf, 1, 1))
     t_kf = np.zeros((n_kf, 3))
     for k in range(n_kf):
-        t_kf[k] = _interp_extrap(float(d_kf[k]), xs, Ct_a)
-        R_kf[k] = Rotation.from_rotvec(
-            _interp_extrap(float(d_kf[k]), xs, Cr_a)).as_matrix()
+        Ck = _screw_interp(float(d_kf[k]), xs, Cs_a)
+        R_kf[k] = Ck[:3, :3]
+        t_kf[k] = Ck[:3, 3]
 
     k_kf = np.ones(n_kf)
     for sol in visit_solutions:
@@ -129,10 +272,10 @@ def distribute(n_kf: int, d_kf: np.ndarray, ref_kf: int,
         "reference_correction_m": round(float(np.linalg.norm(C_ref_t)), 4),
         "drift_rate_mm_per_m": round(float(rate_t) * 1000, 2),
         "drift_rate_deg_per_m": round(float(np.degrees(
-            np.linalg.norm(r_full))) / d1, 4),
+            np.linalg.norm(xi_full[:3]))) / d1, 4),
         "knots": [{"chainage_m": round(float(x), 3),
                    "correction_m": round(float(np.linalg.norm(c)), 4)}
-                  for x, c in zip(xs, Ct_a)],
+                  for x, c in zip(xs, Cs_a[:, :3, 3])],
         "anchors": [{"kf": int(s["anchor_kf"]),
                      "rot_deg": round(rot_deg(np.asarray(s["R"])), 3),
                      "t_m": round(float(np.linalg.norm(s["t"])), 4)}

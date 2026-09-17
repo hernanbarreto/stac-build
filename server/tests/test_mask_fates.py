@@ -165,3 +165,39 @@ def test_a_cycle_in_the_record_cannot_hang_the_resolution():
                              {2: {"into": 3, "reason": "fragment"},
                               3: {"into": 2, "reason": "fragment"}})
     assert fates[2]["into"] is None and fates[3]["into"] is None
+
+
+# ── the record has to survive the save ───────────────────────────────────
+
+def _merge_absorbed_fn():
+    src = (Path(__file__).resolve().parents[1] / "segmentation" / "pipeline.py").read_text()
+    body = src[src.index("def _merge_absorbed("):src.index("def _match_and_save_result(")]
+    ns = {}
+    exec(compile(body, "pipeline.py", "exec"), ns)
+    return ns["_merge_absorbed"]
+
+
+def test_the_result_writer_carries_the_absorbed_key():
+    """pccr 2026-09-17: the matcher printed "138 mask(s) ... are not separate
+    objects" and segmentation_result.json came out with no record at all.
+    _match_and_save_result rebuilds the dict key by key, so a key the matcher
+    returns reaches disk only if it is named there. This pins the name."""
+    src = (Path(__file__).resolve().parents[1] / "segmentation" / "pipeline.py").read_text()
+    writer = src[src.index("        merged_result = {"):src.index("atomic_write_json(result_path, merged_result)")]
+    assert '"absorbed"' in writer,         "merged_result must carry 'absorbed' or the record never reaches the file"
+
+
+def test_the_newer_record_wins_and_a_survivor_leaves_the_record():
+    merge = _merge_absorbed_fn()
+    prev = {"2": {"into": 1, "reason": "fragment"}, "9": {"into": 1, "reason": "space_dedupe"}}
+    new = {"3": {"into": 1, "reason": "fragment"}, "2": {"into": 5, "reason": "space_dedupe"}}
+    out = merge(prev, new, [{"instance_id": 1}, {"instance_id": 9}])
+    assert sorted(out) == ["2", "3"]
+    assert out["2"]["into"] == 5                      # the new pass overrides the old
+    assert "9" not in out, "a mask that is an instance again is absorbed by nothing"
+
+
+def test_merging_nothing_is_empty_and_a_bad_key_is_skipped():
+    merge = _merge_absorbed_fn()
+    assert merge(None, None, [{"instance_id": 1}]) == {}
+    assert merge({"dos": {"into": 1}}, None, []) == {}
