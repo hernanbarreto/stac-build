@@ -469,6 +469,11 @@ def visit_edges(session, ccfg, vcfg, loop_sigma_rot_deg: float, log=print,
         info_rot = R_i.T @ (wy * Pu + wb * (np.eye(3) - Pu)) @ R_i
         out.append({"i": i, "j": j, "region": rg.get("region"), "earlier_kfs": rg["earlier_kfs"],
                     "later_kfs": rg["later_kfs"], "accepted": True, "trusted": True,
+                    # the block this region occupies, so the greedy loop can take
+                    # the points of each visit and TRY the closure the way it
+                    # tries an instance's (USER 2026-09-17)
+                    "volume_m": rg.get("volume_m"),
+                    "label": f"revisit_region_{rg.get('region')}",
                     "rot_deg": cl.get("rot_deg"), "t_norm_m": cl.get("t_norm_m"),
                     "icp_rms_m": sigma_t, "n_hits": rg.get("n_hits"),
                     "offset_before_m": float(rg.get("offset_before_cm", 0.0)) / 100.0,

@@ -327,3 +327,44 @@ until the §9 gates fail, and the screw distribution changes the SHAPE of what a
 given closure applies at intermediate keyframes. A denser loop set may now hit
 a gate earlier for a reason that has nothing to do with how much error is
 correctable.
+
+## 14. A LOCAL correction is spread over the WHOLE walk
+
+USER 2026-09-17, comparing epochs 1 and 2 in the viewer: in epoch 2 "el piso
+prácticamente logró fusionarse", and at the same time "hay zonas cercanas a la
+de conflicto que han empeorado un poco, se nota en las costuras de algunas
+paredes".
+
+Both are true, and together they explain the objective. Epoch 2 was applied
+after `revisit_region_4` — the first geometric region the greedy ever accepted
+— and the objective called that iteration a 49% regression while closure
+(0.36 → 0.26 m), seams (0.0254 → 0.0229) and duplicates (16 → 13) all
+improved. The objective was not wrong: it was seeing the collateral damage the
+user can see on the wall seams. Each of us was looking at one half.
+
+The cause is a mismatch of scale. The evidence is LOCAL — a 3 m voxel block
+that measures 22 cm — but `distribute` applies it through the drift-rate model,
+which assumes the error accumulates smoothly with the distance walked and
+therefore moves EVERY keyframe in proportion to its chainage. A localised
+error spread that way fixes its own corner and displaces geometry that was
+already right.
+
+The drift-rate model is correct for what it was written for (USER 2026-09-09:
+the accumulated error of the walk, pinned by a duplicate). It is the wrong
+carrier for a region that says "this block, and only this block, is 22 cm out".
+
+Measured on pccr after the run: mask_conflict 6.93% → 7.18% and verified
+91.06% → 90.59%, i.e. the point-status criterion did not improve even though
+the floor visibly fused — consistent with gaining in the corner and losing
+around it.
+
+## 15. The epoch transaction re-dirties the vote field
+
+`witness.drop_statuses` removes the single-witness mass inside
+`gpu_cloud_clean`, at merge time. But the epoch transaction recomputes the
+witnesses on the warped cloud and nothing applies the drop there, so every
+epoch brings new points with fewer than two agreeing views: pccr epoch 2 has
+383,001 of them (1.73%) where the delivered cloud had none. The user's
+acceptance criterion is that Votes and Point status are both green, so the
+drop has to be part of the transaction too — or the field has to be declared
+as provisional inside an epoch.

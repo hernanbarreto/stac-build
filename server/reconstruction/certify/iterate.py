@@ -219,7 +219,9 @@ class Candidate:
         return self._masks
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
-        return f"<{self.label}#{self.instance_id} kf {self.i}<->{self.j}>"
+        # a geometric revisit region has no instance: its label already names it
+        who = self.label if self.instance_id < 0 else f"{self.label}#{self.instance_id}"
+        return f"<{who} kf {self.i}<->{self.j}>"
 
 
 def _rate_order(pool: List[Candidate], d_kf: np.ndarray) -> List[Candidate]:
@@ -286,15 +288,30 @@ class GreedyLoop:
                      f"the reprojection judge will abstain")
             obj_of = {}
         w = int(self.ccfg_window())
+        n_rev = 0
         for k, e in enumerate(edges):
             if "X" not in e or not e.get("trusted"):
                 continue
             inst = self.instances.get(int(e.get("instance_id", -1)))
+            if inst is not None:
+                ia, ib, _ks = _copy_indices(self.base, inst, int(e["i"]), int(e["j"]), w)
+            else:
+                # A GEOMETRIC revisit region. It has no instance, and until
+                # 2026-09-17 that alone kept it out of the pool: the loop tried
+                # the 19 instance candidates and never the ones that measure the
+                # error. pccr is the case for it — `white_tiled_floor#44` is ONE
+                # instance of 5.7 M points spanning the whole building, so its
+                # two "copies" are two stretches of the same floor 7.4 m apart
+                # and closing them slides the floor along itself (the greedy
+                # measured 766 k observations worse and was right to refuse).
+                # The revisit regions are 3 m blocks: local, and they measured
+                # the real thing — region 1 reads 22.0 cm, the exact vertical
+                # duplication under the two desks, and closes it to 4.2 cm.
+                ia, ib = self._region_indices(e)
+            if ia is None or len(ia) == 0 or len(ib) == 0:
+                continue
             if inst is None:
-                continue
-            ia, ib, _ks = _copy_indices(self.base, inst, int(e["i"]), int(e["j"]), w)
-            if len(ia) == 0 or len(ib) == 0:
-                continue
+                n_rev += 1
             fa = [self.base.frames[x] for x in range(max(0, e["i"] - w),
                                                      min(self.n_kf, e["i"] + w + 1))]
             fb = [self.base.frames[x] for x in range(max(0, e["j"] - w),
@@ -302,7 +319,28 @@ class GreedyLoop:
             self.pool.append(Candidate(k, e, ia, ib, fa, fb,
                                        obj_of.get(int(e.get("instance_id", -1))),
                                        samples=int(self.gcfg.offset_samples)))
-        self.log(f"[greedy] {len(self.pool)} candidate(s) in the pool")
+        self.log(f"[greedy] {len(self.pool)} candidate(s) in the pool"
+                 + (f" ({n_rev} geometric revisit region(s))" if n_rev else ""))
+
+    def _region_indices(self, e: dict):
+        """The points of a revisit region's two visits: inside the block, owned
+        by the LATER span (copy A) and by the EARLIER one (copy B).
+
+        The instance path asks an instance for its own points near each
+        keyframe; a region has no instance, so it asks the block it occupies.
+        """
+        vol = e.get("volume_m") or {}
+        lo, hi = vol.get("lo"), vol.get("hi")
+        early, late = e.get("earlier_kfs"), e.get("later_kfs")
+        if lo is None or hi is None or not early or not late:
+            return None, None
+        P = self.base.xyz
+        lo = np.asarray(lo, np.float64); hi = np.asarray(hi, np.float64)
+        inside = np.all((P >= lo) & (P <= hi), axis=1)
+        ks = self.base.ks
+        a = inside & (ks >= int(late[0])) & (ks <= int(late[-1]))
+        b = inside & (ks >= int(early[0])) & (ks <= int(early[-1]))
+        return np.flatnonzero(a), np.flatnonzero(b)
 
     def ccfg_window(self) -> int:
         return int(self.gcfg.window_kf)
