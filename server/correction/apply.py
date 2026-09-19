@@ -178,6 +178,7 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     log(f"  cleaned_cloud.ply staged ({n_moved:,} pts warped)")
 
     # 2) raw cloud (same per-keyframe transform — same order+provenance) ---
+    raw_data_new = None
     if session.raw_data is not None:
         raw_xyz = np.stack([session.raw_data["x"], session.raw_data["y"],
                             session.raw_data["z"]], axis=1).astype(np.float64)
@@ -272,6 +273,39 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
         np.savez(tx / "floor_transform.npz", **floor_npz)
         _art("floor_transform.npz")
 
+    # 9a) THE MASK FILTER — last, and INSIDE this transaction ------------
+    # USER 2026-09-19: *"al final de todo como último paso antes de la
+    # consolidación y del octree"* … *"no vamos a hacer un octree atrás de
+    # otro"*. Here the pose is already corrected, so a point is judged against
+    # its own mask where the correction actually left it; and the ONE
+    # consolidation and the ONE octree below carry the result. Never fatal —
+    # a transaction that could not filter is still a valid epoch.
+    kept_mask = None
+    if getattr(cfg.apply, "mask_filter", False):
+        _p(66, "tx: mask filter (masklets, last before consolidation)...")
+        try:
+            from correction.visit_drift_run import filter_staged_cloud
+            out = filter_staged_cloud(
+                tx, session, data_new, xyz_new, poses_new,
+                raw_data_new,
+                cfg, log=log)
+            frep, kept_mask = out if out is not None else (None, None)
+            if frep is not None:
+                (tx / "mask_filter.json").write_text(json.dumps(frep, indent=1,
+                                                                default=float))
+                _art("mask_filter.json")
+                # the epoch npz was written at step 8, before this filter knew
+                # what it would delete. An epoch that moved 22 M points AND
+                # deleted a quarter million is not reproduced by the motion
+                # alone, so it is rewritten with what left (correction.replay
+                # honours `dropped`).
+                save_epoch_npz(output_dir, epoch_to, R_kf, t_kf, k_kf,
+                               session.frames, dir_override=tx / EPOCH_NPZ_DIR,
+                               b_kf=b_kf,
+                               dropped=np.flatnonzero(~kept_mask))
+        except Exception as e:  # noqa: BLE001 — declared, never silent
+            log(f"  mask filter failed ({e}) — the epoch keeps every point")
+
     # 9b) re-consolidate the WARPED cloud ---------------------------------
     # The warp moves every point by its own keyframe's correction and nothing
     # cleans up afterwards. Where a duplicate finally closes, the two copies
@@ -322,13 +356,19 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     _p(85, "tx: verifying staged artifacts...")
     from correction.session import read_ply
     _, staged = read_ply(tx / "cleaned_cloud.ply")
-    if len(staged) != session.n_points:
+    # after the mask filter the expectation is the FILTERED one — the invariant
+    # is that every surviving row keeps its provenance and its ORDER, not that
+    # no row was ever removed (USER 2026-09-19: the filter deletes for real)
+    n_expect = int(kept_mask.sum()) if kept_mask is not None else session.n_points
+    if len(staged) != n_expect:
         shutil.rmtree(tx)
         raise RuntimeError(
             f"staged cloud has {len(staged)} points, expected "
-            f"{session.n_points} — transaction discarded")
+            f"{n_expect} — transaction discarded")
     for fld in ("frame_global", "pixel_row", "pixel_col"):
-        if not np.array_equal(staged[fld], session.data[fld]):
+        src_fld = (session.data[fld][kept_mask] if kept_mask is not None
+                   else session.data[fld])
+        if not np.array_equal(staged[fld], src_fld):
             shutil.rmtree(tx)
             raise RuntimeError(
                 f"staged cloud provenance field '{fld}' differs from the "

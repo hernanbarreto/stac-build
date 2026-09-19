@@ -156,6 +156,7 @@ class PoseGraphConfig:
 @dataclass(frozen=True)
 class ApplyConfig:
     depth_correction_mode: str
+    mask_filter: bool
     potree_rebuild: bool
     reconsolidate: bool   # re-run the scene consolidation on the WARPED cloud inside the
                           # transaction. The epoch moves each point by its keyframe's
@@ -173,21 +174,6 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
-class FloorConsensusConfig:
-    """The floor as a per-keyframe vertical constraint (USER 2026-09-19).
-
-    Real terrain belongs to the PLACE and a pose error to the MOMENT: the same
-    cell of floor measured from two keyframes far apart in the walk reads the
-    same height if the difference is a ramp or a step, and a different one if
-    it is drift. Ramps and steps survive untouched.
-    """
-    enabled: bool
-    cell_m: float
-    texture_window_m: float
-    min_shared_cells: int
-
-
-@dataclass(frozen=True)
 class VisitDriftConfig:
     """The correction that measures on the object's own visits and its three
     views (USER 2026-09-18). Every number the algorithm uses lives here."""
@@ -202,14 +188,12 @@ class VisitDriftConfig:
     silhouette_blur_px: float       # gaussian blur, in cells
     search_margin_m: float          # margin around the pair, bounds the shift
     default_repeatability_m: float  # used only when uncertainty.json is absent
-    max_epochs: int
 
 
 @dataclass(frozen=True)
 class CorrectionConfig:
     evidence: EvidenceConfig
     visit_drift: "VisitDriftConfig"
-    floor_consensus: "FloorConsensusConfig"
     observability: ObservabilityConfig
     solve: SolveConfig
     gates: GatesConfig
@@ -287,12 +271,6 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
             "config.yaml has no 'correction:' section — the correction module "
             "cannot run without its parameters")
 
-    fc_ = section.get("floor_consensus")
-    floor_consensus = FloorConsensusConfig(
-        enabled=_bool(fc_, "enabled", "floor_consensus"),
-        cell_m=_num(fc_, "cell_m", "floor_consensus", lo=0, lo_excl=True),
-        texture_window_m=_num(fc_, "texture_window_m", "floor_consensus", lo=0, lo_excl=True),
-        min_shared_cells=_num(fc_, "min_shared_cells", "floor_consensus", lo=1, integer=True))
     vd_ = section.get("visit_drift")
     visit_drift = VisitDriftConfig(
         min_points=_num(vd_, "min_points", "visit_drift", lo=1, integer=True),
@@ -306,7 +284,6 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
         search_margin_m=_num(vd_, "search_margin_m", "visit_drift", lo=0.0, lo_excl=True),
         default_repeatability_m=_num(vd_, "default_repeatability_m", "visit_drift",
                                      lo=0.0, lo_excl=True),
-        max_epochs=_num(vd_, "max_epochs", "visit_drift", lo=1, integer=True),
     )
 
     ev = section.get("evidence")
@@ -525,6 +502,7 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
             f"'correction.apply.reconsolidate' must be a boolean, got "
             f"{reconsolidate!r}")
     apply_cfg = ApplyConfig(depth_correction_mode=depth_mode,
+                            mask_filter=_bool(ap, "mask_filter", "apply"),
                             potree_rebuild=potree_rebuild,
                             reconsolidate=reconsolidate)
 
@@ -533,7 +511,6 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
         workers=_resolve_workers(_require(rt, "workers", "runtime")))
 
     return CorrectionConfig(evidence=evidence, visit_drift=visit_drift,
-                            floor_consensus=floor_consensus,
                             observability=observability,
                             solve=solve, gates=gates, floor=floor,
                             revisit=revisit, consistency=consistency,

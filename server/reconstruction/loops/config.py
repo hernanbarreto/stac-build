@@ -451,7 +451,8 @@ class DeterminismConfig:
 @dataclass(frozen=True)
 class CertifyConfig:
     ensemble_offset_frames: int     # >0 → a second Omega pass with shifted chunk boundaries
-    keep_aligned_chunks: bool       # keep maplong_run/_tmp_results_aligned + _tmp_results_loop
+    keep_aligned_chunks: bool
+    geometric_cleanup: bool         # the retired second deleter — OFF, see config.yaml
                                     # after the scale (the post-hoc graph, the A/B harness and
                                     # the certification loop read them)
     max_iters: int
@@ -892,6 +893,7 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
     return CertifyConfig(
         ensemble_offset_frames=_num(ce, "ensemble_offset_frames", P, lo=0, integer=True),
         keep_aligned_chunks=_bool(ce, "keep_aligned_chunks", P),
+        geometric_cleanup=_bool(ce, "geometric_cleanup", P),
         max_iters=_num(ce, "max_iters", P, lo=1, integer=True),
         eps=_num(ce, "eps", P, lo=0),
         regression_eps=_num(ce, "regression_eps", P, lo=0),

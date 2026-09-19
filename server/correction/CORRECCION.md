@@ -405,7 +405,7 @@ Tres reglas, todas sobre los **masklets**:
 1. un punto que **dice ser parte de un objeto** y, ya corregida la pose, sigue
    cayendo **fuera de la máscara de ese objeto** en todas las vistas que lo
    vieron, no es parte de él
-2. un masklet con menos de `min_points` (500) no se puede medir y no retiene nada
+2. un masklet con menos de `min_points` no se puede medir y no retiene nada
 3. una visita que aporta `min_visit_share` (25 %) o menos de su masklet vio un
    PEDAZO de él y
    no retiene nada

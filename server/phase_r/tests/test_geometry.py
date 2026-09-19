@@ -13,7 +13,7 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from phase_r.geometry import (  # noqa: E402
-    fit_gravity_aligned_obb, filter_outliers_knn, signed_distances_along_axis,
+    fit_gravity_aligned_obb, signed_distances_along_axis,
 )
 from phase_r.instance_store import InstanceStore  # noqa: E402
 
@@ -31,16 +31,6 @@ def test_obb_recovers_box_extents():
     expected = sorted([2.0, 1.0, 0.5])
     assert np.allclose(extents, expected, atol=0.1), (extents, expected)
     assert np.allclose(pos, 0, atol=0.1)
-
-
-def test_knn_removes_outliers():
-    cluster = rng.normal(0, 0.05, (500, 3))
-    outliers = rng.uniform(-5, 5, (30, 3))
-    pts = np.vstack([cluster, outliers])
-    keep = filter_outliers_knn(pts, k=6, factor=3.0)
-    # most cluster kept, most outliers removed
-    assert keep[:500].mean() > 0.9
-    assert keep[500:].mean() < 0.5
 
 
 def test_store_roundtrip():

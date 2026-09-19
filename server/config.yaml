@@ -2025,8 +2025,11 @@ correction:
   # USER 2026-09-18, after the floor closed with its tile lines aligned. See
   # correction/visit_drift.py for why each of these exists.
   visit_drift:
-    min_points: 500              # an object with fewer cannot be measured; its
-                                 # points are DELETED from the cloud
+    min_points: 1000             # an object with fewer cannot be measured; its
+                                 # points are DELETED from the cloud. USER
+                                 # 2026-09-19, raised from 500: "todos los de
+                                 # menos de 1000 puntos deben eliminarse los
+                                 # segmentos"
     min_visit_share: 0.25        # a visit leaving AT MOST this share of the
                                  # object's points did not observe it, it saw a
                                  # PIECE of it — those points are DELETED too.
@@ -2052,7 +2055,20 @@ correction:
                                  # a discrepancy. The size is a RESOLUTION, not a
                                  # decision — it is declared with every count,
                                  # because "zero common voxels" depends on it
-    max_ambiguity: 2             # an object is used only when FEWER than this
+    max_ambiguity: 99999         # OFF — USER-VALIDATED 2026-09-19 ("la epoca 3
+                                 # quedo perfecta ... ya no hay duplicados").
+                                 # At 2 it hid TEN white_tiled_floor closures and
+                                 # left the scale with two doors: 4.96 % instead
+                                 # of 9.70 %. The fear it answered was real —
+                                 # two patches of a repeated surface can be
+                                 # different tiles — but the data contradicted
+                                 # it: six independent floor patches agreed on
+                                 # x1.14-1.23 and 90-99 % radial, and the two
+                                 # false ones (x0.48 with 122 cm tangential,
+                                 # x1.65 with 95 cm) priced THEMSELVES out
+                                 # through sigma. The tangential residual is the
+                                 # better guard than counting same-label rivals.
+                                 # an object is used only when FEWER than this
                                  # many OTHER masklets of its own label sit
                                  # within its own measured displacement. USER
                                  # 2026-09-18: two visits can agree perfectly
@@ -2076,54 +2092,16 @@ correction:
                                  # correlation can find
     default_repeatability_m: 0.0477   # only when uncertainty.json is absent —
                                  # the session measures its own and that wins
-    max_epochs: 4                # HOW MANY EPOCHS ARE GENERATED. USER
-                                 # 2026-09-18: "vamos a ejecutar siempre hasta
-                                 # epoch 0 (original), 1, 2, 3 y 4, forzosamente
-                                 # siempre" — the automatic stop is OPEN for now,
-                                 # so this is a count, not a backstop. The loop
-                                 # still ends early when a pass measures a
-                                 # correction under what the session can repeat,
-                                 # because refusing to write noise is not a
-                                 # convergence rule
-  floor_consensus:               # THE FLOOR AS A CONSTRAINT (USER 2026-09-19).
-                                 # Real terrain belongs to the PLACE, a pose
-                                 # error to the MOMENT: the same cell measured
-                                 # from two keyframes far apart in the walk
-                                 # reads the same height if the difference is a
-                                 # ramp or a step, and a different one if it is
-                                 # drift. Measured on pccr: the spread of a
-                                 # cell's height grows 18 -> 44 -> 81 -> 296 mm
-                                 # as the separation between the keyframes that
-                                 # saw it grows 0.5 -> 2 -> 5 -> 20 m. Terrain
-                                 # cannot do that.
-    enabled: true                # STEP 0 of the correction: level the chunks
-                                 # against each other on the floor cells they
-                                 # SHARE, before anything else runs. On pccr it
-                                 # took 248 mm of accumulated vertical drift out
-                                 # with a residual of 0.0 mm on every edge, and
-                                 # the building's own ramp survived untouched —
-                                 # the relief cancels because both chunks are
-                                 # looking at the same places.
-                                 # What NOT to do, measured: levelling each
-                                 # chunk to y=0 by its OWN average moves it by
-                                 # the relief (306-632 mm on pccr) and, since
-                                 # chunks overlap by half, splits the shared
-                                 # area into two heights — vertical duplicates
-                                 # created where there were none.
-    cell_m: 0.10                 # horizontal cell. A RESOLUTION, not a
-                                 # decision, and declared with every count
-    texture_window_m: 0.40       # HORIZONTAL search half-width on the floor's
-                                 # own texture. A tiled floor REPEATS, so a
-                                 # shift of one period matches as well as none:
-                                 # the search has to stay well under half the
-                                 # period, which is measured and reported with
-                                 # every answer (pccr: 1.40 m, and the residual
-                                 # it found was 15 cm — a tenth of it, the same
-                                 # at every window from 20 to 40 cm)
-    min_shared_cells: 30         # a pair of chunks measured on fewer cells than
-                                 # this is not a measurement; the least squares
-                                 # already weights the rest by how many they
-                                 # share
+    obb_core_pct: 98.0            # USER 2026-09-09: the box follows where the segment's
+                                  # points CONCENTRATE — the per-axis range holding this
+                                  # percentage of them — never its extremes (one floater
+                                  # stretched the door's box to 2.8 M points)
+    obb_margin_m: 0.03            # margin around that core when collecting copy evidence
+    min_object_points_solve: 300  # a visit with fewer own points inherits its neighbour
+    min_object_points_fingerprint: 500  # min points for a copy to enter the fingerprint
+    min_baseline_m: 0.30          # min inter-object centroid distance for depth evidence
+    min_objects_for_depth: 2      # depth (k) needs at least this many baseline pairs' objects
+    visit_gap_kf: 2               # keyframe gaps ≤ this stay one visit (sparse evidence)
   evidence:
     obb_core_pct: 98.0            # USER 2026-09-09: the box follows where the segment's
                                   # points CONCENTRATE — the per-axis range holding this
@@ -2209,7 +2187,16 @@ correction:
                                   # first N anchors of the walk (drift-free start) —
                                   # a plane over the whole drifted floor followed the
                                   # drift (pccr 2026-09-09: 3° tilt, invisible fix)
-    step_demote_m: 0.15           # plane/profile models: an anchor whose local floor
+    step_demote_m: 99999.0        # OFF — USER-VALIDATED 2026-09-19. At 0.15 the
+                                  # guard read pccr's own DRIFT (floors sitting
+                                  # 0.34-0.45 m off the reference plane) as REAL
+                                  # steps and preserved it: 40 anchors of 201,
+                                  # 2.5 cm of correction, the floor untouched.
+                                  # With it off: 201 anchors, and the USER
+                                  # confirmed the building's real ramp SURVIVED
+                                  # ("no se rompio la rampa"). Max step between
+                                  # keyframes went 33.9 -> 144.9 mm — watch that
+                                  # number on a scene with genuine level changes.
                                   # sits farther than this from the reference model is
                                   # a REAL step/level change → demoted to interpolated
                                   # (the step is preserved, only drift is removed)
@@ -2291,6 +2278,16 @@ correction:
     min_blocks_improved: 1.0      # the joint closure must reduce the offset in this
                                   # fraction of the pair's blocks (1.0 = ALL of them)
   apply:
+    mask_filter: true             # STEP 12, the LAST thing before the single
+                                  # consolidation and the single octree (USER
+                                  # 2026-09-19: "al final de todo como último
+                                  # paso antes de la consolidación y del
+                                  # octree"). Judges every point against its
+                                  # own MASKLET's mask with the pose already
+                                  # corrected, and drops masklets under
+                                  # visit_drift.min_points and visits at or
+                                  # under visit_drift.min_visit_share.
+                                  # UNSEGMENTED POINTS ARE NEVER TOUCHED.
     depth_correction_mode: sidecar  # sidecar (output/depth_correction.json served
                                     # via segmentation/session_io.correct_depth) |
                                     # rewrite (NOT implemented — selecting it fails loudly)
@@ -2605,6 +2602,13 @@ certify:                            # §4.8 ensemble witness + §9 certification
                                     # this many frames — a third prediction per frame for
                                     # certification runs (OFF: doubles the inference)
   keep_aligned_chunks: true         # keep maplong_run/_tmp_results_aligned (+ the loop bridges)
+  geometric_cleanup: false          # SUPERSEDED 2026-09-19 by the mask filter inside
+                                    # the epoch transaction (correction.apply.mask_filter):
+                                    # that one judges the 270 MASKLETS with the pose already
+                                    # corrected and runs before the single consolidation;
+                                    # this one the fused instances, after the epoch. Running
+                                    # both deletes twice, the second time by the weaker
+                                    # criterion. The module stays, selectable — turn on to use.
                                     # after the scale: the post-hoc keyframe graph, the
                                     # elastic_seam A/B harness (§7) and the certification loop
                                     # read them. (The 2026-09-04 streaming clean deleted them

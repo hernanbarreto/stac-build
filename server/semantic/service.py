@@ -70,6 +70,30 @@ def ensure_service(config: Optional[dict] = None,
 
     _log("Semantic service down — starting vLLM (Qwen3-VL)...")
 
+    # Give back the VRAM THIS process is holding before vLLM asks for its own.
+    # A GPU stage that ran here (the epoch re-consolidation is the one that
+    # bites) leaves PyTorch's caching allocator sitting on tens of GB it no
+    # longer uses, and vLLM refuses to start below its
+    # `--gpu-memory-utilization` share. pccr 2026-09-19: the certification
+    # stopped vLLM to take the whole GPU, consolidated, asked for it back, and
+    # vLLM died with "Free memory on device cuda:0 (16.27/47.41 GiB) … is less
+    # than desired GPU memory utilization (0.5, 23.71 GiB)" — then the
+    # certification blocked FOREVER waiting for a service that could not start
+    # while the certification itself held the memory. A deadlock, not a crash:
+    # nothing in the log, 1 % CPU, S (sleeping), for as long as anyone waited.
+    try:
+        import torch  # noqa: PLC0415 — optional here, the caller may be CPU-only
+        if torch.cuda.is_available():
+            free_before = torch.cuda.mem_get_info()[0] / 2 ** 30
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            free_after = torch.cuda.mem_get_info()[0] / 2 ** 30
+            if free_after - free_before > 0.1:
+                _log(f"[gpu] released {free_after - free_before:.1f} GB of cached "
+                     f"VRAM before starting vLLM ({free_after:.1f} GB free)")
+    except Exception as e:  # noqa: BLE001 — declared, never fatal
+        _log(f"[gpu] could not release cached VRAM ({e}) — starting anyway")
+
     def _die_with_parent():
         # USER ORDER 2026-09-04: the chat must DIE with the backend — twice
         # today orphaned vLLMs (start_new_session) kept 20-45 GB of VRAM after

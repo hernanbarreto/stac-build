@@ -275,12 +275,13 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
             f"seams {prev['seam_residual']['median_m']} | closure {prev['closure']['median_m']}")
         del s0, i0
 
-        from correction.visit_drift_run import run as run_visit_drift
-        vd = run_visit_drift(session_dir, log=log)
-        acta["visit_drift"] = {
-            "epochs": [{k: v for k, v in e.items() if k not in ("all", "drift")}
-                       for e in vd["epochs"]],
-            "elapsed_s": vd["elapsed_s"]}
+        # THE CORRECTION (USER-VALIDATED, pccr 2026-09-19): depth first, then
+        # the floor plane. No translation stage and no loop — see
+        # `correction.visit_drift_run.run`.
+        from correction.visit_drift_run import run as run_correction
+        vd = run_correction(session_dir, log=log)
+        acta["correction"] = {"stages": vd["stages"],
+                              "elapsed_s": vd["elapsed_s"]}
         acta["epoch_after_correction"] = current_epoch(output_dir)
         base = load_session_frames(output_dir, log)   # poses moved under us
 
@@ -564,11 +565,31 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     # outside has no correction left to wait for, and leaves the cloud (USER
     # 2026-09-15: "si no lo puedo corregir, lamentablemente lo voy a tener que
     # sacar"). No gate of its own: the marks only exist when the audit ran.
-    try:
+    # SUPERSEDED BY THE MASK FILTER (USER 2026-09-19). Both delete the points
+    # that still fall outside their own mask once the pose is corrected, but
+    # this one judges against the FUSED INSTANCES and runs AFTER the epoch,
+    # while `visit_drift.cloud_filter_masklets` judges against the 270
+    # MASKLETS of segmentation.json — the unit the user corrected us to
+    # ("no eran 82 instancias, está mal") — and runs INSIDE the transaction,
+    # before the single consolidation and the single octree, carrying
+    # `min_points` and `min_visit_share` as well. Running both deletes twice,
+    # the second time by the weaker criterion, and on a run where the
+    # correction did NOT apply it would judge every point with the pose
+    # UNcorrected, which is exactly what step 12 exists to avoid.
+    # The module stays, selectable, OFF by default — the repo's pattern.
+    if not getattr(ccert, "geometric_cleanup", False):
+        acta["geometric_cleanup"] = {
+            "applied": False,
+            "reason": "superseded by the mask filter inside the epoch "
+                      "transaction (certify.geometric_cleanup: false)"}
+        log("[certify] geometric cleanup OFF — the mask filter already ran "
+            "inside the epoch, on the masklets and with the pose corrected")
+    else:
+      try:
         from segmentation.geometric_cleanup import geometric_cleanup
         acta["geometric_cleanup"] = geometric_cleanup(
             output_dir, session_dir, apply=apply, log=log)
-    except Exception as e:  # noqa: BLE001 — declared, never silent
+      except Exception as e:  # noqa: BLE001 — declared, never silent
         log(f"[certify] ⚠ geometric cleanup failed ({e}) — the cloud keeps the "
             f"points the audit marked out of place")
         acta["geometric_cleanup"] = {"applied": False, "reason": str(e)}

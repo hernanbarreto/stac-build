@@ -476,9 +476,33 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
 def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
               operator: str, log: Callable = print,
               progress: Callable = _noop_progress,
-              cfg: Optional[CorrectionConfig] = None) -> dict:
+              cfg: Optional[CorrectionConfig] = None,
+              pre: Optional[dict] = None) -> dict:
     """Floor alignment (kind=floor): same gates, same transactional apply,
-    same ledger."""
+    same ledger.
+
+    ``pre`` is a per-keyframe transform ({R_kf, t_kf, k_kf}) to apply BEFORE
+    the floor and publish COMPOSED with it, in ONE epoch (USER 2026-09-19:
+    *"podría generarse una sola época que tenga la profundidad y el piso, es
+    decir, la cero y la corregida, nada más"*).
+
+    It is not a convenience: the floor has to be MEASURED on the geometry the
+    depth correction already produced — measuring both on the raw cloud gives
+    the wrong floor, the same way it gave the wrong translation. So ``pre`` is
+    applied to an IN-MEMORY session, the floor is solved against that, and the
+    two are composed exactly:
+
+        warp(p; R, t, k) = R·(C + (p−C)k) + t        C → R·C + t
+
+    so stage 1 then stage 2 is stage (R₂R₁, R₂·t₁ + t₂, k₁k₂). The floor's own
+    k is 1 and the depth's R is the identity, but the composition is written in
+    full because nothing here should depend on that staying true.
+
+    The GATES still judge the floor's own solution, not the composed one: each
+    stage is answerable for its own motion (the depth stage has its own
+    `max_correction_log`), and a floor whose steps are fine should not be
+    vetoed for a depth correction that already passed.
+    """
     t0 = time.time()
     output_dir = Path(output_dir)
     if cfg is None:
@@ -524,8 +548,25 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
         return _reject(g_int["detail"], [g_int])
 
     _p(15, f"solving floor alignment (model: {model})...")
-    sol = floor_mod.solve_floor(session, cfg, model, keyframes, rng, log=log)
+    session_for_floor = session
+    if pre is not None:
+        from reconstruction.certify.run import transformed_session
+        log("  a previous stage is composed into this epoch — solving the "
+            "floor on the geometry it produces")
+        session_for_floor = transformed_session(
+            session, pre["R_kf"], pre["t_kf"], pre["k_kf"])
+    sol = floor_mod.solve_floor(session_for_floor, cfg, model, keyframes, rng,
+                                log=log)
     R_kf, t_kf, k_kf = sol["R_kf"], sol["t_kf"], sol["k_kf"]
+    if pre is not None:
+        R_pre = np.asarray(pre["R_kf"], np.float64)
+        t_pre = np.asarray(pre["t_kf"], np.float64)
+        k_pre = np.asarray(pre["k_kf"], np.float64)
+        R_kf = np.einsum("nij,njk->nik", R_kf, R_pre)
+        t_kf = np.einsum("nij,nj->ni", sol["R_kf"], t_pre) + t_kf
+        k_kf = k_pre * k_kf
+        log(f"  composed: depth {k_kf.min():.4f}-{k_kf.max():.4f}, "
+            f"translation up to {np.linalg.norm(t_kf, axis=1).max() * 100:.1f} cm")
 
     anchors_as_solutions = [
         {"R": R_kf[a["kf"]], "t": t_kf[a["kf"]]} for a in sol["anchors"]]
@@ -824,7 +865,11 @@ def state(output_dir) -> dict:
     if last is not None:
         st["correction_id"] = last["correction_id"]
         st["kind"] = last["kind"]
-        rp = output_dir / last.get("report", "")
+        # `.get(k, "")` only defaults when the KEY is missing; a row that
+        # carries report: null returned None and crashed the endpoint the
+        # UI polls for the current epoch — so the viewer could not see an
+        # epoch that was applied (pccr 2026-09-19).
+        rp = output_dir / (last.get("report") or "")
         if rp.is_file():
             st["report"] = json.loads(rp.read_text())
     return st

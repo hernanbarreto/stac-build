@@ -299,7 +299,7 @@ with a measurement, not to retune it.**
 
 - **DICTATED BY THE USER — his criteria, not thresholds someone chose**
   (`correction.visit_drift`, 2026-09-18, written down in the session's
-  `output/reproject/CRITERIOS.md`): `min_points: 500`, `min_walk_m: 1.0` (two
+  `output/reproject/CRITERIOS.md`): `min_points`, `min_walk_m` (two
   visits under a metre of WALK apart are one pass with an occlusion in the
   middle), and `min_visit_share`, RAISED 0.01 -> **0.25** on 2026-09-19
   ("podemos subirlo al 25%") after the orthogonal views of pccr's six

@@ -120,6 +120,7 @@ def main():
         print(f"[DA3 Extractor] peak VRAM: "
               f"{torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
 
+    os.makedirs(args.output_dir, exist_ok=True)   # own your output directory
     for i, img_path in enumerate(images):
         basename = os.path.basename(img_path)
         stem = os.path.splitext(basename)[0]

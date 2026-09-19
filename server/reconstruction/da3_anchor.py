@@ -43,6 +43,10 @@ def extract_anchor_depths(frames_dir, output_dir, anchor_files: Iterable[str],
         if src.exists():
             os.symlink(str(src), str(tmp / f))
     raw = output_dir / "da3_run" / "anchor_raw"
+    # the extractor writes straight into this directory and does not create it:
+    # every run until 2026-09-19 inherited it from a previous one, so the first
+    # reconstruction of a session with no da3_run/ died on the first np.save
+    raw.mkdir(parents=True, exist_ok=True)
     cmd = [str(python), str(server_dir / "extract_da3_depth.py"),
            "--image_dir", str(tmp), "--output_dir", str(raw),
            "--model", str(model_id), "--per_frame"]

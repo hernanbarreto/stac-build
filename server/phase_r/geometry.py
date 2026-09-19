@@ -83,24 +83,6 @@ def lift_masked_depth_to_world(
     return pts_world
 
 
-# ── KNN outlier filter (ported R3D _filter_outliers_knn) ────────────
-
-def filter_outliers_knn(points: np.ndarray, k: int = 6, factor: float = 3.0) -> np.ndarray:
-    """Keep points whose mean distance to k nearest neighbours is < factor ×
-    median NN distance. Returns a boolean keep-mask. No-op for tiny sets.
-    Ported from R3D build_scene.py:82-94."""
-    n = len(points)
-    if n <= max(k, 20):
-        return np.ones(n, bool)
-    from scipy.spatial import cKDTree
-
-    tree = cKDTree(points)
-    dists, _ = tree.query(points, k=k + 1)  # first col is self (0)
-    mean_nn = dists[:, 1:].mean(axis=1)
-    median = np.median(mean_nn)
-    return mean_nn < factor * median
-
-
 # ── gravity-aligned OBB (ported/adapted R3D _fit_gravity_aligned_obb) ─
 
 def _gravity_rotation(gravity: np.ndarray | None) -> np.ndarray:
