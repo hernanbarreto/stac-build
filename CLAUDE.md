@@ -124,6 +124,168 @@ geométrica obligatoria en todo artefacto derivado."
   enforced by test). Tests: `server/tests/test_correction_*.py` + shared
   generator `tests/synth_correction.py` (30 tests, no GPU).
 
+## ⭐ CORRECTION ALGORITHM — USER DECISION 2026-09-18 (visit drift replaces the
+## greedy loop; it IS the correction now)
+**"esto agregalo completo como algoritmo de correccion en lugar del que
+tenemos actualmente porque el piso quedo perfecto, hasta las lineas
+perfectamente alineadas … que se generen tantas epocas automaticamente hasta
+que no mejore mas … ademas antes aplicale a la nube el filtrado que te dije en
+cada etapa, por revisitas que no aportan etc … ademas se debe aplicar floor
+transform en cada ajuste tambien"**
+
+`correction/visit_drift.py` (the measurement) + `correction/visit_drift_run.py`
+(the epoch loop). One epoch =
+
+1. **FILTER the cloud for real** — a visit contributing < `min_visit_share` of
+   an object never observed it, it grazed it; an object under `min_points`
+   cannot be measured. Both are DELETED (like `single_witness`), the instance
+   index is reindexed, and an instance left with no points stops existing.
+2. **MEASURE** every object two separated visits saw, by aligning the
+   SILHOUETTES of its two copies in the three orthogonal views of its OWN OBB
+   (plan L-W, side L-U, front W-U) by normalised FFT cross-correlation. Each
+   view fixes two components, so **every component is measured twice and their
+   disagreement is the determination test** — it replaced 3-DOF-vs-6-DOF ICP.
+   3-D ICP SLIDES on flat/symmetric surfaces (pccr epoch 2: ICP said 1.4 cm of
+   residual drift on `desk#203` while the plan view showed the two tops
+   plainly offset); the centroid hides it too (3.1 cm), compensating what is
+   missing on one side with what is extra on the other.
+   Filters before it, in order: 2+ visits · `min_points` · visit share ·
+   `min_walk_m` of WALK between visits · `min_comparability` of IQR extent
+   (never max−min: one flyer stretches the OBB).
+3. **CORRECT** — every DETERMINED closure (disagreement ≤ 2× the session's own
+   repeatability) becomes a knot; closures at the same moment of the walk, or
+   agreeing within that same bar, are ONE knot (weighted mean). All of them go
+   to `distribute` TOGETHER: feeding one closure per epoch and iterating made
+   the loop oscillate (pccr, monitor 76.5→0→48.6 while the door went
+   64.7→49→0.5).
+4. **PUBLISH** a selectable epoch — cloud, poses, segmentation, octree, epoch
+   record, per-keyframe npz — and **RE-LEVEL THE FLOOR** on the new geometry.
+   Every correction tilts the scene a little and the display frame has to
+   follow or the floor walks off y=0 epoch after epoch.
+
+It **stops before publishing** when what the closures AGREE on falls under the
+session's own repeatability: once the survivors point in opposite directions
+their weighted sum is ~0, and what each still shows is disagreement BETWEEN
+objects, which no motion of the walk removes. Judged after publishing, this
+cost two epochs that moved the cloud by 2 mm and rebuilt a 22 M-point octree
+to do it. Second stop: an epoch that corrects no less than the previous one.
+
+Measured on pccr 2026-08-31 (19.3 m walk, 22.1 M points, 82 objects):
+67.0 cm applied → 8.2 cm → converged, 3 objects testifying together
+(76.5/70.9/64.7 cm → 23.4/18.6/24.8 cm), floor +334.9 mm/2.90° → 0.
+
+**UNHOOKED AND DELETED the same day** (USER: *"luego desenganchamos el anterior
+y lo eliminamos asi no queda basura"*): `reconstruction/certify/iterate.py`
+(the §9 GREEDY loop and `greedy_is_the_correction`), its `certify.greedy:`
+config block and `GreedyConfig`, and its two test files. On the pccr run that
+produced the session's acta the greedy chain was the ONLY stage that moved
+geometry and it REGRESSED the objective by 4.5 %. The keyframe pose graph
+still RUNS inside the certification and its loop residual reaches the acta —
+it is MEASURED, never applied (`stages.poses.verdict = "MEASURED"`). Scale and
+depth still solve their own degrees of freedom, which visit-drift never
+touches.
+
+Consequences wired the same day:
+- `certify_session` measures `metrics_initial` BEFORE the correction. It used
+  to be iteration 0's own starting state, which was the same thing only while
+  the correction happened inside iteration 0 — after the move it compared the
+  corrected session with itself and every §9 gate passed by construction.
+  `metrics_final` is the last state MEASURED, not the last one applied.
+- An epoch carries what it DELETED (`dropped` in `corrections/epoch_<N>.npz`)
+  and `correction.replay` honours it, so an epoch that both moved 22 M points
+  and deleted eight thousand still replays exactly.
+- `geometry_epoch.json` is an epoch ARTIFACT: it travels with the geometry.
+  `select_epoch` swaps the union of the manifests and nothing else, so a
+  record left live is a record that lies — the session showed epoch 0 while
+  the file said 3 and the next run numbered itself from that. `run_select`
+  repairs a record that did not travel. `floor_transform.npz` /
+  `floor_level.json` are artifacts too, for the same reason.
+- `distribute` extrapolates past the LAST KNOT along the screw measured FROM
+  THE START (E(d) = ε·d, the model's own sentence), not along the last
+  segment: past the last closure there is nothing to measure and the rate with
+  the longest lever arm behind it is the one to continue with. Two knots 3.7 m
+  apart whose 15.8 and 15.2 cm closures point ~35° apart moved the walk's end
+  33 cm for a 15 cm closure. With ONE knot — the common case — the two
+  readings are identical.
+- DECLARED LIMIT, measured by the §10.11 envelope: the drift-rate model
+  represents error that ACCUMULATES with the distance walked. A step kink
+  injected into one chunk (what the known-answer experiment injects) is not
+  that shape; the instrument recovers part of a small one, fails on a large
+  one, and the §9 gates say so instead of hiding it.
+
+## ⭐ THE DRIFT IS DEPTH, NOT POSE — USER DECISION 2026-09-19 (pccr)
+**The duplicates are separated ALONG THE LINE OF SIGHT, not sideways.** Five of
+pccr's six surviving closures are 97-99 % RADIAL (`desk#203`: 67.2 cm of 67.8).
+A translation is the same everywhere; a DEPTH error grows with distance — which
+is why the desk closed at 0.7 cm at 3.6 m while the tile lines 8 m away stayed
+18.1 cm off, and why no two objects ever agreed on a vector: each sits at a
+different BEARING, so ONE depth error becomes a different world vector for each.
+
+Two independent instruments agree on the size: the SAM3 silhouettes
+(`k(d) = 1 + eps*d` fits the closures with ONE parameter better than the
+per-keyframe TRANSLATION with three — rms 16.7 vs 22.8 cm, and beats it across
+the whole regularisation sweep) and the DA3 anchors of `scale_diagnostics.json`,
+which never see a silhouette (per-frame scale median 0.8784 first half → 1.0015
+second, ratio **1.1401**, bootstrap 90 % CI [1.008, 1.256], Spearman rho +0.459
+p 0.0038 over 38 frames). `scale_align` ran in `global_median` and applied ONE
+factor (0.9845): it corrects the average and leaves the drift. The session had
+already written the evidence and nobody read it — `mad_rel` 10.3 %,
+`scale_confidence` 0.486, `residual_vs_depth` +21 % at 0.59 m to −12 % at 2.13 m.
+
+RULED OUT BY MEASUREMENT, do not re-try blind: global rigid rotation (residual
+27 cm, axis swings 67° on leave-one-out), per-object rotation (peak flat over
+±6°, |t| moves ≤1.2 cm), uniform scale of a copy (the three OBB axis ratios were
+1.183 / 0.849 / 1.138 — not one number), and camera rotation about its own
+centre, which is impossible by construction: it moves a point PERPENDICULAR to
+its ray and these closures lie ALONG it.
+
+Wired the same day (USER: *"arreglemos la escala en origen"* → B first):
+- `visit_drift.scale_rows()` reads every closure as the depth ratio it measures
+  (`k_b = 1 + (t·u)/D_b`, `s_ab = 1/k_b`) and `visit_drift_run` publishes them as
+  `scale_loop_rows.json`, STAMPED with the epoch measured on — this correction
+  changes the very depths the rows are made of, so `scale_epoch` re-measures
+  when the stamp is stale instead of compounding a correction already applied.
+  NOTHING IS VETOED: the TANGENTIAL part becomes the row's residual, so a
+  sideways closure widens its own error bar. pccr's one false identity,
+  `glass_door#121` (a TRIPLICATE — three parallel doors in one masklet), is 91 %
+  tangential and priced itself out at σ 0.267 vs the desk's 0.054.
+- `certify/scale_stage` had ZERO loop rows on pccr while `visit_drift` measured
+  five good ones every pass and spent them all on a translation solver. It now
+  reads them, plus `da3_trend_rows()` — the SHAPE of the DA3 drift as RELATIVE
+  rows between consecutive chunks, never absolute pins (NOT the 2026-09-13 move:
+  that fed each chunk's absolute median, ±8-15 % monocular noise; a relative row
+  carries no opinion about the metre, only about how it is DISTRIBUTED, and
+  already-applied corrections are subtracted via the lock-relative agreements so
+  the row goes to zero when the drift is gone). σ is measured from the session's
+  own `anchors.mad_rel` over √n per chunk.
+- An anchor row of a chunk that has NOT moved since the lock is 1.0 BY
+  CONSTRUCTION — it restates the gauge, it does not measure whether the lock was
+  right. With no other evidence it is exactly the row to keep (2026-09-13). With
+  loop rows it is not harmless: seven such rows at σ 0.03 plus six seam rows at
+  0.02 outvoted the one loop row 13 to 1 and turned a measured +17.2 % into
+  +2.3 %. They now STAND DOWN when something else can speak, and the report says
+  which and why (`anchor_rows_stood_down`). WHAT HOLDS THE GAUGE then: anchors
+  and absolute rows are the only ABSOLUTE rows; seams and loops are relative, so
+  `solve_scale_graph`'s lstsq returns the MINIMUM-NORM solution — geometric mean
+  of the factors = 1. That is correct here and must not be "fixed": the lock
+  already set the session's size from all 38 anchors at once; what stands down is
+  each chunk's individual pin. The drift is redistributed, the total size is not.
+- `visit_drift_run.scale_epoch()` applies it: `depth × r_k about each keyframe's
+  OWN camera` + the translation that keeps the walk continuous (the existing
+  `scale_transforms` + `warp_subset`, unchanged). The CHUNK is the unit because
+  each chunk carries its own gauge; a per-FRAME depth change would break the
+  multi-view consistency the reconstruction still has INSIDE a chunk.
+  pccr epoch 1: r 0.9586→1.0432, cameras move ≤31.3 cm, the cloud ≤66.9 cm —
+  the order of the duplicate separation, reached WITHOUT measuring a single
+  translation.
+- **DECLARED LIMIT**: the DA3 anchors show a CONTINUOUS drift and seven chunks
+  can only spell a STAIRCASE. With `sigma_seam_log` 0.02 over six seams the
+  model tops out near 12 %; pccr needs ~14 %. Do not "fix" this by retuning the
+  seam σ — the overlap frames really do measure relative scale to 0.1-1 %, and
+  the cap is structural. The fix is A: `scale_align` learning a mode along the
+  WALK (the axis its 2026-08-11 A/B never tested — it tested DEPTH, `s·z+b` and
+  `a0·z+a1·z²`, and correctly found no structure there).
+
 ## ⭐ ARBITRARY NUMBERS LEDGER — USER 2026-09-14 ("en algún momento nos va a
 ## joder seguro")
 Every value below GATES a decision — it accepts, rejects, stops or caps
@@ -135,18 +297,41 @@ against §10.10, and `mask_filter.visit_gap_kf: 20` asserted a continuity
 nothing observed. **When one of these misbehaves, the fix is to replace it
 with a measurement, not to retune it.**
 
+- **DICTATED BY THE USER — his criteria, not thresholds someone chose**
+  (`correction.visit_drift`, 2026-09-18, written down in the session's
+  `output/reproject/CRITERIOS.md`): `min_points: 500`, `min_walk_m: 1.0` (two
+  visits under a metre of WALK apart are one pass with an occlusion in the
+  middle), and `min_visit_share`, RAISED 0.01 -> **0.25** on 2026-09-19
+  ("podemos subirlo al 25%") after the orthogonal views of pccr's six
+  survivors: at 1 % four entered on a visit worth 6-10 % of the object —
+  `black_office_chair#199`'s was a patch of FLOOR — and the silhouette peak
+  falls with the share (0.86/0.76 above a third; 0.72/0.51/0.34 below).
+  (`min_comparability` and `fallback_best_n` were REMOVED with the old step 3;
+  they configure nothing today.)
 - **DERIVED — leave alone, the evidence is in the YAML comment**
   - `segmentation.dedupe_overlap: 0.5` — from all 2,926 instance pairs of pccr
     (max mutual overlap in the whole session is 61 %; at 0.5 the mutual test
     merges 5 pairs, the old containment test 54).
   - `segmentation.mask_filter.visit_gap_kf: 1` — the USER's definition, not a
     threshold: a visit ends at ANY discontinuity.
+  - `correction.visit_drift.silhouette_cell_m: 0.01` + `silhouette_close_px: 5`
+    + `silhouette_blur_px: 2.0` — MEASURED on pccr: at 5 mm and unfilled the
+    projection of a cloud is nearly empty and the correlation follows the
+    noise (peaks 0.013–0.032, the two views measuring one component
+    disagreeing by 24 and 30 cm); closed and blurred at 1 cm, peaks 0.70–0.91
+    and agreement within 5 cm.
+  - `correction.visit_drift.default_repeatability_m: 0.0477` — a FALLBACK, not
+    a decision: the session measures its own repeatability
+    (`certify.repeatability.session_repeatability`: uncertainty.json → elastic
+    seam residual → intra-chunk agreement) and that always wins. The value is
+    what pccr measured, kept for a session that wrote no evidence at all.
 - **INVENTED AND IT DECIDES — the ones to replace first**
   - `correction_graph.graph.drift_min_gain: 0.2` — the only one that REJECTS a
     correction by a made-up threshold. The replacement already exists: the
-    greedy loop's measure (points landing inside their masks, up or down).
-    Not urgent only because the drift model runs solely when the greedy loop
-    accepts nothing.
+    It is now unreachable from the session's correction path (the greedy
+    loop that fell through to it was DELETED 2026-09-18 and the keyframe graph
+    no longer applies); it still gates `correction_graph` when that module is
+    called directly.
   - `segmentation.mask_filter.min_inside_frac: 0.5` (a point is noise below
     this share of frames), `min_votes: 2` (frames needed to judge at all),
     `max_drop_frac: 0.5` (refuses the whole filter).
@@ -166,8 +351,8 @@ with a measurement, not to retune it.**
     predict, applied anyway.
 - **INVENTED, BOUNDS NOT DECISIONS** — `drift_prior_rot_deg: 30` /
   `drift_prior_trans_m: 5` (deliberately generous: pccr demands ~3 m and the
-  blow-up they stop measured 458°), `greedy.max_epochs: 12`,
-  `certify.max_iters: 3`, `scale.max_correction_log: 0.2`,
+  blow-up they stop measured 458°), `visit_drift.max_epochs: 12` and
+  `visit_drift.search_margin_m: 1.20`, `certify.max_iters: 3`, `scale.max_correction_log: 0.2`,
   `visit_loops.sigma_floor_m: 0.01`, `outlier_mad_k: 3.0`,
   `outlier_max_sigma_factor: 10.0`, `outlier_overlap_frac: 0.6`.
 - **REMOVED, do not bring back** — `certify.known_answer.tol_t_m/tol_deg/
@@ -176,7 +361,9 @@ with a measurement, not to retune it.**
   de especificación y decirlo"; the envelope now stops where the §9 gates
   fail, as the spec names). `correction_graph.graph.min_gain` of the greedy
   loop (USER rejected 5 % as arbitrary; the fixed sample makes any threshold
-  unnecessary and a test fails if it returns).
+  unnecessary and a test fails if it returns). The whole `certify.greedy:`
+  block with the module it configured (`reconstruction/certify/iterate.py`) —
+  deleted 2026-09-18, replaced by `correction.visit_drift`.
 
 ## ⭐ ONE COMMAND — USER DECISION 2026-09-13/14 ("Reconstruir" delivers the
 ## corrected cloud; nothing manual, nothing OFF left in the code)
@@ -187,13 +374,18 @@ with a measurement, not to retune it.**
   the acta shows a new epoch; the kit opens by itself with pending epochs —
   Approve/Undo is the only human verdict. No "Run certification" button, no
   `/api/certify/run`.
-- EVERY loop closure is applied inside the pipeline: SALAD candidates (fork
-  `LoopModel` searches top-k among NON-local keyframes; thresholds from
-  `loops.salad`), exact bridges + in-run keyframe graph (fork), SAM3 instance
-  copies (`instance_edges`) + geometric revisits (`visit_edges`) in the
-  post-hoc graph. "nunca debe descartarse un duplicado detectado por SAM3":
-  any VLM class except dynamic proposes; a non-structural proposer only
-  inflates σ (`loops.semantic.nonstructural_sigma_factor`).
+- EVERY loop closure is MEASURED inside the pipeline and none is discarded:
+  SALAD candidates (fork `LoopModel` searches top-k among NON-local keyframes;
+  thresholds from `loops.salad`), exact bridges + in-run keyframe graph
+  (fork), SAM3 instance copies (`instance_edges`) + geometric revisits
+  (`visit_edges`) in the post-hoc graph. "nunca debe descartarse un duplicado
+  detectado por SAM3": any VLM class except dynamic proposes; a non-structural
+  proposer only inflates σ (`loops.semantic.nonstructural_sigma_factor`).
+  SINCE 2026-09-18 the IN-RUN closures still move the reconstruction (fork);
+  the POST-HOC keyframe graph is measured and reported, not applied — the
+  session's correction is the visit-drift loop (see the CORRECTION ALGORITHM
+  block above), and the graph's loop residual is how the acta says what it
+  left behind.
 - GATES ARE ADVISORY everywhere (`correction.gates.mode`,
   `correction_graph.graph.gate_mode`, `certify.gates.mode` = advisory): drift
   budget, loop gain, held-out pairs, authority, the §9 iteration gates are

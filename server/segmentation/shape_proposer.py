@@ -152,9 +152,15 @@ def _region_facts(idx: int, r: dict, P_disp: np.ndarray) -> dict:
 
 def _project_frame(ev, fidx: int, pts: np.ndarray):
     """K-grid pixel coords + camera depth for raw-frame points; None if the
-    frame has no pose. Same math as hole_audit's vote()."""
-    c2w = ev.cam.pose_map.get(fidx)
-    K = ev.cam.K_for(fidx)
+    frame has no pose. Same math as hole_audit's vote().
+
+    ``fidx`` is a CLOUD/POSE frame number — the space the camera source, the
+    JPEG names and every point's ``frame_global`` live in. A caller holding a
+    MASK index (what ``ev.frames_for`` hands out) translates first, with
+    ``ev.cloud_frame``; three of the four callers already speak this space and
+    handing them a mask index silently returns another keyframe's pose."""
+    c2w = ev.cam.pose_map.get(int(fidx))
+    K = ev.cam.K_for(int(fidx))
     if c2w is None or K is None:
         return None
     c2w4 = np.eye(4)
@@ -172,6 +178,7 @@ def _project_frame(ev, fidx: int, pts: np.ndarray):
 
 def _inst_zbuf(ev, fidx: int, mh: int, mw: int, inst_pts: np.ndarray,
                cache: Dict[int, Optional[np.ndarray]]):
+    # fidx is a CLOUD frame, like _project_frame's
     """Z-buffer of the INSTANCE's own points only, NO minimum filter — used
     for self-occlusion. hole_audit's full-cloud buffer + 5-px min filter is
     right for walls but flags most of a compact object as 'occluded' by its
@@ -198,6 +205,7 @@ def _visible_in_frame(ev, fidx: int, mh: int, mw: int, pts: np.ndarray,
                       inst_zbuf_cache: Optional[dict] = None,
                       depth_tol: float = 0.15, self_tol: float = 0.10):
     """(mask-grid u, v, visible) — visible = in bounds AND not occluded.
+    ``fidx`` is a CLOUD frame (see :func:`_project_frame`).
     External occlusion: the full-cloud Z-buffer says something ≥depth_tol in
     front AND the instance's own buffer does NOT (so the occluder is another
     object, not the object's own surface). Self-occlusion: the instance's own
@@ -256,7 +264,7 @@ def _calibrate_oid_lenient(ev, inst_pts: np.ndarray, instance_id: int,
         for fidx, key in by_area:
             m = ev.masks[key]
             mh, mw = m.shape
-            pr = _project_frame(ev, fidx, sample)
+            pr = _project_frame(ev, ev.cloud_frame(fidx), sample)
             if pr is None:
                 continue
             u, v, z, front = pr
@@ -278,7 +286,11 @@ def _pick_frames(ev, oid: int, mask_frames: List[Tuple[int, str]],
                  min_gap: int = 25, log=print) -> List[Tuple[int, str]]:
     """Rank candidate keyframes: object mask area first (cheap), then how many
     regions each shows un-occluded; greedy pick with a frame-index gap so the
-    views actually differ."""
+    views actually differ.
+
+    Everything here is in MASK frame indices — ``min_gap`` therefore counts
+    KEYFRAMES apart, which is what "the views actually differ" means; it is
+    not a count of video frames."""
     by_area = sorted(
         mask_frames,
         key=lambda fk: int((ev.masks[fk[1]] > 0).sum()), reverse=True)[:24]
@@ -288,7 +300,7 @@ def _pick_frames(ev, oid: int, mask_frames: List[Tuple[int, str]],
         mh, mw = m.shape
         score = 0.0
         for P in region_pts:
-            r = _visible_in_frame(ev, fidx, mh, mw, P,
+            r = _visible_in_frame(ev, ev.cloud_frame(fidx), mh, mw, P,
                                   inst_pts=inst_pts,
                                   inst_zbuf_cache=inst_zbuf_cache)
             if r is None:
@@ -306,16 +318,26 @@ def _pick_frames(ev, oid: int, mask_frames: List[Tuple[int, str]],
         if len(picked) >= n_views:
             break
     for f0, _k in picked:
-        log(f"  view: frame {f0}")
+        log(f"  view: keyframe {f0} (frame {ev.cloud_frame(f0)})")
     return picked
 
 
-def _load_frame_rgb(session_dir: Path, fidx: int):
+def _load_frame_rgb(session_dir: Path, fnum: int):
+    """The scan JPEG of a REAL video frame number. The frames/ filenames are
+    the video numbering — a MASK frame index opens a different photograph (or
+    none). Hold a mask index? call :func:`_mask_frame_rgb`."""
     from PIL import Image
-    p = Path(session_dir) / "frames" / f"{fidx:06d}.jpg"
+    if fnum is None:
+        return None
+    p = Path(session_dir) / "frames" / f"{int(fnum):06d}.jpg"
     if not p.exists():
         return None
     return Image.open(p).convert("RGB")
+
+
+def _mask_frame_rgb(ev, session_dir: Path, fidx: int):
+    """The scan JPEG behind a MASK frame index."""
+    return _load_frame_rgb(session_dir, ev.cloud_frame(int(fidx)))
 
 
 def _font(size: int):
@@ -344,7 +366,7 @@ def _annotated_crop(ev, fidx: int, key: str, session_dir: Path,
     (stable palette) and numbered at its 2-D centroid. Returns (PIL, legend)
     where legend maps region index → color name shown."""
     from PIL import Image, ImageDraw
-    img = _load_frame_rgb(session_dir, fidx)
+    img = _mask_frame_rgb(ev, session_dir, fidx)
     if img is None:
         return None
     W, H = img.size
@@ -354,7 +376,7 @@ def _annotated_crop(ev, fidx: int, key: str, session_dir: Path,
 
     centroids: Dict[int, Tuple[float, float]] = {}
     for ri, P in enumerate(region_pts):
-        r = _visible_in_frame(ev, fidx, mh, mw, P,
+        r = _visible_in_frame(ev, ev.cloud_frame(fidx), mh, mw, P,
                               inst_pts=inst_pts,
                               inst_zbuf_cache=inst_zbuf_cache)
         if r is None:
@@ -667,7 +689,8 @@ def propose_object(output_dir: Path, instance_id: int,
         crop, present = ac
         p = dst / f"regions_f{fidx}.jpg"
         crop.save(p, quality=90)
-        annotated.append({"frame": fidx, "path": p, "regions": present})
+        annotated.append({"frame": ev.cloud_frame(fidx), "mask_frame": fidx,
+                          "path": p, "regions": present})
         covered_regions.update(present)
 
     # TARGETED second pass: regions the main views missed get their own
@@ -695,7 +718,8 @@ def propose_object(output_dir: Path, instance_id: int,
             crop, present = ac
             p = dst / f"regions_f{fidx}_extra.jpg"
             crop.save(p, quality=90)
-            annotated.append({"frame": fidx, "path": p, "regions": present})
+            annotated.append({"frame": ev.cloud_frame(fidx), "mask_frame": fidx,
+                              "path": p, "regions": present})
             covered_regions.update(present)
 
     # measured-cloud views (display frame): material vs void + placement
@@ -709,7 +733,7 @@ def propose_object(output_dir: Path, instance_id: int,
                      key=lambda fk: int((ev.masks[fk[1]] > 0).sum()),
                      reverse=True)
     for fidx, key in by_area[:n_obj_views]:
-        img = _load_frame_rgb(session_dir, fidx)
+        img = _mask_frame_rgb(ev, session_dir, fidx)
         if img is None:
             continue
         m = ev.masks[key] > 0
@@ -718,7 +742,7 @@ def propose_object(output_dir: Path, instance_id: int,
         crop = _isolated_crop(img, mrgb)
         p = dst / f"object_f{fidx}.jpg"
         crop.save(p, quality=90)
-        iso.append({"frame": fidx, "path": p})
+        iso.append({"frame": ev.cloud_frame(fidx), "mask_frame": fidx, "path": p})
     if not annotated and not iso:
         raise RuntimeError(f"{safe}: could not build any evidence image")
 
@@ -766,7 +790,7 @@ def propose_object(output_dir: Path, instance_id: int,
         try:
             from PIL import ImageDraw
             fidx0, key0 = by_area[0]
-            img = _load_frame_rgb(session_dir, fidx0)
+            img = _mask_frame_rgb(ev, session_dir, fidx0)
             if img is not None:
                 m0 = ev.masks[key0]
                 ys, xs = np.where(m0 > 0)

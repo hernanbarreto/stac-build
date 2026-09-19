@@ -2021,6 +2021,109 @@ meshflow:
 # user-validated behaviour; new gates were calibrated on the synthetic suite
 # (server/tests/synth_correction.py).
 correction:
+  # ── the correction: visits of the object, silhouettes of its three views ──
+  # USER 2026-09-18, after the floor closed with its tile lines aligned. See
+  # correction/visit_drift.py for why each of these exists.
+  visit_drift:
+    min_points: 500              # an object with fewer cannot be measured; its
+                                 # points are DELETED from the cloud
+    min_visit_share: 0.25        # a visit leaving AT MOST this share of the
+                                 # object's points did not observe it, it saw a
+                                 # PIECE of it — those points are DELETED too.
+                                 # USER 2026-09-19, raised from 0.01 on pccr's
+                                 # own six survivors: at 1 % four of them
+                                 # entered on a visit worth 6-10 % of the
+                                 # object, and a fragment cannot be aligned
+                                 # against the whole. The silhouette peak
+                                 # follows the share — 0.86 and 0.76 for the
+                                 # two whose smaller visit is over a third,
+                                 # 0.72 / 0.51 / 0.34 for the 10 %, 6 % and 6 %
+                                 # ones, and desk#201's two views disagreed by
+                                 # 25 cm. The orthogonal views name what the
+                                 # number could not: black_office_chair#199's
+                                 # 6 % visit is a patch of FLOOR, not a chair
+    min_walk_m: 1.0              # two visits closer than this along the WALK
+                                 # are one pass with an occlusion in between;
+                                 # nothing accumulates in that distance
+    voxel_m: 0.10                # the grid the COMMON REGION is decided on: per
+                                 # voxel, which visits SAW it (their masks, checked
+                                 # against a per-keyframe Z-buffer). USER
+                                 # 2026-09-18: only what both visits saw can show
+                                 # a discrepancy. The size is a RESOLUTION, not a
+                                 # decision — it is declared with every count,
+                                 # because "zero common voxels" depends on it
+    max_ambiguity: 2             # an object is used only when FEWER than this
+                                 # many OTHER masklets of its own label sit
+                                 # within its own measured displacement. USER
+                                 # 2026-09-18: two visits can agree perfectly
+                                 # in shape and still be two different pieces
+                                 # of a repeated surface. pccr has 85
+                                 # white_tiled_floor masklets and the best
+                                 # silhouette correlation of the session (0.93)
+                                 # is one of them; every surviving floor scores
+                                 # 17 to 59 rivals, every non-floor 0 to 6.
+                                 # Nothing here knows what a floor is: it is
+                                 # the label against itself.
+    silhouette_cell_m: 0.01      # raster cell. At 5 mm and unfilled the
+                                 # projection is nearly empty and the
+                                 # correlation follows the noise (peaks 0.013,
+                                 # views disagreeing by 24 cm); at 1 cm closed
+                                 # and blurred, peaks 0.70-0.91 and agreement
+                                 # within 5 cm
+    silhouette_close_px: 5       # morphological closing, in cells
+    silhouette_blur_px: 2.0      # gaussian blur, in cells
+    search_margin_m: 1.20        # margin around the pair; bounds the shift the
+                                 # correlation can find
+    default_repeatability_m: 0.0477   # only when uncertainty.json is absent —
+                                 # the session measures its own and that wins
+    max_epochs: 4                # HOW MANY EPOCHS ARE GENERATED. USER
+                                 # 2026-09-18: "vamos a ejecutar siempre hasta
+                                 # epoch 0 (original), 1, 2, 3 y 4, forzosamente
+                                 # siempre" — the automatic stop is OPEN for now,
+                                 # so this is a count, not a backstop. The loop
+                                 # still ends early when a pass measures a
+                                 # correction under what the session can repeat,
+                                 # because refusing to write noise is not a
+                                 # convergence rule
+  floor_consensus:               # THE FLOOR AS A CONSTRAINT (USER 2026-09-19).
+                                 # Real terrain belongs to the PLACE, a pose
+                                 # error to the MOMENT: the same cell measured
+                                 # from two keyframes far apart in the walk
+                                 # reads the same height if the difference is a
+                                 # ramp or a step, and a different one if it is
+                                 # drift. Measured on pccr: the spread of a
+                                 # cell's height grows 18 -> 44 -> 81 -> 296 mm
+                                 # as the separation between the keyframes that
+                                 # saw it grows 0.5 -> 2 -> 5 -> 20 m. Terrain
+                                 # cannot do that.
+    enabled: true                # STEP 0 of the correction: level the chunks
+                                 # against each other on the floor cells they
+                                 # SHARE, before anything else runs. On pccr it
+                                 # took 248 mm of accumulated vertical drift out
+                                 # with a residual of 0.0 mm on every edge, and
+                                 # the building's own ramp survived untouched —
+                                 # the relief cancels because both chunks are
+                                 # looking at the same places.
+                                 # What NOT to do, measured: levelling each
+                                 # chunk to y=0 by its OWN average moves it by
+                                 # the relief (306-632 mm on pccr) and, since
+                                 # chunks overlap by half, splits the shared
+                                 # area into two heights — vertical duplicates
+                                 # created where there were none.
+    cell_m: 0.10                 # horizontal cell. A RESOLUTION, not a
+                                 # decision, and declared with every count
+    texture_window_m: 0.40       # HORIZONTAL search half-width on the floor's
+                                 # own texture. A tiled floor REPEATS, so a
+                                 # shift of one period matches as well as none:
+                                 # the search has to stay well under half the
+                                 # period, which is measured and reported with
+                                 # every answer (pccr: 1.40 m, and the residual
+                                 # it found was 15 cm — a tenth of it, the same
+                                 # at every window from 20 to 40 cm)
+    min_shared_cells: 30         # a pair of chunks measured on fewer cells than
+                                 # this is not a measurement; the least squares
+                                 # already weights the rest by how many they
+                                 # share
   evidence:
     obb_core_pct: 98.0            # USER 2026-09-09: the box follows where the segment's
                                   # points CONCENTRATE — the per-axis range holding this
@@ -2561,42 +2664,6 @@ certify:                            # §4.8 ensemble witness + §9 certification
     unobserved_sigma_m: 5.0         # a direction the visit does not observe (a floor's in-plane) — huge σ
     unobserved_sigma_deg: 30.0      # roll / pitch of a yaw-only closure — huge σ
     window_kf: 15                   # an instance's copy = its points within ± this of the visit keyframe
-  greedy:                           # §9 GREEDY loop — USER's mechanic 2026-09-14: "empezamos epoca 1
-                                    # mejora, sigo con epoca 2, no mejora, pruebo con otra no mejora,
-                                    # pruebo con otra mejora, epoca 3 ... ninguna mejora, ok".
-                                    # ONE duplicate at a time and the MEASUREMENT decides: a trial that
-                                    # improves stays and becomes the next epoch of the chain, one that
-                                    # does not is discarded and the next candidate is tried. A failed
-                                    # candidate goes BACK into the pool — the state moved under it, and
-                                    # a correction that did not help before can help now — so
-                                    # convergence is a FULL PASS over what remains with no improvement.
-                                    # Why not a batch fit: pccr 2026-09-14 has sixteen closures that
-                                    # contradict each other by a factor of five (69 to 376 cm for the
-                                    # same quantity); least squares over contradictory observations
-                                    # lands on a compromise that satisfies none — 43 cm applied where
-                                    # the desks asked 112-215, closure 0.946 -> 1.228 m. Applying one
-                                    # and looking is the only thing that separates them. The trials
-                                    # never touch disk: the correction is per keyframe, so a trial
-                                    # warps the INSTANCES' points and the cameras (tens of thousands
-                                    # of points, not 28 million) and only the accepted chain is
-                                    # materialised, once, at the end.
-                                    # WHAT "BETTER" MEANS (USER 2026-09-14): "mejorar es que mas
-                                    # puntos de nube caigan en las mascaras desde donde se vio, es
-                                    # eso. Y empeorar es justamente eso, menos puntos en su
-                                    # mascara." One count of points, no weighted objective and no
-                                    # invented percentage. Two things make the count mean it:
-                                    # (1) every point is projected into EVERY keyframe of its
-                                    # instance, BOTH visits — a point seen from its own keyframe is
-                                    # blind to the correction, because the point and its camera move
-                                    # together, so only the CROSS projection moves, and that is
-                                    # exactly where a duplicate shows itself; (2) the sample is
-                                    # FIXED across trials, so the count is exact and any increase is
-                                    # real, which is why no minimum gain has to be invented.
-    enabled: true
-    max_epochs: 12                  # cap of the ACCEPTED chain, not of the trials
-    window_kf: 15                   # an instance's copy = its points within ± this of its visit kf
-    offset_samples: 4000            # points scored per copy. Fixed across trials by construction;
-                                    # raising it costs every trial linearly
   known_answer:                     # §10.10 field check of the instrument
     chunk: last                     # the perturbed chunk: the revisited one — where the loops see it
                                     # (a kink in a chunk no loop covers is the §4.6 corridor case:

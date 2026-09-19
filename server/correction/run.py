@@ -772,6 +772,20 @@ def run_select(output_dir, epoch: int, operator: str = "user",
 
     res = select_epoch(output_dir, epoch, log=log)
 
+    # The record has to name the epoch actually on screen. It travels with the
+    # geometry whenever the epoch that wrote it listed it as an artifact; an
+    # epoch published before that was the rule leaves the previous record live,
+    # and then `current_epoch` lies — the session showed epoch 0 while the file
+    # still said 3, and the next correction numbered itself from the lie
+    # (pccr 2026-09-18). Repairing it here costs the correction_id of those old
+    # epochs and nothing else.
+    if current_epoch(output_dir) != epoch:
+        from correction.epoch import make_epoch_record, EPOCH_FILE
+        (output_dir / EPOCH_FILE).write_text(json.dumps(make_epoch_record(
+            epoch, f"select/epoch_{epoch}", max(epoch - 1, 0)), indent=2))
+        log(f"  epoch record did not travel with the geometry — rewritten to "
+            f"epoch {epoch}")
+
     for mv, inverse in moves:
         R, t, k, b, frames = (mv["R_kf"], mv["t_kf"], mv["k_kf"],
                               np.asarray(mv["b_kf"]), mv["frames"])

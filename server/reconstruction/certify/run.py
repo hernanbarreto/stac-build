@@ -171,7 +171,6 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     from reconstruction.loops.instance_loops import detect_instance_loops
     from reconstruction.witness.depth_tracks import depth_stage, contour_observations, load_images
     _vendor_on_path()
-    from loop_utils.lie import se3_exp
     cfg = cfg or load_loops_config()
     ccfg = correction_cfg or load_correction_config()
     ccert = cfg.certify
@@ -192,9 +191,6 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                                       fallback_m=ccert.visit_loops.sigma_floor_m,
                                       log=log)
     sigma_floor_m = float(rep_floor["sigma_floor_m"])
-    gdict = {"window_kf": cfg.loops.min_gap_keyframes // 2,
-             "sigma_floor_m": sigma_floor_m,
-             "ambiguous_sigma_factor": cfg.loop.ambiguous_sigma_factor}
     acta = {"version": 1, "started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "operator": operator,
             "max_iters": n_iters, "eps": ccert.eps, "loop_density": float(loop_density),
             # what this session can repeat — every σ in the graph is floored by
@@ -225,7 +221,68 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     base = base_frames if base_frames is not None else load_session_frames(output_dir, log)
     from correction.epoch import current_epoch
     acta["epoch_initial"] = current_epoch(output_dir)
+
+    # ── THE CORRECTION ───────────────────────────────────────────────────
+    # USER 2026-09-18: *"esto agregalo completo como algoritmo de correccion
+    # en lugar del que tenemos actualmente porque el piso quedo perfecto,
+    # hasta las lineas perfectamente alineadas … y que se generen tantas
+    # epocas automaticamente hasta que no mejore mas, ademas antes aplicale a
+    # la nube el filtrado que te dije en cada etapa … ademas se debe aplicar
+    # floor transform en cada ajuste tambien"*.
+    #
+    # One epoch of the loop: FILTER the cloud for real (the visits that
+    # contribute almost nothing and the objects too small to be measured stop
+    # existing), MEASURE the drift of every object two separated visits saw,
+    # SPREAD what the determined closures agree on over the walk by the
+    # drift-rate model, PUBLISH it as a selectable epoch and RE-LEVEL the
+    # floor on the new geometry. It repeats until the correction the closures
+    # agree on falls under what the session can repeat.
+    #
+    # Everything below this point MEASURES the result: the loops, the
+    # witnesses, the metrics, the gates and the acta. The scale and depth
+    # stages still solve their own degrees of freedom, which the visit-drift
+    # loop does not touch.
+    def _measure_now(sess, insts, st, dy):
+        """The state of the session, measured: loops, witnesses, metrics.
+        Used for the acta's BEFORE and reused as iteration 0's baseline."""
+        fr = frames_with_state(base, sess)
+        fl = witness_fields(sess.xyz, sess.fg, sess.data["pixel_row"],
+                            sess.data["pixel_col"], fr, cfg.witness, insts, st, dy,
+                            device=device)
+        cn = []
+        if detect_loops and insts:
+            cn = [c for c in detect_instance_loops(
+                output_dir, session_dir, cfg, log=lambda m: None,
+                apply_splits=False)["candidates"]
+                  if c["verdict"] in ("loop", "ambiguous")]
+        return _state_metrics(sess, fr, _all_edges(sess, cn, quiet=True), {}, insts, fl)
+
+    # The acta's BEFORE is measured BEFORE the correction — it used to be
+    # iteration 0's own starting state, which was the same thing only because
+    # the correction happened inside iteration 0. It does not any more, so a
+    # baseline taken after it would compare the corrected session with itself
+    # and report that nothing improved.
     prev = None
+    last_m = None
+    last_fields = None
+    if apply:
+        s0 = load_session(output_dir)
+        i0 = _instances()
+        prev = _measure_now(s0, i0, load_mask_store(output_dir) if i0 else None,
+                            dynamic_instance_ids(output_dir))
+        acta["metrics_initial"] = prev
+        log(f"[certify] before the correction: objective {prev['objective']:.4f} | "
+            f"seams {prev['seam_residual']['median_m']} | closure {prev['closure']['median_m']}")
+        del s0, i0
+
+        from correction.visit_drift_run import run as run_visit_drift
+        vd = run_visit_drift(session_dir, log=log)
+        acta["visit_drift"] = {
+            "epochs": [{k: v for k, v in e.items() if k not in ("all", "drift")}
+                       for e in vd["epochs"]],
+            "elapsed_s": vd["elapsed_s"]}
+        acta["epoch_after_correction"] = current_epoch(output_dir)
+        base = load_session_frames(output_dir, log)   # poses moved under us
 
     for it in range(n_iters):
         t_it = time.time()
@@ -255,7 +312,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         rec["loops"] = [{k: v for k, v in m.items() if k not in ("Z", "X", "info_t", "info_rot")}
                         for m in edges_now]
         rec["scale_measurements"] = scale_meas
-        if prev is None:
+        if prev is None:          # apply=False: the acta measures, nothing moved
             frames0 = frames_with_state(base, session)
             fields0 = witness_fields(session.xyz, session.fg, session.data["pixel_row"],
                                      session.data["pixel_col"], frames0, cfg.witness, instances, store, dyn,
@@ -278,70 +335,30 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         # 3) the loops re-measured on the closed scale → SE(3) edges → pose graph
         edges_s = _all_edges(session_s, cands, quiet=True) if srep.get("applied") else edges_now
         edges = [m for m in edges_s if "Z" in m and m.get("trusted")] + extra
-        # 3a) the GREEDY loop first (USER 2026-09-14): one duplicate at a time,
-        #     and the measurement — points landing inside their masks — decides.
-        #     A batch fit over closures that contradict each other by a factor
-        #     of five lands on a compromise satisfying none of them; applying
-        #     one and looking is what separates the right ones from the wrong.
-        #     It falls through to the graph when it accepts nothing.
-        greedy_rep = None
-        R_g = t_g = None
-        if ccert.greedy.enabled and edges:
-            from reconstruction.certify.iterate import GreedyLoop
-            gl = GreedyLoop(session_s, edges, ccfg, cfg, output_dir, session_dir,
-                            instances, ccert.greedy, log=log)
-            greedy_rep = gl.run()
-            comp = gl.composed()
-            if comp is not None:
-                R_g, t_g, _k_g = comp
-            rec["greedy"] = greedy_rep
+        # 3a) THE POSE CORRECTION IS NOT SOLVED HERE ANY MORE (USER 2026-09-18).
+        #     It is the VISIT-DRIFT loop, which ran before this iteration and
+        #     published its own epochs. It measures the drift where the drift
+        #     is actually visible — the SILHOUETTES of the two copies of one
+        #     object, aligned in the three orthogonal views of that object's
+        #     own OBB, each component measured twice so its determination is
+        #     measured too — instead of a 3-D fit that slides freely along
+        #     every flat or symmetric surface. What used to decide here, the
+        #     greedy chain, regressed this very session's objective by 4.5 %.
+        #     The keyframe pose graph still RUNS: its loop residual is a
+        #     measurement, and measuring is what the certification is for. It
+        #     no longer moves a point.
         prep = run_keyframe_graph(output_dir, session_dir, cfg, operator=operator, apply=False,
                                   extra_loop_edges=edges, use_structural=True, log=log,
                                   session=session_s, use_fork_edges=use_fork_edges)
         pose_moved = False
-        if prep.get("verdict") == "APPLY" and prep.get("xi"):
-            X = np.stack([se3_exp(np.asarray(x)) for x in prep["xi"]])
-            # a correction inside the closures' own σ floor is noise, not a move
-            pose_moved = bool(np.max(np.linalg.norm(X[:, :3, 3], axis=1)) > sigma_floor_m)
-        # "It falls through to the graph when it accepts nothing" — and a chain
-        # whose every step lands inside the σ floor this session MEASURES is
-        # nothing: it is the repeatability of the reconstruction, not a move.
-        # pccr 2026-09-16: the chain held one step (a ceiling light, closure
-        # |t| 2 cm < 4.77 cm floor); it replaced a graph that had just measured
-        # the loop residual down 94.50 → 89.46 m over 23 edges at coverage
-        # 1.00, and the iteration reported "no stage moved geometry". The same
-        # floor already decides for the graph two lines above; it decides here.
-        from reconstruction.certify.iterate import greedy_is_the_correction
-        greedy_moved = R_g is not None and greedy_is_the_correction(t_g, sigma_floor_m)
-        if greedy_moved:
-            # the greedy chain is the pose correction: every step of it was
-            # accepted because MORE points landed in their masks, which the
-            # graph's own judges cannot see
-            R2, t2 = R_g, t_g
-            pose_moved = True
-            prep = dict(prep, verdict="APPLY", source="greedy", greedy=greedy_rep)
-            log(f"[certify] pose correction from the greedy chain: "
-                f"{greedy_rep['epochs']} step(s) over {greedy_rep['trials']} trial(s), "
-                f"observations off their mask "
-                f"{greedy_rep['points_off_mask_before']:,} → "
-                f"{greedy_rep['points_off_mask_after']:,}")
-        elif pose_moved:
-            if R_g is not None:
-                log(f"[certify] the greedy chain ({greedy_rep['epochs']} step(s)) stays "
-                    f"inside the σ floor this session measures "
-                    f"({sigma_floor_m * 100:.2f} cm) — no evidence of a move; the "
-                    f"keyframe pose graph is the correction")
-                prep = dict(prep, greedy=greedy_rep,
-                            greedy_below_floor_m=float(np.max(np.linalg.norm(t_g, axis=1))))
-            R2, t2 = X[:, :3, :3].copy(), X[:, :3, 3].copy()
-        else:
-            R2, t2 = I3.copy(), np.zeros((N, 3))
-            if prep.get("verdict") == "APPLY":
-                prep = dict(prep, verdict="IDENTITY",
-                            identity_reason=f"pose correction within the σ floor this "
-                                            f"session measures ({sigma_floor_m:.4f} m, "
-                                            f"{rep_floor['source']})")
-                log(f"[certify] pose graph: correction within the σ floor — identity")
+        R2, t2 = I3.copy(), np.zeros((N, 3))
+        if prep.get("verdict") == "APPLY":
+            prep = dict(prep, verdict="MEASURED", source="visit_drift",
+                        not_applied_reason="the pose correction of this session is the "
+                                           "visit-drift loop (correction.visit_drift_run); "
+                                           "the keyframe graph is measured, not applied")
+            log("[certify] pose graph measured and NOT applied — the pose "
+                "correction of this session is the visit-drift loop")
         session_p = transformed_session(session_s, R2, t2, np.ones(N)) if pose_moved else session_s
         # 4) depth by correspondences on the closed poses
         frames_p = frames_with_state(base, session_p, k1_by_frame)
@@ -381,6 +398,12 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         # 6) metrics + gates
         stages = {"scale": srep, "poses": {k: v for k, v in prep.items() if k not in ("xi",)}, "depth": drep}
         m = _state_metrics(session_d, frames_d, edges_d, stages, instances, fields)
+        # the acta's AFTER is the last state MEASURED, not the last one
+        # applied: since the correction moved out of the iterations, an
+        # iteration that applies nothing is the normal ending, and reporting
+        # the pre-correction baseline as "final" said the session had not
+        # improved when it had
+        last_m, last_fields = m, fields
         gates = _gates(m, prev, ccert.gates)
         failed = [g for g in gates if not g["passed"]]
         advisory = ccert.gates.mode == "advisory"
@@ -493,6 +516,46 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     else:
         acta["stopped_at"] = n_iters - 1
         acta["stop_reason"] = f"max_iters {n_iters} reached"
+    # ── what the certification MEASURED reaches the cloud ─────────────────
+    # The per-point witness columns are a measurement of the geometry the
+    # session is showing, and this is the stage that measures them. They used
+    # to ride along on the epoch the iteration applied — so they only ever
+    # landed when a stage moved geometry, and the correction moved out of the
+    # iterations in 2026-09-18. Written only when they are ABSENT: production
+    # clouds already carry them from the merge (`witness.at_merge`), and
+    # rewriting values a second time would make a rejected iteration look like
+    # it had touched the session.
+    if apply and last_fields is not None:
+        try:
+            from correction.session import read_ply, write_ply
+            from reconstruction.witness.fields import add_fields as _add
+            cp = output_dir / "cleaned_cloud.ply"
+            hdr, dat = read_ply(cp)
+            missing = [f for f in WITNESS_FIELDS if f not in (dat.dtype.names or ())]
+            n_ok = all(len(v) == len(dat) for v in last_fields.values())
+            if missing and n_ok:
+                h2, d2 = _add(hdr, dat, last_fields)
+                write_ply(cp, h2, d2)
+                log(f"[certify] witness columns written to the cloud: "
+                    f"{', '.join(missing)}")
+            elif missing:
+                log(f"[certify] ⚠ witness columns not written: measured on "
+                    f"{len(next(iter(last_fields.values())))} points, the cloud "
+                    f"has {len(dat)}")
+        except Exception as e:  # noqa: BLE001 — declared, never silent
+            log(f"[certify] ⚠ witness columns could not be written ({e})")
+
+    # ── one quality report per epoch the correction published ─────────────
+    # The kit's acta panel reads `quality/report_epoch_<N>.json`. The epochs
+    # now come from the visit-drift loop, so each one gets its report here,
+    # carrying its OWN measurement (the closures, the filter, the
+    # distribution) against the session measured before the correction.
+    for e in acta.get("visit_drift", {}).get("epochs", []):
+        write_epoch_report(output_dir, int(e["epoch"]),
+                           last_m if last_m is not None else acta.get("metrics_initial", {}),
+                           acta.get("metrics_initial"),
+                           extra={"correction": "visit_drift", "visit_drift": e})
+
     # ── the second moment of the geometric cleanup cycle ──────────────────
     # The mask audit MARKED, at match time, every point landing off its own
     # mask in a view that saw it, and removed nothing: the certification still
@@ -510,7 +573,8 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
             f"points the audit marked out of place")
         acta["geometric_cleanup"] = {"applied": False, "reason": str(e)}
 
-    acta["metrics_final"] = prev if prev is not None else acta.get("metrics_initial")
+    acta["metrics_final"] = (last_m if last_m is not None else
+                             (prev if prev is not None else acta.get("metrics_initial")))
     acta["epoch_final"] = current_epoch(output_dir)
     acta["elapsed_s"] = round(time.time() - t_start, 1)
     (output_dir / ACTA_JSON).write_text(json.dumps(acta, indent=1, default=float))

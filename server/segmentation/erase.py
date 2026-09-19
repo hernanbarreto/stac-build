@@ -52,6 +52,12 @@ def _atomic_savez(path: Path, arrays: Dict[str, np.ndarray]) -> None:
     try:
         np.savez_compressed(tmp, **arrays)
         os.replace(tmp, path)
+        if Path(path).name == "seg_masks.npz":
+            # the frame-space cache is keyed by the store's mtime, but an
+            # in-process reader that already resolved it must not keep a
+            # verdict measured on the previous contents
+            from segmentation import mask_space
+            mask_space.invalidate(Path(path).parent)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)

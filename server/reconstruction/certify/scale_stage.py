@@ -57,9 +57,11 @@ def _baseline_agreements(diag: dict) -> Optional[Dict[int, float]]:
     return {int(fr["num"]): float(fr["s_f"]) / float(s_applied) for fr in frames if fr.get("s_f")}
 
 
-def anchor_rows(output_dir, owner: np.ndarray, frames: List[int]) -> Tuple[Dict[int, float], Dict[int, int]]:
+def anchor_rows(output_dir, owner: np.ndarray, frames: List[int]
+                ) -> Tuple[Dict[int, float], Dict[int, int], Dict[int, bool]]:
     """Per-chunk DA3 evidence RELATIVE to the metric lock: median over the
-    chunk's anchors of agreement_now / agreement_at_lock → (s_da3, n_anchors).
+    chunk's anchors of agreement_now / agreement_at_lock → (s_da3, n_anchors,
+    moved).
 
     The lock already weighed the raw anchors against the seams and chose;
     re-solving the raw ratios post-hoc only pulled the chunks back toward
@@ -68,16 +70,22 @@ def anchor_rows(output_dir, owner: np.ndarray, frames: List[int]) -> Tuple[Dict[
     What the anchors can still say is whether the geometry MOVED against
     them since the lock — an injected or accumulated scale error changes
     the agreement by 1/k (known-answer §10.10), an untouched session leaves
-    every ratio at 1 → identity. A ratio of 1 means: nothing new."""
+    every ratio at 1 → identity. A ratio of 1 means: nothing new.
+
+    `moved[k]` says whether that chunk's agreement changed AT ALL since the
+    lock. It is the honest reading of the row: when nothing moved, every ratio
+    is exactly 1 by construction, and "the geometry has not moved" is a
+    restatement of the gauge, not a measurement of whether the lock was RIGHT.
+    `solve_scale_stage` needs to tell those two apart — see there."""
     p = Path(output_dir) / "scale_diagnostics.json"
     if not p.exists():
-        return {}, {}
+        return {}, {}, {}
     from correction.diagnose import _current_agreements
     diag = json.loads(p.read_text())
     now = _current_agreements(diag)
     base = _baseline_agreements(diag)
     if not now or not base:
-        return {}, {}
+        return {}, {}, {}
     kf_of = {int(f): k for k, f in enumerate(frames)}
     per_chunk: Dict[int, List[float]] = {}
     for frame, ratio in now.items():
@@ -88,7 +96,136 @@ def anchor_rows(output_dir, owner: np.ndarray, frames: List[int]) -> Tuple[Dict[
         per_chunk.setdefault(int(owner[k]), []).append(float(ratio) / float(b))
     s = {k: float(np.median(v)) for k, v in per_chunk.items()}
     n = {k: len(v) for k, v in per_chunk.items()}
-    return s, n
+    moved = {k: any(x != 1.0 for x in v) for k, v in per_chunk.items()}
+    return s, n, moved
+
+
+def applied_depth_factor(output_dir, n_kf: int) -> np.ndarray:
+    """The cumulative depth factor already applied to each keyframe, walking
+    the epoch chain from the live epoch back to 0.
+
+    `_current_agreements` cannot answer this: it reads an `epochs` history in
+    `scale_diagnostics.json` that NOTHING writes, so it always falls through to
+    `s_f / s_applied` — identical to the baseline, ratio 1.0000 forever (found
+    2026-09-19, after epoch 1 had already applied 0.9586-1.0432 and every
+    anchor still read "nothing moved"). The epoch npz is the record that DOES
+    travel: `k_kf` is exactly what was applied, per keyframe, and
+    `parent_epoch` gives the chain — so showing an older epoch reports that
+    epoch's history, not the newest one's.
+    """
+    from correction.epoch import current_epoch, EPOCH_FILE
+    from correction import ledger
+
+    output_dir = Path(output_dir)
+    k = np.ones(int(n_kf), np.float64)
+    seen, ep = set(), int(current_epoch(output_dir))
+    while ep > 0 and ep not in seen:
+        seen.add(ep)
+        try:
+            d = ledger.load_epoch_npz(output_dir, ep)
+        except Exception:                      # noqa: BLE001 — a missing epoch
+            break                              # ends the chain, it never lies
+        kk = np.asarray(d.get("k_kf"), np.float64)
+        if kk.shape == k.shape:
+            k *= kk
+        rec = output_dir / f"_epoch_{ep}" / EPOCH_FILE
+        if not rec.exists():
+            rec = output_dir / EPOCH_FILE
+        try:
+            ep = int(json.loads(rec.read_text()).get("parent_epoch", ep - 1))
+        except Exception:                      # noqa: BLE001
+            ep = ep - 1
+    return k
+
+
+def da3_trend_rows(output_dir, owner: np.ndarray, frames: List[int],
+                   ) -> Tuple[Dict[Tuple[int, int], Tuple[float, float]], List[dict]]:
+    """The SHAPE of the DA3 drift along the walk, as RELATIVE rows between
+    consecutive chunks — never as absolute pins.
+
+    USER 2026-09-19. This is not the move rejected on 2026-09-13: that one fed
+    each chunk's ABSOLUTE DA3 median (±8-15 % monocular noise) and dragged the
+    session toward medians the lock had overruled. What goes in here is only
+    how the per-frame scale CHANGES from one chunk to the next — the trend
+    that pccr measured at Spearman rho +0.459, p 0.0038 over 38 anchors, and
+    that the silhouette closures independently agree with (+14.0 % vs
+    +12.3-15.7 %). A relative row carries no opinion about the metre; it
+    cannot move the session's size, only how the size is DISTRIBUTED.
+
+    Already-applied corrections are subtracted, or the row would ask for the
+    same drift every epoch and compound it. The lock-relative agreements are
+    what measure that: expanding a chunk by r improves its agreement by 1/r,
+    so with B_k the chunk's agreement AT the lock and K_k the depth factor
+    ALREADY APPLIED to it (from the epoch chain, see `applied_depth_factor` —
+    NOT from `_current_agreements`, which is inert),
+
+        log r_{k+1} - log r_k  =  log(B_{k+1}/B_k) - log(K_{k+1}/K_k)
+
+    and the row goes to zero exactly when the drift has been corrected.
+
+    σ is MEASURED, never chosen: the session's own anchor dispersion
+    (`anchors.mad_rel`) over √n of each chunk's anchors, the two chunks of a
+    row combined in quadrature. A chunk with three noisy anchors prices itself
+    out on its own evidence.
+    """
+    p = Path(output_dir) / "scale_diagnostics.json"
+    if not p.exists():
+        return {}, []
+    from correction.diagnose import _current_agreements
+    diag = json.loads(p.read_text())
+    now = _current_agreements(diag)
+    base = _baseline_agreements(diag)
+    if not now or not base:
+        return {}, []
+    mad = float((diag.get("anchors") or {}).get("mad_rel") or 0.0)
+    if not np.isfinite(mad) or mad <= 0:
+        return {}, []
+    kf_of = {int(f): k for k, f in enumerate(frames)}
+    applied = applied_depth_factor(output_dir, len(frames))
+    B: Dict[int, List[float]] = {}
+    A: Dict[int, List[float]] = {}
+    for frame, b in base.items():
+        k = kf_of.get(int(frame))
+        if k is None or not np.isfinite(b) or b <= 0:
+            continue
+        c = int(owner[k])
+        B.setdefault(c, []).append(float(b))
+        A.setdefault(c, []).append(float(applied[k]))
+    rows: Dict[Tuple[int, int], Tuple[float, float]] = {}
+    rep: List[dict] = []
+    for c in sorted(B):
+        if (c + 1) not in B:
+            continue
+        b0, b1 = float(np.median(B[c])), float(np.median(B[c + 1]))
+        a0, a1 = float(np.median(A[c])), float(np.median(A[c + 1]))
+        # what the chunks still want, MINUS what has already been applied
+        log_r = float(np.log(b1 / b0) - np.log(a1 / a0))
+        sig = float(np.hypot(mad / max(np.sqrt(len(B[c])), 1.0),
+                             mad / max(np.sqrt(len(B[c + 1])), 1.0)))
+        if not np.isfinite(log_r) or not (sig > 0):
+            continue
+        rows[(c, c + 1)] = (log_r, sig)
+        rep.append({"chunks": [c, c + 1], "log_r": log_r, "sigma": sig,
+                    "s_at_lock": [b0, b1], "already_applied": [a0, a1],
+                    "n_anchors": [len(B[c]), len(B[c + 1])]})
+    return rows, rep
+
+
+def loop_rows_artifact(output_dir) -> Tuple[List[dict], Optional[int]]:
+    """The §5.1 loop rows `correction.visit_drift` measured, and the epoch it
+    measured them on.
+
+    On pccr the stage solved with ZERO loop rows while the correction module
+    was measuring five good ones every pass and spending them all on a
+    translation solver (USER 2026-09-19). The closures are 97-99 % RADIAL —
+    a DEPTH ratio, which is exactly what this graph solves for.
+    """
+    p = Path(output_dir) / "scale_loop_rows.json"
+    if not p.exists():
+        return [], None
+    doc = json.loads(p.read_text())
+    ep = doc.get("measured_on_epoch")
+    return list(doc.get("rows") or []), (int(ep) if ep is not None else None)
 
 
 def absolute_rows(output_dir) -> List[Tuple[int, float, float, str]]:
@@ -110,11 +247,12 @@ def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, 
     output_dir = Path(output_dir)
     ranges, owner = chunk_of_keyframes(output_dir, session.n_kf)
     n_chunks = len(ranges)
-    s_da3, n_anch = anchor_rows(output_dir, owner, session.frames)
+    s_da3, n_anch, moved = anchor_rows(output_dir, owner, session.frames)
     abs_rows = absolute_rows(output_dir)
+    vd_rows, vd_epoch = loop_rows_artifact(output_dir)
     loop_rel: Dict[Tuple[int, int], Tuple[float, float]] = {}
     rows_used = []
-    for m in loop_measurements:
+    for m in list(loop_measurements) + list(vd_rows):
         if not m.get("scale_trusted") or "s_ab" not in m:
             continue
         ci, cj = int(owner[int(m["i"])]), int(owner[int(m["j"])])
@@ -133,8 +271,45 @@ def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, 
             loop_rel[key] = (log_r, sig)
         rows_used.append({"instance_id": m.get("instance_id"), "chunks": [ci, cj], "s_ab": m["s_ab"],
                           "log_r": log_r, "sigma": sig})
+    # the SHAPE of the DA3 drift, as relative rows between consecutive chunks.
+    # Same fusion as the loop rows: several sources on one chunk pair are one
+    # weighted measurement, not two votes.
+    trend_rel, trend_rep = da3_trend_rows(output_dir, owner, session.frames)
+    for key, (log_r, sig) in trend_rel.items():
+        if key in loop_rel:
+            lr, sg = loop_rel[key]
+            w1, w2 = 1.0 / sg ** 2, 1.0 / sig ** 2
+            loop_rel[key] = ((lr * w1 + log_r * w2) / (w1 + w2), (1.0 / (w1 + w2)) ** 0.5)
+        else:
+            loop_rel[key] = (log_r, sig)
+
     seam_rel = {k: 1.0 for k in range(n_chunks - 1)}
+    # An anchor row of a chunk that has NOT moved since the lock is 1.0 by
+    # construction: "the geometry has not moved" restates the gauge, it does
+    # not measure whether the lock was RIGHT. With no loop row that is exactly
+    # the anchor to keep — it is what stopped the chunks drifting back to the
+    # raw DA3 medians the lock overruled (pccr 2026-09-13). With loop rows it
+    # stops being harmless: on pccr seven such rows at σ 0.03, plus six seam
+    # rows at 0.02, outvoted the one loop row 13 to 1 and turned a measured
+    # +17.2 % into +2.3 % (USER 2026-09-19). So they stand down exactly when
+    # something else can speak, and the report says which and why.
+    #
+    # WHAT HOLDS THE GAUGE once they do: anchor and absolute rows are the only
+    # ABSOLUTE rows (x_k = log s_k); seams and loops are both RELATIVE. With
+    # every anchor stood down and no absolute row the system is rank-deficient
+    # by exactly one, and `solve_scale_graph`'s lstsq returns the MINIMUM-NORM
+    # solution — mean(log r) = 0, the geometric mean of the factors is 1. That
+    # is the right gauge here and it is not an accident to be "fixed": the
+    # metric lock already set the session's overall size from all its anchors
+    # at once, and what stands down is only each chunk's individual pin. The
+    # drift is redistributed along the walk; the total size does not move.
+    stood_down = sorted(k for k in list(s_da3) if not moved.get(k, True)) if loop_rel else []
+    for k in stood_down:
+        s_da3.pop(k, None)
+        n_anch.pop(k, None)
     rep = {"n_chunks": n_chunks, "chunk_ranges": [list(r) for r in ranges],
+           "visit_drift_rows": len(vd_rows), "visit_drift_epoch": vd_epoch,
+           "da3_trend_rows": trend_rep, "anchor_rows_stood_down": stood_down,
            "loop_rows": rows_used, "anchor_rows": {str(k): {"s": s_da3[k], "n": n_anch[k]} for k in s_da3},
            "absolute_rows": [{"chunk": k, "log_s": ls, "sigma": sg, "source": src} for k, ls, sg, src in abs_rows],
            "sigma_seam_log": float(scfg.sigma_seam_log), "sigma_anchor_log": float(scfg.sigma_anchor_log)}
@@ -176,8 +351,12 @@ def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, 
         rep["r"] = [1.0] * n_chunks
     rep["reason"] = ("scale graph solved" if rep["applied"]
                      else f"solution within the row σ ({max_log:.5f} ≤ {scfg.sigma_loop_min_log}) — identity")
-    log(f"[scale-posthoc] {len(loop_rel)} loop row(s), {len(abs_rows)} absolute, {len(s_da3)} anchor chunk(s) "
-        f"→ r = {np.round(r, 4).tolist()} (max |log r| {max_log:.4f})")
+    log(f"[scale-posthoc] {len(loop_rel)} relative row(s) ({len(vd_rows)} closure(s) from "
+        f"visit-drift on epoch {vd_epoch}, {len(trend_rep)} DA3 trend), "
+        f"{len(abs_rows)} absolute, {len(s_da3)} anchor chunk(s)"
+        + (f", {len(stood_down)} anchor row(s) stood down as identity-by-construction "
+           f"{stood_down}" if stood_down else "")
+        + f" → r = {np.round(r, 4).tolist()} (max |log r| {max_log:.4f})")
     return rep
 
 

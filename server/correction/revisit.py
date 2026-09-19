@@ -298,8 +298,25 @@ def measure_region(session: CorrectionSession, early: List[int],
         return out
     A, B = session.xyz[ia], session.xyz[ib]
     tree = cKDTree(A)
-    d0, _ = tree.query(B, workers=cfg.runtime.workers)
-    before = float(np.median(d0))
+
+    # ── the separation is measured where it can be SEEN ──────────────────
+    # Nearest-neighbour distance alone cannot see a visit slid ALONG the
+    # surface it shares with the other: a floor block moved sideways still has
+    # near neighbours everywhere the two visits overlap, so the region would
+    # report itself closed while the duplicate sits there in plain view. The
+    # same trap the instance closures had (loops_posthoc.measure_copy), and
+    # the ICP below minimises that same quantity, so its cost has a flat
+    # valley along the surface and it drifts INTO the slide.
+    #
+    # So the offset of a region is the WORSE of what the surfaces say and what
+    # the bodies say. The surface term catches a gap, the centroid term
+    # catches a slide, and neither can hide the other.
+    def _sep(P):
+        d, _ = tree.query(P, workers=cfg.runtime.workers)
+        return float(np.median(d)), float(np.linalg.norm(P.mean(0) - A.mean(0)))
+
+    nn_before, cen_before = _sep(B)
+    before = max(nn_before, cen_before)
     shape = obs_mod.classify_object(A, 0, "region", cfg)
     init_t = np.median(A, axis=0) - np.median(B, axis=0)
     sub = B[rng.choice(len(B), min(cfg.solve.icp_sample, len(B)),
@@ -315,14 +332,25 @@ def measure_region(session: CorrectionSession, early: List[int],
             {"mode": "normal", "normal": shape.normal.tolist()}
             if shape.shape == obs_mod.SHAPE_PLANAR else
             {"mode": "perp_axis", "axis": shape.axis.tolist()})
-    d1, _ = tree.query(B @ R.T + t_full, workers=cfg.runtime.workers)
-    after = float(np.median(d1))
+    # the closure competes against the plain displacement the two bodies
+    # demand — a slid ICP solution can no longer win by hugging the surface
+    nn_icp, cen_icp = _sep(B @ R.T + t_full)
+    cands = [(max(nn_icp, cen_icp), R, t_full, nn_icp, cen_icp, "icp")]
+    t_cen = A.mean(0) - B.mean(0)
+    nn_c, cen_c = _sep(B + t_cen)
+    cands.append((max(nn_c, cen_c), np.eye(3), t_cen, nn_c, cen_c, "centroid"))
+    cands.sort(key=lambda r: r[0])
+    after, R, t_full, nn_after, cen_after, fit_chosen = cands[0]
     closure_ok = after < before
     out.update({
         "measured": True,
         "duplicated": before >= rc.offset_min_m,
         "offset_before_cm": round(before * 100, 1),
         "offset_after_cm": round(after * 100, 1),
+        "nn_before_cm": round(nn_before * 100, 1), "nn_after_cm": round(nn_after * 100, 1),
+        "centroid_before_cm": round(cen_before * 100, 1),
+        "centroid_after_cm": round(cen_after * 100, 1),
+        "fit_chosen": fit_chosen,
         "closure_found": closure_ok,
         "closure": ({"rot_deg": round(solve.rot_deg(R), 3),
                      "t_m": [round(float(x), 4) for x in t_full],

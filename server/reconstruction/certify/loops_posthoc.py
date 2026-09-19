@@ -115,16 +115,94 @@ def measure_copy(pts_a: np.ndarray, pts_b: np.ndarray, scfg, seed: int = 0,
     if fit is None:
         return None
     s, R_s, t_s, med, n = fit
-    trusted = bool(med <= float(scfg.max_copy_residual_m))
     c_a = a.mean(0)
-    t_r = np.asarray(t_s, np.float64) + (float(s) - 1.0) * (np.asarray(R_s, np.float64) @ c_a)
+    R_s = np.asarray(R_s, np.float64)
+    t_r = np.asarray(t_s, np.float64) + (float(s) - 1.0) * (R_s @ c_a)
     d_before, _ = tree_b.query(a, k=1)
-    d_after, _ = tree_b.query(a @ np.asarray(R_s, np.float64).T + t_r, k=1)
-    return {"s_ab": float(s), "residual_m": float(med), "n": int(n), "coverage_a": cov_a,
+
+    # ── the rotation has to EARN its degrees of freedom ──────────────────
+    # Six DOF fitted to two copies of a near-symmetric object land on a
+    # rotation that buys nothing and costs everything. pccr 2026-09-17,
+    # measured on the copies themselves: desk#201 closes to 2.6 cm with a
+    # 63.9 deg rotation and |t| = 5.44 m, and to THE SAME 2.6 cm with a pure
+    # translation of 66.8 cm — the size of the duplicate the user can see and
+    # of which he says "no parece haber rotación". The floor is worse: 77.9
+    # deg leaves 30.0 cm where a pure translation leaves 19.0.
+    #
+    # That invented rotation is where the rest of the day's trouble came
+    # from: |t| of metres, drift rates of 100 cm/m, a discrepancy of 30 m for
+    # the graph to absorb, and the observability projection throwing away part
+    # of the REAL translation to compensate for it — the sideways residual the
+    # user sees after the desks close.
+    #
+    # No threshold: both fits are measured against the same points and the
+    # rotation is kept only when it is strictly better. A tie goes to the
+    # fewer degrees of freedom.
+    t_only = _translation_fit(a, b, tree_b, scfg)
+    t_cen = b.mean(0) - c_a            # the displacement the two BODIES demand
+    rot_deg = float(np.degrees(np.arccos(np.clip((np.trace(R_s) - 1.0) / 2.0, -1.0, 1.0))))
+
+    # ── the separation is measured where it can be SEEN ──────────────────
+    # Nearest-neighbour distance cannot see a copy slid ALONG its own
+    # surface: two desks side by side overlapping 50% have near neighbours
+    # everywhere they overlap. pccr 2026-09-17, desk#201: the loop reported
+    # "copies 60.4 -> 2.7 cm" and declared the duplicate closed while the two
+    # centroids stood 52.6 cm apart — exactly the "duplicado al costado con
+    # superposición del 50%" the user was looking at. Between two of its own
+    # epochs the desk slid 15 cm FURTHER apart and the measure read that as
+    # 2.7 -> 4.2 cm, i.e. nothing.
+    #
+    # So the separation of two copies is the WORSE of what the surfaces say
+    # and what the bodies say. The surface term catches a gap, the centroid
+    # term catches a slide, and neither can hide the other. The centroid term
+    # carries the bias of unequal coverage (pccr desk#201: extents 1.30 vs
+    # 1.47 m, so up to ~17 cm of it) — declared here, and small against the
+    # 52 cm it exposes.
+    def _sep(P):
+        d, _ = tree_b.query(P, k=1)
+        return float(np.median(d)), float(np.linalg.norm(P.mean(0) - b.mean(0)))
+
+    nn_before, cen_before = _sep(a)
+    cands = [("rotated", R_s, t_r), ("translated", np.eye(3), t_only),
+             ("centroid", np.eye(3), t_cen)]
+    scored = []
+    for name, R_c, t_c in cands:
+        nn, cen = _sep(a @ np.asarray(R_c, np.float64).T + np.asarray(t_c, np.float64))
+        scored.append((max(nn, cen), nn, cen, name, R_c, t_c))
+    scored.sort(key=lambda r: r[0])
+    sep_after, nn_after, cen_after, chosen, R_s, t_r = scored[0]
+    R_s = np.asarray(R_s, np.float64); t_r = np.asarray(t_r, np.float64)
+    rotation_earned = chosen == "rotated"
+    med = nn_after
+    trusted = bool(sep_after <= float(scfg.max_copy_residual_m))
+    return {"s_ab": float(s) if rotation_earned else 1.0,
+            "residual_m": float(med), "n": int(n), "coverage_a": cov_a,
             "coverage_b": cov_b, "rigid_rms": float(rms), "trusted": trusted,
-            "scale_trusted": bool(trusted and cov_a >= 0.8 and cov_b >= 0.8),
-            "R": np.asarray(R_s, np.float64).tolist(), "t": t_r.tolist(), "centroid_a": c_a.tolist(),
-            "offset_before_m": float(np.median(d_before)), "offset_after_m": float(np.median(d_after))}
+            "scale_trusted": bool(rotation_earned and trusted and cov_a >= 0.8 and cov_b >= 0.8),
+            "R": R_s.tolist(), "t": t_r.tolist(), "centroid_a": c_a.tolist(),
+            "rotation_earned": rotation_earned, "rot_deg_fitted": rot_deg,
+            "fit_chosen": chosen,
+            "fit_scores_m": {nm: round(sc, 4) for sc, _nn, _cn, nm, _R, _t in scored},
+            "nn_before_m": nn_before, "nn_after_m": nn_after,
+            "centroid_before_m": cen_before, "centroid_after_m": cen_after,
+            # what everything downstream decides on: the separation that can be
+            # SEEN, not the one that hides a slide
+            "offset_before_m": float(max(nn_before, cen_before)),
+            "offset_after_m": float(sep_after)}
+
+
+def _translation_fit(a: np.ndarray, b: np.ndarray, tree_b, scfg) -> np.ndarray:
+    """The best PURE translation taking copy A onto copy B — the same trimmed
+    nearest-neighbour loop the rigid fit uses, with the rotation held out."""
+    t = np.zeros(3, np.float64)
+    trim = float(scfg.icp_trim)
+    for _ in range(int(scfg.icp_iters)):
+        p = a + t
+        d, j = tree_b.query(p, k=1)
+        k = max(int(trim * len(d)), 3)
+        idx = np.argpartition(d, k - 1)[:k]
+        t = t + (b[j[idx]] - p[idx]).mean(0)
+    return t
 
 
 def _copy_indices(session, inst: dict, i: int, j: int, window_kf: int):

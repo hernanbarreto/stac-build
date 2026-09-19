@@ -133,12 +133,22 @@ class FindingDetector:
         seg = json.load(open(self.output_dir / "segmentation.json"))
         self._id_to = {i["id"]: i for i in seg.get("instances", [])}
         npz = np.load(self.output_dir / seg.get("mask_file", "seg_masks.npz"))
+        # ``_by_frame`` is keyed by the REAL frame number: the detector opens
+        # frames/<fid>.jpg, reads depth frame_<fid>.npz and looks the pose up
+        # in cam.pose_map with it. The store's own keys are keyframe
+        # POSITIONS — handing one of those to any of the three reads a
+        # different moment of the walk, or nothing.
+        from segmentation import mask_space
+        self._mask_space = mask_space.resolve(self.output_dir, masks=npz)
         by_frame: dict[int, list[tuple[int, str]]] = {}
         for key in npz.files:
             if not key.startswith("f") or "_o" not in key:
                 continue
             fpart, opart = key[1:].split("_o")
-            by_frame.setdefault(int(fpart), []).append((int(opart), key))
+            fid = self._mask_space.to_cloud(int(fpart))
+            if fid is None:
+                continue
+            by_frame.setdefault(int(fid), []).append((int(opart), key))
         self._npz = npz
         self._by_frame = by_frame
 

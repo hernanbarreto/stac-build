@@ -771,30 +771,6 @@
 }
 
 /* ── Correction verdict pill (collapsed dialog) ────────────────────────── */
-.stac-verdict-pill {
-  position: fixed;
-  top: calc(var(--header-h) + var(--hud-inset));
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: var(--z-banner);
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-3);
-  border: var(--bw) solid var(--warn);
-  border-radius: var(--r-pill);
-  background: var(--surface-2);
-  color: var(--warn-fg);
-  font-size: var(--fs-1);
-  font-weight: var(--fw-medium);
-  box-shadow: var(--elev-2);
-}
-
-.stac-verdict-pill svg {
-  width: var(--icon-sm);
-  height: var(--icon-sm);
-}
-
 /* ── Fuse ──────────────────────────────────────────────────────────────── */
 .stac-fuse__scan {
   flex-direction: column;

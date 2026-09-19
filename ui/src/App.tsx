@@ -16,7 +16,6 @@ import TeamPanel from './components/TeamPanel'
 import WebRTCCall from './components/WebRTCCall'
 import BIMNavigator from './components/BIMNavigator'
 import FuseScansModal from './components/FuseScansModal'
-import CorrectionVerdictDialog from './components/CorrectionVerdictDialog'
 import CertifyKitPanel from './components/CertifyKitPanel'
 import DeviationOverlay from './components/DeviationOverlay'
 import type { IFCLoadResult } from './components/IFCLoader'
@@ -2346,11 +2345,6 @@ function App() {
             if (d.ok) { setShowObjectLibrary(false); await viewportRef.current?.placeSceneObject(d.object) }
           } catch { report(t('library.addFailed'), 'err') }
         }} />
-
-      {(correctionState?.status === 'applied' || (pendingSession && pendingSession !== activeSession)) && (
-        <CorrectionVerdictDialog state={correctionState} session={activeSession} otherSession={pendingSession && pendingSession !== activeSession ? pendingSession : null}
-          busy={correctionRunning} epochs={correctionEpochs} onSelectEpoch={selectCorrectionEpoch} />
-      )}
 
       <CorrectionDialog open={showCorrectionModal} onClose={() => setShowCorrectionModal(false)} state={correctionState} report={correctionReport} running={correctionRunning} progress={correctionProgress}
         segments={segments} selected={correctionSelected} onToggleSelected={id => setCorrectionSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}

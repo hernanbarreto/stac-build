@@ -2692,6 +2692,199 @@ async def get_floor_level(session_id: str):
     return {"ok": True, "candidates": candidates, "selected": selected}
 
 
+def level_floor_core(output_dir, result_path, cloud_path, fl_path,
+                     req_iid=None, mode="auto", session_id=""):
+    """Level the selected (or lowest) segmented floor to y=0.
+
+    Extracted from the endpoint so the correction loop can re-level after
+    every epoch (USER 2026-09-18: "se debe aplicar floor transform en cada
+    ajuste tambien") without duplicating a line of the decision logic.
+    """
+    import open3d as o3d
+    from reconstruction.geometry.primitives import fit_plane_ransac
+
+    with open(result_path) as f:
+        result_data = json.load(f)
+    candidates = _floor_candidates_from_result(result_data)
+    if not candidates:
+        return {"ok": True, "leveled": False, "reason": "no floor instances",
+                "candidates": []}
+
+    # selection: explicit > remembered > lowest
+    fl_path = output_dir / "floor_level.json"
+    remembered = None
+    if fl_path.exists():
+        try:
+            remembered = json.loads(fl_path.read_text()).get("selected_instance_id")
+        except Exception:
+            pass
+    cand_ids = {c["instance_id"] for c in candidates}
+    floor_pts = sum(c["n_points"] for c in candidates) or 1
+    pts = np.asarray(o3d.io.read_point_cloud(str(cloud_path)).points)
+    s, R, t = _load_floor_transform_srt(output_dir)
+
+    def _measure(iid):
+        """Fit the floor plane of one candidate. Returns its display-space
+        normal, centre, tilt and share of the floor points, or a refusal."""
+        inst = next((i for i in result_data["instances"]
+                     if i.get("instance_id", i.get("id")) == iid), None)
+        gi = np.asarray((inst or {}).get("globalIndices") or [], dtype=np.int64)
+        if len(gi) < 100:
+            return None, "selected floor has too few points"
+        gi = gi[(gi >= 0) & (gi < len(pts))]
+        seg = pts[gi]
+        if len(seg) > 200_000:
+            seg = seg[np.random.default_rng(0).choice(len(seg), 200_000,
+                                                      replace=False)]
+        pf = fit_plane_ransac(seg, dist_thresh=0.02, iters=400,
+                              min_inlier_frac=0.2, measure_curvature=False)
+        if pf is None:
+            return None, "floor plane fit failed"
+        n_raw = pf.normal
+        n_disp = R @ n_raw
+        if n_disp[1] < 0:
+            n_raw, n_disp = -n_raw, -n_disp
+        c_disp = s * (R @ seg[pf.inliers].mean(0)) + t
+        tilt = float(np.degrees(np.arccos(np.clip(n_disp[1], -1, 1))))
+        share = next((c["n_points"] for c in candidates
+                      if c["instance_id"] == iid), 0) / floor_pts
+        return {"n_disp": n_disp, "c_disp": c_disp, "tilt": tilt,
+                "share": share}, None
+
+    def _implausible(m):
+        """A big rotation is only believable from the DOMINANT floor. A
+        scene genuinely lying on its side has its main floor tilted and
+        must stay levelable, so this is not a blanket tilt veto — it is a
+        veto on a MINOR patch demanding a major rotation, which is what
+        put pccr 2026-09-14 on its side (a 389-point sliver, 0.005 % of
+        the floor, fitted 78.4 deg off horizontal)."""
+        return (m["tilt"] > _FLOOR_MAX_MINOR_TILT_DEG
+                and m["share"] < _FLOOR_DOMINANT_FRAC)
+
+    # selection: explicit > remembered > automatic
+    order, forced = [], False
+    if mode == "explicit" and req_iid is not None:
+        if int(req_iid) not in cand_ids:
+            return {"ok": False, "leveled": False,
+                    "reason": f"instance {req_iid} is not a floor",
+                    "candidates": candidates}
+        order, forced = [int(req_iid)], True
+    elif remembered in cand_ids:
+        order, forced = [remembered], True
+    else:
+        # "the lowest floor" alone is not a floor: a split leaves slivers
+        # carrying the floor's label and the smallest of them is usually
+        # the lowest thing in the scene. Support gates the list, height
+        # orders what survives, and every candidate is TRIED — a bad plane
+        # fit on the first one falls through to the next instead of
+        # leaving the user with no way to level.
+        with_h = [c for c in candidates if c["height_m"] is not None]
+        if with_h:
+            biggest = max(c["n_points"] for c in with_h)
+            eligible = [c for c in with_h
+                        if c["n_points"] >= _FLOOR_MIN_SUPPORT_FRAC * biggest]
+            if not eligible:                     # every candidate is small
+                eligible = with_h
+            if len(eligible) < len(with_h):
+                print(f"[FloorLevel]   {len(with_h) - len(eligible)} candidate(s) "
+                      f"below {_FLOOR_MIN_SUPPORT_FRAC:.0%} of the largest floor "
+                      f"({biggest:,} pts) are not eligible for automatic selection")
+            order = [c["instance_id"]
+                     for c in sorted(eligible, key=lambda c: c["height_m"])]
+        else:
+            order = [candidates[0]["instance_id"]]
+
+    selected, meas, why = None, None, "no floor candidate could be measured"
+    for iid in order:
+        m, err = _measure(iid)
+        if m is None:
+            why = err
+            print(f"[FloorLevel]   instance {iid}: {err}")
+            continue
+        if _implausible(m):
+            why = (f"instance {iid} holds only {m['share']:.1%} of the floor "
+                   f"points and its plane is {m['tilt']:.1f}° off horizontal — "
+                   f"too little evidence for a rotation this large")
+            print(f"[FloorLevel]   {why}")
+            continue
+        selected, meas = iid, m
+        break
+
+    if meas is None:
+        print(f"[FloorLevel] {session_id}: REFUSED — {why}")
+        return {"ok": False, "leveled": False,
+                "reason": (why + (". Select the main floor instead."
+                                  if forced else
+                                  ". No floor candidate is trustworthy enough.")),
+                "selected": order[0] if order else None,
+                "candidates": candidates}
+
+    n_disp, c_disp = meas["n_disp"], meas["c_disp"]
+    tilt_deg, height = meas["tilt"], float(meas["c_disp"][1])
+
+    already = tilt_deg < 0.5 and abs(height) < 0.01
+    if mode == "auto_if_needed" and already:
+        return {"ok": True, "leveled": True, "changed": False,
+                "selected": selected, "candidates": candidates,
+                "residual_mm": round(height * 1000, 1),
+                "matrix": _srt_to_threejs_col_major(s, R, t)}
+
+    # minimal delta rotation in DISPLAY space: n_disp → +Y
+    up = np.array([0.0, 1.0, 0.0])
+    v = n_disp / max(np.linalg.norm(n_disp), 1e-12)
+    axis = np.cross(v, up)
+    ln = np.linalg.norm(axis)
+    if ln < 1e-9:
+        R_delta = np.eye(3)
+    else:
+        axis /= ln
+        ang = float(np.arccos(np.clip(v @ up, -1, 1)))
+        K = np.array([[0, -axis[2], axis[1]],
+                      [axis[2], 0, -axis[0]],
+                      [-axis[1], axis[0], 0]])
+        R_delta = np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * (K @ K)
+
+    R_new = R_delta @ R
+    t_new = t.copy()
+    # keep lateral placement; put the fitted plane exactly at y=0
+    c_disp_new = R_delta @ (c_disp - t) + t
+    t_new[1] = t[1] - c_disp_new[1]
+    np.savez(output_dir / "floor_transform.npz",
+             s=np.array(s), R=R_new, t=np.array([t[0], t_new[1], t[2]]))
+
+    # Recompute EVERY OBB from the cloud under the new transform (delta
+    # re-projection preserves any historical drift between result OBBs
+    # and the npz — see _recompute_result_obbs). No DBSCAN rerun; the
+    # rewrite also keeps the result-cache mtime valid vs the new npz.
+    t_final = np.array([t[0], t_new[1], t[2]])
+    n_obb = _recompute_result_obbs(output_dir, result_data, s, R_new, t_final)
+    print(f"[FloorLevel]   recomputed {n_obb} OBBs under the new frame")
+    atomic_write_json(result_path, result_data)
+    # The instance store (scene_r.db) is display-frame too — rebuild it or
+    # every chat measurement/OBB stays in the OLD frame (2026-08-29).
+    try:
+        from segmentation.pipeline import rebuild_instance_store
+        if rebuild_instance_store(output_dir):
+            print("[FloorLevel]   scene_r.db rebuilt under the new frame")
+    except Exception as e:
+        print(f"[FloorLevel]   store rebuild failed (non-fatal): {e}")
+
+    fl_path.write_text(json.dumps({
+        "selected_instance_id": selected,
+        "candidates": candidates,
+        "leveled_height_before_mm": round(height * 1000, 1),
+        "tilt_before_deg": round(tilt_deg, 3),
+    }, indent=2))
+
+    print(f"[FloorLevel] {session_id}: floor inst {selected} → y=0 "
+          f"(was {height*1000:+.1f} mm, tilt {tilt_deg:.2f}°)")
+    return {"ok": True, "leveled": True, "changed": True,
+            "selected": selected, "candidates": candidates,
+            "residual_before_mm": round(height * 1000, 1),
+            "matrix": _srt_to_threejs_col_major(
+                s, R_new, np.array([t[0], t_new[1], t[2]]))}
+
+
 @app.post("/api/segmentation/level_floor")
 async def level_floor(request: Request):
     """Level the selected (or lowest) segmented floor to y=0.
@@ -2733,192 +2926,9 @@ async def level_floor(request: Request):
 
     loop = asyncio.get_event_loop()
 
-    def _level():
-        import open3d as o3d
-        from reconstruction.geometry.primitives import fit_plane_ransac
-
-        with open(result_path) as f:
-            result_data = json.load(f)
-        candidates = _floor_candidates_from_result(result_data)
-        if not candidates:
-            return {"ok": True, "leveled": False, "reason": "no floor instances",
-                    "candidates": []}
-
-        # selection: explicit > remembered > lowest
-        fl_path = output_dir / "floor_level.json"
-        remembered = None
-        if fl_path.exists():
-            try:
-                remembered = json.loads(fl_path.read_text()).get("selected_instance_id")
-            except Exception:
-                pass
-        cand_ids = {c["instance_id"] for c in candidates}
-        floor_pts = sum(c["n_points"] for c in candidates) or 1
-        pts = np.asarray(o3d.io.read_point_cloud(str(cloud_path)).points)
-        s, R, t = _load_floor_transform_srt(output_dir)
-
-        def _measure(iid):
-            """Fit the floor plane of one candidate. Returns its display-space
-            normal, centre, tilt and share of the floor points, or a refusal."""
-            inst = next((i for i in result_data["instances"]
-                         if i.get("instance_id", i.get("id")) == iid), None)
-            gi = np.asarray((inst or {}).get("globalIndices") or [], dtype=np.int64)
-            if len(gi) < 100:
-                return None, "selected floor has too few points"
-            gi = gi[(gi >= 0) & (gi < len(pts))]
-            seg = pts[gi]
-            if len(seg) > 200_000:
-                seg = seg[np.random.default_rng(0).choice(len(seg), 200_000,
-                                                          replace=False)]
-            pf = fit_plane_ransac(seg, dist_thresh=0.02, iters=400,
-                                  min_inlier_frac=0.2, measure_curvature=False)
-            if pf is None:
-                return None, "floor plane fit failed"
-            n_raw = pf.normal
-            n_disp = R @ n_raw
-            if n_disp[1] < 0:
-                n_raw, n_disp = -n_raw, -n_disp
-            c_disp = s * (R @ seg[pf.inliers].mean(0)) + t
-            tilt = float(np.degrees(np.arccos(np.clip(n_disp[1], -1, 1))))
-            share = next((c["n_points"] for c in candidates
-                          if c["instance_id"] == iid), 0) / floor_pts
-            return {"n_disp": n_disp, "c_disp": c_disp, "tilt": tilt,
-                    "share": share}, None
-
-        def _implausible(m):
-            """A big rotation is only believable from the DOMINANT floor. A
-            scene genuinely lying on its side has its main floor tilted and
-            must stay levelable, so this is not a blanket tilt veto — it is a
-            veto on a MINOR patch demanding a major rotation, which is what
-            put pccr 2026-09-14 on its side (a 389-point sliver, 0.005 % of
-            the floor, fitted 78.4 deg off horizontal)."""
-            return (m["tilt"] > _FLOOR_MAX_MINOR_TILT_DEG
-                    and m["share"] < _FLOOR_DOMINANT_FRAC)
-
-        # selection: explicit > remembered > automatic
-        order, forced = [], False
-        if mode == "explicit" and req_iid is not None:
-            if int(req_iid) not in cand_ids:
-                return {"ok": False, "leveled": False,
-                        "reason": f"instance {req_iid} is not a floor",
-                        "candidates": candidates}
-            order, forced = [int(req_iid)], True
-        elif remembered in cand_ids:
-            order, forced = [remembered], True
-        else:
-            # "the lowest floor" alone is not a floor: a split leaves slivers
-            # carrying the floor's label and the smallest of them is usually
-            # the lowest thing in the scene. Support gates the list, height
-            # orders what survives, and every candidate is TRIED — a bad plane
-            # fit on the first one falls through to the next instead of
-            # leaving the user with no way to level.
-            with_h = [c for c in candidates if c["height_m"] is not None]
-            if with_h:
-                biggest = max(c["n_points"] for c in with_h)
-                eligible = [c for c in with_h
-                            if c["n_points"] >= _FLOOR_MIN_SUPPORT_FRAC * biggest]
-                if not eligible:                     # every candidate is small
-                    eligible = with_h
-                if len(eligible) < len(with_h):
-                    print(f"[FloorLevel]   {len(with_h) - len(eligible)} candidate(s) "
-                          f"below {_FLOOR_MIN_SUPPORT_FRAC:.0%} of the largest floor "
-                          f"({biggest:,} pts) are not eligible for automatic selection")
-                order = [c["instance_id"]
-                         for c in sorted(eligible, key=lambda c: c["height_m"])]
-            else:
-                order = [candidates[0]["instance_id"]]
-
-        selected, meas, why = None, None, "no floor candidate could be measured"
-        for iid in order:
-            m, err = _measure(iid)
-            if m is None:
-                why = err
-                print(f"[FloorLevel]   instance {iid}: {err}")
-                continue
-            if _implausible(m):
-                why = (f"instance {iid} holds only {m['share']:.1%} of the floor "
-                       f"points and its plane is {m['tilt']:.1f}° off horizontal — "
-                       f"too little evidence for a rotation this large")
-                print(f"[FloorLevel]   {why}")
-                continue
-            selected, meas = iid, m
-            break
-
-        if meas is None:
-            print(f"[FloorLevel] {session_id}: REFUSED — {why}")
-            return {"ok": False, "leveled": False,
-                    "reason": (why + (". Select the main floor instead."
-                                      if forced else
-                                      ". No floor candidate is trustworthy enough.")),
-                    "selected": order[0] if order else None,
-                    "candidates": candidates}
-
-        n_disp, c_disp = meas["n_disp"], meas["c_disp"]
-        tilt_deg, height = meas["tilt"], float(meas["c_disp"][1])
-
-        already = tilt_deg < 0.5 and abs(height) < 0.01
-        if mode == "auto_if_needed" and already:
-            return {"ok": True, "leveled": True, "changed": False,
-                    "selected": selected, "candidates": candidates,
-                    "residual_mm": round(height * 1000, 1),
-                    "matrix": _srt_to_threejs_col_major(s, R, t)}
-
-        # minimal delta rotation in DISPLAY space: n_disp → +Y
-        up = np.array([0.0, 1.0, 0.0])
-        v = n_disp / max(np.linalg.norm(n_disp), 1e-12)
-        axis = np.cross(v, up)
-        ln = np.linalg.norm(axis)
-        if ln < 1e-9:
-            R_delta = np.eye(3)
-        else:
-            axis /= ln
-            ang = float(np.arccos(np.clip(v @ up, -1, 1)))
-            K = np.array([[0, -axis[2], axis[1]],
-                          [axis[2], 0, -axis[0]],
-                          [-axis[1], axis[0], 0]])
-            R_delta = np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * (K @ K)
-
-        R_new = R_delta @ R
-        t_new = t.copy()
-        # keep lateral placement; put the fitted plane exactly at y=0
-        c_disp_new = R_delta @ (c_disp - t) + t
-        t_new[1] = t[1] - c_disp_new[1]
-        np.savez(output_dir / "floor_transform.npz",
-                 s=np.array(s), R=R_new, t=np.array([t[0], t_new[1], t[2]]))
-
-        # Recompute EVERY OBB from the cloud under the new transform (delta
-        # re-projection preserves any historical drift between result OBBs
-        # and the npz — see _recompute_result_obbs). No DBSCAN rerun; the
-        # rewrite also keeps the result-cache mtime valid vs the new npz.
-        t_final = np.array([t[0], t_new[1], t[2]])
-        n_obb = _recompute_result_obbs(output_dir, result_data, s, R_new, t_final)
-        print(f"[FloorLevel]   recomputed {n_obb} OBBs under the new frame")
-        atomic_write_json(result_path, result_data)
-        # The instance store (scene_r.db) is display-frame too — rebuild it or
-        # every chat measurement/OBB stays in the OLD frame (2026-08-29).
-        try:
-            from segmentation.pipeline import rebuild_instance_store
-            if rebuild_instance_store(output_dir):
-                print("[FloorLevel]   scene_r.db rebuilt under the new frame")
-        except Exception as e:
-            print(f"[FloorLevel]   store rebuild failed (non-fatal): {e}")
-
-        fl_path.write_text(json.dumps({
-            "selected_instance_id": selected,
-            "candidates": candidates,
-            "leveled_height_before_mm": round(height * 1000, 1),
-            "tilt_before_deg": round(tilt_deg, 3),
-        }, indent=2))
-
-        print(f"[FloorLevel] {session_id}: floor inst {selected} → y=0 "
-              f"(was {height*1000:+.1f} mm, tilt {tilt_deg:.2f}°)")
-        return {"ok": True, "leveled": True, "changed": True,
-                "selected": selected, "candidates": candidates,
-                "residual_before_mm": round(height * 1000, 1),
-                "matrix": _srt_to_threejs_col_major(
-                    s, R_new, np.array([t[0], t_new[1], t[2]]))}
-
-    result = await loop.run_in_executor(None, _level)
+    result = await loop.run_in_executor(
+        None, level_floor_core, output_dir, result_path, cloud_path,
+        output_dir / "floor_level.json", req_iid, mode, session_id)
     return result
 
 
@@ -3164,7 +3174,12 @@ async def propagate_interactive_segmentation(request: Request):
                 all_obj_ids.update(frame_masks.keys())
             obj_labels = {oid: obj_label_map.get(oid, label_name) for oid in all_obj_ids}
             categories = sorted(set(obj_labels.values())) or [label_name]
-            saved_seg = _save_masks(output_dir, translated_masks, categories, obj_labels, cfg)
+            # translated_masks was keyed back to REAL video frame numbers
+            # above — declare it, so the store never mixes conventions
+            from segmentation import mask_space as _mspace
+            saved_seg = _save_masks(output_dir, translated_masks, categories,
+                                    obj_labels, cfg,
+                                    frame_space=_mspace.SPACE_VIDEO)
             print(f"[Segmentation] Saved {len(all_obj_ids)} object(s): "
                   f"{', '.join(f'{oid}={obj_labels[oid]}' for oid in sorted(all_obj_ids))}")
             # mark fully-propagated (ONLY on a run that reached the end)
@@ -3485,15 +3500,22 @@ async def get_instance_mask(session_id: str, instance_id: int, frame: str = "", 
             g = int(color_hex[2:4], 16)
             b = int(color_hex[4:6], 16)
 
-            # Determine frame index for NPZ lookup
+            # Determine frame index for NPZ lookup. kf_index is a KEYFRAME
+            # POSITION and `frame` is a REAL video frame filename — neither is
+            # necessarily the store's own key space, so both are translated
+            # through the store's declaration.
+            from segmentation import mask_space as _mspace
+            _space = _mspace.resolve(output_dir, masks=npz)
             if kf_index >= 0:
-                frame_idx = kf_index
+                frame_idx = _space.from_keyframe(kf_index)
             elif frame:
                 import re
                 nums = re.findall(r'\d+', frame.split('.')[0])
-                frame_idx = int(nums[-1]) if nums else 0
+                frame_idx = _space.to_mask(int(nums[-1])) if nums else None
             else:
-                frame_idx = 0
+                frame_idx = _space.from_keyframe(0)
+            if frame_idx is None:
+                return None
 
             # Find all obj_ids for this instance_id
             obj_ids_to_check = iid_to_obj_ids.get(instance_id, [instance_id])
@@ -3818,6 +3840,8 @@ async def delete_segmentation_instance(request: Request):
                 os.close(tmp_fd)
                 np.savez_compressed(tmp_path, **new_data)
                 os.replace(tmp_path, str(masks_path))
+                from segmentation import mask_space as _mspace
+                _mspace.invalidate(output_dir)
                 print(f"[SegDelete]   seg_masks.npz: removed {removed_keys} mask keys")
 
             # 4) Delete shape folder if it exists
@@ -6239,7 +6263,9 @@ async def resume_run(body: dict):
                       (i.get("label") or str(i["instance_id"]))
                       for i in seg.get("instances", [])}
         cats = list({v for v in obj_labels.values()})
-        _save_masks(output_dir, translated, cats, obj_labels, cfg)
+        from segmentation import mask_space as _mspace
+        _save_masks(output_dir, translated, cats, obj_labels, cfg,
+                    frame_space=_mspace.SPACE_VIDEO)
         for inst in seg.get("instances", []):
             inst["propagated"] = True
         (output_dir / "segmentation.json").write_text(json.dumps(seg, indent=2))
@@ -6601,10 +6627,18 @@ async def paint_mask(request: Request):
                 if iid == instance_id and inst.get("id") != instance_id:
                     obj_ids_for_instance.append(inst.get("id"))
 
-        # Find the NPZ key for this frame+instance
+        # Find the NPZ key for this frame+instance. kf_index is a KEYFRAME
+        # POSITION; the store may be keyed by the video frame number, and
+        # painting under the wrong space is precisely what left one file
+        # holding two conventions.
+        from segmentation import mask_space as _mspace
+        _space = _mspace.resolve(output_dir)
+        _mf = _space.from_keyframe(kf_index)
+        if _mf is None:
+            return None
         target_key = None
         for oid in obj_ids_for_instance:
-            key = f"f{kf_index}_o{oid}"
+            key = f"f{_mf}_o{oid}"
             if key in npz:
                 target_key = key
                 break
@@ -6621,7 +6655,7 @@ async def paint_mask(request: Request):
             else:
                 return None
             mask = np.zeros(shape, dtype=np.uint8)
-            target_key = f"f{kf_index}_o{obj_ids_for_instance[0]}"
+            target_key = f"f{_mf}_o{obj_ids_for_instance[0]}"
         else:
             mask = npz[target_key].astype(np.uint8).copy()
 
@@ -6639,12 +6673,19 @@ async def paint_mask(request: Request):
             mask[circle] = 0
 
         npz[target_key] = mask
+        # a brush stroke can create a key on a frame the store never listed
+        if "frames" in npz:
+            _fr = np.asarray(npz["frames"], dtype=np.int32)
+            if int(_mf) not in set(_fr.tolist()):
+                npz["frames"] = np.array(sorted(set(_fr.tolist()) | {int(_mf)}),
+                                         dtype=np.int32)
         # Atomic write: save to temp file, then rename to prevent corruption
         import tempfile
         tmp_fd, tmp_path = tempfile.mkstemp(suffix='.npz', dir=str(masks_path.parent))
         os.close(tmp_fd)
         np.savez_compressed(tmp_path, **npz)
         os.replace(tmp_path, str(masks_path))
+        _mspace.invalidate(output_dir)
 
         # Generate updated mask PNG
         # Get instance color

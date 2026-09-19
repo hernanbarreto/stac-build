@@ -37,10 +37,16 @@ def build_set(session_dir, output_dir, out_dir, n_frames: int = 25,
     seg = json.load(open(output_dir / "segmentation.json"))
     id_to = {i["id"]: i for i in seg.get("instances", [])}
     npz = np.load(output_dir / seg.get("mask_file", "seg_masks.npz"))
+    # by the REAL frame number — frames/<fid>.jpg is opened with it, and the
+    # npz keys are keyframe POSITIONS
+    from segmentation import mask_space
+    space = mask_space.resolve(output_dir, masks=npz)
     by_frame: dict[int, list[str]] = {}
     for key in npz.files:
         if key.startswith("f") and "_o" in key:
-            by_frame.setdefault(int(key[1:].split("_o")[0]), []).append(key)
+            fid = space.to_cloud(int(key[1:].split("_o")[0]))
+            if fid is not None:
+                by_frame.setdefault(int(fid), []).append(key)
     frames = sorted(by_frame.keys())[::seed_stride][:n_frames]
 
     template = _load_template(out_dir)

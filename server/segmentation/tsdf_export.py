@@ -65,6 +65,14 @@ def _with_depth_correction(loader: Callable, output_dir: Path) -> Callable:
         if isinstance(out, tuple):
             d, *rest = out
             return (correct_depth(d, frame_idx, output_dir), *rest)
+        # some loaders hand back the whole frame record ({"depth", "K", "hw",
+        # "rgb"}) — the correction applies to its depth, not to the record
+        if isinstance(out, dict):
+            if out.get("depth") is None:
+                return out
+            rec = dict(out)
+            rec["depth"] = correct_depth(out["depth"], frame_idx, output_dir)
+            return rec
         return correct_depth(out, frame_idx, output_dir)
 
     return _wrapped

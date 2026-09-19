@@ -82,15 +82,51 @@ class _Evidence:
                 return
             self.kw, self.kh, self._cloud = grid
             self._zbuf_cache: Dict[int, Optional[np.ndarray]] = {}
+            # The npz keys are NOT the frame the poses are keyed by. Measured
+            # (or declared) once here; every lookup below goes through it.
+            from segmentation import mask_space
+            self.space = mask_space.resolve(Path(output_dir), masks=self.masks)
+            if self.space.mixed:
+                logger.warning("hole_audit: %s", self.space.describe())
             self.ok = True
         except Exception as e:  # noqa: BLE001
             logger.warning("hole_audit: evidence load failed: %s", e)
 
-    def _zbuf(self, fidx: int, mh: int, mw: int) -> Optional[np.ndarray]:
+    # ── frame spaces: a mask key is NOT a camera key ─────────────────
+    #
+    # ``frames_for`` / ``_others_mask`` / every ``f<N>_o<OID>`` key speaks the
+    # MASK space (keyframe position on every store the pipeline writes); the
+    # camera source, the JPEG filenames and the cloud's ``frame_global`` speak
+    # the video frame number. These three are the only place the two meet.
+
+    def cloud_frame(self, fidx: int) -> Optional[int]:
+        """Mask key frame → the frame the poses and images are keyed by."""
+        return self.space.to_cloud(int(fidx))
+
+    def pose_at(self, fidx: int):
+        """c2w for a MASK frame index (None when it has no keyframe/pose)."""
+        cf = self.cloud_frame(fidx)
+        return None if cf is None else self.cam.pose_map.get(cf)
+
+    def K_at(self, fidx: int):
+        """Intrinsics for a MASK frame index (K lives on the TRACE grid)."""
+        cf = self.cloud_frame(fidx)
+        return None if cf is None else self.cam.K_for(cf)
+
+    def zbuf_of_mask_frame(self, fidx: int, mh: int, mw: int) -> Optional[np.ndarray]:
+        """:meth:`_zbuf` addressed by a MASK frame index."""
+        cf = self.cloud_frame(fidx)
+        return None if cf is None else self._zbuf(cf, mh, mw)
+
+    def _zbuf(self, cloud_fidx: int, mh: int, mw: int) -> Optional[np.ndarray]:
         """Per-frame Z-buffer from the FULL cloud at mask resolution: what
         measured geometry is closest along each pixel ray. THE depth check
         the 2-D masks lack (without it, a phantom plane cell beyond the wall
-        edge projected onto some other surface and voted 'occluded')."""
+        edge projected onto some other surface and voted 'occluded').
+
+        ``cloud_fidx`` is a CLOUD/POSE frame number — the camera's own space.
+        Use :meth:`zbuf_of_mask_frame` when holding a mask key's index."""
+        fidx = int(cloud_fidx)
         if fidx in self._zbuf_cache:
             return self._zbuf_cache[fidx]
         c2w = self.cam.pose_map.get(fidx)
@@ -162,13 +198,13 @@ class _Evidence:
         occluded = np.zeros(n, dtype=np.int32)
         valid = np.zeros(n, dtype=np.int32)
         for fidx, key in self.frames_for(oid):
-            c2w = self.cam.pose_map.get(fidx)
-            K = self.cam.K_for(fidx)
+            c2w = self.pose_at(fidx)
+            K = self.K_at(fidx)
             if c2w is None or K is None:
                 continue
             m = self.masks[key]
             mh, mw = m.shape
-            zb = self._zbuf(fidx, mh, mw)
+            zb = self.zbuf_of_mask_frame(fidx, mh, mw)
             c2w4 = np.eye(4)
             c2w4[:c2w.shape[0], :c2w.shape[1]] = c2w
             M = np.linalg.inv(c2w4)
@@ -449,7 +485,8 @@ def audit_and_fill(model, uv_support: np.ndarray,
         "filled_occluded_area_m2": round(float(fill_occl.sum()) * resolution * resolution, 3),
         "open_area_m2": round(float(open_.sum()) * resolution * resolution, 3),
         "mask_oid": int(oid),
-        "frames_used": [f for f, _ in ev.frames_for(oid)],
+        "frames_used": [ev.cloud_frame(f) for f, _ in ev.frames_for(oid)],
+        "mask_frames_used": [f for f, _ in ev.frames_for(oid)],
         "fill_ratio_gate": fill_ratio,
         "open_ratio_gate": open_ratio,
         "occluded_ratio_gate": occluded_ratio,
@@ -487,8 +524,8 @@ def silhouette_report(verts_world: np.ndarray,
         return None
     frames = []
     for fidx, key in ev.frames_for(oid):
-        c2w = ev.cam.pose_map.get(fidx)
-        K = ev.cam.K_for(fidx)
+        c2w = ev.pose_at(fidx)
+        K = ev.K_at(fidx)
         if c2w is None or K is None:
             continue
         m = ev.masks[key] > 0
@@ -514,7 +551,8 @@ def silhouette_report(verts_world: np.ndarray,
         inter = float((foot & m).sum())
         union = float((foot | m).sum())
         frames.append({
-            "frame": fidx,
+            "frame": ev.cloud_frame(fidx),
+            "mask_frame": fidx,
             "precision": round(inter / max(foot.sum(), 1), 3),
             "recall": round(inter / max(m.sum(), 1), 3),
             "iou": round(inter / max(union, 1.0), 3),

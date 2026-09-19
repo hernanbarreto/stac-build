@@ -67,7 +67,7 @@ def analyze_object(output_dir: Path, instance_id: int,
     from segmentation.tsdf_export import _safe_label
     from segmentation.shape_proposer import (_ANALYSIS_SCHEMA, _chat_json,
                                              _calibrate_oid_lenient,
-                                             _isolated_crop, _load_frame_rgb)
+                                             _isolated_crop, _mask_frame_rgb)
     from semantic.client import get_semantic_client
     from semantic.types import system as sys_msg, user as user_msg
 
@@ -109,7 +109,8 @@ def analyze_object(output_dir: Path, instance_id: int,
         dst = out / "object_analysis" / safe
         dst.mkdir(parents=True, exist_ok=True)
         for n, (fidx, key) in enumerate(frames[:3]):
-            img = _load_frame_rgb(session_dir, fidx)
+            # fidx is a MASK frame index; the JPEG is named by the video frame
+            img = _mask_frame_rgb(ev, session_dir, fidx)
             if img is None:
                 continue
             m = ev.masks[key] > 0
@@ -131,7 +132,7 @@ def analyze_object(output_dir: Path, instance_id: int,
             mrgb = np.asarray(Image.fromarray(m.astype(np.uint8) * 255)
                               .resize(img.size, Image.NEAREST)) > 0
             crop = _isolated_crop(img, mrgb)
-            p = dst / f"iso_f{fidx}.jpg"
+            p = dst / f"iso_f{ev.cloud_frame(fidx)}.jpg"
             crop.save(p, quality=88)
             images.append(str(p))
     if not images:

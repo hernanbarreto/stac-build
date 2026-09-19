@@ -53,10 +53,15 @@ def _is_architectural(label: str, arch_roles: Sequence[str]) -> bool:
 def _best_view_ref_image(output_dir: Path, frames_dir: Optional[Path],
                          obj_id: int, out_path: Path,
                          pad_frac: float = 0.18) -> Optional[dict]:
-    """Pick the frame where this object's mask covers the most pixels
-    (traceability: seg_masks.npz keys are 'f<real_frame>_o<obj_id>'), crop the
+    """Pick the frame where this object's mask covers the most pixels, crop the
     frame image to the mask bbox (+padding) and save it as the MeshFlow
-    reference image. Returns {"frame", "area_px", "path"} or None."""
+    reference image. Returns {"frame", "area_px", "path"} or None.
+
+    Traceability: the npz keys are ``f<mask_frame>_o<obj_id>`` and
+    ``mask_frame`` is the KEYFRAME POSITION — NOT the real frame number the
+    JPEG filenames use. This docstring claimed the opposite and the lookup
+    believed it, so the reference image was either missing or a photograph of
+    a different moment of the walk."""
     import cv2
     masks_path = Path(output_dir) / "seg_masks.npz"
     if not masks_path.exists() or frames_dir is None:
@@ -74,16 +79,19 @@ def _best_view_ref_image(output_dir: Path, frames_dir: Optional[Path],
         return None
 
     npz = np.load(masks_path, allow_pickle=True)
+    from segmentation import mask_space
+    space = mask_space.resolve(Path(output_dir), masks=npz)
     best = None   # (area, frame, mask)
     suffix = f"_o{obj_id}"
     for key in npz.files:
         if not (key.startswith("f") and key.endswith(suffix)):
             continue
         try:
-            frame = int(key[1:-len(suffix)])
+            mask_frame = int(key[1:-len(suffix)])
         except ValueError:
             continue
-        if frame not in frame_files:
+        frame = space.to_cloud(mask_frame)          # → the JPEG's own number
+        if frame is None or frame not in frame_files:
             continue
         mask = npz[key]
         area = int(np.count_nonzero(mask))

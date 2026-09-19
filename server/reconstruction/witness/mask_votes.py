@@ -28,6 +28,21 @@ class MaskStore:
     masks: dict                      # key f<frame>_o<obj> → uint8 (Hm,Wm)
     res: Tuple[int, int]             # (Hm, Wm) of the masks
     obj_of: Dict[int, int]           # instance_id → SAM3 obj id (mask key space)
+    space: "object" = None           # segmentation.mask_space.MaskSpace
+
+    def mask_key(self, cloud_frame: int, obj: int) -> Optional[str]:
+        """The npz key of an object in a CLOUD/pose frame, or None when that
+        frame is not a keyframe. The store's ``f<N>`` is the keyframe POSITION
+        on every store the batch pipeline writes — never the frame number the
+        poses, the depths and ``frame_global`` use."""
+        if self.space is None:
+            return f"f{int(cloud_frame)}_o{int(obj)}"
+        return self.space.key(cloud_frame, obj)
+
+    def cloud_frame(self, mask_frame: int) -> Optional[int]:
+        if self.space is None:
+            return int(mask_frame)
+        return self.space.to_cloud(mask_frame)
 
 
 def load_mask_store(output_dir) -> Optional[MaskStore]:
@@ -51,7 +66,10 @@ def load_mask_store(output_dir) -> Optional[MaskStore]:
         if e.get("id") is not None and e.get("instance_id") is not None:
             obj_of[int(e["instance_id"])] = int(e["id"])
     masks = {k: z[k] for k in z.files if k.startswith("f") and "_o" in k}
-    return MaskStore(masks=masks, res=(int(res[0]), int(res[1])), obj_of=obj_of)
+    from segmentation import mask_space
+    space = mask_space.resolve(output_dir, masks=z)
+    return MaskStore(masks=masks, res=(int(res[0]), int(res[1])), obj_of=obj_of,
+                     space=space)
 
 
 def _erode(mask: np.ndarray, px: int) -> np.ndarray:
@@ -65,8 +83,16 @@ def label_maps(store: MaskStore, instance_ids: List[int], erosion_px: int
                ) -> Tuple[Dict[int, np.ndarray], Dict[int, Set[int]]]:
     """Per keyframe an int32 label image (instance_id per pixel, 0 =
     background; smaller masks painted last so a nested object keeps its
-    identity) and the set of instances observed in that frame."""
+    identity) and the set of instances observed in that frame.
+
+    Keyed by the CLOUD/POSE frame, because that is what the caller's
+    ``frames`` dict is keyed by. The mask keys are keyframe POSITIONS, and
+    comparing the two directly is what limited the whole mask witness to the
+    13 pccr keyframes whose video number happens to be below 216 — and those
+    13 were matched to the WRONG keyframe's masks. The point ``status`` the
+    kit paints green/yellow/red comes out of here."""
     per_frame: Dict[int, List[Tuple[int, np.ndarray]]] = {}
+    dropped = 0
     for iid in instance_ids:
         obj = store.obj_of.get(int(iid))
         if obj is None:
@@ -75,8 +101,15 @@ def label_maps(store: MaskStore, instance_ids: List[int], erosion_px: int
         for key, m in store.masks.items():
             if not key.endswith(suffix):
                 continue
-            frame = int(key[1:key.index("_o")])
-            per_frame.setdefault(frame, []).append((int(iid), m))
+            mask_frame = int(key[1:key.index("_o")])
+            frame = store.cloud_frame(mask_frame)
+            if frame is None:            # a stray key of a mixed store
+                dropped += 1
+                continue
+            per_frame.setdefault(int(frame), []).append((int(iid), m))
+    if dropped:
+        print(f"[witness] {dropped} mask key(s) have no keyframe — "
+              f"{store.space.describe() if store.space else 'unknown frame space'}")
     maps: Dict[int, np.ndarray] = {}
     present: Dict[int, Set[int]] = {}
     Hm, Wm = store.res
@@ -86,8 +119,8 @@ def label_maps(store: MaskStore, instance_ids: List[int], erosion_px: int
         seen: Set[int] = set()
         for iid, m in items:
             if m.shape != (Hm, Wm):
-                raise RuntimeError(f"mask f{frame}_o{store.obj_of[iid]} has shape {m.shape}, "
-                                   f"the store declares {store.res}")
+                raise RuntimeError(f"mask {store.mask_key(frame, store.obj_of[iid])} has "
+                                   f"shape {m.shape}, the store declares {store.res}")
             e = _erode(m, erosion_px)
             lm[e] = iid
             seen.add(iid)

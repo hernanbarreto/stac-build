@@ -22,7 +22,10 @@ def certified(tmp_path_factory):
     sess = make_session(H=40, W=56, scene=corridor_loop_scene(), poses=loop_trajectory(N_KF, extra_laps=0.15))
     root = _write(tmp_path_factory.mktemp("kit") / "s", sess, _drift(sess))
     acta = _run(root, sess, _cfg(), max_iters=1)
-    assert acta["iterations"][0]["verdict"] == "applied"
+    # the correction is the visit-drift loop, which publishes its epochs
+    # before the iterations; an iteration that applies nothing is the normal
+    # ending, so what the kit needs is that an epoch reached the session
+    assert acta["epoch_final"] >= 1, acta["stop_reason"]
     return root / "output", acta
 
 
@@ -58,8 +61,16 @@ def test_kit_edges_duplicates_and_attention(certified):
     assert any(it["kind"] == "low_mv_votes" for it in att["items"])     # the cloud has witnesses
     # epoch chain for the before/after toggle
     ep = epoch_layers(out)
-    assert ep["epoch"] == 1 and [p["epoch"] for p in ep["previous"]] == [0]
-    assert ep["previous"][0]["potree"] is False                        # no octree in the synthetic session
+    # one epoch per correction the visit-drift loop published, all of them
+    # still on disk for the before/after toggle
+    assert ep["epoch"] == acta["epoch_final"] >= 1
+    assert sorted(p["epoch"] for p in ep["previous"]) == list(range(acta["epoch_final"]))
+    # every epoch the correction published carries its own octree — that is
+    # what the epoch selector loads; epoch 0 is the synthetic fixture's own
+    # reconstruction and never had one
+    by_epoch = {p["epoch"]: p for p in ep["previous"]}
+    assert by_epoch[0]["potree"] is False
+    assert all(by_epoch[e]["potree"] is True for e in by_epoch if e > 0), by_epoch
 
 
 def test_kit_acta_and_reports(certified):
@@ -74,4 +85,5 @@ def test_kit_acta_and_reports(certified):
     it = acta["iterations"][0]
     assert all({"name", "value", "threshold", "passed"} <= set(g) for g in it["gates"])
     a = json.loads((out / "certify_acta.json").read_text())
-    assert a["stop_reason"] and a["iterations"][0]["verdict"] == "applied"
+    assert a["stop_reason"] and a["iterations"][0]["verdict"] in ("applied", "identity")
+    assert a["visit_drift"]["epochs"] and a["epoch_final"] >= 1

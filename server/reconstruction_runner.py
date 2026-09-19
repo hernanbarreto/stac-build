@@ -155,15 +155,22 @@ def _build_camera_views(cam, frames_dir: Path, max_views: int = 150) -> List[Cam
 
 
 def _load_mask_store(output_dir: Path):
-    """Open ``seg_masks.npz`` (lazily) → dict with the NpzFile + scaled_res, or None.
-    Keys in the NPZ are ``f{frame_idx}_o{instance_id}`` → uint8 (H,W) mask."""
+    """Open ``seg_masks.npz`` (lazily) → dict with the NpzFile + scaled_res +
+    the store's frame space, or None.
+
+    Keys in the NPZ are ``f{mask_frame}_o{instance_id}`` → uint8 (H,W), and
+    ``mask_frame`` is the KEYFRAME POSITION, not the frame ``cam.pose_map`` is
+    keyed by. ``space`` translates."""
     p = Path(output_dir) / "seg_masks.npz"
     if not p.exists():
         return None
     try:
         data = np.load(p)
         sres = data["scaled_res"].tolist() if "scaled_res" in data.files else None
-        return {"data": data, "scaled_res": sres, "files": set(data.files)}
+        from segmentation import mask_space
+        space = mask_space.resolve(Path(output_dir), masks=data)
+        return {"data": data, "scaled_res": sres, "files": set(data.files),
+                "space": space}
     except Exception:
         return None
 
@@ -180,8 +187,12 @@ def _instance_camera_views(cam, mask_store, iid: int, frames_dir: Path,
         return []
     data = mask_store["data"]
     files = mask_store["files"]
+    space = mask_store.get("space")
     iid = int(iid)
-    frame_ids = []
+    # mask keys → CLOUD frames, so the pose map, the keyframe list and the
+    # masks are all compared in ONE space (intersecting keyframe positions
+    # with pose keys matched 13 of 216 on pccr, all of them the wrong frame)
+    mask_of: Dict[int, int] = {}
     for f in files:
         if not (f.startswith("f") and "_o" in f):
             continue
@@ -189,9 +200,12 @@ def _instance_camera_views(cam, mask_store, iid: int, frames_dir: Path,
         if "_o" not in body:
             continue
         fidx, oidx = body.split("_o", 1)
-        if fidx.isdigit() and oidx.isdigit() and int(oidx) == iid:
-            frame_ids.append(int(fidx))
-    frame_ids = sorted(set(frame_ids) & set(cam.pose_map.keys()))
+        if not (fidx.isdigit() and oidx.isdigit() and int(oidx) == iid):
+            continue
+        cf = space.to_cloud(int(fidx)) if space is not None else int(fidx)
+        if cf is not None:
+            mask_of[int(cf)] = int(fidx)
+    frame_ids = sorted(set(mask_of) & set(cam.pose_map.keys()))
     sel = _selected_frame_indices(frames_dir)
     if sel:
         kept = [fi for fi in frame_ids if fi in sel]
@@ -214,7 +228,7 @@ def _instance_camera_views(cam, mask_store, iid: int, frames_dir: Path,
         if c2w is None or K is None:
             continue
         try:
-            m = np.asarray(data[f"f{fi}_o{iid}"])
+            m = np.asarray(data[f"f{mask_of[fi]}_o{iid}"])
         except Exception:
             continue
         if m.ndim != 2 or m.size == 0:

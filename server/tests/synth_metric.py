@@ -666,6 +666,11 @@ def write_session_dir(root: Path, sess: Session, instances: Dict[int, dict],
     res_insts, seg_insts, masks = [], [], {}
     masks["scaled_res"] = np.array([H, W], np.int32)
     masks["frames"] = sess.frame_numbers.astype(np.int32)
+    # the synthetic store keys its masks by the REAL frame number (unlike the
+    # pipeline, which keys by keyframe position) — declare it, so no reader
+    # has to measure the fixture
+    from segmentation import mask_space as _mspace
+    masks[_mspace.NPZ_KEY] = _mspace.declaration(_mspace.SPACE_VIDEO)
     masks["obj_ids"] = np.array([int(i) - 1 for i in instances], np.int32)
     # SAM3 gives ONE mask object id per object it segments; an instance that
     # holds several of them is a FUSION that happened downstream, and that
@@ -756,8 +761,6 @@ def certify_cfg(**over) -> dict:
                    "icp_trim": 0.8, "max_correction_log": 0.2},
          "visit_loops": {"sigma_floor_m": 0.01, "unobserved_sigma_m": 5.0, "unobserved_sigma_deg": 30.0,
                          "window_kf": 15},
-         "greedy": {"enabled": True, "max_epochs": 12, "window_kf": 15,
-                    "offset_samples": 4000},
          "known_answer": {"chunk": "last", "yaw_deg": 1.0, "t_m": 0.20, "scale": 1.03},
          "envelope": {"levels_t_m": [0.1, 0.2, 0.4, 0.8, 1.6], "levels_scale_pct": [1, 2, 5, 10, 20],
                       "loop_densities": [1.0, 0.5, 0.25]},

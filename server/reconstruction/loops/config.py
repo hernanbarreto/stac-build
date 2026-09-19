@@ -449,17 +449,6 @@ class DeterminismConfig:
 
 
 @dataclass(frozen=True)
-class GreedyConfig:
-    """§9 greedy loop — one duplicate at a time, the measurement decides."""
-    enabled: bool
-    max_epochs: int                 # cap of the accepted chain, not of the trials
-    window_kf: int                  # an instance's copy = its points within ± this of its
-                                    # visit keyframe (mirrors visit_loops.window_kf)
-    offset_samples: int             # points sampled per copy — FIXED across trials, which is
-                                    # what makes the count exact and a threshold unnecessary
-
-
-@dataclass(frozen=True)
 class CertifyConfig:
     ensemble_offset_frames: int     # >0 → a second Omega pass with shifted chunk boundaries
     keep_aligned_chunks: bool       # keep maplong_run/_tmp_results_aligned + _tmp_results_loop
@@ -477,7 +466,6 @@ class CertifyConfig:
     gates: CertifyGates
     scale: CertifyScale
     visit_loops: VisitLoopsConfig
-    greedy: GreedyConfig
     known_answer: KnownAnswerConfig
     envelope: EnvelopeConfig
     determinism: DeterminismConfig
@@ -878,13 +866,6 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
         unobserved_sigma_m=_num(vl, "unobserved_sigma_m", V, lo=0, lo_excl=True),
         unobserved_sigma_deg=_num(vl, "unobserved_sigma_deg", V, lo=0, lo_excl=True),
         window_kf=_num(vl, "window_kf", V, lo=1, integer=True))
-    gr = _sub(ce, "greedy", P)
-    G = P + ".greedy"
-    greedy = GreedyConfig(
-        enabled=_bool(gr, "enabled", G),
-        max_epochs=_num(gr, "max_epochs", G, lo=1, integer=True),
-        window_kf=_num(gr, "window_kf", G, lo=1, integer=True),
-        offset_samples=_num(gr, "offset_samples", G, lo=100, integer=True))
     ka = _sub(ce, "known_answer", P)
     K = P + ".known_answer"
     chunk = str(_require(ka, "chunk", K))
@@ -916,7 +897,7 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
         regression_eps=_num(ce, "regression_eps", P, lo=0),
         auto_after_segmentation=_bool(ce, "auto_after_segmentation", P),
         objective=objective, gates=gates, scale=scale, visit_loops=visit_loops,
-        greedy=greedy, known_answer=known, envelope=envelope, determinism=determinism)
+        known_answer=known, envelope=envelope, determinism=determinism)
 
 
 # ── fork-facing dicts ────────────────────────────────────────────────────────

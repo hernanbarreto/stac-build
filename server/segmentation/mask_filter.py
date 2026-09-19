@@ -75,7 +75,13 @@ class MaskAudit:
             self.log(f"[mask-audit] instance→oid map unavailable ({e}) — audit skipped")
             self.ok = False
             return
-        c2m = dict(cloud_to_mask or {})
+        # the store's own declaration is the default; an explicit
+        # cloud_to_mask (the matcher's) still wins so a caller can audit a
+        # translation it built itself
+        if cloud_to_mask is None:
+            c2m = self.ev.space.cloud_to_mask()
+        else:
+            c2m = dict(cloud_to_mask)
         self._m2c = {int(m): int(c) for c, m in c2m.items()}
         self.res = self._mask_res()
         if self.res is None:

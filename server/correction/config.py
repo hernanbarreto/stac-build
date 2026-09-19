@@ -173,8 +173,43 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class FloorConsensusConfig:
+    """The floor as a per-keyframe vertical constraint (USER 2026-09-19).
+
+    Real terrain belongs to the PLACE and a pose error to the MOMENT: the same
+    cell of floor measured from two keyframes far apart in the walk reads the
+    same height if the difference is a ramp or a step, and a different one if
+    it is drift. Ramps and steps survive untouched.
+    """
+    enabled: bool
+    cell_m: float
+    texture_window_m: float
+    min_shared_cells: int
+
+
+@dataclass(frozen=True)
+class VisitDriftConfig:
+    """The correction that measures on the object's own visits and its three
+    views (USER 2026-09-18). Every number the algorithm uses lives here."""
+    min_points: int                 # an object under this cannot be measured
+    min_visit_share: float          # a visit contributing less did not observe it
+    min_walk_m: float
+    voxel_m: float               # two visits closer than this on the walk
+                                    # are one pass with an occlusion in between
+    max_ambiguity: int            # if none reaches it, take the best few
+    silhouette_cell_m: float        # raster cell of the projected silhouette
+    silhouette_close_px: int        # morphological closing, in cells
+    silhouette_blur_px: float       # gaussian blur, in cells
+    search_margin_m: float          # margin around the pair, bounds the shift
+    default_repeatability_m: float  # used only when uncertainty.json is absent
+    max_epochs: int
+
+
+@dataclass(frozen=True)
 class CorrectionConfig:
     evidence: EvidenceConfig
+    visit_drift: "VisitDriftConfig"
+    floor_consensus: "FloorConsensusConfig"
     observability: ObservabilityConfig
     solve: SolveConfig
     gates: GatesConfig
@@ -251,6 +286,28 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
         raise CorrectionConfigError(
             "config.yaml has no 'correction:' section — the correction module "
             "cannot run without its parameters")
+
+    fc_ = section.get("floor_consensus")
+    floor_consensus = FloorConsensusConfig(
+        enabled=_bool(fc_, "enabled", "floor_consensus"),
+        cell_m=_num(fc_, "cell_m", "floor_consensus", lo=0, lo_excl=True),
+        texture_window_m=_num(fc_, "texture_window_m", "floor_consensus", lo=0, lo_excl=True),
+        min_shared_cells=_num(fc_, "min_shared_cells", "floor_consensus", lo=1, integer=True))
+    vd_ = section.get("visit_drift")
+    visit_drift = VisitDriftConfig(
+        min_points=_num(vd_, "min_points", "visit_drift", lo=1, integer=True),
+        min_visit_share=_num(vd_, "min_visit_share", "visit_drift", lo=0.0, hi=1.0),
+        min_walk_m=_num(vd_, "min_walk_m", "visit_drift", lo=0.0),
+        voxel_m=_num(vd_, "voxel_m", "visit_drift", lo=0, lo_excl=True),
+        max_ambiguity=_num(vd_, "max_ambiguity", "visit_drift", lo=1, integer=True),
+        silhouette_cell_m=_num(vd_, "silhouette_cell_m", "visit_drift", lo=0.0, lo_excl=True),
+        silhouette_close_px=_num(vd_, "silhouette_close_px", "visit_drift", lo=0, integer=True),
+        silhouette_blur_px=_num(vd_, "silhouette_blur_px", "visit_drift", lo=0.0),
+        search_margin_m=_num(vd_, "search_margin_m", "visit_drift", lo=0.0, lo_excl=True),
+        default_repeatability_m=_num(vd_, "default_repeatability_m", "visit_drift",
+                                     lo=0.0, lo_excl=True),
+        max_epochs=_num(vd_, "max_epochs", "visit_drift", lo=1, integer=True),
+    )
 
     ev = section.get("evidence")
     evidence = EvidenceConfig(
@@ -475,7 +532,9 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
     runtime = RuntimeConfig(
         workers=_resolve_workers(_require(rt, "workers", "runtime")))
 
-    return CorrectionConfig(evidence=evidence, observability=observability,
+    return CorrectionConfig(evidence=evidence, visit_drift=visit_drift,
+                            floor_consensus=floor_consensus,
+                            observability=observability,
                             solve=solve, gates=gates, floor=floor,
                             revisit=revisit, consistency=consistency,
                             kfgraph=kfgraph, photo=photo, posegraph=posegraph,

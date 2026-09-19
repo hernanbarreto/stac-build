@@ -385,8 +385,9 @@ class PipelineManager:
         # the post-hoc graph, the candidates/duplicates lists). Its epochs are
         # correction artifacts: a NEW reconstruction wipes output/ (epoch 0
         # again) — the ledger corrections.jsonl is never deleted.
-        StageId.CERTIFY: ["certify_acta.json", "quality", "keyframe_graph.json",
-                          "loop_candidates.json", "duplicates.json", "loop_semantics.json"],
+        StageId.CERTIFY: ["certify_acta.json", "visit_drift_report.json", "quality",
+                          "keyframe_graph.json", "loop_candidates.json", "duplicates.json",
+                          "loop_semantics.json"],
         StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
     }
 

@@ -1,4 +1,14 @@
 """claude_stac.txt F3 — §12.8 the certification loop converges and stops,
+a correction reaches the session and every epoch stays selectable.
+
+SINCE 2026-09-18 the pose correction is the VISIT-DRIFT loop
+(`correction.visit_drift_run`), which runs inside `certify_session` before its
+iterations and publishes its own epochs; the iterations MEASURE that result and
+still solve the degrees of freedom the loop does not touch (scale, depth). So
+what these tests pin is the property, not the stage that produced it: epochs
+reach disk, the geometry moves toward the truth, every epoch is selectable bit
+for bit and the chain replays exactly.
+
 a rejected iteration leaves the previous epoch bit for bit and every epoch of
 the chain stays selectable bit for bit; §12.7d known answer within tolerance
 and an envelope monotone with the loop density; §12.7e determinism;
@@ -92,8 +102,15 @@ def test_loop_converges_stops_and_every_epoch_is_selectable(tmp_path, truth):
     acta = _run(root, sess, cfg, max_iters=3)
     assert acta["stop_reason"] and acta["stopped_at"] is not None
     its = acta["iterations"]
-    assert its and its[0]["verdict"] == "applied", its[0]
     assert all(it["verdict"] in ("applied", "identity") for it in its), [it["verdict"] for it in its]
+    # the correction reached the session: the visit-drift loop published at
+    # least one epoch and declared, per epoch, what it applied
+    vd = acta["visit_drift"]["epochs"]
+    assert vd, acta["visit_drift"]
+    assert all(e["applied_m"] > 0.0 and e["provenance"] == "tool_measured" for e in vd), vd
+    # the keyframe pose graph measures and never applies
+    for it in its:
+        assert it["stages"]["poses"].get("verdict") != "APPLY", it["stages"]["poses"]
     assert acta["epoch_final"] >= 1
     # the geometry moved toward the truth: the revisited stretch is closed
     err1 = _pose_errors(root, sess)
@@ -104,13 +121,16 @@ def test_loop_converges_stops_and_every_epoch_is_selectable(tmp_path, truth):
     assert acta["metrics_final"]["objective"] < acta["metrics_initial"]["objective"]
     assert ("converged" in acta["stop_reason"]) or ("max_iters" in acta["stop_reason"]) \
         or ("nothing to close" in acta["stop_reason"])
-    # one epoch per applied iteration, every one of them on disk and selectable
-    n_applied = sum(1 for it in its if it["verdict"] == "applied")
+    # one epoch per correction that reached the session — the visit-drift
+    # epochs plus whatever the iterations still applied — each on disk, in the
+    # ledger and selectable
+    n_applied = len(vd) + sum(1 for it in its if it["verdict"] == "applied")
     assert acta["epoch_final"] == n_applied
     from correction.apply import available_epochs
     from correction import ledger
     assert [e["epoch"] for e in available_epochs(out)] == list(range(n_applied + 1))
     assert len(ledger.applied_runs(out)) == n_applied
+    assert [r["kind"] for r in ledger.applied_runs(out)][:len(vd)] == ["visit_drift"] * len(vd)
     snap_top = session_files_snapshot(out)
     for q in (out / "quality").glob("report_epoch_*.json"):
         rep = json.loads(q.read_text())
@@ -156,7 +176,7 @@ def test_veto_mode_rejected_iteration_keeps_the_previous_epoch_bit_for_bit(tmp_p
     out = root / "output"
     cfg = _cfg(**{"certify.gates.mode": "veto"})
     acta1 = _run(root, sess, cfg, max_iters=1)
-    assert acta1["iterations"][0]["verdict"] == "applied"
+    assert acta1["epoch_final"] >= 1, acta1["stop_reason"]
     snap1 = session_files_snapshot(out)
     _liar_depth_stage(monkeypatch)
     acta2 = _run(root, sess, cfg, max_iters=1)
@@ -185,7 +205,7 @@ def test_advisory_mode_failed_gate_is_applied_and_declared(tmp_path, truth, monk
     cfg = _cfg()
     assert cfg.certify.gates.mode == "advisory"
     acta1 = _run(root, sess, cfg, max_iters=1)
-    assert acta1["iterations"][0]["verdict"] == "applied"
+    assert acta1["epoch_final"] >= 1, acta1["stop_reason"]
     snap1 = session_files_snapshot(out)
     _liar_depth_stage(monkeypatch)
     acta2 = _run(root, sess, cfg, max_iters=1)
@@ -194,7 +214,7 @@ def test_advisory_mode_failed_gate_is_applied_and_declared(tmp_path, truth, monk
     assert it["gate_mode"] == "advisory" and it["gate_warnings"], it["gates"]
     failed = [g for g in it["gates"] if not g["passed"]]
     assert failed and all(g.get("advisory") for g in failed)
-    assert acta2["epoch_final"] == acta1["epoch_final"] + 1
+    assert acta2["epoch_final"] > acta1["epoch_final"]
     snap2 = session_files_snapshot(out)
     assert snap2.get("cleaned_cloud.ply") != snap1.get("cleaned_cloud.ply")
     from correction import ledger
@@ -248,11 +268,10 @@ def test_instance_copies_become_pose_edges_whatever_the_class(tmp_path, truth):
         assert e["offset_after_m"] < e["offset_before_m"]
         assert e["sigma_factors"].get("class:movable") == cfg.loops.semantic.nonstructural_sigma_factor
         assert e["sigma_m"] >= cfg.certify.visit_loops.sigma_floor_m * cfg.loops.semantic.nonstructural_sigma_factor
-    # the loop applies them: the acta records instance edges and the
-    # duplicates go down
+    # the loop carries them: the acta records the instance edges it measured
+    # and the duplicates go down over the corrected session
     acta = _run(root, sess, cfg, max_iters=2)
     it0 = acta["iterations"][0]
-    assert it0["verdict"] == "applied", it0
     assert any(l.get("source") == "instance" and l.get("accepted") for l in it0["loops"])
     assert acta["metrics_final"]["duplicates"]["n"] <= acta["metrics_initial"]["duplicates"]["n"]
     assert acta["metrics_final"]["closure"]["median_m"] < acta["metrics_initial"]["closure"]["median_m"]
@@ -281,8 +300,22 @@ def test_known_answer_and_envelope_monotone_with_loop_density(tmp_path, truth):
     assert rep["provenance"] == "tool_measured"
     env = envelope(root, cfg, make_correction_cfg(), work=tmp_path / "env", log=lambda m: None, **kw)
     assert env["monotone_with_loop_density"], env["per_density"]
-    assert env["declared"]["max_correctable_t_m"] is not None
-    assert env["declared"]["min_loop_density_recovering"] is not None
+    assert set(env["declared"]) == {"max_correctable_t_m", "max_correctable_scale_pct",
+                                    "min_loop_density_recovering"}
+    # §10.11 asks the experiment to DECLARE where the instrument stops, and an
+    # empty envelope is a legitimate declaration — but never a silent one.
+    # This known answer injects a KINK into one chunk, and the correction of
+    # this session is the drift-rate model, whose sentence is E(d) = ε·d:
+    # error that accumulates with the distance walked, not a step inside one
+    # chunk. So every level that does not hold must name the gate that said
+    # so, and every level that does hold must have recovered something.
+    for d, res in env["per_density"].items():
+        assert res["translation"], (d, res)
+        for row in res["translation"] + res["scale"]:
+            if row["held"]:
+                assert (row["recovered_fraction"]["t"] or 0.0) > 0.0, (d, row)
+            else:
+                assert row["gate_warnings"] or "REGRESS" in (row["stop_reason"] or ""), (d, row)
 
 
 def test_determinism_two_runs_same_acta(tmp_path, truth):
@@ -305,29 +338,49 @@ def test_provenance_survives_the_loop_and_the_epoch_replays_exactly(tmp_path, tr
     poses0 = read_poses(out / "camera_poses.txt")
     cfg = _cfg()
     acta = _run(root, sess, cfg, max_iters=1)
-    assert acta["iterations"][0]["verdict"] == "applied"
+    assert acta["epoch_final"] >= 1, acta["stop_reason"]
     _, after = read_ply(out / "cleaned_cloud.ply")
-    assert len(after) == len(before)
-    for fld in ("frame_global", "pixel_row", "pixel_col", "confidence"):
-        assert np.array_equal(after[fld], before[fld]), fld
-    for fld in ("mv_votes", "mask_votes", "mask_conflicts", "status"):
-        assert fld in after.dtype.names
+    # an epoch may DELETE points (the visit-drift filter does — a visit that
+    # contributed almost nothing to an object never observed it), so the cloud
+    # may be shorter; every point that survived keeps its provenance intact
+    assert len(after) <= len(before)
+    assert len(after) == acta["visit_drift"]["epochs"][-1]["points_after"]
+    # every field the cloud arrived with survives the correction — the witness
+    # fields among them when the merge wrote them (`witness.at_merge`, the
+    # production default). The certification no longer ADDS them: they used to
+    # ride along on the epoch it applied, and it applies none now, so what is
+    # pinned here is that nothing is lost, not that something is gained.
+    for fld in before.dtype.names:
+        assert fld in after.dtype.names, fld
     res = json.loads((out / "segmentation_result.json").read_text())["instances"]
     for r in res:
         gi = np.asarray(r["globalIndices"], np.int64)
         if len(gi):
             assert gi.min() >= 0 and gi.max() < len(after)
-    # the epoch npz replays the exact transform (bit-faithful, keyed by frame_global)
-    from correction.replay import apply_epoch_to_arrays
-    from correction import ledger
-    npz = ledger.load_epoch_npz(out, 1)
-    xyz = np.stack([before["x"], before["y"], before["z"]], 1).astype(np.float64)
-    frames = [int(x) for x in (out / "camera_frames.txt").read_text().split()]
-    poses = poses0.copy()
-    apply_epoch_to_arrays(xyz, before["frame_global"].astype(np.int64), poses, frames, npz)
-    cur = np.stack([after["x"], after["y"], after["z"]], 1).astype(np.float64)
-    assert np.abs(xyz - cur).max() < 1e-4
-    assert np.allclose(poses, read_poses(out / "camera_poses.txt"), atol=1e-6)
+    # the epoch chain replays EXACTLY from epoch 0 — the motion and the
+    # deletion both, keyed by frame_global so it re-applies to a new
+    # reconstruction of the same walk
+    snapshot = session_files_snapshot(out)
+    from correction.run import run_select
+    from correction.replay import replay as replay_epochs
+    top = acta["epoch_final"]
+    run_select(out, 0, "test")
+    rep = replay_epochs(root, top, out_dir=tmp_path / "replay", log=lambda m: None)
+    assert rep["epochs_applied"] == top
+    _, rp = read_ply(Path(rep["cloud"]))
+    run_select(out, top, "test")
+    # the GEOMETRY comes back bit for bit; scene_r.db is a SQLite file rebuilt
+    # on every selection and is not byte-stable by construction
+    for rel in GEOMETRY_FILES:
+        assert session_files_snapshot(out).get(rel) == snapshot.get(rel), rel
+    assert len(rp) == len(after)
+    for fld in ("frame_global", "pixel_row", "pixel_col", "confidence"):
+        assert np.array_equal(rp[fld], after[fld]), fld
+    for a, b in (("x", "x"), ("y", "y"), ("z", "z")):
+        assert np.abs(rp[a].astype(np.float64) - after[b].astype(np.float64)).max() < 1e-4, a
+    assert np.allclose(read_poses(Path(rep["poses"])),
+                       read_poses(out / "camera_poses.txt"), atol=1e-6)
+    assert poses0.shape == read_poses(out / "camera_poses.txt").shape
 
 
 def test_adversarial_suite_declares_every_failure(tmp_path):

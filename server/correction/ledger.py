@@ -147,7 +147,15 @@ def last_run(output_dir) -> Optional[dict]:
 def save_epoch_npz(output_dir, epoch: int, R_kf: np.ndarray,
                    t_kf: np.ndarray, k_kf: np.ndarray,
                    frames: List[int], dir_override: Optional[Path] = None,
-                   b_kf: Optional[np.ndarray] = None) -> Path:
+                   b_kf: Optional[np.ndarray] = None,
+                   dropped: Optional[np.ndarray] = None) -> Path:
+    """The exact, re-appliable definition of one epoch.
+
+    ``dropped`` are the row indices, into the cloud as that epoch FOUND it,
+    that the epoch deleted — the visit-drift filter removes points for real
+    (USER 2026-09-18) and an epoch that moved 22 million points and deleted
+    eight thousand is not reproduced by the motion alone.
+    """
     d = (Path(dir_override) if dir_override
          else Path(output_dir) / EPOCH_NPZ_DIR)
     d.mkdir(parents=True, exist_ok=True)
@@ -155,7 +163,9 @@ def save_epoch_npz(output_dir, epoch: int, R_kf: np.ndarray,
     b = (np.asarray(b_kf, np.float64) if b_kf is not None
          else np.zeros(len(k_kf), np.float64))
     np.savez(p, R_kf=R_kf, t_kf=t_kf, k_kf=k_kf, b_kf=b,
-             frames=np.asarray(frames, dtype=np.int64))
+             frames=np.asarray(frames, dtype=np.int64),
+             dropped=(np.asarray(dropped, np.int64) if dropped is not None
+                      else np.zeros(0, np.int64)))
     return p
 
 
@@ -168,4 +178,6 @@ def load_epoch_npz(output_dir, epoch: int) -> dict:
     d = np.load(p)
     return {"R_kf": d["R_kf"], "t_kf": d["t_kf"], "k_kf": d["k_kf"],
             "b_kf": (d["b_kf"] if "b_kf" in d.files else np.zeros(len(d["k_kf"]))),
-            "frames": [int(f) for f in d["frames"]]}
+            "frames": [int(f) for f in d["frames"]],
+            "dropped": (d["dropped"] if "dropped" in d.files
+                        else np.zeros(0, np.int64))}

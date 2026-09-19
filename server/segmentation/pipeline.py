@@ -28,6 +28,7 @@ from typing import Dict, List, Optional, Tuple
 import logging
 
 from atomic_io import atomic_write_json
+from segmentation import mask_space
 
 logger = logging.getLogger("SegPipeline")
 
@@ -101,7 +102,10 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
             return {"error": "No masks generated", "instances": []}
         
         # ── Step 3: Save masks and metadata ──
-        seg_meta = _save_masks(output_dir, all_masks, categories, obj_labels, cfg)
+        # frames_valid/ is numbered 0,1,2… — SAM3 keys its masks by that
+        # KEYFRAME POSITION, not by the video frame number
+        seg_meta = _save_masks(output_dir, all_masks, categories, obj_labels, cfg,
+                               frame_space=mask_space.SPACE_KEYFRAME)
         
         # ── Step 4: Match masks to cloud and cache final result (ONCE) ──
         # In the anchored pipeline order (recon → vlm → sam3 → phase_r →
@@ -215,7 +219,18 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
     frames_valid_dir.mkdir()
     
     # Copy valid frames with sequential numbering (the KEYFRAME POSITION — see
-    # the docstring: it is not the cloud's frame_global)
+    # the docstring: it is not the cloud's frame_global).
+    #
+    # The list is filtered to what is ON DISK *before* numbering: a missing
+    # keyframe used to leave a hole in the sequence (seq_idx kept counting)
+    # while the returned list closed it, so the mask key, the list index and
+    # the keyframe position were three different numbers for every frame
+    # after the hole — and the store declares a POSITION space.
+    missing = [f for f in valid_filenames if not (frames_dir / f).exists()]
+    if missing:
+        print(f"[SegPipeline] ⚠️ {len(missing)} selected keyframe(s) are not on "
+              f"disk (e.g. {missing[:3]}) — segmenting the {len(valid_filenames) - len(missing)} that are")
+        valid_filenames = [f for f in valid_filenames if (frames_dir / f).exists()]
     index_mapping = {}
     seq_frame_files = []
     
@@ -224,10 +239,8 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
         ext = src.suffix
         new_name = f"{seq_idx:06d}{ext}"
         dst = frames_valid_dir / new_name
-        
-        if src.exists():
-            shutil.copyfile(str(src), str(dst))
-            seq_frame_files.append(new_name)
+        shutil.copyfile(str(src), str(dst))
+        seq_frame_files.append(new_name)
     
     print(f"[SegPipeline] Copied {len(seq_frame_files)} valid frames to {frames_valid_dir}")
     
@@ -583,7 +596,8 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         if output_dir and cfg and all_masks:
             try:
                 categories_so_far = categories[:cat_idx + 1]
-                _save_masks(output_dir, all_masks, categories_so_far, obj_labels, cfg)
+                _save_masks(output_dir, all_masks, categories_so_far, obj_labels,
+                            cfg, frame_space=mask_space.SPACE_KEYFRAME)
                 print(f"[SegPipeline] 💾 Incremental save: {cat_idx+1}/{len(categories)} categories saved")
             except Exception as e:
                 print(f"[SegPipeline] ⚠️ Incremental save failed: {e}")
@@ -850,14 +864,35 @@ def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
 # ═══════════════════════════════════════════════════════════════════
 
 def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
-                categories: List[str], obj_labels: Dict[int, str], cfg: dict):
+                categories: List[str], obj_labels: Dict[int, str], cfg: dict,
+                *, frame_space: str):
     """
     Save SAM3 masks as compressed NPZ + metadata JSON.
     Upsert logic: if an obj_id already exists in the NPZ (same object from a
     previous incremental save), keep its ID and overwrite its masks.
     If it's genuinely new, assign a new ID.
+
+    ``frame_space`` (mandatory, keyword-only) DECLARES which index space
+    ``all_masks`` is keyed by — ``mask_space.SPACE_KEYFRAME`` for the batch
+    pipeline, which numbers frames_valid/ 0,1,2…, or ``SPACE_VIDEO`` for the
+    interactive and Resume paths, which translate SAM3's sequential index
+    back to the real video frame number through ``kf_mapping``. All three
+    upsert into the SAME file, and until this argument existed the file ended
+    up holding both conventions at once: on pccr oid 110 was keyed 0,1,2,3…
+    and oid 213 keyed 1,60,97,…, so every reader took the wrong mask for one
+    of them, or none. The incoming frames are now translated into whatever
+    space the store already uses (a new store adopts the writer's), the
+    choice is WRITTEN INTO the npz, and a frame that cannot be translated
+    fails the save instead of corrupting it.
     """
+    from segmentation import mask_space as _mspace
+
     colors = cfg["visualization"]["segment_colors"]
+
+    # ── ONE space per store (see the docstring) ──
+    all_masks, frame_space = _mspace.normalize_masks(
+        output_dir, all_masks, frame_space,
+        log=lambda m: print(f"[SegPipeline] {m}"))
     
     # Load resolution from chunk metadata (DA3/MapAnything backends)
     meta_files = sorted(output_dir.glob("chunk_*_meta.json"))
@@ -986,11 +1021,15 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     npz_data["obj_ids"] = np.array(all_obj_ids, dtype=np.int32)
     npz_data["frames"] = np.array(all_frames, dtype=np.int32)
     npz_data["scaled_res"] = np.array(scaled_res, dtype=np.int32)
+    # the store describes itself: no later reader has to guess (or measure)
+    # which of the two frame spaces these keys are in
+    npz_data[_mspace.NPZ_KEY] = _mspace.declaration(frame_space)
     
     # Save compressed NPZ — ATOMIC (tmp ending in .npz + replace): a crash
     # mid-write must never truncate the session's masks (2026-08-29)
     from segmentation.erase import _atomic_savez
     _atomic_savez(masks_path, npz_data)
+    _mspace.invalidate(output_dir)
     masks_mb = masks_path.stat().st_size / (1024 * 1024)
     new_count = mask_count - len(existing_npz)
     print(f"[SegPipeline] ✅ Saved masks: {masks_path.name} "
@@ -2064,8 +2103,11 @@ def segmentation_result_is_stale(output_dir) -> tuple:
 def _mask_frame_lookup(output_dir: Path, mask_frames, cloud_frames):
     """Map a cloud frame_global to the frame index the MASKS are keyed by.
 
-    The two live in different index spaces and nothing used to translate
-    between them. ``_prepare_valid_frames`` copies the keyframes into
+    Thin wrapper over ``segmentation.mask_space`` — kept because eight call
+    sites already speak this contract: it returns {cloud frame: mask frame},
+    EMPTY when the identity is right.
+
+    The two spaces: ``_prepare_valid_frames`` copies the keyframes into
     frames_valid/ renumbered 000000, 000001, … and SAM3 keys its masks by
     that POSITION, while the reconstruction stamps every point with the REAL
     video frame number (1, 60, 97, … 3026). Comparing them directly only ever
@@ -2074,43 +2116,22 @@ def _mask_frame_lookup(output_dir: Path, mask_frames, cloud_frames):
     mask of the wrong keyframe. Coverage was 5.35% for that reason alone, and
     the patchwork it produced is what shattered one floor into 48 instances.
 
-    Both spaces list the SAME frames in the SAME order, so the i-th smallest
-    frame_global is keyframe i. The identity is still measured against that
-    translation and whichever explains more of the cloud's frames wins, so a
-    session whose masks were already written in video-frame numbers keeps
-    working.
-
-    Returns {cloud_frame: mask_frame} — empty when the identity is right.
+    ``mask_frames`` / ``cloud_frames`` are no longer needed to DECIDE (the
+    store declares its space, and a legacy store is measured against
+    camera_frames.txt, which is the same list the poses were read from); they
+    are still accepted, and the translation is restricted to the cloud frames
+    the caller actually has, so the returned dict means what it always meant.
     """
-    mask_set = {int(f) for f in mask_frames}
-    cloud_sorted = sorted(int(f) for f in cloud_frames)
-    if not mask_set or not cloud_sorted:
+    ms = mask_space.resolve(output_dir, log=lambda m: print(f"[SegPipeline]   {m}"))
+    c2m = ms.cloud_to_mask()
+    if not c2m:
         return {}
-    identity_hits = len(mask_set & set(cloud_sorted))
-
-    # the keyframe order, preferring the selector's own list when it is there
-    ordered = None
-    try:
-        from frame_selector import load_selected_frames
-        sel = load_selected_frames(str(Path(output_dir).parent / "frames"))
-        if sel and len(sel) == len(cloud_sorted):
-            ordered = [int(Path(name).stem) for name in sel]
-    except Exception:
-        ordered = None
-    if ordered is None:
-        ordered = cloud_sorted
-    if len(ordered) != len(cloud_sorted):
-        return {}
-
-    translated = {g: i for i, g in enumerate(ordered) if i in mask_set}
-    if len(translated) <= identity_hits:
-        print(f"[SegPipeline]   mask frame space: identity ({identity_hits}/{len(cloud_sorted)} "
-              f"frames matched) — masks are keyed by video frame number")
-        return {}
-    print(f"[SegPipeline]   mask frame space: keyframe POSITION → video frame number "
-          f"({len(translated)}/{len(cloud_sorted)} frames matched, identity would match "
-          f"{identity_hits})")
-    return translated
+    have = {int(f) for f in cloud_frames} if cloud_frames is not None else None
+    mask_set = ({int(f) for f in mask_frames}
+                if mask_frames is not None else set(c2m.values()))
+    out = {c: m for c, m in c2m.items()
+           if (have is None or c in have) and (not mask_set or m in mask_set)}
+    return out
 
 
 def _mask_fates(metadata: dict, instances: list, absorbed_into: dict) -> dict:

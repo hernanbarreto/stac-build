@@ -280,7 +280,11 @@ def contour_observations(frames: Dict[int, dict], instances: List[dict], store,
         if obj is None:
             continue
         for (i, j) in pairs:
-            ki, kj = f"f{i}_o{obj}", f"f{j}_o{obj}"
+            # i, j are CLOUD/pose frames (that is what `frames` and `images`
+            # are keyed by); the mask store is keyed by keyframe POSITION
+            ki, kj = store.mask_key(i, obj), store.mask_key(j, obj)
+            if ki is None or kj is None:
+                continue
             if ki not in store.masks or kj not in store.masks or i not in frames or j not in frames:
                 continue
             gi = _grad(i)

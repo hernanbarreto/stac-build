@@ -55,7 +55,10 @@ def _build_object_scene(output_dir: Path, scene: Path, obj_scene: Path,
                         obj_pts: np.ndarray, obj_cols, masked_frames: set,
                         mask_arrays: dict, max_seed_pts: int,
                         dilate_px: int = 0) -> None:
-    """Object scene = shared images + cameras, own seed + own inverted masks."""
+    """Object scene = shared images + cameras, own seed + own inverted masks.
+
+    ``masked_frames`` / ``mask_arrays`` are keyed by the REAL frame number —
+    the same numbering as the scene's images/ filenames."""
     import open3d as o3d
     from PIL import Image
     from reconstruction.pgsr_export import _write_points3d_ply
@@ -142,6 +145,9 @@ def main() -> int:
               for i in seg.get("instances") or []}
     oid_map = _mask_obj_by_iid(output_dir)
     masks_npz = np.load(output_dir / "seg_masks.npz", allow_pickle=True)
+    from segmentation import mask_space
+    mspace = mask_space.resolve(output_dir, masks=masks_npz)
+    print(f"[pgsr-obj] {mspace.describe()}", flush=True)
 
     pc = o3d.io.read_point_cloud(str(output_dir / "cleaned_cloud.ply"))
     pts = np.asarray(pc.points)
@@ -168,10 +174,16 @@ def main() -> int:
         if oid is None:
             skipped.append({"instance_id": iid, "reason": "no mask obj id"})
             continue
+        # keyed by the REAL frame number: the PGSR scene's images/ are named
+        # by it, and the mask store is keyed by the KEYFRAME POSITION, so
+        # ``fnum in masked_frames`` below compared two different spaces and
+        # supervised the wrong keyframes (or none)
         mask_arrays = {}
         for k in masks_npz.files:
             if k.startswith("f") and k.endswith(f"_o{oid}"):
-                mask_arrays[int(k.split("_o")[0][1:])] = masks_npz[k]
+                cf = mspace.to_cloud(int(k.split("_o")[0][1:]))
+                if cf is not None:
+                    mask_arrays[int(cf)] = masks_npz[k]
         if len(mask_arrays) < int(args.min_mask_frames):
             skipped.append({"instance_id": iid,
                             "reason": f"only {len(mask_arrays)} masked "

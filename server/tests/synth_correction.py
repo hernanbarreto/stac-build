@@ -94,6 +94,14 @@ def make_correction_raw_cfg(**overrides) -> dict:
         "apply": {"depth_correction_mode": "sidecar",
                   "potree_rebuild": False, "reconsolidate": False},
         "runtime": {"workers": 2},
+        # the visit-drift loop (the session's correction since 2026-09-18),
+        # scaled for the synthetic clouds: centimetre objects, metre walks
+        "visit_drift": {"min_points": 50, "min_visit_share": 0.01,
+                        "min_walk_m": 0.10, "voxel_m": 0.10, "max_ambiguity": 2,
+                        "silhouette_cell_m": 0.01,
+                        "silhouette_close_px": 5, "silhouette_blur_px": 2.0,
+                        "search_margin_m": 1.20,
+                        "default_repeatability_m": 0.0477, "max_epochs": 12},
     }}
     for dotted, value in overrides.items():
         node = raw["correction"]

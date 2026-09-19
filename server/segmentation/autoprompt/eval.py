@@ -54,10 +54,15 @@ def _iou(a, b) -> float:
 
 
 def load_gt_boxes(gt_output_dir: Path) -> dict[int, list[tuple[str, tuple]]]:
-    """From Manager-format GT: {frame_idx: [(label, box_norm), ...]}."""
+    """From Manager-format GT: {frame_number: [(label, box_norm), ...]}.
+
+    Keyed by the REAL frame number — ``evaluate`` resolves the JPEG by its
+    numeric stem — while the npz keys are keyframe POSITIONS."""
     seg = json.load(open(gt_output_dir / "segmentation.json"))
     id_to_label = {inst["id"]: inst["label"] for inst in seg.get("instances", [])}
     npz = np.load(gt_output_dir / seg.get("mask_file", "seg_masks.npz"))
+    from segmentation import mask_space
+    space = mask_space.resolve(gt_output_dir, masks=npz)
     out: dict[int, list[tuple[str, tuple]]] = {}
     for key in npz.files:
         if not key.startswith("f") or "_o" not in key:
@@ -67,9 +72,12 @@ def load_gt_boxes(gt_output_dir: Path) -> dict[int, list[tuple[str, tuple]]]:
         label = id_to_label.get(obj_id)
         if label is None:
             continue
+        frame_num = space.to_cloud(frame_idx)
+        if frame_num is None:
+            continue
         bb = _mask_bbox_norm(npz[key])
         if bb:
-            out.setdefault(frame_idx, []).append((label, bb))
+            out.setdefault(int(frame_num), []).append((label, bb))
     return out
 
 

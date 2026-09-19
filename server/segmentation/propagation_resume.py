@@ -38,7 +38,12 @@ def _load_seg(output_dir: Path) -> dict:
 
 
 def _mask_obj_ids(output_dir: Path) -> Dict[int, List[int]]:
-    """obj_id → sorted list of real frame numbers with a non-empty mask."""
+    """obj_id → sorted list of MASK frame indices with a non-empty mask.
+
+    Mask indices, not video frame numbers — only the count is used (``status``
+    reports how many frames an instance covers) and translating would just
+    hide which space these are in. :func:`build_resume_seeds` is where they
+    become real frames."""
     npz = output_dir / "seg_masks.npz"
     out: Dict[int, List[int]] = {}
     if not npz.exists():
@@ -134,6 +139,8 @@ def cancel(output_dir: Path, log=print) -> dict:
             else:
                 keep[k] = z[k]
         np.savez_compressed(npz, **keep)
+        from segmentation import mask_space
+        mask_space.invalidate(output_dir)
 
     # segmentation_result.json + classification.npy
     res_p = output_dir / "segmentation_result.json"
@@ -247,16 +254,25 @@ def build_resume_seeds(output_dir: Path, grid: int = 4, erode_px: int = 4,
         m = re.match(r"f(\d+)_o(\d+)$", k)
         if m and int(m.group(2)) in incomplete_oids and z[k].any():
             by_oid.setdefault(int(m.group(2)), []).append(int(m.group(1)))
+    # the caller feeds these frames to SAM3 through `real_to_seq`, which is
+    # built from kf_mapping = REAL video frame numbers; the store's keys are
+    # keyframe POSITIONS, so the seeds have to be translated here or every
+    # resumed object is re-seeded on the wrong photographs
+    from segmentation import mask_space
+    space = mask_space.resolve(output_dir, masks=z)
     seeds: Dict[int, Dict[int, List[Tuple[int, int]]]] = {}
     for oid, frames in by_oid.items():
         frames.sort()
         sel = pick_seed_frames(frames, min_frames, max_frames)
         fseeds = {}
-        for rf in sel:
-            pts = seed_points_from_mask(z[f"f{rf}_o{oid}"], grid, erode_px,
+        for mf in sel:
+            rf = space.to_cloud(mf)
+            if rf is None:
+                continue
+            pts = seed_points_from_mask(z[f"f{mf}_o{oid}"], grid, erode_px,
                                         max_pts_per_frame)
             if pts:
-                fseeds[rf] = pts
+                fseeds[int(rf)] = pts
         if fseeds:
             seeds[oid] = fseeds
             npt = sum(len(v) for v in fseeds.values())

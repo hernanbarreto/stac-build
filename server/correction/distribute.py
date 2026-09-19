@@ -9,8 +9,10 @@ measures the closure t_j = E(d_ref) − E(d_j); with one duplicate the error
 curve is the straight line through (0, 0) and that closure (ε = t_j /
 (d_j − d_ref)); with more duplicates it is piecewise-linear through their
 knots. The correction at ANY keyframe is −E(d_k): small near the start,
-growing along the walk, extrapolated with the last slope beyond the last
-knot. The reference copy moves too (by −E(d_ref)) — it is not exact either,
+growing along the walk. Beyond the last knot it continues at the rate
+measured from the START, which is the sentence E(d) = ε·d itself — the rate
+with the longest lever arm behind it, not a local slope between the two
+closest closures. The reference copy moves too (by −E(d_ref)) — it is not exact either,
 only closer to the start.
 
 Superseded and removed (both smeared the closure over keyframes that were
@@ -86,9 +88,18 @@ def _screw_interp(x: float, xs: np.ndarray, Ts: np.ndarray) -> np.ndarray:
     reproduces the closure), which is why loops_posthoc predicted 60.6 -> 1.3
     cm for the same edge and nothing looked wrong until the frames were asked.
 
-    Both ends are extrapolated with the adjacent segment's screw, which is the
-    drift-rate model's own statement: the error keeps accumulating at the last
-    measured rate.
+    BEYOND THE LAST KNOT the curve continues along the screw measured from the
+    START — ``E(d) = ε·d``, the model's own sentence — not along the last
+    segment's. Past the last closure there is nothing to measure, so the rate
+    to continue with is the one with the longest lever arm behind it: a
+    segment's rate carries the closure uncertainty divided by that segment's
+    length, and the last two closures are usually the closest together. The
+    synthetic corridor measured the cost of the other choice: knots at 57.3 m
+    and 61.0 m whose 15.8 and 15.2 cm closures point ~35 deg apart gave a
+    local rate that, extended over the remaining 3.7 m, moved the walk's end
+    33 cm for a 15 cm closure (step between keyframes 2.57 mm -> 53.19 mm).
+    With one knot — the common case — the two readings are identical, because
+    the only segment IS the whole walk.
     """
     if len(xs) == 1:
         return Ts[0].copy()
@@ -97,8 +108,8 @@ def _screw_interp(x: float, xs: np.ndarray, Ts: np.ndarray) -> np.ndarray:
         u = (x - xs[0]) / span
         j = 1
     elif x >= xs[-1]:
-        i, j = len(xs) - 2, len(xs) - 1
-        span = max(xs[-1] - xs[-2], 1e-9)
+        i, j = 0, len(xs) - 1
+        span = max(xs[-1] - xs[0], 1e-9)
         u = 1.0 + (x - xs[-1]) / span
     else:
         i = int(np.searchsorted(xs, x, side="right")) - 1
@@ -107,74 +118,6 @@ def _screw_interp(x: float, xs: np.ndarray, Ts: np.ndarray) -> np.ndarray:
     rel = np.linalg.inv(Ts[i]) @ Ts[j]
     return Ts[i] @ screw_exp(u * screw_log(rel))
 
-
-def _V(w: np.ndarray) -> np.ndarray:
-    """Left Jacobian of SO(3): the matrix that turns a screw's linear part into
-    the translation of the rigid motion, t = V(w) @ rho."""
-    th = float(np.linalg.norm(w))
-    W = np.array([[0.0, -w[2], w[1]], [w[2], 0.0, -w[0]], [-w[1], w[0], 0.0]])
-    if th < 1e-9:                       # V -> I + W/2 as th -> 0
-        return np.eye(3) + 0.5 * W
-    return (np.eye(3) + ((1.0 - np.cos(th)) / th ** 2) * W
-            + ((th - np.sin(th)) / th ** 3) * (W @ W))
-
-
-def screw_log(T: np.ndarray) -> np.ndarray:
-    """SE(3) logarithm: the screw [w(3), rho(3)] with exp(xi) == T.
-
-    NOT the small-motion convention used elsewhere in the repo (``R=exp(w)``
-    with the translation taken as-is): that one is exactly the separable model
-    this module had, and it is what broke the distribution (pccr 2026-09-17).
-    """
-    T = np.asarray(T, np.float64)
-    w = Rotation.from_matrix(T[:3, :3]).as_rotvec()
-    rho = np.linalg.solve(_V(w), T[:3, 3])
-    return np.concatenate([w, rho])
-
-
-def screw_exp(xi: np.ndarray) -> np.ndarray:
-    """SE(3) exponential: the rigid motion of the screw ``xi = [w, rho]``."""
-    xi = np.asarray(xi, np.float64)
-    w, rho = xi[:3], xi[3:]
-    T = np.eye(4)
-    T[:3, :3] = Rotation.from_rotvec(w).as_matrix()
-    T[:3, 3] = _V(w) @ rho
-    return T
-
-
-def _screw_interp(x: float, xs: np.ndarray, Ts: np.ndarray) -> np.ndarray:
-    """The correction curve at chainage ``x``, moving between knots along the
-    ONE-PARAMETER SUBGROUP that joins them — the screw motion.
-
-    The old curve interpolated the rotation on the manifold and the translation
-    LINEARLY, as if the rotation were not there. That is only valid for small
-    rotations. pccr 2026-09-17, desk#201: a closure of 148.5 deg that moves its
-    copy 60.6 cm onto its twin was spread over the chain as displacements of
-    up to 6-7 m in the middle of the walk — measured by the greedy loop as
-    "its own copies 60.8 -> 783.2 cm". The two ENDS agreed (at f=1 the model
-    reproduces the closure), which is why loops_posthoc predicted 60.6 -> 1.3
-    cm for the same edge and nothing looked wrong until the frames were asked.
-
-    Both ends are extrapolated with the adjacent segment's screw, which is the
-    drift-rate model's own statement: the error keeps accumulating at the last
-    measured rate.
-    """
-    if len(xs) == 1:
-        return Ts[0].copy()
-    if x <= xs[0]:
-        i, span = 0, max(xs[1] - xs[0], 1e-9)
-        u = (x - xs[0]) / span
-        j = 1
-    elif x >= xs[-1]:
-        i, j = len(xs) - 2, len(xs) - 1
-        span = max(xs[-1] - xs[-2], 1e-9)
-        u = 1.0 + (x - xs[-1]) / span
-    else:
-        i = int(np.searchsorted(xs, x, side="right")) - 1
-        j = i + 1
-        u = (x - xs[i]) / max(xs[j] - xs[i], 1e-9)
-    rel = np.linalg.inv(Ts[i]) @ Ts[j]
-    return Ts[i] @ screw_exp(u * screw_log(rel))
 
 
 def _interp_extrap(x: float, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:

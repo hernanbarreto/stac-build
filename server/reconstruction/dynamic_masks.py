@@ -69,7 +69,12 @@ def generate(output_dir: Path, dst_dir: Path, log=None,
         return 0
 
     from PIL import Image
+    from segmentation import mask_space
     data = np.load(npz_path)
+    # the PNG must be named after the IMAGE the trainer loads (the real frame
+    # number); the npz keys are keyframe POSITIONS, so writing them verbatim
+    # masked the wrong views — or, more often, matched no image at all
+    space = mask_space.resolve(output_dir, masks=data)
     per_frame: Dict[int, np.ndarray] = {}
     for key in data.files:
         if not (key.startswith("f") and "_o" in key):
@@ -80,6 +85,9 @@ def generate(output_dir: Path, dst_dir: Path, log=None,
         except Exception:
             continue
         if oid not in dyn_ids:
+            continue
+        fnum = space.to_cloud(fnum)
+        if fnum is None:
             continue
         m = np.asarray(data[key]).astype(bool)
         if fnum in per_frame:

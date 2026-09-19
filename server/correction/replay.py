@@ -120,13 +120,23 @@ def replay(session_dir: Path, to_epoch: int,
                            "cannot key the replay by real frame numbers")
 
     lineage = epoch_lineage(output_dir, int(to_epoch))
+    # rows of the ORIGINAL cloud still alive — an epoch may delete points
+    # (the visit-drift filter does), and replaying only the motion would hand
+    # back a cloud the session never had
+    alive = np.arange(len(xyz), dtype=np.int64)
     for ep in lineage[1:]:            # lineage[0] is epoch 0, the starting point
         npz = load_epoch_npz(output_dir, ep)
         apply_epoch_to_arrays(xyz, fg, poses, frames, npz)
+        drop = np.asarray(npz.get("dropped", np.zeros(0, np.int64)), np.int64)
+        if len(drop):
+            keep = np.ones(len(xyz), bool)
+            keep[drop[(drop >= 0) & (drop < len(xyz))]] = False
+            xyz, fg, alive = xyz[keep], fg[keep], alive[keep]
         log(f"  replayed epoch {ep} "
-            f"({int((npz['k_kf'] != 1.0).sum())} depth keyframe(s))")
+            f"({int((npz['k_kf'] != 1.0).sum())} depth keyframe(s)"
+            + (f", {len(drop):,} point(s) deleted)" if len(drop) else ")"))
 
-    data_out = data.copy()
+    data_out = data[alive].copy()
     data_out["x"] = xyz[:, 0].astype(data.dtype["x"])
     data_out["y"] = xyz[:, 1].astype(data.dtype["y"])
     data_out["z"] = xyz[:, 2].astype(data.dtype["z"])
