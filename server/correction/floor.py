@@ -32,6 +32,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
+import time
+
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
@@ -232,11 +234,21 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
     # 1) local floor per candidate keyframe --------------------------------
     locals_: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
     per_kf_report: List[dict] = []
-    for k in candidates:
+    # RANSAC on every candidate keyframe is minutes of work. It used to print
+    # nothing until it was over, so the user could not tell it apart from a
+    # hang — "no se esta imprimiendo nada en consola" (USER 2026-09-21). No
+    # stage may go more than a handful of seconds without a magnitude.
+    _REPORTS = 8          # how many progress lines this stage prints
+    _step = max(1, int(len(candidates) / _REPORTS))
+    _t0 = time.time()
+    for _n, k in enumerate(candidates, 1):
         nrm, c_f, info = _keyframe_floor(session, k, cfg, rng)
         per_kf_report.append(info)
         if nrm is not None:
             locals_[k] = (nrm, c_f)
+        if _n % _step == 0 or _n == len(candidates):
+            log(f"    floor planes: {_n}/{len(candidates)} keyframes, "
+                f"{len(locals_)} usable ({time.time() - _t0:.0f}s)")
     if not locals_:
         raise RuntimeError(
             "no candidate keyframe produced a trustworthy local floor plane "

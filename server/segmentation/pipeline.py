@@ -3228,7 +3228,19 @@ def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
     When new_obj_ids is provided (incremental mode), only matches those
     obj_ids against the cloud and merges them with the existing result.
     This avoids re-processing all previous instances after each category.
+
+    Takes the session's matching lock (`segmentation.match_lock`) — an OS
+    lock, honoured ACROSS PROCESSES. It used to take none, so the pipeline's
+    worker and the API process matched the same cloud at the same time
+    (pccr 2026-09-21: four passes, four octrees, and the session's object
+    count decided by arrival order).
     """
+    from segmentation.match_lock import matching_lock
+    with matching_lock(output_dir, log=lambda m: print(f"[SegPipeline]{m}")):
+        return _match_and_save_result_locked(output_dir, ply_path, new_obj_ids)
+
+
+def _match_and_save_result_locked(output_dir, ply_path=None, new_obj_ids=None):
     output_dir = Path(output_dir)
     result_path = output_dir / "segmentation_result.json"
     
@@ -3336,16 +3348,12 @@ def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
 
 # Per-session lock to prevent parallel matching runs on the same output dir
 import threading
-_matching_locks: dict = {}  # output_dir_str -> threading.Lock
-_matching_locks_guard = threading.Lock()
-
-def _get_matching_lock(output_dir: Path) -> threading.Lock:
-    """Get or create a lock for a specific session's output directory."""
-    key = str(output_dir)
-    with _matching_locks_guard:
-        if key not in _matching_locks:
-            _matching_locks[key] = threading.Lock()
-        return _matching_locks[key]
+# The per-session matching lock lives in `segmentation.match_lock`: an OS lock
+# on the session directory, honoured ACROSS PROCESSES. What used to be here was
+# a `threading.Lock`, which coordinates threads inside one process and is blind
+# to the pipeline's `multiprocessing.spawn` worker — so on 2026-09-21 the
+# viewer and the pipeline matched the same cloud at the same time. A dead guard
+# that looks like a protection is worse than none.
 
 
 def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
@@ -3382,25 +3390,36 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
         except Exception as e:
             print(f"[SegPipeline] ⚠️ Failed to load cached result: {e}")
     
-    # ── Slow path: acquire per-session lock to prevent parallel matching ──
-    lock = _get_matching_lock(output_dir)
-    if not lock.acquire(blocking=False):
-        # Another thread is already matching — wait for it to finish
-        print(f"[SegPipeline] ⏳ Matching already in progress, waiting for result...")
-        lock.acquire()  # Block until the other thread finishes
-        lock.release()
-        # The other thread should have cached the result — try loading it
-        if result_path.exists():
+    # ── Slow path ─────────────────────────────────────────────────────────
+    # The lock is an OS lock on the session directory, so it is honoured by
+    # the pipeline's worker PROCESS as well (`segmentation.match_lock`). The
+    # old `threading.Lock` only saw other threads, so on 2026-09-21 the viewer
+    # opening a session launched a full second matching alongside the
+    # pipeline's — four passes over 22.7 M points, four octrees, and the
+    # session's object count decided by arrival order.
+    #
+    # A caller that finds one in flight does NOT start its own: it waits and
+    # reads what that pass wrote. That is the whole point — the redundant work
+    # must not exist, not merely be serialised.
+    from segmentation.match_lock import matching_lock
+    with matching_lock(output_dir,
+                       log=lambda m: print(f"[SegPipeline]{m}")) as waited:
+        if waited and result_path.exists():
             try:
                 with open(result_path) as f:
                     result = json.load(f)
-                print(f"[SegPipeline] ⚡ Loaded result from concurrent match")
+                print(f"[SegPipeline] ⚡ Loaded the result the other matching "
+                      f"just wrote ({len(result.get('instances') or [])} "
+                      f"instances) — no second pass")
                 return result
-            except Exception:
+            except Exception:  # noqa: BLE001 — fall through and match
                 pass
-        return {"instances": [], "error": "Concurrent match produced no result"}
-    
-    try:
+        return _apply_segmentation_slow(output_dir, ply_path, result_path)
+
+
+def _apply_segmentation_slow(output_dir, ply_path, result_path):
+    """The matching itself. The caller already holds the session lock."""
+    if True:
         print(f"[SegPipeline] No cached result, running full mask matching (will cache for next time)...")
         result = _match_masks_to_cloud(output_dir, ply_path)
         
@@ -3434,6 +3453,4 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
                 print(f"[SegPipeline] ⚠️ Failed to cache result: {e}")
         
         return result
-    finally:
-        lock.release()
 

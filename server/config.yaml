@@ -2695,6 +2695,13 @@ certify:                            # §4.8 ensemble witness + §9 certification
     unobserved_sigma_m: 5.0         # a direction the visit does not observe (a floor's in-plane) — huge σ
     unobserved_sigma_deg: 30.0      # roll / pitch of a yaw-only closure — huge σ
     window_kf: 15                   # an instance's copy = its points within ± this of the visit keyframe
+    max_pairs_per_instance: 3   # how many copy pairs of ONE object are worth the ICP. On pccr
+                                # 2026-09-21 a single extended ceiling produced 42 of 56
+                                # evaluations by pairing its own clusters across every keyframe
+                                # that saw it (n^2), and yielded ZERO scale rows: the ICP slides
+                                # on a flat surface, so the 42nd says exactly what the 1st said.
+                                # A BOUND on wasted work, not a decision about evidence — the
+                                # pairs that survive are still judged on their own merits.
   known_answer:                     # §10.10 field check of the instrument
     chunk: last                     # the perturbed chunk: the revisited one — where the loops see it
                                     # (a kink in a chunk no loop covers is the §4.6 corridor case:

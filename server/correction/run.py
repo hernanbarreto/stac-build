@@ -429,7 +429,12 @@ def run_objects(output_dir, instance_ids: List[int], operator: str,
             f"{names}")
 
     # apply (transaction) -------------------------------------------------
-    _p(50, "all gates passed — staging the transaction...")
+    # Never "all gates passed" when one did not. Saying it right after
+    # declaring a failure erases the declaration that advisory mode exists to
+    # make (USER 2026-09-21, reading the log of a full run).
+    _p(50, ("staging the transaction — "
+            + (f"{len(warnings)} advisory gate(s) failed and are declared "
+               f"(gates.mode: advisory)" if warnings else "all gates passed")))
     scale_diag_new = diagnose.regenerate_scale_diagnostics(
         output_dir, k_by_frame, epoch_from + 1, correction_id)
     tx_info = stage_transaction(
@@ -605,7 +610,10 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
         log(f"  ⚠ advisory gate(s) failed (applied anyway, USER 2026-09-09): "
             f"{[g['name'] for g in failed]}")
 
-    _p(50, "all gates passed — staging the transaction...")
+    # never "all gates passed" when one did not (see the floor path above)
+    _p(50, ("staging the transaction — "
+            + (f"{len(warnings)} advisory gate(s) failed and are declared "
+               f"(gates.mode: advisory)" if warnings else "all gates passed")))
     tx_info = stage_transaction(
         session, cfg, R_kf, t_kf, k_kf, correction_id=correction_id,
         scale_diag_new=diagnose.regenerate_scale_diagnostics(

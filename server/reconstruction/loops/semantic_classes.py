@@ -96,7 +96,19 @@ def classify_instances(output_dir, session_dir, instances: List[dict], cfg,
     store = InstanceStore(output_dir / "scene_r.db")
     out: Dict[int, dict] = {}
     client = None
-    if cfg.enabled:
+    # The class of an object is a property of the OBJECT: a desk is still a
+    # desk after the cloud is corrected. Every instance already classified is
+    # read from the store below — so the service is only worth starting when
+    # something is actually missing. It used to start unconditionally: on pccr
+    # 2026-09-21 certify booted vLLM (24 GB, ~4 min) and then classified ZERO
+    # instances, every one of them already cached.
+    _pending = [i for i in instances
+                if not store.get_meta(
+                    f"loop_class_{int(i.get('instance_id', i.get('id')))}")]
+    if not _pending:
+        log(f"[loop-class] all {len(instances)} instance(s) already classified "
+            f"— the semantic service is not started")
+    if cfg.enabled and _pending:
         try:
             # the service may be DOWN here (SAM3 stops vLLM for its exclusive
             # window): bring it up and wait, exactly as the VLM stage does —
