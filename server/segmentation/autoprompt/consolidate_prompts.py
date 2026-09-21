@@ -37,7 +37,10 @@
 #     survives untouched;
 #   · the structural envelope is never dropped as somebody's part (USER: "puertas
 #     ventanas paredes pisos techos columnas, eso es estructural, debe estar");
-#   · a failed or unparseable pass returns the list unchanged.
+#   · a failed or unparseable pass returns the list unchanged — and it is
+#     the one thing here that can silently change the session vocabulary,
+#     so it is RECORDED (history, reason, numbers) and declared as a
+#     warning the session carries on disk, not only in a log line.
 #
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
@@ -121,12 +124,51 @@ class Consolidation:
     kept_unmentioned: list[str] = field(default_factory=list)
     kept_structural: list[str] = field(default_factory=list)
     passes: int = 0
+    # ── what actually happened, because it DECIDES the vocabulary ────────
+    # Two runs of the SAME scan, same 61 object types out of the VLM:
+    #   04:57  "the pass returned nothing parseable — list unchanged"
+    #          61 → 61 concept(s) in 0 pass(es)   → 61 categories to SAM3
+    #   11:34  pass 1: 61 → 33 ; pass 2: 33 → 32  → 32 categories to SAM3
+    # The VLM was stable; the whole difference was here, and nothing on disk
+    # said so. The detail of a session's segmentation is decided in this
+    # dataclass, so it carries the evidence: the list it was given, every
+    # pass and its outcome, and whether any pass failed to parse.
+    input_objects: list[str] = field(default_factory=list)
+    history: list[dict] = field(default_factory=list)
+    parse_failed: bool = False
+    max_passes_reached: bool = False
+    stopped_reason: str = ""
+
+    def warning(self) -> Optional[str]:
+        """The one sentence the session must be able to say about its own
+        vocabulary, or None when the list converged normally."""
+        if self.passes == 0:
+            return (f"the consolidation never ran — SAM3 is segmenting with "
+                    f"the RAW per-frame list of {len(self.objects)} concept(s) "
+                    f"({self.stopped_reason})")
+        if self.parse_failed:
+            return (f"the consolidation stopped after {self.passes} pass(es) "
+                    f"with {len(self.objects)} concept(s), which is not a "
+                    f"converged list ({self.stopped_reason})")
+        if self.max_passes_reached:
+            return (f"the consolidation used all {self.passes} pass(es) and "
+                    f"the list was still changing at the last one — "
+                    f"{len(self.objects)} concept(s)")
+        return None
 
     def to_dict(self) -> dict:
         return {"origin": "vlm_proposed", "objects": self.objects,
                 "merged": self.merged, "parts": self.parts,
                 "kept_unmentioned": self.kept_unmentioned,
-                "kept_structural": self.kept_structural, "passes": self.passes}
+                "kept_structural": self.kept_structural, "passes": self.passes,
+                "input_objects": self.input_objects,
+                "n_input": len(self.input_objects),
+                "n_objects": len(self.objects),
+                "history": self.history,
+                "parse_failed": self.parse_failed,
+                "max_passes_reached": self.max_passes_reached,
+                "stopped_reason": self.stopped_reason,
+                "warning": self.warning()}
 
 
 def _parse(txt: str) -> Optional[dict]:
@@ -147,15 +189,37 @@ def _norm(s: str) -> str:
 
 
 def _one_pass(client, scene_type: str, phrases: list[str], max_tokens: int,
-              log: Callable[[str], None]) -> Optional[Consolidation]:
+              log: Callable[[str], None]) -> tuple[Optional[Consolidation], dict]:
+    """(result, note) — the note is kept whether the pass worked or not.
+
+    A pass that does not parse used to write one log line and vanish. It is a
+    REFUSAL and it records its reason and its numbers like every other refusal
+    in this codebase: how many characters came back, why the JSON did not
+    survive, and what the model said it stopped for (`finish_reason` 'length'
+    is a truncated answer, not a confused one — the list grows with the scene
+    and `max_tokens` does not).
+    """
     from semantic.types import system, user
 
     resp = client.chat([system(_SYSTEM), user(_prompt(scene_type, phrases))],
                        max_tokens=max_tokens, consumer="phase1.consolidate")
-    d = _parse(resp.content or "")
+    txt = resp.content or ""
+    note = {"before": len(phrases), "chars": len(txt),
+            "finish_reason": getattr(resp, "finish_reason", None)}
+    d = _parse(txt)
     if d is None or not isinstance(d.get("objects"), list):
-        log("[consolidate] the pass returned nothing parseable — list unchanged")
-        return None
+        if not txt:
+            why = "the model returned an empty response"
+        elif d is None:
+            why = f"no JSON object in the {len(txt)} character(s) returned"
+        else:
+            why = f"the JSON of {len(txt)} character(s) carries no 'objects' list"
+        if note["finish_reason"] == "length":
+            why += f" (finish_reason=length: the answer was cut at max_tokens={max_tokens})"
+        note.update(status="unparsed", reason=why, after=len(phrases))
+        log(f"[consolidate] the pass returned nothing parseable — "
+            f"list unchanged ({why})")
+        return None, note
 
     known = {_norm(p): p for p in phrases}
     out = Consolidation(objects=[], passes=1)
@@ -191,7 +255,12 @@ def _one_pass(client, scene_type: str, phrases: list[str], max_tokens: int,
         if _norm(p) not in seen:
             out.objects.append(p)
             out.kept_unmentioned.append(p)
-    return out
+    note.update(status="applied", reason="", after=len(out.objects),
+                merged={k: list(v) for k, v in out.merged.items()},
+                parts={k: list(v) for k, v in out.parts.items()},
+                kept_structural=list(out.kept_structural),
+                kept_unmentioned=list(out.kept_unmentioned))
+    return out, note
 
 
 def consolidate(client, scene_type: str, phrases: list[str],
@@ -210,14 +279,29 @@ def consolidate(client, scene_type: str, phrases: list[str],
     parts: dict[str, list[str]] = {}
     unmentioned: list[str] = []
     structural: list[str] = []
+    history: list[dict] = []
+    parse_failed = False
+    stopped = ""
     done = 0
-    for _ in range(max(1, int(max_passes))):
+    bound = max(1, int(max_passes))
+    for _ in range(bound):
         try:
-            res = _one_pass(client, scene_type, current, max_tokens, log)
+            res, note = _one_pass(client, scene_type, current, max_tokens, log)
         except Exception as e:  # noqa: BLE001 — declared, never fatal
+            stopped = f"the pass raised {type(e).__name__}: {e}"
+            history.append({"pass": len(history) + 1, "status": "failed",
+                            "reason": stopped, "before": len(current),
+                            "after": len(current)})
             log(f"[consolidate] pass failed ({e}) — keeping the list as it is")
             break
+        note["pass"] = len(history) + 1
+        history.append(note)
         if res is None:
+            # THE defect this record exists for: an unparseable pass changed
+            # the session vocabulary (61 concepts instead of 32) and said so
+            # only in a log line nothing keeps.
+            parse_failed = True
+            stopped = note.get("reason", "the pass returned nothing parseable")
             break
         done += 1
         for name, al in res.merged.items():
@@ -227,13 +311,26 @@ def consolidate(client, scene_type: str, phrases: list[str],
         unmentioned.extend(res.kept_unmentioned)
         structural.extend(res.kept_structural)
         if res.objects == current:
+            note["status"] = "converged"
+            stopped = "converged: the pass changed nothing"
             break                       # converged: the pass changed nothing
         log(f"[consolidate] pass {done}: {len(current)} → {len(res.objects)} concept(s)")
         current = res.objects
 
+    # the bound is a BOUND, not a decision — but reaching it means the list was
+    # still moving when we stopped, and that has to be declared, not inferred
+    max_reached = (len(history) >= bound and not parse_failed
+                   and bool(history) and history[-1].get("status") == "applied")
+    if max_reached:
+        stopped = (f"the {bound}-pass bound was reached with the list still "
+                   f"changing")
+
     out = Consolidation(objects=current, merged=merged, parts=parts,
                         kept_unmentioned=sorted(set(unmentioned)),
-                        kept_structural=sorted(set(structural)), passes=done)
+                        kept_structural=sorted(set(structural)), passes=done,
+                        input_objects=list(phrases), history=history,
+                        parse_failed=parse_failed,
+                        max_passes_reached=max_reached, stopped_reason=stopped)
     n_al = sum(len(v) for v in merged.values())
     n_pt = sum(len(v) for v in parts.values())
     log(f"[consolidate] {len(phrases)} → {len(current)} concept(s) in {done} pass(es): "
@@ -242,4 +339,7 @@ def consolidate(client, scene_type: str, phrases: list[str],
            if out.kept_structural else "")
         + (f", {len(out.kept_unmentioned)} kept because the pass never mentioned them"
            if out.kept_unmentioned else ""))
+    warn = out.warning()
+    if warn:
+        log(f"[consolidate] ⚠️ {warn}")
     return out

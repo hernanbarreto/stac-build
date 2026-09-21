@@ -301,6 +301,16 @@ def solve_depth(output_dir: Path, log: Callable[[str], None] = print,
     DECLARED LIMIT: the anchors show a CONTINUOUS drift and seven chunks can
     only spell a STAIRCASE — with `sigma_seam_log` 0.02 over six seams the
     model tops out near 12 % and pccr needs ~14 %.
+
+    DECLARED LIMIT, the degenerate case of the same sentence: a session
+    reconstructed in ONE pass has no chunk plan, so `chunk_of_keyframes`
+    answers with a single unit and the graph solves ONE factor for the whole
+    walk. One number is a global scale change — what `scale_align` already did
+    in `global_median`, which corrects the average and leaves the drift — so on
+    such a session depth DRIFT is out of reach BY CONSTRUCTION. Nothing is
+    skipped and nothing is substituted: the factor is solved and applied as the
+    average it is, and `scale_stage.single_unit_limit` puts that in the log and
+    in the stage record so it is never read as a drift correction.
     """
     from correction.config import load_correction_config
     from correction.epoch import current_epoch
@@ -329,6 +339,14 @@ def solve_depth(output_dir: Path, log: Callable[[str], None] = print,
     session = load_session(output_dir)
     srep = solve_scale_stage(output_dir, session,
                              [], load_loops_config().certify.scale, log=log)
+    # what the graph declared it CANNOT do on this session, said in the depth
+    # stage's own voice before its numbers are read — a one-unit session solves
+    # a global factor and this is what stops it passing for a drift correction
+    # (FINDING 24b, 2026-09-21). The full detail travels in `srep`.
+    for _d in srep.get("declared_limits") or []:
+        log(f"[depth] DECLARED LIMIT — {_d.get('limit')} ({_d.get('source')}): "
+            f"depth drift is OUT OF REACH on this session; what is solved below "
+            f"is an average, and it reaches the acta saying so")
     if not srep.get("applied"):
         log(f"[depth] nothing to apply: {srep.get('reason')}")
         return None
@@ -543,7 +561,11 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
         pre = {"R_kf": np.tile(np.eye(3), (len(k_kf), 1, 1)),
                "t_kf": t_kf, "k_kf": k_kf}
         stages.append({"stage": "depth", "r_per_chunk": srep.get("r"),
-                       "k_min": float(k_kf.min()), "k_max": float(k_kf.max())})
+                       "k_min": float(k_kf.min()), "k_max": float(k_kf.max()),
+                       # the acta reads `stages` verbatim (certify/run.py), so a
+                       # limit the solver declared has to be here or it stops at
+                       # the log (FINDING 24b)
+                       "declared_limits": srep.get("declared_limits") or []})
 
     log("[correction] 2/2 — FLOOR on that geometry, composed and applied ONCE")
     from correction.run import run_floor

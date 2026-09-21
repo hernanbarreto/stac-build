@@ -309,6 +309,69 @@ def same_surface_rule(pts_a: np.ndarray, pts_b: np.ndarray, cfg) -> Dict[str, An
             "same_geometry": False, "centroid_distance_m": centroid_d}
 
 
+
+def surface_overlap(pts_a: np.ndarray, pts_b: np.ndarray,
+                    geom: Dict[str, Any], cfg) -> Dict[str, Any]:
+    """Do two clusters that share a surface OVERLAP on it, or are they two
+    different PARTS of it?
+
+    ``same_surface_rule`` decides that the two clusters lie on ONE plane (or
+    one axis) and reports the offset ACROSS it — the displacement they can
+    observe. It says nothing about WHERE on that surface each of them sits,
+    and the two cases need opposite treatment:
+
+      * two copies of one desk top, overlapping, observe their in-plane
+        displacement through their own edges;
+      * the two ENDS of a ceiling observe NOTHING along the ceiling. A rigid
+        fit between them still "closes" — by sliding one end onto the other —
+        and reports metres of translation no drift produced. pccr 2026-09-21,
+        epoch 1: ``white_tiled_floor#45`` closed 10.36 m at 0.0 deg and
+        ``white_wall#98`` 12.99 m, each of them one surface against itself.
+
+    Measured as the overlap of the two supports ALONG the surface: the two
+    in-plane axes of a plane, the axis of an elongated cluster, over the same
+    percentile band ``model_dims`` uses (one flyer must not stretch the
+    support). They are the SAME piece only if they overlap along EVERY
+    surface direction — disjoint in one is enough to be two pieces.
+
+    Returns ``applies`` (False when the two share no surface: then the
+    centroid distance is the separation and this question does not arise),
+    ``overlap_frac`` (0 = disjoint), ``gap_m`` (the empty stretch between the
+    supports) and the per-direction numbers, so a refusal can say why.
+    """
+    c = _cfg(cfg)
+    A, B = np.asarray(pts_a, np.float64), np.asarray(pts_b, np.float64)
+    if not geom.get("same_geometry") or len(A) < 3 or len(B) < 3:
+        return {"rule": "surface_overlap", "applies": False}
+    big = A if len(A) >= len(B) else B
+    _, _, V = _pca(big)
+    kind = geom.get("kind")
+    if kind == "axis":
+        dirs = [V[0]]                       # along the elongation
+    elif kind == "plane":
+        dirs = [V[0], V[1]]                 # the two in-plane axes
+    else:
+        return {"rule": "surface_overlap", "applies": False}
+    lo, hi = float(c["dims_pct_lo"]), float(c["dims_pct_hi"])
+    per_dir, fracs, gaps = [], [], []
+    for u in dirs:
+        u = np.asarray(u, np.float64)
+        u = u / (np.linalg.norm(u) + 1e-12)
+        pa, pb = A @ u, B @ u
+        a0, a1 = float(np.percentile(pa, lo)), float(np.percentile(pa, hi))
+        b0, b1 = float(np.percentile(pb, lo)), float(np.percentile(pb, hi))
+        inter = min(a1, b1) - max(a0, b0)
+        span = min(a1 - a0, b1 - b0)
+        frac = float(max(inter, 0.0) / span) if span > 1e-9 else 0.0
+        per_dir.append({"support_a": [a0, a1], "support_b": [b0, b1],
+                        "overlap_m": float(inter), "overlap_frac": frac,
+                        "gap_m": float(max(-inter, 0.0))})
+        fracs.append(frac)
+        gaps.append(float(max(-inter, 0.0)))
+    return {"rule": "surface_overlap", "applies": True, "kind": kind,
+            "directions": per_dir, "overlap_frac": float(min(fracs)),
+            "gap_m": float(max(gaps)), "disjoint": bool(min(fracs) <= 0.0)}
+
 # ── verdicts ────────────────────────────────────────────────────────────────
 
 def gate_frame_pair(i: int, j: int, view, cfg,

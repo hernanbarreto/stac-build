@@ -47,6 +47,43 @@ def chunk_of_keyframes(output_dir, n_kf: int) -> Tuple[List[Tuple[int, int]], np
     return ranges, owner
 
 
+def single_unit_limit(output_dir, n_chunks: int) -> Optional[dict]:
+    """The declared limit of a session the graph can only solve as ONE unit.
+
+    `chunk_of_keyframes` answers `[(0, n_kf)]` for a session reconstructed in a
+    single pass — `load_chunk_plan` returns None and there is no plan to group
+    by — so the graph has exactly one unknown and `solve_depth` resolves one
+    factor r for the whole walk. One factor is a GLOBAL scale change: the same
+    degree of freedom `scale_align` already fixed in `global_median`, which the
+    2026-09-19 reading of pccr describes as correcting the average and leaving
+    the drift. Depth DRIFT is by definition what CHANGES along the walk — five
+    of pccr's six closures 97-99 % radial, a depth error that grows with
+    distance — and no single number can express it.
+
+    So the solve is not skipped and no substitute is invented: it still fixes
+    the average, which is real. What stops is presenting that factor as a drift
+    correction. The limit travels in the stage record (`declared_limits`) and in
+    the log, the way `solve_depth`'s staircase limit already does.
+    """
+    if int(n_chunks) != 1:
+        return None
+    from correction.units import load_chunk_plan
+    has_plan = load_chunk_plan(output_dir) is not None
+    return {
+        "limit": "single_unit",
+        "n_chunks": 1,
+        "source": "chunk_plan.json with one range" if has_plan
+                  else "no chunk_plan.json — single-pass session",
+        "detail": "the depth graph has ONE unit, so it solves ONE factor r for the "
+                  "whole session: a global scale change, the degree of freedom "
+                  "scale_align already fixed with global_median. Depth DRIFT — the "
+                  "part of the error that grows along the walk — cannot be expressed "
+                  "by one number and is OUT OF REACH on this session. The factor is "
+                  "applied as what it is, an average, not as a drift correction.",
+        "provenance": "tool_measured",
+    }
+
+
 def _baseline_agreements(diag: dict) -> Optional[Dict[int, float]]:
     """The per-anchor agreement the METRIC LOCK consumed (epoch 0: the
     original estimate, preserved untouched across epochs — s_f / s_applied)."""
@@ -307,7 +344,14 @@ def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, 
     for k in stood_down:
         s_da3.pop(k, None)
         n_anch.pop(k, None)
+    # what this session CANNOT be asked, declared before anything is solved: a
+    # one-unit graph cannot carry drift, and the record says so instead of the
+    # single factor passing for one (FINDING 24b, 2026-09-21)
+    declared = [d for d in (single_unit_limit(output_dir, n_chunks),) if d]
+    for d in declared:
+        log(f"[scale-posthoc] DECLARED LIMIT ({d['limit']}, {d['source']}) — {d['detail']}")
     rep = {"n_chunks": n_chunks, "chunk_ranges": [list(r) for r in ranges],
+           "declared_limits": declared,
            "visit_drift_rows": len(vd_rows), "visit_drift_epoch": vd_epoch,
            "da3_trend_rows": trend_rep, "anchor_rows_stood_down": stood_down,
            "loop_rows": rows_used, "anchor_rows": {str(k): {"s": s_da3[k], "n": n_anch[k]} for k in s_da3},

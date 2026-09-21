@@ -7548,11 +7548,38 @@ async def viewer_websocket(websocket: WebSocket):
 
                 # The pipeline runs reconstruction → cloudcompy and ends at the
                 # cleaned cloud (pipeline.auto_tsdf false, user 2026-08-28: the
-                # mesh is on-demand only). Any stage selection the client might
-                # still send is deliberately ignored (see build_pipeline_stages).
-                from pipeline_manager import build_pipeline_stages
+                # mesh is on-demand only).
+                #
+                # A caller may now name the stages, which until 2026-09-21 was
+                # impossible (USER: "quiero que relances desde segmentacion con
+                # todas sus etapas, ademas de la certificacion... es decir desde
+                # cloudcompy para abajo sin incluir claro a cloudcompy"):
+                #   {"type": "run_pipeline", "from_stage": "vlm"}      → vlm →
+                #   {"type": "run_pipeline", "stages": ["sam3", "certify"]}
+                # Omitting both is the historical behaviour — the whole chain,
+                # gated by the config switches. An unknown or impossible name is
+                # REJECTED here and the command does not start: a relaunch that
+                # silently runs a different set than the one asked for is how the
+                # reconstruction ended up inside a semantic-only relaunch.
+                from pipeline_manager import (build_pipeline_stages,
+                                              PipelineSelectionError)
                 _recon_backend = cfg.get("reconstruction", {}).get("backend", "da3")
-                stages = build_pipeline_stages(backend=_recon_backend)
+                try:
+                    stages = build_pipeline_stages(
+                        backend=_recon_backend,
+                        stages=cmd.get("stages"),
+                        from_stage=cmd.get("from_stage"),
+                    )
+                except PipelineSelectionError as _sel_err:
+                    print(f"[Pipeline] ✋ stage selection REJECTED for "
+                          f"{session_id}: {_sel_err}")
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": f"Stage selection rejected: {_sel_err}"}))
+                    continue
+                print(f"[Pipeline] stages: "
+                      f"{', '.join(s.id.value for s in stages if s.enabled) or 'none'}"
+                      f" (replace={bool(cmd.get('replace', False))})")
 
                 # Progress callback: relay to this websocket + broadcast
                 from task_manager import task_manager as _tm

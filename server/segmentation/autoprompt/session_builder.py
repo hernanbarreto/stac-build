@@ -303,7 +303,9 @@ class AutoPrompter:
             # duplicate or an unsegmentable fragment. Deciding which words name
             # one thing is a language judgement over the WHOLE list, which is
             # exactly what a per-frame prompt can never have.
+            raw_phrases = list(phrases)
             consolidation = None
+            skipped = ""
             if self.consolidate_prompts and len(phrases) > 1:
                 from .consolidate_prompts import consolidate
                 prog(23, f"consolidating {len(phrases)} concepts")
@@ -316,13 +318,19 @@ class AutoPrompter:
                 (self.output_dir / "prompt_consolidation.json").write_text(
                     json.dumps(consolidation.to_dict(), indent=2, ensure_ascii=False))
                 prog(25, f"consolidated to {len(phrases)} concepts")
+            else:
+                skipped = ("autoprompt.consolidate_prompts is off"
+                           if not self.consolidate_prompts
+                           else f"only {len(phrases)} concept(s) — nothing to group")
+            concepts = self._write_concepts_record(
+                understanding, raw_phrases, phrases, consolidation, skipped)
             prompt = ";".join(phrases)
             self.output_dir.mkdir(parents=True, exist_ok=True)
             vlm_analysis = {
                 "source": "qwen3vl_autoprompt_simple",
                 "backend": self.backend_name,
                 "scene_understanding": understanding.to_dict() if understanding else None,
-                "consolidation": consolidation.to_dict() if consolidation else None,
+                "consolidation": concepts["consolidation"],
                 "prompt": prompt,
                 "frame_map": {},          # empty → SAM3 runs every phrase on ALL frames
                 "boxes": {},              # NO box seeds, ever, in this mode
@@ -459,6 +467,72 @@ class AutoPrompter:
         )
 
     # ── helpers ─────────────────────────────────────────────────────
+    def _write_concepts_record(self, understanding, raw_phrases: list[str],
+                               phrases: list[str], consolidation,
+                               skipped: str) -> dict:
+        """output/autoprompt_concepts.json — where the session's VOCABULARY
+        comes from, in full, so yesterday's list can be read back.
+
+        Two runs of the SAME scan, 2026-09-21: the VLM understood 61 object
+        types both times, and SAM3 received 61 categories in one and 32 in the
+        other. The whole difference was the consolidation pass — 04:57 "the
+        pass returned nothing parseable — list unchanged", 11:34 "pass 1:
+        61 → 33 ; pass 2: 33 → 32". Nothing on disk recorded which of the two
+        had happened: `prompt_consolidation.json` is written only when the pass
+        RUNS, and the run where it failed is exactly the one nobody can
+        reconstruct. This file is written on every SIMPLE run, whether the pass
+        ran, was switched off or failed to parse, and it carries the raw
+        per-frame names, the consolidated list, every pass with its outcome,
+        what was folded into what, and the parse_failed flag.
+
+        PROVENANCE vlm_proposed: every phrase here was NAMED by the VLM. It
+        measures nothing.
+        """
+        cons = (consolidation.to_dict() if consolidation is not None
+                else {"origin": "vlm_proposed", "ran": False,
+                      "reason": skipped, "objects": list(phrases),
+                      "input_objects": list(raw_phrases),
+                      "n_input": len(raw_phrases), "n_objects": len(phrases),
+                      "passes": 0, "history": [], "merged": {}, "parts": {},
+                      "parse_failed": False, "max_passes_reached": False,
+                      "stopped_reason": skipped, "warning": None})
+        cons.setdefault("ran", consolidation is not None)
+        # "what was folded into what", flat — `merged`/`parts` are keyed by the
+        # SURVIVOR, and the question asked of this file is always the other
+        # way round: this phrase is not a prompt any more, where did it go?
+        folded: dict[str, dict] = {}
+        for role, bucket in (("alias", cons.get("merged") or {}),
+                             ("part", cons.get("parts") or {})):
+            for survivor, gone in bucket.items():
+                for phrase in gone:
+                    folded[phrase] = {"into": survivor, "as": role}
+        record = {
+            "origin": "vlm_proposed",
+            "scene_type": (understanding.scene_type if understanding else ""),
+            "raw": {
+                "objects": list(raw_phrases),
+                "n_objects": len(raw_phrases),
+                # what each keyframe named on its own — the list before any
+                # frame saw another frame's answer
+                "per_frame": [{"frame_id": f.frame_id, "objects": list(f.objects)}
+                              for f in ((understanding.per_frame if understanding
+                                         else []) or [])],
+            },
+            "consolidated": {"objects": list(phrases), "n_objects": len(phrases)},
+            "consolidation": cons,
+            "folded": folded,
+            "parse_failed": bool(cons.get("parse_failed")),
+            "warning": cons.get("warning"),
+            "prompt": ";".join(phrases),
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        (self.output_dir / "autoprompt_concepts.json").write_text(
+            json.dumps(record, indent=2, ensure_ascii=False))
+        if record["warning"]:
+            print(f"[autoprompt] ⚠️ {record['warning']} — recorded in "
+                  f"output/autoprompt_concepts.json")
+        return record
+
     def _gate(self, instances: list[Instance]) -> tuple[list[Instance], list[Instance]]:
         accepted, review = [], []
         for inst in instances:
