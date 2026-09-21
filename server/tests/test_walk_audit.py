@@ -4,12 +4,16 @@ that has only one unit to correct with.
 Two findings of 2026-09-21, both about a number that DECIDES and was not said
 out loud:
 
-  * FINDING 25 — three readings of ONE 216-keyframe walk of one scan: 44.1 m
-    and <=15 m from the phase-1 probe on two runs, 19.3 m from `chainage()` on
-    the geometry delivered. The probe's reading is what `map_worker` weighs
-    against `reconstruction.simple.max_walk_single_pass_m`, and on the run that
-    read under the limit NOTHING was logged at all — the run whose structure
-    differed from the other two is the one the log could not explain.
+  * FINDING 25 — two readings of ONE 216-keyframe walk of one scan: the
+    phase-1 probe says 44.1 m (every run of that day, to the tenth) and the
+    chunked pass that follows says 19.3 m of the same trajectory, measured by
+    the same function over a different geometry — phase 1 scaled by the global
+    DA3 median, phase 2 by the per-chunk metric lock. The probe's reading is
+    what `map_worker` weighs against
+    `reconstruction.simple.max_walk_single_pass_m`, so the limit is applied to
+    a number the delivered geometry contradicts by 2.3x; it came out right on
+    this scan by luck, and the path where the walk fits inside the limit logged
+    nothing at all.
   * FINDING 24b — a single-pass session has no `chunk_plan.json`, so the depth
     graph has ONE unit and solves ONE factor: a global scale change, not a
     drift correction. It used to publish that factor as the correction.
@@ -84,7 +88,7 @@ def test_a_single_keyframe_walks_nothing(tmp_path):
 _PATHS = [
     # (walk, comfort, n_kf, chunked_already, expected re-run)
     (19.3, 15.0, 216, False, True),    # pccr: over the limit, phase 2
-    (12.7, 15.0, 216, False, False),   # the 10:00 run: under the limit, silent until now
+    (12.7, 15.0, 216, False, False),   # under the limit: the path that logged nothing
     (44.1, 15.0, 10, False, False),    # over the limit, fewer kf than one chunk
     (44.1, 15.0, 216, True, False),    # the frame count already chunked it
 ]

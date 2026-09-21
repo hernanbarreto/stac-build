@@ -1468,13 +1468,17 @@ def _walk_chainage_m(poses_txt: Path) -> float:
 
     This used to be `chunk_plan.walk_length_m`, which computes the same sum in
     its own words. The same sum is not the same NUMBER once the two are put
-    side by side, and they have to be: three readings of ONE 216-keyframe walk
-    of one scan were 44.1 m and <=15 m (the phase-1 probe, two runs of the same
-    scan) against 19.3 m (`chainage()` on the geometry finally delivered), and
-    the probe's reading is the one that decides whether the session is re-run
-    chunked. Measuring both ends with the very same function makes the
-    confrontation below a statement about the GEOMETRY and not about two
-    implementations of a cumulative sum.
+    side by side, and they have to be, because the two readings of ONE walk
+    disagree by more than the limit that reads them: on the 216-keyframe pccr
+    scan the phase-1 probe measured 44.1 m and the chunked pass that followed
+    measured 19.3 m of the same trajectory (2026-09-21, reproduced in the runs
+    of 04:57 and 10:40, identical to the tenth). The probe is not noisy — it
+    reads 44.1 m every time — it reads a DIFFERENT GEOMETRY: phase 1 is scaled
+    by the global DA3 median (s 5.7789 over 12 anchors, MAD 6.2 %) and phase 2
+    by the per-chunk metric lock (2.42-4.67 over 38 anchors), and the session's
+    own history puts the true walk at 19.3 m. Measuring both ends with the very
+    same function makes the confrontation below a statement about the GEOMETRY
+    and not about two implementations of a cumulative sum.
     """
     import numpy as np
     from reconstruction.loops.drift import chainage
@@ -1497,14 +1501,15 @@ def _phase2_decision(walk_m: float, comfort_m: float, n_kf: int,
     """Whether the measured walk sends the session back through a
     chunked-metric pass — and the LINE that says so, on every path.
 
-    The branch this speaks for only ever spoke when it fired. On the
-    216-keyframe scan the 04:57 and 10:40 runs measured 44.1 m and re-ran in
-    7 chunks, each of them logged; the 10:00 run of the SAME scan measured a
-    walk under the limit, kept the single pass, and left NOTHING behind — no
-    walk, no limit, no decision — so the one run whose structure differed from
-    the other two is the one the log cannot explain. A decision that changes
-    the structure of the reconstruction is readable in every run, including
-    the run where it decided to do nothing.
+    The branch this speaks for only ever spoke when it FIRED. The pccr runs of
+    2026-09-21 all exceeded the limit (44.1 m against 15 m) and each logged its
+    re-run in 7 chunks; the path where the walk fits inside the comfort range
+    logs nothing at all, and neither does the path where the run was already
+    chunked on the frame count alone. A decision that changes the STRUCTURE of
+    the reconstruction — one chunk or seven, and therefore whether the depth
+    correction downstream has any units to distribute over
+    (`scale_stage.single_unit_limit`) — has to be readable in EVERY run,
+    including the run where it decided to do nothing.
 
     Returns (re_run_chunked, message, log level).
     """
@@ -1530,20 +1535,28 @@ def _walk_confrontation(probe_m: float, final_m: float, comfort_m: float,
 
     The probe measures the walk on PHASE-1 geometry — one feed-forward pass
     scaled by the global DA3 median — and that reading is what the comfort
-    limit is applied to. On the 216-keyframe scan it read 44.1 m over geometry
-    whose delivered chainage is 19.3 m: an overestimate of 2.3x, and between
-    two runs of the same scan the probe itself moved from 44.1 m to <=15 m, so
-    the decision flipped on its own. The limit still came out right there
-    (19.3 m also exceeds 15 m), by luck. Luck is not a verdict, so the two
-    numbers are confronted at the end of the run and the disagreement is an
-    alert, never a detail.
+    limit is applied to. It is not noisy: on the 216-keyframe pccr scan it read
+    44.1 m in every run of 2026-09-21, to the tenth. It reads a DIFFERENT
+    GEOMETRY. The chunked pass that follows measures 19.3 m of the same
+    trajectory with the same function, because phase 1 is scaled by the global
+    DA3 median (s 5.7789 over 12 anchors, MAD 6.2 %) and phase 2 by the
+    per-chunk metric lock (2.42-4.67 over 38 anchors); the session's own
+    history puts the walk at 19.3 m, so the probe overestimates by 2.3x and the
+    limit is applied to the number that is wrong. It still came out right there
+    (19.3 m also exceeds 15 m), by luck — a scene that truly walks 8 m can read
+    18 m and buy itself a second full reconstruction. Luck is not a verdict, so
+    the two numbers are confronted at the end of the run and the disagreement
+    is an alert, never a detail.
 
     The bar is not invented: the comfort limit is the only length this decision
     declares, so it is also what the disagreement is weighed against. Two
     readings of one walk that differ by MORE than the limit they were compared
     to decided nothing between them — the other reading could have produced any
     answer (pccr: |44.1 - 19.3| = 24.8 m against a 15 m limit). The second
-    alert is the flat one: the readings fall on opposite sides of the limit.
+    alert is the flat one: the readings fall on opposite sides of the limit,
+    which on this scan they never did — the alert exists for the scene where
+    the 2.3x bias lands the probe above a limit the delivered geometry is
+    below, and the session re-reconstructs itself for nothing.
 
     Returns (message, log level).
     """
