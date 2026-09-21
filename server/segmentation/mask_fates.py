@@ -21,7 +21,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
-REASONS = ("space_dedupe", "fragment", "too_small", "unmatched", "fused_or_unmatched")
+REASONS = ("space_dedupe", "overlap_dedupe", "fragment", "too_small",
+           "unmatched", "fused_or_unmatched")
 
 
 def instance_id_of(entry: dict) -> Optional[int]:
@@ -44,10 +45,14 @@ def resolve_absorbed(result_data: Optional[dict], raw_instances: Sequence[dict],
 
     * the result carries the record the matching wrote → use it, it says which
       object absorbed each mask and why;
-    * the result predates the record BUT is newer than the mask file → the
-      matching consumed exactly these masks, so a mask missing from it did not
-      survive it. That much is a fact; WHICH of fusion or no-match it was is
-      not known and is not claimed (``fused_or_unmatched``);
+    * a mask that is NEITHER a survivor NOR in the record, while the result is
+      newer than the mask file → it did not survive the last pass either. The
+      record is not a census: an instance dropped AFTER the matching (a
+      correction epoch's ``min_points``, a delete) leaves exactly this gap, and
+      without filling it the mask comes back to the list with no points — the
+      zero-point entries the record was written to remove. WHICH of fusion or
+      no-match it was is not known and is not claimed
+      (``fused_or_unmatched``);
     * the mask file is newer → masks were propagated after the last matching
       and a missing one may simply not have been matched yet. Nothing is
       hidden: that is exactly the case the mask-file-as-list-source exists for.
@@ -61,16 +66,14 @@ def resolve_absorbed(result_data: Optional[dict], raw_instances: Sequence[dict],
             out[int(k)] = dict(v)
         except (TypeError, ValueError):
             continue
-    if out:
-        return out
     survivors = {iid for iid in (instance_id_of(i)
                                  for i in (result_data.get("instances") or []))
                  if iid is not None}
     if not survivors or not result_is_newer:
-        return {}
+        return out
     for inst in raw_instances:
         iid = instance_id_of(inst)
-        if iid is None or iid in survivors:
+        if iid is None or iid in survivors or iid in out:
             continue
         out[iid] = {"into": None, "into_label": None,
                     "reason": "fused_or_unmatched",

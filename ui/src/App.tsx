@@ -1723,7 +1723,7 @@ function App() {
     })
     if (res.ok) {
       setSegments(prev => prev.filter(s => s.key !== seg.key))
-      viewportRef.current?.setSegmentVisibility(seg.id, false)
+      viewportRef.current?.setSegmentVisibility(seg.classId, false)
       viewportRef.current?.refreshSegmentOBBs(activeSession)
       report(t('instances.deleted', { label: seg.label }), 'ok')
     } else report(t('instances.deleteFailed', { status: res.status }), 'err')
@@ -2045,15 +2045,15 @@ function App() {
                 onSelectSegment={id => { setSelectedSegmentId(id); if (id != null) layout.openInspector('properties') }}
                 onSelectAll={() => {
                   setSegments(prev => prev.map(s => ({ ...s, visible: true }))); setUnsegmentedVisible(true)
-                  segments.forEach(s => { viewportRef.current?.toggleOBB(s.key, true); viewportRef.current?.setSegmentVisibility(s.id, true) })
+                  segments.forEach(s => { viewportRef.current?.toggleOBB(s.key, true); viewportRef.current?.setSegmentVisibility(s.classId, true) })
                   viewportRef.current?.setSegmentVisibility(0, true)
                 }}
                 onDeselectAll={() => {
                   setSegments(prev => prev.map(s => ({ ...s, visible: false }))); setUnsegmentedVisible(false)
-                  segments.forEach(s => { viewportRef.current?.toggleOBB(s.key, false); viewportRef.current?.setSegmentVisibility(s.id, false) })
+                  segments.forEach(s => { viewportRef.current?.toggleOBB(s.key, false); viewportRef.current?.setSegmentVisibility(s.classId, false) })
                   viewportRef.current?.setSegmentVisibility(0, false)
                 }}
-                onToggleSegment={(seg, vis) => { setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, visible: vis } : s))); viewportRef.current?.toggleOBB(seg.key, vis); viewportRef.current?.setSegmentVisibility(seg.id, vis) }}
+                onToggleSegment={(seg, vis) => { setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, visible: vis } : s))); viewportRef.current?.toggleOBB(seg.key, vis); viewportRef.current?.setSegmentVisibility(seg.classId, vis) }}
                 onRenameSegment={renameSegment} onDeleteSegment={deleteSegment}
                 onToggleUnsegmented={v => { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) }}
                 onFloorLevel={iid => applyFloorLevel(activeSession, 'explicit', iid)}

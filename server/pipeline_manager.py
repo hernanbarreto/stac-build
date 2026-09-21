@@ -380,7 +380,11 @@ class PipelineManager:
         # exists when it finishes) → its products are SAM3's outputs
         StageId.SAM3: ["segmentation.json", "segmentation_result.json",
                        "seg_masks.npz", "seg_broadcast.json", "scene_r.db",
-                       "classification.npy"],
+                       "classification.npy", "class_map.json",
+                       # the fusion folds the parent and archives the raw SAM3
+                       # output beside it; both belong to the stage that
+                       # produced them, so a re-run starts from masklets again
+                       "fusion_map.json", "_sam3_raw"],
         # the certification's records (the acta, the per-epoch quality reports,
         # the post-hoc graph, the candidates/duplicates lists). Its epochs are
         # correction artifacts: a NEW reconstruction wipes output/ (epoch 0

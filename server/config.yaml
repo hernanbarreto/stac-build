@@ -242,9 +242,15 @@ segmentation:
                               # is for: that desk, the fire extinguisher with and without its
                               # coil, the white wall with and without its electrical outlet, and
                               # the server cabinet with and without its glass door.
-  min_instance_points: 0    # drop mask slivers below this point count (not objects) — applied  # 0 = SIN MÍNIMO (USER 2026-09-16)
-                              # AFTER the fragment consolidation, so a 287-point piece of a wall
-                              # joins the wall instead of being thrown away
+  min_instance_points: 1000   # USER 2026-09-19: "los objetos con menos de 1000 puntos no deben
+                              # figurar en la segmentación" — an object this small is not an
+                              # object. Judged on the FINAL count, after the fragment
+                              # consolidation AND the attach, and every drop is written into
+                              # `absorbed` as `too_small` so the list endpoint hides the mask
+                              # instead of showing it at zero. Same value as
+                              # `correction.visit_drift.min_points`.
+                              # (History: 0 = SIN MÍNIMO, USER 2026-09-16, when this was a
+                              # pre-attach sliver filter.)
   mask_dedupe_iou: 0.90       # SAM3 occasionally returns ONE observation under several object
                               # ids (pccr 2026-09-14: two 'white tiled floor' masks of 109,786
                               # pixels each, IoU 1.0, in the same frame). Ids whose masks agree
@@ -2090,6 +2096,16 @@ correction:
     silhouette_blur_px: 2.0      # gaussian blur, in cells
     search_margin_m: 1.20        # margin around the pair; bounds the shift the
                                  # correlation can find
+    grid_aspect_tol: 0.01       # the SAM3 mask grid and the trace grid the intrinsics live on
+                                # are different rasters of the same image, so their scale
+                                # factors must agree. Above this relative disagreement they are
+                                # not two views of one frame and the points cannot be sampled
+                                # against the masks — it raises rather than sampling the wrong
+                                # pixels.
+    min_depth_m: 0.05           # a point closer than this to the camera centre is not in front
+                                # of it: the projection divides by z and a point at or behind
+                                # the lens lands anywhere on the raster. Dropped from the
+                                # z-buffer, never projected.
     default_repeatability_m: 0.0477   # only when uncertainty.json is absent —
                                  # the session measures its own and that wins
     obb_core_pct: 98.0            # USER 2026-09-09: the box follows where the segment's
@@ -2187,19 +2203,30 @@ correction:
                                   # first N anchors of the walk (drift-free start) —
                                   # a plane over the whole drifted floor followed the
                                   # drift (pccr 2026-09-09: 3° tilt, invisible fix)
-    step_demote_m: 99999.0        # OFF — USER-VALIDATED 2026-09-19. At 0.15 the
-                                  # guard read pccr's own DRIFT (floors sitting
-                                  # 0.34-0.45 m off the reference plane) as REAL
-                                  # steps and preserved it: 40 anchors of 201,
-                                  # 2.5 cm of correction, the floor untouched.
-                                  # With it off: 201 anchors, and the USER
-                                  # confirmed the building's real ramp SURVIVED
-                                  # ("no se rompio la rampa"). Max step between
-                                  # keyframes went 33.9 -> 144.9 mm — watch that
-                                  # number on a scene with genuine level changes.
-                                  # sits farther than this from the reference model is
-                                  # a REAL step/level change → demoted to interpolated
-                                  # (the step is preserved, only drift is removed)
+    local_mad_k: 3.0              # FURNITURE, not a level: an anchor whose raw height sits this
+                                  # many robust sigmas off its own LOCAL TREND is not the floor.
+                                  # The sigma is MEASURED (the MAD of the anchors' residual
+                                  # against the trend, 1.9 mm on pccr) — 3 is the standard
+                                  # robust k, a bound, not a decision.
+                                  #
+                                  # REPLACES `step_demote_m` (deleted 2026-09-20). One number
+                                  # did two jobs: this outlier test, and "the floor sits far
+                                  # from the model, so it is a real step". The second was
+                                  # unfixable by construction — the distance to the model IS the
+                                  # drift being corrected. Measured on pccr epoch 0: the floor
+                                  # runs 0 to +0.498 m off the model, and that 49.8 cm is built
+                                  # out of jumps of at most 4.9 cm with a MEDIAN of 1.2 mm,
+                                  # accumulating at +18.5 mm/m (correlation +0.675 with the
+                                  # distance walked). At 0.15 the guard read the ACCUMULATED
+                                  # offset as a step and demoted 176 of 201 anchors; at 99999 it
+                                  # was off, which also turned off the outlier test above.
+                                  #
+                                  # A real level change is now a DISCONTINUITY: the jump between
+                                  # adjacent anchors minus what the drift rate explains over
+                                  # that stretch of walk, against the session's OWN measured
+                                  # repeatability. Nothing to configure — pccr's largest is
+                                  # 41.7 mm against a repeatability of 47.7 mm (no step), a
+                                  # synthetic 15 cm step is 147.1 mm and a 50 cm one 494.5 mm.
   revisit:                        # geometric revisit detection (USER 2026-09-09): "ver los
                                   # mismos lugares desde diferentes posiciones" — frustum +
                                   # depth co-visibility between keyframes, no descriptors,

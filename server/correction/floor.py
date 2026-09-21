@@ -15,8 +15,9 @@ the ledger:
 
 Anchors are KEYFRAMES whose local floor RANSAC passes the guards
 (``max_tilt_deg``, ``min_inliers``); for ``plane``/``profile`` an anchor whose
-local floor sits farther than ``step_demote_m`` from the reference model is a
-REAL level change and is demoted to interpolated — the step is preserved.
+floor REALLY changes level — a jump between neighbours that the walk's own
+drift rate cannot explain and that the session can tell apart from its own
+repeatability — is demoted to interpolated, and the step is preserved.
 Non-anchor keyframes interpolate (slerp+lerp); the alignment then passes the
 same plausibility/continuity gates and the same transactional apply as the
 object correction.
@@ -117,6 +118,79 @@ def _moving_median(values: np.ndarray, keys: np.ndarray, window: int
     return out
 
 
+# MAD → sigma for a normal distribution: 1/Phi^-1(3/4). A mathematical
+# constant, not a threshold — nothing decides by changing it.
+MAD_TO_SIGMA = 1.0 / 0.6744897501960817
+
+
+def _session_repeatability(session: CorrectionSession, cfg) -> float:
+    """What this session can repeat, measured by itself. The same cascade the
+    correction already uses (uncertainty.json → elastic seam residual →
+    intra-chunk agreement), with the config fallback only for a session that
+    wrote no evidence at all."""
+    fb = float(cfg.visit_drift.default_repeatability_m)
+    try:
+        from reconstruction.certify.repeatability import session_repeatability
+        # it returns a RECORD, not a number — `float(dict)` raised a TypeError
+        # the bare except below swallowed, so this always fell back to the
+        # config and never used what the session measured, against its own
+        # docstring (found 2026-09-21). `visit_drift_run:56` reads it right.
+        v = session_repeatability(session.output_dir, fallback_m=fb,
+                                  log=lambda m: None)
+        sig = float((v or {}).get("sigma_floor_m") or 0.0)
+        return sig if sig > 0 else fb
+    except Exception:  # noqa: BLE001 — a session with no evidence keeps the fallback
+        return fb
+
+
+def _robust_sigma(v: np.ndarray) -> float:
+    """MAD → sigma. The session's own scatter, measured, never assumed."""
+    v = np.asarray(v, dtype=np.float64)
+    if v.size == 0:
+        return 1e-6
+    return max(float(MAD_TO_SIGMA * np.median(np.abs(v - np.median(v)))), 1e-6)
+
+
+def _level_changes(trend: np.ndarray, walk: np.ndarray, rep_m: float
+                   ) -> Tuple[np.ndarray, float]:
+    """Where the floor REALLY changes level, and the drift rate it is judged
+    against.
+
+    A step is a DISCONTINUITY: the height jumps between two adjacent anchors
+    and stays at the new level. Drift ACCUMULATES: it grows with the distance
+    walked. Distance to the reference MODEL cannot tell them apart — it IS the
+    drift being corrected, which is what `step_demote_m` got wrong (pccr epoch
+    0: 49.8 cm of offset built out of jumps of at most 4.9 cm, median 1.2 mm,
+    accumulating at +18.5 mm/m).
+
+    So the jump between neighbours is compared against what the walk's own
+    drift rate explains over that stretch, and what is left over has to clear
+    the session's OWN repeatability before it may be called a level change.
+    Measured: pccr's largest excess is 41.7 mm against a 47.7 mm repeatability
+    — no step, and the whole floor is corrected; a synthetic 15 cm step is
+    147.1 mm and a 50 cm one 494.5 mm.
+
+    Returns (cut, rate): `cut[i]` is True when a real level change happens
+    between anchor i and i+1 (so `cut` has one entry fewer than `trend`).
+    """
+    trend = np.asarray(trend, np.float64)
+    walk = np.asarray(walk, np.float64)
+    if len(trend) < 3:
+        return np.zeros(max(0, len(trend) - 1), bool), 0.0
+    A = np.vstack([walk, np.ones_like(walk)]).T
+    rate = float(np.linalg.lstsq(A, trend, rcond=None)[0][0])
+    excess = np.abs(np.diff(trend)) - abs(rate) * np.abs(np.diff(walk))
+    return excess > float(rep_m), rate
+
+
+def _segments(cut: np.ndarray) -> np.ndarray:
+    """Anchor → the level segment it belongs to; a cut starts a new one."""
+    seg = np.zeros(len(cut) + 1, np.int64)
+    for i, c in enumerate(cut):
+        seg[i + 1] = seg[i] + (1 if c else 0)
+    return seg
+
+
 def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
                 model: str, keyframes: Optional[List[int]],
                 rng: np.random.Generator, log=print,
@@ -139,8 +213,8 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
     normals on a 2 m patch, long lever arms from the origin. The drift is
     SMOOTH along the walk, so every anchor uses the TREND: heights and
     normals are moving medians/means over ±``smooth_window_kf``, and an
-    anchor whose raw height sits farther than ``step_demote_m`` from the
-    local trend is demoted (a table top is not the floor).
+    anchor whose raw height sits more than ``local_mad_k`` robust sigmas from
+    its own local trend is demoted (a table top is not the floor).
     """
     if model not in FLOOR_MODELS:
         raise RuntimeError(f"unknown floor model {model!r} — valid: "
@@ -288,9 +362,8 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
 
     # 3) TREND along the walk: raw per-keyframe distances to the model and
     #    normals → moving median / mean over ±smooth_window_kf; anchors off
-    #    the local trend (furniture caught as floor) are demoted, and for
-    #    plane/profile an anchor off the MODEL by more than step_demote_m
-    #    is a real level change (preserved by interpolation, H6) ----------
+    #    the local trend (furniture caught as floor) are demoted, and a run
+    #    of anchors beyond a real DISCONTINUITY keeps its own level (H6) ---
     ks_sorted = np.array(sorted(locals_), dtype=np.int64)
     raw_dist = np.array([ref_signed_dist(int(k), locals_[int(k)][1])
                          for k in ks_sorted])
@@ -303,20 +376,50 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
         n_avg = np.mean(nbrs, axis=0)
         trend_norm[int(k)] = n_avg / np.linalg.norm(n_avg)
 
+    # TWO tests, each against a MEASURED scale — never one number for both
+    # (USER 2026-09-20; see `_level_changes` and config `floor.local_mad_k`).
+    #  (1) FURNITURE: the anchor disagrees with its own neighbours.
+    #  (2) LEVEL CHANGE: the floor jumps and stays jumped, by more than the
+    #      drift rate explains and more than the session can repeat.
+    resid_local = raw_dist - trend_dist
+    sigma_local = _robust_sigma(resid_local)
+    rep_m = _session_repeatability(session, cfg)
+    walk_of = _chainage(session)[ks_sorted]
+    cut, drift_rate = _level_changes(trend_dist, walk_of, rep_m)
+    seg_of = _segments(cut)
+    ref_seg = int(seg_of[0])
+    step_seg: Dict[int, float] = {}
+    if cut.any() and model != "level" and fixed_plane is None:
+        ref_level = float(np.median(trend_dist[seg_of == ref_seg]))
+        ref_walk = float(np.median(walk_of[seg_of == ref_seg]))
+        for sg in set(int(x) for x in seg_of) - {ref_seg}:
+            m_ = seg_of == sg
+            expl = abs(drift_rate) * abs(float(np.median(walk_of[m_])) - ref_walk)
+            off = float(np.median(trend_dist[m_])) - ref_level
+            if abs(off) - expl > rep_m:
+                step_seg[sg] = off
+    log(f"  floor: local scatter {sigma_local*1000:.1f} mm (k "
+        f"{cfg.floor.local_mad_k}), drift {drift_rate*1000:+.1f} mm/m, "
+        f"repeatability {rep_m*1000:.1f} mm — {int(cut.sum())} level "
+        f"change(s), {len(step_seg)} segment(s) preserved")
+
     anchors: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
     for i, k in enumerate(ks_sorted):
         k = int(k)
         nrm_raw, c_f = locals_[k]
         why = None
-        if abs(raw_dist[i] - trend_dist[i]) > cfg.floor.step_demote_m:
+        if abs(resid_local[i]) > cfg.floor.local_mad_k * sigma_local:
             why = (f"local floor {raw_dist[i]:+.3f} m vs trend "
-                   f"{trend_dist[i]:+.3f} m — not the floor (furniture / "
-                   f"outlier patch), interpolated")
-        elif model != "level" and abs(trend_dist[i]) > cfg.floor.step_demote_m \
-                and fixed_plane is None:
-            why = (f"floor sits {trend_dist[i]:+.3f} m off the reference "
-                   f"model — real step/level change, preserved by "
-                   f"interpolation")
+                   f"{trend_dist[i]:+.3f} m — "
+                   f"{abs(resid_local[i])/sigma_local:.1f} sigma off its own "
+                   f"neighbours, not the floor (furniture / outlier patch), "
+                   f"interpolated")
+        elif int(seg_of[i]) in step_seg:
+            why = (f"floor sits {step_seg[int(seg_of[i])]:+.3f} m from the "
+                   f"reference level, more than the {drift_rate*1000:+.1f} "
+                   f"mm/m drift explains and more than the session repeats "
+                   f"({rep_m*1000:.1f} mm) — real step/level change, "
+                   f"preserved by interpolation")
         if why:
             for info in per_kf_report:
                 if info.get("kf") == k:

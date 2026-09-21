@@ -65,13 +65,39 @@ import numpy as np
 #   "no eran 82 instancias, esta mal, tenes que tomar todas las de
 #    segmentation.json"
 #
-# CRITERIO 3: the objects are the RAW SAM3 MASKLETS of ``segmentation.json``
-# (220 on pccr) — what SAM3 tracked BEFORE the fusion into the 82 instances of
-# ``segmentation_result.json``. The fusion merges masklets that the matcher
-# judged to be the same thing, and merging two copies of one object into a
-# single instance is exactly what destroys the evidence this measurement needs:
-# the pccr floor, one instance after fusion and seen "0-215" without a break,
-# is forty masklets before it, and many of THOSE do have two separated visits.
+# CRITERIO 3: the objects are the entries of ``segmentation.json``, whatever
+# they are — and SINCE 2026-09-20 they are the FUSED objects, because the
+# fusion now rewrites the parent itself (``segmentation/fuse_parent.py``).
+#
+# USER 2026-09-20: *"la etapa de fusion de instancias es sumamente importante
+# porque justamente evita estas cosas, que dos instancias con nombre diferente
+# que son lo mismo sean tratadas como objetos independientes … cuando se hace
+# todo el analisis de la certificacion, y la correccion, se hace sobre las
+# instancias fusionadas y no sobre 'las partes'"*.
+#
+# The earlier reading of this line said the opposite — that fusing destroys the
+# evidence, because the pccr floor is one continuous instance after fusion and
+# forty revisited masklets before it. That observation is still true and it is
+# the COST, measured on epoch 0: the fused parent yields 2 scale rows where the
+# masklet parent yields 11. What the count hides is that 6 of those 11 are
+# noise — `k_b` from 0.4432 to 1.8170, two floor patches disagreeing on the
+# SIGN of the drift — while the fused set is the desk at residual 10.0 cm and
+# a door at 44.0. USER, on being shown it: *"esta bien que se pierdan los
+# objetos chicos, la idea es que queden los correctos, no cualquiera, mas no
+# significa mejor"*.
+#
+# What fusion BUYS is the closure that no threshold could reach:
+# `wooden_desk#230` (69,608 pts, kf 199-215) reads as ONE visit as a masklet
+# and dies at the 2+ visits gate with 149 of the 270; its second copy is the
+# masklet `#226` (kf 0-9) 0.64 m away, which the matcher had already absorbed
+# into it. Fused: visits kf 0-12 and kf 199-215, shares 34.1 %/65.9 %, closure
+# 68.9 cm with 3.0 cm of disagreement against a 9.5 cm bar, over 17.17 m of
+# walk — the longest lever arm in the session.
+#
+# It also makes cross-masklet pairing SAFE, which it never was: `#225` and
+# `#226` are different desks in a row and their silhouettes agree to 8 cm at
+# 230 cm of separation. Only the matcher knows they are different objects, and
+# after the fusion the parent says so.
 #
 # CRITERIO 4: which keyframe sees each object comes from THE MASKS
 # (``seg_masks.npz``, key ``f<frame>_o<oid>``, ``oid = instance_id - 1``), not
@@ -184,9 +210,18 @@ def trace_grid(output_dir) -> Tuple[int, int]:
     return int(round(cy * 2)), int(round(cx * 2))
 
 
+def _vd_cfg():
+    """The visit-drift block of config.yaml. Read lazily so the tools that
+    call into this module keep their signatures, and through the typed
+    dataclass so a missing key fails at load naming itself."""
+    from correction.config import load_correction_config
+    return load_correction_config().visit_drift
+
+
 def points_of_masklets(output_dir, frame_global: np.ndarray,
                        pixel_row: np.ndarray, pixel_col: np.ndarray,
-                       log: Callable[[str], None] = print
+                       log: Callable[[str], None] = print,
+                       aspect_tol: Optional[float] = None
                        ) -> Dict[int, np.ndarray]:
     """Which cloud points belong to each SAM3 masklet.
 
@@ -219,11 +254,12 @@ def points_of_masklets(output_dir, frame_global: np.ndarray,
     probe = next(masks[k] for k in masks.files if k.startswith("f") and "_o" in k)
     Hm, Wm = int(probe.shape[0]), int(probe.shape[1])
     sr, sc = Hm / float(Ht), Wm / float(Wt)
-    if abs(sr - sc) / max(sr, sc) > 0.01:
+    tol = float(_vd_cfg().grid_aspect_tol if aspect_tol is None else aspect_tol)
+    if abs(sr - sc) / max(sr, sc) > tol:
         raise RuntimeError(
             f"the mask grid ({Hm}x{Wm}) and the trace grid ({Ht}x{Wt}) do not "
-            f"share an aspect ratio ({sr:.4f} vs {sc:.4f}) — the points cannot "
-            f"be sampled against the masks")
+            f"share an aspect ratio ({sr:.4f} vs {sc:.4f}, over {tol}) — the "
+            f"points cannot be sampled against the masks")
     rows = np.clip((np.asarray(pixel_row, np.int64) * sr).astype(np.int64), 0, Hm - 1)
     cols = np.clip((np.asarray(pixel_col, np.int64) * sc).astype(np.int64), 0, Wm - 1)
     log(f"[visit-drift] points -> masklets: trace {Ht}x{Wt} -> mask {Hm}x{Wm} "
@@ -755,7 +791,8 @@ class Visibility:
     """
 
     def __init__(self, output_dir, xyz: np.ndarray, ks_of_point: np.ndarray,
-                 poses: np.ndarray, K_all: np.ndarray, depth_tol_m: float):
+                 poses: np.ndarray, K_all: np.ndarray, depth_tol_m: float,
+                 min_depth_m: Optional[float] = None):
         from segmentation import mask_space
         self.dir = Path(output_dir)
         self.xyz, self.poses, self.K = xyz, poses, K_all
@@ -765,6 +802,8 @@ class Visibility:
         self._start = np.searchsorted(self.ks[order], np.arange(len(poses)), "left")
         self._end = np.searchsorted(self.ks[order], np.arange(len(poses)), "right")
         self.tol = float(depth_tol_m)
+        self.min_depth = float(_vd_cfg().min_depth_m if min_depth_m is None
+                               else min_depth_m)
         doc = json.loads((self.dir / "segmentation.json").read_text())
         self.masks = np.load(self.dir / str(doc.get("mask_file") or "seg_masks.npz"))
         self.space = mask_space.resolve(self.dir, masks=self.masks,
@@ -822,7 +861,7 @@ class Visibility:
         M = np.linalg.inv(c2w)
         p = (M[:3, :3] @ self.xyz[own].T).T + M[:3, 3]
         z = p[:, 2]
-        ok = z > 0.05
+        ok = z > self.min_depth
         fx, fy, cx, cy = self.K[kf]
         u = fx * p[ok, 0] / z[ok] + cx
         v = fy * p[ok, 1] / z[ok] + cy
@@ -846,7 +885,7 @@ class Visibility:
             M = np.linalg.inv(c2w)
             p = (M[:3, :3] @ centres.T).T + M[:3, 3]
             z = p[:, 2]
-            front = z > 0.05
+            front = z > self.min_depth
             if not front.any():
                 continue
             fx, fy, cx, cy = self.K[kf]
@@ -1024,7 +1063,8 @@ def scale_rows(kept: Sequence[Tuple["Candidate", "Drift"]], poses: np.ndarray,
                                       - np.percentile(ext, 2, axis=0)))
         residual = float(np.hypot(tangential, dr.worst_disagreement))
         out.append({"instance_id": int(cand.instance_id), "label": cand.label,
-                    "i": int((a1 + b1) // 2), "j": int((a2 + b2) // 2),
+                    "i": int(round((a1 + b1) / 2.0)),
+                    "j": int(round((a2 + b2) / 2.0)),
                     "s_ab": float(1.0 / k_b), "k_b": float(k_b),
                     "residual_m": residual, "extent_m": extent,
                     "radial_m": radial, "tangential_m": tangential,
@@ -1153,7 +1193,7 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
                 M = np.linalg.inv(c2w)
                 q = (M[:3, :3] @ P.T).T + M[:3, 3]
                 z = q[:, 2]
-                fr = z > 0.05
+                fr = z > self.min_depth
                 if not fr.any():
                     continue
                 fx, fy, cx, cy = vis.K[kf]

@@ -69,7 +69,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
             "min_inlier_ratio": 0.5, "ransac_tol_m": 0.02,
             "ransac_refit_band_m": 0.03, "ransac_iters": 200,
             "ransac_sample": 20000, "smooth_window_kf": 5,
-            "step_demote_m": 0.15, "reference_span_kf": 8,
+            "local_mad_k": 3.0, "reference_span_kf": 8,
         },
         "revisit": {
             "sample_per_kf": 400, "min_gap_kf": 8, "min_covis": 0.25,
@@ -91,7 +91,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
                   "splat_radius": 1, "outer_iters": 1, "huber_px": 4.0},
         "posegraph": {"loop_weight": 100.0, "rot_lever_m": 3.0,
                       "min_blocks_improved": 1.0},
-        "apply": {"depth_correction_mode": "sidecar",
+        "apply": {"depth_correction_mode": "sidecar", "mask_filter": False,
                   "potree_rebuild": False, "reconsolidate": False},
         "runtime": {"workers": 2},
         # the visit-drift loop (the session's correction since 2026-09-18),
@@ -101,7 +101,8 @@ def make_correction_raw_cfg(**overrides) -> dict:
                         "silhouette_cell_m": 0.01,
                         "silhouette_close_px": 5, "silhouette_blur_px": 2.0,
                         "search_margin_m": 1.20,
-                        "default_repeatability_m": 0.0477, "max_epochs": 12},
+                        "default_repeatability_m": 0.0477,
+                        "grid_aspect_tol": 0.01, "min_depth_m": 0.05},
     }}
     for dotted, value in overrides.items():
         node = raw["correction"]

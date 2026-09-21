@@ -764,7 +764,11 @@ def certify_cfg(**over) -> dict:
          "known_answer": {"chunk": "last", "yaw_deg": 1.0, "t_m": 0.20, "scale": 1.03},
          "envelope": {"levels_t_m": [0.1, 0.2, 0.4, 0.8, 1.6], "levels_scale_pct": [1, 2, 5, 10, 20],
                       "loop_densities": [1.0, 0.5, 0.25]},
-         "determinism": {"tol_m": 1.0e-4, "tol_frac": 0.01, "seed": 0}}
+         "determinism": {"tol_m": 1.0e-4, "tol_frac": 0.01, "seed": 0},
+         # the retired second deleter — OFF, superseded 2026-09-19 by the mask
+         # filter inside the correction's own transaction. Mandatory in
+         # `LoopsConfig`, so the fixture has to name it like config.yaml does.
+         "geometric_cleanup": False}
     d.update(over)
     return d
 

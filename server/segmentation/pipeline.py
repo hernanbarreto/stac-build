@@ -955,6 +955,11 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
                 max_existing_id = max(max_existing_id, inst.get("id", -1))
             for oid in existing_obj_ids:
                 max_existing_id = max(max_existing_id, oid)
+            # a mask folded into an object is GONE from the parent but its oid
+            # is not free: the archive and the `absorbed` record still speak
+            # about it, so a new masklet reusing it would collide with both
+            max_existing_id = max(max_existing_id,
+                                  int(old_meta.get("id_high_water") or -1))
         except Exception as e:
             print(f"[SegPipeline] ⚠️ Could not load existing metadata: {e}")
             existing_instances = []
@@ -1042,6 +1047,14 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     max_existing_iid = 0
     for inst in existing_instances:
         max_existing_iid = max(max_existing_iid, inst.get("instance_id", 0))
+        for _p in (inst.get("parts") or []):          # retired, not free
+            max_existing_iid = max(max_existing_iid,
+                                   int(_p.get("instance_id", 0)))
+    try:
+        max_existing_iid = max(max_existing_iid,
+                               int((old_meta or {}).get("instance_id_high_water") or 0))
+    except Exception:  # noqa: BLE001
+        pass
     
     color_offset = len(existing_instances)
     new_count = 0
@@ -1817,6 +1830,27 @@ def _dedupe_masks_per_frame(batch_masks, iou_threshold: float):
         collapsed[frame_idx] = out
     n_collapsed = sum(1 for oid in parent if find(oid) != oid)
     return collapsed, n_collapsed
+
+
+def _record_overlap(record: dict, absorbed: dict, keeper: dict,
+                    overlap_ratio: float) -> None:
+    """Write down an index-overlap merge, like every other merge does.
+
+    This one printed its line and wrote nothing (pccr 2026-09-20). While the
+    record was only a display filter that was merely untidy; now that the
+    fusion REWRITES THE PARENT from it, a merge with no record is a mask that
+    is never folded into its object and an entry left in the parent owning
+    points that belong to the keeper — the parent would lie.
+    """
+    iid = absorbed.get("instance_id", absorbed.get("id"))
+    into = keeper.get("instance_id", keeper.get("id"))
+    if iid is None or into is None:
+        return
+    record[int(iid)] = {"into": int(into),
+                        "into_label": keeper.get("label"),
+                        "reason": "overlap_dedupe",
+                        "label": absorbed.get("label"),
+                        "overlap": round(float(overlap_ratio), 3)}
 
 
 def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
@@ -2681,6 +2715,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                         instances[i]["globalIndices"] = sorted(set_i)
                         instances[i]["total_points"] = len(set_i)
                         merged_away.add(j)
+                        _record_overlap(absorbed_into, instances[j], instances[i],
+                                        overlap_ratio)
                         print(f"[SegPipeline]   🔗 Merged '{instances[j]['label']}' #{instances[j]['id']} "
                               f"into '{instances[i]['label']}' #{instances[i]['id']} "
                               f"(overlap={overlap_ratio:.0%})")
@@ -2690,6 +2726,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                         instances[j]["globalIndices"] = sorted(set_j)
                         instances[j]["total_points"] = len(set_j)
                         merged_away.add(i)
+                        _record_overlap(absorbed_into, instances[i], instances[j],
+                                        overlap_ratio)
                         print(f"[SegPipeline]   🔗 Merged '{instances[i]['label']}' #{instances[i]['id']} "
                               f"into '{instances[j]['label']}' #{instances[j]['id']} "
                               f"(overlap={overlap_ratio:.0%})")
@@ -2810,19 +2848,6 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         except Exception as e:
             print(f"[SegPipeline] fragment consolidation failed (non-fatal): {e}")
 
-    if _min_pts > 0:
-        tiny = [inst for inst in instances if inst["total_points"] < _min_pts]
-        if tiny:
-            _tiny_desc = ", ".join("{}#{}({})".format(t["label"], t["id"], t["total_points"])
-                                   for t in tiny[:10])
-            print(f"[SegPipeline]   Dropped {len(tiny)} tiny instance(s) "
-                  f"(<{_min_pts} pts): {_tiny_desc}{'...' if len(tiny) > 10 else ''}")
-            for t in tiny:
-                absorbed_into[int(t.get("instance_id", t["id"]))] = {
-                    "into": None, "into_label": None, "reason": "too_small",
-                    "points": int(t["total_points"]), "min_points": int(_min_pts)}
-            instances = [inst for inst in instances if inst["total_points"] >= _min_pts]
-
     # ── Geometric completion — "pegar los puntos al lugar correcto" (USER
     # 2026-08-29): SAM3 runs on the KEYFRAMES and the mask→cloud step only
     # labels a point whose own origin frame carries a mask, so coverage is
@@ -2863,6 +2888,29 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                   f"double-owned point(s) resolved")
     except Exception as e:
         print(f"[SegPipeline] exclusivity enforcement failed (non-fatal): {e}")
+
+    # ── Minimum object size — judged on the FINAL point count ────────────
+    # It used to run before the attach, when it was a sliver filter reading a
+    # mask's raw match. As an OBJECT filter (USER 2026-09-19: an object under
+    # `min_instance_points` "que no quede segmentado") it has to judge what the
+    # object ends up being: the attach glues on the points the keyframe masks
+    # never reached, and exclusivity can take some back. A piece that grows
+    # into a real surface is a real surface; one that does not is a sliver
+    # either way.
+    if _min_pts > 0:
+        _sz = {id(i): int(len(i.get("globalIndices") or ())) for i in instances}
+        tiny = [inst for inst in instances if _sz[id(inst)] < _min_pts]
+        if tiny:
+            _tiny_desc = ", ".join("{}#{}({})".format(t["label"], t["id"], _sz[id(t)])
+                                   for t in tiny[:10])
+            print(f"[SegPipeline]   Dropped {len(tiny)} tiny instance(s) "
+                  f"(<{_min_pts} pts): {_tiny_desc}{'...' if len(tiny) > 10 else ''}")
+            for t in tiny:
+                absorbed_into[int(t.get("instance_id", t["id"]))] = {
+                    "into": None, "into_label": None, "reason": "too_small",
+                    "label": t.get("label"),
+                    "points": _sz[id(t)], "min_points": int(_min_pts)}
+            instances = [inst for inst in instances if _sz[id(inst)] >= _min_pts]
 
     # ── Canonical instance store (scene_r.db) — THE single source of objects
     # for spatial Q&A (phase5), classification (phase2), findings (phase3) and
@@ -3259,6 +3307,22 @@ def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
                                         result.get("absorbed"), merged),
         }
         
+        # ── THE FUSION BECOMES REAL IN THE PARENT (USER 2026-09-20) ──────
+        # Until now the matcher's verdict lived only in this file and the
+        # parent kept the parts, so every downstream measurement read pieces.
+        # It runs BEFORE the result is written: the pipeline decides whether
+        # the mask->cloud mapping is current by comparing mtimes, so the
+        # result has to end up the newest of the three. Never fatal — a
+        # session whose parent could not be folded is still a valid session,
+        # it only keeps measuring parts.
+        try:
+            from segmentation import fuse_parent
+            fuse_parent.apply_fusion(output_dir, merged_result,
+                                     log=lambda m: print(f"[SegPipeline]{m}"))
+        except Exception as e:  # noqa: BLE001 — declared, never silent
+            print(f"[SegPipeline] ⚠️ parent fusion skipped ({e}) — the parent "
+                  f"keeps the individual masklets")
+
         atomic_write_json(result_path, merged_result)
         print(f"[SegPipeline] 💾 Saved segmentation_result.json "
               f"({len(merged)} instances, {coverage*100:.1f}% coverage)")
@@ -3353,6 +3417,17 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
                 # Strip transient flags — only needed for first load after segmentation
                 cache_result = {k: v for k, v in result.items()
                                 if k not in ("reload_potree", "corrected_is_display_space")}
+                # the cold-load path caches a result WITHOUT going through
+                # `_match_and_save_result`, so the parent would stay unfused
+                # until something else re-matched. Same call, same order (the
+                # result is written last), and it is idempotent.
+                try:
+                    from segmentation import fuse_parent
+                    fuse_parent.apply_fusion(
+                        output_dir, cache_result,
+                        log=lambda m: print(f"[SegPipeline]{m}"))
+                except Exception as e:  # noqa: BLE001 — declared, never silent
+                    print(f"[SegPipeline] ⚠️ parent fusion skipped ({e})")
                 atomic_write_json(result_path, cache_result)
                 print(f"[SegPipeline] 💾 Cached result for instant future loads")
             except Exception as e:

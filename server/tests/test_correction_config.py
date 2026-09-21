@@ -58,7 +58,10 @@ def test_valid_config_loads():
 # epsilon / unit-conversion values. Integers are indices, counts, rounding
 # digits and progress percentages — not decision values — except the
 # whitelisted structural ones below.
-_FLOAT_WHITELIST = {0.0, 1.0, -1.0, 2.0, 0.5, 1e-9, 1e-6, 100.0, 1000.0}
+# 0.6744897501960817 is Phi^-1(3/4): the MAD→sigma conversion, a property of
+# the normal distribution and not a value anyone chose.
+_FLOAT_WHITELIST = {0.0, 1.0, -1.0, 2.0, 0.5, 1e-9, 1e-6, 100.0, 1000.0,
+                    0.6744897501960817}
 
 
 def _float_literals(path: Path):

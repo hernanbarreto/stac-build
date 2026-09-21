@@ -103,20 +103,34 @@ def test_loop_converges_stops_and_every_epoch_is_selectable(tmp_path, truth):
     assert acta["stop_reason"] and acta["stopped_at"] is not None
     its = acta["iterations"]
     assert all(it["verdict"] in ("applied", "identity") for it in its), [it["verdict"] for it in its]
-    # the correction reached the session: the visit-drift loop published at
-    # least one epoch and declared, per epoch, what it applied
-    vd = acta["visit_drift"]["epochs"]
-    assert vd, acta["visit_drift"]
-    assert all(e["applied_m"] > 0.0 and e["provenance"] == "tool_measured" for e in vd), vd
+    # The correction reached the session and declared what it applied. Since
+    # db52016 it is ONE composed epoch (depth + floor), not a list of them —
+    # USER 2026-09-19: "podría generarse una sola época que tenga la
+    # profundidad y el piso, es decir, la cero y la corregida, nada más" — so
+    # the acta carries `correction`, not `visit_drift.epochs`. The three
+    # properties are the same: it ran, it applied something, it is measured.
+    corr = acta["correction"]
+    assert corr["stages"], corr
+    assert acta["epoch_after_correction"] > acta["epoch_initial"], corr
+    assert [st for st in corr["stages"] if st.get("status") == "applied"], corr
+    assert corr.get("provenance") == "tool_measured", corr
+    n_corr = acta["epoch_after_correction"] - acta["epoch_initial"]
     # the keyframe pose graph measures and never applies
     for it in its:
         assert it["stages"]["poses"].get("verdict") != "APPLY", it["stages"]["poses"]
     assert acta["epoch_final"] >= 1
-    # the geometry moved toward the truth: the revisited stretch is closed
-    err1 = _pose_errors(root, sess)
-    revisited = np.arange(int(N_KF * 0.85), N_KF)
-    assert err1[revisited].max() < 0.5 * err0[revisited].max(), (err0[revisited].max(), err1[revisited].max())
-    assert np.median(err1) < np.median(err0)
+    # The geometry moved toward the truth on the axes the correction OWNS.
+    # It is no longer the pose error: since 2026-09-18 the post-hoc keyframe
+    # graph is MEASURED and never applied (`stages.poses.verdict` below), and
+    # since 2026-09-19 the correction solves depth and the floor — so a fixture
+    # that injects a rigid yaw+xz chain drift leaves the pose error untouched
+    # BY DESIGN. What must improve is what the correction measures.
+    assert acta["metrics_final"]["closure"]["median_m"] \
+        <= acta["metrics_initial"]["closure"]["median_m"], \
+        (acta["metrics_initial"]["closure"], acta["metrics_final"]["closure"])
+    assert acta["metrics_final"]["duplicates"]["n"] \
+        <= acta["metrics_initial"]["duplicates"]["n"], \
+        (acta["metrics_initial"]["duplicates"], acta["metrics_final"]["duplicates"])
     # the objective went down and the loop stopped for a declared reason
     assert acta["metrics_final"]["objective"] < acta["metrics_initial"]["objective"]
     assert ("converged" in acta["stop_reason"]) or ("max_iters" in acta["stop_reason"]) \
@@ -124,13 +138,19 @@ def test_loop_converges_stops_and_every_epoch_is_selectable(tmp_path, truth):
     # one epoch per correction that reached the session — the visit-drift
     # epochs plus whatever the iterations still applied — each on disk, in the
     # ledger and selectable
-    n_applied = len(vd) + sum(1 for it in its if it["verdict"] == "applied")
+    n_applied = n_corr + sum(1 for it in its if it["verdict"] == "applied")
     assert acta["epoch_final"] == n_applied
     from correction.apply import available_epochs
     from correction import ledger
     assert [e["epoch"] for e in available_epochs(out)] == list(range(n_applied + 1))
     assert len(ledger.applied_runs(out)) == n_applied
-    assert [r["kind"] for r in ledger.applied_runs(out)][:len(vd)] == ["visit_drift"] * len(vd)
+    # the composed epoch is filed by the stage that published it: "floor" for
+    # depth+floor together, "scale_depth" when the floor was rejected and the
+    # depth went out alone (visit_drift_run: "publishing the DEPTH correction
+    # on its own so what it solved is not lost")
+    assert all(k in ("floor", "scale_depth")
+               for k in [r["kind"] for r in ledger.applied_runs(out)][:n_corr]), \
+        ledger.applied_runs(out)
     snap_top = session_files_snapshot(out)
     for q in (out / "quality").glob("report_epoch_*.json"):
         rep = json.loads(q.read_text())
@@ -179,6 +199,18 @@ def test_veto_mode_rejected_iteration_keeps_the_previous_epoch_bit_for_bit(tmp_p
     assert acta1["epoch_final"] >= 1, acta1["stop_reason"]
     snap1 = session_files_snapshot(out)
     _liar_depth_stage(monkeypatch)
+    # Since 2026-09-18 the CORRECTION runs at the head of every certification
+    # (certify/run.py, unconditional when apply=True) and publishes its own
+    # epoch before any iteration is judged — so a second certify_session can
+    # never leave the geometry untouched. What this test protects is the
+    # ITERATION's veto, not the correction, so the correction is stood down
+    # for the second run only and every assertion below is unchanged.
+    import correction.visit_drift_run as _vdr
+    monkeypatch.setattr(
+        _vdr, "run",
+        lambda session_dir, log=print, cfg=None: {
+            "stages": [{"stage": "stood_down_by_test", "status": "skipped"}],
+            "elapsed_s": 0.0, "epoch": None, "provenance": "tool_measured"})
     acta2 = _run(root, sess, cfg, max_iters=1)
     it = acta2["iterations"][0]
     assert it["verdict"] == "rejected", it
@@ -208,6 +240,18 @@ def test_advisory_mode_failed_gate_is_applied_and_declared(tmp_path, truth, monk
     assert acta1["epoch_final"] >= 1, acta1["stop_reason"]
     snap1 = session_files_snapshot(out)
     _liar_depth_stage(monkeypatch)
+    # Since 2026-09-18 the CORRECTION runs at the head of every certification
+    # (certify/run.py, unconditional when apply=True) and publishes its own
+    # epoch before any iteration is judged — so a second certify_session can
+    # never leave the geometry untouched. What this test protects is the
+    # ITERATION's veto, not the correction, so the correction is stood down
+    # for the second run only and every assertion below is unchanged.
+    import correction.visit_drift_run as _vdr
+    monkeypatch.setattr(
+        _vdr, "run",
+        lambda session_dir, log=print, cfg=None: {
+            "stages": [{"stage": "stood_down_by_test", "status": "skipped"}],
+            "elapsed_s": 0.0, "epoch": None, "provenance": "tool_measured"})
     acta2 = _run(root, sess, cfg, max_iters=1)
     it = acta2["iterations"][0]
     assert it["verdict"] == "applied", it
@@ -294,9 +338,22 @@ def test_known_answer_and_envelope_monotone_with_loop_density(tmp_path, truth):
     # asserted is that the injection landed, that the instrument recovers, and
     # that the numbers reach the report — all comparisons, no thresholds.
     assert rep["error_before"]["t_m_max"] > 0.0, rep["error_before"]
-    assert rep["improved"], rep["error_after"]
-    assert rep["error_after"]["t_m_max"] < rep["error_before"]["t_m_max"]
-    assert 0.0 < rep["recovered_fraction"]["t"] <= 1.0, rep["recovered_fraction"]
+    # DECLARED LIMIT (CLAUDE.md, 2026-09-18): "the drift-rate model represents
+    # error that ACCUMULATES with the distance walked. A step kink injected
+    # into one chunk is not that shape; the instrument recovers part of a
+    # small one, FAILS ON A LARGE ONE, and the §9 gates say so instead of
+    # hiding it." §10.10 asks the experiment to MEASURE and DECLARE, never to
+    # pass or fail against a tolerance nobody derived (USER 2026-09-14: "que
+    # mida y declare, no que falle"). So what is pinned is that the two
+    # readings AGREE — a report may not claim an improvement its own error
+    # numbers contradict — and that a failure to recover is declared.
+    assert rep["improved"] == (rep["error_after"]["t_m_max"]
+                               < rep["error_before"]["t_m_max"]), rep
+    assert rep["improved"] == ((rep["recovered_fraction"]["t"] or 0.0) > 0.0), rep
+    assert rep["recovered_fraction"]["t"] <= 1.0, rep["recovered_fraction"]
+    if not rep["improved"]:
+        assert rep["loop"]["gate_warnings"] or rep["loop"]["regressed"], \
+            "an instrument that did not recover must say so, never silently"
     assert rep["provenance"] == "tool_measured"
     env = envelope(root, cfg, make_correction_cfg(), work=tmp_path / "env", log=lambda m: None, **kw)
     assert env["monotone_with_loop_density"], env["per_density"]
@@ -315,7 +372,9 @@ def test_known_answer_and_envelope_monotone_with_loop_density(tmp_path, truth):
             if row["held"]:
                 assert (row["recovered_fraction"]["t"] or 0.0) > 0.0, (d, row)
             else:
-                assert row["gate_warnings"] or "REGRESS" in (row["stop_reason"] or ""), (d, row)
+                assert (row["gate_warnings"]
+                        or "REGRESS" in (row["stop_reason"] or "")
+                        or row.get("not_held_reason")), (d, row)
 
 
 def test_determinism_two_runs_same_acta(tmp_path, truth):
@@ -344,7 +403,17 @@ def test_provenance_survives_the_loop_and_the_epoch_replays_exactly(tmp_path, tr
     # contributed almost nothing to an object never observed it), so the cloud
     # may be shorter; every point that survived keeps its provenance intact
     assert len(after) <= len(before)
-    assert len(after) == acta["visit_drift"]["epochs"][-1]["points_after"]
+    # the acta no longer carries a per-epoch list (db52016, ONE composed
+    # epoch), so what the cloud lost is read from the epochs themselves —
+    # `dropped` in corrections/epoch_<N>.npz, the record `correction.replay`
+    # honours so an epoch that both moved and deleted replays exactly
+    from correction.ledger import load_epoch_npz
+    n_dropped = 0
+    for e in range(int(acta.get("epoch_initial", 0)) + 1,
+                   int(acta["epoch_final"]) + 1):
+        npz = load_epoch_npz(out, e) or {}
+        n_dropped += int(len(npz.get("dropped", ())))
+    assert len(after) == len(before) - n_dropped, (len(before), len(after), n_dropped)
     # every field the cloud arrived with survives the correction — the witness
     # fields among them when the merge wrote them (`witness.at_merge`, the
     # production default). The certification no longer ADDS them: they used to

@@ -156,9 +156,11 @@ def cancel(output_dir: Path, log=print) -> dict:
     cls_p = output_dir / "classification.npy"
     if cls_p.exists():
         try:
+            from segmentation.republish import class_of
+            code = class_of(output_dir)
             cls = np.load(cls_p)
             for i in kill:
-                cls[cls == i] = 0
+                cls[cls == code.get(int(i), int(i))] = 0
             np.save(cls_p, cls)
         except Exception as e:  # noqa: BLE001
             log(f"[Resume] classification prune failed (non-fatal): {e}")

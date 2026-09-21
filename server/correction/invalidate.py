@@ -64,15 +64,31 @@ def update_instance_store(output_dir, R_kf: np.ndarray, t_kf: np.ndarray,
     store = InstanceStore(db)
     try:
         n_inst = 0
+        live_ids = []
+        known = {int(r.get("instance_id")) for r in store.list_instances()}
         for inst in result.get("instances", []):
             iid = int(inst.get("instance_id", inst.get("id", -1)))
+            if iid < 0:
+                continue
+            live_ids.append(iid)
+            # an instance the store never heard of (a brush segment, a split)
+            # used to be silently skipped: the geometry refreshed around a hole
+            if iid not in known:
+                store.upsert_instance(iid, str(inst.get("label") or "segment"),
+                                      source="sam3_concepts", status="proposed",
+                                      label_origin="vlm_proposed")
+                known.add(iid)
             g = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
             g = g[(g >= 0) & (g < len(xyz_display))]
-            if len(g) < 10:
+            if not len(g):
                 continue
             pts = xyz_display[g].astype(np.float32)
             fids = data["frame_global"][g].astype(np.int32)
             store.set_points(iid, pts, frame_ids=fids)
+            # the OBB needs a volume to fit; the points stand on their own
+            if len(g) < 4:
+                n_inst += 1
+                continue
             obb = _compute_obb(xyz_display[g])
             # same OBB→store mapping as segmentation.pipeline._write_instance_store
             c = np.asarray(obb["center"], float)
@@ -123,10 +139,19 @@ def update_instance_store(output_dir, R_kf: np.ndarray, t_kf: np.ndarray,
                  int(f["finding_id"])))
             n_findings += 1
         store.conn.commit()
+        # what the segmentation no longer has stops existing here too — the
+        # store is the canonical object list and a ghost in it is a lie the
+        # chat, the findings and the reports all repeat
+        recon = store.reconcile(live_ids)
         store.set_meta("geometry_epoch", str(current_epoch(output_dir)))
         summary = {"store": "updated", "instances": n_inst,
+                   "removed": recon["removed"],
+                   "findings_orphaned": recon["findings_orphaned"],
                    "findings_transformed": n_findings,
                    "findings_unresolvable": n_findings_lost}
+        if recon["removed"]:
+            log(f"  instance store: {recon['removed']} instance(s) dropped — "
+                f"{recon.get('removed_ids')}")
         log(f"  instance store updated in place: {summary}")
         return summary
     finally:

@@ -230,11 +230,27 @@ def envelope(session_dir, cfg=None, correction_cfg=None, chunk: Optional[str] = 
     ka = cfg.certify.known_answer
     t0 = time.time()
 
-    def _held(rep) -> bool:
-        """Did the loop get through this level? The gates are what say so, and
-        a REGRESSION — the iteration left the session worse than it found it —
-        is the system declaring the same thing."""
-        return not rep["loop"]["gate_warnings"] and not rep["loop"]["regressed"]
+    def _held(rep, axis: str) -> Tuple[bool, Optional[str]]:
+        """Did the loop get through this level, and if not, why?
+
+        The gates say so, and a REGRESSION — the iteration left the session
+        worse than it found it — is the system declaring the same thing. But
+        neither of those fires when the instrument simply RECOVERS NOTHING: a
+        level whose `recovered_fraction` is ~-6e-7 used to be declared "held"
+        and became `max_correctable_t_m`, which is the silent
+        non-declaration §10.11 forbids ("saber cuándo está fuera de
+        especificación y decirlo"). Its own sentence is "el último nivel
+        RECUPERADO es la envolvente" — so a level holds only when the
+        recovery on the axis under test is positive and measured.
+        """
+        if rep["loop"]["gate_warnings"]:
+            return False, "gate_warnings"
+        if rep["loop"]["regressed"]:
+            return False, "regressed"
+        frac = (rep.get("recovered_fraction") or {}).get(axis)
+        if frac is None or not float(frac) > 0.0:
+            return False, f"recovered_fraction[{axis}]={frac}"
+        return True, None
 
     results = {}
     for density in env.loop_densities:
@@ -243,8 +259,9 @@ def envelope(session_dir, cfg=None, correction_cfg=None, chunk: Optional[str] = 
         for lvl in env.levels_t_m:
             rep = known_answer(session_dir, cfg, correction_cfg, chunk, (ka.yaw_deg, float(lvl), 1.0),
                                work, log, loop_density=float(density), **certify_kw)
-            held = _held(rep)
+            held, why = _held(rep, "t")
             rows_t.append({"level_t_m": float(lvl), "held": held,
+                           "not_held_reason": why,
                            "gate_warnings": rep["loop"]["gate_warnings"],
                            "recovered_fraction": rep["recovered_fraction"],
                            "error_after": rep["error_after"], "stop_reason": rep["loop"]["stop_reason"]})
@@ -255,8 +272,9 @@ def envelope(session_dir, cfg=None, correction_cfg=None, chunk: Optional[str] = 
         for pct in env.levels_scale_pct:
             rep = known_answer(session_dir, cfg, correction_cfg, chunk, (0.0, 0.0, 1.0 + float(pct) / 100.0),
                                work, log, loop_density=float(density), **certify_kw)
-            held = _held(rep)
+            held, why = _held(rep, "scale")
             rows_s.append({"level_scale_pct": float(pct), "held": held,
+                           "not_held_reason": why,
                            "gate_warnings": rep["loop"]["gate_warnings"],
                            "recovered_fraction": rep["recovered_fraction"],
                            "error_after": rep["error_after"], "stop_reason": rep["loop"]["stop_reason"]})

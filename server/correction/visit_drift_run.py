@@ -56,33 +56,107 @@ def _repeatability_m(output_dir: Path, default_m: float,
     return float(rep["sigma_floor_m"])
 
 
-def _reindex(instances: List[dict], keep: np.ndarray) -> List[dict]:
+def _depth_tol() -> float:
+    """How far in front of a surface measured geometry has to sit to count as
+    occluding it. Lives in config.yaml with the rest of the mask filter's
+    parameters; a missing key fails here naming itself rather than falling
+    back to a number nobody chose."""
+    from config import get_param
+    v = get_param("segmentation.mask_filter.depth_tol_m")
+    if v is None:
+        raise RuntimeError(
+            "config.yaml is missing 'segmentation.mask_filter.depth_tol_m' — "
+            "the masks cannot be read against the geometry without it")
+    return float(v)
+
+
+def _condemn(record: Optional[dict], iid, inst: dict, points: int,
+             reason: str, min_points: int) -> None:
+    """Write down why an instance stopped existing, in the result file's own
+    ``absorbed`` format (`segmentation.mask_fates`) — the list endpoint reads
+    exactly this to tell a mask that IS an object from one that is part of the
+    provenance of another."""
+    if record is None or iid is None:
+        return
+    try:
+        key = str(int(iid))
+    except (TypeError, ValueError):
+        return
+    record[key] = {"into": None, "into_label": None, "reason": reason,
+                   "label": inst.get("label"), "points": int(points),
+                   "min_points": int(min_points),
+                   "detail": "dropped by the correction epoch"}
+
+
+def _reindex(instances: List[dict], keep: np.ndarray,
+             min_points: int = 0,
+             record: Optional[dict] = None,
+             log: Callable[[str], None] = lambda m: None) -> List[dict]:
     """globalIndices over the filtered cloud. An instance left without points
-    disappears — it no longer exists in the geometry."""
+    disappears — it no longer exists in the geometry.
+
+    `min_points` extends that to the SIZE the user asked of a segmented object
+    (USER 2026-09-19: *"que no queden segmentados nada más"*). It is the same
+    `visit_drift.min_points` that already governs the MASKLETS, now applied to
+    the fused INSTANCES too — they are what the viewer, the OBBs, the findings
+    and the chat consume, and a three-point "light fixture" is not an object.
+
+    The points are NOT deleted: they stay in the cloud as UNSEGMENTED, which is
+    the same treatment every point with no masklet gets. Only the claim that
+    they form an object goes away.
+
+    `record` is the result file's ``absorbed`` map and every drop is written
+    into it. Removing the instance is not enough: the list endpoint takes its
+    entries from the MASK file and hides only what the record condemns, so an
+    instance dropped in silence walks straight back into the list with no
+    points at all (pccr 2026-09-20: the 22 dropped here reappeared as 22
+    zero-point entries the moment the panel refreshed).
+    """
     new_of = np.full(len(keep), -1, np.int64)
     new_of[keep] = np.arange(int(keep.sum()), dtype=np.int64)
-    out = []
+    out, empty, small = [], 0, []
     for inst in instances:
         gi = np.asarray(inst.get("globalIndices") or [], np.int64)
         gi = gi[(gi >= 0) & (gi < len(keep))]
         gi = new_of[gi]
         gi = gi[gi >= 0]
+        iid = inst.get("instance_id", inst.get("id"))
         if not len(gi):
+            empty += 1
+            _condemn(record, iid, inst, 0, "unmatched", min_points)
+            continue
+        if min_points and len(gi) < int(min_points):
+            small.append((int(len(gi)), inst.get("label", "?"),
+                          inst.get("id", inst.get("instance_id", "?"))))
+            _condemn(record, iid, inst, int(len(gi)), "too_small", min_points)
             continue
         d = dict(inst)
         d["globalIndices"] = gi.tolist()
         d["total_points"] = int(len(gi))
         out.append(d)
+    if empty or small:
+        log(f"  instances: {len(out)} kept, {empty} left with no points, "
+            f"{len(small)} under {min_points} points (their points stay in the "
+            f"cloud, unsegmented)")
+        for n, lbl, iid in sorted(small)[:10]:
+            log(f"      {lbl}#{iid}: {n} points")
     return out
 
 
 
 def measure_epoch(output_dir: Path, cfg, rep_m: float,
-                  log: Callable[[str], None] = print) -> Tuple[Optional[np.ndarray], dict]:
+                  log: Callable[[str], None] = print) -> dict:
     """The whole chain, steps 1 to 10, on the session as it stands.
 
-    Returns ``(t_kf, report)``: the translation to apply to each keyframe, or
-    None when no object can testify. Nothing here writes anything.
+    Returns the REPORT, whose `scale_rows` are the deliverable — empty when no
+    object can testify. Nothing here writes anything.
+
+    (It used to return `(t_kf, report)`, the translation solver deleted
+    2026-09-19. Three early exits still returned the pair while the last
+    returned the report alone, and the only caller handed it straight to
+    `_write_scale_rows`, which calls `.get()` on it: a session where nothing
+    could testify aborted the whole certification with `AttributeError:
+    'tuple' object has no attribute 'get'`. Found 2026-09-21.)
     """
     from correction.config import load_correction_config
     from correction.distribute import chainage
@@ -103,7 +177,7 @@ def measure_epoch(output_dir: Path, cfg, rep_m: float,
     for k, f in enumerate(kfs):
         kf_of[int(f)] = k
     ks = kf_of[np.clip(data["frame_global"].astype(np.int64), 0, len(kf_of) - 1)]
-    tol = float(get_param("segmentation.mask_filter.depth_tol_m", 0.15))
+    tol = _depth_tol()
 
     rep = {"chain": {}, "objects": [], "rejected": [], "provenance": "tool_measured"}
 
@@ -118,7 +192,8 @@ def measure_epoch(output_dir: Path, cfg, rep_m: float,
                                    xyz=xyz, log=log)
     rep["chain"] = steps
     if not cands:
-        return None, rep
+        rep["scale_rows"] = []
+        return rep
 
     vis = vd.Visibility(output_dir, xyz, ks, poses, K_all, tol)
     det: List[Tuple] = []
@@ -150,14 +225,16 @@ def measure_epoch(output_dir: Path, cfg, rep_m: float,
         f" with a common region; step 7: {len(det)} determined "
         f"(bar {2.0 * rep_m * 100:.1f} cm)")
     if not det:
-        return None, rep
+        rep["scale_rows"] = []
+        return rep
 
     # 8) the identity has to be the only candidate
     kept, arep = vd.drop_ambiguous([(c, dr) for c, dr, _ in det], pm, label_of,
                                    xyz, cfg.max_ambiguity, log=log)
     rep["ambiguity"] = arep
     if not kept:
-        return None, rep
+        rep["scale_rows"] = []
+        return rep
 
     # 9) every closure, read as the DEPTH RATIO it measures — the scale
     # graph's §5.1 loop rows. USER-VALIDATED 2026-09-19: that is the whole
@@ -202,8 +279,8 @@ def _write_scale_rows(output_dir: Path, mrep: dict,
         f"graph (measured on epoch {doc['measured_on_epoch']})")
 
 
-def solve_depth(output_dir: Path, log: Callable[[str], None] = print
-                ) -> Optional[Tuple[np.ndarray, np.ndarray, dict]]:
+def solve_depth(output_dir: Path, log: Callable[[str], None] = print,
+                cfg=None) -> Optional[Tuple[np.ndarray, np.ndarray, dict]]:
     """THE DEPTH CORRECTION, measured and solved — nothing applied.
 
     Returns ``(k_kf, t_kf, report)``: the depth factor of each keyframe and the
@@ -241,7 +318,7 @@ def solve_depth(output_dir: Path, log: Callable[[str], None] = print
              if rows_file.exists() else None)
     now = int(current_epoch(output_dir))
     if stamp != now:
-        vcfg = load_correction_config().visit_drift
+        vcfg = (cfg or load_correction_config()).visit_drift
         rep_m = _repeatability_m(output_dir, vcfg.default_repeatability_m, log)
         _write_scale_rows(output_dir, measure_epoch(output_dir, vcfg, rep_m,
                                                     log=log), log=log)
@@ -306,7 +383,7 @@ def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
                                data_new["pixel_row"], data_new["pixel_col"],
                                log=lambda m: None)
     K_all = np.loadtxt(output_dir / "intrinsic.txt").reshape(-1, 4)
-    tol = float(get_param("segmentation.mask_filter.depth_tol_m", 0.15))
+    tol = _depth_tol()
     vis = vd.Visibility(output_dir, xyz_new, session.ks, poses_new, K_all, tol)
 
     kill, frep = vd.cloud_filter_masklets(
@@ -332,7 +409,14 @@ def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
     seg = tx / "segmentation_result.json"
     if seg.exists():
         doc = json.loads(seg.read_text())
-        doc["instances"] = _reindex(doc.get("instances") or [], keep)
+        absorbed = dict(doc.get("absorbed") or {})
+        doc["instances"] = _reindex(doc.get("instances") or [], keep,
+                                    int(cfg.visit_drift.min_points),
+                                    absorbed, log)
+        doc["absorbed"] = absorbed
+        # the census (total_points / segmented_points / coverage) is written by
+        # `segmentation.republish` at step 9c, over the FINAL staged geometry —
+        # one writer, so the three numbers cannot disagree with each other
         seg.write_text(json.dumps(doc))
 
     rep = {"dropped_points": int(kill.sum()), "kept": int(keep.sum()),
@@ -349,7 +433,8 @@ def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
 
 def apply_transform_epoch(output_dir: Path, R_kf: np.ndarray, t_kf: np.ndarray,
                           k_kf: np.ndarray, kind: str, diagnosis: List[dict],
-                          log: Callable[[str], None] = print) -> Optional[dict]:
+                          log: Callable[[str], None] = print,
+                          cfg=None) -> Optional[dict]:
     """Publish a per-keyframe transform as its own epoch, through the same
     transactional path as every other correction — so the mask filter at
     `apply` step 9a, the single consolidation and the single octree all run.
@@ -369,7 +454,7 @@ def apply_transform_epoch(output_dir: Path, R_kf: np.ndarray, t_kf: np.ndarray,
     from correction import diagnose as diag_mod, ledger
 
     output_dir = Path(output_dir)
-    cfg = load_correction_config()
+    cfg = cfg or load_correction_config()
     session = load_session(output_dir)
     cid = ledger.new_correction_id()
     epoch_from = int(current_epoch(output_dir))
@@ -400,7 +485,7 @@ def apply_transform_epoch(output_dir: Path, R_kf: np.ndarray, t_kf: np.ndarray,
 
 # ── THE CORRECTION ───────────────────────────────────────────────────────
 
-def run(session_dir, log: Callable[[str], None] = print) -> dict:
+def run(session_dir, log: Callable[[str], None] = print, cfg=None) -> dict:
     """The session's correction: ONE epoch, depth and floor composed.
 
     USER-VALIDATED on pccr 2026-09-19 — *"el pipeline de corrección es este de
@@ -430,7 +515,15 @@ def run(session_dir, log: Callable[[str], None] = print) -> dict:
     pre = None
 
     log("[correction] 1/2 — DEPTH: measuring and solving (applied to nothing yet)")
-    dep = solve_depth(output_dir, log=log)
+    # the CALLER's config, not a second opinion. The certification resolves a
+    # CorrectionConfig and used to drop it here, so the correction silently
+    # re-read production config.yaml — on a synthetic session that means
+    # `floor.min_inliers: 5000` against ~1,120 points per keyframe, every
+    # keyframe demoted, no epoch published at all (found 2026-09-21).
+    if cfg is None:
+        from correction.config import load_correction_config
+        cfg = cfg or load_correction_config()
+    dep = solve_depth(output_dir, log=log, cfg=cfg)
     if dep is None:
         log("[correction] no depth correction — the floor runs on its own")
     else:
@@ -443,7 +536,8 @@ def run(session_dir, log: Callable[[str], None] = print) -> dict:
     log("[correction] 2/2 — FLOOR on that geometry, composed and applied ONCE")
     from correction.run import run_floor
     try:
-        frec = run_floor(output_dir, None, None, "auto", log=log, pre=pre)
+        frec = run_floor(output_dir, None, None, "auto", log=log, pre=pre,
+                         cfg=cfg)
         stages.append({"stage": "floor_plane+depth" if pre else "floor_plane",
                        "status": frec.get("status"),
                        "correction_id": frec.get("correction_id")})
@@ -467,7 +561,7 @@ def run(session_dir, log: Callable[[str], None] = print) -> dict:
                 [{"kind": "depth",
                   "evidence": "the closures are radial: a per-chunk depth "
                               "factor, cross-checked against the DA3 anchors"}],
-                log=log)
+                log=log, cfg=cfg)
             stages.append({"stage": "depth_alone", "status": "applied",
                            **{k: v for k, v in (rec2 or {}).items()
                               if k != "instance_store"}})

@@ -198,9 +198,14 @@ def _mask_oids_by_iid(output_dir: Path) -> Dict[int, List[int]]:
     if not seg_json.exists():
         return out
     try:
+        from segmentation.fuse_parent import oids_of
         for e in (json.loads(seg_json.read_text()).get("instances") or []):
             if e.get("id") is not None and e.get("instance_id") is not None:
-                out.setdefault(int(e["instance_id"]), []).append(int(e["id"]))
+                # after the fusion the survivor's PARTS are those other mask
+                # ids: reading only `id` would make every instance single-mask
+                # and the split path — the only evidence the user accepts for
+                # separating an instance — would go dead
+                out.setdefault(int(e["instance_id"]), []).extend(oids_of(e))
     except Exception:  # noqa: BLE001
         pass
     return {k: sorted(set(v)) for k, v in out.items()}
@@ -215,23 +220,16 @@ def published_mesh_path(output_dir: Path, label: str, iid: int) -> Optional[Path
 
 def _write_classification(output_dir: Path, instances: List[dict],
                           n_points: int) -> np.ndarray:
-    """Rebuild classification.npy (per-point INSTANCE id; 0 = unsegmented) —
-    it is THE color source the Potree converter bakes into the octree. Without
-    this, an erase updated the indices but the rebuilt octree kept painting
-    the removed points with their old segment color (user 2026-08-30)."""
-    classification = np.zeros(n_points, dtype=np.uint8)
-    for inst in instances:
-        gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
-        gi = gi[(gi >= 0) & (gi < n_points)]
-        # INSTANCE id, never the mask obj id: brush-created segments carry
-        # id = mask oid (instance_id − 1), and writing THAT painted their
-        # points with the PREVIOUS segment's class in the octree — the
-        # "reassigned points answer to another segment's toggle" bug
-        # (user 2026-08-31).
-        classification[gi] = min(
-            int(inst.get("instance_id", inst.get("id", 0))), 255)
-    np.save(output_dir / "classification.npy", classification)
-    return classification
+    """Rebuild classification.npy — kept here as the name five call sites use.
+
+    The body moved to `segmentation.republish.write_classification` so the
+    per-point class byte has exactly ONE writer: a correction epoch has to
+    write it too, from a staged directory, and two implementations of the same
+    array drift apart (they already disagreed on the key — `id` here,
+    `instance_id` there — equal only by the result file's convention).
+    """
+    from segmentation.republish import write_classification
+    return write_classification(output_dir, instances, n_points)
 
 
 def verify_octree_classification(output_dir: Path,
@@ -483,7 +481,13 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
         except Exception:  # noqa: BLE001
             meta = {}
         meta_insts = meta.get("instances") or []
-        new_oid = 1 + max([int(e.get("id", 0)) for e in meta_insts], default=0)
+        from segmentation.fuse_parent import high_water
+        _hi_id, _hi_iid = high_water(output_dir)
+        new_oid = 1 + max([int(e.get("id", 0)) for e in meta_insts] + [_hi_id],
+                          default=0)
+        # both ids come from the SAME high-water mark now: they used to be
+        # drawn from two different files holding two different id sets
+        new_iid = max(new_iid, _hi_iid + 1)
         color = _NEW_SEGMENT_COLORS[(new_iid - 1) % len(_NEW_SEGMENT_COLORS)]
         # result-file convention is id == instance_id (1-based); the mask obj
         # id (new_oid) lives ONLY in segmentation.json. Writing new_oid here

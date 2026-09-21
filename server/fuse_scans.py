@@ -134,9 +134,10 @@ def _segment_points(output_dir: Path, xyz: np.ndarray, inst: dict) -> np.ndarray
     iid = int(inst.get("instance_id", inst.get("id", -1)))
     cls_p = output_dir / "classification.npy"
     if cls_p.exists():
+        from segmentation.republish import class_byte
         cls = np.load(cls_p, mmap_mode="r")
         if len(cls) == len(xyz):
-            idx = np.flatnonzero(cls == iid)
+            idx = np.flatnonzero(cls == class_byte(output_dir, iid))
             if len(idx):
                 return xyz[idx]
     gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
@@ -240,9 +241,10 @@ def run_fuse(paths: ProjectPaths, scan_keys: List[str],
                 iid = int(inst[l].get("instance_id", inst[l].get("id", -1)))
                 cls_p = ctx.output_dir / "classification.npy"
                 if cls_p.exists():
+                    from segmentation.republish import class_byte
                     cls = np.load(cls_p, mmap_mode="r")
                     if len(cls) == len(xyz):
-                        used_mask |= (cls == iid)
+                        used_mask |= (cls == class_byte(ctx.output_dir, iid))
             if len(pairs) < 2:
                 raise ValueError(f"{key}: fewer than 2 usable pairs")
             spec["reference"]["pairs"].update(ref_pair_pts)
@@ -426,18 +428,25 @@ def run_fuse(paths: ProjectPaths, scan_keys: List[str],
         ref_cls_p = ref_ctx.output_dir / "classification.npy"
         ref_cls = np.load(ref_cls_p) if ref_cls_p.exists() else np.zeros(len(ref_xyz), np.uint8)
 
-        def _block(data, xyz_t, scan_id, cls, base):
+        def _block(data, xyz_t, scan_id, cls, base, src_dir=None):
+            # the fused class is the NAMESPACED INSTANCE id, so each scan's
+            # bytes are read back as instance ids before the offset is added —
+            # a scan whose ids did not fit in a byte carries a compact index
+            # and adding `base` to THAT would namespace the wrong number
             out = np.empty(len(data), dtype=dt)
             out["x"], out["y"], out["z"] = xyz_t[:, 0], xyz_t[:, 1], xyz_t[:, 2]
             for n in keep:
                 if n not in ("x", "y", "z"):
                     out[n] = data[n]
             out["scan"] = scan_id
-            c = cls.astype(np.int32)
+            from segmentation.republish import as_instance_ids
+            c = (as_instance_ids(src_dir, cls) if src_dir is not None
+                 else np.asarray(cls).astype(np.int32))
             c[c > 0] += base
             return out, c
 
-        blk, c = _block(ref_data, ref_xyz * ref_scale, 0, ref_cls, offset)
+        blk, c = _block(ref_data, ref_xyz * ref_scale, 0, ref_cls, offset,
+                        src_dir=ref_ctx.output_dir)
         parts.append(blk); cls_parts.append(c)
         for i in ref_inst.values():
             instances.append({**{k: v for k, v in i.items() if k != "globalIndices"},
@@ -448,7 +457,8 @@ def run_fuse(paths: ProjectPaths, scan_keys: List[str],
             xyz_t = (np.c_[st["xyz"], np.ones(len(st["xyz"]))] @ st["T_scan"].T)[:, :3]
             cls_p = st["ctx"].output_dir / "classification.npy"
             cls = np.load(cls_p) if cls_p.exists() else np.zeros(len(xyz_t), np.uint8)
-            blk, c = _block(st["data"], xyz_t, si, cls, offset)
+            blk, c = _block(st["data"], xyz_t, si, cls, offset,
+                            src_dir=st["ctx"].output_dir)
             parts.append(blk); cls_parts.append(c)
             for i in st["inst"].values():
                 instances.append({**{k: v for k, v in i.items() if k != "globalIndices"},

@@ -86,4 +86,9 @@ def test_kit_acta_and_reports(certified):
     assert all({"name", "value", "threshold", "passed"} <= set(g) for g in it["gates"])
     a = json.loads((out / "certify_acta.json").read_text())
     assert a["stop_reason"] and a["iterations"][0]["verdict"] in ("applied", "identity")
-    assert a["visit_drift"]["epochs"] and a["epoch_final"] >= 1
+    # db52016: ONE composed epoch, so the acta carries `correction` with its
+    # stages instead of a `visit_drift.epochs` list
+    assert a["correction"]["stages"] and a["epoch_final"] >= 1
+    assert a["epoch_after_correction"] <= a["epoch_final"]
+    assert [st for st in a["correction"]["stages"]
+            if st.get("status") == "applied"], a["correction"]

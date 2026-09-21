@@ -91,6 +91,12 @@ interface ViewportProps {
 export interface SegmentInstance {
     key: string
     id: number
+    /** The class BYTE the octree carries for this instance — what the
+     *  visibility texture, the node culling and the raycast filter are keyed
+     *  by. It equals `id` while the instance ids fit in a byte, and is a
+     *  compact index when they do not (pccr 2026-09-20: eight instances above
+     *  254 all saturated to 255, one toggle switched all eight). */
+    classId: number
     label: string
     color: string
     totalPoints: number
@@ -135,6 +141,9 @@ export interface ViewportHandle {
     refreshSegmentOBBs: (sessionId: string) => void
     setFloorTransform: (arr: number[]) => void
     setOBBsVisible: (visible: boolean) => void
+    /** `segId` is the CLASS BYTE (`SegmentInstance.classId`), not the
+     *  instance id — the texture, the node culling and the raycast filter all
+     *  speak in class bytes. 0 is the unsegmented remainder. */
     setSegmentVisibility: (segId: number, visible: boolean) => void
     setCloudObjectVisible: (visible: boolean) => void
     reloadShapes: (sessionId: string) => Promise<void>
@@ -4537,6 +4546,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         for (const inst of instances) {
             const obb = inst.obb as Record<string, unknown> | undefined
             const instId = (inst.instance_id || inst.id || 0) as number
+            const clsId = (inst.class_byte ?? instId) as number
             const label = (inst.label || 'object') as string
             const colorStr = (inst.color || tokenColor(VP.measure)) as string
             const totalPoints = (inst.total_points || 0) as number
@@ -4545,10 +4555,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             segmentList.push({
                 key: globalKey,
                 id: instId,
+                classId: clsId,
                 label: `${label} #${instId}`,
                 color: colorStr,
                 totalPoints,
-                visible: segVisRef.current.get(instId) ?? true,
+                visible: segVisRef.current.get(clsId) ?? true,
             })
 
             if (!obb) continue

@@ -24,10 +24,15 @@ print(f"categorias: {len(prompt.split(';'))}")
 
 # SIMPLE pipeline: text concepts only, all frames per concept, no box seeds
 for stale in ("segmentation.json", "seg_masks.npz", "segmentation_result.json",
-              "scene_r.db", "classification.npy", "seg_broadcast.json"):
+              "scene_r.db", "classification.npy", "class_map.json",
+              "seg_broadcast.json", "fusion_map.json"):
     p = OUT / stale
     if p.exists():
         p.unlink(); print(f"  borrado previo: {stale}")
+_raw = OUT / "_sam3_raw"
+if _raw.exists():
+    import shutil as _sh
+    _sh.rmtree(_raw); print("  borrado previo: _sam3_raw")
 
 # SAM3 wants the whole GPU: vLLM's ~40 GB resident starve a long session.
 # Any later consumer restarts it (semantic.service.ensure_service).

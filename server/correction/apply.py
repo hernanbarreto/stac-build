@@ -157,7 +157,17 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     tx.mkdir(parents=True)
     artifacts: List[dict] = []
 
+    _art_seen = set()
+
     def _art(rel: str):
+        """Register a staged artifact for the swap. Idempotent: two steps can
+        legitimately touch the same file (step 4 stages the segmentation and
+        step 9c republishes it), and the swap moves the manifest ROW BY ROW —
+        a second row for the same path renames a file that is already gone and
+        aborts the whole swap."""
+        if rel in _art_seen:
+            return
+        _art_seen.add(rel)
         artifacts.append({"rel": rel,
                           "existed_before": (output_dir / rel).exists()})
 
@@ -223,13 +233,15 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     if pose_copies_skipped:
         log(f"  pose copies skipped (declared): {pose_copies_skipped}")
 
-    # 4) segmentation OBBs ------------------------------------------------
+    # 4) segmentation staged as it stands ---------------------------------
+    # The OBBs are NOT fitted here. The mask filter (9a) has not run yet, so
+    # `xyz_new` still holds points this transaction is about to delete, and
+    # `_reindex` then remaps every globalIndex without refitting — an OBB
+    # computed from points the same transaction removes (pccr 2026-09-20).
+    # The fit happens at 9c, on the geometry that actually ships.
     res_path = output_dir / "segmentation_result.json"
     if res_path.exists():
-        result = json.loads(res_path.read_text())
-        result = _recompute_obbs(output_dir, xyz_new, result, log=log,
-                                 floor_npz=floor_npz)
-        (tx / "segmentation_result.json").write_text(json.dumps(result))
+        (tx / "segmentation_result.json").write_text(res_path.read_text())
         _art("segmentation_result.json")
 
     # 5) depth-correction sidecar (cumulative affine z'' = k·(k₀z + b₀) + b) --
@@ -306,6 +318,38 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
         except Exception as e:  # noqa: BLE001 — declared, never silent
             log(f"  mask filter failed ({e}) — the epoch keeps every point")
 
+    # 9c) the cloud's siblings, republished from the FINAL staged geometry --
+    # A cloud never travels alone: `classification.npy` (the per-point class
+    # the Potree converter bakes into the octree), `out_of_place.npy` (the
+    # cleanup marks) and the result's own census are all indexed BY ROW. Until
+    # now the epoch staged the cloud and left them behind, and nothing said so
+    # — the converter compares the two lengths, writes NOTHING and logs one
+    # line, so pccr's epoch-1 octree came out with every class byte at zero
+    # and `geometric_cleanup` refused to run at all. This is deliberately
+    # FATAL: an epoch whose siblings do not describe its cloud is the silent
+    # breakage this step exists to end.
+    _p(67, "tx: republishing the segmentation siblings...")
+    xyz_final = xyz_new[kept_mask] if kept_mask is not None else xyz_new
+    res_tx = tx / "segmentation_result.json"
+    if res_tx.exists():
+        result = _recompute_obbs(output_dir, xyz_final,
+                                 json.loads(res_tx.read_text()),
+                                 log=log, floor_npz=floor_npz)
+        res_tx.write_text(json.dumps(result))
+    try:
+        from segmentation.republish import republish_membership
+        rep = republish_membership(tx, n_points=int(len(xyz_final)),
+                                   keep=kept_mask, source_dir=output_dir,
+                                   log=log)
+        for rel in rep["files"]:
+            _art(rel)
+    except Exception as e:
+        shutil.rmtree(tx)
+        raise RuntimeError(
+            f"the epoch could not republish what hangs off its cloud ({e}) — "
+            f"transaction discarded rather than shipping an octree with no "
+            f"classes and per-point arrays that describe the previous epoch")
+
     # 9b) re-consolidate the WARPED cloud ---------------------------------
     # The warp moves every point by its own keyframe's correction and nothing
     # cleans up afterwards. Where a duplicate finally closes, the two copies
@@ -373,6 +417,13 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
             raise RuntimeError(
                 f"staged cloud provenance field '{fld}' differs from the "
                 f"source — transaction discarded")
+    for sib in ("classification.npy", "out_of_place.npy"):
+        sp = tx / sib
+        if sp.exists() and len(np.load(sp)) != n_expect:
+            shutil.rmtree(tx)
+            raise RuntimeError(
+                f"staged {sib} has {len(np.load(sp))} values against "
+                f"{n_expect} points — transaction discarded")
     if len(read_poses(tx / "camera_poses.txt")) != session.n_kf:
         shutil.rmtree(tx)
         raise RuntimeError("staged camera_poses.txt row count mismatch — "

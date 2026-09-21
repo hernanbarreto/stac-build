@@ -3396,6 +3396,39 @@ async def get_segmentation_instances(session_id: str):
         absorbed = resolve_absorbed(result_data, raw_instances, result_is_newer)
         merged, hidden = split_list(raw_instances, enriched_by_id, absorbed)
 
+        # The class BYTE, which is what the octree carries and what the
+        # viewer's visibility texture, node culling and raycast filter are all
+        # keyed by. It is the instance id while the ids fit in a byte and a
+        # compact index when they do not — pccr 2026-09-20 had eight live
+        # instances above 254, every one of them saturated to 255, one block in
+        # the viewer where one toggle switched all eight.
+        from segmentation.republish import class_of
+        code = class_of(output_dir)
+        if code:
+            for m in merged:
+                iid = m.get("instance_id", m.get("id"))
+                if iid is not None:
+                    m["class_byte"] = int(code.get(int(iid), int(iid)))
+
+        # Once the parent IS the fused list, `absorbed` stops being a display
+        # filter and becomes pure provenance: its keys name masklets that are
+        # no longer parent entries, so `split_list` hides nothing and the
+        # panel would lose its "what am I not seeing, and why" list. Render
+        # those records straight from the record (USER 2026-09-20).
+        _listed_iids = {int(m.get("instance_id", m.get("id")))
+                        for m in merged
+                        if m.get("instance_id", m.get("id")) is not None}
+        for _k, _rec in ((result_data or {}).get("absorbed") or {}).items():
+            try:
+                _ki = int(_k)
+            except (TypeError, ValueError):
+                continue
+            if _ki in _listed_iids or any(int(h.get("instance_id", -1)) == _ki
+                                          for h in hidden):
+                continue
+            hidden.append({"instance_id": _ki, "id": _ki - 1,
+                           "label": _rec.get("label"), **_rec})
+
         # Cloud totals so the panel can show the unsegmented count too
         # (user 2026-08-31: every segment shows its points except Unsegmented)
         total_pts = segmented_pts = None
@@ -3419,7 +3452,11 @@ async def get_segmentation_instances(session_id: str):
             # display as "216 masks → 77 objects" without re-reading anything
             "absorbed": hidden,
             "absorbed_by_reason": by_reason(hidden),
-            "mask_count": len(raw_instances),
+            # the RAW masklet count, so the panel still reads "270 masks ->
+            # 83 objects" after the fusion folded the parent
+            "mask_count": int(seg_data.get("masks_total")
+                              or len(raw_instances)),
+            "fusion": seg_data.get("fusion"),
             "total_points": total_pts,
             "unsegmented_points": (max(0, total_pts - segmented_pts)
                                    if total_pts is not None

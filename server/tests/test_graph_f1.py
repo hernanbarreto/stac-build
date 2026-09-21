@@ -1,7 +1,8 @@
 """claude_stac.txt F1 on the server side: §12.5 (instance detector: two
 clusters → candidate; after the graph, zero duplicates), §12.5b (spatial
-gate: fused identity → split, drift within budget → loop, out of frustum →
-rejected, re-evaluation with a measured budget), §12.10 (config + zero
+gate: drift within budget → loop, out of frustum → rejected, a tighter
+measured budget WITHDRAWS the closure — nothing is ever cut, USER 2026-09-16
+"no debe cortar objetos, no debe existir"), §12.10 (config + zero
 decision literals)."""
 
 import ast
@@ -148,10 +149,17 @@ def test_reevaluation_with_measured_budget_flips_intermediate(sess):
     loop = sg.gate_instance_pair(later, ks[0], view, c, pts_mid, pts, "column",
                                  budget_override={"delta_m": 2.0 * delta, "theta_deg": 3.0})
     assert loop["verdict"] == "loop"
-    # ...or SMALLER → the fusion is confirmed (split)
-    split = sg.gate_instance_pair(later, ks[0], view, c, pts_mid, pts, "column",
+    # ...or SMALLER → the closure is WITHDRAWN, and nothing is ever cut.
+    # USER 2026-09-16: *"no debe cortar objetos, no debe existir"* — the
+    # verdict used to be "split" (the instance was cut in two) and that cut
+    # pccr's floor into four pieces and its ceiling into six. A tighter budget
+    # now takes the closure away; it never takes the object apart.
+    tight = sg.gate_instance_pair(later, ks[0], view, c, pts_mid, pts, "column",
                                   budget_override={"delta_m": 0.3 * delta, "theta_deg": 1.0})
-    assert split["verdict"] == "split"
+    assert tight["verdict"] == "reject", tight
+    assert tight["rules"]["frustum"]["passed"] is False, tight["rules"]
+    assert tight["reason"], tight
+    assert tight["verdict"] != "split"
 
 
 def test_corridor_detection(sess):
@@ -197,17 +205,32 @@ def test_instance_detector_two_clusters_then_zero_after_correction(tmp_path, ses
     assert 1 in by_iid, rep["candidates"]
     assert any(c["verdict"] in ("loop", "ambiguous") for c in by_iid[1])
     assert rep["n_written"] >= 1
-    # instance 3: two columns 8+ m apart → split, no loop
-    assert 3 in by_iid and any(c["verdict"] == "split" for c in by_iid[3])
-    assert rep["splits"] and {s["source_instance"] for s in rep["splits"]} == {3}
+    # instance 3: two columns 8+ m apart → the closure is REJECTED and the
+    # instance is left whole. USER 2026-09-16: *"no debe cortar objetos, no
+    # debe existir"* — what the detector may do is withhold the edge and say
+    # why; the mask audit says where the mass actually falls and the
+    # correction moves it.
+    assert 3 in by_iid, rep["candidates"]
+    assert all(c["verdict"] != "split" for c in by_iid[3]), by_iid[3]
+    assert any(c["verdict"] == "reject"
+               and (c.get("reason") or (c.get("gate") or {}).get("reason"))
+               for c in by_iid[3]), by_iid[3]
+    assert not rep["splits"], rep["splits"]
     # the wall (one plane, sampled with gaps, drifted) is never split — its
     # observable separation is the plane offset, not the centroid distance
     assert all(c["verdict"] != "split" for c in by_iid.get(2, []))
     res = json.loads((root / "output" / "segmentation_result.json").read_text())
     ids = sorted(int(i["instance_id"]) for i in res["instances"])
-    assert ids == [1, 2, 3, 4]
-    led = (root / "output" / "segmentation_ledger.jsonl").read_text().strip().splitlines()
-    assert json.loads(led[-1])["type"] == "instance_split"
+    # three instances, not four: the fourth existed only because the detector
+    # used to CUT instance 3 in two. Nothing is cut any more, so nothing is
+    # created (USER 2026-09-16: "no debe cortar objetos, no debe existir").
+    assert ids == [1, 2, 3], ids
+    # and no instance_split ever reaches the ledger: `loops/split.py` is the
+    # only writer of that row and nothing calls it from this path any more
+    led_p = root / "output" / "segmentation_ledger.jsonl"
+    if led_p.exists():
+        rows = [json.loads(l) for l in led_p.read_text().strip().splitlines() if l]
+        assert not [r for r in rows if r.get("type") == "instance_split"], rows
     # loop_closures.txt carries the instance candidate with its source
     txt = (root / "output" / "maplong_run" / "loop_closures.txt").read_text()
     assert "instance" in txt

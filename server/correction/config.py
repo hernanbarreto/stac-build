@@ -89,7 +89,7 @@ class FloorConfig:
     ransac_iters: int
     ransac_sample: int
     smooth_window_kf: int
-    step_demote_m: float
+    local_mad_k: float
     reference_span_kf: int
 
 
@@ -188,6 +188,8 @@ class VisitDriftConfig:
     silhouette_blur_px: float       # gaussian blur, in cells
     search_margin_m: float          # margin around the pair, bounds the shift
     default_repeatability_m: float  # used only when uncertainty.json is absent
+    grid_aspect_tol: float          # mask grid vs trace grid, relative disagreement
+    min_depth_m: float              # a point nearer than this is not in front of the camera
 
 
 @dataclass(frozen=True)
@@ -284,6 +286,8 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
         search_margin_m=_num(vd_, "search_margin_m", "visit_drift", lo=0.0, lo_excl=True),
         default_repeatability_m=_num(vd_, "default_repeatability_m", "visit_drift",
                                      lo=0.0, lo_excl=True),
+        grid_aspect_tol=_num(vd_, "grid_aspect_tol", "visit_drift", lo=0.0, lo_excl=True),
+        min_depth_m=_num(vd_, "min_depth_m", "visit_drift", lo=0.0, lo_excl=True),
     )
 
     ev = section.get("evidence")
@@ -397,8 +401,7 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
                            integer=True),
         smooth_window_kf=_num(fl, "smooth_window_kf", "floor", lo=0,
                               integer=True),
-        step_demote_m=_num(fl, "step_demote_m", "floor", lo=0.0,
-                           lo_excl=True),
+        local_mad_k=_num(fl, "local_mad_k", "floor", lo=0.0, lo_excl=True),
         reference_span_kf=_num(fl, "reference_span_kf", "floor", lo=1,
                                integer=True),
     )

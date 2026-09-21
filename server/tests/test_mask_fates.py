@@ -12,7 +12,8 @@ Taking the list from the result file instead is NOT the fix: a mask the user
 just propagated has to appear before the expensive matching runs again, which
 is the bug the mask-file source was introduced to fix. What was missing is the
 record of what the matching DID with each mask. These tests pin both halves:
-a recorded mask is not an object, and an unrecorded one is never hidden.
+a recorded mask is not an object, and an unrecorded one is never hidden while
+the mask file is the newer of the two — which is what "just propagated" means.
 """
 
 import importlib.util
@@ -54,9 +55,11 @@ def _enriched(result):
 # ── the record decides ───────────────────────────────────────────────────
 
 def test_a_recorded_mask_is_not_an_object():
+    # newer=False isolates the record: nothing else may speak (the timestamp
+    # fallback fills the record's silences only when the result is newer)
     res = _result([1], absorbed={"2": {"into": 1, "into_label": "l1", "reason": "fragment"},
                                  "3": {"into": 1, "into_label": "l1", "reason": "space_dedupe"}})
-    ab = resolve_absorbed(res, MASKS, result_is_newer=True)
+    ab = resolve_absorbed(res, MASKS, result_is_newer=False)
     listed, hidden = split_list(MASKS, _enriched(res), ab)
     assert [m["instance_id"] for m in listed] == [1, 4, 5]
     assert [h["instance_id"] for h in hidden] == [2, 3]
@@ -74,9 +77,10 @@ def test_the_hidden_row_carries_where_it_went():
 
 def test_a_mask_with_no_record_stays_in_the_list_even_with_no_points():
     """The just-propagated case: it has no points yet because the matching has
-    not run over it. Hiding it is the original bug."""
+    not run over it. Hiding it is the original bug — and the mask file being
+    NEWER is what says the mask is in that case."""
     res = _result([1], absorbed={"2": {"into": 1, "reason": "fragment"}})
-    listed, _hidden = split_list(MASKS, _enriched(res), resolve_absorbed(res, MASKS, True))
+    listed, _hidden = split_list(MASKS, _enriched(res), resolve_absorbed(res, MASKS, False))
     fresh = [m for m in listed if m["instance_id"] == 5][0]
     assert "total_points" not in fresh and "globalIndices" not in fresh
 
@@ -86,7 +90,7 @@ def test_a_survivor_is_never_hidden_even_if_the_record_names_it():
     res = _result([1, 2], absorbed={"2": {"into": 1, "reason": "fragment"}})
     listed, hidden = split_list(MASKS, _enriched(res), resolve_absorbed(res, MASKS, True))
     # split_list honours the record, so this is the guard that must hold upstream
-    assert [h["instance_id"] for h in hidden] == [2]
+    assert 2 in [h["instance_id"] for h in hidden]
     assert 2 not in [m["instance_id"] for m in listed]
     # _mask_fates never writes a survivor into the record — pinned in its own test
 
@@ -120,16 +124,34 @@ def test_an_empty_result_hides_nothing():
     assert resolve_absorbed(_result([]), MASKS, result_is_newer=True) == {}
 
 
-def test_the_record_wins_over_the_timestamp_fallback():
+def test_the_record_wins_where_it_speaks_and_the_fallback_fills_its_silences():
+    """USER 2026-09-20: he dropped 22 instances from the result file and the
+    22 masks came straight back to the list at zero points — the very rows the
+    record exists to remove. The record is NOT a census: an instance dropped
+    AFTER the matching (a correction epoch's min_points, a delete) leaves a
+    mask that is neither a survivor nor recorded, and with the result newer
+    than the mask file that mask did not survive either. What the record DOES
+    say still wins, verdict and reason."""
     res = _result([1, 4], absorbed={"2": {"into": 1, "reason": "space_dedupe"}})
     ab = resolve_absorbed(res, MASKS, result_is_newer=True)
-    assert sorted(ab) == [2], "a real record is never widened by the fallback"
+    assert sorted(ab) == [2, 3, 5]
+    assert ab[2]["reason"] == "space_dedupe" and ab[2]["into"] == 1, \
+        "the record's own verdict is never overwritten by the fallback"
+    assert ab[3]["reason"] == ab[5]["reason"] == "fused_or_unmatched"
+    assert ab[3]["into"] is None, "which object absorbed it is not known here"
+
+
+def test_a_mask_the_record_missed_is_still_listed_while_the_masks_are_newer():
+    """The widening is the timestamp's, not the record's: masks propagated
+    after the last matching are exactly what the list source exists to show."""
+    res = _result([1, 4], absorbed={"2": {"into": 1, "reason": "space_dedupe"}})
+    assert sorted(resolve_absorbed(res, MASKS, result_is_newer=False)) == [2]
 
 
 def test_a_malformed_record_entry_is_skipped_not_fatal():
     res = _result([1], absorbed={"two": {"into": 1, "reason": "fragment"},
                                  "3": {"into": 1, "reason": "fragment"}})
-    assert sorted(resolve_absorbed(res, MASKS, result_is_newer=True)) == [3]
+    assert sorted(resolve_absorbed(res, MASKS, result_is_newer=False)) == [3]
 
 
 # ── the producer: every mask gets a fate, survivors get none ─────────────

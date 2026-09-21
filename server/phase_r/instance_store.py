@@ -442,6 +442,45 @@ class InstanceStore:
         self.conn.execute("DELETE FROM user_volumes WHERE volume_id=?", (volume_id,))
         self.conn.commit()
 
+    def reconcile(self, keep_ids) -> dict:
+        """Drop every instance the segmentation no longer has.
+
+        The store is the canonical object list for the chat, the findings, the
+        classification phase and the reports, and nothing ever removed from it
+        (pccr 2026-09-20: a correction epoch dropped 22 instances and the db
+        still answered 105 — ghosts with points and an OBB, in a place whose
+        whole job is to say what exists). A full rebuild is not the answer: it
+        deletes the db, and with it the findings, the volumes and the notes —
+        which is exactly why `correction.invalidate` updates in place.
+
+        So this removes only what ASSERTS THE OBJECT EXISTS AND WHERE IT IS.
+        A finding is an OBSERVATION and survives: it keeps its 3-D anchor and
+        loses its instance. Verdicts about an id (`instance_classification`)
+        and the user's own volumes are never touched.
+        """
+        keep = {int(i) for i in keep_ids}
+        have = {int(r[0]) for r in
+                self.conn.execute("SELECT instance_id FROM instances")}
+        gone = sorted(have - keep)
+        if not gone:
+            return {"removed": 0, "kept": len(have), "findings_orphaned": 0}
+        qs = ",".join("?" * len(gone))
+        args = [int(g) for g in gone]
+        n_find = self.conn.execute(
+            f"SELECT COUNT(*) FROM findings WHERE instance_id IN ({qs})",
+            args).fetchone()[0]
+        self.conn.execute(
+            f"UPDATE findings SET instance_id=NULL WHERE instance_id IN ({qs})",
+            args)
+        for table in ("instances", "instance_points", "instance_obb",
+                      "masklet_refs", "vote_metrics", "onion_metrics",
+                      "window_history"):
+            self.conn.execute(
+                f"DELETE FROM {table} WHERE instance_id IN ({qs})", args)
+        self.conn.commit()
+        return {"removed": len(gone), "kept": len(keep & have),
+                "findings_orphaned": int(n_find), "removed_ids": gone}
+
     def set_meta(self, key: str, value: str) -> None:
         self.conn.execute("INSERT OR REPLACE INTO scene_meta (key,value) VALUES (?,?)",
                           (key, str(value)))

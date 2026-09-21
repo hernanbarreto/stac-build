@@ -66,7 +66,11 @@ def split_instance(output_dir, iid: int, idx_new: np.ndarray, reason: dict,
     seg_json = output_dir / "segmentation.json"
     meta = json.loads(seg_json.read_text()) if seg_json.exists() else {}
     meta_insts = meta.get("instances") or []
-    new_oid = 1 + max([int(e.get("id", 0)) for e in meta_insts], default=0)
+    from segmentation.fuse_parent import high_water
+    _hi_id, _hi_iid = high_water(output_dir)
+    new_oid = 1 + max([int(e.get("id", 0)) for e in meta_insts] + [_hi_id],
+                      default=0)
+    new_iid = max(new_iid, _hi_iid + 1)
     color = _NEW_SEGMENT_COLORS[(new_iid - 1) % len(_NEW_SEGMENT_COLORS)]
     label = str(src.get("label", "segment"))
     new_inst = {"id": int(new_iid), "label": label, "instance_id": int(new_iid),

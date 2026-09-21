@@ -279,9 +279,17 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         # the floor plane. No translation stage and no loop — see
         # `correction.visit_drift_run.run`.
         from correction.visit_drift_run import run as run_correction
-        vd = run_correction(session_dir, log=log)
+        # the config THIS function already resolved — dropping it made the
+        # correction re-read production config.yaml behind the caller's back
+        # (found 2026-09-21: on a synthetic session `floor.min_inliers: 5000`
+        # demoted every keyframe and no epoch was ever published)
+        vd = run_correction(session_dir, log=log, cfg=ccfg)
         acta["correction"] = {"stages": vd["stages"],
-                              "elapsed_s": vd["elapsed_s"]}
+                              "elapsed_s": vd["elapsed_s"],
+                              # the correction's own epoch and provenance tag:
+                              # the acta used to drop both
+                              "epoch": vd.get("epoch"),
+                              "provenance": vd.get("provenance")}
         acta["epoch_after_correction"] = current_epoch(output_dir)
         base = load_session_frames(output_dir, log)   # poses moved under us
 
@@ -551,11 +559,18 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     # now come from the visit-drift loop, so each one gets its report here,
     # carrying its OWN measurement (the closures, the filter, the
     # distribution) against the session measured before the correction.
-    for e in acta.get("visit_drift", {}).get("epochs", []):
-        write_epoch_report(output_dir, int(e["epoch"]),
+    # It used to read `acta["visit_drift"]["epochs"]`, a key that stopped
+    # existing when the multi-epoch loop became the ONE composed epoch
+    # (db52016). The loop was dead, so `output/quality/` stayed empty and both
+    # `GET /api/certify/report/{id}` and `?epoch=N` answered 404 after every
+    # real certification — the acta panel got nothing (found 2026-09-21).
+    for e in range(int(acta.get("epoch_initial", 0)) + 1,
+                   int(acta.get("epoch_after_correction",
+                                acta.get("epoch_initial", 0))) + 1):
+        write_epoch_report(output_dir, int(e),
                            last_m if last_m is not None else acta.get("metrics_initial", {}),
                            acta.get("metrics_initial"),
-                           extra={"correction": "visit_drift", "visit_drift": e})
+                           extra={"correction": acta.get("correction")})
 
     # ── the second moment of the geometric cleanup cycle ──────────────────
     # The mask audit MARKED, at match time, every point landing off its own

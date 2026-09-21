@@ -57,9 +57,11 @@ def instance_indices(output_dir: Path, inst: dict,
     iid = int(inst.get("instance_id", inst.get("id", -1)))
     cls_p = Path(output_dir) / "classification.npy"
     if cls_p.exists():
+        from segmentation.republish import class_byte
         cls = np.load(cls_p, mmap_mode="r")
         if len(cls) == n_points:
-            idx = np.flatnonzero(np.asarray(cls) == iid)
+            idx = np.flatnonzero(np.asarray(cls)
+                                 == class_byte(output_dir, iid))
             if len(idx):
                 return idx.astype(np.int64)
     gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
