@@ -343,8 +343,14 @@ def surface_overlap(pts_a: np.ndarray, pts_b: np.ndarray,
     A, B = np.asarray(pts_a, np.float64), np.asarray(pts_b, np.float64)
     if not geom.get("same_geometry") or len(A) < 3 or len(B) < 3:
         return {"rule": "surface_overlap", "applies": False}
-    big = A if len(A) >= len(B) else B
-    _, _, V = _pca(big)
+    # the basis the OBJECT decided on, when the caller brought one
+    # (`surface_of_instance`); otherwise the better-sampled copy's own, which
+    # is all a pair-level verdict ever had
+    if geom.get("axes") is not None:
+        V = np.asarray(geom["axes"], np.float64)
+    else:
+        big = A if len(A) >= len(B) else B
+        _, _, V = _pca(big)
     kind = geom.get("kind")
     if kind == "axis":
         dirs = [V[0]]                       # along the elongation
@@ -371,6 +377,48 @@ def surface_overlap(pts_a: np.ndarray, pts_b: np.ndarray,
     return {"rule": "surface_overlap", "applies": True, "kind": kind,
             "directions": per_dir, "overlap_frac": float(min(fracs)),
             "gap_m": float(max(gaps)), "disjoint": bool(min(fracs) <= 0.0)}
+
+
+def surface_of_instance(pts: np.ndarray, cfg) -> Dict[str, Any]:
+    """The geometry of the OBJECT, decided ONCE over all of its points.
+
+    ``same_surface_rule`` decides plane / axis / compact from the two COPIES,
+    which are keyframe windows — and the same object answers differently
+    depending on which window it is asked about. pccr 2026-09-21, epoch 1:
+    ``exposed_ceiling_ducts#116`` was read as an axis on the pair kf 169<->115
+    and REFUSED, and as neither plane nor axis on kf 203<->92, where a stub of
+    it had no direction of its own; that pair went on to "close" 10.30 m at
+    0.0 deg. Seven of the acta's thirteen voting pairs were that duct and that
+    floor against themselves, and they are what carried the objective from
+    2.7487 to 5.4322 while the REAL closures improved from a median of 75.7 cm
+    to 54.3 cm.
+
+    A shape is a property of the OBJECT, not of the window it was sampled
+    through. Same test, same config, all the instance's points: elongated
+    first (a thin cluster is degenerate in two directions and would pass the
+    planar test with an arbitrary normal), then planar.
+
+    Returns the same shape of dict ``same_surface_rule`` returns, plus the
+    ``axes`` the decision was made on, so the overlap test below measures
+    along the OBJECT's own directions instead of re-deriving them from the
+    larger copy.
+    """
+    c = _cfg(cfg)
+    P = np.asarray(pts, np.float64)
+    if len(P) < 3:
+        return {"rule": "surface_of_instance", "kind": "centroid",
+                "same_geometry": False, "source": "instance"}
+    _, ev, V = _pca(P)
+    if ev[1] <= float(c["same_surface_axis_ratio"]) * max(ev[0], 1e-12):
+        kind = "axis"
+    elif ev[2] <= float(c["same_surface_planar_ratio"]) * max(ev[0], 1e-12):
+        kind = "plane"
+    else:
+        kind = "centroid"
+    return {"rule": "surface_of_instance", "kind": kind,
+            "same_geometry": kind in ("plane", "axis"),
+            "axes": [v.tolist() for v in V], "source": "instance",
+            "eigenvalues": [float(x) for x in ev]}
 
 # ── verdicts ────────────────────────────────────────────────────────────────
 

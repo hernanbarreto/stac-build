@@ -500,12 +500,24 @@ class AutoPrompter:
         # "what was folded into what", flat — `merged`/`parts` are keyed by the
         # SURVIVOR, and the question asked of this file is always the other
         # way round: this phrase is not a prompt any more, where did it go?
+        # A PART IS NOT FOLDED ANY MORE (2026-09-21): under the literal merge
+        # rule it keeps its own prompt and the part-of relationship is kept as
+        # provenance, so listing it here — under a key whose question is "this
+        # phrase is not a prompt any more, where did it go?" — would say the
+        # opposite of what happened. The relationship still travels, in
+        # `consolidation.parts`, and `part_of` below says so without claiming
+        # the concept was removed.
+        survivors = set(phrases)
         folded: dict[str, dict] = {}
+        part_of: dict[str, str] = {}
         for role, bucket in (("alias", cons.get("merged") or {}),
                              ("part", cons.get("parts") or {})):
             for survivor, gone in bucket.items():
                 for phrase in gone:
-                    folded[phrase] = {"into": survivor, "as": role}
+                    if phrase in survivors:
+                        part_of[phrase] = survivor
+                    else:
+                        folded[phrase] = {"into": survivor, "as": role}
         record = {
             "origin": "vlm_proposed",
             "scene_type": (understanding.scene_type if understanding else ""),
@@ -521,6 +533,8 @@ class AutoPrompter:
             "consolidated": {"objects": list(phrases), "n_objects": len(phrases)},
             "consolidation": cons,
             "folded": folded,
+            # still a prompt, and known to be part of another one
+            "part_of": part_of,
             "parse_failed": bool(cons.get("parse_failed")),
             "warning": cons.get("warning"),
             "prompt": ";".join(phrases),

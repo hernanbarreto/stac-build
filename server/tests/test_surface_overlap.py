@@ -213,3 +213,71 @@ def test_the_graph_writes_no_edge_for_one_surface_against_itself(tmp_path, monke
     assert "two parts of one plane" in out[0]["reason"]
     # nothing is dropped silently: the numbers travel with the refusal
     assert out[0]["surface_overlap"]["gap_m"] > 1.0
+
+
+# ── the shape belongs to the OBJECT, not to the window it was sampled through ─
+
+def test_a_stub_of_one_duct_has_no_direction_of_its_own():
+    """Why `surface_of_instance` exists. pccr 2026-09-21, epoch 1: asked of the
+    two COPIES, `exposed_ceiling_ducts#116` answered "axis" on kf 169<->115 and
+    was refused, and answered neither plane nor axis on kf 203<->92, where the
+    window held a stub with no direction — that pair went on to close 10.30 m
+    at 0.0 deg. Seven of the acta's thirteen voting pairs were one duct and one
+    floor against themselves."""
+    rng = np.random.default_rng(11)
+    # a duct with a real cross-section: 12 m long, ~25 cm across
+    n = 12000
+    bar = np.c_[rng.uniform(0, 12.0, n), rng.normal(0, 0.12, n),
+                rng.normal(0, 0.12, n)]
+    # what a 15-keyframe window sees of it: a stub no longer than it is thick,
+    # which has no direction of its own
+    stub_a = bar[bar[:, 0] < 0.30]
+    stub_b = bar[bar[:, 0] > 11.70]
+    pair = sg.same_surface_rule(stub_a, stub_b, _cfg())
+    assert not pair["same_geometry"], "the stubs already agreed — pick a harder pair"
+    whole = sg.surface_of_instance(bar, _cfg())
+    assert whole["kind"] == "axis" and whole["same_geometry"]
+    ov = sg.surface_overlap(stub_a, stub_b, whole, _cfg())
+    assert ov["applies"] and ov["disjoint"]
+    assert ov["gap_m"] > 5.0
+    # and the pair-level rule, asked alone, would have let it through
+    assert sg.surface_overlap(stub_a, stub_b, pair, _cfg())["applies"] is False
+
+
+def test_the_object_rule_measures_along_the_objects_own_axes():
+    rng = np.random.default_rng(12)
+    bar = _bar(rng, length=6.0)
+    whole = sg.surface_of_instance(bar, _cfg())
+    assert whole["source"] == "instance" and whole.get("axes") is not None
+    # the basis travels: surface_overlap must use it instead of re-deriving one
+    ov = sg.surface_overlap(bar[bar[:, 0] < 1.0], bar[bar[:, 0] > 5.0], whole, _cfg())
+    assert len(ov["directions"]) == 1          # an axis is judged on one
+
+
+def test_a_compact_object_is_never_refused_by_the_object_rule():
+    """The guard that keeps the REAL duplicates. `computer_monitor#178` closed
+    a genuine 59 cm duplicate whose copies sit FARTHER apart than the monitor
+    is wide — a blanket disjointness test would have thrown it away."""
+    rng = np.random.default_rng(13)
+    blob = rng.normal(0, 0.15, (2000, 3))
+    whole = sg.surface_of_instance(blob, _cfg())
+    assert whole["kind"] == "centroid" and not whole["same_geometry"]
+    a = blob[:1000]
+    b = blob[1000:] + np.array([0.59, 0.0, 0.0])
+    assert sg.surface_overlap(a, b, whole, _cfg())["applies"] is False
+
+
+def test_the_instance_rule_needs_points_like_every_other_one():
+    assert sg.surface_of_instance(np.zeros((2, 3)), _cfg())["same_geometry"] is False
+
+
+def test_the_graph_falls_back_to_the_object_when_the_copies_cannot_say():
+    """`instance_edges` asks the copies first — when they AGREE on a surface
+    that is the strongest statement available — and the object only when they
+    do not."""
+    src = (Path(__file__).resolve().parents[1]
+           / "reconstruction" / "certify" / "loops_posthoc.py").read_text()
+    body = src[src.index("def instance_edges("):src.index("def _info_from_projection(")]
+    assert "same_surface_rule(" in body and "surface_of_instance(" in body
+    assert body.index("same_surface_rule(") < body.index("surface_of_instance("), \
+        "the pair must speak before the object"

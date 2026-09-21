@@ -507,18 +507,39 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print,
         # when the two supports do not OVERLAP on the surface they share, in
         # which case there is no common piece to close, and the refusal is
         # recorded with its numbers like every other one.
+        # The shape is asked of the OBJECT, not of the two windows. Asked of
+        # the windows, the same ceiling duct answered "axis" on one pair and
+        # "neither" on the next, and the pair it could not classify went on to
+        # close 10.30 m at 0.0 deg (pccr 2026-09-21, epoch 1: seven of the
+        # acta's thirteen voting pairs were one duct and one floor against
+        # themselves). `same_surface_rule` still speaks first — when the two
+        # copies AGREE on a shared plane or axis that is the strongest
+        # statement available, and it carries the offset across it that the
+        # refusal reports — and the instance answers when they do not.
         _geom = sg.same_surface_rule(session.xyz[idx_a], session.xyz[idx_b],
                                      cfg.loops.spatial)
+        if not _geom.get("same_geometry"):
+            _whole = np.asarray(inst.get("globalIndices") or [], np.int64)
+            _whole = _whole[(_whole >= 0) & (_whole < session.n_points)]
+            if len(_whole) >= 3:
+                _shape = sg.surface_of_instance(session.xyz[_whole],
+                                                cfg.loops.spatial)
+                if _shape.get("same_geometry"):
+                    _shape["centroid_distance_m"] = _geom.get("centroid_distance_m")
+                    _shape["distance_m"] = _geom.get("distance_m")
+                    _geom = _shape
         _ov = sg.surface_overlap(session.xyz[idx_a], session.xyz[idx_b],
                                  _geom, cfg.loops.spatial)
         if _ov.get("applies") and _ov.get("disjoint"):
             skipped.append(dict(
                 base, geometry=_geom.get("kind"), surface_overlap=_ov,
-                reason=(f"two parts of one {_geom.get('kind')} — the supports "
-                        f"do not overlap on it (gap {_ov['gap_m']:.2f} m, "
-                        f"centroids {_geom.get('centroid_distance_m', 0.0):.2f} m "
-                        f"apart, offset across the surface "
-                        f"{_geom.get('distance_m', 0.0) * 100:.1f} cm): one "
+                reason=(f"two parts of one {_geom.get('kind')} "
+                        f"({'the object' if _geom.get('source') == 'instance' else 'both copies'} "
+                        f"says so) — the supports do not overlap on it "
+                        f"(gap {_ov['gap_m']:.2f} m, centroids "
+                        f"{(_geom.get('centroid_distance_m') or 0.0):.2f} m apart, "
+                        f"offset across the surface "
+                        f"{(_geom.get('distance_m') or 0.0) * 100:.1f} cm): one "
                         f"surface against itself observes nothing along it")))
             continue
         # what drift over the walk between these two visits could produce —

@@ -29,8 +29,15 @@ The VLM was stable; the vocabulary of the whole session was not, and nothing
 on disk said which of the two had happened. What is pinned here is that the
 outcome is now RECORDED (raw per-frame names, every pass, what was folded into
 what, the parse_failed flag) and DECLARED (a warning on the consolidation and
-next to `prompts` in the parent). The consolidation itself is not changed —
-it is the user's own request and it prevents a −1205 % regression.
+next to `prompts` in the parent).
+
+Since 2026-09-21 the pass only APPLIES a literal restatement of one name
+(`consolidate_prompts.same_name`) and a PART keeps its own prompt, so the
+fixtures here are built out of restatements — a plural, a collective suffix —
+whenever a list has to shrink across passes. The record grew a map with it:
+`folded` answers "this phrase is not a prompt any more, where did it go?" and
+so may only hold concepts that really went, while a surviving part is declared
+in `part_of`.
 """
 
 import json
@@ -52,6 +59,14 @@ from segmentation.autoprompt.session_builder import AutoPrompter  # noqa: E402
 
 PCCR = ["white tiled floor", "checkered floor tiles", "black server rack",
         "server rack fan", "dark wooden door"]
+
+# The same list, rewritten so the consolidation can still move it: 'server
+# racks' restates 'server rack' (a plural) and is APPLIED; 'server rack fan' is
+# a PART and since 2026-09-21 keeps its own prompt. 'checkered floor tiles' was
+# neither — head 'tile' against head 'floor' — so it is now a refusal and a
+# list built on it never shrinks at all.
+RESTATED = ["white tiled floor", "server rack", "server racks",
+            "server rack fan", "dark wooden door"]
 
 
 def _quiet(_m):
@@ -244,46 +259,65 @@ def test_a_failing_client_is_recorded_too():
 
 def test_a_converged_run_carries_no_warning_and_a_full_history():
     """11:34: the good run. Every pass is written down with what it did, so
-    the 61 → 32 of a session can be read back a month later."""
+    the 61 → 32 of a session can be read back a month later.
+
+    The shrink is narrower than it was that day: one literal restatement is
+    APPLIED ('server racks' → 'server rack') and the part is RECORDED and kept
+    ('server rack fan' is still a prompt), so 5 → 4 and then convergence. What
+    the history has to carry is unchanged — before, after, what was merged,
+    what was named as a part — and it is the same whether the pass applied the
+    proposal or refused it.
+    """
     first = {"objects": [
-        {"name": "white tiled floor", "aliases": ["checkered floor tiles"],
-         "parts": []},
-        {"name": "black server rack", "aliases": [], "parts": ["server rack fan"]},
+        {"name": "server rack", "aliases": ["server racks"],
+         "parts": ["server rack fan"]},
+        {"name": "white tiled floor", "aliases": [], "parts": []},
         {"name": "dark wooden door", "aliases": [], "parts": []}]}
     second = {"objects": [{"name": p, "aliases": [], "parts": []}
-                          for p in ["white tiled floor", "black server rack",
-                                    "dark wooden door"]]}
-    res = consolidate(_Client(first, second), "server room", PCCR,
+                          for p in ["server rack", "server rack fan",
+                                    "white tiled floor", "dark wooden door"]]}
+    res = consolidate(_Client(first, second), "server room", RESTATED,
                       max_passes=3, log=_quiet)
-    assert res.objects == ["white tiled floor", "black server rack",
+    assert res.objects == ["server rack", "server rack fan", "white tiled floor",
                            "dark wooden door"]
     assert res.parse_failed is False and res.max_passes_reached is False
     assert res.warning() is None
     assert [h["status"] for h in res.history] == ["applied", "converged"]
-    assert res.history[0]["before"] == 5 and res.history[0]["after"] == 3
-    assert res.history[0]["merged"] == {"white tiled floor": ["checkered floor tiles"]}
-    assert res.history[0]["parts"] == {"black server rack": ["server rack fan"]}
-    assert res.input_objects == PCCR
+    assert res.history[0]["before"] == 5 and res.history[0]["after"] == 4
+    assert res.history[0]["merged"] == {"server rack": ["server racks"]}
+    assert res.history[0]["parts"] == {"server rack": ["server rack fan"]}
+    assert res.input_objects == RESTATED
 
 
 def test_reaching_the_bound_with_a_moving_list_is_declared():
     """`consolidate_passes` is a BOUND, not a decision — but stopping on it
-    means the list was still changing, which is not convergence."""
-    listing = ["white tiled floor", "checkered floor tiles", "black server rack",
-               "server rack fan", "red fire extinguisher", "computer monitor"]
-    shrink = [{"objects": [{"name": "white tiled floor",
-                            "aliases": ["checkered floor tiles"], "parts": []},
-                           {"name": "black server rack", "aliases": [],
-                            "parts": ["server rack fan"]},
+    means the list was still changing, which is not convergence.
+
+    A pass only CHANGES the list when it applies something, so two restatements
+    the model spots one pass at a time are what it takes: the plural in pass 1,
+    the collective suffix in pass 2, and the bound falls while the list is
+    still moving.
+    """
+    listing = ["server rack", "server racks", "exposed ceiling ducts",
+               "exposed ceiling ductwork", "red fire extinguisher",
+               "computer monitor"]
+    shrink = [{"objects": [{"name": "server rack",
+                            "aliases": ["server racks"], "parts": []},
+                           {"name": "exposed ceiling ducts", "aliases": [],
+                            "parts": []},
+                           {"name": "exposed ceiling ductwork", "aliases": [],
+                            "parts": []},
                            {"name": "red fire extinguisher", "aliases": [], "parts": []},
                            {"name": "computer monitor", "aliases": [], "parts": []}]},
-              {"objects": [{"name": "white tiled floor", "aliases": [], "parts": []},
-                           {"name": "black server rack", "aliases": [],
-                            "parts": ["computer monitor"]},
-                           {"name": "red fire extinguisher", "aliases": [], "parts": []}]}]
+              {"objects": [{"name": "exposed ceiling ducts",
+                            "aliases": ["exposed ceiling ductwork"], "parts": []},
+                           {"name": "server rack", "aliases": [], "parts": []},
+                           {"name": "red fire extinguisher", "aliases": [], "parts": []},
+                           {"name": "computer monitor", "aliases": [], "parts": []}]}]
     res = consolidate(_Client(*shrink), "server room", listing, max_passes=2,
                       log=_quiet)
     assert [h["status"] for h in res.history] == ["applied", "applied"]
+    assert [(h["before"], h["after"]) for h in res.history] == [(6, 5), (5, 4)]
     assert res.max_passes_reached is True
     assert "still changing" in res.warning()
 
@@ -301,6 +335,20 @@ def _understanding():
                                        "dark wooden door"])])
 
 
+def _understanding_restated():
+    """`_understanding` over RESTATED — the list the pass can still fold
+    something out of, so the record has both a real fold and a surviving
+    part to declare."""
+    return SceneUnderstanding(
+        scene_type="server room", summary="a server room",
+        objects=list(RESTATED),
+        per_frame=[FrameUnderstanding(0, "server room", "",
+                                      ["white tiled floor", "server rack"]),
+                   FrameUnderstanding(60, "server room", "",
+                                      ["server racks", "server rack fan",
+                                       "dark wooden door"])])
+
+
 class _Prompter:
     """Just enough AutoPrompter to exercise the record writer — the VLM, the
     poses and the keyframes play no part in it."""
@@ -312,28 +360,46 @@ class _Prompter:
 
 
 def test_the_record_carries_the_raw_names_the_passes_and_the_folds(tmp_path):
+    """The record answers "where did this phrase go?", so it may only claim a
+    phrase went somewhere when it did.
+
+    Until 2026-09-21 a PART was removed, and `folded` — whose question is
+    literally "this phrase is not a prompt any more, where did it go?" — listed
+    it with the aliases. A part now keeps its own prompt ("segment
+    EVERYTHING"), so listing it there would say the opposite of what happened
+    to it. The relationship still has to travel, because it is provenance the
+    VLM proposed: it is declared in `part_of`, which says "still a prompt, and
+    known to be part of that one". `folded` keeps only the concepts that are
+    genuinely gone.
+    """
     answer = {"objects": [
-        {"name": "white tiled floor", "aliases": ["checkered floor tiles"],
-         "parts": []},
-        {"name": "black server rack", "aliases": [], "parts": ["server rack fan"]},
+        {"name": "server rack", "aliases": ["server racks"],
+         "parts": ["server rack fan"]},
+        {"name": "white tiled floor", "aliases": [], "parts": []},
         {"name": "dark wooden door", "aliases": [], "parts": []}]}
-    cons = consolidate(_Client(answer), "server room", PCCR, log=_quiet)
+    cons = consolidate(_Client(answer), "server room", RESTATED, log=_quiet)
     rec = _Prompter(tmp_path)._write_concepts_record(
-        _understanding(), PCCR, cons.objects, cons, "")
+        _understanding_restated(), RESTATED, cons.objects, cons, "")
     on_disk = json.loads((tmp_path / "autoprompt_concepts.json").read_text())
     assert on_disk == rec
     assert on_disk["origin"] == "vlm_proposed"          # the provenance rule
-    assert on_disk["raw"]["objects"] == PCCR
+    assert on_disk["raw"]["objects"] == RESTATED
     assert [f["frame_id"] for f in on_disk["raw"]["per_frame"]] == [0, 60]
     assert on_disk["raw"]["per_frame"][1]["objects"] == [
-        "checkered floor tiles", "server rack fan", "dark wooden door"]
+        "server racks", "server rack fan", "dark wooden door"]
     assert on_disk["consolidated"]["objects"] == cons.objects
     assert on_disk["consolidation"]["history"][0]["status"] == "applied"
-    # "what was folded into what", asked the way a reader asks it
-    assert on_disk["folded"]["checkered floor tiles"] == {
-        "into": "white tiled floor", "as": "alias"}
-    assert on_disk["folded"]["server rack fan"] == {
-        "into": "black server rack", "as": "part"}
+    # "what was folded into what", asked the way a reader asks it — and only
+    # the alias really left the list
+    assert on_disk["folded"] == {
+        "server racks": {"into": "server rack", "as": "alias"}}
+    assert "server racks" not in on_disk["consolidated"]["objects"]
+    # the part survived, so it is a RELATIONSHIP and not a fold
+    assert on_disk["part_of"] == {"server rack fan": "server rack"}
+    assert "server rack fan" in on_disk["consolidated"]["objects"]
+    assert not set(on_disk["folded"]) & set(on_disk["part_of"])
+    assert on_disk["consolidation"]["parts"] == {"server rack": ["server rack fan"]}
+    assert on_disk["consolidation"]["parts_kept_as_objects"] is True
     assert on_disk["parse_failed"] is False and on_disk["warning"] is None
     assert on_disk["prompt"] == ";".join(cons.objects)
 
