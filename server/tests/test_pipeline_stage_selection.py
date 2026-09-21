@@ -295,3 +295,33 @@ def test_every_stage_name_is_selectable():
     for sid in DEFAULT_STAGE_ORDER:
         picked = build_pipeline_stages(backend=BACKEND, stages=[sid.value])
         assert [s.id for s in picked if s.enabled] == [sid]
+
+
+def test_from_stage_is_a_range_not_a_naming():
+    """`from_stage` must not resurrect a stage the config switched off.
+
+    Measured 2026-09-21 while preparing the relaunch the user asked for
+    ("relanzar al menos desde cloudcompy para abajo completo, excluyendo el
+    cloudcompy"): `from_stage="vlm"` answered vlm, sam3, certify AND TSDF on a
+    session whose config says `pipeline.auto_tsdf: false` — "the run ends at
+    the cleaned cloud, the mesh is on demand" (USER 2026-08-28). A relaunch
+    meant to redo the segmentation would have ended in a two-hour mesh nobody
+    asked for.
+
+    Naming a stage in `stages=` is the opposite case: that IS asking for it,
+    and it still runs whatever the switch says.
+    """
+    from pipeline_manager import build_pipeline_stages, StageId
+
+    def _ids(**kw):
+        return [s.id for s in build_pipeline_stages(backend="vggtomega", **kw)
+                if s.enabled]
+
+    auto = _ids()
+    frm = _ids(from_stage="vlm")
+    assert StageId.TSDF not in auto, "the fixture's config no longer disables TSDF"
+    assert StageId.TSDF not in frm, "from_stage re-enabled a stage the config disabled"
+    # the range is exactly the tail of the automatic chain
+    assert frm == auto[auto.index(StageId.VLM):]
+    # naming it explicitly is a decision, and it is honoured
+    assert _ids(stages=["tsdf"]) == [StageId.TSDF]

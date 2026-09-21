@@ -1249,7 +1249,22 @@ def build_pipeline_stages(backend: Optional[str] = None,
                 f"stage '{first.value}' is not part of this pipeline "
                 f"(backend={backend}) — it runs "
                 f"{', '.join(s.value for s in order)}")
-        selection = order[order.index(first):]
+        # A RANGE, not a naming: "from the VLM down" means the stages the
+        # automatic chain would have run from there, not every stage that
+        # exists. Without this filter `from_stage="vlm"` answered
+        # vlm, sam3, certify, TSDF on a session whose config says
+        # `pipeline.auto_tsdf: false` — "the pipeline ends at the cleaned
+        # cloud, the mesh is on demand" (USER 2026-08-28) — and a relaunch
+        # meant to redo the segmentation would have ended in the two-hour
+        # mesh nobody asked for. Naming a stage in `stages=` is different:
+        # that IS asking for it, switch or no switch.
+        selection = [s for s in order[order.index(first):] if _auto_enabled(s)]
+        if not selection:
+            raise PipelineSelectionError(
+                f"from_stage '{first.value}': every stage from there on is "
+                f"disabled by the config switches (auto_segment / auto_tsdf / "
+                f"certify.auto_after_segmentation) — name them explicitly with "
+                f"stages= if you mean to override that")
     elif stages is not None:
         wanted = [_parse_stage(s) for s in stages]
         if not wanted:

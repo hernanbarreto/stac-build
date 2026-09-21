@@ -73,11 +73,13 @@ geométrica obligatoria en todo artefacto derivado."
   stale ones get a UI badge + Regenerate (never auto-regenerated). Depth
   corrections live in the `depth_correction.json` sidecar served ONLY through
   `segmentation/session_io.correct_depth` (DA3-anchor/Stray witness depth is
-  never corrected). Ledger `corrections.jsonl` is append-only (undone runs
-  keep their verdict; a new reconstruction resets the epoch but NEVER deletes
-  the ledger); `corrections/epoch_<N>.npz` + `python -m correction.replay`
-  reproduce any epoch bit-faithfully (keyed by frame_global → re-appliable to
-  a re-reconstruction).
+  never corrected). Ledger `corrections.jsonl` is append-only WITHIN a run
+  (undone runs keep their verdict), but it is NOT sacred: USER 2026-09-21
+  ("elimina esa premisa... si lo rehacemos no hace falta") — when the
+  segmentation and the epochs are regenerated the ledger goes with them, it
+  is not preserved across a re-run. `corrections/epoch_<N>.npz` +
+  `python -m correction.replay` reproduce any epoch bit-faithfully (keyed by
+  frame_global → re-appliable to a re-reconstruction).
 - Floor alignment is the same flow (kind=floor): per-keyframe anchors vs an
   explicit model — level | plane (default; real slopes survive) | profile —
   with step-demotion (real level changes preserved), anchor-normal smoothing
