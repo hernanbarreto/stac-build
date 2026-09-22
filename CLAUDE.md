@@ -286,6 +286,47 @@ Wired the same day (USER: *"arreglemos la escala en origen"* → B first):
   WALK (the axis its 2026-08-11 A/B never tested — it tested DEPTH, `s·z+b` and
   `a0·z+a1·z²`, and correctly found no structure there).
 
+## ⭐ RECONSTRUCTION = ONE PASS, FIXED 60/30 — USER DECISION 2026-09-22
+**"no quiero que haga dos pasadas de da3, despues vggt omega para luego ir otra
+vez a da3 y vggt omega pero con chunks, quiero que lo haga de una, si hay
+muchos kf lo chunkee y son menos que lo haga en uno solo siempre 60/30"** and
+**"no debe haber max walk, eso ya no aplica"**.
+
+`reconstruction.simple.chunk_frames: 60` is now BOTH the single-pass capacity
+and the chunk size, and it decides from the KEYFRAME COUNT alone, before any
+inference:
+- `n_kf <= 60` → ONE chunk, overlap 0, loop closure off — no seams.
+- `n_kf > 60` → chunked-metric DIRECTLY at 60/30 (`direct-chunked`), every chunk
+  metric-locked by its DA3 anchors, glued SE(3), SALAD loop closure on.
+
+60/30 is the VENDOR default, validated in the VGGT-Long paper and in
+`vendor/VGGT-Long/configs/{base_config,waymo,map_long_config}.yaml` (kitti is
+75/30). Our own `stac_vggtomega.yaml` says 120/60 and never decided anything,
+because the walk-based planner overrode it every chunked run.
+
+DELETED with the two-phase flow (do not bring back):
+- `max_walk_single_pass_m` (15 m) — the comfort limit that re-ran the WHOLE
+  reconstruction: a second DA3 round plus a second full Omega pass. On pccr
+  2026-08-31 the probe measured **44.1 m over a ~19 m real walk** and that one
+  number both fired the re-run and sized the chunks from the error (59/29).
+- `chunk_walk_m` (12 m) and `chunk_plan.plan_chunks` — chunk size in walked
+  METRES through that same walk — with the 45-kf re-densification it fed.
+- `max_frames_single_pass` (600) — the single-pass cap `chunk_frames` now IS.
+
+The walk is still MEASURED and reported (`walk_length_m`, stamped into
+`chunk_plan.json` after the pass): it is evidence, not a verdict. Reading it
+back against the real walk is what made the 2.3x over-measurement visible.
+
+The per-chunk DA3 anchors are now extracted in the SAME DA3 round as the scale
+anchors (`map_worker._anchor_files` union), because a fixed size makes the chunk
+layout known before inference — that is the second DA3 launch removed.
+
+DECLARED, unchanged by this: the per-chunk scale ladder still has one riser per
+seam, so its 1-sigma budget is `n_seams x sigma_seam_log` (pccr: 6 x 0.02 ~
+12 %, and it needs ~14 %). On pccr 60/30 gives the SAME 7 chunks / 6 seams the
+derived 59/29 gave, so this decision does not move that ceiling either way —
+the fix for it is a scale mode CONTINUOUS along the walk.
+
 ## ⭐ ARBITRARY NUMBERS LEDGER — USER 2026-09-14 ("en algún momento nos va a
 ## joder seguro")
 Every value below GATES a decision — it accepts, rejects, stops or caps

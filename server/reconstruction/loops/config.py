@@ -464,6 +464,11 @@ class CertifyConfig:
                                     # under gates.mode advisory the epoch is still applied and
                                     # the epoch selector remains the verdict (USER 2026-09-13)
     auto_after_segmentation: bool
+    deliverable_only: bool          # the stage runs the CORRECTION and publishes its
+                                    # epoch, and nothing else: no §9 before/after
+                                    # measurement, no iteration loop, no acta metrics
+                                    # (USER 2026-09-22 — the deliverable is epoch 0 and
+                                    # the corrected epoch 1, judged by eye)
     objective: ObjectiveWeights
     gates: CertifyGates
     scale: CertifyScale
@@ -868,7 +873,7 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
         unobserved_sigma_m=_num(vl, "unobserved_sigma_m", V, lo=0, lo_excl=True),
         unobserved_sigma_deg=_num(vl, "unobserved_sigma_deg", V, lo=0, lo_excl=True),
         window_kf=_num(vl, "window_kf", V, lo=1, integer=True),
-        max_pairs_per_instance=_num(vl, "max_pairs_per_instance", V, lo=1,
+        max_pairs_per_instance=_num(vl, "max_pairs_per_instance", V, lo=0,
                                     integer=True))
     ka = _sub(ce, "known_answer", P)
     K = P + ".known_answer"
@@ -901,6 +906,7 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
         eps=_num(ce, "eps", P, lo=0),
         regression_eps=_num(ce, "regression_eps", P, lo=0),
         auto_after_segmentation=_bool(ce, "auto_after_segmentation", P),
+        deliverable_only=_bool(ce, "deliverable_only", P),
         objective=objective, gates=gates, scale=scale, visit_loops=visit_loops,
         known_answer=known, envelope=envelope, determinism=determinism)
 

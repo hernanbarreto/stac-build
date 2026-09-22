@@ -64,6 +64,14 @@ class QwenLocalBackend(LLMBackend):
         gen = self._root_cfg.get("generation", {})
         self._default_temp = gen.get("temperature", 0.0)
         self._default_max_tokens = gen.get("max_tokens", 2048)
+        # REPRODUCIBILITY (USER 2026-09-22: *"debe ser lo mas determinista
+        # posible"*). temperature 0 already asks for the argmax, but the engine
+        # batches requests and the batch composition changes between runs: the
+        # reduction order changes, the logits move in the last decimal and a
+        # near-tie falls the other way — one token, one different phrase, a
+        # different vocabulary downstream. A fixed seed pins the sampler so
+        # everything the engine CAN make deterministic is.
+        self._seed = gen.get("seed")
 
     # ── OpenAI /chat/completions ────────────────────────────────────
     def chat(
@@ -81,6 +89,8 @@ class QwenLocalBackend(LLMBackend):
             "temperature": self._default_temp if temperature is None else temperature,
             "max_tokens": self._default_max_tokens if max_tokens is None else max_tokens,
         }
+        if self._seed is not None:
+            payload["seed"] = int(self._seed)
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice or "auto"

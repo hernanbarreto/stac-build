@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import time as _time
+import threading as _threading
 import subprocess
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -54,14 +56,42 @@ def extract_anchor_depths(frames_dir, output_dir, anchor_files: Iterable[str],
         f"({model_id}) — no streaming")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
-    for line in proc.stdout:
-        line = line.strip()
-        if line:
-            log(line)
-        if check_cancel is not None and check_cancel():
-            proc.terminate()
-            return 0
-    proc.wait()
+    # A LONG STAGE MUST SAY WHERE IT IS (USER 2026-09-22). The extractor prints
+    # almost nothing, and with every keyframe anchoring this runs for ~15 min on
+    # a 216-frame session; counting what it has already written on disk is the
+    # only honest progress — it is the work itself, not an estimate.
+    _t0 = _time.time()
+    _total = len(anchor_files)
+    _stop = _threading.Event()
+
+    def _heartbeat():
+        last = -1
+        while not _stop.wait(20.0):
+            try:
+                done = len(list(raw.glob("*_depth.npy")))
+            except Exception:                                # noqa: BLE001
+                continue
+            if done == last:
+                continue
+            last = done
+            el = _time.time() - _t0
+            eta = (el / done) * (_total - done) if done else 0.0
+            log(f"DA3 anchor: {done}/{_total} frames ({el:.0f}s elapsed"
+                + (f", ~{eta:.0f}s left)" if done else ")"))
+
+    _hb = _threading.Thread(target=_heartbeat, daemon=True)
+    _hb.start()
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                log(line)
+            if check_cancel is not None and check_cancel():
+                proc.terminate()
+                return 0
+        proc.wait()
+    finally:
+        _stop.set()
     if proc.returncode != 0:
         raise RuntimeError(f"DA3 anchor extraction exited with code {proc.returncode}")
 

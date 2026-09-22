@@ -281,7 +281,22 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     prev = None
     last_m = None
     last_fields = None
-    if apply:
+    # THE DELIVERABLE IS ONE CORRECTED EPOCH (USER 2026-09-22: *"el entregable es
+    # una sola epoch1 ademas del epoch0 que es la original ... no hace falta
+    # ahora correr el acta etc, que lleva muchisimo tiempo"*). With
+    # `certify.deliverable_only` the stage runs the CORRECTION and nothing else:
+    # no §9 before/after measurement, no iteration loop, no acta metrics. The
+    # epoch is still published transactionally and epoch 0 is still selectable,
+    # so the two states the user compares are both there. The measurement is
+    # what costs the time (≈25 % of the stage each pass) and it buys a verdict
+    # the user gives by eye at this stage of development.
+    _deliverable_only = bool(getattr(ccert, "deliverable_only", False))
+    if _deliverable_only:
+        n_iters = 0
+        log("[certify] deliverable-only: the correction runs and publishes its "
+            "epoch; the §9 measurement, the iteration loop and the acta metrics "
+            "are SKIPPED (certify.deliverable_only: true)")
+    if apply and not _deliverable_only:
         s0 = load_session(output_dir)
         i0 = _instances()
         prev = _measure_now(s0, i0, load_mask_store(output_dir) if i0 else None,
@@ -291,6 +306,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         log(f"[certify] before the correction: objective {prev['objective']:.4f} | "
             f"seams {prev['seam_residual']['median_m']} | closure {prev['closure']['median_m']}")
         del s0, i0
+    if apply:
 
         # THE CORRECTION (USER-VALIDATED, pccr 2026-09-19): depth first, then
         # the floor plane. No translation stage and no loop — see
@@ -632,6 +648,10 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
             f"points the audit marked out of place")
         acta["geometric_cleanup"] = {"applied": False, "reason": str(e)}
 
+    if _deliverable_only and not acta.get("stop_reason"):
+        acta["stop_reason"] = ("deliverable-only: correction applied and its epoch "
+                               "published; §9 measurement, iterations and acta "
+                               "metrics skipped by certify.deliverable_only")
     acta["metrics_final"] = (last_m if last_m is not None else
                              (prev if prev is not None else acta.get("metrics_initial")))
     acta["epoch_final"] = current_epoch(output_dir)

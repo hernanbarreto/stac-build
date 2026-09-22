@@ -75,3 +75,13 @@ def test_step_is_preserved_by_demotion(tmp_path):
     plat = y[x > 8.0]
     gap = float(np.median(plat) - np.median(main))
     assert abs(gap - 0.5) < 0.05, f"real step must survive: {gap:.3f} m"
+
+
+def test_the_tilt_bar_is_measured_not_a_constant():
+    src = (Path(__file__).resolve().parents[1] / "correction" / "floor.py").read_text()
+    assert "sigma_tilt" in src, "the session's own normal scatter must be measured"
+    i = src.index("sigma_tilt = ")
+    j = src.index("_tilt_bar = ")
+    assert i < j, "the scatter must be measured before the bar is built"
+    assert "max(float(cfg.floor.min_tilt_deg)" in src, \
+        "min_tilt_deg must be the FLOOR of the bar, not the bar"

@@ -1,8 +1,9 @@
 # STAC-Builder — chunked-metric Omega: unit tests (synthetic, no GPU).
 #
 # Covers the three pure pieces the two-phase pipeline stands on:
-#   1. chunk_plan — walk measurement, meter-sized chunk planning, anchor placement
-#      (every chunk must get anchors, and ranges must match VGGT-Long's slicing).
+#   1. chunk_plan — walk measurement, the FIXED-size chunk layout and anchor
+#      placement (every chunk must get anchors, and ranges must match VGGT-Long's
+#      slicing). Meter-sized planning was deleted 2026-09-22 with the two-phase flow.
 #   2. metric_lock — per-chunk scale recovery from synthetic DA3 anchors and its
 #      application to world_points / depth / extrinsics.
 #
@@ -20,7 +21,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
                                                 "vendor", "VGGT-Long")))
 
 from reconstruction.chunk_plan import (  # noqa: E402
-    walk_length_m, plan_chunks, chunk_ranges, plan_anchor_indices,
+    walk_length_m, chunk_ranges, plan_anchor_indices,
 )
 from loop_utils.metric_lock import anchor_ratio, chunk_scale, apply_scale  # noqa: E402
 
@@ -38,23 +39,6 @@ def test_walk_length():
             rows.append(" ".join(f"{v:.6f}" for v in M.reshape(-1)))
         p.write_text("\n".join(rows))
         assert abs(walk_length_m(p) - 10.0) < 1e-6
-
-
-def test_plan_chunks_by_meters():
-    # 100 kf over 100 m → 1 m/kf → 12 m chunks = 12 kf... clamped to min 24
-    size, ov = plan_chunks(100, walk_m=100.0, chunk_walk_m=12.0)
-    assert size == 24 and ov == 12
-    # 200 kf over 100 m → 0.5 m/kf → 12 m = 24 kf
-    size, ov = plan_chunks(200, walk_m=100.0, chunk_walk_m=12.0)
-    assert size == 24 and ov == 12
-    # dense scan: 300 kf over 30 m → 0.1 m/kf → 12 m = 120 kf
-    size, ov = plan_chunks(300, walk_m=30.0, chunk_walk_m=12.0)
-    assert size == 120 and ov == 60
-    # never exceeds the keyframe count or max_size
-    size, _ = plan_chunks(40, walk_m=200.0, chunk_walk_m=50.0)
-    assert size <= 40
-    size, _ = plan_chunks(1000, walk_m=10.0, chunk_walk_m=12.0)
-    assert size == 150                            # max clamp
 
 
 def test_chunk_ranges_match_vendor_slicing():
@@ -945,3 +929,52 @@ def test_chunk_field_verdict_gates():
     wild = xi.copy(); wild[:, 4] += np.linspace(0, 1.0, S)
     v_w = chunk_field_verdict(wild, taus, held)
     assert not v_w["bounded"]
+
+
+# ── the FIXED 60/30 policy (USER ORDER 2026-09-22) ───────────────────
+# *"no quiero que haga dos pasadas de da3, despues vggt omega para luego ir otra
+# vez a da3 y vggt omega pero con chunks, quiero que lo haga de una, si hay
+# muchos kf lo chunkee y son menos que lo haga en uno solo siempre 60/30"*.
+# What is asserted here is that the DECISION no longer consults the walk: the
+# walk probe measured 44.1 m on pccr's ~19 m walk and that one number both
+# triggered the second pass and sized the chunks from it.
+
+def test_the_fixed_size_is_the_vendor_default_and_the_overlap_is_half():
+    import yaml
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
+    n = int(cfg["reconstruction"]["simple"]["chunk_frames"])
+    assert n == 60, "the fixed chunk size is the vendor's validated default"
+    vendor = yaml.safe_load(
+        (Path(__file__).resolve().parents[2] / "vendor" / "VGGT-Long" / "configs"
+         / "base_config.yaml").read_text())["Model"]
+    assert n == int(vendor["chunk_size"]) and n // 2 == int(vendor["overlap"]), \
+        "60/30 must stay the vendor's own recommendation, not a number we invented"
+
+
+def test_one_pass_either_way_at_the_fixed_size():
+    """A scene at or under the fixed size is ONE chunk with no seam; over it, the
+    chunked layout is entered directly — and in neither case is there a second
+    pass to re-run, because nothing measured afterwards can change the size."""
+    assert chunk_ranges(60, 60, 30) == [(0, 60)]
+    assert chunk_ranges(45, 60, 30) == [(0, 45)]
+    over = chunk_ranges(216, 60, 30)               # pccr 2026-08-31
+    assert len(over) == 7 and over[0] == (0, 60) and over[-1] == (180, 216)
+    assert all(b - a <= 60 for a, b in over), "no chunk may exceed the fixed size"
+
+
+def test_every_chunk_of_the_fixed_layout_gets_its_anchors_before_inference():
+    """The per-chunk metric anchors are known from the KEYFRAME COUNT alone, which
+    is what lets them be extracted in the SAME DA3 round as the scale anchors —
+    the second DA3 launch existed only because the layout waited for the walk."""
+    idx = plan_anchor_indices(216, 60, 30, per_chunk=3)
+    assert idx == sorted(set(idx))
+    for start, end in chunk_ranges(216, 60, 30):
+        assert any(start <= i < end for i in idx), (start, end)
+
+
+def test_the_worker_extracts_both_anchor_sets_in_one_round():
+    src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
+    i = src.index("_cf_anchor = int(_simple_cfg.get(\"chunk_frames\", 0) or 0)")
+    j = src.index("_run_da3_anchor(pipe, frames_dir, output_dir, sorted(set(_missing))")
+    assert i < j, ("the per-chunk anchors must join _anchor_files BEFORE the DA3 "
+                   "extraction, or the second launch comes back")

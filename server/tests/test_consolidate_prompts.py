@@ -196,13 +196,46 @@ def test_the_ironmongery_of_a_door_is_not_the_door():
         assert not is_structural(p), p
 
 
-def test_the_pass_is_wired_into_the_simple_pipeline():
+def test_the_pass_groups_but_never_removes_a_prompt():
+    """USER 2026-09-22: *"tampoco segmento una puerta, de entrada una locura"*.
+
+    The pass still runs — its grouping is what labels the scene and what the
+    report shows — but it may not decide, from the WORDS alone and before
+    anything has been segmented, that two names are one object. On pccr
+    2026-09-22 it folded `doorway` into `glass door` and `desk` into `white
+    workbench`, and four of its five merges differed by COLOUR in their own
+    names (`white server cabinet` into `black server rack`, `red painted wall
+    section` into `white wall`). Neither object was ever segmented. Identity is
+    settled downstream, on the geometry.
+    """
     src = (Path(__file__).resolve().parents[1]
            / "segmentation" / "autoprompt" / "session_builder.py").read_text()
     assert "from .consolidate_prompts import consolidate" in src
+    assert "consolidation = consolidate(" in src, "the pass must still run"
+    assert "phrases = consolidation.objects" not in src, \
+        "the consolidated list may NOT replace the prompts — it groups them"
     i = src.index("consolidation = consolidate(")
-    assert src.index('prompt = ";".join(phrases)') > i, \
-        "the prompt must be built from the CONSOLIDATED list"
+    j = src.index("_grouped = list(consolidation.objects)", i)
+    assert j > i, "the grouping must be kept for labelling and for the report"
+
+
+def test_the_vocabulary_is_recorded_and_reusable():
+    """USER 2026-09-22: *"no debe cambiar en silencio, debe ser lo mas
+    determinista posible, debe ser reproducible"*. The engine cannot promise the
+    same tokens twice, so the guarantee is the artifact."""
+    src = (Path(__file__).resolve().parents[1]
+           / "segmentation" / "autoprompt" / "session_builder.py").read_text()
+    assert "autoprompt_concepts.json" in src, "the session must record its vocabulary"
+    assert "reuse_vocabulary" in src, "and be able to reuse it"
+    i = src.index("if _reused:")
+    j = src.index("if self.consolidate_prompts", i)
+    assert i < j, "a reused vocabulary must short-circuit the consolidation"
+    import yaml
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
+    assert cfg["autoprompt"]["reuse_vocabulary"] is True
+    assert cfg["semantic"]["generation"]["temperature"] == 0.0
+    assert cfg["semantic"]["generation"].get("seed") is not None, \
+        "the sampler must be pinned too"
 
 
 def test_the_config_carries_the_switch_and_the_bound():

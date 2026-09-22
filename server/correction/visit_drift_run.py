@@ -189,7 +189,8 @@ def measure_epoch(output_dir: Path, cfg, rep_m: float,
     label_of = {m.oid: m.label for m in masklets}
     cands, steps = vd.filter_chain(masklets, pm, ks, chain, cfg.min_points,
                                    cfg.min_walk_m, cfg.min_visit_share,
-                                   xyz=xyz, log=log)
+                                   xyz=xyz, log=log,
+                                   group_points=vd.fused_object_points(output_dir))
     rep["chain"] = steps
     if not cands:
         rep["scale_rows"] = []
@@ -386,11 +387,18 @@ def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
     tol = _depth_tol()
     vis = vd.Visibility(output_dir, xyz_new, session.ks, poses_new, K_all, tol)
 
+    # the "too small to be worth anything" test is about the OBJECT, not the
+    # mask: small masklets fuse into big objects (USER 2026-09-22)
+    _grp = vd.fused_object_points(output_dir)
+    if _grp:
+        log(f"  mask filter: the {cfg.visit_drift.min_points}-point minimum is "
+            f"judged on the FUSED object ({len(_grp)} masklet(s) mapped)")
     kill, frep = vd.cloud_filter_masklets(
         pm, masklets, session.ks, xyz_new, vis,
         cfg.visit_drift.min_points, cfg.visit_drift.min_visit_share,
         int(get_param("segmentation.mask_filter.max_frames_per_visit", 8)),
-        int(get_param("segmentation.mask_filter.dilate_px", 2)), log=log)
+        int(get_param("segmentation.mask_filter.dilate_px", 2)), log=log,
+        group_points=_grp)
     if not kill.any():
         log("  mask filter: every point is where its own mask says — nothing to do")
         return None

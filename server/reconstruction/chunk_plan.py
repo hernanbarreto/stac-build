@@ -1,11 +1,13 @@
 # STAC-Builder — chunked-metric Omega: walk measurement + chunk/anchor planning.
 #
-# Pure helpers (numpy only) behind the two-phase reconstruction:
-#   phase 1: single Omega pass over the motion keyframes (the probe — and the final
-#            result for short scans);
-#   phase 2: when the measured walk exceeds the comfort limit, re-run in chunks sized
-#            by WALKED METERS, each chunk metric-locked by DA3 anchors, glued SE(3),
-#            loop closure on.
+# Pure helpers (numpy only) behind the ONE-PASS reconstruction (USER ORDER
+# 2026-09-22): `reconstruction.simple.chunk_frames` is both the single-pass
+# capacity and the chunk size, decided from the keyframe COUNT before any
+# inference — at or under it one chunk with no overlap, over it chunked-metric at
+# 50 % overlap with every chunk metric-locked by DA3 anchors, glued SE(3), loop
+# closure on. `walk_length_m` stays because the walk is still worth REPORTING;
+# `plan_chunks` (chunk size from WALKED METERS) was deleted with the two-phase
+# flow — on pccr it read 44.1 m over a ~19 m walk and sized the chunks from it.
 #
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
@@ -30,24 +32,6 @@ def walk_length_m(poses_txt: Path) -> float:
     if len(centers) < 2:
         return 0.0
     return float(np.linalg.norm(np.diff(centers, axis=0), axis=1).sum())
-
-
-def plan_chunks(n_keyframes: int, walk_m: float, chunk_walk_m: float,
-                min_size: int = 24, max_size: int = 150) -> Tuple[int, int]:
-    """(chunk_size, overlap) in KEYFRAMES so each chunk covers ~chunk_walk_m of walk.
-
-    Keyframes are parallax-uniform, so count maps to walk through the measured
-    m/keyframe of THIS scan (walk_m / n_keyframes). 50% overlap. chunk_size is clamped:
-    below min_size the overlap alignment starves; above max_size the chunk re-enters
-    the drift regime the chunking exists to avoid.
-    """
-    if n_keyframes < 2 or walk_m <= 0 or chunk_walk_m <= 0:
-        raise ValueError("need n_keyframes>=2, walk_m>0, chunk_walk_m>0")
-    m_per_kf = walk_m / n_keyframes
-    size = int(round(chunk_walk_m / max(m_per_kf, 1e-6)))
-    size = max(min_size, min(max_size, size, n_keyframes))
-    overlap = size // 2
-    return size, overlap
 
 
 def chunk_ranges(n_keyframes: int, chunk_size: int, overlap: int) -> List[Tuple[int, int]]:

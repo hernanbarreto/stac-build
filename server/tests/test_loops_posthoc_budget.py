@@ -101,7 +101,22 @@ def test_an_empty_side_never_reaches_the_icp(tmp_path, monkeypatch):
 def test_the_cap_is_configured_not_hardcoded():
     from reconstruction.loops.config import load_loops_config
     c = load_loops_config()
-    assert c.certify.visit_loops.max_pairs_per_instance >= 1
+    assert c.certify.visit_loops.max_pairs_per_instance >= 0
     src = (Path(__file__).resolve().parents[1]
            / "reconstruction" / "certify" / "loops_posthoc.py").read_text()
     assert "_MAX_PAIRS_PER_INSTANCE" not in src, "the bound must come from config"
+
+
+def test_zero_means_no_cap(tmp_path, monkeypatch):
+    """USER 2026-09-22: *"no limites la cantidad de cierres y anclas nada si hay
+    duplicados cuanto mas mejor"*. The cap is a COMPUTE budget, so it must be
+    possible to switch it off entirely — and then every distinct pair of one
+    object is measured, however many it contributes."""
+    s = _Session(tmp_path)
+    _patch_indices(monkeypatch, s)
+    calls = []
+    monkeypatch.setattr(lp, "measure_copy",
+                        lambda a, b, cfg, seed=0: calls.append(1) or None)
+    cands = [_cand(10, 200 + k) for k in range(12)]     # 12 distinct pairs
+    lp.copy_scale_rows(s, cands, _scfg(), 15, 0, log=lambda m: None)
+    assert len(calls) == 12, f"0 must measure every pair, measured {len(calls)}"

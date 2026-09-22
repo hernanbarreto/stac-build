@@ -395,6 +395,19 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
     #      drift rate explains and more than the session can repeat.
     resid_local = raw_dist - trend_dist
     sigma_local = _robust_sigma(resid_local)
+    # ...and the same for the NORMALS: how much each keyframe's own measured
+    # floor normal disagrees with the trend its neighbours draw. That angle IS
+    # the normal-estimation noise of this session, measured on its own data —
+    # it replaces `min_tilt_deg`, a constant that decided whether the scene
+    # gets levelled at all (USER 2026-09-22: pccr's floor drifted 16.7 mm/m =
+    # 0.957 deg and lost to the 1.0 deg constant by four hundredths of a
+    # degree, so 216 keyframes were rotated by exactly 0.000 deg and 32 cm of
+    # slope over the walk stayed in the cloud).
+    _tilt_resid = np.array([
+        float(np.degrees(np.arccos(np.clip(
+            float(locals_[int(k)][0] @ trend_norm[int(k)]), -1, 1))))
+        for k in ks_sorted])
+    sigma_tilt = float(_robust_sigma(_tilt_resid - np.median(_tilt_resid)))
     rep_m = _session_repeatability(session, cfg)
     walk_of = _chainage(session)[ks_sorted]
     cut, drift_rate = _level_changes(trend_dist, walk_of, rep_m)
@@ -410,10 +423,29 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
             off = float(np.median(trend_dist[m_])) - ref_level
             if abs(off) - expl > rep_m:
                 step_seg[sg] = off
+                # A PRESERVED segment is height this stage decides NOT to
+                # correct, so it has to say what it keeps and on what evidence
+                # — the pccr epoch of 2026-09-22 preserved two of them and
+                # delivered a floor 2.8° tilted with 606 mm end to end, and
+                # nothing in the log said which stretch held it (USER: *"no
+                # dejes cabos sueltos"*).
+                _kfs = ks_sorted[m_]
+                log(f"    floor: LEVEL CHANGE kept — keyframes "
+                    f"{int(_kfs.min())}-{int(_kfs.max())} "
+                    f"({int(m_.sum())} anchor(s), walk "
+                    f"{float(np.median(walk_of[m_])):.1f} m) sit "
+                    f"{off*1000:+.0f} mm from the reference level; the "
+                    f"{drift_rate*1000:+.1f} mm/m drift explains "
+                    f"{expl*1000:.0f} mm of it, the remaining "
+                    f"{(abs(off)-expl)*1000:.0f} mm clears the session's "
+                    f"{rep_m*1000:.0f} mm repeatability → NOT corrected")
     log(f"  floor: local scatter {sigma_local*1000:.1f} mm (k "
         f"{cfg.floor.local_mad_k}), drift {drift_rate*1000:+.1f} mm/m, "
-        f"repeatability {rep_m*1000:.1f} mm — {int(cut.sum())} level "
-        f"change(s), {len(step_seg)} segment(s) preserved")
+        f"repeatability {rep_m*1000:.1f} mm, normal scatter "
+        f"{sigma_tilt:.3f}° → tilt bar "
+        f"{max(float(cfg.floor.min_tilt_deg), float(cfg.floor.local_mad_k)*sigma_tilt):.3f}° "
+        f"— {int(cut.sum())} level change(s), {len(step_seg)} segment(s) "
+        f"preserved")
 
     anchors: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
     for i, k in enumerate(ks_sorted):
@@ -443,11 +475,19 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
         n_t = ref_normal(k)
         tilt_off = float(np.degrees(np.arccos(
             np.clip(float(nrm @ n_t), -1, 1))))
-        if tilt_off >= cfg.floor.min_tilt_deg:
+        # A tilt is REAL when it is bigger than what this session's own normals
+        # scatter by — the same discipline the two tests above already follow
+        # (a MEASURED scale, never one number for both). `min_tilt_deg` is the
+        # floor of that bar, not the bar: set it to 0 and the measurement
+        # decides alone.
+        _tilt_bar = max(float(cfg.floor.min_tilt_deg),
+                        float(cfg.floor.local_mad_k) * sigma_tilt)
+        if tilt_off >= _tilt_bar:
             R = _rot_between(nrm, n_t)
             t = c_f - R @ c_f        # rotate about the local floor centroid
         else:
-            # below min_tilt_deg the trend tilt is noise: height only
+            # under the session's own normal noise the trend tilt is noise too:
+            # height only
             R = np.eye(3)
             t = np.zeros(3)
         t = t - dist * n_t           # land the trend height on the model

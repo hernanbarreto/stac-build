@@ -172,3 +172,42 @@ def test_full_observability_is_never_projected_with_or_without_about():
     for about in (None, np.array([4.0, 1.2, 7.8])):
         R2, t2 = project_solution(R, t, {"mode": "full"}, about=about)
         assert np.allclose(R2, R) and np.allclose(t2, t)
+
+
+def test_the_size_minimum_is_about_the_fused_object(tmp_path):
+    """USER 2026-09-22: *"pueden ser mascaras chicas que despues se fusionan ...
+    pero si queda un objeto de menos de 1000 puntos no sirve de nada"*.
+
+    A 300-point masklet that is one fragment of a 4.6 M-point floor is not a
+    small object; deleting it erodes the floor. Measured on pccr 2026-09-22: 41
+    masklets were dropped for being under 1000 points and not one of the
+    objects they belong to was under it.
+    """
+    import json
+    import sys
+    from pathlib import Path as _P
+    sys.path.insert(0, str(_P(__file__).resolve().parents[1]))
+    from correction import visit_drift as vd
+
+    (tmp_path / "segmentation_result.json").write_text(json.dumps({
+        "instances": [{"instance_id": 44, "label": "floor", "total_points": 4_597_829},
+                      {"instance_id": 9, "label": "screw", "total_points": 120}],
+        "absorbed": {"1": {"into": 44}, "2": {"into": 1}, "7": {"into": None}},
+    }))
+    g = vd.fused_object_points(tmp_path)
+    assert g[43] == 4_597_829, "the surviving masklet keeps its object's size"
+    assert g[0] == 4_597_829, "an absorbed masklet inherits the object it went into"
+    assert g[1] == 4_597_829, "...through a chain of absorptions, too"
+    assert g[8] == 120, "an object that really is tiny stays tiny"
+    assert 6 not in g, "an absorbed entry with no target is not invented"
+
+
+def test_no_fused_result_means_the_old_per_mask_rule(tmp_path):
+    """Without segmentation_result.json there is nothing to group by, and the
+    filter must fall back to judging the masklet on its own — never crash and
+    never silently keep everything."""
+    import sys
+    from pathlib import Path as _P
+    sys.path.insert(0, str(_P(__file__).resolve().parents[1]))
+    from correction import visit_drift as vd
+    assert vd.fused_object_points(tmp_path) == {}

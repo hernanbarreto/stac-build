@@ -358,12 +358,19 @@ def filter_chain(masklets: Sequence[Masklet], points_by_oid: Dict[int, np.ndarra
                  ks_of_point: np.ndarray, chainage_kf: np.ndarray,
                  min_points: int, min_walk_m: float, min_visit_share: float,
                  xyz: Optional[np.ndarray] = None,
-                 log: Callable[[str], None] = print) -> Tuple[List[Candidate], dict]:
+                 log: Callable[[str], None] = print,
+                 group_points: Optional[Dict[int, int]] = None
+                 ) -> Tuple[List[Candidate], dict]:
     """The masklets that can testify about a pose error, and why the rest cannot.
 
     The chain, in order, each rule applied to what the previous one left:
 
-      1. more than ``min_points`` points
+      1. more than ``min_points`` points — of the FUSED OBJECT when
+         ``group_points`` says which one the masklet ended up in (USER
+         2026-09-22: a small mask that fuses into a big object is a piece of a
+         big object, and the size test is about the object). Whether the
+         masklet's own silhouette can then be measured is decided later, by
+         the determination test, which is a measurement and not a cap
       2. two or more visits
       3. drop every visit less than ``min_walk_m`` of WALK from the previous
          one — the visit, not the object; then re-count
@@ -377,7 +384,11 @@ def filter_chain(masklets: Sequence[Masklet], points_by_oid: Dict[int, np.ndarra
              "visits_dropped_close": 0, "after_close": 0,
              "visits_dropped_share": 0, "after_share": 0}
 
-    a = [m for m in masklets if len(points_by_oid.get(m.oid, ())) > int(min_points)]
+    def _size(m) -> int:
+        own = len(points_by_oid.get(m.oid, ()))
+        return int((group_points or {}).get(int(m.oid), own))
+
+    a = [m for m in masklets if _size(m) > int(min_points)]
     steps["enough_points"] = len(a)
     b = [m for m in a if m.n_visits >= 2]
     steps["two_visits"] = len(b)
@@ -1093,12 +1104,65 @@ class FilterReport:
                 "detail": self.detail[:50], "provenance": "tool_measured"}
 
 
+def fused_object_points(output_dir) -> Dict[int, int]:
+    """oid → how many points the FUSED object it ends up in has.
+
+    The matcher groups masklets into the session's objects
+    (`segmentation_result.json`: `instances` + `absorbed`, which names the
+    instance each absorbed one went `into`). A masklet is small; the object it
+    belongs to need not be, and the "too small to be worth anything" test is
+    about the OBJECT (USER 2026-09-22). Returns {} when the result is missing —
+    the caller then judges the masklet on its own, as before.
+    """
+    import json as _json
+    p = Path(output_dir) / "segmentation_result.json"
+    if not p.exists():
+        return {}
+    try:
+        d = _json.loads(p.read_text())
+    except Exception:                                        # noqa: BLE001
+        return {}
+    size: Dict[int, int] = {}
+    for inst in d.get("instances") or []:
+        iid = int(inst.get("instance_id", inst.get("id", -1)))
+        n = inst.get("total_points")
+        if n is None:
+            n = len(inst.get("globalIndices") or ())
+        size[iid] = int(n)
+    absorbed = {}
+    for k, v in (d.get("absorbed") or {}).items():
+        into = (v or {}).get("into")
+        if into is None:
+            continue
+        try:
+            absorbed[int(k)] = int(into)
+        except (TypeError, ValueError):
+            continue
+
+    def _root(iid: int, _seen=None) -> int:
+        _seen = _seen or set()
+        while iid in absorbed and absorbed[iid] >= 0 and iid not in _seen:
+            _seen.add(iid)
+            iid = absorbed[iid]
+        return iid
+
+    out: Dict[int, int] = {}
+    for iid in set(list(size) + list(absorbed)):
+        r = _root(int(iid))
+        n = size.get(r)
+        if n is None:
+            continue
+        out[int(iid) - 1] = int(n)          # mask store oid = instance_id - 1
+    return out
+
+
 def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
                           masklets: Sequence[Masklet], ks_of_point: np.ndarray,
                           xyz: np.ndarray, vis: "Visibility",
                           min_points: int, min_visit_share: float,
                           max_frames_per_visit: int, dilate_px: int,
-                          log: Callable[[str], None] = print
+                          log: Callable[[str], None] = print,
+                          group_points: Optional[Dict[int, int]] = None
                           ) -> Tuple[np.ndarray, FilterReport]:
     """STEP 12 — which points leave the cloud, once the pose is corrected.
 
@@ -1113,7 +1177,14 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
       · a point that CLAIMS to be part of an object and, with the pose already
         corrected, still lands outside that object's mask in every view that
         saw it, is not part of it
-      · a masklet under ``min_points`` cannot be measured and keeps nothing
+      · an object under ``min_points`` keeps nothing — judged on the FUSED
+        object when ``group_points`` says which masklets ended up in the same
+        one (USER 2026-09-22: *"podriamos objetarlo luego de la union de
+        segmentation ... porque pueden ser mascaras chicas que despues se
+        fusionan ... pero si queda un objeto de menos de 1000 puntos no sirve
+        de nada"*). A 300-point masklet that is one fragment of a 4.6 M-point
+        floor is not a small object; it is a piece of a large one, and
+        deleting it erodes the floor
       · a visit contributing at most ``min_visit_share`` of its masklet grazed
         it and keeps nothing
 
@@ -1145,11 +1216,15 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
         seg[idx] = True
         m = by_oid.get(int(oid))
         label = m.label if m is not None else "object"
-        if len(idx) < int(min_points):
+        _own = len(idx)
+        _grp = int((group_points or {}).get(int(oid), _own))
+        if _grp < int(min_points):
             rep.dropped_objects += 1
             rep.detail.append({"oid": int(oid), "label": label,
-                               "reason": f"masklet under {min_points} points",
-                               "points": int(len(idx))})
+                               "reason": (f"object under {min_points} points"
+                                          + (f" (masklet {_own}, fused object "
+                                             f"{_grp})" if _grp != _own else "")),
+                               "points": int(_own)})
             continue
         ks = ks_of_point[idx]
         total = len(idx)

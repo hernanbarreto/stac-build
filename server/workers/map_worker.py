@@ -1488,7 +1488,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # is converted to the DA3 layout by convert_stray_to_da3.py and detected as done).
     _anchor_files = None
     if _simple_on and _scale_align_on and _sel_files:
-        _k = int(_simple_cfg.get("scale_anchor_frames", 12) or 12)
+        # 0 (or >= the selection) = EVERY selected keyframe anchors — the
+        # `or 12` that used to sit here turned a deliberate 0 back into 12.
+        _k = int(_simple_cfg.get("scale_anchor_frames", 12))
         if 1 < _k < _n_selected:
             _idx = sorted({round(i * (_n_selected - 1) / (_k - 1)) for i in range(_k)})
             _anchor_files = [_sel_files[int(i)] for i in _idx]
@@ -1500,6 +1502,31 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                            "selected_files": _anchor_files}, _f)
             pipe.send_log(f"SIMPLE: DA3 metric anchor on {len(_anchor_files)}/{_n_selected} "
                           f"evenly-spread frames (scale is one scalar — the rest is waste)")
+        # ONE pass, ONE DA3 round — USER ORDER 2026-09-22: *"no quiero que haga
+        # dos pasadas de da3, despues vggt omega para luego ir otra vez a da3 y
+        # vggt omega pero con chunks, quiero que lo haga de una"*. With a FIXED
+        # chunk size the chunk layout, and therefore the per-chunk metric
+        # anchors, is known BEFORE any inference — so they are extracted in THIS
+        # round instead of costing a second DA3 launch (model load included) in
+        # between the two Omega passes the walk probe used to need.
+        _cf_anchor = int(_simple_cfg.get("chunk_frames", 0) or 0)
+        if _anchor_files and _cf_anchor and _n_selected > _cf_anchor:
+            from reconstruction.chunk_plan import plan_anchor_indices as _pai
+            _chunk_anchor_files = [
+                _sel_files[i] for i in _pai(_n_selected, _cf_anchor, _cf_anchor // 2,
+                                            int(_simple_cfg.get("chunk_anchors", 3)))]
+            _extra = sorted(set(_chunk_anchor_files) - set(_anchor_files))
+            if _extra:
+                _anchor_files = sorted(set(_anchor_files) | set(_extra))
+                with open(output_dir / "scale_anchor_frames.json", "w") as _f:
+                    json.dump({"version": "2.0",
+                               "method": f"scale_anchor_{_k}+chunk_{_cf_anchor}",
+                               "total_frames": _n_selected,
+                               "selected_count": len(_anchor_files),
+                               "selected_files": _anchor_files}, _f)
+                pipe.send_log(f"SIMPLE: + {len(_extra)} per-chunk anchor(s) for the "
+                              f"{_cf_anchor}/{_cf_anchor // 2} layout in the SAME DA3 "
+                              f"round → {len(_anchor_files)} frames, ONE extraction")
     if _scale_align_on:
         pipe.send_progress(6, "VGGT-Omega: extracting DA3 metric depth (per-frame)...",
                            stage="reconstruction")
@@ -1530,22 +1557,24 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         pipe.send_log("scale_align OFF → skipping DA3 (its only role here is the metric "
                       "anchor for scale_align) — running Omega ONLY")
 
-    # ── VGGT-Long with the Omega backbone — TWO-PHASE ──
-    # Phase 1: ONE pass over the motion keyframes. For short walks this IS the result
-    # (no windows → no seams → no onion; validated vs the web demo on test2). It is
-    # ALSO the probe: the metric trajectory it yields measures the real walk length.
-    # Phase 2 (walk > max_walk_single_pass_m): Omega drifts ~1.3 cm/m on long walks
-    # (feed-forward, gauge-anchored at frame 0, no global correction — measured on
-    # test4). Re-run CHUNKED-METRIC: chunks sized by walked meters, each metric-locked
-    # to DA3 anchors BEFORE alignment, glued SE(3) (scale is not negotiable — the Sim3
-    # scale freedom is what produced the onion), SALAD loop closure + pose graph on.
-    from reconstruction.chunk_plan import (walk_length_m, plan_chunks,
-                                           plan_anchor_indices,
+    # ── VGGT-Long with the Omega backbone — ONE PASS ──
+    # USER ORDER 2026-09-22: *"quiero que lo haga de una, si hay muchos kf lo chunkee
+    # y son menos que lo haga en uno solo siempre 60/30"*. `chunk_frames` decides,
+    # from the KEYFRAME COUNT alone, before any inference:
+    #   n_kf <= chunk_frames → ONE chunk, overlap 0, loop closure off: no seams.
+    #   n_kf >  chunk_frames → chunked-metric DIRECTLY at chunk_frames/2 overlap,
+    #     each chunk metric-locked to DA3 anchors BEFORE alignment, glued SE(3)
+    #     (scale is not negotiable — the Sim3 freedom is what produced the onion),
+    #     SALAD loop closure + pose graph on.
+    # There is NO second pass and NO walk comfort limit. The walk USED to decide
+    # both (`max_walk_single_pass_m`, `chunk_walk_m` — both REMOVED): it measured
+    # 44.1 m on pccr's ~19 m walk and that one number re-ran the whole
+    # reconstruction AND sized its chunks from the error. The walk is still
+    # measured and reported — it is evidence, not a verdict.
+    from reconstruction.chunk_plan import (walk_length_m, plan_anchor_indices,
                                            chunk_ranges)
     vggt_config = _build_vggtomega_config(config)
     _va_cfg = recon_cfg.get("vggtomega", {}) or {}
-    _max_walk = float(_simple_cfg.get("max_walk_single_pass_m", 25.0))
-    _chunk_walk = float(_simple_cfg.get("chunk_walk_m", 12.0))
     _anch_per_chunk = int(_simple_cfg.get("chunk_anchors", 3))
     _anchor_dir = output_dir / "da3_run" / "results_output"
 
@@ -1751,59 +1780,52 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         return True
 
     _chunked_already = False
-    # USER ORDER 2026-09-04: ONE FIXED chunk size for EVERY scene — the largest
-    # that fits the GPU with real headroom (measured ~0.086 GB/frame + ~4 GB
-    # base on the A6000 48 GB: 500 frames ≈ 47 GB = at the limit; 450 ≈ 42.7 GB
-    # with ~5 GB free). Small scene → ONE chunk (maybe with room to spare);
-    # large scene → several chunks; overlap ALWAYS 50%. No dynamic sizing —
-    # identical behaviour run to run. Supersedes: the free-VRAM fit probe, the
-    # 60-frame chunked cap, and phase 2's walk-based plan_chunks/re-densify
-    # (all kept in code, short-circuited while chunk_frames > 0).
-    _chunk_cfg = int(_simple_cfg.get("chunk_frames", 450) or 0)
+    # ONE FIXED chunk size for EVERY scene, overlap ALWAYS 50% — 60/30 is the
+    # VENDOR default (vendor/VGGT-Long/configs/{base_config,waymo,map_long_config}
+    # .yaml and the paper). The size is a DECLARED capacity, not a fit probe and
+    # not a measurement: identical behaviour run to run, and the only thing the
+    # scene decides is HOW MANY chunks that capacity needs.
+    _chunk_cfg = int(_simple_cfg.get("chunk_frames", 0) or 0)
+    if _chunk_cfg < 2:
+        raise RuntimeError("reconstruction.simple.chunk_frames must be >= 2: it is "
+                           "the single-pass capacity AND the chunk size (USER ORDER "
+                           "2026-09-22 — one pass, fixed 60/30)")
     if _simple_on and _n_selected:
-        _max_sp = int(_simple_cfg.get("max_frames_single_pass", 600) or 600)
         _free = _gpu_free_gb()
-        _fits = max(2, int((_free - 4.0) / 0.086)) if _free is not None else _max_sp
-        if _chunk_cfg:
-            _need = 4.0 + 0.086 * _chunk_cfg
-            if _free is not None and _free < _need:
-                pipe.send_log(f"WARNING: free VRAM {_free:.1f} GB < {_need:.1f} GB "
-                              f"needed for {_chunk_cfg}-frame chunks — NOT resizing "
-                              f"(fixed-size policy): free the GPU or lower "
-                              f"vggtomega.simple.chunk_frames", level="warning")
-            _single_cap = _chunk_cfg
-        else:
-            _single_cap = min(_max_sp, _fits)
-        if _n_selected <= _single_cap:
+        _need = 4.0 + 0.086 * _chunk_cfg
+        if _free is not None and _free < _need:
+            pipe.send_log(f"WARNING: free VRAM {_free:.1f} GB < {_need:.1f} GB "
+                          f"needed for {_chunk_cfg}-frame chunks — NOT resizing "
+                          f"(fixed-size policy): free the GPU or lower "
+                          f"reconstruction.simple.chunk_frames", level="warning")
+        if _n_selected <= _chunk_cfg:
             vggt_config["Model"]["chunk_size"] = max(_n_selected, 2)
             vggt_config["Model"]["overlap"] = 0
             vggt_config["Model"]["loop_enable"] = False
             # single pass = no chunks: a stale plan from a previous chunked run
             # would lie to the correction module
             (output_dir / "chunk_plan.json").unlink(missing_ok=True)
-            pipe.send_log(f"SIMPLE single-pass: {_n_selected} frames ≤ chunk "
-                          f"capacity {_single_cap} → ONE chunk (no windows → no "
-                          f"seams). Walk length measured after — a walk over "
-                          f"{_max_walk:g} m re-runs chunked-metric.")
+            pipe.send_log(f"SIMPLE single-pass: {_n_selected} keyframes ≤ "
+                          f"{_chunk_cfg} → ONE chunk, no overlap, no seams. "
+                          f"Nothing measured afterwards re-runs it.")
         elif _scale_align_on:
-            # too many frames for one pass → chunked-metric DIRECTLY with the
-            # FIXED chunk size (legacy: max(24, min(60, fits)) by free VRAM)
-            _chunk = _chunk_cfg if _chunk_cfg else max(24, min(60, _fits))
-            _ov = _chunk // 2
+            _ov = _chunk_cfg // 2
             _chunked_already = True
-            _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov,
+            _anchor_idx = plan_anchor_indices(_n_selected, _chunk_cfg, _ov,
                                               _anch_per_chunk)
             _ensure_anchors([_sel_files[i] for i in _anchor_idx])
-            _apply_chunked_metric(vggt_config, _chunk, _ov)
-            _persist_chunk_plan(_chunk, _ov, _n_selected, "direct-chunked")
+            _apply_chunked_metric(vggt_config, _chunk_cfg, _ov)
+            _persist_chunk_plan(_chunk_cfg, _ov, _n_selected, "direct-chunked")
+            pipe.send_log(f"SIMPLE chunked-metric: {_n_selected} keyframes > "
+                          f"{_chunk_cfg} → "
+                          f"{len(chunk_ranges(_n_selected, _chunk_cfg, _ov))} chunks "
+                          f"of {_chunk_cfg} (overlap {_ov}), ONE pass")
         else:
-            _chunk = _chunk_cfg if _chunk_cfg else max(
-                min(int(vggt_config["Model"]["chunk_size"]), _fits), 50)
-            vggt_config["Model"]["chunk_size"] = _chunk
-            vggt_config["Model"]["overlap"] = _chunk // 2
-            pipe.send_log(f"SIMPLE: {_n_selected} frames exceed one pass and scale_align "
-                          f"is OFF → legacy windowed mode ({_chunk}/{_chunk // 2})",
-                          level="warning")
+            vggt_config["Model"]["chunk_size"] = _chunk_cfg
+            vggt_config["Model"]["overlap"] = _chunk_cfg // 2
+            pipe.send_log(f"SIMPLE: {_n_selected} keyframes > {_chunk_cfg} and "
+                          f"scale_align is OFF → windowed mode without the metric "
+                          f"lock ({_chunk_cfg}/{_chunk_cfg // 2})", level="warning")
         _apply_conf_filter(vggt_config)
     if not _omega_pass(vggt_config, "chunked-metric" if _chunked_already else "single-pass"):
         return
@@ -1899,82 +1921,25 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _walk_m = _metricize_and_orient(vggt_config, "chunked-metric" if _chunked_already
                                     else "single-pass")
 
-    # ── PHASE 2: the probe says the walk exceeds Omega's comfort range → re-run
-    # chunked-metric. The comfort limit is a config parameter (25 m default): Omega is
-    # excellent on short walks and drifts ~1.3 cm/m past them (measured, test4).
-    if (_simple_on and not _chunked_already and _walk_m > _max_walk
-            and _n_selected >= 24):
+    # The walk lands in the plan as EVIDENCE (the plan is written before the pass,
+    # so the size never waited for it). Reading it back against the real walk is
+    # how the 2.3x over-measurement became visible at all.
+    _plan_path = output_dir / "chunk_plan.json"
+    if _plan_path.exists():
+        try:
+            _plan = json.loads(_plan_path.read_text())
+            _plan["walk_m"] = round(float(_walk_m), 2)
+            _plan_path.write_text(json.dumps(_plan, indent=1))
+        except Exception as _e:  # noqa: BLE001
+            pipe.send_log(f"[chunk-plan] could not stamp the measured walk ({_e})",
+                          level="warning")
 
-        # Re-select keyframes DENSER for the chunked pass: with sparse keyframes
-        # (big m/kf) a minimum-size chunk covers far more walk than chunk_walk_m —
-        # e.g. 66 kf over 81 m gives 1.2 m/kf, so a 24-kf chunk spans 29 m. Target
-        # ~30 kf per chunk: quantum scales linearly with the desired kf spacing.
-        # Within a 12 m chunk this added density is HARMLESS (the drift-amplifying
-        # redundancy is a long-sequence effect; 30-frame passes are the demo regime).
-        # 45 kf per 12 m chunk (user-requested density bump from 30, 2026-07-11):
-        # cloud density scales with keyframes/metre; chunk_size grows with it so
-        # each chunk still spans chunk_walk_m. VRAM is ample (~0.086 GB/frame);
-        # inference cost grows ~quadratically per chunk. Density is only useful
-        # WITH the fusion stages active (blend/consensus) — otherwise extra frames
-        # add fuzz layers, not signal.
-        _kf_per_chunk = 45
-        _m_per_kf = _walk_m / max(_n_selected, 1)
-        _desired_m_per_kf = _chunk_walk / _kf_per_chunk
-        # fixed-size policy (USER 2026-09-04): 12-m chunks no longer exist, so
-        # the 45-kf re-densification has no target — keep the selected keyframes
-        if not _chunk_cfg and _desired_m_per_kf < _m_per_kf * 0.95:
-            _q1 = float(_simple_cfg.get("keyframe_motion_quantum", 250.0))
-            _q2 = max(20.0, _q1 * _desired_m_per_kf / _m_per_kf)
-            _chosen2, _n_total2, _ = _motion_keyframes(frames_dir, _q2)
-            if len(_chosen2) > _n_selected:
-                with open(selected_frames_path, "w") as _f:
-                    json.dump({"version": "2.0", "method": f"motion_{_q2:g}_chunked",
-                               "total_frames": _n_total2,
-                               "selected_count": len(_chosen2),
-                               "selected_files": _chosen2}, _f)
-                pipe.send_log(f"[chunk-plan] re-selected {len(_chosen2)} keyframes "
-                              f"(quantum {_q1:g}→{_q2:.0f}) so each {_chunk_walk:g} m "
-                              f"chunk holds ~{_kf_per_chunk} keyframes")
-                _sel_files = _chosen2
-                _n_selected = len(_chosen2)
-        if _chunk_cfg:
-            _chunk, _ov = _chunk_cfg, _chunk_cfg // 2
-        else:
-            _chunk, _ov = plan_chunks(_n_selected, _walk_m, _chunk_walk)
-        if _chunk < _n_selected:
-            pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > comfort "
-                          f"{_max_walk:g} m → phase 2: chunked-metric re-run "
-                          f"({_chunk} kf/chunk, overlap {_ov})")
-            _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov,
-                                              _anch_per_chunk)
-            _ensure_anchors([_sel_files[i] for i in _anchor_idx])
-            # wipe phase-1 reconstruction artifacts (NOT da3_run — the anchors live there)
-            for _pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
-                for _f in output_dir.glob(_pat):
-                    _f.unlink(missing_ok=True)
-            for _name in ("maplong_run", "omega_run", "frame_list.json", "intrinsic.txt",
-                          "camera_poses.txt", "camera_poses.txt.prescale",
-                          "camera_poses.txt.preorient", "camera_frames.txt",
-                          "camera_poses_mapanything.json",
-                          ".metric_scale_applied", ".orientation_applied"):
-                _t = output_dir / _name
-                if _t.is_dir():
-                    shutil.rmtree(_t, ignore_errors=True)
-                elif _t.exists():
-                    _t.unlink()
-            vggt_config = _build_vggtomega_config(config)
-            _apply_chunked_metric(vggt_config, _chunk, _ov)
-            _persist_chunk_plan(_chunk, _ov, _n_selected, "chunked-metric",
-                                _walk=_walk_m)
-            _apply_conf_filter(vggt_config)
-            _chunked_already = True
-            if not _omega_pass(vggt_config, "chunked-metric"):
-                return
-            _walk_m = _metricize_and_orient(vggt_config, "chunked-metric")
-        else:
-            pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > comfort {_max_walk:g} m "
-                          f"but only {_n_selected} keyframes (one chunk) — keeping the "
-                          f"single pass", level="warning")
+    # NO PHASE 2. The walk is measured and reported by _metricize_and_orient; it
+    # does not re-run anything (USER ORDER 2026-09-22). What it replaced: a
+    # second DA3 round + a second full Omega pass, triggered and sized by a walk
+    # that over-measured pccr 44.1 m against a ~19 m real walk — the same number
+    # that then set 59 kf/chunk. Deleted with it: the 45-kf re-densification
+    # (its target, chunk_walk_m, no longer exists) and plan_chunks.
 
     # Success → free da3_run when the TSDF won't use it (depth_source not DA3-based).
     _ds = str((config.get("tsdf", {}) or {}).get("depth_source", "auto")).lower()

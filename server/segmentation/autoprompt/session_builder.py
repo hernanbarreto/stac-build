@@ -86,6 +86,7 @@ class AutoPrompter:
         self.understand_cover_overlap = float(cfg.get("understand_cover_overlap", 0.50))
         self.consolidate_prompts = bool(cfg.get("consolidate_prompts", True))
         self.consolidate_passes = int(cfg.get("consolidate_passes", 3))
+        self.reuse_vocabulary = bool(cfg.get("reuse_vocabulary", True))
         self.confidence_threshold = cfg.get("confidence_threshold", 0.5)
         self.iou_threshold = cfg.get("association_iou_threshold", 0.25)
         self.assumed_depth_m = cfg.get("assumed_depth_m", 5.0)
@@ -295,6 +296,29 @@ class AutoPrompter:
             if not phrases:
                 raise RuntimeError("scene understanding produced no objects — "
                                    "cannot build SAM3 prompts")
+            # THE SESSION'S VOCABULARY IS AN ARTIFACT (USER 2026-09-22): once
+            # written it is the answer, so re-running the semantic stages on the
+            # same session segments the same concepts. Only the list is reused —
+            # the understanding still runs and still describes the scene.
+            _rec_path = self.output_dir / "autoprompt_concepts.json"
+            _reused = None
+            if getattr(self, "reuse_vocabulary", False) and _rec_path.exists():
+                try:
+                    _prev = json.loads(_rec_path.read_text())
+                    _reused = [p for p in (_prev.get("prompts") or []) if p and p.strip()]
+                except Exception as _e:                      # noqa: BLE001
+                    print(f"[autoprompt] ⚠ could not read the session vocabulary "
+                          f"({_e}) — deriving it again")
+                    _reused = None
+            if _reused:
+                print(f"[autoprompt] ♻ session vocabulary REUSED: "
+                      f"{len(_reused)} concept(s) from autoprompt_concepts.json "
+                      f"(the understanding named {len(phrases)} this time) — "
+                      f"autoprompt.reuse_vocabulary")
+                phrases = _reused
+                consolidation = None
+                prompt = ";".join(phrases)
+                prog(25, f"{len(phrases)} concepts (reused)")
             # ── the CONSOLIDATION pass (USER 2026-09-16) ─────────────────
             # The understanding ran frame by frame and no frame ever saw the
             # others' answers, so the union carries the same object under
@@ -304,18 +328,75 @@ class AutoPrompter:
             # one thing is a language judgement over the WHOLE list, which is
             # exactly what a per-frame prompt can never have.
             consolidation = None
-            if self.consolidate_prompts and len(phrases) > 1:
+            if self.consolidate_prompts and len(phrases) > 1 and not _reused:
                 from .consolidate_prompts import consolidate
                 prog(23, f"consolidating {len(phrases)} concepts")
                 consolidation = consolidate(
                     client, understanding.scene_type if understanding else "",
                     phrases, max_passes=self.consolidate_passes,
                     log=lambda m: print(f"[autoprompt] {m}"))
-                phrases = consolidation.objects
+                # THE CONSOLIDATION GROUPS, IT DOES NOT DELETE (USER 2026-09-22:
+                # *"tampoco segmento una puerta, de entrada una locura"* ... *"no
+                # lo fuerces sino que debe ser generico"*). Every phrase the
+                # understanding produced still becomes a SAM3 prompt; what the
+                # pass returns is the GROUPING, which travels in
+                # prompt_consolidation.json for labelling and for the report.
+                #
+                # WHY: deciding that two WORDS name one thing, before anything
+                # has been segmented, throws away the object itself when the
+                # judgement is wrong — and it was wrong on its own evidence.
+                # pccr 2026-09-22, verbatim from the run's own file:
+                #     glass door        <- doorway
+                #     white workbench   <- white table, desk
+                #     black server rack <- white server cabinet
+                #     white wall        <- red painted wall section
+                #     white tiled floor <- dark gray tiled floor patch
+                # Four of those five differ by COLOUR in their own names. The
+                # structural rescue (`is_structural`) could not help: it only
+                # protects a phrase filed as somebody's PART, never one filed as
+                # somebody's ALIAS, so 'doorway' went with no warning.
+                # The identity question is not a language question — it is
+                # settled downstream on the GEOMETRY, by the mutual-overlap test
+                # over the instances' own points (`segmentation.dedupe_overlap`,
+                # measured on all 2,926 instance pairs of this very scan) and by
+                # the fragment merge. Words propose; the cloud decides.
+                # The cost is SAM3 time, linear in the number of concepts.
+                _grouped = list(consolidation.objects)
                 (self.output_dir).mkdir(parents=True, exist_ok=True)
                 (self.output_dir / "prompt_consolidation.json").write_text(
                     json.dumps(consolidation.to_dict(), indent=2, ensure_ascii=False))
-                prog(25, f"consolidated to {len(phrases)} concepts")
+                _folded = [p for p in phrases if p not in set(_grouped)]
+                if _folded:
+                    print(f"[autoprompt] [consolidate] {len(_grouped)} group(s) for "
+                          f"labelling; ALL {len(phrases)} concepts still go to SAM3 "
+                          f"— kept: {_folded}")
+                prog(25, f"{len(_grouped)} group(s), {len(phrases)} concepts to SAM3")
+            # NOTHING CHANGES IN SILENCE, AND THE LIST IS REPRODUCIBLE
+            # (USER 2026-09-22: *"vocabulario, no debe cambiar en silencio,
+            # debe ser lo mas determinista posible, debe ser reproducible"*).
+            # The record below is the session's vocabulary: the raw union, the
+            # grouping, every pass and every failure. `reuse_vocabulary` then
+            # makes it the ANSWER on any later run of this session — the engine
+            # cannot promise the same tokens twice (it batches, the reduction
+            # order moves, a near-tie falls the other way: 61/32/34/39/38/34/36
+            # concepts over seven runs of pccr from an understanding that gave
+            # 60-61 types every single time), so the guarantee has to be the
+            # artifact, not the model.
+            _rec = {
+                "version": 1,
+                "raw": list(targets or []),
+                "prompts": list(phrases),
+                "groups": (consolidation.to_dict() if consolidation else None),
+                "passes": (consolidation.passes if consolidation else 0),
+                "reused": False,
+                "scene_type": (understanding.scene_type if understanding else None),
+            }
+            if consolidation is not None and consolidation.passes == 0:
+                _rec["warning"] = ("the consolidation pass returned nothing "
+                                   "parseable — the list is the raw union")
+                print(f"[autoprompt] ⚠ {_rec['warning']}")
+            (self.output_dir / "autoprompt_concepts.json").write_text(
+                json.dumps(_rec, indent=2, ensure_ascii=False))
             prompt = ";".join(phrases)
             self.output_dir.mkdir(parents=True, exist_ok=True)
             vlm_analysis = {

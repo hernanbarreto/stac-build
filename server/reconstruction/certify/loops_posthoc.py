@@ -239,12 +239,15 @@ def copy_scale_rows(session, candidates: List[dict], scfg, window_kf: int,
         if (iid, min(i, j), max(i, j)) in _seen_pairs:
             continue
         _seen_pairs.add((iid, min(i, j), max(i, j)))
-        # AND NO OBJECT IS MEASURED MORE THAN `max_pairs_per_instance` TIMES.
-        # One extended surface generated 42 of 56 evaluations by pairing its
-        # own clusters across every keyframe that saw it — n² growth that
-        # yields the same (non-)information every time.
+        # AND NO OBJECT IS MEASURED MORE THAN `max_pairs_per_instance` TIMES —
+        # 0 means NO CAP (USER 2026-09-22: *"no limites la cantidad de cierres
+        # y anclas nada si hay duplicados cuanto mas mejor"*). The cap exists
+        # because one extended surface generated 42 of 56 evaluations by
+        # pairing its own clusters across every keyframe that saw it — n²
+        # growth that yields the same (non-)information every time; it is a
+        # COMPUTE budget, never a judgement about the evidence.
         _n_of[iid] = _n_of.get(iid, 0) + 1
-        if _n_of[iid] > int(max_pairs_per_instance):
+        if max_pairs_per_instance and _n_of[iid] > int(max_pairs_per_instance):
             continue
         rec = {"instance_id": iid, "label": cand.get("label"), "i": i, "j": j, "verdict": cand["verdict"],
                "kind": cand.get("kind")}

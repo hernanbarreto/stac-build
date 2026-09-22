@@ -20,6 +20,7 @@ import json
 import shutil
 import torch
 import numpy as np
+import time as _time
 import cv2
 import gc
 import tempfile
@@ -2487,10 +2488,28 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     print(f"[SegPipeline]   Original resolution: {orig_w:.0f}x{orig_h:.0f}, mask: {mask_h_ref}x{mask_w_ref}")
     print(f"[SegPipeline]   Scale factors: row={mask_h_ref/orig_h:.4f}, col={mask_w_ref/orig_w:.4f}")
     
+    # A LONG STAGE MUST SAY WHERE IT IS (USER 2026-09-22: *"etapas largas mudas
+    # se puede y se debe solucionar ahora porque voy a lanzar desde ui y sino no
+    # voy a recibir nada por mucho tiempo"*). This loop projects every masklet
+    # over the whole cloud and printed nothing until it finished — 10 minutes of
+    # silence on pccr, indistinguishable from a hang.
+    _t_match = _time.time()
+    _n_obj = len(obj_ids) if only_obj_ids is None else len(
+        [o for o in obj_ids if o in only_obj_ids])
+    _step = max(1, _n_obj // 20)          # ~20 lines, whatever the session size
+    _done = 0
     for i, obj_id in enumerate(obj_ids):
         # Skip obj_ids not in the incremental set
         if only_obj_ids is not None and obj_id not in only_obj_ids:
             continue
+        _done += 1
+        if _done == 1 or _done % _step == 0 or _done == _n_obj:
+            _el = _time.time() - _t_match
+            _eta = (_el / _done) * (_n_obj - _done)
+            print(f"[SegPipeline]   matching {_done}/{_n_obj} masklets "
+                  f"({100.0 * _done / max(_n_obj, 1):.0f}%, {_el:.0f}s elapsed"
+                  + (f", ~{_eta:.0f}s left)" if _done < _n_obj else ")"),
+                  flush=True)
         # Compute average mask area for this object (across all frames)
         frame_areas = []
         
@@ -3103,6 +3122,27 @@ def map_segmentation_to_cloud(output_dir) -> dict:
         return {"error": "no segmentation.json", "instances": []}
     if not (output_dir / "cleaned_cloud.ply").exists():
         return {"error": "no cleaned_cloud.ply", "instances": []}
+    # ONCE means once. `run_segmentation` already matches when the cloud is on
+    # disk — which it always is since CloudCompy moved ahead of the semantic
+    # stages — so this call ran the whole thing a SECOND time on every session:
+    # the same 22.7 M points re-projected, the store rebuilt and the Potree
+    # octree reconstructed over a cloud that had not changed (pccr 2026-09-22:
+    # two octrees, and the fusion opened a round 2 that applied 3 merges the
+    # first round had already reached). The freshness question already has one
+    # answer for every caller — ask it.
+    _stale, _why = segmentation_result_is_stale(output_dir)
+    if not _stale:
+        import json as _json
+        try:
+            _cached = _json.loads(
+                (output_dir / "segmentation_result.json").read_text())
+        except Exception:                                   # noqa: BLE001
+            _cached = None
+        if _cached and _cached.get("instances"):
+            print(f"[SegPipeline] ♻ segmentation_result.json reused "
+                  f"({len(_cached['instances'])} instance(s), {_why}) — the "
+                  f"mask→cloud matching already ran on this state")
+            return _cached
     result = _match_and_save_result(output_dir)
     # scene_r.db is (re)built inside the mask→cloud matching itself — points,
     # labels and OBBs all in the display frame, single source for phases 2-6.

@@ -431,6 +431,14 @@ autoprompt:
                                       # the floor from 5 names to 1, the rack from 14 entries to 1,
                                       # the main door kept.
   consolidate_passes: 3               # BOUND, not a decision: the pass repeats while it still
+  reuse_vocabulary: true       # USER 2026-09-22: *"debe ser reproducible"*. Once
+                               # output/autoprompt_concepts.json exists for a session,
+                               # ITS concept list is the one segmented — re-running the
+                               # semantic stages on the same session gives the same
+                               # prompts, whatever the engine's batching does to the
+                               # tokens that day. The understanding still runs and still
+                               # describes the scene; only the LIST is pinned. Delete the
+                               # file (or set false) to let the VLM propose it again.
                                       # changes the list and stops when it changes nothing
                                       # (convergence). This only caps a model that oscillates, and
                                       # reaching it is declared in output/prompt_consolidation.json.
@@ -512,6 +520,17 @@ semantic:
   generation:
     temperature: 0.0            # deterministic — measurements must be repeatable
     max_tokens: 2048
+    seed: 0                     # USER 2026-09-22: *"debe ser lo mas determinista posible,
+                                # debe ser reproducible"*. temperature 0 asks for the
+                                # argmax; the seed pins the sampler as well, so everything
+                                # the engine CAN make deterministic is. DECLARED LIMIT: it
+                                # is not enough on its own — vLLM batches requests and the
+                                # batch composition changes between runs, so the reduction
+                                # order changes and a near-tie can still fall the other way.
+                                # Measured on pccr: the understanding produced 60-61 types
+                                # EVERY run while the consolidation returned 61, 32, 34, 39,
+                                # 38, 34 and 36. The guarantee is `reuse_vocabulary`: the
+                                # session's own concept list, once written, is the one used.
 
   tool_calling:
     max_iterations: 8           # bound the Q&A tool loop (Phase 5)
@@ -1385,7 +1404,8 @@ reconstruction:
                                         # training views; measured trade-offs on bufferStop:
                                         # scale MAD 3.5%→11.1% (confidence 0.82→0.50), probe
                                         # walk over-measured 28.8 vs 12.7 m real → chunked mode
-                                        # triggers, runtime 1h34→2h50. Under evaluation across
+                                        # triggers (that trigger no longer exists — chunk_frames
+                                        # decides, see below), runtime 1h34→2h50. Under evaluation across
                                         # more scenes before it is considered validated.
                                         # HISTORY — 250 confirmed 2026-08-11 (bufferStop A/B):
                                         # 150 was tried against ghosting and made it WORSE —
@@ -1402,18 +1422,40 @@ reconstruction:
                                         # are not. Lower = denser keyframes.
     target_fps: 1.0                     # "fps" mode only: time sampling rate. 1 fps = the web
                                         # demo's regime (its slider caps at 2; examples use 1).
-    max_walk_single_pass_m: 15.0        # Omega's COMFORT RANGE (config parameter, tune freely):
-                                        # phase 1 always runs one pass; if the measured walk
-                                        # exceeds this, phase 2 re-runs chunked-metric (Omega
-                                        # drifts ~1.3 cm/m past its comfort range — measured).
-                                        # 25→15 (2026-07-09): test6 (29 m walk) was still bad
-                                        # single-pass — the comfort proven so far is test2 ~10 m.
-    chunk_frames: 0                     # USER FINAL 2026-09-04 NIGHT: back to 60/30 (0 = legacy
-                                      # sizing). The 450-chunk clean run was judged MUCH worse
-                                      # by eye (intra-chunk drift over the long horizon); the
-                                      # full-stack 60/30 run was good except the depth-duplicate
-                                      # door/floor defect (open, targeted investigation).
-                                      # (History of the 450 order below, kept for the record.)
+    # max_walk_single_pass_m: REMOVED 2026-09-22 (USER: *"no debe haber max walk,
+    #   eso ya no aplica"*). It was the comfort limit that re-ran the whole
+    #   reconstruction when the measured walk exceeded it — a second DA3 round and a
+    #   second Omega pass, decided by a number that read 44.1 m on pccr's ~19 m walk.
+    #   The chunk decision is chunk_frames alone, taken before any inference.
+    # chunk_walk_m / max_frames_single_pass: REMOVED the same day — the first sized
+    #   chunks in walked METERS through that same bad walk (plan_chunks, deleted with
+    #   its 45-kf re-densification); the second was the single-pass cap that
+    #   chunk_frames now IS.
+    chunk_frames: 60                    # USER ORDER 2026-09-22: ONE pass, FIXED 60/30, always.
+                                        # *"no quiero que haga dos pasadas de da3, despues vggt
+                                        # omega para luego ir otra vez a da3 y vggt omega pero con
+                                        # chunks, quiero que lo haga de una, si hay muchos kf lo
+                                        # chunkee y son menos que lo haga en uno solo siempre
+                                        # 60/30"*. So this value is BOTH the single-pass capacity
+                                        # and the chunk size: n_kf <= 60 -> one chunk, overlap 0,
+                                        # no seams; n_kf > 60 -> chunked-metric DIRECTLY at 60/30
+                                        # (`direct-chunked`), and phase 2 never re-runs (the walk
+                                        # probe stops deciding the SIZE — it measured 44.1 m on a
+                                        # ~19 m walk and sized the chunks from that number).
+                                        # 60/30 is the VENDOR default, validated in the VGGT-Long
+                                        # paper and in vendor/VGGT-Long/configs/{base_config,
+                                        # waymo,map_long_config}.yaml; our own stac_vggtomega.yaml
+                                        # says 120/60 and never decided anything because
+                                        # plan_chunks overrode it. pccr 2026-08-31: 216 kf ->
+                                        # 7 chunks / 6 seams at 60/30, the same layout the derived
+                                        # 59/29 produced, so the per-chunk scale ladder keeps its
+                                        # 6 risers (6 x sigma_seam_log 0.02 ~ 12 %).
+                                        # HISTORY — 0 (legacy walk sizing) USER FINAL 2026-09-04
+                                        # NIGHT: back to 60/30. The 450-chunk clean run was judged
+                                        # MUCH worse by eye (intra-chunk drift over the long
+                                        # horizon); the full-stack 60/30 run was good except the
+                                        # depth-duplicate door/floor defect.
+                                        # (History of the 450 order below, kept for the record.)
   # chunk_frames: 450                 # USER ORDER 2026-09-04: ONE FIXED chunk size for every
                                         # scene — the largest with real VRAM headroom on the
                                         # A6000 48 GB (measured ~0.086 GB/frame + ~4 GB base:
@@ -1426,9 +1468,6 @@ reconstruction:
                                         # plan_chunks + 45-kf re-densify (code kept; 0 = legacy
                                         # dynamic sizing). Context: pccr_v1 ran 44 chunks of 60
                                         # frames — 43 seams for the scale to derail across.
-    chunk_walk_m: 12.0                  # LEGACY (chunk_frames: 0 only): walked meters per chunk
-                                        # (50% overlap). Small chunks = the regime where Omega
-                                        # was excellent on test4 WITH the adjustment stack.
     chunk_anchors: 3                    # DA3 metric anchors per chunk (metric lock BEFORE the
                                         # SE(3) gluing — scale is never a degree of freedom).
     # densify: REMOVED (2026-07-10). DA3 fill glued by frame-to-keyframe ICP was
@@ -1438,10 +1477,6 @@ reconstruction:
     # manufactured onion. If density is ever needed, densify WITHIN the Omega
     # chunks (more keyframes per chunk in its comfort regime), never by gluing
     # another model's geometry.
-    max_frames_single_pass: 600         # above this, windowed mode resumes (long videos).
-                                        # ~43 GB VRAM at 500 frames (paper) ≈ 86 MB/frame —
-                                        # the worker ALSO checks free VRAM and degrades to
-                                        # windowed mode with a fitting chunk when short.
     exclusive_gpu: true                 # stop vLLM before reconstruction (Omega gets the
                                         # whole GPU); the VLM stage auto-restarts it after
     conf_percentile: 20.0               # USER 2026-09-04: 10 → 20 (his word — the same voice
@@ -1477,7 +1512,21 @@ reconstruction:
                                         # Set to null to fall back to conf_threshold_coef.
     conf_threshold_coef: 0.6            # legacy fallback (keep conf >= mean*coef); ignored
                                         # whenever conf_percentile is set
-    scale_anchor_frames: 12             # DA3 runs on ONLY this many evenly-spread frames
+    scale_anchor_frames: 0              # 0 = DA3 sobre TODOS los keyframes seleccionados
+                                        # (USER 2026-09-22: "no limites la cantidad de
+                                        # cierres y anclas nada"). Cada ancla es una
+                                        # medicion metrica independiente: con 12 la escala
+                                        # global queda bien (una sola incognita) pero el
+                                        # ajuste POR CHUNK se queda con ~2 anclas por chunk,
+                                        # y la deriva se reparte entre 7 chunks. Con todas,
+                                        # cada chunk lleva ~30 y el reparto tiene de donde
+                                        # agarrarse. Cuesta una pasada de DA3 por frame
+                                        # (aislada, sin streaming), no cuesta calidad.
+                                        # HISTORIA: 12 — "el metro es UN escalar y un
+                                        # puñado de frames bien repartidos es
+                                        # estadisticamente equivalente (un re-chequeo con
+                                        # 11 frames movio s un -0,91%)". Cierto para el
+                                        # escalar; falso para su DISTRIBUCION.
     orient_from_poses: true             # bake Y-up + floor at y=0 into cloud + poses
 
   # ── Dense frame fusion (frame-to-keyframe ICP) — cloud-stage completeness ──
@@ -2031,26 +2080,54 @@ correction:
   # USER 2026-09-18, after the floor closed with its tile lines aligned. See
   # correction/visit_drift.py for why each of these exists.
   visit_drift:
-    min_points: 1000             # an object with fewer cannot be measured; its
-                                 # points are DELETED from the cloud. USER
-                                 # 2026-09-19, raised from 500: "todos los de
-                                 # menos de 1000 puntos deben eliminarse los
-                                 # segmentos"
-    min_visit_share: 0.25        # a visit leaving AT MOST this share of the
-                                 # object's points did not observe it, it saw a
-                                 # PIECE of it — those points are DELETED too.
-                                 # USER 2026-09-19, raised from 0.01 on pccr's
-                                 # own six survivors: at 1 % four of them
-                                 # entered on a visit worth 6-10 % of the
-                                 # object, and a fragment cannot be aligned
-                                 # against the whole. The silhouette peak
-                                 # follows the share — 0.86 and 0.76 for the
-                                 # two whose smaller visit is over a third,
-                                 # 0.72 / 0.51 / 0.34 for the 10 %, 6 % and 6 %
-                                 # ones, and desk#201's two views disagreed by
-                                 # 25 cm. The orthogonal views name what the
-                                 # number could not: black_office_chair#199's
-                                 # 6 % visit is a patch of FLOOR, not a chair
+    min_points: 1000             # USER 2026-09-22: *"min points esta bien de
+                                 # 1000 o incluso mas, para que queremos
+                                 # objetos tan pequeños ... pero si queda un
+                                 # objeto de menos de 1000 puntos no sirve de
+                                 # nada"*. WHAT CHANGED is not the number, it
+                                 # is WHAT IT IS MEASURED ON: the FUSED object,
+                                 # not the individual mask — *"podriamos
+                                 # objetarlo luego de la union de segmentation
+                                 # ... porque pueden ser mascaras chicas que
+                                 # despues se fusionan"*. Measured on the run
+                                 # of 2026-09-22: 41 masklets were deleted for
+                                 # being under 1000 points and NOT ONE of the
+                                 # objects they belong to is — every one was a
+                                 # fragment of something big (the 4.6 M-point
+                                 # floor among them). See
+                                 # `visit_drift.fused_object_points`.
+                                 # (USER 2026-09-19, when it was per-mask:
+                                 # "todos los de menos de 1000 puntos deben
+                                 # eliminarse los segmentos".)
+    min_visit_share: 0.0         # USER 2026-09-22: *"no limites la cantidad de
+                                 # cierres y anclas nada si hay duplicados
+                                 # cuanto mas mejor"* + *"si elimina muchos
+                                 # puntos que no elimine porque sino los
+                                 # erosiona demasiado"*. 0 = NADA se descarta
+                                 # ni se borra por esta razon; quien juzga un
+                                 # cierre flojo es su propia sigma (el residuo
+                                 # tangencial ensancha la barra de error y el
+                                 # cierre se paga solo).
+                                 # QUE HACIA A 0.25, medido en la corrida del
+                                 # 2026-09-22 (mask_filter.json):
+                                 #   1.765.261 puntos borrados por esta regla
+                                 #   contra 7.696 por min_points — y 1.722.043
+                                 #   de ellos eran white_tiled_floor. El caso
+                                 #   testigo: oid 43, "visit 0-44 contributes
+                                 #   23.86%", 1.244.087 puntos del piso
+                                 #   borrados por 1,14 puntos porcentuales.
+                                 #   Y en la medicion: de 14 objetos con 2+
+                                 #   visitas quedaron 2 (los 9 que tiro esta
+                                 #   regla incluian todo lo que no era puerta),
+                                 #   asi que la escala aplico 1,96% de los ~14%
+                                 #   que la sesion necesita.
+                                 # HISTORIA — 0.25 (USER 2026-09-19, subido
+                                 # desde 0.01): a 1% cuatro de los seis
+                                 # supervivientes entraban con una visita del
+                                 # 6-10% del objeto y el pico de la silueta
+                                 # cae con la cuota. Eso sigue siendo cierto:
+                                 # lo que cambia es QUIEN lo rechaza — la
+                                 # sigma medida, no un umbral.
     min_walk_m: 1.0              # two visits closer than this along the WALK
                                  # are one pass with an occlusion in between;
                                  # nothing accumulates in that distance
@@ -2183,10 +2260,23 @@ correction:
                                   # plane keeps real slopes, level is y=0 everywhere)
     band_m: 0.5                   # floor band half-height around the low percentile
     low_band_pct: 5.0             # per-keyframe low percentile that seeds the band
-    min_tilt_deg: 1.0             # tilt below this is normal-estimation noise on a
-                                  # per-keyframe patch: only the height lands on the
-                                  # model, the normal stays (a noisy 0.3° rotation at a
-                                  # 15 m lever arm produced 75 mm inter-keyframe steps)
+    min_tilt_deg: 0.0             # FLOOR of the tilt bar, not the bar (USER 2026-09-22).
+                                  # The bar is now MEASURED: local_mad_k x the scatter of
+                                  # this session's own floor normals against the trend
+                                  # their neighbours draw (declared in the log as "normal
+                                  # scatter ... -> tilt bar ..."). 0 = the measurement
+                                  # decides alone.
+                                  # WHY IT CHANGED: at 1.0 the constant decided whether
+                                  # the scene gets levelled AT ALL. pccr 2026-09-22: the
+                                  # floor drifted 16.7 mm/m = 0.957 deg, lost by four
+                                  # hundredths of a degree, and every one of the 216
+                                  # keyframes was rotated by exactly 0.000 deg — 32 cm of
+                                  # slope over a 19 m walk left in the cloud, with the
+                                  # user reporting "no corrigio piso".
+                                  # The fear it answered is real and is kept, now against
+                                  # evidence: a noisy 0.3 deg rotation at a 15 m lever arm
+                                  # produced 75 mm inter-keyframe steps — but 0.3 deg of
+                                  # NOISE is exactly what the scatter measures.
     max_tilt_deg: 10.0            # anchor guard: floor normal tilt beyond this → demoted
     min_inliers: 5000             # anchor guard: RANSAC inliers below this → demoted
     min_inlier_ratio: 0.5         # accepted plane must hold ≥ ratio × min_inliers
@@ -2641,7 +2731,14 @@ certify:                            # §4.8 ensemble witness + §9 certification
                                     # read them. (The 2026-09-04 streaming clean deleted them
                                     # right after the scale; tens of GB per session.)
   # ── §9 certification loop (post-hoc over the session: scale → poses → depth → witnesses)
-  max_iters: 3                      # iterations; each one is an epoch (Approve/Undo in the kit)
+  max_iters: 12                     # iterations; each one is an epoch (Approve/Undo in the kit).
+                                    # 3 -> 12 (USER 2026-09-22: "no limites la cantidad
+                                    # de cierres y anclas nada"). It is a BOUND, not a
+                                    # verdict: the loop already stops on its own when the
+                                    # objective stops improving (`eps`) or the epoch
+                                    # regresses (`regression_eps`), and correcting an
+                                    # object CREATES the need to re-measure the others, so
+                                    # a cap that bites is a correction left half done.
   eps: 0.05                         # relative objective improvement below this → converged
   regression_eps: 0.01              # ...and an improvement below MINUS this is a REGRESSION, not
                                     # convergence: the iteration left the session worse than it
@@ -2650,6 +2747,18 @@ certify:                            # §4.8 ensemble witness + §9 certification
                                     # acta (regressed: true), in the attention list at severity 4
                                     # and in the kit; under gates.mode advisory the epoch is still
                                     # applied and Approve/Undo stays the verdict (USER 2026-09-13).
+  deliverable_only: true            # USER 2026-09-22: *"el entregable es una sola epoch1
+                                    # ademas del epoch0 que es la original, la 1 es la
+                                    # corregida luego que termina, no hace falta ahora
+                                    # correr el acta etc, que lleva muchisimo tiempo"*.
+                                    # true  = the CORRECTION runs, publishes epoch 1 and
+                                    #         the stage ends. Epoch 0 stays selectable, so
+                                    #         both states the user compares are on disk.
+                                    # false = the full §9 certification: metrics before and
+                                    #         after, the iteration loop and the acta.
+                                    # What it costs when on: the objective, the gates and
+                                    # the regression verdict are not measured — the verdict
+                                    # is the user's eye on the two epochs.
   auto_after_segmentation: true     # the ONE switch of the automatic certification: (a) the
                                     # pipeline's CERTIFY stage after the cleaned cloud
                                     # (USER 2026-09-13: no button, no manual trigger) and (b) a
@@ -2695,7 +2804,15 @@ certify:                            # §4.8 ensemble witness + §9 certification
     unobserved_sigma_m: 5.0         # a direction the visit does not observe (a floor's in-plane) — huge σ
     unobserved_sigma_deg: 30.0      # roll / pitch of a yaw-only closure — huge σ
     window_kf: 15                   # an instance's copy = its points within ± this of the visit keyframe
-    max_pairs_per_instance: 3   # how many copy pairs of ONE object are worth the ICP. On pccr
+    max_pairs_per_instance: 0   # 0 = SIN TOPE (USER 2026-09-22: "no limites la
+                                # cantidad de cierres y anclas nada si hay
+                                # duplicados cuanto mas mejor"). Es un
+                                # presupuesto de COMPUTO, nunca un juicio sobre
+                                # la evidencia: quien descarta un par flojo es
+                                # su propia sigma. HISTORIA: 3 — en pccr
+                                # 2026-09-21 un techo extendido produjo 42 de
+                                # 56 evaluaciones emparejando sus propios
+                                # cumulos contra cada keyframe que lo vio.
                                 # 2026-09-21 a single extended ceiling produced 42 of 56
                                 # evaluations by pairing its own clusters across every keyframe
                                 # that saw it (n^2), and yielded ZERO scale rows: the ICP slides
