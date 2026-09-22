@@ -1193,7 +1193,7 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
                 M = np.linalg.inv(c2w)
                 q = (M[:3, :3] @ P.T).T + M[:3, 3]
                 z = q[:, 2]
-                fr = z > self.min_depth
+                fr = z > vis.min_depth
                 if not fr.any():
                     continue
                 fx, fy, cx, cy = vis.K[kf]
