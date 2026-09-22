@@ -242,6 +242,12 @@
   --progress-h-lg: 8px;
   --scrollbar-w: 8px;
   --z-panel: 5;
+  /* Information ABOUT the viewport, painted over the canvas and UNDER every
+     control: progress, "loading", "context lost". It is not interactive and
+     must never sit on top of menus, popovers or dialogs (USER 2026-09-21:
+     "el panel azul... queda por encima de los menues desplegables... no
+     corrijas solo su posicion z, sino arreglalo correctamente"). */
+  --z-viewport-overlay: 10;
   --z-hud: 20;
   --z-float: 60;
   --z-popover: 100;

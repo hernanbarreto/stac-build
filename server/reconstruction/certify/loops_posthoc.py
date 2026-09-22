@@ -214,18 +214,38 @@ def _copy_indices(session, inst: dict, i: int, j: int, window_kf: int):
     return gi[np.abs(ks - i) <= int(window_kf)], gi[np.abs(ks - j) <= int(window_kf)], ks
 
 
-def copy_scale_rows(session, candidates: List[dict], scfg, window_kf: int, log=print) -> List[dict]:
+def copy_scale_rows(session, candidates: List[dict], scfg, window_kf: int,
+                    max_pairs_per_instance: int, log=print) -> List[dict]:
     """Scale measurements from the copies of every revisited instance
     (candidates with verdict loop|ambiguous and a temporal gap)."""
     res_path = Path(session.output_dir) / "segmentation_result.json"
     instances = {int(i.get("instance_id", i.get("id"))): i
                  for i in (json.loads(res_path.read_text()).get("instances") or [])} if res_path.exists() else {}
     out = []
+    # a pair is (instance, i, j) regardless of order; an object may not spend
+    # the budget of the whole stage on itself
+    _seen_pairs: set = set()
+    _n_of: Dict[int, int] = {}
+
     for cand in candidates:
         if cand.get("verdict") not in ("loop", "ambiguous"):
             continue
         iid = int(cand["instance_id"])
         i, j = int(cand["i"]), int(cand["j"])
+        # THE SAME PAIR IS NEVER MEASURED TWICE. The candidate list carries
+        # repeats (pccr 2026-09-21: 7 of 56 evaluations were a pair already
+        # done, with an identical residual to four decimals), and each one is
+        # an ICP over the whole cloud.
+        if (iid, min(i, j), max(i, j)) in _seen_pairs:
+            continue
+        _seen_pairs.add((iid, min(i, j), max(i, j)))
+        # AND NO OBJECT IS MEASURED MORE THAN `max_pairs_per_instance` TIMES.
+        # One extended surface generated 42 of 56 evaluations by pairing its
+        # own clusters across every keyframe that saw it — n² growth that
+        # yields the same (non-)information every time.
+        _n_of[iid] = _n_of.get(iid, 0) + 1
+        if _n_of[iid] > int(max_pairs_per_instance):
+            continue
         rec = {"instance_id": iid, "label": cand.get("label"), "i": i, "j": j, "verdict": cand["verdict"],
                "kind": cand.get("kind")}
         inst = instances.get(iid)
@@ -236,6 +256,13 @@ def copy_scale_rows(session, candidates: List[dict], scfg, window_kf: int, log=p
             rec["reason"] = "not a revisit (the two copies come from overlapping keyframe windows)"
             out.append(rec); continue
         idx_a, idx_b, _ks = _copy_indices(session, inst, i, j, window_kf)
+        # Both sides must have something to align. It used to run the ICP with
+        # one side EMPTY and discard the answer afterwards (pccr 2026-09-21:
+        # four pairs at coverage 0.00) — the work is skipped, not undone.
+        if len(idx_a) == 0 or len(idx_b) == 0:
+            rec["reason"] = (f"one copy has no points ({len(idx_a)} / "
+                             f"{len(idx_b)}) — nothing to align")
+            out.append(rec); continue
         m = measure_copy(session.xyz[idx_a], session.xyz[idx_b], scfg, seed=iid)
         if m is None:
             rec["reason"] = f"copies starved ({len(idx_a)} / {len(idx_b)} points)"

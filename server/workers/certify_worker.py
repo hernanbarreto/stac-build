@@ -50,7 +50,7 @@ def _certify_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # (semantic.service.ensure_service). pccr 2026-09-13 21:03: with vLLM
     # down every instance fell to the default class → 0 instance loops,
     # 0 structural constraints, and the epoch was rejected.
-    pipe.send_progress(5, "Certification loop: loops → scale → poses → depth → witnesses",
+    pipe.send_progress(2, "Certification: instance loops and geometric revisits",
                        stage="certify")
 
     from reconstruction.certify.run import certify_session
@@ -58,7 +58,15 @@ def _certify_work(pipe: WorkerPipe, session_dir: str, config: dict):
     def _log(msg: str):
         pipe.send_log(str(msg))
 
-    acta = certify_session(session_path, cfg=cfg, operator="pipeline", log=_log)
+    # The bar used to jump from 5 % to 100 % with 40 minutes of silence in
+    # between (pccr 2026-09-21: the user watched it frozen at 5 % while the
+    # correction ran, applied and published an epoch). Certify now reports the
+    # real advance of every stage and the correction reports its own inside it.
+    def _progress(pct: int, msg: str):
+        pipe.send_progress(int(pct), str(msg), stage="certify")
+
+    acta = certify_session(session_path, cfg=cfg, operator="pipeline", log=_log,
+                           progress=_progress)
 
     if pipe.check_cancel():
         return

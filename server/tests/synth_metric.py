@@ -760,7 +760,7 @@ def certify_cfg(**over) -> dict:
                    "min_copy_points": 300, "max_copy_residual_m": 0.05, "icp_iters": 30,
                    "icp_trim": 0.8, "max_correction_log": 0.2},
          "visit_loops": {"sigma_floor_m": 0.01, "unobserved_sigma_m": 5.0, "unobserved_sigma_deg": 30.0,
-                         "window_kf": 15},
+                         "window_kf": 15, "max_pairs_per_instance": 3},
          "known_answer": {"chunk": "last", "yaw_deg": 1.0, "t_m": 0.20, "scale": 1.03},
          "envelope": {"levels_t_m": [0.1, 0.2, 0.4, 0.8, 1.6], "levels_scale_pct": [1, 2, 5, 10, 20],
                       "loop_densities": [1.0, 0.5, 0.25]},

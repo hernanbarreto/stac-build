@@ -290,8 +290,14 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     # consolidación y del octree"* … *"no vamos a hacer un octree atrás de
     # otro"*. Here the pose is already corrected, so a point is judged against
     # its own mask where the correction actually left it; and the ONE
-    # consolidation and the ONE octree below carry the result. Never fatal —
-    # a transaction that could not filter is still a valid epoch.
+    # consolidation and the ONE octree below carry the result.
+    #
+    # It is FATAL when it is configured ON and cannot run. It used to be
+    # "never fatal", and on 2026-09-21 a NameError inside it degraded to one
+    # line of log: the epoch published WITHOUT filtering a single point, and
+    # the geometric cleanup then skipped itself because "the mask filter
+    # already ran inside the epoch". A step that cannot do its job must stop
+    # the transaction, not let the next one inherit a false premise.
     kept_mask = None
     if getattr(cfg.apply, "mask_filter", False):
         _p(66, "tx: mask filter (masklets, last before consolidation)...")
@@ -316,7 +322,12 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
                                b_kf=b_kf,
                                dropped=np.flatnonzero(~kept_mask))
         except Exception as e:  # noqa: BLE001 — declared, never silent
-            log(f"  mask filter failed ({e}) — the epoch keeps every point")
+            shutil.rmtree(tx)
+            raise RuntimeError(
+                f"the mask filter is ON and could not run ({e}) — transaction "
+                f"discarded rather than publishing an epoch that skipped it "
+                f"and letting the cleanup believe the filtering happened "
+                f"(pccr 2026-09-21)") from e
 
     # 9c) the cloud's siblings, republished from the FINAL staged geometry --
     # A cloud never travels alone: `classification.npy` (the per-point class

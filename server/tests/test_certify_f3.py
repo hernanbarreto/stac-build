@@ -208,7 +208,9 @@ def test_veto_mode_rejected_iteration_keeps_the_previous_epoch_bit_for_bit(tmp_p
     import correction.visit_drift_run as _vdr
     monkeypatch.setattr(
         _vdr, "run",
-        lambda session_dir, log=print, cfg=None: {
+        # **_ so the stand-in keeps working as the real signature grows
+        # (it gained `cfg` and then `progress`)
+        lambda session_dir, log=print, **_: {
             "stages": [{"stage": "stood_down_by_test", "status": "skipped"}],
             "elapsed_s": 0.0, "epoch": None, "provenance": "tool_measured"})
     acta2 = _run(root, sess, cfg, max_iters=1)
@@ -249,7 +251,9 @@ def test_advisory_mode_failed_gate_is_applied_and_declared(tmp_path, truth, monk
     import correction.visit_drift_run as _vdr
     monkeypatch.setattr(
         _vdr, "run",
-        lambda session_dir, log=print, cfg=None: {
+        # **_ so the stand-in keeps working as the real signature grows
+        # (it gained `cfg` and then `progress`)
+        lambda session_dir, log=print, **_: {
             "stages": [{"stage": "stood_down_by_test", "status": "skipped"}],
             "elapsed_s": 0.0, "epoch": None, "provenance": "tool_measured"})
     acta2 = _run(root, sess, cfg, max_iters=1)
