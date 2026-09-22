@@ -475,34 +475,6 @@ function App() {
     } catch { return null }
   })
   const pipelineRunningRef = useRef<PipelineState | null>(pipelineRunning)
-  // RECONCILE AGAINST THE SERVER, never trust the restored state.
-  // `sessionStorage` is a convenience so a reload does not lose a running
-  // pipeline; it is not the truth. On 2026-09-21 a pipeline finished while
-  // the viewer was disconnected, the final event reached nobody, and every
-  // reload restored "running at 5%" from storage — the blue panel covered the
-  // cloud forever although the server had said `pipelines: {}` all along.
-  // The same reasoning applies to the epoch and the octree below: state is
-  // asked for, not caught.
-  useEffect(() => {
-    let cancelled = false
-    const reconcile = async () => {
-      try {
-        const r = await fetch('/api/pipelines/active')
-        if (!r.ok || cancelled) return
-        const live = ((await r.json())?.pipelines ?? {}) as Record<string, unknown>
-        setPipelineRunning(prev => {
-          if (!prev) return prev
-          if (Object.prototype.hasOwnProperty.call(live, prev.session_id ?? '')) return prev
-          // the server does not know it: it finished while we were away
-          return null
-        })
-      } catch { /* offline: keep what we have rather than guess */ }
-    }
-    reconcile()
-    const onFocus = () => { void reconcile() }
-    window.addEventListener('focus', onFocus)
-    return () => { cancelled = true; window.removeEventListener('focus', onFocus) }
-  }, [])
   useEffect(() => {
     pipelineRunningRef.current = pipelineRunning
     if (pipelineRunning && pipelineRunning.status !== 'done' && pipelineRunning.status !== 'failed' && pipelineRunning.status !== 'cancelled') {
@@ -2022,7 +1994,7 @@ function App() {
   if (authLoading) {
     return (
       <div className="stac-login">
-        <SplashOverlay title={t('app.name')} status={t('common.loading')} boot />
+        <SplashOverlay title={t('app.name')} status={t('common.loading')} />
       </div>
     )
   }
@@ -2070,17 +2042,7 @@ function App() {
               <InstancesPanel segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
                 placedObjects={placedObjects} shapeMeshes={shapeMeshes} tsdfMeshes={tsdfMeshes} selectedSegmentId={selectedSegmentId}
                 canFuse={projectScans.filter((sc: any) => sc.kind !== 'fused').length >= 2}
-                onSelectSegment={id => {
-                  setSelectedSegmentId(id)
-                  if (id == null) return
-                  layout.openInspector('properties')
-                  // FLY TO the object (USER 2026-09-21). The frame comes from
-                  // the instance's own OBB, so a 9 m floor and a 20 cm light
-                  // both fill the view; an instance with no OBB (just
-                  // propagated, no points) simply does not move the camera.
-                  const seg = segments.find(s => s.id === id)
-                  if (seg?.focus) viewportRef.current?.flyToPoint(seg.focus.center, seg.focus.radius)
-                }}
+                onSelectSegment={id => { setSelectedSegmentId(id); if (id != null) layout.openInspector('properties') }}
                 onSelectAll={() => {
                   setSegments(prev => prev.map(s => ({ ...s, visible: true }))); setUnsegmentedVisible(true)
                   segments.forEach(s => { viewportRef.current?.toggleOBB(s.key, true); viewportRef.current?.setSegmentVisibility(s.classId, true) })

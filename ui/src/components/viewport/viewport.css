@@ -362,11 +362,11 @@
   height: var(--icon-sm);
 }
 
-/* WebGL context lost — also information about the canvas, same layer */
+/* WebGL context lost */
 .stac-vplost {
   position: absolute;
   inset: 0;
-  z-index: var(--z-viewport-overlay);
+  z-index: var(--z-splash);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -379,22 +379,14 @@
 }
 
 /* ── Splash ─────────────────────────────────────────────────────────── */
-/* Default: INSIDE a session it is information over the canvas and goes under
-   every control. The app-boot splash (nothing else on screen yet) opts into
-   the top layer with `--boot`. */
 .stac-splash {
   position: absolute;
   inset: 0;
-  z-index: var(--z-viewport-overlay);
+  z-index: var(--z-splash);
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--surface-brand);
-}
-
-.stac-splash--boot {
-  /* the application is still starting: there is no chrome to cover */
-  z-index: var(--z-splash);
 }
 
 .stac-splash__card {

@@ -485,8 +485,7 @@ def apply_transform_epoch(output_dir: Path, R_kf: np.ndarray, t_kf: np.ndarray,
 
 # ── THE CORRECTION ───────────────────────────────────────────────────────
 
-def run(session_dir, log: Callable[[str], None] = print, cfg=None,
-        progress: Optional[Callable[[int, str], None]] = None) -> dict:
+def run(session_dir, log: Callable[[str], None] = print, cfg=None) -> dict:
     """The session's correction: ONE epoch, depth and floor composed.
 
     USER-VALIDATED on pccr 2026-09-19 — *"el pipeline de corrección es este de
@@ -515,16 +514,6 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
     stages: List[dict] = []
     pre = None
 
-    def _pc(pct: int, msg: str) -> None:
-        if progress is not None:
-            try:
-                progress(int(pct), str(msg))
-            except Exception:  # noqa: BLE001 — reporting never breaks the run
-                pass
-
-    # the two milestones of this stage; the floor reports inside its band
-    _DEPTH_PCT, _FLOOR_PCT, _DONE_PCT = 5, 45, 100
-    _pc(_DEPTH_PCT, "correction: measuring the depth on the object closures")
     log("[correction] 1/2 — DEPTH: measuring and solving (applied to nothing yet)")
     # the CALLER's config, not a second opinion. The certification resolves a
     # CorrectionConfig and used to drop it here, so the correction silently
@@ -535,7 +524,6 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
         from correction.config import load_correction_config
         cfg = cfg or load_correction_config()
     dep = solve_depth(output_dir, log=log, cfg=cfg)
-    _pc(_FLOOR_PCT, "correction: solving the floor on that geometry")
     if dep is None:
         log("[correction] no depth correction — the floor runs on its own")
     else:
@@ -549,10 +537,7 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
     from correction.run import run_floor
     try:
         frec = run_floor(output_dir, None, None, "auto", log=log, pre=pre,
-                         cfg=cfg,
-                         progress=lambda p, m: _pc(
-                             _FLOOR_PCT + int(p * (_DONE_PCT - _FLOOR_PCT) / 100),
-                             m))
+                         cfg=cfg)
         stages.append({"stage": "floor_plane+depth" if pre else "floor_plane",
                        "status": frec.get("status"),
                        "correction_id": frec.get("correction_id")})

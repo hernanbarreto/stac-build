@@ -13,17 +13,12 @@ interface SplashOverlayProps {
   status?: string
   stages?: ProgressStage[]
   value?: number
-  /** The application is still booting: there is no chrome to cover, so it may
-   *  take the top layer. Inside a session it must NOT — it is information over
-   *  the canvas and every control stays reachable (USER 2026-09-21). */
-  boot?: boolean
 }
 
-export function SplashOverlay({ title, status, stages, value, boot }: SplashOverlayProps) {
+export function SplashOverlay({ title, status, stages, value }: SplashOverlayProps) {
   const t = useT()
   return (
-    <div className={`stac-splash${boot ? ' stac-splash--boot' : ''}`}
-         role="status" aria-live="polite" aria-label={title}>
+    <div className="stac-splash" role="status" aria-live="polite" aria-label={title}>
       <div className="stac-splash__card">
         <img src="/logo.png" alt={t('app.name')} className="stac-splash__logo" />
         <div className="stac-splash__title">{title}</div>

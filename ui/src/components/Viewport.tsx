@@ -97,11 +97,6 @@ export interface SegmentInstance {
      *  compact index when they do not (pccr 2026-09-20: eight instances above
      *  254 all saturated to 255, one toggle switched all eight). */
     classId: number
-    /** World-space centre and radius of the instance's own OBB, so selecting
-     *  it in the list can frame it (USER 2026-09-21: "un fly to de three al
-     *  objeto cuando toco un objeto de la lista de segmentacion"). Absent
-     *  when the instance has no OBB yet (just propagated, no points). */
-    focus?: { center: [number, number, number]; radius: number }
     label: string
     color: string
     totalPoints: number
@@ -4557,19 +4552,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const totalPoints = (inst.total_points || 0) as number
             const globalKey = (inst.global_id || `${label}_${instId}`) as string
 
-            const halfE = (obb?.half_extents ?? obb?.halfExtents) as number[] | undefined
-            const ctr = obb?.center as number[] | undefined
-            const focus = (ctr && ctr.length === 3)
-                ? { center: [ctr[0], ctr[1], ctr[2]] as [number, number, number],
-                    // the frame follows the object's own size, never a fixed
-                    // distance: a 9 m floor and a 20 cm light both fill the view
-                    radius: Math.max(0.25, ...(halfE ?? [0.5]).map(Number)) }
-                : undefined
             segmentList.push({
                 key: globalKey,
                 id: instId,
                 classId: clsId,
-                focus,
                 label: `${label} #${instId}`,
                 color: colorStr,
                 totalPoints,

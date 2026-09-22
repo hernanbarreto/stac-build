@@ -492,18 +492,8 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
 
     queue = list(instances)
     n_rounds = 0
-    # This loop gates every candidate of every instance against the cloud and
-    # took 20 MINUTES on pccr 2026-09-21 without printing one line — the user
-    # could not tell it apart from a hang. It now says where it is.
-    _total = len(queue)
-    _step = max(1, _total // 10)
-    _t0, _done = time.time(), 0
     while queue:
         inst = queue.pop(0)
-        _done += 1
-        if _done % _step == 0 or not queue:
-            log(f"[instance-loops] {_done}/{_total} instance(s), "
-                f"{len(to_write)} candidate(s) so far ({time.time() - _t0:.0f}s)")
         iid = int(inst.get("instance_id", inst.get("id")))
         cls = classes.get(iid, {}).get("class", cfg.loops.semantic.default_class)
         if cls == "dynamic":

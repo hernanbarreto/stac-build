@@ -159,24 +159,8 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                     correction_cfg=None, device=None, base_frames: Optional[Dict[int, dict]] = None,
                     tracks=None, loop_density: float = 1.0, detect_loops: bool = True,
                     extra_loop_edges: Optional[Sequence[dict]] = None, use_fork_edges: bool = True,
-                    max_iters: Optional[int] = None, apply: bool = True,
-                    progress: Optional[Callable[[int, str], None]] = None) -> dict:
-    """Run the loop; returns the acta (also output/certify_acta.json).
-
-    `progress(pct, message)` reports the REAL advance of each stage. It used
-    to report nothing: the worker sent 5 % on entry and 100 % on exit, so the
-    user watched a bar frozen at 5 % for the 40 minutes in between, and the
-    correction's own progress was discarded at the `stage_transaction` call
-    (`progress=None`). The percentages below are the measured weights of a
-    full pccr run, not guesses: loops ~35 %, the correction ~30 % (it reports
-    its own inside that band), the post-hoc measurement ~25 %, the acta ~10 %.
-    """
-    def _pc(pct: int, msg: str) -> None:
-        if progress is not None:
-            try:
-                progress(int(pct), str(msg))
-            except Exception:  # noqa: BLE001 — reporting never breaks the run
-                pass
+                    max_iters: Optional[int] = None, apply: bool = True) -> dict:
+    """Run the loop; returns the acta (also output/certify_acta.json)."""
     from correction.session import load_session
     from correction.apply import stage_transaction, swap_transaction, assert_no_interrupted_swap
     from correction.config import load_correction_config
@@ -287,7 +271,6 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         prev = _measure_now(s0, i0, load_mask_store(output_dir) if i0 else None,
                             dynamic_instance_ids(output_dir))
         acta["metrics_initial"] = prev
-        _pc(35, "certification: correcting (depth, then the floor)")
         log(f"[certify] before the correction: objective {prev['objective']:.4f} | "
             f"seams {prev['seam_residual']['median_m']} | closure {prev['closure']['median_m']}")
         del s0, i0
@@ -300,8 +283,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         # correction re-read production config.yaml behind the caller's back
         # (found 2026-09-21: on a synthetic session `floor.min_inliers: 5000`
         # demoted every keyframe and no epoch was ever published)
-        vd = run_correction(session_dir, log=log, cfg=ccfg,
-                            progress=lambda p, m: _pc(35 + int(p * 0.27), m))
+        vd = run_correction(session_dir, log=log, cfg=ccfg)
         acta["correction"] = {"stages": vd["stages"],
                               "elapsed_s": vd["elapsed_s"],
                               # the correction's own epoch and provenance tag:
@@ -333,9 +315,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
             rec["candidates"] = {"n": len(cands), "n_splits": len(det.get("splits", [])),
                                  "n_duplicates": len(det.get("duplicates", []))}
         cands = _subsample([c for c in cands if c.get("verdict") in ("loop", "ambiguous")], loop_density)
-        scale_meas = copy_scale_rows(
-            session, cands, ccert.scale, ccert.visit_loops.window_kf,
-            ccert.visit_loops.max_pairs_per_instance, log=log)
+        scale_meas = copy_scale_rows(session, cands, ccert.scale, ccert.visit_loops.window_kf, log=log)
         edges_now = _all_edges(session, cands)
         extra = [dict(e) for e in (extra_loop_edges or [])]
         rec["loops"] = [{k: v for k, v in m.items() if k not in ("Z", "X", "info_t", "info_rot")}
@@ -348,7 +328,6 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                                      device=device)
             prev = _state_metrics(session, frames0, edges_now, {}, instances, fields0)
             acta["metrics_initial"] = prev
-            _pc(62, "certification: measuring the corrected session")
             log(f"[certify] initial: objective {prev['objective']:.4f} | seams "
                 f"{prev['seam_residual']['median_m']} | closure {prev['closure']['median_m']} | "
                 f"verified {prev['witnesses']['status_fraction']['verified']:.3f}")
@@ -387,7 +366,6 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                         not_applied_reason="the pose correction of this session is the "
                                            "visit-drift loop (correction.visit_drift_run); "
                                            "the keyframe graph is measured, not applied")
-            _pc(78, "certification: pose graph measured")
             log("[certify] pose graph measured and NOT applied — the pose "
                 "correction of this session is the visit-drift loop")
         session_p = transformed_session(session_s, R2, t2, np.ones(N)) if pose_moved else session_s
@@ -505,8 +483,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                 output_dir, {int(f): float(k_tot[k]) for f, k in session.kf_index.items()},
                 current_epoch(output_dir) + 1, cid)
             tx = stage_transaction(sess_tx, ccfg, R_tot, t_tot, k_tot, correction_id=cid,
-                                   scale_diag_new=scale_diag_new, floor_npz=None, log=log,
-                                   progress=lambda p, m: _pc(78 + int(p * 0.18), m),
+                                   scale_diag_new=scale_diag_new, floor_npz=None, log=log, progress=None,
                                    b_kf=b_tot)
             swap_transaction(output_dir, tx, log=log)
             update_instance_store(output_dir, R_tot, t_tot, k_tot, session.frames, log=log, b_kf=b_tot)
@@ -637,7 +614,6 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     acta["epoch_final"] = current_epoch(output_dir)
     acta["elapsed_s"] = round(time.time() - t_start, 1)
     (output_dir / ACTA_JSON).write_text(json.dumps(acta, indent=1, default=float))
-    _pc(97, "certification: writing the acta")
     log(f"[certify] stopped: {acta['stop_reason']} (epoch {acta['epoch_final']}, {acta['elapsed_s']}s)")
     return acta
 

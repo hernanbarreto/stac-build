@@ -7450,16 +7450,7 @@ async def viewer_websocket(websocket: WebSocket):
                                     if has_confidence:
                                         reload_msg["hasConfidence"] = True
                                     await websocket.send_text(json.dumps(reload_msg))
-                                    # NOT "corrected cloud": this fires whenever
-                                    # the octree was rebuilt — on pccr
-                                    # 2026-09-21 it said "corrected" an hour
-                                    # BEFORE the correction ran, which misleads
-                                    # the user and anyone reading the log.
-                                    _ep = reload_meta.get("epoch")
-                                    print(f"[Viewer] 🔄 Sent potree_ready reload "
-                                          f"({reload_meta.get('points', 0):,} pts"
-                                          + (f", epoch {_ep}" if _ep is not None else "")
-                                          + ")")
+                                    print(f"[Viewer] 🔄 Sent potree_ready reload (corrected cloud)")
 
                         
                         # Notify frontend about BIM files (raw IFC — parsed on frontend by web-ifc)

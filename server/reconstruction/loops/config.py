@@ -423,7 +423,6 @@ class VisitLoopsConfig:
     unobserved_sigma_m: float       # σ of a translation direction the visit does not observe
     unobserved_sigma_deg: float     # σ of a rotation the visit does not observe (roll / pitch)
     window_kf: int                  # an instance's copy = its points within ± this of the visit keyframe
-    max_pairs_per_instance: int     # how many copy pairs of ONE object are worth the ICP
 
 
 @dataclass(frozen=True)
@@ -867,9 +866,7 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
         sigma_floor_m=_num(vl, "sigma_floor_m", V, lo=0, lo_excl=True),
         unobserved_sigma_m=_num(vl, "unobserved_sigma_m", V, lo=0, lo_excl=True),
         unobserved_sigma_deg=_num(vl, "unobserved_sigma_deg", V, lo=0, lo_excl=True),
-        window_kf=_num(vl, "window_kf", V, lo=1, integer=True),
-        max_pairs_per_instance=_num(vl, "max_pairs_per_instance", V, lo=1,
-                                    integer=True))
+        window_kf=_num(vl, "window_kf", V, lo=1, integer=True))
     ka = _sub(ce, "known_answer", P)
     K = P + ".known_answer"
     chunk = str(_require(ka, "chunk", K))

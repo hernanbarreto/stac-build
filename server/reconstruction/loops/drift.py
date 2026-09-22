@@ -218,29 +218,17 @@ def fit_drift(poses: np.ndarray, loops: Sequence[dict], degree: int,
 
     X = corrections(c)
 
-    def _edge_offsets(Xa) -> np.ndarray:
-        """Per EDGE, never only their sum. The sum is dominated by whichever
-        edges are numerous: on pccr 2026-09-21, 82 of 90 loop edges were two
-        ends of the SAME extended surface (a ceiling, a duct) 6-13 m apart, so
-        "loop offset 45999 cm" read as 459 m of error and the `loop gain`
-        gate was measured against a denominator those edges owned. The median
-        and the count say what the sum cannot."""
-        out = np.empty(len(edges), np.float64)
-        for k, e in enumerate(edges):
+    def _edge_offset(Xa) -> float:
+        tot = 0.0
+        for e in edges:
             i, j = int(e["i"]), int(e["j"])
             Zc = se3_inv(Xa[i] @ poses[i]) @ (Xa[j] @ poses[j])
-            out[k] = float(np.linalg.norm(
+            tot += float(np.linalg.norm(
                 (se3_inv(np.asarray(e["Z"], np.float64)) @ Zc)[:3, 3]))
-        return out
-
-    def _edge_offset(Xa) -> float:
-        return float(_edge_offsets(Xa).sum())
+        return tot
 
     eye = np.repeat(np.eye(4)[None], n, axis=0)
-    off_b, off_a = _edge_offsets(eye), _edge_offsets(X)
-    before, after = float(off_b.sum()), float(off_a.sum())
-    med_b = float(np.median(off_b)) if len(off_b) else 0.0
-    med_a = float(np.median(off_a)) if len(off_a) else 0.0
+    before, after = _edge_offset(eye), _edge_offset(X)
     moved = np.linalg.norm(X[:, :3, 3], axis=1)
     rate = float(moved[-1] / D) if D > 0 else 0.0
     # the biggest excursion, not the endpoint: a model that cancels at both
@@ -248,15 +236,12 @@ def fit_drift(poses: np.ndarray, loops: Sequence[dict], degree: int,
     peak = float(moved.max())
     log(f"[drift] {M}-term model (degree {degree} asked, {n_span} independent "
         f"loop span(s)) over {D:.1f} m / {n} keyframes, {len(edges)} loop(s): "
-        f"loop offset median {med_b * 100:.1f} → {med_a * 100:.1f} cm over "
-        f"{len(edges)} edge(s) (sum {before * 100:.0f} → {after * 100:.0f}), "
+        f"loop offset {before * 100:.0f} → {after * 100:.0f} cm, "
         f"keyframes moved 0 → {peak * 100:.0f} cm peak / "
         f"{moved[-1] * 100:.0f} cm at the end ({rate * 100:.2f} cm/m), "
         f"‖c‖ {float(np.linalg.norm(c)):.2f}")
     return {"coeffs": c.reshape(M, 6).tolist(), "u": u.tolist(), "corrections": X,
             "residual_before_m": before, "residual_after_m": after,
-            "residual_before_median_m": med_b, "residual_after_median_m": med_a,
-            "n_edges": int(len(edges)),
             "rate_m_per_m": rate, "degree": M, "degree_requested": int(degree),
             "n_independent_spans": n_span, "walk_m": D, "n_loops": len(edges),
             "peak_move_m": peak, "coeff_norm": float(np.linalg.norm(c))}
