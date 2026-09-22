@@ -337,27 +337,9 @@ def add_manual_candidate(output_dir, i: int, j: int, instance_ids: List[int],
 
 def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConfig] = None,
                           log: Callable[[str], None] = print, apply_splits: bool = True,
-                          budget_override: Optional[Dict[str, float]] = None,
-                          progress: Optional[Callable[[str], None]] = None) -> dict:
+                          budget_override: Optional[Dict[str, float]] = None) -> dict:
     """Run the detector over every instance of the session. Returns the
-    report written to output/loop_candidates.json.
-
-    TWO CHANNELS, and they are not the same channel. ``log`` carries the
-    per-candidate DETAIL — every reprojection verdict, every declined split,
-    every line a reader only wants when reading this stage. ``progress``
-    carries only WHERE THE STAGE IS. They were one channel until
-    2026-09-21, and a caller that did not want the detail had no way to keep
-    the advance: the certification's ``_measure_now`` passes
-    ``log=lambda m: None`` and bought ELEVEN MINUTES of total silence on
-    pccr — 82 instances over 216 keyframes, 444 % CPU, 3.5 GB resident, and
-    not one line between "loaded 216 keyframes" and "before the correction".
-    From the console that is indistinguishable from a hang (USER: "no se
-    esta imprimiendo nada en consola, anota que todos estos pasos deben
-    estar en consola").
-
-    With no ``progress`` given the advance goes to ``log``, which is exactly
-    what every verbose call site already printed.
-    """
+    report written to output/loop_candidates.json."""
     from correction.session import load_session
     from segmentation.erase import _mask_obj_by_iid, _mask_oids_by_iid
     from reconstruction.loops.semantic_classes import classify_instances
@@ -366,7 +348,6 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
     cfg = cfg or load_loops_config()
     output_dir, session_dir = Path(output_dir), Path(session_dir)
     t0 = time.time()
-    _advance = progress if progress is not None else log
 
     # A split rewrites segmentation.json and seg_masks.npz in place — points
     # moved into a new instance, mask pixels repainted — and there is no undo.
@@ -395,9 +376,6 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
     if not res_path.exists():
         raise RuntimeError(f"{res_path} missing — the instance detector needs a segmentation")
     instances = json.loads(res_path.read_text()).get("instances") or []
-    _advance(f"[instance-loops] session loaded: {len(instances)} instance(s) over "
-             f"{session.n_kf} keyframe(s), {session.n_points} point(s) "
-             f"({time.time() - t0:.0f}s) — classifying them")
     view = SessionView(session, session_dir)
 
     # classes (Qwen) → recorded with every candidate; dynamic instances excluded,
@@ -426,8 +404,6 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
         cloud_to_mask = {}
     classes = classify_instances(output_dir, session_dir, instances, cfg.loops.semantic,
                                  oid_of, frames_of, cloud_to_mask, log=log)
-    _advance(f"[instance-loops] {len(classes)} instance(s) classified "
-             f"({time.time() - t0:.0f}s) — gating the candidates of each one")
     # per-frame label lists for the verifier (§4.2.4) — keyed by REAL frame number
     per_frame: Dict[str, Dict[str, List[str]]] = {}
     for inst in instances:
@@ -518,12 +494,7 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
     n_rounds = 0
     # This loop gates every candidate of every instance against the cloud and
     # took 20 MINUTES on pccr 2026-09-21 without printing one line — the user
-    # could not tell it apart from a hang. It now says where it is, on the
-    # ADVANCE channel: the caller that silenced the detail (certify's
-    # `_measure_now`) silenced this too, which is how eleven of those minutes
-    # were spent in the dark. A tenth of the instances is a cadence, not a
-    # threshold: it decides nothing, it only bounds how long the console can
-    # stay quiet.
+    # could not tell it apart from a hang. It now says where it is.
     _total = len(queue)
     _step = max(1, _total // 10)
     _t0, _done = time.time(), 0
@@ -531,8 +502,8 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
         inst = queue.pop(0)
         _done += 1
         if _done % _step == 0 or not queue:
-            _advance(f"[instance-loops] {_done}/{_total} instance(s), "
-                     f"{len(to_write)} candidate(s) so far ({time.time() - _t0:.0f}s)")
+            log(f"[instance-loops] {_done}/{_total} instance(s), "
+                f"{len(to_write)} candidate(s) so far ({time.time() - _t0:.0f}s)")
         iid = int(inst.get("instance_id", inst.get("id")))
         cls = classes.get(iid, {}).get("class", cfg.loops.semantic.default_class)
         if cls == "dynamic":
@@ -694,10 +665,9 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
     (output_dir / DUPLICATES_JSON).write_text(json.dumps(
         {"version": 1, "n_duplicates": len(report["duplicates"]),
          "duplicates": report["duplicates"], "target": 0}, indent=1, default=float))
-    _advance(f"[instance-loops] {len(report['candidates'])} candidate(s): "
-             f"{len(to_write)} written as loops, {len(report['splits'])} split(s), "
-             f"{len(report['duplicates'])} duplicate(s) in {report['elapsed_s']}s "
-             f"— {output_dir / CANDIDATES_JSON}")
+    log(f"[instance-loops] {len(report['candidates'])} candidate(s): "
+        f"{len(to_write)} written as loops, {len(report['splits'])} split(s), "
+        f"{len(report['duplicates'])} duplicate(s) — {output_dir / CANDIDATES_JSON}")
     return report
 
 

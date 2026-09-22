@@ -48,28 +48,6 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
         else:
             pipe.send_log(f"Using VLM prompt: '{prompt}'"
                           + (f" (+box seeds for {len(boxes_map)} labels)" if boxes_map else ""))
-
-        # THE DETAIL OF THE SEGMENTATION IS DECIDED BEFORE WE GET HERE. Two
-        # runs of the same scan on 2026-09-21: the VLM understood 61 object
-        # types both times, SAM3 was handed 61 categories in one run and 32 in
-        # the other, and the difference was one consolidation pass that
-        # returned nothing parseable ("the pass returned nothing parseable —
-        # list unchanged"). That is the vocabulary of the whole session and it
-        # went by as a line in a log nobody keeps, so it is said out loud here
-        # and written into segmentation.json next to `prompts`.
-        _cons = vlm_data.get("consolidation") or {}
-        _warn = _cons.get("warning")
-        if _warn:
-            pipe.send_log(f"concept vocabulary: {_warn} — see "
-                          f"output/autoprompt_concepts.json", level="warning")
-        elif _cons.get("ran"):
-            pipe.send_log(f"concept vocabulary: {_cons.get('n_input', '?')} → "
-                          f"{_cons.get('n_objects', '?')} concept(s) in "
-                          f"{_cons.get('passes', 0)} consolidation pass(es)")
-        elif _cons:
-            pipe.send_log(f"concept vocabulary: {_cons.get('n_objects', '?')} "
-                          f"concept(s), not consolidated "
-                          f"({_cons.get('reason') or _cons.get('stopped_reason')})")
     else:
         # No scene understanding on disk. An explicit config prompt is
         # honored (operator override); otherwise FAIL — a canned category
@@ -135,16 +113,6 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # and the "apply to the viewer" call that ran here anyway found no cloud,
     # degraded to instances with no points and cached that as the session's
     # segmentation.
-    #
-    # Because the cloud is on disk, run_segmentation() ALSO matches at the end
-    # of SAM3, so this call used to repeat the whole pass: pccr 2026-09-21,
-    # 12:18→12:26 and 12:26→12:32 over the same 22,771,938 points for 287
-    # points of difference, plus a second fusion round and a second octree.
-    # map_segmentation_to_cloud() now compares mtimes against the parent
-    # (segmentation.json / seg_masks.npz / cleaned_cloud.ply) and returns the
-    # cached result when it already covers them — the call stays here so the
-    # broadcast below is written on every path, including the sessions where
-    # the matching really is still pending.
     try:
         from segmentation_pipeline import map_segmentation_to_cloud
         seg_data = map_segmentation_to_cloud(output_dir)

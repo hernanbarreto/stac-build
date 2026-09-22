@@ -42,9 +42,7 @@ STAGE_REGISTRY = {
     StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
 }
 
-# THE reconstruction pipeline — the default run is end to end; a caller that
-# needs a partial relaunch names the stages (build_pipeline_stages stages= /
-# from_stage=), which is the only way to get one.
+# THE reconstruction pipeline — always runs end-to-end, no client selection.
 #   Reconstruction (SIMPLE: sparse frames → ONE Omega pass → metric scale →
 #                   upright orientation baked into cloud + poses)
 #   → VLM   (Qwen3-VL understands the scene → RICH concept phrases, no boxes)
@@ -81,27 +79,11 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
 ]
 
 
-class PipelineSelectionError(ValueError):
-    """An explicit stage selection that cannot be honoured: an unknown name, a
-    stage this backend does not have, or a selection that comes out empty.
-    It is RAISED, never quietly narrowed — the caller asked for a precise set
-    of stages (USER 2026-09-21: "relances desde segmentacion con todas sus
-    etapas, ademas de la certificacion") and a relaunch that silently runs a
-    different set than the one asked for is exactly how 3.5 h of
-    reconstruction got re-run."""
-
-
 @dataclass
 class PipelineStage:
     id: StageId
     enabled: bool = True
     config: dict = field(default_factory=dict)
-    # True when the CALLER named this stage (stages=/from_stage=), as opposed to
-    # the automatic full chain. An explicitly named stage RUNS: the resume probe
-    # is not consulted for it, because the selection IS the resume decision the
-    # user already made (finding 21 — before this there was no way to say "from
-    # the VLM down", and every worker decided for itself whether it had run).
-    explicit: bool = False
 
     @property
     def label(self) -> str:
@@ -161,7 +143,6 @@ class PipelineJob:
                     "label": ss.stage.label,
                     "icon": ss.stage.icon,
                     "enabled": ss.stage.enabled,
-                    "explicit": ss.stage.explicit,
                     "status": ss.status.value,
                     "pct": ss.pct,
                     "message": ss.message,
@@ -213,10 +194,7 @@ class PipelineManager:
             on_complete: Async callback(session_id, success) when pipeline finishes
             replace: If True, WIPE output/ (and its derived caches) and re-run every
                      stage from scratch. Defaults to False: resume is the safe default,
-                     an omitted flag must never destroy a reconstruction — and since
-                     2026-09-21 it does not, replace=False deletes NOTHING. A stage
-                     that cannot re-run without rewriting a finished predecessor
-                     refuses instead (_destructive_conflict).
+                     an omitted flag must never destroy a reconstruction.
             scan_key: Optional "date/source" key (e.g. "2026-03-07/legacy") to target
                       a specific scan. If None, resolves to latest scan/first source.
         """
@@ -417,20 +395,9 @@ class PipelineManager:
         StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
     }
 
-    # Files in frames/ dir that should be regenerated on reconstruction.
-    #
-    # frames/selected_frames.json is NOT here and must not come back: it is the
-    # INPUT of the segmentation, not an output of the reconstruction. On
-    # 2026-09-21 at 10:00 a resume run deleted it on the way in, and SAM3 —
-    # which falls back to "all frames" when the file is missing (main.py,
-    # _sam3_init) — started segmenting 3,044 video frames in 12 batches
-    # instead of the 216 keyframes: 14× the work, with masks in video-frame
-    # space instead of keyframe space. map_worker WRITES the file on every
-    # reconstruction that is allowed to re-select frames (replace=on), so
-    # deleting it first buys nothing and costs the segmentation its keyframe
-    # space whenever the run is cancelled in between.
+    # Files in frames/ dir that should be regenerated on reconstruction
     FRAMES_DIR_FILES: List[str] = [
-        "selected_frames_seg*.json", "frame_quality.json",
+        "selected_frames.json", "selected_frames_seg*.json", "frame_quality.json",
         "da3_frames.json",   # dense-set list (legacy da3/mapanything backends)
     ]
 
@@ -480,31 +447,6 @@ class PipelineManager:
         ],
         StageId.PGSR: [
             StageId.TSDF,             # precision TSDF integrates pgsr_render depths
-        ],
-    }
-
-    # Stages whose worker REWRITES, in place and without staging, artifacts that
-    # other stages read. Nothing here is deleted by the manager — these names are
-    # what a re-run would take with it, so the manager can NAME them in a refusal.
-    #
-    # 2026-09-21 10:00, the incident that put this map here: a run_pipeline with
-    # replace=False (relaunch from the VLM) enabled every stage, so RECONSTRUCTION
-    # was in the list, and STARTING it wiped cleaned_cloud.ply,
-    # cleaned_cloud_raw.ply, camera_poses.txt, intrinsic.txt, omega_run/, da3_run/,
-    # chunk_plan.json, scale_diagnostics.json, the idempotency markers and
-    # frames/selected_frames.json. Cancelled 40 s later: too late, 3.5 h gone.
-    # replace=False now deletes NOTHING — pre-cleaning is what replace MEANS — and
-    # a stage that cannot run without destroying a FINISHED predecessor refuses
-    # and names the flag that authorises it.
-    IN_PLACE_REWRITERS: Dict[StageId, List[str]] = {
-        # map_worker's phase-2 chunked re-run unlinks these by name before it
-        # starts over (workers/map_worker.py, "wipe phase-1 reconstruction
-        # artifacts"), and re-selects the keyframes on top.
-        StageId.RECONSTRUCTION: [
-            "camera_poses.txt", "camera_frames.txt", "intrinsic.txt",
-            "omega_run", "maplong_run", "da3_run",
-            "chunk_plan.json", "scale_diagnostics.json",
-            ".metric_scale_applied", ".orientation_applied",
         ],
     }
 
@@ -687,31 +629,6 @@ class PipelineManager:
                 cascade_label = f" (+cascade: {', '.join(s.value for s in stages_to_clean[1:])})"
             logger.info(f"[Pipeline] 🗑️ Replace mode{cascade_label}: deleted {', '.join(all_deleted)}")
 
-    @classmethod
-    def _destructive_conflict(cls, output_dir: Path, session_dir: Path,
-                              stage_id: StageId) -> List[str]:
-        """The artifacts re-running `stage_id` would rewrite in place, when a
-        FINISHED version of that stage is already on disk. Empty list = there is
-        nothing to lose and the stage may run.
-
-        A HALF-finished stage returns nothing on purpose: resuming a crashed
-        reconstruction is the whole point of resume mode, and its leftovers are
-        not a deliverable. What this protects is the finished one — the 3.5 h
-        chain of 2026-09-21 that a replace-less relaunch destroyed in 40 s."""
-        names = cls.IN_PLACE_REWRITERS.get(stage_id)
-        if not names:
-            return []
-        done, _why = cls._stage_is_complete(output_dir, session_dir, stage_id)
-        if not done:
-            return []
-        at_risk = [n for n in names if (output_dir / n).exists()]
-        if stage_id == StageId.RECONSTRUCTION:
-            # the segmentation's keyframe list: map_worker re-selects it, and
-            # without it SAM3 segments the raw video instead of the keyframes
-            if (session_dir / "frames" / "selected_frames.json").exists():
-                at_risk.append("frames/selected_frames.json")
-        return at_risk
-
     async def _run_pipeline(
         self,
         job: PipelineJob,
@@ -731,41 +648,28 @@ class PipelineManager:
         # consulting them first is what made Replace a no-op on sessions whose
         # artifacts all probed complete.
         #
-        # replace=False DELETES NOTHING. Pre-cleaning is what replace MEANS, by
-        # definition, and the flag is documented right above as "resume is the
-        # safe default, an omitted flag must never destroy a reconstruction".
-        # It did not honour that: until 2026-09-21 the wipe also fired whenever
-        # the RECONSTRUCTION stage merely appeared in the list, under the theory
-        # that a reconstruction must never reuse a prior artifact. Since the
-        # manager enables ALL stages (finding 21), a relaunch-from-the-VLM with
-        # replace=False carried the reconstruction along and the wipe took the
-        # session's cloud, poses, omega_run/, chunk_plan.json and the
-        # segmentation's keyframe list with it — 3.5 h destroyed in 40 s. The
-        # clean-slate contract now lives where it belongs: a FINISHED
-        # reconstruction is refused a silent re-run (see _destructive_conflict
-        # below), so the choice is explicit instead of destructive.
-        #
-        # A replace that carries an explicit stage SELECTION pre-cleans only the
-        # selected stages and their cascade (_cleanup_stage_outputs, below in the
-        # loop). Wiping the whole output/ for a partial relaunch would destroy
-        # exactly what the caller did not ask to redo — the same shape of loss
-        # this fix is about, one flag further along.
-        _selective = any(s.stage.explicit for s in job.stages)
-        if replace and not _selective:
+        # RECONSTRUCTION always starts from scratch: whenever the reconstruction
+        # stage is part of this run, output/ is wiped UNCONDITIONALLY — a
+        # reconstruction must never reuse any prior artifact (resume subtleties
+        # inside the stages caused silent partial reuse; the only safe contract
+        # is a clean slate). Stage-only runs (TSDF / segmentation) still resume
+        # on the existing outputs.
+        recon_requested = any(
+            s.stage.enabled and s.stage.id == StageId.RECONSTRUCTION
+            for s in job.stages)
+        if replace or recon_requested:
+            if recon_requested and not replace:
+                logger.info("[Pipeline] reconstruction stage requested → output/ "
+                            "wiped unconditionally (a reconstruction never reuses "
+                            "prior artifacts)")
             self._wipe_outputs_for_replace(Path(session_dir), output_dir)
-        elif replace:
-            logger.info("[Pipeline] Replace with an explicit stage selection → "
-                        "pre-cleaning only "
-                        f"{', '.join(s.stage.id.value for s in job.stages if s.stage.explicit)}"
-                        " and their cascade; the rest of output/ is untouched")
 
         # RESUME MODE (no wipe): the pipeline detects on its own which stages
         # this session already completed (artifact + freshness probes) and only
-        # runs what is missing/stale. Once any stage actually runs, everything
-        # downstream is considered stale (its inputs just changed) and runs too.
-        # An EXPLICITLY selected stage (stages= / from_stage=) skips the probe:
-        # the caller already made that decision by naming it.
-        upstream_ran = replace
+        # runs what is missing/stale — the user never selects stages. Once any
+        # stage actually runs, everything downstream is considered stale (its
+        # inputs just changed) and runs too.
+        upstream_ran = replace or recon_requested
 
         for idx, stage_state in enumerate(job.stages):
             if not stage_state.stage.enabled:
@@ -776,7 +680,7 @@ class PipelineManager:
             if job.status == JobStatus.CANCELLED:
                 break
 
-            if not upstream_ran and not stage_state.stage.explicit:
+            if not upstream_ran:
                 done, why = self._stage_is_complete(
                     output_dir, Path(session_dir), stage_state.stage.id)
                 if done:
@@ -787,27 +691,6 @@ class PipelineManager:
                                 f"already complete ({why}) — skipping")
                     continue
             upstream_ran = True
-
-            # A stage about to destroy a FINISHED predecessor says so and stops:
-            # the flag that authorises the destruction is `replace`, and nobody
-            # else gets to imply it. Refusing is the whole finding-23 fix — the
-            # run that cost the user his cloud never asked this question.
-            if not replace:
-                at_risk = self._destructive_conflict(
-                    output_dir, Path(session_dir), stage_state.stage.id)
-                if at_risk:
-                    detail = (
-                        f"{stage_state.stage.id.value} is already complete and "
-                        f"re-running it rewrites {', '.join(at_risk)} in place. "
-                        f"replace=False deletes nothing — resend with "
-                        f"replace=true to authorise it, or drop "
-                        f"'{stage_state.stage.id.value}' from the stage "
-                        f"selection (stages=/from_stage=)")
-                    stage_state.status = JobStatus.FAILED
-                    stage_state.message = detail
-                    logger.error(f"[Pipeline] ✋ refused: {detail}")
-                    success = False
-                    break
 
             # Clean up previous outputs if in replace mode (cascade invalidation)
             if replace and output_dir.exists():
@@ -1006,13 +889,6 @@ class PipelineManager:
                 return 0.0
 
         if stage_id == StageId.RECONSTRUCTION:
-            # NEVER chunk_*.ply. CloudCompy DELETES them when it finishes
-            # ("removed 21 redundant chunk files, baked into cleaned_cloud",
-            # workers/cloudcompy_worker.py), so a probe that asks for them says
-            # "never ran" about every session that ever reached the cleaned
-            # cloud — and then redoes the whole 3.5 h. The evidence that the
-            # reconstruction ran is what SURVIVES the later stages: the poses,
-            # the run directory that produced them, the chunk plan, the depth.
             poses = [output_dir / d / "camera_poses.txt"
                      for d in ("omega_run", "da3_run", "maplong_run", ".")]
             has_poses = any(p.exists() for p in poses)
@@ -1020,21 +896,8 @@ class PipelineManager:
                             for d in ("omega_run/results_output",
                                       "da3_run/results_output", "results_output",
                                       "_tmp_results_aligned"))
-            has_run = any((output_dir / d).is_dir()
-                          for d in ("omega_run", "da3_run", "maplong_run"))
-            # chunk_plan.json is persisted by map_worker on every chunked run and
-            # nothing downstream removes it; it is the correction's own record of
-            # the real chunks, so its presence means this session reconstructed.
-            has_plan = (output_dir / "chunk_plan.json").exists()
-            has_cloud = (output_dir / "cleaned_cloud.ply").exists()
-            if has_poses and (has_depth or has_cloud or has_plan or has_run):
-                why = ", ".join(w for w, ok in (
-                    ("poses", has_poses), ("depth", has_depth),
-                    ("chunk_plan", has_plan), ("run dir", has_run),
-                    ("cleaned cloud", has_cloud)) if ok)
-                return True, f"{why} on disk"
-            if has_poses:
-                return False, "poses on disk but no depth, chunk plan or run dir"
+            if has_poses and (has_depth or (output_dir / "cleaned_cloud.ply").exists()):
+                return True, "poses + depth on disk"
             return False, "no reconstruction artifacts"
 
         if stage_id == StageId.CLOUDCOMPY:
@@ -1128,52 +991,17 @@ class PipelineManager:
 
 # ── Helpers ──────────────────────────────────────────────────
 
-def _parse_stage(name) -> StageId:
-    """One stage name → StageId. An unknown name is a PipelineSelectionError
-    that lists what IS valid; it is never dropped, never coerced."""
-    if isinstance(name, StageId):
-        return name
-    key = str(name).strip().lower()
-    for sid in StageId:
-        if sid.value == key:
-            return sid
-    raise PipelineSelectionError(
-        f"unknown stage '{name}' — valid stages are "
-        f"{', '.join(s.value for s in DEFAULT_STAGE_ORDER)}")
-
-
-def build_pipeline_stages(backend: Optional[str] = None,
-                          stages: Optional[List] = None,
-                          from_stage: Optional[str] = None) -> List[PipelineStage]:
-    """Build the pipeline stage list.
-
-    With no selection this is THE pipeline — the whole DEFAULT_STAGE_ORDER,
-    gated only by the config switches (auto_segment / auto_tsdf /
-    auto_after_segmentation) and by the backend. That is the historical
-    behaviour and it is unchanged: `build_pipeline_stages(backend)` returns
-    exactly what it returned before.
-
-    With a selection it runs what the caller NAMED. There was no way to ask for
-    that until 2026-09-21 (USER: "quiero que relances desde segmentacion con
-    todas sus etapas, ademas de la certificacion... es decir desde cloudcompy
-    para abajo sin incluir claro a cloudcompy") — the only options were the full
-    chain or nothing, which is how the reconstruction ended up in a relaunch
-    that only wanted the semantic stages, and how it then destroyed them
-    (finding 23). A named stage also RUNS: the resume probe is not consulted for
-    it (PipelineStage.explicit), because naming it IS the decision.
+def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
+    """Build THE pipeline stage list — always the full DEFAULT_STAGE_ORDER
+    (reconstruction → cloudcompy → tsdf), end to end. There is deliberately no
+    per-stage client selection: a reconstruction is only usable once the cloud
+    is cleaned (Potree) and the scene TSDF exists, so partial runs just left
+    sessions in in-between states that hung the on-load lazy paths.
 
     Args:
         backend: Reconstruction backend name (e.g., "da3", "gaus_slam").
                  GauS-SLAM backends skip CloudCompPy (Gaussian surfels are
                  already clean — the stage has nothing to consume).
-        stages: Explicit stage ids/names to run, in any order — the list is
-                re-sorted into pipeline order. Mutually exclusive with
-                from_stage.
-        from_stage: Run this stage and everything after it in pipeline order.
-
-    Raises:
-        PipelineSelectionError: unknown name, both selectors given, a stage this
-        backend does not have, or a selection that comes out empty.
     """
     _gaus_backends = ("gaus_slam", "gaus_slam_lidar", "gaus_slam_da3", "gaus_slam_hybrid")
     skip_cloudcompy = backend in _gaus_backends
@@ -1217,8 +1045,7 @@ def build_pipeline_stages(backend: Optional[str] = None,
     if not auto_certify:
         logger.info("[Pipeline] auto_after_segmentation off — CERTIFY stage disabled")
 
-    def _auto_enabled(stage_id: StageId) -> bool:
-        """What the AUTOMATIC chain runs — the config switches' verdict."""
+    def _enabled(stage_id: StageId) -> bool:
         if skip_cloudcompy and stage_id == StageId.CLOUDCOMPY:
             return False
         if not auto_segment and stage_id in _semantic_stages:
@@ -1235,70 +1062,5 @@ def build_pipeline_stages(backend: Optional[str] = None,
     # must not show a "Precision (PGSR)" step the pipeline will never run).
     order = [s for s in DEFAULT_STAGE_ORDER
              if s != StageId.PGSR or backend == "vggtomega_pgsr"]
-
-    # ── explicit selection ────────────────────────────────────
-    selection: Optional[List[StageId]] = None
-    if stages is not None and from_stage is not None:
-        raise PipelineSelectionError(
-            "stages= and from_stage= are mutually exclusive — one names a set, "
-            "the other names a starting point; pick one")
-    if from_stage is not None:
-        first = _parse_stage(from_stage)
-        if first not in order:
-            raise PipelineSelectionError(
-                f"stage '{first.value}' is not part of this pipeline "
-                f"(backend={backend}) — it runs "
-                f"{', '.join(s.value for s in order)}")
-        # A RANGE, not a naming: "from the VLM down" means the stages the
-        # automatic chain would have run from there, not every stage that
-        # exists. Without this filter `from_stage="vlm"` answered
-        # vlm, sam3, certify, TSDF on a session whose config says
-        # `pipeline.auto_tsdf: false` — "the pipeline ends at the cleaned
-        # cloud, the mesh is on demand" (USER 2026-08-28) — and a relaunch
-        # meant to redo the segmentation would have ended in the two-hour
-        # mesh nobody asked for. Naming a stage in `stages=` is different:
-        # that IS asking for it, switch or no switch.
-        selection = [s for s in order[order.index(first):] if _auto_enabled(s)]
-        if not selection:
-            raise PipelineSelectionError(
-                f"from_stage '{first.value}': every stage from there on is "
-                f"disabled by the config switches (auto_segment / auto_tsdf / "
-                f"certify.auto_after_segmentation) — name them explicitly with "
-                f"stages= if you mean to override that")
-    elif stages is not None:
-        wanted = [_parse_stage(s) for s in stages]
-        if not wanted:
-            raise PipelineSelectionError(
-                "empty stage selection — omit stages= to run the whole chain")
-        for w in wanted:
-            if w not in order:
-                raise PipelineSelectionError(
-                    f"stage '{w.value}' is not part of this pipeline "
-                    f"(backend={backend}) — it runs "
-                    f"{', '.join(s.value for s in order)}")
-        wanted_set = set(wanted)
-        selection = [s for s in order if s in wanted_set]   # pipeline order wins
-
-    if selection is None:
-        chosen = [s for s in order if _auto_enabled(s)]
-    else:
-        # A structurally absent stage was already refused above. What remains is
-        # the config switches, and against a stage the caller named BY NAME they
-        # do not get a vote — they configure the automatic chain, not a manual
-        # relaunch. The override is logged, never silent.
-        overridden = [s.value for s in selection if not _auto_enabled(s)]
-        if overridden:
-            logger.info(f"[Pipeline] explicit selection runs {', '.join(overridden)} "
-                        f"although the config switches them off — named by the caller")
-        chosen = list(selection)
-        if not chosen:
-            raise PipelineSelectionError(
-                "the stage selection resolved to no runnable stage")
-        logger.info(f"[Pipeline] explicit stage selection: "
-                    f"{', '.join(s.value for s in chosen)} "
-                    f"(the resume probe is not consulted for these)")
-
-    chosen_set = set(chosen)
-    return [PipelineStage(id=stage_id, enabled=stage_id in chosen_set,
-                          explicit=selection is not None and stage_id in chosen_set)
+    return [PipelineStage(id=stage_id, enabled=_enabled(stage_id))
             for stage_id in order]

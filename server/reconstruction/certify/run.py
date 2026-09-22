@@ -102,64 +102,6 @@ def _subsample(items: list, density: float) -> list:
     return [items[order[q]] for q in keep]
 
 
-def split_closure_population(loops: Sequence[dict]):
-    """The two populations of a measured loop list: the pairs that are
-    PLAUSIBLE DUPLICATES (the measurement was made and it stood) and the
-    pairs the measurement REFUSED (``accepted: False``, always carrying the
-    reason and the numbers that refused them).
-
-    They must never be averaged together. pccr 2026-09-21 measured 21 edges
-    before the correction and 22 after, and 10 and 11 of them were ONE
-    SURFACE AGAINST ITSELF — the two ends of a floor, a wall, a ceiling duct,
-    "closed" by sliding one end onto the other, 3.8 to 13 m by construction
-    (`loops.spatial_gate.surface_overlap` is what refuses them now). Split
-    into the two populations that same acta reads:
-
-        BEFORE  11 real: 106 106 97 97 97 80 77 77 73 69 33 cm → median 80.5
-        AFTER   11 real:  92  74 61 61 61 48 40 16 16 13 12 cm → median 47.7
-
-    The real closures improved 41 %, and so did every item independent of the
-    edge set (seam residual median 2.417 → 2.358 cm, residual scale per chunk
-    7.8 % → 0.6 %, the user's desk 67.1 → 16.1 cm). The acta still printed
-    "REGRESSION: objective 4.3000 → 7.3823 (-71.7%)", because what changed
-    was the MIX of refused pairs and the mix was voting. A number the user
-    acts on must not be able to invert like that.
-
-    A refused pair keeps its whole record — the caller publishes it beside
-    the metrics — it simply does not get a vote.
-    """
-    plausible = [m for m in loops if m.get("accepted")]
-    refused = [m for m in loops if not m.get("accepted")]
-    return plausible, refused
-
-
-def refused_closures(refused: Sequence[dict]) -> dict:
-    """The refused population DECLARED: how many, what they would have
-    contributed to the closure had they voted, and one record per pair with
-    the reason that refused it. Nothing is dropped silently — a pair that
-    closes nothing is still a measurement the session made."""
-    vals = [float(m["offset_before_m"]) for m in refused
-            if m.get("offset_before_m") is not None]
-    gaps = [float((m.get("surface_overlap") or {}).get("gap_m")) for m in refused
-            if (m.get("surface_overlap") or {}).get("gap_m") is not None]
-    per = []
-    for m in refused:
-        rec = {k: m.get(k) for k in ("i", "j", "instance_id", "label", "source",
-                                     "kind", "region", "reason", "offset_before_m",
-                                     "offset_after_m")}
-        ov = m.get("surface_overlap")
-        if ov is not None:
-            rec["surface_overlap"] = {"kind": ov.get("kind"),
-                                      "overlap_frac": ov.get("overlap_frac"),
-                                      "gap_m": ov.get("gap_m")}
-        per.append(rec)
-    return {"n": len(refused), "n_with_offset": len(vals),
-            "median_m": (float(np.median(vals)) if vals else None),
-            "max_m": (float(max(vals)) if vals else None),
-            "median_surface_gap_m": (float(np.median(gaps)) if gaps else None),
-            "per_pair": per, "provenance": "tool_measured"}
-
-
 def _gates(m: dict, prev: Optional[dict], gcfg) -> List[dict]:
     out = []
     if prev is None:
@@ -279,40 +221,17 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         return json.loads(p.read_text()).get("instances") or [] if p.exists() else []
 
     def _state_metrics(session, frames, loops, stages, instances, fields):
-        # Only the pairs that ARE plausible duplicates vote on the closure and
-        # on the duplicate count — therefore on the objective, on the §9 gates
-        # and on the regression verdict. The refused ones travel next to them,
-        # declared with their numbers, and decide nothing (see
-        # `split_closure_population`).
-        plausible, refused = split_closure_population(loops)
-        m = compute_metrics(session, fields, plausible, stages, cfg, output_dir,
-                            instances, frames=frames)
-        m["closure_refused"] = refused_closures(refused)
-        return m
+        return compute_metrics(session, fields, loops, stages, cfg, output_dir, instances, frames=frames)
 
-    def _all_edges(sess, cands_now, quiet=False, progress=None):
+    def _all_edges(sess, cands_now, quiet=False):
         """Every loop edge measurable on a state: the SAM3 instance copies
         (§4.4 — the detector's loop|ambiguous candidates, any class but
-        dynamic) and the geometric revisit regions, subsampled alike.
-
-        ``quiet`` silences the per-edge DETAIL; ``progress`` is the separate
-        channel that says which of the two measurements is running. The two
-        were one, and with `quiet=True` this function contributed several of
-        the eleven silent minutes of pccr 2026-09-21 — the revisit detection
-        alone walks every keyframe pair of the session.
-        """
+        dynamic) and the geometric revisit regions, subsampled alike."""
         _log = (lambda m: None) if quiet else log
-        _pg = progress if progress is not None else (lambda m: None)
-        _t = time.time()
-        _pg(f"measuring the copies of {len(cands_now)} instance candidate(s)")
         inst = (instance_edges(sess, cands_now, ccfg, cfg, log=_log,
                                sigma_floor_m=sigma_floor_m) if cands_now else [])
-        _pg(f"{len(inst)} instance record(s) in {time.time() - _t:.0f}s — "
-            f"now the geometric revisits")
-        _t = time.time()
         vis = visit_edges(sess, ccfg, ccert.visit_loops, cfg.graph.loop_sigma_rot_deg,
                           log=_log, sigma_floor_m=sigma_floor_m)
-        _pg(f"{len(vis)} revisit record(s) in {time.time() - _t:.0f}s")
         return _subsample(inst, loop_density) + _subsample(vis, loop_density)
 
     base = base_frames if base_frames is not None else load_session_frames(output_dir, log)
@@ -339,45 +258,20 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     # witnesses, the metrics, the gates and the acta. The scale and depth
     # stages still solve their own degrees of freedom, which the visit-drift
     # loop does not touch.
-    def _measure_now(sess, insts, st, dy, phase: str):
+    def _measure_now(sess, insts, st, dy):
         """The state of the session, measured: loops, witnesses, metrics.
-        Used for the acta's BEFORE and reused as iteration 0's baseline.
-
-        This is the LONGEST STAGE OF THE CERTIFICATION and until 2026-09-21 it
-        printed NOTHING: eleven minutes between "[certify] loaded 216
-        keyframes" and "[certify] before the correction" on pccr, with the
-        process alive the whole time (444 % CPU, 336 threads, 3.5 GB RSS).
-        The per-instance advance the detector already emits was thrown away
-        here — this caller passes `log=lambda m: None` because it wants no
-        per-candidate detail in the acta's BEFORE, and that silenced the
-        advance with it. The detail still goes nowhere; the ADVANCE now comes
-        back on its own channel, prefixed `[certify] [metrics]` and naming
-        the phase, so the console says where the stage is (USER: "todos estos
-        pasos deben estar en consola").
-        """
-        def _pg(msg: str) -> None:
-            log(f"[certify] [metrics] {phase}: {msg}")
-
-        _t0 = time.time()
-        _pg(f"{len(insts)} instance(s) — projecting the witness fields")
+        Used for the acta's BEFORE and reused as iteration 0's baseline."""
         fr = frames_with_state(base, sess)
         fl = witness_fields(sess.xyz, sess.fg, sess.data["pixel_row"],
                             sess.data["pixel_col"], fr, cfg.witness, insts, st, dy,
                             device=device)
-        _pg(f"witness fields measured ({time.time() - _t0:.0f}s) — now the SAM3 "
-            f"instance candidates")
         cn = []
         if detect_loops and insts:
             cn = [c for c in detect_instance_loops(
                 output_dir, session_dir, cfg, log=lambda m: None,
-                apply_splits=False, progress=_pg)["candidates"]
+                apply_splits=False)["candidates"]
                   if c["verdict"] in ("loop", "ambiguous")]
-        _pg(f"{len(cn)} candidate(s) closing a loop — measuring their edges")
-        ed = _all_edges(sess, cn, quiet=True, progress=_pg)
-        _pg(f"{len(ed)} loop record(s) — seams, closure and objective")
-        m = _state_metrics(sess, fr, ed, {}, insts, fl)
-        _pg(f"measured in {time.time() - _t0:.0f}s: objective {m['objective']:.4f}")
-        return m
+        return _state_metrics(sess, fr, _all_edges(sess, cn, quiet=True), {}, insts, fl)
 
     # The acta's BEFORE is measured BEFORE the correction — it used to be
     # iteration 0's own starting state, which was the same thing only because
@@ -390,17 +284,12 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     if apply:
         s0 = load_session(output_dir)
         i0 = _instances()
-        _pc(10, "certification: measuring the state before the correction")
         prev = _measure_now(s0, i0, load_mask_store(output_dir) if i0 else None,
-                            dynamic_instance_ids(output_dir),
-                            "measuring the state before the correction")
+                            dynamic_instance_ids(output_dir))
         acta["metrics_initial"] = prev
         _pc(35, "certification: correcting (depth, then the floor)")
         log(f"[certify] before the correction: objective {prev['objective']:.4f} | "
-            f"seams {prev['seam_residual']['median_m']} | closure "
-            f"{prev['closure']['median_m']} over {prev['loop_residual']['n_edges']} "
-            f"plausible pair(s) | {prev['closure_refused']['n']} pair(s) refused, "
-            f"declared and not voting")
+            f"seams {prev['seam_residual']['median_m']} | closure {prev['closure']['median_m']}")
         del s0, i0
 
         # THE CORRECTION (USER-VALIDATED, pccr 2026-09-19): depth first, then
@@ -446,8 +335,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         cands = _subsample([c for c in cands if c.get("verdict") in ("loop", "ambiguous")], loop_density)
         scale_meas = copy_scale_rows(
             session, cands, ccert.scale, ccert.visit_loops.window_kf,
-            ccert.visit_loops.max_pairs_per_instance, log=log,
-            spatial_cfg=cfg.loops.spatial)
+            ccert.visit_loops.max_pairs_per_instance, log=log)
         edges_now = _all_edges(session, cands)
         extra = [dict(e) for e in (extra_loop_edges or [])]
         rec["loops"] = [{k: v for k, v in m.items() if k not in ("Z", "X", "info_t", "info_rot")}
@@ -462,9 +350,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
             acta["metrics_initial"] = prev
             _pc(62, "certification: measuring the corrected session")
             log(f"[certify] initial: objective {prev['objective']:.4f} | seams "
-                f"{prev['seam_residual']['median_m']} | closure {prev['closure']['median_m']} "
-                f"over {prev['loop_residual']['n_edges']} plausible pair(s) "
-                f"({prev['closure_refused']['n']} refused) | "
+                f"{prev['seam_residual']['median_m']} | closure {prev['closure']['median_m']} | "
                 f"verified {prev['witnesses']['status_fraction']['verified']:.3f}")
         # 2) scale FIRST
         srep = solve_scale_stage(output_dir, session, scale_meas, ccert.scale, log=log)
@@ -477,13 +363,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         session_s = transformed_session(session, I3, t1, k1) if srep.get("applied") else session
         k1_by_frame = {int(f): float(k1[k]) for f, k in session.kf_index.items()}
         # 3) the loops re-measured on the closed scale → SE(3) edges → pose graph
-        # re-measured with the detail silenced (it was already printed on the
-        # state before the scale) but NEVER silently: the advance says which
-        # measurement is running, like every other step of this stage
-        edges_s = _all_edges(session_s, cands, quiet=True,
-                             progress=lambda mm: log(f"[certify] [metrics] loops on the "
-                                                     f"closed scale: {mm}")) \
-            if srep.get("applied") else edges_now
+        edges_s = _all_edges(session_s, cands, quiet=True) if srep.get("applied") else edges_now
         edges = [m for m in edges_s if "Z" in m and m.get("trusted")] + extra
         # 3a) THE POSE CORRECTION IS NOT SOLVED HERE ANY MORE (USER 2026-09-18).
         #     It is the VISIT-DRIFT loop, which ran before this iteration and
@@ -545,10 +425,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         fields = witness_fields(session_d.xyz, session_d.fg, session_d.data["pixel_row"],
                                 session_d.data["pixel_col"], frames_d, cfg.witness, instances, store, dyn,
                                 device=device)
-        edges_d = _all_edges(session_d, cands, quiet=True,
-                             progress=lambda mm: log(f"[certify] [metrics] loops on the "
-                                                     f"composed state: {mm}")) \
-            if moved else edges_now
+        edges_d = _all_edges(session_d, cands, quiet=True) if moved else edges_now
         # 6) metrics + gates
         stages = {"scale": srep, "poses": {k: v for k, v in prep.items() if k not in ("xi",)}, "depth": drep}
         m = _state_metrics(session_d, frames_d, edges_d, stages, instances, fields)
@@ -579,10 +456,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                 f"objective_regressed: {prev['objective']:.4f} → {m['objective']:.4f} "
                 f"({improvement * 100:+.1f}%, tolerance {ccert.regression_eps * 100:.1f}%)")
             log(f"[certify] ⚠ REGRESSION: objective {prev['objective']:.4f} → "
-                f"{m['objective']:.4f} ({improvement * 100:+.1f}%) — closure over "
-                f"{prev['loop_residual']['n_edges']} → {m['loop_residual']['n_edges']} "
-                f"plausible pair(s), {prev['closure_refused']['n']} → "
-                f"{m['closure_refused']['n']} refused and not voting")
+                f"{m['objective']:.4f} ({improvement * 100:+.1f}%)")
         rec.update({"stages": {"scale": srep,
                                "poses": {k: v for k, v in prep.items() if k not in ("xi", "solver")},
                                "depth": {k: v for k, v in drep.items() if k not in ("a", "b")}},
@@ -655,8 +529,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         acta["iterations"].append(rec)
         log(f"[certify] iteration {it}: objective {prev['objective']:.4f} → {m['objective']:.4f} "
             f"({rec['improvement'] * 100:+.1f}%) | seams {m['seam_residual']['median_m']} | closure "
-            f"{m['closure']['median_m']} over {m['loop_residual']['n_edges']} plausible pair(s) "
-            f"({m['closure_refused']['n']} refused) | duplicates {m['duplicates']['n']} | verified "
+            f"{m['closure']['median_m']} | duplicates {m['duplicates']['n']} | verified "
             f"{m['witnesses']['status_fraction']['verified']:.3f} → epoch {rec.get('epoch_to')}"
             + (f" | ⚠ {len(gate_warnings)} advisory gate warning(s)" if gate_warnings else ""))
         prev = m

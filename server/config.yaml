@@ -434,33 +434,6 @@ autoprompt:
                                       # changes the list and stops when it changes nothing
                                       # (convergence). This only caps a model that oscillates, and
                                       # reaching it is declared in output/prompt_consolidation.json.
-  consolidate_merge_rule: "literal"   # WHAT THE CODE LETS THAT PASS APPLY. MANDATORY — a missing
-                                      # key fails at load naming it (consolidate_prompts.
-                                      # load_merge_rule), because it decides the session's whole
-                                      # object vocabulary and the vocabulary decides how many
-                                      # objects the correction can measure a closure on.
-                                      #   "literal" — an alias must be the SAME NAME RESTATED (same
-                                      #     head noun up to plural/singular and 'ductwork'≡'ducts',
-                                      #     and the words of one phrase a subset of the other's, so
-                                      #     no modifier contradicts); a PART is never removed, only
-                                      #     recorded. Everything proposed and not applied lands in
-                                      #     `refused` with its reason.
-                                      #   "model" — the pre-2026-09-21 behaviour (apply what the VLM
-                                      #     says, structural rescue as the only veto). Evaluation.
-                                      # USER 2026-09-21: "el detalle de vlm sobre la escena debe ser
-                                      # altamente detallado, como no va a haber desk, incluso hay
-                                      # muchos de ellos". MEASURED the same day: the 15:30 run folded
-                                      # 'desk', 'white table' and 'computer workstation' into 'white
-                                      # workbench' as ALIASES and the rack's nine internals into
-                                      # 'black server rack'. Those objects ARE the evidence the
-                                      # correction runs on — same scan, 61 raw concepts → 123 objects
-                                      # over 1000 pts → 5 closures → 10.2 % depth drift recovered,
-                                      # against 34 concepts → 79 → 2 closures → 2.2 %. The
-                                      # fragmentation the aggressive merge protected against (84
-                                      # phrases → 149 fragments → −1205 % regression, 2026-09-15) is
-                                      # handled since 2026-09-21 where it broke: surface_overlap in
-                                      # reconstruction/loops/spatial_gate.py and loops_posthoc.py
-                                      # refuse a pair whose supports do not overlap.
   vocabulary_path: null               # null -> segmentation/autoprompt/vocabulary.yaml
                                       # (canonicalization/routing overlay, NOT a filter)
   confidence_threshold: 0.5           # below (per-class overridable) -> review queue

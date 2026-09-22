@@ -80,72 +80,15 @@ def rigid_icp(src: np.ndarray, dst: np.ndarray, iters: int, trim: float):
     return R, t, rms
 
 
-# the degrees of freedom each candidate fit spends: the rigid Sim3 fits a
-# rotation as well, the other two only move the copy. The docstring of the
-# comparison below has promised since 2026-09-17 that "a tie goes to the fewer
-# degrees of freedom"; this is the number that makes it true.
-_FIT_DOF = {"rotated": 6, "translated": 3, "centroid": 3}
-
-
-def _rot_deg(R) -> float:
-    """Rotation angle of R in degrees."""
-    A = np.asarray(R, np.float64)
-    return float(np.degrees(np.arccos(np.clip((np.trace(A) - 1.0) / 2.0, -1.0, 1.0))))
-
-
-def _over_budget(R, t, budget: Optional[Dict[str, float]]) -> Optional[float]:
-    """The motion a fit demands, in units of the drift the WALK between the two
-    visits can produce: max(|t| / δ(L), rot / θ(L)). 1.0 is the budget itself.
-    pccr 2026-09-21, epoch 1: the rigid fit of `desk#198` (107.7°, 8.76 m over
-    19.3 m walked, δ 0.30 m / θ 2.0°) reads 53.9, while the 74.1 cm its two
-    copies actually stood apart reads 2.5 — the two sit on opposite sides of
-    everything the walk could explain. None when no budget was handed in:
-    then nothing is judged on motion."""
-    if budget is None:
-        return None
-    d = max(float(budget["delta_m"]), 1e-9)
-    th = max(float(budget["theta_deg"]), 1e-9)
-    return float(max(float(np.linalg.norm(np.asarray(t, np.float64))) / d,
-                     _rot_deg(R) / th))
-
-
-def _pair_budget(session, i: int, j: int, spatial_cfg):
-    """δ(L), θ(L) for one candidate pair — ``spatial_gate.drift_budget`` over
-    the metres WALKED between keyframes i and j along the current camera
-    centres. Returns (budget, why): the budget is None, and the reason travels
-    into the record, when the spatial block handed in states no drift rate
-    (``copy_scale_rows`` takes its spatial config optionally, and a caller may
-    hand only the same-surface keys the overlap refusal needs). A bound nobody
-    stated is not a bound to invent here."""
-    from reconstruction.loops import spatial_gate as sg
-    if spatial_cfg is None:
-        return None, "no spatial config: the drift budget was never stated"
-    c = sg._cfg(spatial_cfg)
-    missing = [k for k in ("drift_floor_m", "drift_rate_m_per_m",
-                           "drift_floor_deg", "drift_rate_deg_per_m") if k not in c]
-    if missing:
-        return None, ("the spatial config states no drift rate "
-                      f"({', '.join(missing)}) — the fit is judged on quality alone")
-    L = sg.walked_length_m(np.asarray(session.poses, np.float64)[:, :3, 3], int(i), int(j))
-    return sg.drift_budget(L, c), None
-
-
 def measure_copy(pts_a: np.ndarray, pts_b: np.ndarray, scfg, seed: int = 0,
-                 max_points: int = 20000,
-                 budget: Optional[Dict[str, float]] = None) -> Optional[dict]:
+                 max_points: int = 20000) -> Optional[dict]:
     """Sim3 of copy A onto copy B. None when starved; else {"s_ab",
     "residual_m", "n", "coverage_a", "coverage_b", "trusted", "scale_trusted",
     "R", "t", "centroid_a", "offset_before_m", "offset_after_m"} — (R, t) is
     the RIGID closure of A onto B (world, p_b = R·p_a + t), exact at A's
     centroid: the Sim3 fit p_b = s·R·p_a + t_s and the rigid map agree there
     when t = t_s + (s − 1)·R·c_a. The scale goes to the scale graph as its
-    own row; the pose graph takes the rigid part (``instance_edges``).
-
-    ``budget`` — δ(L), θ(L) from ``spatial_gate.drift_budget`` over the metres
-    WALKED between the two visits, built by ``_pair_budget`` — is what the
-    chosen fit's MOTION is judged against. Without it the fit is chosen on
-    quality alone, the way it was before 2026-09-21, and the record says the
-    budget was unavailable instead of pretending one was applied."""
+    own row; the pose graph takes the rigid part (``instance_edges``)."""
     _vendor_on_path()
     from loop_utils.loop_bridges import robust_sim3
     from scipy.spatial import cKDTree
@@ -197,7 +140,7 @@ def measure_copy(pts_a: np.ndarray, pts_b: np.ndarray, scfg, seed: int = 0,
     # fewer degrees of freedom.
     t_only = _translation_fit(a, b, tree_b, scfg)
     t_cen = b.mean(0) - c_a            # the displacement the two BODIES demand
-    rot_deg = _rot_deg(R_s)
+    rot_deg = float(np.degrees(np.arccos(np.clip((np.trace(R_s) - 1.0) / 2.0, -1.0, 1.0))))
 
     # ── the separation is measured where it can be SEEN ──────────────────
     # Nearest-neighbour distance cannot see a copy slid ALONG its own
@@ -224,70 +167,11 @@ def measure_copy(pts_a: np.ndarray, pts_b: np.ndarray, scfg, seed: int = 0,
              ("centroid", np.eye(3), t_cen)]
     scored = []
     for name, R_c, t_c in cands:
-        R_c = np.asarray(R_c, np.float64); t_c = np.asarray(t_c, np.float64)
-        nn, cen = _sep(a @ R_c.T + t_c)
-        scored.append({"name": name, "R": R_c, "t": t_c, "dof": _FIT_DOF[name],
-                       "score": float(max(nn, cen)), "nn": nn, "cen": cen,
-                       "rot_deg": _rot_deg(R_c),
-                       "t_norm_m": float(np.linalg.norm(t_c)),
-                       "over_budget": _over_budget(R_c, t_c, budget)})
-    # the tie the paragraph above promises is now actually broken that way: the
-    # DOF is IN the sort key, where a stable sort used to hand every tie to
-    # `rotated` for being first in the list
-    scored.sort(key=lambda r: (r["score"], r["dof"]))
-    best = scored[0]
-
-    # ── and the motion has to be DRIFT-SHAPED ────────────────────────────
-    # Everything above compares QUALITY OF FIT. Nothing in it compares
-    # PLAUSIBILITY OF MOTION, and a rigid fit between two DIFFERENT objects
-    # filed under one label "closes" by putting one on top of the other. pccr
-    # 2026-09-21, epoch 1: `desk#198` kf 204<->2 — TWO desks in one masklet —
-    # fitted 107.7° and 8.76 m of translation over a 19.3 m walk, took the
-    # copies 74.1 → 11.2 cm and won outright; there was no tie to break. It
-    # entered the pose graph at σ 67.0 cm. The paragraph above records the
-    # same pathology twice over (desk#201 at 63.9° / 5.44 m, floor#44 at
-    # 77.9°) and both times it was caught by a BETTER fit happening to exist,
-    # never by the motion being impossible.
-    #
-    # The session already knows what motion is plausible: δ(L), θ(L) of
-    # `spatial_gate.drift_budget` over the metres WALKED between the two
-    # visits — the same "what we would still call drift" bound the identity
-    # gate spends. A fit that exceeds it does not get to win by fitting
-    # better: it is DEMOTED to the best-scoring fit that is BOTH more
-    # parsimonious and smaller in motion, and the refusal travels with both
-    # numbers (rotation and translation, against θ and δ).
-    #
-    # Nothing is vetoed (USER 2026-09-16: *"no debe cortar objetos"*, and a
-    # duplicate SAM3 detected is never discarded): the pair still produces its
-    # edge, now from a fit that is physically possible. And because the
-    # demotion demands a candidate that is simpler AND moves less, a copy that
-    # really did turn — the one case where the rotation buys motion a
-    # translation cannot — keeps its rotation.
-    demoted = None
-    if best["over_budget"] is not None and best["over_budget"] > 1.0:
-        alt = [r for r in scored if r["dof"] < best["dof"]
-               and r["over_budget"] < best["over_budget"]]
-        if alt:
-            demoted = {
-                "refused": best["name"], "chosen": alt[0]["name"],
-                "refused_rot_deg": best["rot_deg"], "refused_t_norm_m": best["t_norm_m"],
-                "refused_over_budget": best["over_budget"], "refused_score_m": best["score"],
-                "chosen_rot_deg": alt[0]["rot_deg"], "chosen_t_norm_m": alt[0]["t_norm_m"],
-                "chosen_over_budget": alt[0]["over_budget"], "chosen_score_m": alt[0]["score"],
-                "walk_m": float(budget["L_m"]), "delta_m": float(budget["delta_m"]),
-                "theta_deg": float(budget["theta_deg"]), "source": budget.get("source"),
-                "why": (f"the {best['name']} fit demands {best['rot_deg']:.1f}° / "
-                        f"{best['t_norm_m']:.2f} m where drift over {float(budget['L_m']):.1f} m "
-                        f"walked produces at most {float(budget['theta_deg']):.1f}° / "
-                        f"{float(budget['delta_m']):.2f} m ({best['over_budget']:.1f}× the "
-                        f"budget) — refused although it fits better "
-                        f"({best['score'] * 100:.1f} vs {alt[0]['score'] * 100:.1f} cm); "
-                        f"the {alt[0]['name']} fit ({alt[0]['rot_deg']:.1f}° / "
-                        f"{alt[0]['t_norm_m']:.2f} m, {alt[0]['over_budget']:.1f}×) is "
-                        f"applied instead")}
-            best = alt[0]
-    sep_after, nn_after, cen_after = best["score"], best["nn"], best["cen"]
-    chosen, R_s, t_r = best["name"], best["R"], best["t"]
+        nn, cen = _sep(a @ np.asarray(R_c, np.float64).T + np.asarray(t_c, np.float64))
+        scored.append((max(nn, cen), nn, cen, name, R_c, t_c))
+    scored.sort(key=lambda r: r[0])
+    sep_after, nn_after, cen_after, chosen, R_s, t_r = scored[0]
+    R_s = np.asarray(R_s, np.float64); t_r = np.asarray(t_r, np.float64)
     rotation_earned = chosen == "rotated"
     med = nn_after
     trusted = bool(sep_after <= float(scfg.max_copy_residual_m))
@@ -298,16 +182,7 @@ def measure_copy(pts_a: np.ndarray, pts_b: np.ndarray, scfg, seed: int = 0,
             "R": R_s.tolist(), "t": t_r.tolist(), "centroid_a": c_a.tolist(),
             "rotation_earned": rotation_earned, "rot_deg_fitted": rot_deg,
             "fit_chosen": chosen,
-            "fit_scores_m": {r["name"]: round(r["score"], 4) for r in scored},
-            # what each fit would have MOVED, and by how much it exceeds the
-            # drift of the walk — the numbers a demotion is argued from
-            "fit_motion": {r["name"]: {"rot_deg": round(r["rot_deg"], 2),
-                                       "t_norm_m": round(r["t_norm_m"], 4),
-                                       "over_budget": (None if r["over_budget"] is None
-                                                       else round(r["over_budget"], 2))}
-                           for r in scored},
-            "drift_budget": (dict(budget) if budget is not None else None),
-            "fit_demoted": demoted,
+            "fit_scores_m": {nm: round(sc, 4) for sc, _nn, _cn, nm, _R, _t in scored},
             "nn_before_m": nn_before, "nn_after_m": nn_after,
             "centroid_before_m": cen_before, "centroid_after_m": cen_after,
             # what everything downstream decides on: the separation that can be
@@ -340,18 +215,9 @@ def _copy_indices(session, inst: dict, i: int, j: int, window_kf: int):
 
 
 def copy_scale_rows(session, candidates: List[dict], scfg, window_kf: int,
-                    max_pairs_per_instance: int, log=print,
-                    spatial_cfg=None) -> List[dict]:
+                    max_pairs_per_instance: int, log=print) -> List[dict]:
     """Scale measurements from the copies of every revisited instance
-    (candidates with verdict loop|ambiguous and a temporal gap).
-
-    ``spatial_cfg`` (the loops' spatial block) lets the stage refuse a pair
-    that is two PARTS of one surface BEFORE paying for its ICP — see
-    ``surface_overlap`` — and states the DRIFT BUDGET the chosen fit's motion
-    is judged against (``_pair_budget``): a Sim3 that closes two different
-    objects by turning one 107.7° writes a scale row out of a rotation that
-    never happened. Without it the pair is still measured and still priced out
-    by ``scale_trusted``; the refusal only saves the work."""
+    (candidates with verdict loop|ambiguous and a temporal gap)."""
     res_path = Path(session.output_dir) / "segmentation_result.json"
     instances = {int(i.get("instance_id", i.get("id"))): i
                  for i in (json.loads(res_path.read_text()).get("instances") or [])} if res_path.exists() else {}
@@ -397,36 +263,11 @@ def copy_scale_rows(session, candidates: List[dict], scfg, window_kf: int,
             rec["reason"] = (f"one copy has no points ({len(idx_a)} / "
                              f"{len(idx_b)}) — nothing to align")
             out.append(rec); continue
-        if spatial_cfg is not None:
-            from reconstruction.loops import spatial_gate as _sg
-            _g = _sg.same_surface_rule(session.xyz[idx_a], session.xyz[idx_b],
-                                       spatial_cfg)
-            _o = _sg.surface_overlap(session.xyz[idx_a], session.xyz[idx_b],
-                                     _g, spatial_cfg)
-            if _o.get("applies") and _o.get("disjoint"):
-                rec["reason"] = (
-                    f"two parts of one {_g.get('kind')} — the supports do not "
-                    f"overlap on it (gap {_o['gap_m']:.2f} m); a surface "
-                    f"measures no scale against itself")
-                rec["surface_overlap"] = _o
-                out.append(rec); continue
-        # the drift the walk between the two visits can produce — handed in
-        # only when the spatial block actually states a rate, so a caller on
-        # the pre-2026-09-21 signature is left exactly as it was
-        budget, budget_why = _pair_budget(session, i, j, spatial_cfg)
-        # recorded the moment it is known, so a pair that never reaches the
-        # measurement still says on what its fit was (not) judged
-        if budget_why:
-            rec["drift_budget_why"] = budget_why
-        m = measure_copy(session.xyz[idx_a], session.xyz[idx_b], scfg, seed=iid,
-                         **({} if budget is None else {"budget": budget}))
+        m = measure_copy(session.xyz[idx_a], session.xyz[idx_b], scfg, seed=iid)
         if m is None:
             rec["reason"] = f"copies starved ({len(idx_a)} / {len(idx_b)} points)"
             out.append(rec); continue
         rec.update({k: v for k, v in m.items() if k not in ("R", "t", "centroid_a")})
-        if m.get("fit_demoted"):
-            log(f"[loops-posthoc] copies {cand.get('label')}#{iid} kf {i}<->{j}: "
-                f"{m['fit_demoted']['why']}")
         rec["extent_m"] = float(np.linalg.norm(np.ptp(session.xyz[idx_a], axis=0)))
         out.append(rec)
         log(f"[loops-posthoc] copies {cand.get('label')}#{iid} kf {i}<->{j}: s_ab {m['s_ab']:.4f}, residual "
@@ -455,7 +296,6 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print,
     duplicates) and the kit treat both sources alike; unmeasurable
     candidates are returned ``accepted: False`` with the reason."""
     from correction import observability as obs_mod, solve
-    from reconstruction.loops import spatial_gate as sg
     res_path = Path(session.output_dir) / "segmentation_result.json"
     instances = {int(x.get("instance_id", x.get("id"))): x
                  for x in (json.loads(res_path.read_text()).get("instances") or [])} if res_path.exists() else {}
@@ -489,73 +329,10 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print,
             skipped.append(dict(base, reason="not a revisit (overlapping keyframe windows)"))
             continue
         idx_a, idx_b, ks = _copy_indices(session, inst, i, j, vcfg.window_kf)
-        # ── is this pair two COPIES, or two PARTS of one surface? ────────
-        # The gate accepted on the separation it can OBSERVE (the offset
-        # across the shared plane / axis — `same_surface_rule`), which for
-        # two pieces of one ceiling is ~0. The measurement below takes the
-        # copies by KEYFRAME WINDOW instead, so it gets the two ENDS of that
-        # ceiling and the rigid fit "closes" them by sliding one onto the
-        # other: pccr 2026-09-21 epoch 1 wrote `white_tiled_floor#45` at
-        # 10.36 m / 0.0 deg, `white_wall#98` at 12.99 m and EIGHT edges for
-        # one ceiling duct, 3.8 to 10.7 m each. Those are not observations of
-        # drift — along its own surface a plane determines nothing — and they
-        # are not harmless: they outnumbered the real closures in the acta's
-        # median and turned a 41 % improvement into a reported 71.7 %
-        # regression.
-        #
-        # Nothing is discarded that could speak: the pair is refused only
-        # when the two supports do not OVERLAP on the surface they share, in
-        # which case there is no common piece to close, and the refusal is
-        # recorded with its numbers like every other one.
-        # The shape is asked of the OBJECT, not of the two windows. Asked of
-        # the windows, the same ceiling duct answered "axis" on one pair and
-        # "neither" on the next, and the pair it could not classify went on to
-        # close 10.30 m at 0.0 deg (pccr 2026-09-21, epoch 1: seven of the
-        # acta's thirteen voting pairs were one duct and one floor against
-        # themselves). `same_surface_rule` still speaks first — when the two
-        # copies AGREE on a shared plane or axis that is the strongest
-        # statement available, and it carries the offset across it that the
-        # refusal reports — and the instance answers when they do not.
-        _geom = sg.same_surface_rule(session.xyz[idx_a], session.xyz[idx_b],
-                                     cfg.loops.spatial)
-        if not _geom.get("same_geometry"):
-            _whole = np.asarray(inst.get("globalIndices") or [], np.int64)
-            _whole = _whole[(_whole >= 0) & (_whole < session.n_points)]
-            if len(_whole) >= 3:
-                _shape = sg.surface_of_instance(session.xyz[_whole],
-                                                cfg.loops.spatial)
-                if _shape.get("same_geometry"):
-                    _shape["centroid_distance_m"] = _geom.get("centroid_distance_m")
-                    _shape["distance_m"] = _geom.get("distance_m")
-                    _geom = _shape
-        _ov = sg.surface_overlap(session.xyz[idx_a], session.xyz[idx_b],
-                                 _geom, cfg.loops.spatial)
-        if _ov.get("applies") and _ov.get("disjoint"):
-            skipped.append(dict(
-                base, geometry=_geom.get("kind"), surface_overlap=_ov,
-                reason=(f"two parts of one {_geom.get('kind')} "
-                        f"({'the object' if _geom.get('source') == 'instance' else 'both copies'} "
-                        f"says so) — the supports do not overlap on it "
-                        f"(gap {_ov['gap_m']:.2f} m, centroids "
-                        f"{(_geom.get('centroid_distance_m') or 0.0):.2f} m apart, "
-                        f"offset across the surface "
-                        f"{(_geom.get('distance_m') or 0.0) * 100:.1f} cm): one "
-                        f"surface against itself observes nothing along it")))
-            continue
-        # what drift over the walk between these two visits could produce —
-        # the bound the chosen fit's MOTION is held to. Measured here because
-        # `measure_copy` sees two point clouds and not the trajectory that
-        # separates them; it is the walk, not the number of keyframes, that
-        # says how much error could have accumulated.
-        budget, budget_why = _pair_budget(session, i, j, cfg.loops.spatial)
-        m = measure_copy(session.xyz[idx_a], session.xyz[idx_b], scfg, seed=iid,
-                         budget=budget)
+        m = measure_copy(session.xyz[idx_a], session.xyz[idx_b], scfg, seed=iid)
         if m is None:
             skipped.append(dict(base, reason=f"copies starved ({len(idx_a)} / {len(idx_b)} points)"))
             continue
-        if m.get("fit_demoted"):
-            log(f"[loops-posthoc] instance {label}#{iid} kf {i}<->{j}: "
-                f"{m['fit_demoted']['why']}")
         if not (m["offset_after_m"] < m["offset_before_m"]):
             skipped.append(dict(base, reason="the rigid closure did not reduce the copies' offset",
                                 offset_before_m=m["offset_before_m"], offset_after_m=m["offset_after_m"]))
@@ -631,7 +408,7 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print,
         info_t = _info_from_projection(sigma_t, float(vcfg.unobserved_sigma_m), mode, axis, R_i)
         wy = wy_rot if full else wb_rot
         info_rot = R_i.T @ (wy * Pu + wb_rot * (np.eye(3) - Pu)) @ R_i
-        rot_deg = _rot_deg(R)
+        rot_deg = float(np.degrees(np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))))
         ks_a, ks_b = ks[np.abs(ks - i) <= int(vcfg.window_kf)], ks[np.abs(ks - j) <= int(vcfg.window_kf)]
         out.append(dict(base, earlier_kfs=[int(ks_b.min()), int(ks_b.max())],
                         later_kfs=[int(ks_a.min()), int(ks_a.max())], accepted=True, trusted=True,
@@ -642,13 +419,6 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print,
                         shape=shape.shape, observability=mode,
                         observed_axis=(axis.tolist() if axis is not None else None), yaw_observed=bool(full),
                         s_ab=float(m["s_ab"]), copy_residual_m=float(m["residual_m"]), sigma_factors=factors,
-                        # the edge says which fit it came from, what the
-                        # alternatives would have moved, and — when the
-                        # best-fitting one was refused as impossible over this
-                        # walk — why (finding 27, pccr 2026-09-21)
-                        fit_chosen=m.get("fit_chosen"), fit_motion=m.get("fit_motion"),
-                        fit_demoted=m.get("fit_demoted"), drift_budget=m.get("drift_budget"),
-                        drift_budget_why=budget_why,
                         Z=Z, X=X, sigma_m=float(sigma_t), sigma_deg=float(cfg.graph.loop_sigma_rot_deg),
                         info_t=info_t, info_rot=info_rot))
         log(f"[loops-posthoc] instance {label}#{iid} ({cls}, {cand.get('verdict')}) kf {i}<->{j}: copies "

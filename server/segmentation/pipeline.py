@@ -108,15 +108,10 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
                                frame_space=mask_space.SPACE_KEYFRAME)
         
         # ── Step 4: Match masks to cloud and cache final result (ONCE) ──
-        # CloudCompy now runs BEFORE the semantic stages, so the cleaned cloud
-        # is on disk by the time SAM3 finishes and the masks are projected here
-        # — this is the ONE matching of a normal run. The `else` below is the
-        # old anchored order (recon → vlm → sam3 → phase_r → cloudcompy), where
-        # the cloud did not exist yet and the mapping was DEFERRED to the
-        # cloudcompy stage. Whoever calls map_segmentation_to_cloud() afterwards
-        # (the SAM3 worker does, unconditionally) finds the result newer than
-        # the parent and reuses it instead of matching 22.7 M points twice —
-        # see that function for the measurement.
+        # In the anchored pipeline order (recon → vlm → sam3 → phase_r →
+        # cloudcompy → tsdf) the cleaned cloud does not exist yet — the
+        # mapping is DEFERRED to the cloudcompy stage, which calls
+        # map_segmentation_to_cloud() after the (corrected) merge.
         if (output_dir / "cleaned_cloud.ply").exists():
             result = _match_and_save_result(output_dir)
         else:
@@ -868,46 +863,6 @@ def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
 #  MASK STORAGE (cloud-agnostic)
 # ═══════════════════════════════════════════════════════════════════
 
-def _consolidation_summary(output_dir: Path, previous=None):
-    """The one-line verdict of the concept consolidation, for segmentation.json.
-
-    The full evidence (raw per-frame names, every pass, what was folded into
-    what) lives in ``output/autoprompt_concepts.json``, written by the
-    auto-prompter. What the PARENT has to carry is the sentence a reader of
-    `prompts` needs: how many concepts the VLM proposed, how many survived,
-    and whether any pass failed to parse — the case where the session is
-    segmenting with the RAW list and nothing used to say so.
-
-    A session with no auto-prompter record (manual prompt, older session) gets
-    whatever the parent already carried, never an invented verdict.
-    """
-    rec_path = Path(output_dir) / "autoprompt_concepts.json"
-    if not rec_path.exists():
-        return previous
-    try:
-        rec = json.loads(rec_path.read_text())
-    except Exception as e:  # noqa: BLE001 — declared, never fatal
-        print(f"[SegPipeline] ⚠️ autoprompt_concepts.json unreadable ({e}) — "
-              f"the parent keeps its previous consolidation summary")
-        return previous
-    cons = rec.get("consolidation") or {}
-    out = {
-        "origin": "vlm_proposed",
-        "ran": bool(cons.get("ran")),
-        "passes": int(cons.get("passes") or 0),
-        "n_raw": int((rec.get("raw") or {}).get("n_objects") or 0),
-        "n_objects": int((rec.get("consolidated") or {}).get("n_objects") or 0),
-        "parse_failed": bool(rec.get("parse_failed")),
-        "stopped_reason": cons.get("stopped_reason") or "",
-        "warning": rec.get("warning"),
-        "record": rec_path.name,
-    }
-    if out["warning"]:
-        print(f"[SegPipeline] ⚠️ vocabulary: {out['warning']} "
-              f"(see {rec_path.name})")
-    return out
-
-
 def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
                 categories: List[str], obj_labels: Dict[int, str], cfg: dict,
                 *, frame_space: str):
@@ -971,7 +926,6 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     existing_npz = {}
     existing_instances = []
     existing_prompts = []
-    existing_consolidation = None
     max_existing_id = -1
     existing_frames = set()
     existing_obj_ids = set()
@@ -995,7 +949,6 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
                 old_meta = json.load(f)
             existing_instances = old_meta.get("instances", [])
             existing_prompts = old_meta.get("prompts", [])
-            existing_consolidation = old_meta.get("consolidation")
             if not existing_prompts and old_meta.get("prompt"):
                 existing_prompts = [old_meta["prompt"]]
             for inst in existing_instances:
@@ -1011,7 +964,6 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
             print(f"[SegPipeline] ⚠️ Could not load existing metadata: {e}")
             existing_instances = []
             existing_prompts = []
-            existing_consolidation = None
     
     # ── Upsert: keep existing IDs, only remap genuinely new ones ──
     new_obj_ids_raw = set()
@@ -1140,13 +1092,6 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
         "version": "3.0",
         "prompt": ";".join(categories),  # last prompt string used
         "prompts": all_prompts,  # all prompts ever used
-        # WHERE THOSE PROMPTS CAME FROM. The VLM was stable across two runs of
-        # the same scan on 2026-09-21 (61 object types both times) and SAM3 got
-        # 61 categories in one and 32 in the other: the difference was the
-        # consolidation pass, and in the 61 run it had returned nothing
-        # parseable. The parent said `prompts: [61 strings]` and not one word
-        # about why there were 61. It says so now, right next to them.
-        "consolidation": _consolidation_summary(output_dir, existing_consolidation),
         "resolution": {"scaled": scaled_res, "original": original_res},
         "instances": all_instances,
         "mask_file": "seg_masks.npz",
@@ -3152,56 +3097,12 @@ def map_segmentation_to_cloud(output_dir) -> dict:
     matching + per-instance cleaning ONCE against the (corrected, merged)
     cleaned cloud, then refresh the Phase R store's canonical OBBs so the
     assistant's boxes coincide exactly with the viewer's. Called by the
-    cloudcompy stage when segmentation.json exists.
-
-    ONE MATCHING PER SET OF INPUTS. ``run_segmentation`` step 4 already matches
-    at the end of SAM3 whenever cleaned_cloud.ply is on disk — which is ALWAYS,
-    since CloudCompy moved ahead of the semantic stages — and then the SAM3
-    worker called this function, which matched the very same three files again.
-    pccr 2026-09-21, no viewer request in flight:
-
-        12:18  Matching masks against cleaned_cloud (22,771,938 points)…
-        12:26  75 instances, 20,803,417/22,771,938 pts (91.4 %); fusion round 1
-        12:26  Matching masks against cleaned_cloud (22,771,938 points)…
-        12:32  75 instances, 20,803,704/22,771,938 pts (91.4 %); fusion round 2
-
-    Eight minutes, 287 points of difference out of 22.7 M (an identical attach
-    of 2,823,879 points), one superfluous fusion round and one superfluous
-    22 M-point Potree octree. The `match_lock` serialises concurrent matchings;
-    it cannot see that this one is simply redundant.
-
-    The freshness test is the write order ``segmentation/fuse_parent`` already
-    establishes and documents: the fusion writes the PARENT (segmentation.json
-    + seg_masks.npz) first and the caller writes segmentation_result.json LAST,
-    so a result NEWER than the parent is a result that covers this parent.
-    ``segmentation_result_is_stale`` is that comparison, plus the cloud the
-    masks were projected onto — one answer for every caller, as its own
-    docstring says. Missing, stale or unreadable → we match.
-    """
+    cloudcompy stage when segmentation.json exists."""
     output_dir = Path(output_dir)
     if not (output_dir / "segmentation.json").exists():
         return {"error": "no segmentation.json", "instances": []}
     if not (output_dir / "cleaned_cloud.ply").exists():
         return {"error": "no cleaned_cloud.ply", "instances": []}
-
-    stale, why = segmentation_result_is_stale(output_dir)
-    if not stale:
-        result_path = output_dir / "segmentation_result.json"
-        try:
-            cached = json.loads(result_path.read_text())
-        except Exception as e:  # noqa: BLE001 — declared, then we match
-            print(f"[SegPipeline] segmentation_result.json is {why} but could "
-                  f"not be read ({e}) — matching again")
-        else:
-            print(f"[SegPipeline] ♻️ Reusing segmentation_result.json — {why}, "
-                  f"so it already covers these masks "
-                  f"({len(cached.get('instances') or [])} instances, "
-                  f"{float(cached.get('coverage') or 0.0) * 100:.1f}% coverage); "
-                  f"no second pass over the cloud")
-            return cached
-    else:
-        print(f"[SegPipeline] mask→cloud mapping needed: {why}")
-
     result = _match_and_save_result(output_dir)
     # scene_r.db is (re)built inside the mask→cloud matching itself — points,
     # labels and OBBs all in the display frame, single source for phases 2-6.

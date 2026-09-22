@@ -1453,132 +1453,6 @@ def _run_da3_anchor(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         pipe.send_log("DA3 anchor extraction cancelled by user", level="warning")
 
 
-# The smallest chunk `chunk_plan.plan_chunks` can ever return — its own
-# `min_size`. Below that many keyframes `chunk_ranges` hands back a single
-# range and the chunked-metric re-run is a no-op BY CONSTRUCTION. A bound, not
-# a decision: it is named here so the phase-2 guard cannot drift away from the
-# planner it guards.
-_MIN_CHUNK_KEYFRAMES = 24
-
-
-def _walk_chainage_m(poses_txt: Path) -> float:
-    """The walked distance of `camera_poses.txt`, by the SAME definition the
-    correction uses: `reconstruction.loops.drift.chainage` over the camera
-    centres, total = its last entry.
-
-    This used to be `chunk_plan.walk_length_m`, which computes the same sum in
-    its own words. The same sum is not the same NUMBER once the two are put
-    side by side, and they have to be, because the two readings of ONE walk
-    disagree by more than the limit that reads them: on the 216-keyframe pccr
-    scan the phase-1 probe measured 44.1 m and the chunked pass that followed
-    measured 19.3 m of the same trajectory (2026-09-21, reproduced in the runs
-    of 04:57 and 10:40, identical to the tenth). The probe is not noisy — it
-    reads 44.1 m every time — it reads a DIFFERENT GEOMETRY: phase 1 is scaled
-    by the global DA3 median (s 5.7789 over 12 anchors, MAD 6.2 %) and phase 2
-    by the per-chunk metric lock (2.42-4.67 over 38 anchors), and the session's
-    own history puts the true walk at 19.3 m. Measuring both ends with the very
-    same function makes the confrontation below a statement about the GEOMETRY
-    and not about two implementations of a cumulative sum.
-    """
-    import numpy as np
-    from reconstruction.loops.drift import chainage
-    rows = [ln.split() for ln in open(poses_txt) if ln.strip()]
-    if not rows:
-        return 0.0
-    arr = np.array([[float(x) for x in r] for r in rows], np.float64)
-    if arr.shape[1] == 17:                     # frame_idx + flattened 4x4
-        arr = arr[:, 1:]
-    if arr.shape[1] != 16:
-        raise ValueError(f"unexpected camera_poses.txt layout: {arr.shape[1]} cols")
-    centres = arr.reshape(-1, 4, 4)[:, :3, 3]
-    if len(centres) < 2:
-        return 0.0
-    return float(chainage(centres)[-1])
-
-
-def _phase2_decision(walk_m: float, comfort_m: float, n_kf: int,
-                     chunked_already: bool) -> tuple:
-    """Whether the measured walk sends the session back through a
-    chunked-metric pass — and the LINE that says so, on every path.
-
-    The branch this speaks for only ever spoke when it FIRED. The pccr runs of
-    2026-09-21 all exceeded the limit (44.1 m against 15 m) and each logged its
-    re-run in 7 chunks; the path where the walk fits inside the comfort range
-    logs nothing at all, and neither does the path where the run was already
-    chunked on the frame count alone. A decision that changes the STRUCTURE of
-    the reconstruction — one chunk or seven, and therefore whether the depth
-    correction downstream has any units to distribute over
-    (`scale_stage.single_unit_limit`) — has to be readable in EVERY run,
-    including the run where it decided to do nothing.
-
-    Returns (re_run_chunked, message, log level).
-    """
-    head = f"walk {walk_m:.1f} m vs comfort {comfort_m:g} m"
-    if chunked_already:
-        return False, (f"[chunk-plan] {head} — this run was ALREADY chunked-metric "
-                       f"(the frame count alone exceeded one pass), no phase 2"), "info"
-    if walk_m <= comfort_m:
-        return False, (f"[chunk-plan] {head} → walk within comfort, KEEPING THE SINGLE "
-                       f"PASS ({n_kf} keyframes, no windows → no seams)"), "info"
-    if n_kf < _MIN_CHUNK_KEYFRAMES:
-        return False, (f"[chunk-plan] {head} → over comfort, but {n_kf} keyframes are "
-                       f"fewer than the planner's smallest chunk "
-                       f"({_MIN_CHUNK_KEYFRAMES}) — chunking would return ONE chunk; "
-                       f"keeping the single pass"), "warning"
-    return True, (f"[chunk-plan] {head} → over comfort: phase 2, chunked-metric re-run "
-                  f"over {n_kf} keyframes"), "info"
-
-
-def _walk_confrontation(probe_m: float, final_m: float, comfort_m: float,
-                        chunked: bool) -> tuple:
-    """The probe walk against the walk of the geometry actually delivered.
-
-    The probe measures the walk on PHASE-1 geometry — one feed-forward pass
-    scaled by the global DA3 median — and that reading is what the comfort
-    limit is applied to. It is not noisy: on the 216-keyframe pccr scan it read
-    44.1 m in every run of 2026-09-21, to the tenth. It reads a DIFFERENT
-    GEOMETRY. The chunked pass that follows measures 19.3 m of the same
-    trajectory with the same function, because phase 1 is scaled by the global
-    DA3 median (s 5.7789 over 12 anchors, MAD 6.2 %) and phase 2 by the
-    per-chunk metric lock (2.42-4.67 over 38 anchors); the session's own
-    history puts the walk at 19.3 m, so the probe overestimates by 2.3x and the
-    limit is applied to the number that is wrong. It still came out right there
-    (19.3 m also exceeds 15 m), by luck — a scene that truly walks 8 m can read
-    18 m and buy itself a second full reconstruction. Luck is not a verdict, so
-    the two numbers are confronted at the end of the run and the disagreement
-    is an alert, never a detail.
-
-    The bar is not invented: the comfort limit is the only length this decision
-    declares, so it is also what the disagreement is weighed against. Two
-    readings of one walk that differ by MORE than the limit they were compared
-    to decided nothing between them — the other reading could have produced any
-    answer (pccr: |44.1 - 19.3| = 24.8 m against a 15 m limit). The second
-    alert is the flat one: the readings fall on opposite sides of the limit,
-    which on this scan they never did — the alert exists for the scene where
-    the 2.3x bias lands the probe above a limit the delivered geometry is
-    below, and the session re-reconstructs itself for nothing.
-
-    Returns (message, log level).
-    """
-    disagreement = abs(float(probe_m) - float(final_m))
-    ratio = (float(probe_m) / float(final_m)) if final_m > 0 else float("inf")
-    flipped = (probe_m > comfort_m) != (final_m > comfort_m)
-    body = (f"[walk-audit] probe {probe_m:.1f} m (phase-1 geometry) vs {final_m:.1f} m "
-            f"on the geometry delivered "
-            f"({'chunked-metric' if chunked else 'single pass'}) — disagreement "
-            f"{disagreement:.1f} m, ratio {ratio:.2f}x, comfort limit {comfort_m:g} m")
-    if flipped:
-        return (body + " — ALERT: the two readings fall on OPPOSITE sides of the limit, "
-                       "so the chunking decision was taken on a number the delivered "
-                       "geometry contradicts"), "warning"
-    if disagreement > comfort_m:
-        return (body + " — ALERT: the two readings of the same walk disagree by more "
-                       "than the limit they are compared against; the chunking decision "
-                       "agreed with the delivered geometry by luck, it was not supported "
-                       "by the measurement"), "warning"
-    return body + " — the two measurements agree within the limit", "info"
-
-
 def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                    selected_frames_path: str, recon_cfg: dict, config: dict):
     """VGGT-Omega backbone: DA3 per-frame metric depth (anchor) + VGGT-Long[Omega] poses
@@ -1665,23 +1539,12 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # test4). Re-run CHUNKED-METRIC: chunks sized by walked meters, each metric-locked
     # to DA3 anchors BEFORE alignment, glued SE(3) (scale is not negotiable — the Sim3
     # scale freedom is what produced the onion), SALAD loop closure + pose graph on.
-    from reconstruction.chunk_plan import (plan_chunks, plan_anchor_indices,
+    from reconstruction.chunk_plan import (walk_length_m, plan_chunks,
+                                           plan_anchor_indices,
                                            chunk_ranges)
     vggt_config = _build_vggtomega_config(config)
     _va_cfg = recon_cfg.get("vggtomega", {}) or {}
-    # The comfort limit DECIDES (one pass vs a chunked-metric re-run), so it comes
-    # from config.yaml and from nowhere else. The `.get(..., 25.0)` fallback that
-    # stood here disagreed with the 15.0 the file has carried since 2026-07-09 and
-    # with the log line printed next to it: a scan walking 20 m was re-chunked by
-    # the config and kept single-pass by the fallback, depending only on whether
-    # the key was reachable. A missing key now fails naming itself.
-    _mw = _simple_cfg.get("max_walk_single_pass_m")
-    if _simple_on and _mw is None:
-        raise RuntimeError(
-            "config.yaml is missing 'reconstruction.simple.max_walk_single_pass_m' — "
-            "the measured walk decides between ONE Omega pass and a chunked-metric "
-            "re-run and cannot be weighed against a limit nobody declared")
-    _max_walk = float(_mw) if _mw is not None else 0.0
+    _max_walk = float(_simple_cfg.get("max_walk_single_pass_m", 25.0))
     _chunk_walk = float(_simple_cfg.get("chunk_walk_m", 12.0))
     _anch_per_chunk = int(_simple_cfg.get("chunk_anchors", 3))
     _anchor_dir = output_dir / "da3_run" / "results_output"
@@ -2009,7 +1872,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                               "consensus) — the floor leveler downstream is the fallback",
                               level="warning")
         try:
-            _walk = _walk_chainage_m(output_dir / "camera_poses.txt")
+            _walk = walk_length_m(output_dir / "camera_poses.txt")
         except Exception as _e:  # noqa: BLE001
             pipe.send_log(f"[chunk-plan] could not measure walk length ({_e})", level="warning")
             _walk = 0.0
@@ -2035,22 +1898,12 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
 
     _walk_m = _metricize_and_orient(vggt_config, "chunked-metric" if _chunked_already
                                     else "single-pass")
-    # the PROBE reading, kept apart from the running one: after a phase-2 re-run
-    # `_walk_m` is the walk of the NEW geometry, and the whole point of the audit
-    # at the end of this function is to put the two side by side.
-    _probe_walk_m = _walk_m
 
     # ── PHASE 2: the probe says the walk exceeds Omega's comfort range → re-run
-    # chunked-metric. The comfort limit is a config parameter
-    # (reconstruction.simple.max_walk_single_pass_m, 15.0 in config.yaml since
-    # 2026-07-09): Omega is excellent on short walks and drifts ~1.3 cm/m past
-    # them (measured, test4). The decision is logged on EVERY path — including
-    # the path that keeps the single pass, which used to say nothing at all.
-    _go_phase2, _dec_msg, _dec_lvl = _phase2_decision(
-        _walk_m, _max_walk, _n_selected, _chunked_already)
-    if _simple_on:
-        pipe.send_log(_dec_msg, level=_dec_lvl)
-    if _simple_on and _go_phase2:
+    # chunked-metric. The comfort limit is a config parameter (25 m default): Omega is
+    # excellent on short walks and drifts ~1.3 cm/m past them (measured, test4).
+    if (_simple_on and not _chunked_already and _walk_m > _max_walk
+            and _n_selected >= 24):
 
         # Re-select keyframes DENSER for the chunked pass: with sparse keyframes
         # (big m/kf) a minimum-size chunk covers far more walk than chunk_walk_m —
@@ -2089,8 +1942,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         else:
             _chunk, _ov = plan_chunks(_n_selected, _walk_m, _chunk_walk)
         if _chunk < _n_selected:
-            pipe.send_log(f"[chunk-plan] phase 2 planned: {_chunk} kf/chunk, overlap "
-                          f"{_ov}, over {_n_selected} keyframes")
+            pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > comfort "
+                          f"{_max_walk:g} m → phase 2: chunked-metric re-run "
+                          f"({_chunk} kf/chunk, overlap {_ov})")
             _anchor_idx = plan_anchor_indices(_n_selected, _chunk, _ov,
                                               _anch_per_chunk)
             _ensure_anchors([_sel_files[i] for i in _anchor_idx])
@@ -2118,30 +1972,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 return
             _walk_m = _metricize_and_orient(vggt_config, "chunked-metric")
         else:
-            pipe.send_log(f"[chunk-plan] phase 2 CANCELLED: the planner returns "
-                          f"{_chunk} kf/chunk over {_n_selected} keyframes — ONE chunk, "
-                          f"so the re-run would reproduce the single pass exactly. "
-                          f"Keeping it; the walk {_walk_m:.1f} m > comfort "
-                          f"{_max_walk:g} m stands UNADDRESSED", level="warning")
-
-    # ── the two measurements of the SAME walk, confronted ──
-    # The probe read the walk on phase-1 geometry and that reading is what chose
-    # the structure of this reconstruction; the delivered geometry is what the
-    # correction will measure its chainage on later. They have disagreed by 2.3x
-    # (44.1 m of probe over geometry that measures 19.3 m) while the log carried
-    # only the probe's half of it. Both halves are stated here, with the same
-    # function behind each, and a disagreement is an alert rather than a detail.
-    if _simple_on:
-        try:
-            _final_walk_m = _walk_chainage_m(output_dir / "camera_poses.txt")
-        except Exception as _e:  # noqa: BLE001 — the audit never fails a finished run
-            pipe.send_log(f"[walk-audit] the delivered geometry could not be measured "
-                          f"({_e}) — the probe's {_probe_walk_m:.1f} m stands "
-                          f"unconfronted", level="warning")
-        else:
-            _au_msg, _au_lvl = _walk_confrontation(_probe_walk_m, _final_walk_m,
-                                                   _max_walk, _chunked_already)
-            pipe.send_log(_au_msg, level=_au_lvl)
+            pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > comfort {_max_walk:g} m "
+                          f"but only {_n_selected} keyframes (one chunk) — keeping the "
+                          f"single pass", level="warning")
 
     # Success → free da3_run when the TSDF won't use it (depth_source not DA3-based).
     _ds = str((config.get("tsdf", {}) or {}).get("depth_source", "auto")).lower()
