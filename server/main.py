@@ -244,7 +244,7 @@ async def _run_cloudcompy_postprocess_inner(session_id: str, postproc_config: di
     
     if websocket:
         try:
-            await websocket.send_text(json.dumps({
+            await viewer_manager.send_text(websocket, json.dumps({
                 "type": "status",
                 "message": f"Post-processing {len(chunks)} chunks with CloudCompPy..."
             }))
@@ -536,18 +536,18 @@ async def _send_cleaned_cloud(websocket, session_id: str):
             return False
         
         # Send via proper viewer protocol (async, already non-blocking)
-        await websocket.send_text(json.dumps({
+        await viewer_manager.send_text(websocket, json.dumps({
             "type": "status",
             "message": f"Sending {label} ({point_count:,} points, {file_size_mb:.1f} MB)..."
         }))
-        await websocket.send_text(json.dumps({
+        await viewer_manager.send_text(websocket, json.dumps({
             "type": "chunk_start",
             "chunk_id": 0,
             "point_count": point_count
         }))
         
         for sub in chunk_data(binary_bytes):
-            await websocket.send_bytes(sub)
+            await viewer_manager.send_bytes(websocket, sub)
             await asyncio.sleep(0.001)
         
         origin_tag = " +origins" if has_origins else ""
@@ -617,23 +617,23 @@ async def _send_sabana_cloud(websocket, session_id: str):
             print("[SendSabana] ⚠️ Empty sábana cloud")
             return False
         
-        await websocket.send_text(json.dumps({
+        await viewer_manager.send_text(websocket, json.dumps({
             "type": "status",
             "message": f"Sending sábana ({point_count:,} points, {file_size_mb:.1f} MB)..."
         }))
         # Use sabana_start so frontend knows to apply transparency
-        await websocket.send_text(json.dumps({
+        await viewer_manager.send_text(websocket, json.dumps({
             "type": "sabana_start",
             "chunk_id": 0,
             "point_count": point_count
         }))
         
         for sub in chunk_data(binary_bytes):
-            await websocket.send_bytes(sub)
+            await viewer_manager.send_bytes(websocket, sub)
             await asyncio.sleep(0.001)
         
         # Signal completion
-        await websocket.send_text(json.dumps({
+        await viewer_manager.send_text(websocket, json.dumps({
             "type": "sabana_loaded",
             "point_count": point_count
         }))
@@ -900,22 +900,38 @@ class ViewerManager:
         for viewer in list(self.viewers):
             await self.send_text(viewer, message)
             
+    def _lock_for(self, websocket: WebSocket) -> asyncio.Lock:
+        """The lock is the point: EVERY write to a viewer socket goes through it.
+
+        Two coroutines draining the same transport trip websockets'
+        `_drain_helper` assertion, the keepalive ping dies with it and the
+        browser loses the socket — measured 2026-09-23, once per session the
+        user opened: the handler wrote a large payload directly while a
+        pipeline broadcast wrote through the manager.
+
+        Created ON DEMAND rather than only for registered viewers. The old
+        `if websocket not in self.locks: return` dropped the message SILENTLY
+        for any socket that was not (yet) registered — and a socket nobody
+        registered still needs its writes serialised."""
+        lk = self.locks.get(websocket)
+        if lk is None:
+            lk = self.locks[websocket] = asyncio.Lock()
+        return lk
+
     async def send_text(self, websocket: WebSocket, message: str):
-        if websocket not in self.locks: return
-        async with self.locks[websocket]:
+        async with self._lock_for(websocket):
             try:
                 await websocket.send_text(message)
             except Exception as e:
-                # print(f"Send Text Error: {e}")
+                print(f"[Viewer] send_text failed, dropping the socket: {e}")
                 self.disconnect_viewer(websocket)
 
     async def send_bytes(self, websocket: WebSocket, data: bytes):
-        if websocket not in self.locks: return
-        async with self.locks[websocket]:
+        async with self._lock_for(websocket):
             try:
                 await websocket.send_bytes(data)
             except Exception as e:
-                # print(f"Send Bytes Error: {e}")
+                print(f"[Viewer] send_bytes failed, dropping the socket: {e}")
                 self.disconnect_viewer(websocket)
 
 # --- Global State ---
@@ -7080,7 +7096,7 @@ async def viewer_websocket(websocket: WebSocket):
                              if success:
                                  # Refresh viewer: resend cleaned cloud + segmentation
                                  session_id = frame_storage.current_session.session_id
-                                 await websocket.send_text(json.dumps({"type": "cleared"}))
+                                 await viewer_manager.send_text(websocket, json.dumps({"type": "cleared"}))
                                  
                                  # Resend the cleaned cloud
                                  sent = await _send_cleaned_cloud(websocket, session_id)
@@ -7089,7 +7105,7 @@ async def viewer_websocket(websocket: WebSocket):
                                  from segmentation_pipeline import apply_segmentation_to_cloud
                                  seg_data = await loop.run_in_executor(None, apply_segmentation_to_cloud, frame_storage.current_session.output_dir)
                                  if seg_data.get("instances"):
-                                     await websocket.send_text(json.dumps(seg_data))
+                                     await viewer_manager.send_text(websocket, json.dumps(seg_data))
                                  
                                  print(f"[Viewer] Refreshed view with segmented data (cloud={'✅' if sent else '❌'}).")
 
@@ -7097,7 +7113,7 @@ async def viewer_websocket(websocket: WebSocket):
                     else:
                         # No reconstruction available — inform user to run pipeline first
                         print(f"[Viewer] ⚠️ No reconstruction found. Run pipeline first.")
-                        await websocket.send_text(json.dumps({
+                        await viewer_manager.send_text(websocket, json.dumps({
                             "type": "info", 
                             "message": "No reconstruction found. Please run the pipeline first."
                         }))
@@ -7125,14 +7141,14 @@ async def viewer_websocket(websocket: WebSocket):
                 if frame_storage:
                     await loop.run_in_executor(None, frame_storage.load_session_from_disk, session_id)
                 
-                await websocket.send_text(json.dumps({"type": "cleared"}))
+                await viewer_manager.send_text(websocket, json.dumps({"type": "cleared"}))
                 await asyncio.sleep(0)  # Yield to process pings
                 
                 total_chunks = 0
                 if frame_storage and frame_storage.current_session:
                     total_chunks = len(frame_storage.current_session.chunks)
 
-                await websocket.send_text(json.dumps({
+                await viewer_manager.send_text(websocket, json.dumps({
                     "type": "session_info",
                     "session_id": session_id,
                     "mode": "Offline",
@@ -7143,7 +7159,7 @@ async def viewer_websocket(websocket: WebSocket):
                 status = pipeline_manager.get_status(session_id)
                 if status and status.get("status") in ("queued", "running"):
                     try:
-                        await websocket.send_text(json.dumps({
+                        await viewer_manager.send_text(websocket, json.dumps({
                             "type": "pipeline_progress",
                             "session_id": session_id,
                             **status
@@ -7199,7 +7215,7 @@ async def viewer_websocket(websocket: WebSocket):
                                     _msg = (f"Scan {_cur or '(none)'} has no reconstruction — "
                                             f"opening the reconstructed scan {_alt}")
                                     print(f"[Viewer] {_msg}")
-                                    await websocket.send_text(json.dumps({"type": "status", "message": _msg}))
+                                    await viewer_manager.send_text(websocket, json.dumps({"type": "status", "message": _msg}))
                         except Exception as _e:  # noqa: BLE001
                             print(f"[Viewer] loadable-scan fallback skipped: {_e}")
 
@@ -7234,14 +7250,14 @@ async def viewer_websocket(websocket: WebSocket):
                             # had failed showed "no cloud" while seven perfectly good chunks
                             # sat on disk.
                             print(f"[Viewer] No cleaned_cloud.ply found. Running CloudCompPy on {len(chunk_plys)} chunks...")
-                            await websocket.send_text(json.dumps({
+                            await viewer_manager.send_text(websocket, json.dumps({
                                 "type": "status",
                                 "message": f"Building cleaned cloud from {len(chunk_plys)} chunks..."
                             }))
                             postproc_config = cfg.get("postprocessing", {})
                             await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
                         else:
-                            await websocket.send_text(json.dumps({"type": "error", "message": "No point clouds found for this session"}))
+                            await viewer_manager.send_text(websocket, json.dumps({"type": "error", "message": "No point clouds found for this session"}))
                             raise Exception("No PLY data")
                     
                     await asyncio.sleep(0)  # Yield to process pings
@@ -7249,17 +7265,18 @@ async def viewer_websocket(websocket: WebSocket):
                     if cleaned_ply.exists():
                         # Ensure Potree octree exists (convert if needed)
                         if not potree_metadata.exists():
-                            await websocket.send_text(json.dumps({
+                            await viewer_manager.send_text(websocket, json.dumps({
                                 "type": "status",
                                 "message": "Building LOD octree (first load)..."
                             }))
                             session_path = _load_ctx.session_dir
                             success = await convert_ply_to_potree_async(
                                 session_path,
-                                on_progress=lambda msg: websocket.send_text(json.dumps({"type": "status", "message": msg}))
+                                on_progress=lambda msg: viewer_manager.send_text(
+                                    websocket, json.dumps({"type": "status", "message": msg}))
                             )
                             if not success:
-                                await websocket.send_text(json.dumps({"type": "error", "message": "Potree conversion failed"}))
+                                await viewer_manager.send_text(websocket, json.dumps({"type": "error", "message": "Potree conversion failed"}))
                                 raise Exception("Potree conversion failed")
                         
                         await asyncio.sleep(0)  # Yield to process pings
@@ -7428,7 +7445,7 @@ async def viewer_websocket(websocket: WebSocket):
                                     msg["cameraIntrinsics"] = camera_poses_list[2]
                             else:
                                 msg["cameraPoses"] = camera_poses_list
-                        await websocket.send_text(json.dumps(msg))
+                        await viewer_manager.send_text(websocket, json.dumps(msg))
                         print(f"[Viewer] ✅ Sent potree_ready for {session_id} ({potree_meta.get('points', 0):,} pts)")
                         
                         await asyncio.sleep(0)  # Yield to process pings
@@ -7438,7 +7455,7 @@ async def viewer_websocket(websocket: WebSocket):
                         seg_data = await loop.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
                         if seg_data.get("instances"):
                             should_reload_potree = seg_data.pop("reload_potree", False)
-                            await websocket.send_text(json.dumps(seg_data))
+                            await viewer_manager.send_text(websocket, json.dumps(seg_data))
                             print(f"[Viewer] Sent segmentation ({len(seg_data['instances'])} instances)")
                             
                             # Reload Potree with corrected (projected) cloud
@@ -7458,7 +7475,7 @@ async def viewer_websocket(websocket: WebSocket):
                                         reload_msg["floorTransform"] = floor_transform_4x4
                                     if has_confidence:
                                         reload_msg["hasConfidence"] = True
-                                    await websocket.send_text(json.dumps(reload_msg))
+                                    await viewer_manager.send_text(websocket, json.dumps(reload_msg))
                                     # NOT "corrected cloud": this fires whenever
                                     # the octree was rebuilt — on pccr
                                     # 2026-09-21 it said "corrected" an hour
@@ -7477,20 +7494,20 @@ async def viewer_websocket(websocket: WebSocket):
                                 {'name': name, 'url': f'/api/sessions/{session_id}/bim/{name}'}
                                 for name in ifc_files
                             ]
-                            await websocket.send_text(json.dumps({
+                            await viewer_manager.send_text(websocket, json.dumps({
                                 'type': 'bim_ready',
                                 'session_id': session_id,
                                 'models': bim_models,
                             }))
                             print(f"[Viewer] ✅ Sent bim_ready ({len(bim_models)} IFC files)")
                     else:
-                        await websocket.send_text(json.dumps({"type": "error", "message": "Failed to build cleaned cloud"}))
+                        await viewer_manager.send_text(websocket, json.dumps({"type": "error", "message": "Failed to build cleaned cloud"}))
 
                 except Exception as e:
                     print(f"Error loading session:")
                     print(f"[Viewer] ❌ WebSocket Error: {e}")
                     try:
-                        await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
+                        await viewer_manager.send_text(websocket, json.dumps({"type": "error", "message": str(e)}))
                     except Exception:
                         pass  # Client already disconnected
 
@@ -7507,10 +7524,11 @@ async def viewer_websocket(websocket: WebSocket):
                 from potree_converter import convert_sabana_to_potree_async
                 success = await convert_sabana_to_potree_async(
                     sabana_dir,
-                    on_progress=lambda msg: websocket.send_text(json.dumps({"type": "status", "message": msg})),
+                    on_progress=lambda msg: viewer_manager.send_text(
+                                    websocket, json.dumps({"type": "status", "message": msg})),
                 )
                 if not success:
-                    await websocket.send_text(json.dumps({"type": "error", "message": "Sábana Potree conversion failed"}))
+                    await viewer_manager.send_text(websocket, json.dumps({"type": "error", "message": "Sábana Potree conversion failed"}))
                 else:
                     # Read metadata
                     potree_meta_path = sabana_dir / "sabana_potree" / "metadata.json"
@@ -7518,7 +7536,7 @@ async def viewer_websocket(websocket: WebSocket):
                     n_pts = potree_meta.get("points", 0)
 
                     # Send sabana_potree_ready (NOT cleared — keeps BIM + OBBs)
-                    await websocket.send_text(json.dumps({
+                    await viewer_manager.send_text(websocket, json.dumps({
                         "type": "sabana_potree_ready",
                         "session_id": session_id,
                         "url": f"/potree_sabana/{session_id}/",
@@ -7547,7 +7565,7 @@ async def viewer_websocket(websocket: WebSocket):
                             if _busy else "the on-load rebuild chain is running")
                     print(f"[Pipeline] ✋ run_pipeline REJECTED for "
                           f"{session_id}: {_why} (one and only one)")
-                    await websocket.send_text(json.dumps({
+                    await viewer_manager.send_text(websocket, json.dumps({
                         "type": "error",
                         "message": f"Reconstruction command rejected: {_why}. "
                                    f"One and only one — resend it yourself "
@@ -7774,7 +7792,7 @@ async def viewer_websocket(websocket: WebSocket):
                         scan_key=single_key,
                     )
                     label = single_key or "auto"
-                    await websocket.send_text(json.dumps({
+                    await viewer_manager.send_text(websocket, json.dumps({
                         "type": "info",
                         "message": f"Pipeline started for {session_id} (scan: {label})"
                     }))
@@ -7784,7 +7802,7 @@ async def viewer_websocket(websocket: WebSocket):
                         total = len(scan_keys)
                         for i, sk in enumerate(scan_keys):
                             try:
-                                await websocket.send_text(json.dumps({
+                                await viewer_manager.send_text(websocket, json.dumps({
                                     "type": "info",
                                     "message": f"Starting scan {i+1}/{total}: {sk}"
                                 }))
@@ -7819,7 +7837,7 @@ async def viewer_websocket(websocket: WebSocket):
 
                             if not scan_success[0]:
                                 try:
-                                    await websocket.send_text(json.dumps({
+                                    await viewer_manager.send_text(websocket, json.dumps({
                                         "type": "error",
                                         "message": f"Scan {sk} failed. Stopping multi-scan pipeline."
                                     }))
@@ -7828,7 +7846,7 @@ async def viewer_websocket(websocket: WebSocket):
                                 return
 
                         try:
-                            await websocket.send_text(json.dumps({
+                            await viewer_manager.send_text(websocket, json.dumps({
                                 "type": "info",
                                 "message": f"All {total} scans completed for {session_id}"
                             }))
@@ -7836,7 +7854,7 @@ async def viewer_websocket(websocket: WebSocket):
                             pass
 
                     asyncio.create_task(_run_multi_scan())
-                    await websocket.send_text(json.dumps({
+                    await viewer_manager.send_text(websocket, json.dumps({
                         "type": "info",
                         "message": f"Multi-scan pipeline started: {len(scan_keys)} scans for {session_id}"
                     }))
@@ -7848,7 +7866,7 @@ async def viewer_websocket(websocket: WebSocket):
                 # the chat still comes back once the GPU is released.
                 asyncio.get_running_loop().run_in_executor(
                     None, _semantic_reload_if_idle, "pipeline cancelled")
-                await websocket.send_text(json.dumps({
+                await viewer_manager.send_text(websocket, json.dumps({
                     "type": "info",
                     "message": f"Pipeline cancelled for {session_id}"
                 }))
@@ -7856,7 +7874,7 @@ async def viewer_websocket(websocket: WebSocket):
             elif cmd.get("type") == "get_pipeline_status":
                 session_id = cmd.get("session_id")
                 status = pipeline_manager.get_status(session_id)
-                await websocket.send_text(json.dumps({
+                await viewer_manager.send_text(websocket, json.dumps({
                     "type": "pipeline_status",
                     "session_id": session_id,
                     "status": status,
