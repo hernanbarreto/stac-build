@@ -1176,6 +1176,13 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     cond_stray_dir = None
     if cond:
         vggt_config["Model"]["da3_prior_use_poses"] = True
+        # USER 2026-09-23: one confidence floor governs the whole reconstruction —
+        # the points below it never reach the pose fits, never reach their held-out
+        # judges, and never reach the written cloud. Same min-max fraction the viewer
+        # slider shows, so what he sees at 10 % is what the pipeline removes.
+        vggt_config["Model"]["pose_fit_conf_min_norm"] = float(
+            (config.get("reconstruction", {}).get("simple", {}) or {}).get(
+                "conf_min_norm", 0.0) or 0.0)
         if session_path is not None:
             try:
                 _sd = _find_stray_dir(Path(session_path))

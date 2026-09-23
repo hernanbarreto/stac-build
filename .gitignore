@@ -180,3 +180,8 @@ static/xr8/
 #   git clone https://github.com/nv-tlabs/NKSR.git vendor/NKSR
 vendor/NKSR/
 vendor/point2cad/
+
+# LoGeR: parked 2026-09-23 after the pccr A/B (see docs/polycam.md). 9.5 GB of
+# checkpoints + a vendored clone; re-clone from Junyi42/LoGeR when the km-scale
+# case arrives.
+vendor/LoGeR/

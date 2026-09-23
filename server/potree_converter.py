@@ -121,7 +121,14 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
         else:
             logger.warning(f"[Potree] Classification size mismatch: {len(class_arr)} vs {len(data)} pts")
 
-    # Confidence is already normalized to [0, 1] by VGGT-Long — map directly to uint16 intensity.
+    # Intensity is the FALLBACK channel, for a cloud that carries no `confidence`
+    # extra dim. It must be NORMALIZED here: the old code asserted "already
+    # normalized to [0,1] by VGGT-Long" and clipped — false for this pipeline,
+    # whose clouds arrive raw (pccr: 2.862..70.946), so every point clipped to
+    # 1.0 and the whole channel came out saturated at 65535 (verified in the
+    # octree metadata). Min-max is the same normalization PotreeLoader.ts:711
+    # applies to the `confidence` attribute and Step 1c of gpu_cloud_clean
+    # applies to the gate, so all three speak one language.
     if has_confidence:
         conf = data['confidence'].astype(np.float32)
         # NO NaN TOLERATED: a non-finite confidence means an upstream stage shipped
@@ -134,10 +141,12 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
                 f"cleaned cloud has {int(_bad.sum()):,}/{len(conf):,} non-finite "
                 f"confidence values — an upstream stage corrupted the cloud; refusing "
                 f"to convert corrupted data")
-        conf = np.clip(conf, 0.0, 1.0)
-        las.intensity = (conf * 65535).astype(np.uint16)
+        _lo, _hi = float(conf.min()), float(conf.max())
+        _norm = (conf - _lo) / max(_hi - _lo, 1e-6) if _hi > _lo else np.zeros_like(conf)
+        las.intensity = (np.clip(_norm, 0.0, 1.0) * 65535).astype(np.uint16)
         n = len(conf)
-        logger.info(f"[Potree] Confidence [0-1] mapped to intensity ({n:,} pts)")
+        logger.info(f"[Potree] Confidence {_lo:.3f}..{_hi:.3f} normalized min-max "
+                    f"→ intensity ({n:,} pts)")
 
     # Per-point origin traceability (source keyframe + pixel) as LAS extra
     # dimensions, so PotreeConverter carries them into the octree attributes —
