@@ -141,8 +141,8 @@ async def ar_sessions():
     root = Path(PROJECTS_DIR)
     if root.is_dir():
         for proj in sorted(root.iterdir()):
-            if not proj.is_dir():
-                continue
+            if not proj.is_dir() or proj.name.startswith("."):
+                continue  # a tool's leftover state dir is not a project
             out = _latest_output_dir(proj.name)
             if out is None:
                 continue

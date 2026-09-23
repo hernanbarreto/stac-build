@@ -1489,12 +1489,21 @@ async def get_sessions(
         scans_dir = Path(__file__).parent / "scans"
         projects_dir = PROJECTS_DIR
         
-        # Collect sessions from both legacy scans/ and new projects/
+        # Collect sessions from both legacy scans/ and new projects/.
+        # HIDDEN DIRECTORIES ARE NOT PROJECTS: tools that run with these folders
+        # as their working directory leave their own state behind — Jupyter
+        # writes `.ipynb_checkpoints/` the moment a notebook is saved there —
+        # and `is_dir()` alone let them into the picker as empty projects. Same
+        # rule `ProjectPaths.list_scan_days` already applies one level down.
+        def _visible_dirs(root: Path):
+            return sorted((d for d in root.iterdir() if not d.name.startswith(".")),
+                          reverse=True)
+
         all_dirs = []
         if scans_dir.exists():
-            all_dirs.extend(sorted(scans_dir.iterdir(), reverse=True))
+            all_dirs.extend(_visible_dirs(scans_dir))
         if projects_dir.exists():
-            all_dirs.extend(sorted(projects_dir.iterdir(), reverse=True))
+            all_dirs.extend(_visible_dirs(projects_dir))
         if not all_dirs: return []
         
         sessions = []
