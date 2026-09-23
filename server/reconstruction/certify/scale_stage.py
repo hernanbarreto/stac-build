@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -237,6 +237,134 @@ def absolute_rows(output_dir) -> List[Tuple[int, float, float, str]]:
             for r in rep.get("rows", []) if r.get("chunk") is not None]
 
 
+def _chainage_of_chunks(output_dir, session, ranges) -> np.ndarray:
+    """Walked distance at the MIDDLE keyframe of every chunk (metres).
+
+    The drift model is a function of the distance WALKED, so the free
+    per-chunk solution has to be compared against it on the same axis.
+    """
+    c = np.asarray(session.poses, np.float64)[:, :3, 3]
+    d = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(c, axis=0), axis=1))])
+    return np.array([float(d[min(int((a + b) // 2), len(d) - 1)]) for a, b in ranges])
+
+
+def earn_the_right(r_free, closures, chain, sigma_seam: float,
+                   min_holdout: int = 3, improve: float = 0.75,
+                   log: Callable = print) -> dict:
+    """Does the per-chunk solution EARN the right to touch the geometry?
+
+    USER 2026-09-22, after test2's epoch 1 came out torn: *"debiamos tener una
+    solucion que se adaptara a todos los casos y no se esta logrando"*.
+
+    Every other stage that moves this geometry already answers this question
+    against data it never saw — `metric_lock.scale_drift_gate` on held-out seam
+    ratios, `depth_graph_verdict` on held-out frame pairs, and the intra-chunk
+    consensus on held-out strata (on pccr 2026-09-22 it earned NOTHING and
+    applied nothing, which is the behaviour being copied here). The post-hoc
+    depth correction was the only one that applied unconditionally.
+
+    This is NOT the kind of gate the USER abolished on 2026-09-09 ("no debes
+    rechazar correcciones por umbrales arbitrarios"): there is no threshold on
+    HOW MUCH may be corrected. The question is whether the model explains
+    closures it was not fitted on — the same discipline, and the same 25 %
+    margin, the vendor gate already uses.
+
+    Three outcomes, decided by the held-out error:
+      · the FREE solution (one factor per chunk) explains them best → apply it
+      · the RAMP (k = 1 + eps*d, ONE parameter along the walk) explains them
+        best → apply the ramp: a drift ACCUMULATES, so a smooth ramp cannot
+        tear a seam, and CLAUDE.md already records it fitting pccr's closures
+        better than a 3-DOF translation (rms 16.7 vs 22.8 cm)
+      · neither beats leaving the geometry alone → apply NOTHING
+
+    Measured on the two sessions this was written for:
+      pccr  13 closures agreeing on x1.10-1.15, r monotone     → applies
+      test2 18 closures contradicting each other (0.90-1.18),
+            r zigzagging with a -16.7 % and a +19.2 % jump
+            between ADJACENT chunks (~2 m of tearing at 10 m) → refuses
+    """
+    # The sample is the CLOSURES, not the rows the solver fuses them into: one
+    # row per chunk PAIR would have turned pccr's 13 independent measurements
+    # into 7 and left nothing to hold out (found while testing this, 2026-09-22).
+    n = len(r_free)
+    rows = []
+    for c in (closures or []):
+        ch = c.get("chunks") or ()
+        if len(ch) == 2 and c.get("log_r") is not None:
+            rows.append((int(ch[0]), int(ch[1]), float(c["log_r"])))
+    rep: Dict[str, Any] = {"rows": len(rows), "n_chunks": n}
+    if len(rows) < int(min_holdout) * 3:
+        rep.update({"verdict": "free", "reason":
+                    f"{len(rows)} relative row(s) — too few to hold any out, "
+                    f"the solution stands on its own evidence"})
+        return rep
+    held = [rows[i] for i in range(len(rows)) if i % 3 == 2]
+    fit = [rows[i] for i in range(len(rows)) if i % 3 != 2]
+    if len(held) < int(min_holdout):
+        rep.update({"verdict": "free", "reason": f"held-out too thin ({len(held)})"})
+        return rep
+
+    x_free = np.log(np.asarray(r_free, np.float64))
+
+    def _ramp_from(sample):
+        """eps of k = 1 + eps*d, least squares on the sample's own rows."""
+        A, b = [], []
+        for i, j, lr in sample:
+            A.append(chain[j] - chain[i])
+            b.append(lr)
+        A = np.asarray(A, np.float64)[:, None]
+        b = np.asarray(b, np.float64)
+        if not len(A) or float(np.squeeze(A.T @ A)) <= 0:
+            return 0.0
+        return float(np.linalg.lstsq(A, b, rcond=None)[0][0])
+
+    eps = _ramp_from(fit)
+    x_ramp = eps * (np.asarray(chain, np.float64) - float(chain[0]))
+
+    def _err(x):
+        return float(np.median([abs((x[j] - x[i]) - lr) for i, j, lr in held])) if held else np.inf
+
+    e_free, e_ramp, e_none = _err(x_free), _err(x_ramp), _err(np.zeros(n))
+    rep.update({"held_out": len(held), "fit_rows": len(fit),
+                "err_free": round(e_free, 5), "err_ramp": round(e_ramp, 5),
+                "err_identity": round(e_none, 5), "ramp_eps": round(eps, 6)})
+
+    # the seam sensor: neighbouring chunks share ~30 frames that measure their
+    # relative scale to 0.3-1 %, so a solution demanding far more than the seam
+    # prior allows is contradicted by frames it never consulted
+    jumps = np.abs(np.diff(x_free))
+    worst = float(jumps.max()) if len(jumps) else 0.0
+    seam_cap = 6.0 * float(sigma_seam)          # 6 sigma of the seam sensor
+    rep.update({"worst_seam_jump": round(float(np.exp(worst) - 1.0), 4),
+                "seam_cap": round(float(np.exp(seam_cap) - 1.0), 4)})
+
+    best = min(e_free, e_ramp, e_none)
+    if worst > seam_cap and e_ramp <= e_none:
+        rep.update({"verdict": "ramp", "reason":
+                    f"adjacent chunks demand {np.exp(worst) - 1:.1%} while the "
+                    f"shared frames measure their relative scale to "
+                    f"{np.exp(seam_cap) - 1:.1%} — the free solution is refuted "
+                    f"by evidence it never used; the ramp explains the held-out "
+                    f"closures ({e_ramp:.4f} vs identity {e_none:.4f})"})
+    elif best == e_free and e_free <= improve * e_none:
+        rep.update({"verdict": "free", "reason":
+                    f"the per-chunk solution explains the held-out closures "
+                    f"({e_free:.4f} vs identity {e_none:.4f})"})
+    elif best == e_ramp and e_ramp <= improve * e_none:
+        rep.update({"verdict": "ramp", "reason":
+                    f"the ramp explains the held-out closures better "
+                    f"({e_ramp:.4f} vs free {e_free:.4f}, identity {e_none:.4f})"})
+    else:
+        rep.update({"verdict": "none", "reason":
+                    f"no model explains the closures it did not see "
+                    f"(free {e_free:.4f}, ramp {e_ramp:.4f}, identity "
+                    f"{e_none:.4f}) — the geometry is left alone"})
+    if rep["verdict"] == "ramp":
+        rep["r_ramp"] = [float(v) for v in np.exp(x_ramp)]
+    log(f"[earn] {rep['verdict'].upper()}: {rep['reason']}")
+    return rep
+
+
 def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, log: Callable = print
                       ) -> dict:
     """Per-chunk correction factors from the post-hoc rows. Returns the
@@ -333,6 +461,24 @@ def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, 
                     "reason": "scale graph solution not finite/positive — declared, identity"})
         log(f"[scale-posthoc] IDENTITY — {rep['reason']}")
         return rep
+    # EARN THE RIGHT (USER 2026-09-22): the solution must explain closures it
+    # was not fitted on, or step aside — see `earn_the_right`.
+    try:
+        _earn = earn_the_right(r, rows_used, _chainage_of_chunks(output_dir, session, ranges),
+                               float(scfg.sigma_seam_log), log=log)
+        rep["earned"] = _earn
+        if _earn.get("verdict") == "ramp" and _earn.get("r_ramp"):
+            r = np.asarray(_earn["r_ramp"], np.float64)
+        elif _earn.get("verdict") == "none":
+            rep.update({"r": [1.0] * n_chunks, "applied": False,
+                        "reason": f"did not earn the right: {_earn['reason']}"})
+            log(f"[scale-posthoc] IDENTITY — {rep['reason']}")
+            return rep
+    except Exception as _e:  # noqa: BLE001 — the judge never breaks the run
+        log(f"[scale-posthoc] ⚠ self-validation failed ({_e}) — solution applied "
+            f"as solved, undeclared")
+        rep["earned"] = {"verdict": "error", "reason": str(_e)}
+
     max_log = float(np.max(np.abs(np.log(r))))
     rep["r"] = [float(x) for x in r]
     rep["max_abs_log_r"] = max_log

@@ -246,7 +246,12 @@ def measure_epoch(output_dir: Path, cfg, rep_m: float,
     # build a horizontal accordion the floor could not see — 131.6 mm of
     # correction between keyframes 9.0 cm apart, a local drift rate of 146 %/m
     # against the 37.2 mm/m the session actually measured.
-    rep["scale_rows"] = vd.scale_rows(kept, poses, ks, log=log)
+    # the rivals each object has inside its own displacement PRICE its closure
+    # (they no longer veto it) — see `visit_drift.rival_sigma_factor`
+    _rivals = {int(o["oid"]): int(o.get("ambiguity", 0))
+               for o in (arep.get("objects") or [])}
+    rep["scale_rows"] = vd.scale_rows(kept, poses, ks, log=log,
+                                      rivals_of=_rivals)
     rep["_masklets"] = masklets          # for the cloud filter, same pass
     rep["_points_by_oid"] = pm
     rep["_ks"] = ks

@@ -1022,8 +1022,34 @@ def refine_drift(vis: Visibility, cand: "Candidate", axes: np.ndarray,
 # §5.1 loop rows were EMPTY on pccr while this module measured five good ones
 # and spent them all on a translation solver.
 
+def rival_sigma_factor(n_rivals: int) -> float:
+    """How much a closure's error bar widens when its identity is not unique.
+
+    USER 2026-09-22, after test2's epoch 1: *"debe aplicar la correccion
+    correcta"* — a repeated scene (rails, columns, identical warning labels)
+    produces closures that LOOK perfect and are two different objects.
+    `metal_track_rails#107` measured 99 % radial over 1.12 m and is one rail
+    against another; the tangential residual cannot catch that, because
+    nothing is wrong with the SHAPE match.
+
+    What catches it is already measured and was being thrown away: how many
+    OTHER masklets of the same label sit within this object's own measured
+    displacement (`ambiguity`). With `n` rivals the pairing is one of `n + 1`
+    equally plausible identities, so the measurement's variance grows by
+    `n + 1` and its sigma by `sqrt(n + 1)`.
+
+    It PRICES, it does not veto — the USER's standing rule since 2026-09-09.
+    `max_ambiguity` as a veto was switched off on 2026-09-19 because on pccr
+    it hid ten good floor closures; those closures keep speaking here, just
+    with the error bar their ambiguity earns, and since they all AGREE their
+    weighted sum still points the same way.
+    """
+    return float(np.sqrt(max(0, int(n_rivals)) + 1))
+
+
 def scale_rows(kept: Sequence[Tuple["Candidate", "Drift"]], poses: np.ndarray,
-               ks_of_point: np.ndarray, log: Callable[[str], None] = print
+               ks_of_point: np.ndarray, log: Callable[[str], None] = print,
+               rivals_of: Optional[Dict[int, int]] = None
                ) -> List[dict]:
     """Every closure as the DEPTH ratio between the two chunks it spans.
 
@@ -1073,7 +1099,11 @@ def scale_rows(kept: Sequence[Tuple["Candidate", "Drift"]], poses: np.ndarray,
         extent = float(np.linalg.norm(np.percentile(ext, 98, axis=0)
                                       - np.percentile(ext, 2, axis=0)))
         residual = float(np.hypot(tangential, dr.worst_disagreement))
+        _riv = int((rivals_of or {}).get(int(cand.oid), 0))
+        _fac = rival_sigma_factor(_riv)
+        residual *= _fac
         out.append({"instance_id": int(cand.instance_id), "label": cand.label,
+                    "rivals": _riv, "sigma_factor": round(_fac, 3),
                     "i": int(round((a1 + b1) / 2.0)),
                     "j": int(round((a2 + b2) / 2.0)),
                     "s_ab": float(1.0 / k_b), "k_b": float(k_b),
@@ -1084,7 +1114,8 @@ def scale_rows(kept: Sequence[Tuple["Candidate", "Drift"]], poses: np.ndarray,
         log(f"[visit-drift] scale row {cand.label}#{cand.instance_id}: "
             f"kf {out[-1]['i']}<->{out[-1]['j']}, depth x{k_b:.4f} "
             f"(radial {radial * 100:+.1f} cm of {np.linalg.norm(t) * 100:.1f} "
-            f"at {D_b:.2f} m, tangential {tangential * 100:.1f} cm)")
+            f"at {D_b:.2f} m, tangential {tangential * 100:.1f} cm"
+            + (f", {_riv} rival(s) → σ x{_fac:.2f}" if _riv else "") + ")")
     return out
 
 

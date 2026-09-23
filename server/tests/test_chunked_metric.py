@@ -931,44 +931,52 @@ def test_chunk_field_verdict_gates():
     assert not v_w["bounded"]
 
 
-# ── the FIXED 60/30 policy (USER ORDER 2026-09-22) ───────────────────
-# *"no quiero que haga dos pasadas de da3, despues vggt omega para luego ir otra
-# vez a da3 y vggt omega pero con chunks, quiero que lo haga de una, si hay
-# muchos kf lo chunkee y son menos que lo haga en uno solo siempre 60/30"*.
-# What is asserted here is that the DECISION no longer consults the walk: the
-# walk probe measured 44.1 m on pccr's ~19 m walk and that one number both
-# triggered the second pass and sized the chunks from it.
+# ── AS MANY FRAMES AS THE CARD ALLOWS (USER ORDER 2026-09-23) ────────
+# *"vamos a armar los chunk de la mayor cantidad de frames posibles, si hay mas
+# de uno, con el solape del 50% ... eso lo va a determinar el GPU"*, on his
+# visual verdict: *"yo se como queda observatorio con un solo chunk, y es mucho
+# mejor que lo que tenemos ahora, lo mismo el test2"*. What is asserted is that
+# the capacity is MEASURED off the card, that a scene which fits becomes ONE
+# chunk with no seam, and that above it the overlap stays at half.
 
-def test_the_fixed_size_is_the_vendor_default_and_the_overlap_is_half():
+
+def test_the_capacity_comes_from_the_card_not_from_a_constant():
     import yaml
     cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
-    n = int(cfg["reconstruction"]["simple"]["chunk_frames"])
-    assert n == 60, "the fixed chunk size is the vendor's validated default"
-    vendor = yaml.safe_load(
-        (Path(__file__).resolve().parents[2] / "vendor" / "VGGT-Long" / "configs"
-         / "base_config.yaml").read_text())["Model"]
-    assert n == int(vendor["chunk_size"]) and n // 2 == int(vendor["overlap"]), \
-        "60/30 must stay the vendor's own recommendation, not a number we invented"
+    assert int(cfg["reconstruction"]["simple"]["chunk_frames"]) == 0, \
+        "0 = ask the card; a positive value is an explicit A/B override"
+    src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
+    assert "_cap = max(24, int((_free - 4.0) / 0.086))" in src, \
+        "the capacity must be (free VRAM - base) / per-frame footprint"
+    i = src.index("stop_semantic_service(pipe, stage=\"Omega reconstruction\")")
+    j = src.index("_cap = max(24, int((_free - 4.0) / 0.086))")
+    assert i < j, "the card must be read AFTER vLLM has released it"
 
 
-def test_one_pass_either_way_at_the_fixed_size():
-    """A scene at or under the fixed size is ONE chunk with no seam; over it, the
-    chunked layout is entered directly — and in neither case is there a second
-    pass to re-run, because nothing measured afterwards can change the size."""
-    assert chunk_ranges(60, 60, 30) == [(0, 60)]
-    assert chunk_ranges(45, 60, 30) == [(0, 45)]
-    over = chunk_ranges(216, 60, 30)               # pccr 2026-08-31
-    assert len(over) == 7 and over[0] == (0, 60) and over[-1] == (180, 216)
-    assert all(b - a <= 60 for a, b in over), "no chunk may exceed the fixed size"
+def test_a_scene_that_fits_is_one_chunk_with_no_seam():
+    """The whole point: no seam, nothing to tear. pccr/test2/observatorio all
+    sit at 213-255 keyframes against a ~500-frame capacity on a free 48 GB
+    card."""
+    for n in (213, 216, 255, 500):
+        assert chunk_ranges(n, max(n, 2), 0) == [(0, n)], n
 
 
-def test_every_chunk_of_the_fixed_layout_gets_its_anchors_before_inference():
-    """The per-chunk metric anchors are known from the KEYFRAME COUNT alone, which
-    is what lets them be extracted in the SAME DA3 round as the scale anchors —
-    the second DA3 launch existed only because the layout waited for the walk."""
-    idx = plan_anchor_indices(216, 60, 30, per_chunk=3)
+def test_above_the_capacity_the_overlap_is_half():
+    cap = 500
+    r = chunk_ranges(1200, cap, cap // 2)
+    assert r[0] == (0, cap)
+    assert r[1][0] == cap // 2, "50 % overlap"
+    assert all(b - a <= cap for a, b in r), "no chunk may exceed the capacity"
+    assert r[-1][1] == 1200
+
+
+def test_every_chunk_of_the_capacity_layout_gets_its_anchors():
+    """The per-chunk metric anchors are known from the KEYFRAME COUNT alone,
+    which is what lets them be extracted in the SAME DA3 round."""
+    cap = 500
+    idx = plan_anchor_indices(1200, cap, cap // 2, per_chunk=3)
     assert idx == sorted(set(idx))
-    for start, end in chunk_ranges(216, 60, 30):
+    for start, end in chunk_ranges(1200, cap, cap // 2):
         assert any(start <= i < end for i in idx), (start, end)
 
 

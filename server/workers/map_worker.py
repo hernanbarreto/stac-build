@@ -1780,24 +1780,47 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         return True
 
     _chunked_already = False
-    # ONE FIXED chunk size for EVERY scene, overlap ALWAYS 50% — 60/30 is the
-    # VENDOR default (vendor/VGGT-Long/configs/{base_config,waymo,map_long_config}
-    # .yaml and the paper). The size is a DECLARED capacity, not a fit probe and
-    # not a measurement: identical behaviour run to run, and the only thing the
-    # scene decides is HOW MANY chunks that capacity needs.
+    # AS MANY KEYFRAMES PER CHUNK AS THE CARD ALLOWS — USER ORDER 2026-09-23:
+    # *"vamos a armar los chunk de la mayor cantidad de frames posibles, si hay
+    # mas de uno, con el solape del 50% ... eso lo va a determinar el GPU, lo
+    # que el GPU permita"*, on his visual verdict over many runs: *"yo se como
+    # queda observatorio con un solo chunk, y es mucho mejor que lo que tenemos
+    # ahora, lo mismo el test2"*.
+    #
+    # WHY IT BEATS A FIXED SIZE, read off this repo's own measurements: the
+    # damage lands on the SEAMS. test2's epoch 1 tore at seam 6->7; the elastic
+    # stage starts from 8.4 cm of disagreement between the two copies of a
+    # shared frame; the in-run pose graph worsens its held-out by 0.6 cm. A
+    # chunk that holds the whole scene has none of those. Omega's feed-forward
+    # drift is the reason chunking exists, and on walks of ~11-13 m it is
+    # smaller than what the seams cost.
+    #
+    # `chunk_frames: 0` = ask the card: (free VRAM - 4 GB base) / 0.086 GB per
+    # frame, the vendor's own measured footprint (500 frames ~ 43 GB, the paper's
+    # number). A positive value overrides it, for A/B work.
     _chunk_cfg = int(_simple_cfg.get("chunk_frames", 0) or 0)
-    if _chunk_cfg < 2:
-        raise RuntimeError("reconstruction.simple.chunk_frames must be >= 2: it is "
-                           "the single-pass capacity AND the chunk size (USER ORDER "
-                           "2026-09-22 — one pass, fixed 60/30)")
     if _simple_on and _n_selected:
         _free = _gpu_free_gb()
-        _need = 4.0 + 0.086 * _chunk_cfg
-        if _free is not None and _free < _need:
-            pipe.send_log(f"WARNING: free VRAM {_free:.1f} GB < {_need:.1f} GB "
-                          f"needed for {_chunk_cfg}-frame chunks — NOT resizing "
-                          f"(fixed-size policy): free the GPU or lower "
-                          f"reconstruction.simple.chunk_frames", level="warning")
+        if _chunk_cfg:
+            _cap = _chunk_cfg
+            _need = 4.0 + 0.086 * _cap
+            if _free is not None and _free < _need:
+                pipe.send_log(f"WARNING: free VRAM {_free:.1f} GB < {_need:.1f} GB "
+                              f"needed for {_cap}-frame chunks — NOT resizing "
+                              f"(explicit chunk_frames): free the GPU or lower "
+                              f"reconstruction.simple.chunk_frames", level="warning")
+            pipe.send_log(f"SIMPLE: chunk capacity {_cap} frames "
+                          f"(reconstruction.simple.chunk_frames, explicit)")
+        elif _free is None:
+            _cap = 60
+            pipe.send_log("WARNING: free VRAM unreadable — falling back to 60 "
+                          "frames per chunk (the vendor default)", level="warning")
+        else:
+            _cap = max(24, int((_free - 4.0) / 0.086))
+            pipe.send_log(f"SIMPLE: chunk capacity {_cap} frames — {_free:.1f} GB "
+                          f"free, 4.0 GB base + 0.086 GB/frame (measured). "
+                          f"{_n_selected} keyframe(s) to place.")
+        _chunk_cfg = _cap
         if _n_selected <= _chunk_cfg:
             vggt_config["Model"]["chunk_size"] = max(_n_selected, 2)
             vggt_config["Model"]["overlap"] = 0

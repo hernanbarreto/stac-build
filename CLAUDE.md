@@ -286,7 +286,46 @@ Wired the same day (USER: *"arreglemos la escala en origen"* → B first):
   WALK (the axis its 2026-08-11 A/B never tested — it tested DEPTH, `s·z+b` and
   `a0·z+a1·z²`, and correctly found no structure there).
 
-## ⭐ RECONSTRUCTION = ONE PASS, FIXED 60/30 — USER DECISION 2026-09-22
+## ⭐ RECONSTRUCTION = ONE PASS, AS MANY KEYFRAMES PER CHUNK AS THE CARD
+## ALLOWS — USER DECISION 2026-09-23 (supersedes the fixed 60/30 below)
+**"vamos a armar los chunk de la mayor cantidad de frames posibles, si hay mas
+de uno, con el solape del 50% ... eso lo va a determinar el GPU, lo que el GPU
+permita"**, on his visual verdict over many runs: **"yo se como queda
+observatorio con un solo chunk, y es mucho mejor que lo que tenemos ahora, lo
+mismo el test2, siempre fue mejor que lo que tenemos ahora aun con un solo
+chunk, lo digo con total y absoluta experiencia de lo que veo"**.
+
+`reconstruction.simple.chunk_frames: 0` = ask the card:
+`capacity = (free VRAM - 4 GB base) / 0.086 GB per frame`, the vendor's own
+measured footprint (~500 frames on a free 48 GB card). Then:
+- `n_kf <= capacity` → ONE chunk, overlap 0, loop closure off, no
+  `chunk_plan.json`. Every scene shot so far (213-255 keyframes) lands here.
+- `n_kf > capacity` → chunks of that capacity at 50 % overlap.
+A POSITIVE value overrides the probe, for A/B work.
+
+WHY, from this repo's own measurements: THE DAMAGE LANDS ON THE SEAMS. test2's
+epoch 1 tore at seam 6->7 (the free per-chunk scale solution demanded 19 %
+between adjacent chunks ~ 2 m of displacement at 10 m); the elastic stage starts
+from 8.4 cm of disagreement between the two copies of a shared frame; the in-run
+pose graph worsens its own held-out by 0.6 cm and applies anyway. A chunk that
+holds the whole scene has none of that. Omega's feed-forward drift (~1.3 cm/m)
+is why chunking exists at all, and on the walks measured here — observatorio
+11.2 m, test2 12.9 m, pccr 18.8 m — it costs less than the seams do.
+
+DECLARED CONSEQUENCE: with ONE chunk the post-hoc depth corrector has a single
+unit and therefore ONE degree of freedom — it can change the session's size, it
+cannot redistribute drift along the walk. That is accepted: the user's verdict is
+that the uncorrected single-chunk cloud beats the corrected chunked one on these
+scenes.
+
+HISTORY: 60/30 (2026-09-22, the vendor default) gave 7-8 chunks on 213-255
+keyframes and was judged clearly worse than the single-chunk runs. 450
+(2026-09-04) was this same idea stated as a CONSTANT and was reverted the same
+night for "intra-chunk drift over the long horizon" — the difference now is that
+the capacity is MEASURED off the card instead of declared, and on every scene
+shot so far it resolves to a single pass.
+
+## ⭐ (superseded) RECONSTRUCTION = ONE PASS, FIXED 60/30 — USER DECISION 2026-09-22
 **"no quiero que haga dos pasadas de da3, despues vggt omega para luego ir otra
 vez a da3 y vggt omega pero con chunks, quiero que lo haga de una, si hay
 muchos kf lo chunkee y son menos que lo haga en uno solo siempre 60/30"** and

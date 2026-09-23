@@ -1431,43 +1431,39 @@ reconstruction:
     #   chunks in walked METERS through that same bad walk (plan_chunks, deleted with
     #   its 45-kf re-densification); the second was the single-pass cap that
     #   chunk_frames now IS.
-    chunk_frames: 60                    # USER ORDER 2026-09-22: ONE pass, FIXED 60/30, always.
-                                        # *"no quiero que haga dos pasadas de da3, despues vggt
-                                        # omega para luego ir otra vez a da3 y vggt omega pero con
-                                        # chunks, quiero que lo haga de una, si hay muchos kf lo
-                                        # chunkee y son menos que lo haga en uno solo siempre
-                                        # 60/30"*. So this value is BOTH the single-pass capacity
-                                        # and the chunk size: n_kf <= 60 -> one chunk, overlap 0,
-                                        # no seams; n_kf > 60 -> chunked-metric DIRECTLY at 60/30
-                                        # (`direct-chunked`), and phase 2 never re-runs (the walk
-                                        # probe stops deciding the SIZE — it measured 44.1 m on a
-                                        # ~19 m walk and sized the chunks from that number).
-                                        # 60/30 is the VENDOR default, validated in the VGGT-Long
-                                        # paper and in vendor/VGGT-Long/configs/{base_config,
-                                        # waymo,map_long_config}.yaml; our own stac_vggtomega.yaml
-                                        # says 120/60 and never decided anything because
-                                        # plan_chunks overrode it. pccr 2026-08-31: 216 kf ->
-                                        # 7 chunks / 6 seams at 60/30, the same layout the derived
-                                        # 59/29 produced, so the per-chunk scale ladder keeps its
-                                        # 6 risers (6 x sigma_seam_log 0.02 ~ 12 %).
-                                        # HISTORY — 0 (legacy walk sizing) USER FINAL 2026-09-04
-                                        # NIGHT: back to 60/30. The 450-chunk clean run was judged
-                                        # MUCH worse by eye (intra-chunk drift over the long
-                                        # horizon); the full-stack 60/30 run was good except the
-                                        # depth-duplicate door/floor defect.
-                                        # (History of the 450 order below, kept for the record.)
-  # chunk_frames: 450                 # USER ORDER 2026-09-04: ONE FIXED chunk size for every
-                                        # scene — the largest with real VRAM headroom on the
-                                        # A6000 48 GB (measured ~0.086 GB/frame + ~4 GB base:
-                                        # 500 ≈ 47 GB = at the limit; 450 ≈ 42.7 GB, ~5 GB
-                                        # free). Overlap ALWAYS 50%. Small scene → one chunk
-                                        # (maybe with room to spare); large → several chunks —
-                                        # same capacity for both, identical run to run. While
-                                        # set (>0) it supersedes the free-VRAM fit probe, the
-                                        # 60-frame chunked cap, and phase 2's walk-based
-                                        # plan_chunks + 45-kf re-densify (code kept; 0 = legacy
-                                        # dynamic sizing). Context: pccr_v1 ran 44 chunks of 60
-                                        # frames — 43 seams for the scale to derail across.
+    chunk_frames: 0                     # 0 = AS MANY AS THE CARD ALLOWS (USER ORDER
+                                        # 2026-09-23: *"vamos a armar los chunk de la
+                                        # mayor cantidad de frames posibles, si hay mas de
+                                        # uno, con el solape del 50% ... eso lo va a
+                                        # determinar el GPU, lo que el GPU permita"*).
+                                        # capacity = (free VRAM - 4 GB base) / 0.086 GB per
+                                        # frame — the vendor's measured footprint, ~500
+                                        # frames on a free 48 GB card. n_kf <= capacity ->
+                                        # ONE chunk, overlap 0, no seams; above it ->
+                                        # chunks of that capacity with 50 % overlap.
+                                        # WHY, on his visual verdict over many runs
+                                        # (*"yo se como queda observatorio con un solo
+                                        # chunk, y es mucho mejor ... lo mismo el test2"*)
+                                        # and on this repo's own measurements: the damage
+                                        # lands on the SEAMS — test2's epoch 1 tore at seam
+                                        # 6->7, the elastic stage starts from 8.4 cm of
+                                        # disagreement between the two copies of a shared
+                                        # frame, the in-run pose graph worsens its held-out
+                                        # by 0.6 cm. A chunk that holds the whole scene has
+                                        # none of that. Omega's feed-forward drift is why
+                                        # chunking exists at all, and on walks of ~11-13 m
+                                        # it costs less than the seams do.
+                                        # A POSITIVE VALUE OVERRIDES the probe (A/B work).
+                                        # HISTORY — 60 (2026-09-22, the vendor default) gave
+                                        # 7-8 chunks on 213-255 keyframes and the user
+                                        # judged test2 and observatorio clearly worse than
+                                        # their single-chunk runs. 450 (2026-09-04) was the
+                                        # same idea as this one, stated as a constant; it
+                                        # was reverted the same night for "intra-chunk drift
+                                        # over the long horizon" — now the capacity is
+                                        # MEASURED rather than declared, and the single-pass
+                                        # case (n_kf <= capacity) is the one it produces on
+                                        # every scene shot so far.
     chunk_anchors: 3                    # DA3 metric anchors per chunk (metric lock BEFORE the
                                         # SE(3) gluing — scale is never a degree of freedom).
     # densify: REMOVED (2026-07-10). DA3 fill glued by frame-to-keyframe ICP was

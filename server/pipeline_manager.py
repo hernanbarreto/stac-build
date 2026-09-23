@@ -127,6 +127,8 @@ class PipelineJob:
     # in it, declared "Potree conversion failed" over a perfectly good octree
     # and fell through to the raw-cloud broadcast.
     session_dir: Optional[str] = None
+    # 0 = running or next to run; N = N jobs ahead of it in the queue
+    queue_position: int = 0
     _process: Optional[Process] = field(default=None, repr=False)
     _server_conn: Optional[Connection] = field(default=None, repr=False)
     _task: Optional[asyncio.Task] = field(default=None, repr=False)
@@ -136,6 +138,7 @@ class PipelineJob:
             "session_id": self.session_id,
             "session_dir": self.session_dir,
             "status": self.status.value,
+            "queue_position": self.queue_position,
             "current_stage_idx": self.current_stage_idx,
             "stages": [
                 {
@@ -171,6 +174,15 @@ class PipelineManager:
 
     def __init__(self):
         self._jobs: Dict[str, PipelineJob] = {}
+        # THE QUEUE (USER ORDER 2026-09-23): *"si mando 5 reconstrucciones, se
+        # empieza con la primera y el resto quedan en cola y en la medida que
+        # van terminando va iniciando el resto hasta que terminan todas"*.
+        # ONE GPU, ONE PIPELINE — the operating lesson this repo already
+        # carries ("One GPU job at a time; A/B timing measured under contention
+        # is INVALID"), which until now nothing enforced across SESSIONS: the
+        # refusal below is per session_id, so two different scans launched
+        # together both ran and shared the card.
+        self._queue: List[dict] = []
 
     # ── Public API ───────────────────────────────────────────
 
@@ -252,13 +264,78 @@ class PipelineManager:
 
         job.session_dir = session_dir
 
-        # Start the orchestration loop as an asyncio task
-        job._task = asyncio.create_task(
-            self._run_pipeline(job, session_dir, config, on_progress, on_complete, replace)
-        )
+        # ONE GPU, ONE PIPELINE — anything already running sends this one to the
+        # back of the queue instead of sharing the card (USER 2026-09-23).
+        _pending = {"job": job, "session_dir": session_dir, "config": config,
+                    "on_progress": on_progress, "on_complete": on_complete,
+                    "replace": replace}
+        if self._running_session() is not None:
+            job.status = JobStatus.QUEUED
+            job.queue_position = len(self._queue) + 1
+            self._queue.append(_pending)
+            logger.info(
+                f"[Pipeline] QUEUED {session_id} (scan={scan_key or 'auto'}) — "
+                f"position {job.queue_position}, behind "
+                f"{self._running_session()}; it starts when the card frees up")
+            if on_progress:
+                await on_progress(session_id, job.to_dict())
+            return job
 
+        self._launch(_pending)
         logger.info(f"[Pipeline] Started for {session_id} (scan={scan_key or 'auto'}): {[s.stage.id.value for s in stage_states if s.stage.enabled]}, replace={replace}")
         return job
+
+    # ── the queue ────────────────────────────────────────────
+
+    def _running_session(self) -> Optional[str]:
+        """The session whose pipeline holds the card right now, if any."""
+        for sid, j in self._jobs.items():
+            if j.status == JobStatus.RUNNING:
+                return sid
+        return None
+
+    def _launch(self, pending: dict) -> None:
+        """Hand one pending job to the orchestration loop."""
+        job = pending["job"]
+        job.status = JobStatus.RUNNING
+        job.queue_position = 0
+        job._task = asyncio.create_task(
+            self._run_pipeline(job, pending["session_dir"], pending["config"],
+                               pending["on_progress"], pending["on_complete"],
+                               pending["replace"])
+        )
+
+        # SAFETY NET: `_run_pipeline` starts the next one itself, in order, once
+        # the finished session has published its cloud. This fires when the task
+        # ends any OTHER way — cancelled at an await outside the stage loop, or
+        # killed by an exception — so a queue can never stall on a job that died
+        # in an unexpected place. Both paths are guarded by `_running_session`,
+        # so whichever gets there first is the only one that starts anything.
+        def _then(_t, _self=self):
+            try:
+                asyncio.create_task(_self._start_next_queued())
+            except RuntimeError:            # loop already closing
+                pass
+        job._task.add_done_callback(_then)
+
+    async def _start_next_queued(self) -> None:
+        """The card is free: start the next one in. Called when a pipeline ends,
+        however it ended — done, failed or cancelled."""
+        if self._running_session() is not None:
+            return
+        while self._queue:
+            nxt = self._queue.pop(0)
+            job = nxt["job"]
+            if job.status == JobStatus.CANCELLED:
+                continue                      # cancelled while it waited
+            for k, q in enumerate(self._queue):
+                q["job"].queue_position = k + 1
+            logger.info(f"[Pipeline] the card is free — starting {job.session_id} "
+                        f"({len(self._queue)} still waiting)")
+            self._launch(nxt)
+            if nxt["on_progress"]:
+                await nxt["on_progress"](job.session_id, job.to_dict())
+            return
 
     async def cancel_pipeline(self, session_id: str):
         """Cancel a running pipeline."""
@@ -267,6 +344,19 @@ class PipelineManager:
             return
 
         logger.info(f"[Pipeline] Cancelling {session_id}")
+
+        # A job still WAITING has no process and no task: drop it from the queue
+        # and re-number the rest. Cancelling one that never started must not
+        # touch the pipeline that holds the card (USER 2026-09-23).
+        if job.status == JobStatus.QUEUED and job._task is None:
+            self._queue = [q for q in self._queue if q["job"] is not job]
+            for k, q in enumerate(self._queue):
+                q["job"].queue_position = k + 1
+            job.status = JobStatus.CANCELLED
+            job.queue_position = 0
+            logger.info(f"[Pipeline] {session_id} removed from the queue "
+                        f"({len(self._queue)} still waiting)")
+            return
 
         # Send cancel via pipe
         if job._server_conn:
@@ -739,6 +829,10 @@ class PipelineManager:
             await on_complete(job.session_id, success)
 
         logger.info(f"[Pipeline] {job.session_id} finished: {job.status.value}")
+        # the card is free — whoever is waiting goes in (USER 2026-09-23). It
+        # runs after on_complete so the finished session has already published
+        # its cloud before the next one takes the GPU.
+        await self._start_next_queued()
 
     async def _run_stage(
         self,

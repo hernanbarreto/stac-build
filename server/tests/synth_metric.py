@@ -750,6 +750,10 @@ def certify_cfg(**over) -> dict:
     """Mirror of config.yaml ``certify:``."""
     d = {"ensemble_offset_frames": 0, "keep_aligned_chunks": True,
          "max_iters": 3, "eps": 0.05, "regression_eps": 0.01, "auto_after_segmentation": True,
+         # the §9 loop is what these fixtures exercise, so they ask for the FULL
+         # certification; production runs with deliverable_only: true (USER
+         # 2026-09-22 — correction, epoch, and the stage ends)
+         "deliverable_only": False,
          "objective_weights": {"loop_residual_m": 1.0, "seam_residual_m": 1.0, "closure_m": 1.0,
                                "depth_disagreement_frac": 5.0, "duplicates": 0.1},
          "gates": {"mode": "advisory", "max_seam_degradation_m": 0.005,
