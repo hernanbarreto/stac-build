@@ -423,6 +423,38 @@ seam, so its 1-sigma budget is `n_seams x sigma_seam_log` (pccr: 6 x 0.02 ~
 derived 59/29 gave, so this decision does not move that ceiling either way —
 the fix for it is a scale mode CONTINUOUS along the walk.
 
+## ⭐ ONE CONFIDENCE FLOOR FOR THE WHOLE PIPELINE — USER DECISION 2026-09-23
+**"lo que tenemos que aplicar a nuestro omega es a la nube final filtrar los
+puntos por encima del 10% de confianza ... en que punto es mejor aplicar ese
+filtro durante los ajustes que tiene de pose en la reconstruccion 3D?, no en la
+certificacion, incluso antes de la segmentacion, ya debe entrar filtrada"** and
+**"deben desaparecer de la nube eh!, porque no quiero que se hagan ajustes de
+pose sobre ruido, sobre puntos de baja confianza que es lo que tal vez rompe los
+ajustes de pose y piso"**.
+
+`reconstruction.simple.conf_min_norm: 0.10` — a MIN-MAX fraction of each chunk's
+own valid confidences, the same arithmetic the viewer slider runs
+(`PotreeLoader.ts:711`), so 10 % means the same thing in the UI and in the
+pipeline. It acts at the EARLIEST place the cloud exists, inside the vendor:
+- the pose-fit correspondence sampler (`surface_pair_correspondences`), whose old
+  gate `conf > 1e-5` was the SKY MASK and not a quality bar — low-confidence
+  points both biased the intra-chunk / pose-graph fits AND corrupted the held-out
+  pairs that judge them;
+- `_stac_conf_threshold`, the PLY writer — percentile and floor COMPOSE, the
+  stricter wins. So segmentation, CloudCompy and the correction module all
+  receive the cloud already filtered.
+`postprocessing.conf_min_norm` stays **0** on purpose: a second min-max gate
+downstream would re-normalise over the surviving range and cut again.
+
+WIRING IS THE PART THAT FAILED, TWICE — write it in the BUILDERS, never at a
+call site. The key first went inside `_run_mapanything`'s `if cond:` branch
+(never taken), then only at the legacy builder; the production `vggtomega` path
+builds its own config, so **pccr, test2 and observatorio all ran with the floor
+silently at 0** and nobody could see it — the runs succeed, they are just not
+filtered. Both `_build_vggt_config` and `_build_vggtomega_config` now return
+through `_apply_conf_floor`, and `server/tests/test_conf_floor_wiring.py` fails
+on any builder that returns a vendor config which did not pass through it.
+
 ## ⭐ THE BAR IS THE SAMPLE'S OWN NOISE — USER DECISION 2026-09-23
 **"me parece bien" / "aplicalo"**, after pccr showed the two halves of the same
 evidence — out-of-sample held-out pairs — judged by two invented round numbers

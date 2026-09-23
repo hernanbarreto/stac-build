@@ -1176,13 +1176,6 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     cond_stray_dir = None
     if cond:
         vggt_config["Model"]["da3_prior_use_poses"] = True
-        # USER 2026-09-23: one confidence floor governs the whole reconstruction —
-        # the points below it never reach the pose fits, never reach their held-out
-        # judges, and never reach the written cloud. Same min-max fraction the viewer
-        # slider shows, so what he sees at 10 % is what the pipeline removes.
-        vggt_config["Model"]["pose_fit_conf_min_norm"] = float(
-            (config.get("reconstruction", {}).get("simple", {}) or {}).get(
-                "conf_min_norm", 0.0) or 0.0)
         if session_path is not None:
             try:
                 _sd = _find_stray_dir(Path(session_path))
@@ -1322,6 +1315,27 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _postprocess_reconstruction(pipe, vggt_save_dir, output_dir, vggt_config, backend="mapanything")
 
 
+def _apply_conf_floor(cfg: dict, config: dict) -> dict:
+    """USER 2026-09-23: ONE confidence floor governs the whole reconstruction.
+
+    *"deben desaparecer de la nube eh!, porque no quiero que se hagan ajustes de
+    pose sobre ruido, sobre puntos de baja confianza que es lo que tal vez rompe
+    los ajustes de pose y piso"*. `reconstruction.simple.conf_min_norm` is a
+    min-max fraction of each chunk's own valid confidences — the same arithmetic
+    the viewer slider uses — and the vendor applies it in the two places that
+    matter: the pose-fit correspondence sampler and the PLY writer.
+
+    It lives in the BUILDERS, not at a call site: it first went into one branch
+    of `_run_mapanything` (which the production backend never takes) and three
+    full reconstructions ran with the floor silently at 0. Every path that builds
+    a vendor config passes through here.
+    """
+    cfg.setdefault("Model", {})["pose_fit_conf_min_norm"] = float(
+        ((config.get("reconstruction", {}) or {}).get("simple", {}) or {}).get(
+            "conf_min_norm", 0.0) or 0.0)
+    return cfg
+
+
 def _build_vggtomega_config(config: dict) -> dict:
     """Load stac_vggtomega.yaml and override the same user-configurable params as the
     MapAnything path (chunk size/overlap/loop), keeping the Omega-specific keys."""
@@ -1341,7 +1355,7 @@ def _build_vggtomega_config(config: dict) -> dict:
     cfg["Model"]["delete_temp_files"] = False
     cfg["Model"]["omega_resolution"] = om.get("resolution", cfg["Model"].get("omega_resolution", 512))
     cfg["Model"]["omega_mode"] = om.get("mode", cfg["Model"].get("omega_mode", "balanced"))
-    return cfg
+    return _apply_conf_floor(cfg, config)
 
 
 def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap: int,
@@ -2353,7 +2367,7 @@ def _build_vggt_config(config: dict) -> dict:
     if ma.get("model_weights"):
         cfg["Weights"]["Map"] = ma["model_weights"]
 
-    return cfg
+    return _apply_conf_floor(cfg, config)
 
 
 
