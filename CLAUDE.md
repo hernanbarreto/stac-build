@@ -136,10 +136,12 @@ transform en cada ajuste tambien"**
 `correction/visit_drift.py` (the measurement) + `correction/visit_drift_run.py`
 (the epoch loop). One epoch =
 
-1. **FILTER the cloud for real** — a visit contributing < `min_visit_share` of
-   an object never observed it, it grazed it; an object under `min_points`
-   cannot be measured. Both are DELETED (like `single_witness`), the instance
-   index is reindexed, and an instance left with no points stops existing.
+1. **FILTER the cloud for real** — an object under `min_points` cannot be
+   measured: it is DELETED (like `single_witness`), the instance index is
+   reindexed, and an instance left with no points stops existing. The visit-share
+   half of this step is OFF since 2026-09-22 (`min_visit_share: 0.0`, the user's
+   order — see the ledger below): the code still runs, drops nothing, and logs
+   "after dropping 0 visit(s) at or under 0%".
 2. **MEASURE** every object two separated visits saw, by aligning the
    SILHOUETTES of its two copies in the three orthogonal views of its OWN OBB
    (plan L-W, side L-U, front W-U) by normalised FFT cross-correlation. Each
@@ -243,7 +245,7 @@ Wired the same day (USER: *"arreglemos la escala en origen"* → B first):
 - `visit_drift.scale_rows()` reads every closure as the depth ratio it measures
   (`k_b = 1 + (t·u)/D_b`, `s_ab = 1/k_b`) and `visit_drift_run` publishes them as
   `scale_loop_rows.json`, STAMPED with the epoch measured on — this correction
-  changes the very depths the rows are made of, so `scale_epoch` re-measures
+  changes the very depths the rows are made of, so the depth stage re-measures
   when the stamp is stale instead of compounding a correction already applied.
   NOTHING IS VETOED: the TANGENTIAL part becomes the row's residual, so a
   sideways closure widens its own error bar. pccr's one false identity,
@@ -270,7 +272,9 @@ Wired the same day (USER: *"arreglemos la escala en origen"* → B first):
   of the factors = 1. That is correct here and must not be "fixed": the lock
   already set the session's size from all 38 anchors at once; what stands down is
   each chunk's individual pin. The drift is redistributed, the total size is not.
-- `visit_drift_run.scale_epoch()` applies it: `depth × r_k about each keyframe's
+- `visit_drift_run.solve_depth()` applies it (named `scale_epoch` when this
+  block was written; it no longer publishes an epoch of its own — it composes
+  with the floor and applies once): `depth × r_k about each keyframe's
   OWN camera` + the translation that keeps the walk continuous (the existing
   `scale_transforms` + `warp_subset`, unchanged). The CHUNK is the unit because
   each chunk carries its own gauge; a per-FRAME depth change would break the
@@ -446,14 +450,45 @@ pipeline. It acts at the EARLIEST place the cloud exists, inside the vendor:
 `postprocessing.conf_min_norm` stays **0** on purpose: a second min-max gate
 downstream would re-normalise over the surviving range and cut again.
 
-WIRING IS THE PART THAT FAILED, TWICE — write it in the BUILDERS, never at a
-call site. The key first went inside `_run_mapanything`'s `if cond:` branch
+WIRING IS THE PART THAT FAILED, THREE TIMES — write it in the BUILDERS, never at
+a call site. The key first went inside `_run_mapanything`'s `if cond:` branch
 (never taken), then only at the legacy builder; the production `vggtomega` path
 builds its own config, so **pccr, test2 and observatorio all ran with the floor
 silently at 0** and nobody could see it — the runs succeed, they are just not
 filtered. Both `_build_vggt_config` and `_build_vggtomega_config` now return
-through `_apply_conf_floor`, and `server/tests/test_conf_floor_wiring.py` fails
-on any builder that returns a vendor config which did not pass through it.
+through `_apply_stac_model_keys`, and `server/tests/test_vendor_config_wiring.py`
+fails on any builder that returns a vendor config which did not pass through it.
+
+AN AUDIT OF THAT BUG CLASS (2026-09-23, five lenses over config -> vendor, every
+finding put to two skeptics: 30 swept, 22 refuted, 8 confirmed) found two more of
+exactly the same shape, both now fixed:
+- **`Model.mask_sky`** — the vendor reads it with a default of **True** and
+  NOTHING in this repo ever wrote it, so `skyseg.onnx` ran on every frame of
+  every scene, the indoor ones included. It zeroes the confidence of the pixels
+  it calls sky, which then fall under the percentile and LEAVE THE CLOUD.
+  MEASURED over the cached masks (`output/maplong_run/sky_masks`): pccr 1.7 % of
+  pixels on average and 12 % of its worst frame, observatorio 1.2 %, test2 0.5 %
+  — and on observatorio's worst frame the masked band is the CONCRETE WALKWAY
+  between the rails. Now `reconstruction.simple.mask_sky`, **defaulting to true =
+  what every run so far did**: the defect was that it could not be decided, and
+  turning it off is a geometry decision, not a bug fix.
+- **`Model.intra_chunk`** — written only inside `_apply_chunked_metric`, so the
+  SINGLE-PASS layout never sent it: `intra_chunk` is in pccr's session YAML
+  (chunked) and absent from test2's and observatorio's. It is not a seam stage —
+  every seam stage guards on `len(chunk_indices) < 2` and stands down by itself,
+  while this one guards on `< 1` because it corrects the warp BETWEEN FRAMES OF
+  THE SAME CHUNK. With one chunk holding the whole scene that IS omega's
+  feed-forward drift, so the single-pass layout was dropping the only adjustment
+  it can still run, against a config that says `intra_chunk: true  # (KEEP ON)`.
+  DECLARED CONSEQUENCE: the next single-pass run will not be bit-identical to the
+  observatorio/test2 clouds validated by eye on 2026-09-23 — those ran without it.
+- Also fixed, same audit: the on-load cloud rebuild in `main.py` called itself
+  the "UNIFIED PATH" and omitted `--witness`, so a session rebuilt from the
+  viewer kept every `single_witness` point and lost the per-point status; and the
+  IN-RUN scale ladder solved with the vendor's fallback sigmas (0.003 / 0.08)
+  while the post-hoc solver of the same quantity used the configured pair
+  (0.02 / 0.03) — now declared in `reconstruction.vggtomega`, defaults unchanged
+  so no geometry moved, with the discrepancy written down where it is decided.
 
 ## ⭐ THE BAR IS THE SAMPLE'S OWN NOISE — USER DECISION 2026-09-23
 **"me parece bien" / "aplicalo"**, after pccr showed the two halves of the same
@@ -499,11 +534,17 @@ with a measurement, not to retune it.**
   (`correction.visit_drift`, 2026-09-18, written down in the session's
   `output/reproject/CRITERIOS.md`): `min_points`, `min_walk_m` (two
   visits under a metre of WALK apart are one pass with an occlusion in the
-  middle), and `min_visit_share`, RAISED 0.01 -> **0.25** on 2026-09-19
-  ("podemos subirlo al 25%") after the orthogonal views of pccr's six
-  survivors: at 1 % four entered on a visit worth 6-10 % of the object —
-  `black_office_chair#199`'s was a patch of FLOOR — and the silhouette peak
-  falls with the share (0.86/0.76 above a third; 0.72/0.51/0.34 below).
+  middle), and `min_visit_share`, today **0.0** — NOTHING is dropped for this
+  reason. USER 2026-09-22: *"no limites la cantidad de cierres y anclas nada, si
+  hay duplicados cuanto mas mejor"* + *"si elimina muchos puntos que no elimine
+  porque sino los erosiona demasiado"*. A weak closure is now priced by its own
+  sigma (the tangential residual), not rejected by a share. (History, and why
+  this page said 0.25 until 2026-09-23: it was RAISED 0.01 -> 0.25 on 2026-09-19
+  after the orthogonal views of pccr's six survivors — at 1 % four entered on a
+  visit worth 6-10 % of the object, `black_office_chair#199`'s a patch of FLOOR,
+  and the silhouette peak falls with the share. At 0.25 the 2026-09-22 run
+  deleted 1,765,261 points, 1,722,043 of them `white_tiled_floor`, and left 2 of
+  14 objects with 2+ visits. The two regimes are geometrically opposite.)
   (`min_comparability` and `fallback_best_n` were REMOVED with the old step 3;
   they configure nothing today.)
 - **DERIVED — leave alone, the evidence is in the YAML comment**
@@ -550,7 +591,8 @@ with a measurement, not to retune it.**
 - **INVENTED, BOUNDS NOT DECISIONS** — `drift_prior_rot_deg: 30` /
   `drift_prior_trans_m: 5` (deliberately generous: pccr demands ~3 m and the
   blow-up they stop measured 458°), `visit_drift.max_epochs: 12` and
-  `visit_drift.search_margin_m: 1.20`, `certify.max_iters: 3`, `scale.max_correction_log: 0.2`,
+  `visit_drift.search_margin_m: 1.20`, `certify.max_iters: 12` (was 3; and
+  unreachable today — see `certify.deliverable_only` below), `scale.max_correction_log: 0.2`,
   `visit_loops.sigma_floor_m: 0.01`, `outlier_mad_k: 3.0`,
   `outlier_max_sigma_factor: 10.0`, `outlier_overlap_frac: 0.6`.
 - **REMOVED, do not bring back** — `certify.known_answer.tol_t_m/tol_deg/
@@ -590,6 +632,15 @@ with a measurement, not to retune it.**
   MEASURED and declared (acta `gate_warnings`, kit ⚠, attention list), the
   correction is applied. `veto` exists for evaluation only. No gravity prior,
   no floor datum in the pose graphs (both bent the chain on pccr).
+  **QUALIFIED since 2026-09-22 by `certify.deliverable_only: true`** (USER: *"el
+  entregable es una sola epoch1 ademas del epoch0 ... no hace falta ahora correr
+  el acta etc, que lleva muchisimo tiempo"*): the correction runs and publishes
+  epoch 1, and the §9 measurement around it — `metrics_initial`/`metrics_final`,
+  the iteration loop, the acta metrics and therefore the §9 gate warnings — is
+  SKIPPED (`run.py` sets `n_iters = 0` and the acta reads `max_iters 0 reached`,
+  which is the count of iterations RUN, not a limit). The correction's own gates
+  still measure and declare; the §9 ones do not run at all. The verdict at this
+  stage is the user's eye on epoch 0 vs epoch 1. Set it false for the full acta.
 - Post-hoc scale rows are RELATIVE to the metric lock (anchor agreement now /
   at lock): an untouched session is identity, an injected/accumulated scale
   error is recovered. Raw DA3 medians are never re-solved post-hoc.

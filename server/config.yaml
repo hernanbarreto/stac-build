@@ -323,7 +323,13 @@ segmentation:
                               # harmless here (each half judges its own points) but it is why the
                               # visit count can exceed the number of times the camera really
                               # passed.
-    min_points_per_visit: 50  # below this a visit carries no weight worth reporting
+    # REMOVED 2026-09-23 — `min_points_per_visit: 50` was declared here and read
+    # by NOBODY: one literal occurrence in the whole tree, this line. It announced
+    # the minimum weight of a VISIT, and the visit is the atomic unit of both the
+    # mask filter and the drift correction, so raising it looked like a decision
+    # and did nothing — no change, no error. The only filter by visit weight that
+    # exists is correction.visit_drift.min_visit_share (a SHARE of the object, not
+    # absolute points), today 0.0 by the user's order.
     max_frames_per_visit: 8   # mask keyframes measured per visit, the ones showing MOST of the
                               # object first (a frame with three pixels of mask measures nothing).
                               # COST, not a decision: raising it costs time, never a verdict.
@@ -1229,6 +1235,18 @@ reconstruction:
     # F1 loop bridges / scale graph, the F2 keyframe SE(3) graph, and the
     # stages below. Chunk health flags stay DIAGNOSTIC-ONLY (chunk_health.json;
     # every chunk writes).
+    sigma_seam: 0.003                   # weights of the IN-RUN scale ladder (metric_lock →
+    sigma_anchor: 0.08                  # solve_scale_graph). Nothing wrote them until
+                                        # 2026-09-23, so the lock ran on the vendor's own
+                                        # fallbacks — which are exactly these two values, so
+                                        # declaring them changed no geometry. DECLARED
+                                        # DISCREPANCY, left as it is because changing it moves
+                                        # the cloud and that is the user's call: the POST-HOC
+                                        # solver of the SAME quantity uses certify.scale
+                                        # sigma_seam_log 0.02 / sigma_anchor_log 0.03 — a seam
+                                        # 27x stiffer and an anchor 2.7x softer here. CLAUDE.md's
+                                        # ladder budget ("6 x sigma_seam_log ≈ 12 %") is written
+                                        # against the post-hoc pair, not against these.
     zoom_scale_fix: true                # zoom chunk → correct the scale, keep the chunk
     exact_seam_align: true              # rigid seams from exact pixel correspondences
     frame_ownership: true               # one frame → one writer in overlaps
@@ -1507,6 +1525,20 @@ reconstruction:
     # another model's geometry.
     exclusive_gpu: true                 # stop vLLM before reconstruction (Omega gets the
                                         # whole GPU); the VLM stage auto-restarts it after
+    mask_sky: true                      # skyseg.onnx zeroes the confidence of every pixel
+                                        # it calls sky; those pixels then fall under the
+                                        # percentile and LEAVE THE CLOUD. The vendor reads
+                                        # Model.mask_sky with default True and NOTHING wrote
+                                        # the key until 2026-09-23 — so it ran on every frame
+                                        # of every scene, the indoor ones included, and was
+                                        # not decidable at all. MEASURED over the cached masks
+                                        # (output/maplong_run/sky_masks): pccr 1.7 % of pixels
+                                        # on average, peak 12 % of one frame; observatorio
+                                        # 1.2 %; test2 0.5 %. On observatorio's worst frame the
+                                        # masked band is the CONCRETE WALKWAY between the
+                                        # rails. true = what every run so far did; false =
+                                        # keep that geometry. It is a decision, not a default —
+                                        # this key exists so it can be made.
     conf_min_norm: 0.10                 # USER 2026-09-23: *"filtrar los puntos por encima
                                         # del 10% de confianza ... deben desaparecer de la nube
                                         # eh!, porque no quiero que se hagan ajustes de pose

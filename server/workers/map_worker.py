@@ -1315,8 +1315,16 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _postprocess_reconstruction(pipe, vggt_save_dir, output_dir, vggt_config, backend="mapanything")
 
 
-def _apply_conf_floor(cfg: dict, config: dict) -> dict:
-    """USER 2026-09-23: ONE confidence floor governs the whole reconstruction.
+def _apply_stac_model_keys(cfg: dict, config: dict) -> dict:
+    """Every STAC-level Model key that must reach the vendor WHATEVER the layout.
+
+    It lives in the BUILDERS, not at a call site: the confidence floor first went
+    into one branch of `_run_mapanything` (which the production backend never
+    takes) and three full reconstructions ran with it at 0. Anything written here
+    travels on every path by construction.
+
+    ── confidence floor ──
+    USER 2026-09-23: ONE confidence floor governs the whole reconstruction.
 
     *"deben desaparecer de la nube eh!, porque no quiero que se hagan ajustes de
     pose sobre ruido, sobre puntos de baja confianza que es lo que tal vez rompe
@@ -1325,14 +1333,22 @@ def _apply_conf_floor(cfg: dict, config: dict) -> dict:
     the viewer slider uses — and the vendor applies it in the two places that
     matter: the pose-fit correspondence sampler and the PLY writer.
 
-    It lives in the BUILDERS, not at a call site: it first went into one branch
-    of `_run_mapanything` (which the production backend never takes) and three
-    full reconstructions ran with the floor silently at 0. Every path that builds
-    a vendor config passes through here.
+    ── sky mask ──
+    `skyseg.onnx` zeroes the confidence of every pixel it calls sky, and those
+    pixels then fall under the percentile and LEAVE THE CLOUD. The vendor reads
+    `Model.mask_sky` with a default of True and NOTHING in this repo ever wrote
+    the key — not a builder, not a YAML — so the filter ran on every frame of
+    every scene, indoor ones included. Measured 2026-09-23 over the cached masks:
+    pccr 1.7 % of pixels on average (peak 12 % of one frame), observatorio 1.2 %,
+    test2 0.5 %, and on observatorio's worst frame the masked band is the CONCRETE
+    WALKWAY between the rails, not sky. It is now a declared key with its current
+    behaviour as the default — turning it off is a geometry decision, and the
+    defect was that it could not be decided at all.
     """
-    cfg.setdefault("Model", {})["pose_fit_conf_min_norm"] = float(
-        ((config.get("reconstruction", {}) or {}).get("simple", {}) or {}).get(
-            "conf_min_norm", 0.0) or 0.0)
+    _simple = ((config.get("reconstruction", {}) or {}).get("simple", {}) or {})
+    m = cfg.setdefault("Model", {})
+    m["pose_fit_conf_min_norm"] = float(_simple.get("conf_min_norm", 0.0) or 0.0)
+    m["mask_sky"] = bool(_simple.get("mask_sky", True))
     return cfg
 
 
@@ -1355,7 +1371,7 @@ def _build_vggtomega_config(config: dict) -> dict:
     cfg["Model"]["delete_temp_files"] = False
     cfg["Model"]["omega_resolution"] = om.get("resolution", cfg["Model"].get("omega_resolution", 512))
     cfg["Model"]["omega_mode"] = om.get("mode", cfg["Model"].get("omega_mode", "balanced"))
-    return _apply_conf_floor(cfg, config)
+    return _apply_stac_model_keys(cfg, config)
 
 
 def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap: int,
@@ -1661,6 +1677,17 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             "suspect_spread": float(_va_cfg.get("suspect_spread", 0.30)),
             # zoom → correct the scale (anchor exclusion + seam graph)
             "zoom_scale_fix": bool(_va_cfg.get("zoom_scale_fix", True)),
+            # THE WEIGHTS OF THE IN-RUN SCALE LADDER. Nothing ever wrote these,
+            # so the lock solved with the vendor's own fallbacks (0.003 / 0.08)
+            # while the POST-HOC solver of the same quantity used the configured
+            # pair (certify.scale sigma_seam_log 0.02 / sigma_anchor_log 0.03) —
+            # a seam 27x stiffer and an anchor 2.7x softer, undeclared. The
+            # defaults below ARE the vendor's, so this changes no geometry; what
+            # changes is that the numbers now exist where they can be decided.
+            # CLAUDE.md's ladder budget ("6 x sigma_seam_log ~ 12 %") is written
+            # against the post-hoc pair, so the two do not match by construction.
+            "sigma_seam": float(_va_cfg.get("sigma_seam", 0.003)),
+            "sigma_anchor": float(_va_cfg.get("sigma_anchor", 0.08)),
         }
         cfg_v["Model"]["exact_seam_align"] = bool(
             _va_cfg.get("exact_seam_align", False))
@@ -1849,9 +1876,24 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             # single pass = no chunks: a stale plan from a previous chunked run
             # would lie to the correction module
             (output_dir / "chunk_plan.json").unlink(missing_ok=True)
+            # THE ONE ADJUSTMENT STAGE A SINGLE CHUNK CAN STILL RUN. Every seam
+            # stage guards on `len(chunk_indices) < 2` and disables itself here;
+            # `_stac_intra_chunk` guards on `< 1` — it was WRITTEN to work on one
+            # chunk, because it corrects the warp BETWEEN FRAMES OF THE SAME
+            # chunk, which is exactly what omega's feed-forward drift is when the
+            # chunk holds the whole scene. It was only ever written inside
+            # `_apply_chunked_metric`, so the single-pass layout dropped it in
+            # silence: measured 2026-09-23 — `intra_chunk` appears in pccr's
+            # session YAML (chunked) and NOT in test2's or observatorio's.
+            # config.yaml says `intra_chunk: true  # (KEEP ON)` with its A4
+            # verdict; the flag is what decides, not the layout.
+            vggt_config["Model"]["intra_chunk"] = bool(_va_cfg.get("intra_chunk", False))
             pipe.send_log(f"SIMPLE single-pass: {_n_selected} keyframes ≤ "
                           f"{_chunk_cfg} → ONE chunk, no overlap, no seams. "
-                          f"Nothing measured afterwards re-runs it.")
+                          f"Nothing measured afterwards re-runs it. "
+                          f"Adjustment stage ON: "
+                          f"{'intra_chunk' if vggt_config['Model']['intra_chunk'] else 'NONE'} "
+                          f"(the seam stages need 2+ chunks and stand down by themselves).")
         elif _scale_align_on:
             _ov = _chunk_cfg // 2
             _chunked_already = True
@@ -2367,7 +2409,7 @@ def _build_vggt_config(config: dict) -> dict:
     if ma.get("model_weights"):
         cfg["Weights"]["Map"] = ma["model_weights"]
 
-    return _apply_conf_floor(cfg, config)
+    return _apply_stac_model_keys(cfg, config)
 
 
 

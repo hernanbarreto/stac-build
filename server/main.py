@@ -267,6 +267,25 @@ async def _run_cloudcompy_postprocess_inner(session_id: str, postproc_config: di
         "--noise-sigma", str(postproc_config.get("noise_sigma", 1.0)),
         "--conf-min-norm", str(postproc_config.get("conf_min_norm", 0.0)),
     ]
+    # §6 witnesses before the net — the SAME flag cloudcompy_worker.py passes.
+    # This builder calls itself the UNIFIED PATH and then omitted it: without
+    # `--witness` gpu_cloud_clean computes no per-point status and the
+    # `witness.drop_statuses` deletion never runs, so the single_witness points
+    # the user ordered removed (11.6 % of pccr chunked, 60.1 % of pccr in one
+    # chunk) stay in the cloud — and everything downstream loses the per-point
+    # status. Silent: exit 0, a cloud appears, and the chunks are deleted right
+    # after. Found 2026-09-23.
+    if bool(postproc_config.get("gpu_clean", True)):
+        try:
+            import yaml as _wy
+            _wfull = (_wy.safe_load((Path(__file__).parent / "config.yaml")
+                                    .read_text()) or {})
+            from reconstruction.loops.config import load_loops_config as _wllc
+            if _wllc(_wfull).witness.at_merge:
+                cmd.append("--witness")
+        except Exception as _we:  # noqa: BLE001
+            print(f"[CloudCompy] ⚠ witness flag not resolved ({_we}) — "
+                  f"the per-point status will be missing from this cloud")
     if max_points > 0:
         cmd.extend(["--max-points", str(max_points)])
     if postproc_config.get("skip_duplicates", False):
