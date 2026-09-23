@@ -17,7 +17,13 @@ export interface HeaderMenu {
   disabled?: boolean
 }
 
-export interface HeaderSession { id: string; name: string; loaded: boolean; hasCloud: boolean }
+export interface HeaderSession {
+  id: string; name: string; loaded: boolean; hasCloud: boolean
+  /** live pipeline state of this project, when it has one (USER 2026-09-23:
+   *  "los proyectos que mande deben identificar cual esta en reconstruccion,
+   *  cual en cola"). `queue_position` 0 = holding the card. */
+  pipeline?: { status: string; queue_position: number }
+}
 export interface HeaderScan { key: string; label: string; date: string; kind: 'scan' | 'fused'; isReference: boolean }
 
 interface AppHeaderProps {
@@ -39,8 +45,19 @@ interface AppHeaderProps {
 
 export function AppHeader({ menus, sessions, activeSession, onSelectSession, scans, activeScan, onSelectScan, onOpenPalette, inspectorOpen, onToggleInspector, vlmStatus, userName, userEntries, connected }: AppHeaderProps) {
   const t = useT()
+  const pipelineHint = (s: HeaderSession): string | undefined => {
+    const p = s.pipeline
+    if (!p) return s.loaded ? t('header.loaded') : undefined
+    if (p.status === 'running') return t('header.rebuilding')
+    if (p.status === 'queued') {
+      return p.queue_position > 1
+        ? t('header.queued', { n: p.queue_position - 1 })
+        : t('header.queuedNext')
+    }
+    return s.loaded ? t('header.loaded') : undefined
+  }
   const sessionEntries: MenuEntry[] = sessions.length
-    ? sessions.map(s => ({ id: s.id, label: s.name, checked: s.id === activeSession, disabled: !s.hasCloud, onSelect: () => onSelectSession(s.id), hint: s.loaded ? t('header.loaded') : undefined }))
+    ? sessions.map(s => ({ id: s.id, label: s.name, checked: s.id === activeSession, disabled: !s.hasCloud && !s.pipeline, onSelect: () => onSelectSession(s.id), hint: pipelineHint(s) }))
     : [{ id: 'none', label: connected ? t('header.noSessions') : t('header.notConnected'), disabled: true, onSelect: () => {} }]
   const scanEntries: MenuEntry[] = scans.map(s => ({
     id: s.key,

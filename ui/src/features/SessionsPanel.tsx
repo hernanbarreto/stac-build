@@ -44,7 +44,10 @@ interface SessionsPanelProps {
   activeSession: string | null
   scansOf: (sessionId: string) => ScanRow[]
   activeScanKey: string | null
-  rebuildingSession: string | null
+  /** every live pipeline, keyed by session id (USER 2026-09-23: "los proyectos
+   *  que mande deben identificar cual esta en reconstruccion, cual en cola").
+   *  `queue_position` 0 = holding the card, 1 = next, N = N-1 ahead. */
+  pipelineJobs: Record<string, { status: string; queue_position: number; scan_key?: string }>
   extracting: Record<string, number>
   canManage: boolean
   onConnect: () => void
@@ -88,7 +91,9 @@ export function SessionsPanel(p: SessionsPanelProps) {
     .filter(s => !filter || s.name.toLowerCase().includes(filter.toLowerCase()))
     .map(s => {
       const loaded = p.activeSession === s.id
-      const rebuilding = p.rebuildingSession === s.id
+      const job = p.pipelineJobs[s.id]
+      const rebuilding = job?.status === 'running'
+      const queued = job?.status === 'queued'
       const extractingPct = p.extracting[s.id]
       const kids = p.scansOf(s.id)
       return {
@@ -110,7 +115,24 @@ export function SessionsPanel(p: SessionsPanelProps) {
             {s.hasBim && <><Building2 aria-hidden />{s.bimCount > 1 ? <span>{s.bimCount}</span> : null}</>}
           </Row>
         ),
-        badge: rebuilding ? <Badge tone="brand" size="sm" dot>{t('sessions.rebuilding')}</Badge> : loaded ? <Badge tone="ok" size="sm">{t('sessions.loaded')}</Badge> : undefined,
+        // ONE badge, most specific state first: what the card is doing beats
+        // what is on screen, which beats what exists on disk.
+        badge: rebuilding
+          // just the dot on the PROJECT row — the scan underneath carries the
+          // words (USER 2026-09-23: "ponele un punto a la sesion sin escribirle
+          // rebuilding ... con el punto alcanza")
+          ? <Badge tone="brand" size="sm" dot title={t('sessions.rebuilding')} />
+          : queued
+            ? <Badge tone="warn" size="sm" dot title={(job?.queue_position ?? 0) > 1
+                ? t('sessions.queued', { n: (job!.queue_position - 1) })
+                : t('sessions.queuedNext')} />
+            : loaded
+              ? <Badge tone="ok" size="sm">{t('sessions.loaded')}</Badge>
+              : s.hasCloud
+                ? <Badge tone="neutral" size="sm">{t('sessions.built')}</Badge>
+                // nothing for a project with no reconstruction: a badge on
+                // every row is noise (USER 2026-09-23, "carga demasiado la ui")
+                : undefined,
         muted: !s.hasCloud && s.frameCount === 0,
         twoLine: true,
         defaultExpanded: loaded,
@@ -139,7 +161,18 @@ export function SessionsPanel(p: SessionsPanelProps) {
           label: sc.kind === 'fused' ? sc.label : `${sc.date} ${sc.label}`,
           title: sc.kind === 'fused' ? t('scans.fusedHint') : t('scans.openHint'),
           meta: sc.points ? fmt.millions(sc.points) : sc.recon_state ? t(`reconState.${sc.recon_state}`) : undefined,
-          badge: sc.is_reference ? <Star className="stac-sessions__star" aria-hidden /> : undefined,
+          // WHICH scan the card is on, when the project has more than one
+          // (USER 2026-09-23: "cuando es multisesion, debes indicar en la
+          // sesion cual es el que se esta reconstruyendo"). The star keeps its
+          // place when the scan is neither running nor queued.
+          badge: (job && job.scan_key === sc.key)
+            // the dot alone here too — the tooltip says which state it is
+            ? (rebuilding
+                ? <Badge tone="brand" size="sm" dot title={t('sessions.rebuilding')} />
+                : <Badge tone="warn" size="sm" dot title={(job.queue_position ?? 0) > 1
+                    ? t('sessions.queued', { n: job.queue_position - 1 })
+                    : t('sessions.queuedNext')} />)
+            : sc.is_reference ? <Star className="stac-sessions__star" aria-hidden /> : undefined,
           actions: sc.kind !== 'fused' && !sc.is_reference ? (
             <IconButton size="sm" label={t('scans.setReference')} icon={<Star aria-hidden />} onClick={() => p.onSetReference(s.id, sc)} />
           ) : undefined,

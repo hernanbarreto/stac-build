@@ -153,7 +153,10 @@
     "chooseSession": "Elegir {@session}",
     "scanMenu": "{@Scan}",
     "chooseScan": "Elegir {@scan}",
-    "userMenu": "Menú de usuario"
+    "userMenu": "Menú de usuario",
+    "rebuilding": "reconstruyendo",
+    "queued": "en cola ({n} adelante)",
+    "queuedNext": "siguiente"
   },
   "menu": {
     "file": "Archivo",
@@ -298,7 +301,11 @@
     "deleted": "{@Session} {id} eliminada",
     "createFailed": "No se pudo crear la {@session}.",
     "created": "{@Session} {name} creada",
-    "noCloudData": "La {@session} no tiene nube de puntos. Ejecutá la reconstrucción para generarla."
+    "noCloudData": "La {@session} no tiene nube de puntos. Ejecutá la reconstrucción para generarla.",
+    "queued": "en cola ({n} adelante)",
+    "queuedNext": "siguiente en la cola",
+    "built": "reconstruido",
+    "notBuilt": "sin reconstrucción"
   },
   "scans": {
     "title": "{@Scans}",

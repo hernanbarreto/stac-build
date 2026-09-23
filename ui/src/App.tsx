@@ -483,6 +483,41 @@ function App() {
   // cloud forever although the server had said `pipelines: {}` all along.
   // The same reasoning applies to the epoch and the octree below: state is
   // asked for, not caught.
+  // EVERY active pipeline, not just the one this tab launched (USER 2026-09-23:
+  // "los proyectos que mande deben identificar cual esta en reconstruccion,
+  // cual en cola"). The manager runs one at a time and queues the rest, so a
+  // project list has to say which is which. Polled, because the progress
+  // broadcast only carries the job that moved.
+  const [pipelineJobs, setPipelineJobs] = useState<Record<string, { status: string; queue_position: number; scan_key?: string }>>({})
+  useEffect(() => {
+    let stop = false
+    const poll = async () => {
+      try {
+        const r = await fetch('/api/pipelines/active')
+        if (r.ok && !stop) {
+          const live = ((await r.json())?.pipelines ?? {}) as Record<string, any>
+          // which SCAN the job is on: the manager resolves it into session_dir
+          // (".../scans/<date>/src_<source>"), and the tree keys its scans
+          // "<date>/<source>" — so the row that is actually being rebuilt can
+          // be marked (USER 2026-09-23, multi-scan projects).
+          const scanKeyOf = (dir?: string): string | undefined => {
+            const m = /\/scans\/([^/]+)\/src_([^/]+)/.exec(String(dir ?? ''))
+            return m ? `${m[1]}/${m[2]}` : undefined
+          }
+          setPipelineJobs(Object.fromEntries(Object.entries(live).map(
+            ([sid, j]) => [sid, {
+              status: String(j.status),
+              queue_position: Number(j.queue_position ?? 0),
+              scan_key: scanKeyOf(j.session_dir),
+            }])))
+        }
+      } catch { /* offline: keep the last picture rather than blank the list */ }
+      if (!stop) window.setTimeout(poll, 4000)
+    }
+    void poll()
+    return () => { stop = true }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     const reconcile = async () => {
@@ -2040,7 +2075,7 @@ function App() {
 
       <div className="stac-app__header">
         <AppHeader menus={menus} connected={connected}
-          sessions={sessions.map(s => ({ id: s.id, name: s.name, loaded: s.id === activeSession, hasCloud: s.hasCloud }))}
+          sessions={sessions.map(s => ({ id: s.id, name: s.name, loaded: s.id === activeSession, hasCloud: s.hasCloud, pipeline: pipelineJobs[s.id] }))}
           activeSession={activeSession} onSelectSession={handleSessionLoad}
           scans={projectScans.map((s: any) => ({ key: s.key, label: s.label, date: s.date, kind: s.kind || 'scan', isReference: !!s.is_reference }))}
           activeScan={activeScanTab} onSelectScan={key => { const sc = projectScans.find((s: any) => s.key === key); if (sc && activeSession) activateScan(activeSession, { key: sc.key, label: sc.label, date: sc.date, kind: sc.kind || 'scan' }) }}
@@ -2058,7 +2093,7 @@ function App() {
             {layout.state.leftTab === 'sessions' && (
               <SessionsPanel connected={connected} sessions={sessions} selectedSession={selectedSession} activeSession={activeSession}
                 scansOf={sid => (sid === activeSession && projectScans.length ? projectScans : (allProjectScans[sid] || []))}
-                activeScanKey={activeScanTab} rebuildingSession={pipelineRunning?.status === 'running' ? pipelineRunning.session_id ?? null : null}
+                activeScanKey={activeScanTab} pipelineJobs={pipelineJobs}
                 extracting={extractingSessions} canManage={canManage}
                 onConnect={connectToServer} onSelect={handleSessionSelect} onLoad={handleSessionLoad}
                 onFlythrough={id => { if (activeSession !== id) handleSessionLoad(id); setFlythroughOpen(id) }}
