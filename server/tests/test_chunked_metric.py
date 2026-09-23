@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
                                                 "vendor", "VGGT-Long")))
 
 from reconstruction.chunk_plan import (  # noqa: E402
-    walk_length_m, chunk_ranges, plan_anchor_indices,
+    walk_length_m, plan_chunks, chunk_ranges, plan_anchor_indices,
 )
 from loop_utils.metric_lock import anchor_ratio, chunk_scale, apply_scale  # noqa: E402
 
@@ -986,3 +986,71 @@ def test_the_worker_extracts_both_anchor_sets_in_one_round():
     j = src.index("_run_da3_anchor(pipe, frames_dir, output_dir, sorted(set(_missing))")
     assert i < j, ("the per-chunk anchors must join _anchor_files BEFORE the DA3 "
                    "extraction, or the second launch comes back")
+
+
+# ── THE WALK DECIDES, AND THE SINGLE PASS IS ITS PROBE (USER 2026-09-23) ──
+# *"da3 sobre todos los kf, chunk unico, medida de recorrido, menos de 15m un
+# chunk, mas de 15m, 60/30"*.
+
+
+def test_the_walk_limit_and_the_rerun_size_are_configured():
+    import yaml
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
+    s = cfg["reconstruction"]["simple"]
+    assert float(s["max_walk_single_pass_m"]) == 15.0
+    assert float(s["chunk_walk_m"]) == 12.0, "the re-run is sized in WALKED METRES"
+    assert int(s["chunk_frames_over_walk"]) == 0, "0 = metres decide; >0 pins a size"
+    assert int(s["scale_anchor_frames"]) == 0, "DA3 anchors every keyframe"
+    assert int(s["chunk_frames"]) == 0, "the single pass takes what the card allows"
+
+
+def test_a_chunk_is_a_distance_not_a_frame_count():
+    """USER 2026-09-23: *"implementemos el chunk walk 12, por algo estaban no?"*.
+    60 frames is 5.2 m on pccr and 3.1 m on test2 — the same number, a different
+    chunk. Sizing by metres makes every scene get the same BASELINE."""
+    # pccr, on the walk phase 1 reads (43.7 m): the layout already proven there
+    assert plan_chunks(216, 43.7, 12.0) == (59, 29)
+    # a genuinely long walk: chunks stay ~12 m whatever the keyframe density
+    size, ov = plan_chunks(600, 80.0, 12.0)
+    assert ov == size // 2
+    assert abs(size * (80.0 / 600) - 12.0) < 1.5, size
+    # clamped: never below the overlap-alignment floor, never back into the
+    # long-horizon drift regime
+    assert plan_chunks(1000, 10.0, 12.0)[0] == 150
+    assert plan_chunks(100, 200.0, 12.0)[0] == 24
+
+
+def test_the_order_is_da3_then_one_pass_then_the_walk_then_maybe_chunks():
+    """The single pass IS the probe: its metric poses are what the walk is
+    measured on, so the re-run can only be decided after it."""
+    src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
+    i_da3 = src.index("DA3 metric anchor on ALL")
+    i_cap = src.index("_cap = max(24, int((_free - 4.0) / 0.086))")
+    i_walk = src.index("[chunk-plan] measured walk:")
+    i_rerun = src.index("re-run CHUNKED at")
+    assert i_da3 < i_cap < i_walk < i_rerun, (i_da3, i_cap, i_walk, i_rerun)
+    assert src.count("if not _omega_pass(") == 2, \
+        "one pass always, a second ONLY when the walk asks for it"
+
+
+def test_a_short_walk_never_re_runs():
+    """observatorio 11.2 m and test2 12.9 m stay in the single chunk the user
+    judged better, and a scene whose whole walk fits in one chunk-of-metres
+    keeps it too — a re-run into a single chunk is the same pass twice."""
+    src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
+    assert "_walk_m > _max_walk and _scale_align_on" in src, \
+        "the limit and the metric lock both guard the re-run"
+    assert "_max_walk > 0" in src, "0 disables the re-run entirely"
+    assert "_phase2, _ov2 = 0, 0" in src, \
+        "nothing re-runs unless the walk asks for it"
+    i = src.index("if _phase2 >= _n_selected:")
+    j = src.index("keeping the \n", i) if "keeping the \n" in src[i:i + 400] else i
+    assert j >= i, "one chunk already covering the walk keeps the single pass"
+
+
+def test_the_rerun_layout_is_the_vendor_default():
+    assert chunk_ranges(216, 60, 30)[0] == (0, 60)
+    assert len(chunk_ranges(216, 60, 30)) == 7, "pccr: the layout that worked"
+    idx = plan_anchor_indices(216, 60, 30, per_chunk=3)
+    for a, b in chunk_ranges(216, 60, 30):
+        assert any(a <= i < b for i in idx), (a, b)

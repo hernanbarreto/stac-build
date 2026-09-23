@@ -1422,7 +1422,39 @@ reconstruction:
                                         # are not. Lower = denser keyframes.
     target_fps: 1.0                     # "fps" mode only: time sampling rate. 1 fps = the web
                                         # demo's regime (its slider caps at 2; examples use 1).
-    # max_walk_single_pass_m: REMOVED 2026-09-22 (USER: *"no debe haber max walk,
+    max_walk_single_pass_m: 15.0        # THE WALK DECIDES (USER 2026-09-23: "menos de 15m
+                                        # un chunk, mas de 15m, 60/30"). The single pass is
+                                        # its own probe: measured on its metric poses after
+                                        # scale_align, a pass whose frames still agree reads
+                                        # the real length, one that DRIFTED reads long —
+                                        # and both answers mean the same thing, chunk it.
+                                        # Measured on pccr the day this came back: one chunk
+                                        # read 43.7 m and dropped 60.1 % of the cloud as
+                                        # single_witness; the same scene at 60/30 read 18.8 m
+                                        # (real ~19) and dropped 11.6 %.
+                                        # 0 disables the re-run entirely (one pass, always).
+                                        # 25->15 (2026-07-09): test6 (29 m) was still bad
+                                        # single-pass; the comfort proven so far is test2 ~10 m.
+    chunk_walk_m: 12.0                  # WALKED METRES per chunk when the re-run fires, 50 %
+                                        # overlap (USER 2026-09-23: "implementemos el chunk
+                                        # walk 12, por algo estaban no?"). A size in FRAMES
+                                        # covers a different DISTANCE in every scene, because
+                                        # keyframes are parallax-uniform, not distance-uniform:
+                                        #   pccr          0.087 m/kf -> 60 kf = 5.2 m
+                                        #   test2         0.051 m/kf -> 60 kf = 3.1 m
+                                        #   observatorio  0.053 m/kf -> 60 kf = 3.2 m
+                                        # A 3 m chunk gives Omega nearly the same viewpoint
+                                        # sixty times and puts seven seams inside twelve
+                                        # metres; pccr at 5.2 m was accepted, those two at 3 m
+                                        # came out broken. Clamped to [24, 150] keyframes.
+                                        # On pccr this lands at 59/29 — the layout already
+                                        # proven there — because the walk it divides is phase
+                                        # 1's, inflated by the very drift that triggered the
+                                        # re-run, which shortens the chunk in the direction
+                                        # that helps.
+    chunk_frames_over_walk: 0           # >0 pins the re-run to a FIXED size in frames and
+                                        # ignores chunk_walk_m (A/B work). 0 = metres decide.
+    # (history) max_walk_single_pass_m was REMOVED 2026-09-22 (USER: *"no debe haber max walk,
     #   eso ya no aplica"*). It was the comfort limit that re-ran the whole
     #   reconstruction when the measured walk exceeded it — a second DA3 round and a
     #   second Omega pass, decided by a number that read 44.1 m on pccr's ~19 m walk.

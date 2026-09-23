@@ -286,8 +286,46 @@ Wired the same day (USER: *"arreglemos la escala en origen"* → B first):
   WALK (the axis its 2026-08-11 A/B never tested — it tested DEPTH, `s·z+b` and
   `a0·z+a1·z²`, and correctly found no structure there).
 
-## ⭐ RECONSTRUCTION = ONE PASS, AS MANY KEYFRAMES PER CHUNK AS THE CARD
-## ALLOWS — USER DECISION 2026-09-23 (supersedes the fixed 60/30 below)
+## ⭐ THE WALK DECIDES, THE SINGLE PASS IS ITS PROBE — USER DECISION
+## 2026-09-23 (final shape of the two blocks below)
+**"da3 sobre todos los kf, chunk unico, medida de recorrido, menos de 15m un
+chunk, mas de 15m, 60/30"**.
+
+    1. DA3 metric depth on EVERY keyframe          (scale_anchor_frames: 0)
+    2. ONE Omega pass at the card's capacity       (chunk_frames: 0)
+    3. scale_align + orient, then measure the walk on its own metric poses
+    4. walk <= max_walk_single_pass_m (15 m)  -> that pass IS the result
+       walk >  max_walk_single_pass_m        -> re-run CHUNKED at
+                                                chunk_frames_over_walk (60/30)
+
+THE OVER-MEASUREMENT IS THE SIGNAL, NOT A BUG. This was removed on 2026-09-22
+because a single pass reading 44 m over a ~19 m walk looked like a broken
+instrument. It is not: a pass whose frames still agree measures the real length;
+one that DRIFTED measures long, because the drift stretches the trajectory it
+sums. Both answers mean the same thing — chunk it.
+
+MEASURED THE DAY IT CAME BACK, same scene, same code, two layouts:
+
+    pccr, ONE chunk    walk 43.7 m   single_witness dropped 60.1 % (26.9 M pts)
+    pccr, 60/30        walk 18.8 m   single_witness dropped 11.6 % ( 5.4 M pts)
+
+The witness filter is not failing there — it is reporting that the frames no
+longer agree about where surfaces are, which is what feed-forward drift over a
+216-frame horizon looks like.
+
+WHY THE LIMIT IS NOT ARBITRARY: almost every adjustment stage lives on the
+SEAMS — `exact_seam_align`, `elastic_seam`, `frame_ownership`, `blend_copies`,
+`ownership_backfill`, and `scale_drift`, whose judge IS the per-frame seam
+ratios. A single chunk runs NONE of them: what it delivers is raw Omega plus one
+global scale. Below the limit that is better (the user's visual verdict on
+observatorio 11.2 m and test2 12.9 m: "siempre fue mejor ... aun con un solo
+chunk"); above it, the drift those stages exist to fight is what dominates.
+
+The re-run size is the VENDOR default 60/30 — NOT derived from the measured
+walk, which is a drift detector here and not a length.
+
+## ⭐ (folded into the block above) RECONSTRUCTION = ONE PASS, AS MANY
+## KEYFRAMES PER CHUNK AS THE CARD ALLOWS — USER DECISION 2026-09-23
 **"vamos a armar los chunk de la mayor cantidad de frames posibles, si hay mas
 de uno, con el solape del 50% ... eso lo va a determinar el GPU, lo que el GPU
 permita"**, on his visual verdict over many runs: **"yo se como queda

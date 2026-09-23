@@ -34,6 +34,42 @@ def walk_length_m(poses_txt: Path) -> float:
     return float(np.linalg.norm(np.diff(centers, axis=0), axis=1).sum())
 
 
+def plan_chunks(n_keyframes: int, walk_m: float, chunk_walk_m: float,
+                min_size: int = 24, max_size: int = 150) -> Tuple[int, int]:
+    """(chunk_size, overlap) in KEYFRAMES so each chunk covers ~`chunk_walk_m`
+    of WALK. 50 % overlap.
+
+    USER 2026-09-23: *"implementemos el chunk walk 12, por algo estaban no?"* —
+    and the reason is measured. A chunk size in FRAMES covers a different
+    DISTANCE in every scene, because keyframes are parallax-uniform, not
+    distance-uniform:
+
+        pccr          216 kf / 18.8 m -> 0.087 m/kf -> 60 kf = 5.2 m per chunk
+        test2         255 kf / 12.9 m -> 0.051 m/kf -> 60 kf = 3.1 m per chunk
+        observatorio  213 kf / 11.2 m -> 0.053 m/kf -> 60 kf = 3.2 m per chunk
+
+    A 3-metre chunk gives Omega almost no baseline across its 60 frames — nearly
+    the same viewpoint sixty times — and puts seven seams inside twelve metres.
+    pccr at 5.2 m per chunk was accepted; those two at 3 m came out broken.
+
+    The walk this is sized from is PHASE 1's, which reads long when that pass
+    drifted (pccr: 43.7 m over a ~19 m walk). That inflation is not a problem
+    here: m/kf is inflated by the same factor, so the chunk lands at
+    `chunk_walk_m / inflation` of REAL walk — on pccr, 59 kf, which is the 60/30
+    layout that works. It is self-correcting in the direction that matters:
+    a pass that drifted more gets shorter chunks.
+
+    Clamped: below `min_size` the overlap alignment starves; above `max_size`
+    the chunk re-enters the drift regime the chunking exists to avoid.
+    """
+    if n_keyframes < 2 or walk_m <= 0 or chunk_walk_m <= 0:
+        raise ValueError("need n_keyframes>=2, walk_m>0, chunk_walk_m>0")
+    m_per_kf = walk_m / n_keyframes
+    size = int(round(chunk_walk_m / max(m_per_kf, 1e-6)))
+    size = max(min_size, min(max_size, size, n_keyframes))
+    return size, size // 2
+
+
 def chunk_ranges(n_keyframes: int, chunk_size: int, overlap: int) -> List[Tuple[int, int]]:
     """[(start, end)) keyframe-index ranges, EXACTLY as VGGT-Long slices them
     (step = chunk_size - overlap; last chunk clipped to the end)."""

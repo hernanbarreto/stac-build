@@ -1572,7 +1572,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # reconstruction AND sized its chunks from the error. The walk is still
     # measured and reported — it is evidence, not a verdict.
     from reconstruction.chunk_plan import (walk_length_m, plan_anchor_indices,
-                                           chunk_ranges)
+                                           plan_chunks, chunk_ranges)
     vggt_config = _build_vggtomega_config(config)
     _va_cfg = recon_cfg.get("vggtomega", {}) or {}
     _anch_per_chunk = int(_simple_cfg.get("chunk_anchors", 3))
@@ -1957,12 +1957,85 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             pipe.send_log(f"[chunk-plan] could not stamp the measured walk ({_e})",
                           level="warning")
 
-    # NO PHASE 2. The walk is measured and reported by _metricize_and_orient; it
-    # does not re-run anything (USER ORDER 2026-09-22). What it replaced: a
-    # second DA3 round + a second full Omega pass, triggered and sized by a walk
-    # that over-measured pccr 44.1 m against a ~19 m real walk — the same number
-    # that then set 59 kf/chunk. Deleted with it: the 45-kf re-densification
-    # (its target, chunk_walk_m, no longer exists) and plan_chunks.
+    # ── THE WALK DECIDES, AND THE SINGLE PASS IS ITS PROBE (USER 2026-09-23) ──
+    # *"da3 sobre todos los kf, chunk unico, medida de recorrido, menos de 15m
+    # un chunk, mas de 15m, 60/30"*.
+    #
+    # THE OVER-MEASUREMENT IS THE SIGNAL, NOT A BUG. I removed this on
+    # 2026-09-22 having read it backwards: a single pass that measured 44 m over
+    # a ~19 m walk looked like a broken instrument. It is not — a pass whose
+    # frames still agree measures the real length; one that DRIFTED measures
+    # long, because the drift stretches the trajectory it is summing. Either way
+    # the answer is the same: chunk it. Proven on the very run that led here —
+    # pccr in one chunk measured 43.7 m and dropped 60.1 % of the cloud as
+    # single_witness (frames disagreeing about where surfaces are), against
+    # 18.8 m and 11.6 % on the same scene in 60/30.
+    #
+    # WHY IT IS NOT ARBITRARY: below the limit raw Omega beats Omega + the seam
+    # machinery, above it the machinery wins. Almost every adjustment stage
+    # lives on the SEAMS (exact_seam_align, elastic_seam, frame_ownership,
+    # blend_copies, ownership_backfill, and scale_drift, whose judge IS the seam
+    # ratios), so a single chunk runs none of them: what is delivered is raw
+    # Omega plus one global scale. On short walks that is better — the user's
+    # verdict on observatorio (11.2 m) and test2 (12.9 m). On long ones the
+    # drift the machinery exists to fight is what dominates.
+    _walk_probe = float(_walk_m)
+    _max_walk = float(_simple_cfg.get("max_walk_single_pass_m", 0) or 0)
+    # The re-run is sized in WALKED METRES, not in frames: 60 frames is 5.2 m on
+    # one scene and 3.1 m on another, and a 3 m chunk gives Omega no baseline
+    # (USER 2026-09-23: "implementemos el chunk walk 12, por algo estaban no?").
+    # A positive `chunk_frames_over_walk` overrides it with a fixed size.
+    _fixed2 = int(_simple_cfg.get("chunk_frames_over_walk", 0) or 0)
+    _chunk_walk = float(_simple_cfg.get("chunk_walk_m", 12.0) or 12.0)
+    _phase2, _ov2 = 0, 0          # 0 = the single pass stands, nothing re-runs
+    if (_simple_on and not _chunked_already and _max_walk > 0
+            and _walk_m > _max_walk and _scale_align_on):
+        if _fixed2:
+            _phase2, _ov2 = _fixed2, _fixed2 // 2
+        else:
+            _phase2, _ov2 = plan_chunks(_n_selected, _walk_m, _chunk_walk)
+        if _phase2 >= _n_selected:
+            pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > {_max_walk:g} m but "
+                          f"{_chunk_walk:g} m per chunk needs {_phase2} keyframes of "
+                          f"{_n_selected} — one chunk already covers it, keeping the "
+                          f"single pass")
+            _phase2 = 0
+    if _phase2:
+        pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > {_max_walk:g} m → the single "
+                      f"pass either covers a long walk or drifted; either way it is "
+                      f"re-run CHUNKED at {_phase2}/{_ov2} "
+                      f"({len(chunk_ranges(_n_selected, _phase2, _ov2))} chunks, "
+                      f"{_chunk_walk:g} m of walk each)")
+        pipe.send_progress(40, f"Walk {_walk_m:.1f} m — re-running chunked "
+                               f"({_phase2}/{_ov2})...", stage="reconstruction")
+        _anchor_idx = plan_anchor_indices(_n_selected, _phase2, _ov2, _anch_per_chunk)
+        _ensure_anchors([_sel_files[i] for i in _anchor_idx])   # already on disk: a no-op
+        # wipe what phase 1 produced — NOT da3_run, the anchors live there and
+        # every keyframe already has one (scale_anchor_frames: 0)
+        for _pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
+            for _f in output_dir.glob(_pat):
+                _f.unlink(missing_ok=True)
+        for _name in ("maplong_run", "omega_run", "frame_list.json", "intrinsic.txt",
+                      "camera_poses.txt", "camera_poses.txt.prescale",
+                      "camera_poses.txt.preorient", "camera_frames.txt",
+                      "camera_poses_mapanything.json",
+                      ".metric_scale_applied", ".orientation_applied"):
+            _t = output_dir / _name
+            if _t.is_dir():
+                shutil.rmtree(_t, ignore_errors=True)
+            elif _t.exists():
+                _t.unlink()
+        vggt_config = _build_vggtomega_config(config)
+        _apply_chunked_metric(vggt_config, _phase2, _ov2)
+        _persist_chunk_plan(_phase2, _ov2, _n_selected, "chunked-metric", _walk=_walk_m)
+        _apply_conf_filter(vggt_config)
+        _chunked_already = True
+        if not _omega_pass(vggt_config, "chunked-metric"):
+            return
+        _walk_m = _metricize_and_orient(vggt_config, "chunked-metric")
+        pipe.send_log(f"[chunk-plan] chunked re-run measured walk: {_walk_m:.1f} m "
+                      f"(the single pass read {_walk_probe:.1f} m — the gap between "
+                      f"the two IS the drift the chunking removed)")
 
     # Success → free da3_run when the TSDF won't use it (depth_source not DA3-based).
     _ds = str((config.get("tsdf", {}) or {}).get("depth_source", "auto")).lower()
