@@ -434,6 +434,15 @@ function App() {
   const [showAxes, setShowAxes] = useState(false)
   const [showGrid, setShowGrid] = useState(true)
   const [pointCount, setPointCount] = useState(0)
+  // STICKY: the viewer HAS an octree for this session. `pointCount` is the
+  // VISIBLE count, reported every frame — it dips to 0 whenever Potree swaps
+  // loaders (a new cloud pushed mid-pipeline: CloudCompy's, then the octree)
+  // and the covering overlay used to slam back over a cloud the user was
+  // already looking at. USER 2026-09-23: *"si hay octree enviado al ui, no me
+  // lo pise con el panel azul de reconstruccion ni ningun otro panel azul"*.
+  // Cleared only where the scene really goes away (disconnect / session switch
+  // / clear / logout), never by a frame that happened to render nothing.
+  const [cloudEverShown, setCloudEverShown] = useState(false)
   const [sessionLoading, setSessionLoading] = useState<string | null>(null)
   const [fps, setFps] = useState(0)
   const [consoleLogs, setConsoleLogs] = useState<{ ts: string; level: string; msg: string }[]>([])
@@ -642,6 +651,7 @@ function App() {
       setSegments([])
       setBimModels([])
       setPointCount(0)
+      setCloudEverShown(false)
       setPipelineRunning(null)
       setSessionLoading(null)
       setStatusMessage(tt('status.serverDisconnected'))
@@ -1124,6 +1134,7 @@ function App() {
     setSegments([])
     setBimModels([])
     setPointCount(0)
+    setCloudEverShown(false)
     setStatusMessage('')
     setSessionLoading(sessionId)
     setActiveSession(sessionId)
@@ -1471,6 +1482,7 @@ function App() {
     setSegments([])
     setBimModels([])
     setPointCount(0)
+    setCloudEverShown(false)
     setStatusMessage('')
   }, [])
 
@@ -1698,6 +1710,7 @@ function App() {
     setSegments([])
     setBimModels([])
     setPointCount(0)
+    setCloudEverShown(false)
     setActiveTool('navigate')
     setStatusMessage('')
     if (andLogout) logout()
@@ -2044,7 +2057,9 @@ function App() {
 
   const activeScanRow = projectScans.find((s: any) => s.key === activeScanTab)
   const pipelineActiveHere = !!(pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession)
-  const loadingOverlay = sessionLoading && !pipelineActiveHere
+  // A cloud on screen is never covered: progress rides as a banner instead.
+  const viewerHasCloud = pointCount > 0 || cloudEverShown
+  const loadingOverlay = sessionLoading && !pipelineActiveHere && !viewerHasCloud
   const pipelineStages: ProgressStage[] = (pipelineRunning?.stages || []).filter(s => s.enabled).map(s => ({ id: s.id, label: s.label, status: s.status, pct: s.pct, detail: s.message }))
   const currentStage = pipelineRunning?.stages[pipelineRunning.current_stage_idx]
   const epoch: number | null = certifyState?.epoch ?? correctionState?.epoch ?? null
@@ -2211,7 +2226,7 @@ function App() {
             showAxes={showAxes}
             showGrid={showGrid}
             pipelineRunning={!!pipelineRunning && pipelineRunning.status === 'running'}
-            onPointCount={n => { setPointCount(n); if (n > 0) lastCloudLoadAtRef.current = Date.now() }}
+            onPointCount={n => { setPointCount(n); if (n > 0) { lastCloudLoadAtRef.current = Date.now(); setCloudEverShown(true) } }}
             onFps={setFps}
             onStatusMessage={setStatusMessage}
             onSegments={list => { setSegments(list); refreshUnsegmentedCount(activeSession) }}
@@ -2295,7 +2310,7 @@ function App() {
               statusFractions={certifyState?.report_metrics?.witnesses?.status_fraction ?? null}
               deviationRange={sabanaVisible && sabanaMetrics ? { maxMm: (sabanaMetrics.tolerance_mm || 15) * 3, toleranceMm: sabanaMetrics.tolerance_mm || 15 } : null}
               showEdges={showCertifyKit} readouts={readouts}
-              banner={pipelineActiveHere && pointCount > 0 && currentStage ? (
+              banner={pipelineActiveHere && viewerHasCloud && currentStage ? (
                 <Banner glass compact tone="brand" title={t('pipeline.runningBanner', { stage: currentStage.label })} action={<Button size="sm" variant="ghost" onClick={handlePipelineCancel}>{t('common.cancel')}</Button>}>
                   {currentStage.message} {fmt.percent(currentStage.pct / 100)}
                 </Banner>
@@ -2305,7 +2320,7 @@ function App() {
           {flythroughOpen && <SyncPlayer sessionId={flythroughOpen} viewportRef={viewportRef} onClose={() => setFlythroughOpen(null)} />}
 
           {loadingOverlay && <SplashOverlay title={t('splash.loadingSession')} status={sessionLoading || undefined} />}
-          {pipelineActiveHere && pointCount === 0 && (
+          {pipelineActiveHere && !viewerHasCloud && (
             <SplashOverlay title={t('splash.building')} status={currentStage ? `${currentStage.label}: ${currentStage.message}` : t('splash.initializing')} stages={pipelineStages} />
           )}
           {!hasSession && !sessionLoading && <WelcomeScreen connected={connected} sessionCount={sessions.length} onConnect={connectToServer} />}

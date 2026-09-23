@@ -423,6 +423,35 @@ seam, so its 1-sigma budget is `n_seams x sigma_seam_log` (pccr: 6 x 0.02 ~
 derived 59/29 gave, so this decision does not move that ceiling either way —
 the fix for it is a scale mode CONTINUOUS along the walk.
 
+## ⭐ THE BAR IS THE SAMPLE'S OWN NOISE — USER DECISION 2026-09-23
+**"me parece bien" / "aplicalo"**, after pccr showed the two halves of the same
+evidence — out-of-sample held-out pairs — judged by two invented round numbers
+pointing opposite ways:
+
+    intra-chunk   improves = med_after <= 0.8 * med_before   (0.8 lived in the
+                  vendor SIGNATURE, not even a config key) -> REJECTED chunk 2's
+                  measured 12 % improvement, took chunk 0's 22 %.
+    pose-graph    ok_held  = after <= before + 0.005 m      -> ACCEPTED a
+                  measured 10 % degradation (3.29 -> 3.62 cm) the same run,
+                  without raising one gate warning.
+
+`metric_lock.heldout_change` replaces both, plus the p90 twin in
+`depth_tracks._verdict_with_correspondences`: bootstrap the PAIRED difference
+over the pairs themselves (fixed seed -> reproducible) and ask whether the
+change clears the sample's own noise. `improves` / `worsens` = the whole
+confidence interval on one side of zero; NEITHER means the held-out cannot
+tell, which is not the same as "no change". Config: `heldout_confidence: 0.95`
+in `correction_graph.graph` and in the witness depth block — a declared
+CONFIDENCE (how sure before we move geometry), not a magnitude someone chose.
+`bounded` is untouched: the held-out says whether the geometry got better, the
+bound says whether the correction is plausible.
+
+DECLARED CONSEQUENCE: this applies MORE chunk fields than 0.8 did — a small
+improvement consistent across held-out pairs is real evidence and the old bar
+threw it away. Magnitude stays guarded by `bounded`.
+NOT TOUCHED: `certify.gates.max_seam_degradation_m` — a different stage (the
+§9 iteration gates).
+
 ## ⭐ ARBITRARY NUMBERS LEDGER — USER 2026-09-14 ("en algún momento nos va a
 ## joder seguro")
 Every value below GATES a decision — it accepts, rejects, stops or caps

@@ -931,6 +931,50 @@ def test_chunk_field_verdict_gates():
     assert not v_w["bounded"]
 
 
+def test_heldout_change_is_the_bar_not_a_constant():
+    """USER 2026-09-23: the bar that decides whether a held-out change is real
+    is the SAMPLE'S OWN NOISE, not 0.8 and not 0.005 m. Three cases, one rule.
+
+    Replaced `improves = med_after <= 0.8 * med_before` (a 12 % measured
+    improvement was rejected on pccr chunk 2) and the pose-graph's
+    `after <= before + 0.005` (a 10 % measured degradation was accepted the
+    same run, with no gate warning)."""
+    from loop_utils.metric_lock import heldout_change
+    rng = np.random.default_rng(7)
+    n = 200
+    before = np.abs(rng.normal(0.05, 0.01, n))
+
+    # 1. a SMALL but consistent improvement is real evidence — the old 0.8 bar
+    #    threw exactly this away
+    after = before * 0.94
+    v = heldout_change(before, after)
+    assert v["improves"] and not v["worsens"], v
+    assert v["ci_low"] > 0
+
+    # 2. pure noise: the same sample re-measured. Neither verdict — the held-out
+    #    cannot tell, which is NOT the same as "no change"
+    after = before + rng.normal(0, 0.01, n)
+    v = heldout_change(before, after)
+    assert not v["improves"] and not v["worsens"], v
+    assert v["ci_low"] < 0 < v["ci_high"]
+
+    # 3. a consistent degradation is refused, however small — this is the case
+    #    the 0.5 cm tolerance waved through
+    after = before * 1.06
+    v = heldout_change(before, after)
+    assert v["worsens"] and not v["improves"], v
+    assert v["ci_high"] < 0
+
+    # deterministic: same input, same verdict, every time (fixed seed)
+    a = heldout_change(before, before * 0.94)
+    b = heldout_change(before, before * 0.94)
+    assert a == b
+
+    # a degenerate sample decides nothing
+    v = heldout_change([], [])
+    assert not v["improves"] and not v["worsens"]
+
+
 # ── AS MANY FRAMES AS THE CARD ALLOWS (USER ORDER 2026-09-23) ────────
 # *"vamos a armar los chunk de la mayor cantidad de frames posibles, si hay mas
 # de uno, con el solape del 50% ... eso lo va a determinar el GPU"*, on his

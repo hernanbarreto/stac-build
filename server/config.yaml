@@ -2687,8 +2687,15 @@ correction_graph:
     pcg_max_iters: 2000
     min_loop_gain: 0.5              # gate: the loop residual (observed components) must drop by
                                     # ≥ 50 % of what the edges can deliver (their σ floor excluded)
-    max_seam_degradation_m: 0.005   # gate: held-out surface pairs (chunk_field_verdict strategy)
-                                    # may not worsen by more than 5 mm
+    heldout_confidence: 0.95        # gate: the held-out surface pairs must not worsen BEYOND
+                                    # THEIR OWN NOISE — the bar is bootstrapped from the pairs
+                                    # themselves (metric_lock.heldout_change), not a tolerated
+                                    # magnitude. Replaced max_seam_degradation_m: 0.005 on
+                                    # 2026-09-23: 0.5 cm let a measured 10 % degradation through
+                                    # on pccr without one gate warning, while 0.8 elsewhere
+                                    # rejected a measured 12 % improvement. This is a declared
+                                    # CONFIDENCE (how sure before we move geometry), not a
+                                    # magnitude someone chose.
     gate_mode: advisory             # advisory | veto. USER 2026-09-09 ("siempre debe aplicarse la
                                     # corrección de duplicados, no importa lo mucho que haya que
                                     # corregir") + pccr 2026-09-13 19:25: the four measured
@@ -2927,7 +2934,9 @@ witness:                            # §6 witnesses on the cloud (F3): evidence,
     pair_samples: 8000
     holdout_fraction: 0.25          # pairs never fitted — the verdict is judged on them
     min_pairs: 10
-    improve: 0.8                    # held-out disagreement must fall to ≤ 80 % of before
+    heldout_confidence: 0.95        # held-out disagreement must fall by more than the held-out
+                                    # sample's own noise (metric_lock.heldout_change bootstraps
+                                    # it from the pairs). Replaced improve: 0.8 on 2026-09-23.
     bound: 5.0                      # corrections within 5× the pairwise signal
     zref_m: 5.0
     scale_only: false

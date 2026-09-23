@@ -231,7 +231,9 @@ class GraphConfig:
     pcg_tol: float
     pcg_max_iters: int
     min_loop_gain: float            # gate: total loop residual must drop by this fraction
-    max_seam_degradation_m: float   # gate: held-out surface pairs may not worsen beyond this
+    heldout_confidence: float       # gate: the held-out surface pairs may not worsen beyond
+                                    # THEIR OWN NOISE — the bar is bootstrapped from the pairs
+                                    # (metric_lock.heldout_change), not a tolerated magnitude
     gate_mode: str                  # advisory | veto — advisory: the gates (gain, held-out,
                                     # authority) are measured and declared, the closure is
                                     # APPLIED (USER 2026-09-13); veto: a failed gate → identity
@@ -345,7 +347,8 @@ class DepthStageConfig:
     pair_samples: int
     holdout_fraction: float         # fraction of pairs held out for the verdict (never fitted)
     min_pairs: int
-    improve: float                  # held-out disagreement must fall to ≤ this × before
+    heldout_confidence: float       # confidence that the held-out change is real, not sample
+                                    # noise (metric_lock.heldout_change bootstraps the bar)
     bound: float                    # corrections within this × the pairwise signal
     zref_m: float
     scale_only: bool
@@ -664,7 +667,7 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         pcg_tol=_num(gp, "pcg_tol", G, lo=0, lo_excl=True),
         pcg_max_iters=_num(gp, "pcg_max_iters", G, lo=1, integer=True),
         min_loop_gain=_num(gp, "min_loop_gain", G, lo=0, hi=1.0),
-        max_seam_degradation_m=_num(gp, "max_seam_degradation_m", G, lo=0),
+        heldout_confidence=_num(gp, "heldout_confidence", G, lo=0.5, hi=1.0, lo_excl=True),
         gate_mode=_choice(gp, "gate_mode", G, ("advisory", "veto")),
         holdout_offsets=tuple(int(x) for x in ho),
         holdout_stride=_num(gp, "holdout_stride", G, lo=1, integer=True),
@@ -808,7 +811,7 @@ def _parse_witness(wi: Dict[str, Any]) -> WitnessConfig:
         pair_samples=_num(de, "pair_samples", D, lo=100, integer=True),
         holdout_fraction=_num(de, "holdout_fraction", D, lo=0, hi=0.9, lo_excl=True),
         min_pairs=_num(de, "min_pairs", D, lo=1, integer=True),
-        improve=_num(de, "improve", D, lo=0, hi=1.0, lo_excl=True),
+        heldout_confidence=_num(de, "heldout_confidence", D, lo=0.5, hi=1.0, lo_excl=True),
         bound=_num(de, "bound", D, lo=1.0), zref_m=_num(de, "zref_m", D, lo=0, lo_excl=True),
         scale_only=_bool(de, "scale_only", D),
         pair_sigma_floor_rel=_num(de, "pair_sigma_floor_rel", D, lo=0, lo_excl=True),

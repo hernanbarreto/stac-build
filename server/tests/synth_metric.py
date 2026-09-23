@@ -739,7 +739,7 @@ def witness_cfg(**over) -> dict:
          "contours": {"enabled": True, "min_gradient": 20.0, "samples_per_instance": 64,
                       "search_rel": 0.15, "search_steps": 31, "sigma_rel": 0.02},
          "depth": {"pair_offsets": [1, 2, 3, 5, 8], "pair_samples": 8000, "holdout_fraction": 0.25,
-                   "min_pairs": 10, "improve": 0.8, "bound": 5.0, "zref_m": 5.0, "scale_only": False,
+                   "min_pairs": 10, "heldout_confidence": 0.95, "bound": 5.0, "zref_m": 5.0, "scale_only": False,
                    "pair_sigma_floor_rel": 0.002, "refine_iters": 2, "prior_sigma_rel": 0.005,
                    "pair_scatter_clip_sigma": 5.0}}
     d.update(over)

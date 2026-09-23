@@ -520,7 +520,9 @@ def _verdict_with_correspondences(a, b, held4, obs_by_index: Dict[int, list], dc
                    for f, g, al, be in held4])
     p90_b, p90_a = float(np.percentile(rb, 90)), float(np.percentile(ra, 90))
     med_b, med_a = float(np.median(rb)), float(np.median(ra))
-    improves = (p90_a <= float(dcfg.improve) * p90_b or p90_b <= floor) and (med_a <= med_b + floor)
+    from loop_utils.metric_lock import heldout_change
+    _chg = heldout_change(rb, ra, confidence=float(dcfg.heldout_confidence))
+    improves = (bool(_chg["improves"]) or p90_b <= floor) and (med_a <= med_b + floor)
     per_frame_ok = True
     worst = 0.0
     for f, obs in obs_by_index.items():
@@ -607,7 +609,8 @@ def depth_stage(frames: Dict[int, dict], wcfg, tracks: Optional[Tracks] = None,
     meas4 = [(i, j, al, be) for i, j, al, be, *_ in fit]
     held4 = [(i, j, al, be) for i, j, al, be, *_ in held]
     verdict = depth_graph_verdict(a, b, meas4, held4, zref=float(dcfg.zref_m),
-                                  improve=float(dcfg.improve), bound=float(dcfg.bound))
+                                  confidence=float(dcfg.heldout_confidence),
+                                  bound=float(dcfg.bound))
     verdict = {k_: (bool(v) if isinstance(v, (bool, np.bool_)) else float(v)) for k_, v in verdict.items()}
     verdict.update(_verdict_with_correspondences(a, b, held4, obs_by_index, dcfg, wcfg.tracks.sigma_rel,
                                                  wcfg.tracks.min_obs_per_frame))
