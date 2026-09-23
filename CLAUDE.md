@@ -295,8 +295,8 @@ chunk, mas de 15m, 60/30"**.
     2. ONE Omega pass at the card's capacity       (chunk_frames: 0)
     3. scale_align + orient, then measure the walk on its own metric poses
     4. walk <= max_walk_single_pass_m (15 m)  -> that pass IS the result
-       walk >  max_walk_single_pass_m        -> re-run CHUNKED at
-                                                chunk_frames_over_walk (60/30)
+       walk >  max_walk_single_pass_m        -> re-run CHUNKED at chunks of
+                                                chunk_walk_m (12 m) of WALK, 50 %
 
 THE OVER-MEASUREMENT IS THE SIGNAL, NOT A BUG. This was removed on 2026-09-22
 because a single pass reading 44 m over a ~19 m walk looked like a broken
@@ -321,8 +321,25 @@ global scale. Below the limit that is better (the user's visual verdict on
 observatorio 11.2 m and test2 12.9 m: "siempre fue mejor ... aun con un solo
 chunk"); above it, the drift those stages exist to fight is what dominates.
 
-The re-run size is the VENDOR default 60/30 — NOT derived from the measured
-walk, which is a drift detector here and not a length.
+THE RE-RUN SIZE IS A DISTANCE, NOT A FRAME COUNT (USER 2026-09-23:
+*"implementemos el chunk walk 12, por algo estaban no?"*). A fixed 60 covers a
+different distance in every scene, because keyframes are parallax-uniform:
+
+    pccr          216 kf / 18.8 m -> 0.087 m/kf -> 60 kf = 5.2 m per chunk
+    test2         255 kf / 12.9 m -> 0.051 m/kf -> 60 kf = 3.1 m per chunk
+    observatorio  213 kf / 11.2 m -> 0.053 m/kf -> 60 kf = 3.2 m per chunk
+
+pccr at 5.2 m was accepted; test2 and observatorio at ~3 m came out broken —
+sixty frames from nearly the same viewpoint give Omega no baseline, and seven
+seams land inside twelve metres. So `plan_chunks` sizes the chunk from
+`chunk_walk_m` (12 m) and `chunk_frames_over_walk: 0` leaves it to the metres;
+a POSITIVE value pins a fixed frame count for A/B work.
+
+That the probe's walk reads long when the pass drifted does NOT distort this:
+m/kf is inflated by the same factor, so the chunk lands at
+`chunk_walk_m / inflation` of REAL walk — on pccr, 59 kf, the 60/30 layout that
+works. It is self-correcting in the direction that matters: a pass that drifted
+more gets shorter chunks.
 
 ## ⭐ (folded into the block above) RECONSTRUCTION = ONE PASS, AS MANY
 ## KEYFRAMES PER CHUNK AS THE CARD ALLOWS — USER DECISION 2026-09-23
@@ -388,6 +405,8 @@ DELETED with the two-phase flow (do not bring back):
   number both fired the re-run and sized the chunks from the error (59/29).
 - `chunk_walk_m` (12 m) and `chunk_plan.plan_chunks` — chunk size in walked
   METRES through that same walk — with the 45-kf re-densification it fed.
+  (BOTH CAME BACK on 2026-09-23 by the user's order; see the block above. What
+  stayed deleted is the re-densification.)
 - `max_frames_single_pass` (600) — the single-pass cap `chunk_frames` now IS.
 
 The walk is still MEASURED and reported (`walk_length_m`, stamped into
