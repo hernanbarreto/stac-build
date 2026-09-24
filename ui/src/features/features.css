@@ -279,42 +279,6 @@
   color: var(--text-2);
 }
 
-/* artifacts / ledger */
-.stac-artifacts,
-.stac-ledger {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-}
-
-.stac-artifacts__row,
-.stac-ledger__row {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-height: var(--row-h);
-  border-bottom: var(--bw) solid var(--border-1);
-  font-size: var(--fs-1);
-}
-
-.stac-artifacts__name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-2);
-}
-
-.stac-ledger__kind {
-  font-weight: var(--fw-medium);
-  color: var(--text-1);
-}
-
-.stac-ledger__meta {
-  color: var(--text-3);
-  font-size: var(--fs-0);
-}
-
 /* console */
 .stac-console {
   flex: 1;
@@ -373,12 +337,6 @@
   height: var(--icon-sm);
   color: var(--brand-orange);
   fill: var(--brand-orange);
-}
-
-.stac-scantabs__warn {
-  width: var(--icon-sm);
-  height: var(--icon-sm);
-  color: var(--warn-fg);
 }
 
 /* certification kit (inspector) */

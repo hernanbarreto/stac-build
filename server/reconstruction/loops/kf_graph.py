@@ -135,13 +135,34 @@ def _holdout_pairs(session, per_kf_points, offsets, stride, n_samp, max_nn_m, se
     return pairs
 
 
-def _held_median(pairs, X):
+def _held_pairs(pairs, X):
+    """Per-held-out-pair disagreement (median NN distance) under the per-keyframe
+    transforms X — the PAIRED sample `metric_lock.heldout_change` judges."""
     vals = []
     for f, g, p, q in pairs:
         p2 = p @ X[f][:3, :3].T + X[f][:3, 3]
         q2 = q @ X[g][:3, :3].T + X[g][:3, 3]
         vals.append(float(np.median(np.linalg.norm(p2 - q2, axis=1))))
-    return float(np.median(vals)) if vals else float("nan")
+    return np.asarray(vals, np.float64)
+
+
+def _held_median(pairs, X):
+    vals = _held_pairs(pairs, X)
+    return float(np.median(vals)) if vals.size else float("nan")
+
+
+def _held_verdict(before, after, confidence):
+    """The held-out gate of 2026-09-23 (USER: "me parece bien" / "aplicalo"):
+    the correction passes unless the held-out pairs WORSEN beyond their own
+    noise — bootstrap of the paired change, fixed seed. It replaced
+    `after <= before + max_seam_degradation_m` (0.005 m), the invented bar that
+    accepted a measured 10 % degradation on pccr without one warning.
+    NEITHER (the CI straddles zero) is not a degradation: the sample cannot
+    tell, and the correction stays applied."""
+    from loop_utils.metric_lock import heldout_change
+    chg = heldout_change(before, after, confidence=float(confidence))
+    ok = (before.size == 0) or (not bool(chg["worsens"]))
+    return ok, chg
 
 
 def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig] = None,
@@ -341,7 +362,8 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     held = _holdout_pairs(session, per_kf, gc.holdout_offsets, gc.holdout_stride,
                           gc.holdout_samples, gc.holdout_max_nn_m)
     I = np.tile(np.eye(4), (N, 1, 1))
-    held_before = _held_median(held, I)
+    held_before_v = _held_pairs(held, I)
+    held_before = float(np.median(held_before_v)) if held_before_v.size else float("nan")
 
     budget = cfg.loops.spatial
     centres = T0[:, :3, 3]
@@ -415,10 +437,12 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
             # became 6 %) while the error stayed exactly as localised.
             gain = (1.0 - fd["residual_after_m"] / fd["residual_before_m"]
                     if fd["residual_before_m"] > 1e-9 else 0.0)
+            h_graph_v, h_drift_v = _held_pairs(held, Xc), _held_pairs(held, Xc_d)
             h_graph, h_drift = _held_median(held, Xc), _held_median(held, Xc_d)
             closes = gain >= gc.drift_min_gain
-            keeps = (not np.isfinite(h_graph)) or (h_drift <= h_graph + gc.max_seam_degradation_m)
+            keeps, h_chg = _held_verdict(h_graph_v, h_drift_v, gc.heldout_confidence)
             drift_rep.update(held_out_before_m=h_graph, held_out_after_m=h_drift,
+                             held_out_change=h_chg,
                              gain=gain, applied=bool(closes and keeps))
             if closes and keeps:
                 X_drift = fd["corrections"]
@@ -446,7 +470,8 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     after = pg.edge_residuals("loop")
     loop_after = float(np.sum([r["t_obs_m"] for r in after.values()]))
     n_active = sum(1 for eid, _ in loop_ids if pg._edges[eid]["active"])
-    held_after = _held_median(held, Xc)
+    held_after_v = _held_pairs(held, Xc)
+    held_after = float(np.median(held_after_v)) if held_after_v.size else float("nan")
     # the gain against what the edges can deliver: no edge closes better than
     # its own σ (a post-hoc region closure carries its ICP residual), so the
     # residual floor Σσ is subtracted from both sides — a 30 cm drift closed
@@ -457,7 +482,7 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     else:
         gain = 1.0 - max(loop_after - sigma_floor, 0.0) / (loop_before - sigma_floor)
     ok_gain = (gain >= gc.min_loop_gain) if n_active > 0 else (use_structural and bool(srep))
-    ok_held = (not np.isfinite(held_before)) or (held_after <= held_before + gc.max_seam_degradation_m)
+    ok_held, held_chg = _held_verdict(held_before_v, held_after_v, gc.heldout_confidence)
     t_mag = np.linalg.norm(Xc[:, :3, 3], axis=1)
     r_mag = np.array([np.degrees(np.linalg.norm(se3_log(M)[:3])) for M in Xc])
     frac = max(float(t_mag.max()) / cfg.authority.pose_graph_max_m,
@@ -478,8 +503,10 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     if not ok_gain:
         gate_warnings.append(f"loop gain {gain * 100:.0f}% < {gc.min_loop_gain * 100:.0f}%")
     if not ok_held:
-        gate_warnings.append(f"held-out {held_before * 100:.2f}→{held_after * 100:.2f} cm "
-                             f"(> +{gc.max_seam_degradation_m * 100:.1f} cm)")
+        gate_warnings.append(f"held-out {held_before * 100:.2f}→{held_after * 100:.2f} cm worsens "
+                             f"beyond its own noise (paired change CI "
+                             f"[{held_chg['ci_low'] * 100:.2f}, {held_chg['ci_high'] * 100:.2f}] cm "
+                             f"at {gc.heldout_confidence:.0%}, n={held_chg['n']})")
     if frac > 1.0:
         gate_warnings.append(f"authority {frac * 100:.0f}% (max {cfg.authority.pose_graph_max_m} m / "
                              f"{cfg.authority.pose_graph_max_deg}°)")
@@ -517,7 +544,8 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
                                       "sigma_floor_m": sigma_floor},
                         "holdout_pairs": {"n_pairs": len(held), "median_before_m": held_before,
                                           "median_after_m": held_after,
-                                          "max_degradation_m": gc.max_seam_degradation_m,
+                                          "heldout_confidence": gc.heldout_confidence,
+                                          "change": held_chg,
                                           "passed": ok_held},
                         "authority": {"fraction_used": frac, "saturated": bool(saturated),
                                       "exceeded": bool(frac > 1.0),

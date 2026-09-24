@@ -5160,15 +5160,12 @@ async def _correction_notify_viewer(session_id: str, output_dir: Path):
         print(f"[Correction] viewer notify failed (non-fatal): {e}")
 
 
-# ── Correction module (USER 2026-09-08 redesign) ─────────────────────────
-# All correction logic lives in server/correction/ — main.py only wires the
-# router (DI: session resolver + viewer notify). The old chunk-gizmo endpoints
-# (/api/segmentation/chunks/*, /api/segmentation/correction/*) are REMOVED:
-# the keyframe-based flow lives under /api/correction/*.
-from correction import api as correction_api
-correction_api.configure(resolve_ctx=_ctx,
-                         notify_viewer=_correction_notify_viewer)
-app.include_router(correction_api.router)
+# ── Correction module ──────────────────────────────────────────────────────
+# All correction logic lives in server/correction/ and runs INSIDE the
+# certification stage of the pipeline (visit-drift loop + floor re-level).
+# The manual /api/correction/* router (the UI "Corrections" button: mark
+# objects / floor / revisit / ledger / artifacts) was REMOVED on 2026-09-24
+# by the user's order; epochs are shown through /api/certify/select.
 
 # ── Certification loop + acta (claude_stac.txt §9–§11) ─────────────────────
 from reconstruction.certify import api as certify_api
@@ -8180,13 +8177,13 @@ if __name__ == "__main__":
 
     # The access log is where a long run is read from, and the UI's polling
     # buries it: over the pccr run of 2026-09-14, 1,409 of 4,580 lines were
-    # access lines and two endpoints alone — /api/correction/state (514) and
-    # /api/certify/state (388) — were 64 % of them, with the Potree octree
-    # chunk fetches behind. Successful GETs to those poll/asset routes carry no
-    # information a human reads. Anything else stays, and a poll that FAILS
-    # (4xx/5xx) stays too: the point is to lose noise, never diagnostics.
-    POLL_ROUTES = ("/health", "/api/correction/state/", "/api/certify/state/",
-                   "/potree/", "/prefs")
+    # access lines and two endpoints alone — /api/correction/state (514, a
+    # poll that no longer exists) and /api/certify/state (388) — were 64 % of
+    # them, with the Potree octree chunk fetches behind. Successful GETs to
+    # those poll/asset routes carry no information a human reads. Anything
+    # else stays, and a poll that FAILS (4xx/5xx) stays too: the point is to
+    # lose noise, never diagnostics.
+    POLL_ROUTES = ("/health", "/api/certify/state/", "/potree/", "/prefs")
     _access_re = re.compile(r'"(?P<method>[A-Z]+) (?P<path>\S+) [^"]*"\s+(?P<status>\d{3})')
 
     class PollingAccessFilter(logging.Filter):

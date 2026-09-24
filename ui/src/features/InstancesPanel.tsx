@@ -2,10 +2,10 @@
  * InstancesPanel — the "Instances" tab: visibility tree of segments (colour
  * dot, point count, rename, delete), the unsegmented remainder, placed
  * objects, generated meshes (Object / Mesh) and the floor-at-y=0 selector;
- * footer buttons open Segmentation, Meshing, Correction and Fusion.
+ * footer buttons open Segmentation and Meshing.
  */
 import { useState } from 'react'
-import { Box, CheckSquare, Crosshair, Layers, Pencil, Puzzle, Square, Tag, Trash2, Wrench } from 'lucide-react'
+import { Box, CheckSquare, Crosshair, Pencil, Puzzle, Square, Tag, Trash2 } from 'lucide-react'
 import type { SegmentInstance } from '../components/Viewport'
 import { Panel, Section, Stack } from '../components/ui/Panel'
 import { Tree, type TreeNodeData } from '../components/ui/Tree'
@@ -31,7 +31,6 @@ interface InstancesPanelProps {
   shapeMeshes: MeshListItem[]
   tsdfMeshes: MeshListItem[]
   selectedSegmentId: number | null
-  canFuse: boolean
   onSelectSegment: (id: number | null) => void
   onSelectAll: () => void
   onDeselectAll: () => void
@@ -47,8 +46,6 @@ interface InstancesPanelProps {
   onDeleteTsdf: (m: MeshListItem) => void
   onOpenSegmentation: () => void
   onOpenMeshing: () => void
-  onOpenCorrection: () => void
-  onOpenFuse: () => void
 }
 
 export function InstancesPanel(p: InstancesPanelProps) {
@@ -107,8 +104,6 @@ export function InstancesPanel(p: InstancesPanelProps) {
         <div className="stac-instances__footer">
           <Button size="sm" icon={<Crosshair aria-hidden />} onClick={p.onOpenSegmentation}>{t('instances.segmentation')}</Button>
           <Button size="sm" icon={<Puzzle aria-hidden />} onClick={p.onOpenMeshing} title={t('instances.meshingHint')}>{t('instances.meshing')}</Button>
-          <Button size="sm" icon={<Wrench aria-hidden />} onClick={p.onOpenCorrection} title={t('instances.correctionHint')}>{t('instances.correction')}</Button>
-          <Button size="sm" icon={<Layers aria-hidden />} disabled={!p.canFuse} onClick={p.onOpenFuse} title={p.canFuse ? t('instances.fuseHint') : t('instances.fuseNeedsTwo')}>{t('instances.fuse')}</Button>
         </div>
       }>
       <Stack gap={1}>

@@ -219,11 +219,14 @@ def test_approve_and_undo_are_gone_from_the_whole_system():
     apply_src = (root / "correction" / "apply.py").read_text()
     for gone in ("def approve_swap(", "def undo_swap(", "def pending_prev_dirs("):
         assert gone not in apply_src, f"{gone} is back"
-    for api_rel in ("correction/api.py", "reconstruction/certify/api.py"):
-        api = (root / api_rel).read_text()
-        assert '/select' in api, api_rel
-        assert '@router.post("/approve")' not in api, api_rel
-        assert '@router.post("/undo")' not in api, api_rel
+    # the manual /api/correction/* router is gone too (USER 2026-09-24): the
+    # certification router is the only one that shows epochs
+    assert not (root / "correction" / "api.py").exists(), \
+        "the manual correction router is back"
+    api = (root / "reconstruction" / "certify" / "api.py").read_text()
+    assert '/select' in api
+    assert '@router.post("/approve")' not in api
+    assert '@router.post("/undo")' not in api
     # and nothing anywhere calls what no longer exists
     gone_calls = ("run_verdict", "approve_swap", "undo_swap", "pending_prev_dirs",
                   "ledger.pending_run")

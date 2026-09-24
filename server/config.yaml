@@ -52,8 +52,6 @@ server:
     - "GET /api/tasks/"
     - "GET /api/pipelines/active"
     - "GET /api/semantic/status"        # chat-model warmup poll (user 2026-08-30)
-    - "GET /api/correction/state/"
-    - "GET /api/correction/epochs/"     # the epoch selector refreshes with the state
     - "GET /api/certify/state/"
     - "GET /api/certify/epochs/"
     - "GET /api/certify/edges/"

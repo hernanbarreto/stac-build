@@ -3,7 +3,8 @@ the two is worth a line.
 
 USER 2026-09-16: *"que no aparezcan estos INFO: 127.0.0.1:xxxxx - GET /api/"*.
 Measured on the first minutes of a run: 102 access lines, 60 of them two polls
-(`/api/certify/state` 34, `/api/correction/state` 26) and 24 more the kit's
+(`/api/certify/state` 34, `/api/correction/state` 26 — a poll that no
+longer exists) and 24 more the kit's
 periodic set — the reconstruction's own output was the minority of its own log.
 
 Two rules, and the second is the important one:

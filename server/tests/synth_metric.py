@@ -517,7 +517,8 @@ def fork_graph_cfg(**over) -> dict:
          "dense_max_unknowns": 12000, "lambda_init": 1e-4, "lambda_max": 1e12,
          "lm_diag_floor": 1e-9, "tol": 1e-8, "rel_tol": 1e-6, "max_iters": 50,
          "pcg_tol": 1e-10, "pcg_max_iters": 2000, "min_loop_gain": 0.5,
-         "max_seam_degradation_m": 0.005, "gate_mode": "advisory",
+         "heldout_confidence": 0.95,
+         "gate_mode": "advisory",
          "holdout_offsets": [4, 10], "holdout_stride": 3,
          "holdout_samples": 4000, "holdout_max_nn_m": 0.10}
     d.update(over)

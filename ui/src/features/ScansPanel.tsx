@@ -1,14 +1,13 @@
 /**
  * ScansPanel — the scans of the loaded session (left "Scans" tab) and, in
  * `timeline` mode, the same data laid out by date for the bottom dock.
- * Reference scan marked; double-click / Open activates the scan as a tab;
- * the Fuse button needs two non-fused scans.
+ * Reference scan marked; double-click / Open activates the scan as a tab.
+ * Fusion lives on the project row of the Sessions tab (USER 2026-09-24).
  */
 import { Layers, Star } from 'lucide-react'
 import type { ScanRow } from './SessionsPanel'
 import { Panel, Row } from '../components/ui/Panel'
 import { Table, type Column } from '../components/ui/Table'
-import { Button } from '../components/ui/Button'
 import { IconButton } from '../components/ui/IconButton'
 import { Badge } from '../components/ui/Badge'
 import { EmptyState } from '../components/ui/EmptyState'
@@ -20,14 +19,12 @@ interface ScansPanelProps {
   activeScanKey: string | null
   onOpenScan: (scan: ScanRow) => void
   onSetReference: (scan: ScanRow) => void
-  onFuse: () => void
   variant?: 'panel' | 'timeline'
 }
 
-export function ScansPanel({ sessionId, scans, activeScanKey, onOpenScan, onSetReference, onFuse, variant = 'panel' }: ScansPanelProps) {
+export function ScansPanel({ sessionId, scans, activeScanKey, onOpenScan, onSetReference, variant = 'panel' }: ScansPanelProps) {
   const t = useT()
   const fmt = useFmt()
-  const canFuse = scans.filter(s => s.kind !== 'fused').length >= 2
 
   if (variant === 'timeline') {
     const ordered = [...scans].sort((a, b) => a.date.localeCompare(b.date))
@@ -61,8 +58,7 @@ export function ScansPanel({ sessionId, scans, activeScanKey, onOpenScan, onSetR
   return (
     <Panel title={t('scans.title')} subtitle={sessionId ?? t('scans.noSession')}
       isEmpty={!sessionId || scans.length === 0}
-      empty={<EmptyState icon={<Layers aria-hidden />} title={sessionId ? t('scans.emptyTitle') : t('scans.noSession')} description={sessionId ? t('scans.emptyDesc') : t('welcome.pickSession')} />}
-      footer={<Button block icon={<Layers aria-hidden />} disabled={!canFuse} onClick={onFuse} title={canFuse ? t('instances.fuseHint') : t('instances.fuseNeedsTwo')}>{t('instances.fuse')}</Button>}>
+      empty={<EmptyState icon={<Layers aria-hidden />} title={sessionId ? t('scans.emptyTitle') : t('scans.noSession')} description={sessionId ? t('scans.emptyDesc') : t('welcome.pickSession')} />}>
       <Table columns={columns} rows={scans} rowKey={r => r.key} selectedKey={activeScanKey} onRowClick={onOpenScan} caption={t('scans.title')} initialSort={{ id: 'date', dir: 'asc' }} />
     </Panel>
   )

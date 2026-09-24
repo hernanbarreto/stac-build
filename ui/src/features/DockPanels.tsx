@@ -1,6 +1,6 @@
 /**
  * Dock panels: ConsolePanel (backend log stream), JobsPanel (pipeline
- * stages, correction / meshing / resume / extraction progress),
+ * stages, meshing / resume / extraction progress),
  * PropertiesPanel (inspector: session, scan, cloud, epoch, selected
  * instance). Presentational.
  */
@@ -37,7 +37,6 @@ export function ConsolePanel({ logs }: { logs: LogEntry[] }) {
 export interface JobsState {
   pipeline: { session_id?: string; status: string; stages: ProgressStage[] } | null
   onCancelPipeline: () => void
-  correction: { pct: number; detail: string } | null
   meshing: { phase: string; total?: number; done?: number } | null
   object: { phase: string; total?: number; done?: number } | null
   resume: { pct: number; detail: string } | null
@@ -47,7 +46,7 @@ export interface JobsState {
 
 export function JobsPanel(j: JobsState) {
   const t = useT()
-  const any = j.pipeline || j.correction || (j.meshing && j.meshing.phase !== 'idle') || (j.object && j.object.phase !== 'idle') || j.resume || Object.keys(j.extracting).length || j.tasks.length
+  const any = j.pipeline || (j.meshing && j.meshing.phase !== 'idle') || (j.object && j.object.phase !== 'idle') || j.resume || Object.keys(j.extracting).length || j.tasks.length
   return (
     <div className="stac-jobs">
       {!any && <EmptyState compact icon={<ListTodo aria-hidden />} title={t('jobs.empty')} description={t('jobs.emptyDesc')} />}
@@ -58,7 +57,6 @@ export function JobsPanel(j: JobsState) {
           <Progress stages={j.pipeline.stages} tone="brand" />
         </Section>
       )}
-      {j.correction && <Section title={t('jobs.correction')} flush><Progress value={j.correction.pct} label={j.correction.detail} /></Section>}
       {j.meshing && j.meshing.phase !== 'idle' && (
         <Section title={t('jobs.meshing')} flush><Progress value={j.meshing.total ? ((j.meshing.done || 0) / j.meshing.total) * 100 : 0} label={t(`meshPhase.${j.meshing.phase}`, { done: j.meshing.done || 0, total: j.meshing.total || 0 })} /></Section>
       )}

@@ -39,8 +39,36 @@ mejor ni cerca que vggt"; the vendor single-chunk crash IS fixed in
 vendor/depth-anything-3, keep the patch). The code for all of these stays in
 the repo, selectable, OFF by default.
 
-## ⭐ CORRECTION MODULE — USER DECISION 2026-09-08 (redesign, supersedes the
-## 2026-09-06 chunk-gizmo corrector)
+## ⭐ THE "CORRECTIONS" BUTTON IS GONE — USER DECISION 2026-09-24
+**"del apartado instances debe eliminarse el boton 'corrections' tanto de la
+ui como el codigo del backend pipeline"**. The correction is the automatic
+visit-drift loop inside the certification stage (see the CORRECTION ALGORITHM
+block below); nothing manual is left:
+- UI: `features/CorrectionDialog.tsx` deleted (its `GateList` moved to
+  `components/GateList.tsx` for the certification kit), the Instances footer
+  and the Tools menu lost the Corrections entry, and App.tsx no longer polls
+  `/api/correction/state` (the epoch in the status bar comes from
+  `/api/certify/state` alone; the scan-tab ⚠ badge went with it).
+- Backend: `correction/api.py` (the whole `/api/correction/*` router: run /
+  floor / revisit / select / epochs / state / ledger / artifacts), `run.py`'s
+  `run_objects` + `run_revisit` + `state`, `correction/evidence.py`,
+  `correction/posegraph.py` and `reconstruction/loops/instance_loops.
+  add_manual_candidate` are DELETED, with the six tests that only existed for
+  them (gates, drift_rate, scale, observability, recover, posegraph). The tests
+  of the SHARED machinery (tx, ledger+replay, advisory, downstream) now drive it
+  through `run_floor`. What stays in `run.py`: `run_floor` (called by
+  `visit_drift_run` after every epoch) and `run_select` (behind
+  `/api/certify/select`). `config.yaml correction:` keeps the `evidence` /
+  `posegraph` sections because `revisit`, `gates`, `observability` and
+  `diagnose` still read them.
+- Fusion moved the same day: the Fuse button left the Instances footer and the
+  Scans tab; it is now an icon on the PROJECT row of the Sessions tab
+  (`SessionsPanel.onFuse`), rendered ONLY when the project holds two or more
+  non-fused scans, and it opens `FuseScansModal` for THAT project — loaded or
+  not (`App.fuseSession`). The Tools-menu Fuse entry stays for the loaded one.
+
+## ⭐ CORRECTION MODULE — USER DECISION 2026-09-08 (redesign, superseded in
+## part by the 2026-09-24 block above: the manual flow described here is gone)
 "El gizmo se elimina; queda solo la corrección por objetos marcados; el sistema
 resuelve de forma consistente con toda la escena; nada hardcodeado; época
 geométrica obligatoria en todo artefacto derivado."
@@ -518,6 +546,26 @@ improvement consistent across held-out pairs is real evidence and the old bar
 threw it away. Magnitude stays guarded by `bounded`.
 NOT TOUCHED: `certify.gates.max_seam_degradation_m` — a different stage (the
 §9 iteration gates).
+
+WIRING FOUND BROKEN 2026-09-24 (the same bug class as the confidence floor):
+the 2026-09-23 commit converted the config key and the VENDOR pose graph, but
+the POST-HOC keyframe graph `reconstruction/loops/kf_graph.py` still read
+`gc.max_seam_degradation_m` — an AttributeError on every certification since,
+and `tests/synth_metric.py`'s graph block still carried the old key and lacked
+`heldout_confidence`, so 18 tests (certify_f3, depth_f3, witness_f3, graph_f2)
+failed at config load and nobody saw the crash behind them. Both now use the
+measured bar: `_held_pairs` keeps the PAIRED per-pair disagreement,
+`_held_verdict` = `heldout_change(...)["worsens"]` is the gate (NEITHER passes:
+the sample cannot tell, the correction stays applied), the report's
+`holdout_pairs` carries `heldout_confidence` + `change` instead of
+`max_degradation_m`. STILL FAILING after that, and DECLARED, not patched:
+`test_depth_f3` `test_injected_compression_recovered_from_tracks` and
+`test_depth_epoch_moves_points_along_rays_and_keeps_provenance` — on the
+synthetic scene the depth stage's held-out median goes 0.0005 → 0.0010 rel
+(noise) while the p90 falls 0.0230 → 0.0033: the injected error lives in the
+TAIL, the paired-median bootstrap says NEITHER, the run is not applied. That
+is the 2026-09-23 criterion doing what it says; whether the depth stage should
+also read the tail is the user's call.
 
 ## ⭐ ARBITRARY NUMBERS LEDGER — USER 2026-09-14 ("en algún momento nos va a
 ## joder seguro")

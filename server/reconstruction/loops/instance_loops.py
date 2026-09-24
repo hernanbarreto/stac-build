@@ -325,14 +325,6 @@ def merge_loop_closures(output_dir: Path, new: List[dict], log=print) -> Path:
     return path
 
 
-def add_manual_candidate(output_dir, i: int, j: int, instance_ids: List[int],
-                         log=print) -> Path:
-    """§4.4: a marked-object correction is the SAME edge, source ``manual``."""
-    return merge_loop_closures(Path(output_dir),
-                               [{"i": int(max(i, j)), "j": int(min(i, j)), "sim": None,
-                                 "source": "manual"}], log=log)
-
-
 # ── the detector ────────────────────────────────────────────────────────────
 
 def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConfig] = None,

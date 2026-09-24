@@ -1,9 +1,15 @@
-"""User-directed correction module (USER 2026-09-08 redesign).
+"""Correction module (USER 2026-09-08 redesign; automatic since 2026-09-18).
 
-Converts the parallel-copies symptom of long-walk drift into a human-directed
-loop closure: the user marks duplicated objects, the geometry solves,
-distributes per keyframe, validates against the rest of the scene and applies
-transactionally under a geometry epoch + append-only ledger.
+Converts the parallel-copies symptom of long-walk drift into loop closures
+measured on the objects the scan saw twice (``visit_drift`` +
+``visit_drift_run``, run by the certification stage of the pipeline), solves
+the depth/scale they observe, re-levels the floor (``run.run_floor``) and
+applies transactionally under a geometry epoch + append-only ledger.
+
+The MANUAL flow — the UI "Corrections" button: mark objects → evidence →
+observability → solve, the revisit closure, and its ``/api/correction/*``
+router — was REMOVED on 2026-09-24 by the user's order. What the user still
+decides is which epoch is on screen (``/api/certify/select``).
 
 Doctrine (CLAUDE.md + USER 2026-09-06):
   * The cloud is the truth; only this module modifies it, through

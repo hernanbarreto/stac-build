@@ -27,12 +27,12 @@ def _access(method: str, path: str, status: int) -> logging.LogRecord:
 
 @pytest.fixture()
 def filt():
-    return PollingNoiseFilter(("GET /health", "GET /api/correction/state/",
+    return PollingNoiseFilter(("GET /health", "GET /api/certify/epochs/",
                                "GET /api/certify/state/", "GET /potree/"))
 
 
 @pytest.mark.parametrize("path", [
-    "/api/correction/state/pccr",
+    "/api/certify/epochs/pccr",
     "/api/certify/state/pccr",
     "/health",
     "/potree/pccr/metadata.json",
@@ -43,7 +43,7 @@ def test_the_polls_are_dropped(filt, path):
 
 def test_everything_else_still_prints(filt):
     assert filt.filter(_access("GET", "/api/sessions", 200)) is True
-    assert filt.filter(_access("POST", "/api/correction/select", 200)) is True
+    assert filt.filter(_access("POST", "/api/certify/select", 200)) is True
     # a POST to a quiet PREFIX is not a poll either
     assert filt.filter(_access("POST", "/api/certify/state/pccr", 200)) is True
 
@@ -70,7 +70,7 @@ def test_a_non_access_line_passes_untouched(filt):
 
 def test_the_list_comes_from_config_yaml():
     quiet = load_quiet_prefixes()
-    assert "GET /api/correction/state/" in quiet, quiet
+    assert "GET /api/certify/epochs/" in quiet, quiet
     assert "GET /api/certify/state/" in quiet, quiet
     # the real config must cover what the user actually sees
     assert any(q.startswith("GET /health") for q in quiet)

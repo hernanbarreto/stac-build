@@ -356,7 +356,6 @@ gizmo. One responsibility per module:
 | `epoch.py` | geometry epoch: read/bump/stamp/check (`geometry_epoch.json`); dependency-free |
 | `session.py` | immutable session snapshot (cloud+raw, provenance, keyframes, poses, pose copies) |
 | `units.py` | keyframe = atomic unit; visits = keyframe runs; chunks ONLY from `output/chunk_plan.json` |
-| `evidence.py` | copies per marked instance (curated OBB), visits, reference = earliest visit |
 | `observability.py` | PCA shape classes + baselines → observable DOF per visit |
 | `diagnose.py` | internal fingerprint → pose \| depth+pose; analytic DA3 anchor cross-check |
 | `solve.py` | trimmed yaw-planar ICP (translation-only under constraints), per-ray depth expansion, DOF projection |
@@ -367,7 +366,7 @@ gizmo. One responsibility per module:
 | `invalidate.py` | in-place instance-store refresh, finding re-anchoring, derived-artifact staleness |
 | `ledger.py` | append-only `corrections.jsonl` + `corrections/epoch_<N>.npz` + store mirror |
 | `replay.py` | `python -m correction.replay` — bit-faithful epoch reproduction (keyed by frame_global) |
-| `report.py` / `api.py` | per-run persistent reports / FastAPI router (`main.py` only mounts it) |
+| `report.py` | per-run persistent reports (the manual `/api/correction/*` router was removed 2026-09-24 with the UI "Corrections" button; epochs are shown through `/api/certify/select`) |
 
 ```
 mark instances (UI) → evidence → observability → diagnose → solve

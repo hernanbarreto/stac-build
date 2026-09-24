@@ -1,5 +1,8 @@
 """Ledger + replay: N corrections → the replay reproduces the final epoch from
-the epoch-0 artifacts; the ledger keeps everything and every epoch stays."""
+the epoch-0 artifacts; the ledger keeps everything and every epoch stays.
+
+Two floor alignments since 2026-09-24 (plane, then level): the manual object
+correction went with the UI "Corrections" button."""
 
 import shutil
 import sys
@@ -11,14 +14,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from correction.ledger import ledger_view                    # noqa: E402
 from correction.replay import replay                         # noqa: E402
-from correction.run import run_floor, run_objects, run_select   # noqa: E402
+from correction.run import run_floor                         # noqa: E402
 from correction.session import read_ply, read_poses          # noqa: E402
 from tests.synth_correction import build_scene, make_correction_cfg  # noqa: E402
 
 
 def test_ledger_and_replay(tmp_path):
-    scene = build_scene(tmp_path, drift_yaw_deg=1.5,
-                        drift_t=(0.20, 0.0, 0.08), floor="flat")
+    scene = build_scene(tmp_path, floor="ramp", floor_slope=0.04,
+                        drift_yaw_deg=0.0, drift_t=(0.0, 0.10, 0.0))
     out = scene.output_dir
     # keep the epoch-0 artifacts for the replay
     epoch0 = tmp_path / "epoch0"
@@ -26,18 +29,18 @@ def test_ledger_and_replay(tmp_path):
     shutil.copy2(out / "cleaned_cloud.ply", epoch0 / "cleaned_cloud.ply")
     shutil.copy2(out / "camera_poses.txt", epoch0 / "camera_poses.txt")
 
-    cfg = make_correction_cfg()
-    # epoch 1: objects correction
-    rep1 = run_objects(out, [1, 2], "op", cfg=cfg)
-    assert rep1["status"] == "applied"
-    # epoch 2: floor alignment (plane). No approving in between — every epoch
-    # stays and the next correction runs on top of the one being shown
-    # (USER 2026-09-16).
-    rep2 = run_floor(out, "plane", None, "op", cfg=cfg)
+    # epoch 1: plane keeps the ramp, removes the drift
+    rep1 = run_floor(out, "plane", None, "op", cfg=make_correction_cfg())
+    assert rep1["status"] == "applied", rep1.get("rejection_reason")
+    # epoch 2: level flattens it (a real change on top of epoch 1). No
+    # approving in between — every epoch stays and the next correction runs
+    # on top of the one being shown (USER 2026-09-16).
+    rep2 = run_floor(out, "level", None, "op",
+                     cfg=make_correction_cfg(**{"gates.max_step_mm": 120.0}))
     assert rep2["status"] == "applied", rep2.get("rejection_reason")
 
     rows = ledger_view(out)
-    assert [r["kind"] for r in rows] == ["objects", "floor"]
+    assert [r["kind"] for r in rows] == ["floor", "floor"]
     # every epoch is selectable and none was destroyed
     from correction.apply import available_epochs
     assert [e["epoch"] for e in available_epochs(out)] == [0, 1, 2]

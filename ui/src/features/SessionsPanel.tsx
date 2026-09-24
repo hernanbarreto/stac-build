@@ -2,6 +2,7 @@
  * SessionsPanel — the left "Sessions" tab: search, tree of sessions with
  * their scans as children (reference marked, double-click opens the scan
  * as a tab), row actions (load, flythrough, reconstruct / upload video,
+ * fuse — only when the project holds two or more scans (USER 2026-09-24) —,
  * segment, manager, unload, rename, delete) and "New session" for
  * admins/managers. Presentational: every handler comes from App.
  */
@@ -56,6 +57,9 @@ interface SessionsPanelProps {
   onFlythrough: (id: string) => void
   onReconstruct: (id: string) => void
   onPickVideo: (id: string) => void
+  /** opens the fusion of the project's scans; the icon is only rendered
+   *  when there are two or more non-fused scans to fuse */
+  onFuse: (id: string) => void
   onSegment: (id: string) => void
   onOpenManager: (id: string) => void
   onUnload: () => void
@@ -96,6 +100,7 @@ export function SessionsPanel(p: SessionsPanelProps) {
       const queued = job?.status === 'queued'
       const extractingPct = p.extracting[s.id]
       const kids = p.scansOf(s.id)
+      const canFuse = kids.filter(sc => sc.kind !== 'fused').length >= 2
       return {
         id: `s:${s.id}`,
         data: { kind: 'session', sessionId: s.id },
@@ -147,6 +152,7 @@ export function SessionsPanel(p: SessionsPanelProps) {
             ) : p.canManage ? (
               <IconButton size="sm" label={t('sessions.uploadVideo')} icon={<Plus aria-hidden />} onClick={() => p.onPickVideo(s.id)} />
             ) : null}
+            {canFuse && <IconButton size="sm" label={t('sessions.fuse')} icon={<Layers aria-hidden />} onClick={() => p.onFuse(s.id)} />}
             {loaded && <IconButton size="sm" label={t('sessions.segmentAuto')} icon={<Tag aria-hidden />} onClick={() => p.onSegment(s.id)} />}
             {loaded && <IconButton size="sm" label={t('sessions.segmentManual')} icon={<Crosshair aria-hidden />} onClick={() => p.onOpenManager(s.id)} />}
             {loaded && <IconButton size="sm" label={t('sessions.unload')} icon={<ArrowUpFromLine aria-hidden />} onClick={p.onUnload} />}

@@ -28,8 +28,8 @@ import AssistantPanel from './components/AssistantPanel'
 import {
   Search, Tag, Plug, Upload, Settings, Crosshair, Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
-  Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, AlertTriangle, Terminal,
-  ListTodo, FileCheck2, Puzzle, Wrench, PanelLeftClose, PanelLeftOpen,
+  Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
+  ListTodo, FileCheck2, Puzzle, PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react'
 import { useI18n, getT } from './i18n'
 import { useLayout } from './layout/LayoutContext'
@@ -61,7 +61,6 @@ import { ScansPanel } from './features/ScansPanel'
 import { PipelineDialog } from './features/PipelineDialog'
 import { ResumeDialog } from './features/ResumeDialog'
 import { ObjectLibraryDialog } from './features/ObjectLibraryDialog'
-import { CorrectionDialog } from './features/CorrectionDialog'
 import { MeshingDialog } from './features/MeshingDialog'
 import { ConsolePanel, JobsPanel, PropertiesPanel } from './features/DockPanels'
 
@@ -104,7 +103,7 @@ interface PipelineState {
 type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align' | 'erase'
 
 function App() {
-  // auth first: token feeds the correction handlers' deps below (TDZ)
+  // auth first: token feeds the handlers' deps below (TDZ)
   const { user, token, loading: authLoading, logout } = useAuth()
   const { confirmDanger, dialogElement: appDialog } = useConfirmDialog()
   const [sessions, setSessions] = useState<SessionInfo[]>([])
@@ -121,9 +120,6 @@ function App() {
   // below the threshold in red; applying moves them to unsegmented.
   const [eraseConfThr, setEraseConfThr] = useState(0.25)
   const [eraseConfArmed, setEraseConfArmed] = useState(false)
-  //  Correction Analysis (USER 2026-09-06, replaces Perfect in the
-  // toolbar): user marks the segments with the parallel-copies error; the
-  // algorithm does the rest. Every epoch stays and is selected in the modal.
   // Object library (user 2026-08-31): collection + every project GLB,
   // insertable as scene REFERENCES (delete never touches the source)
   const [showObjectLibrary, setShowObjectLibrary] = useState(false)
@@ -132,7 +128,6 @@ function App() {
   const [placedObjects, setPlacedObjects] = useState<Array<{ id: number; name: string; visible: boolean }>>([])
   const [alignTargets, setAlignTargets] = useState<Array<{ key: string; label: string }>>([])
   const [alignTarget, setAlignTarget] = useState('')
-  const [showCorrectionModal, setShowCorrectionModal] = useState(false)
   //  Certification kit (claude_stac.txt §11): epochs before/after, colour by
   // witness status / mv_votes, trajectory with loop edges, duplicates,
   // attention list, acta — the user judges by selecting between the epochs.
@@ -155,90 +150,9 @@ function App() {
       .catch(() => {})
     return () => { cancelled = true }
   }, [activeSession, certifyRefresh])
-  const [correctionSelected, setCorrectionSelected] = useState<Set<number>>(new Set())
-  const [correctionRunning, setCorrectionRunning] = useState(false)
-  const [correctionState, setCorrectionState] = useState<any>(null)
-  const [pendingSession, setPendingSession] = useState<string | null>(null)
-  const [correctionEpochs, setCorrectionEpochs] = useState<{ epoch: number; live: boolean; potree: boolean }[]>([])
-  const refreshCorrectionStatus = useCallback(async (sid: string) => {
-    try {
-      const r = await fetch(`/api/correction/state/${sid}`)
-      if (r.ok) {
-        const st = await r.json()
-        setCorrectionState(st)
-        // the state carries the epochs the session holds, so the selector is
-        // populated on load and not only after a selection (USER 2026-09-16)
-        if (Array.isArray(st?.epochs)) setCorrectionEpochs(st.epochs)
-        if (st?.status === 'applied') setPendingSession(sid)
-        else if (pendingSessionRef.current === sid) setPendingSession(null)
-      }
-    } catch { /* non-fatal */ }
-  }, [])
-  const pendingSessionRef = useRef<string | null>(null)
-  useEffect(() => { pendingSessionRef.current = pendingSession }, [pendingSession])
-  // keep the pending session's status honest even while ANOTHER session is
-  // active (USER 2026-09-06: the banner survives session switches)
-  useEffect(() => {
-    if (!pendingSession || pendingSession === activeSession) return
-    const iv = setInterval(() => refreshCorrectionStatus(pendingSession), 15000)
-    return () => clearInterval(iv)
-  }, [pendingSession, activeSession, refreshCorrectionStatus])
-  // Correction panel state (USER 2026-09-08 redesign: keyframe-based flow,
-  // no chunk gizmo). The last run's full report (also when rejected), the
-  // live stage progress, the floor model, the ledger and the stale badges.
-  const [correctionReport, setCorrectionReport] = useState<any>(null)
-  const [correctionProgress, setCorrectionProgress] = useState<{ pct: number; detail: string } | null>(null)
-  const [correctionOverrideScale, setCorrectionOverrideScale] = useState(false)
-  const [correctionLedger, setCorrectionLedger] = useState<any[] | null>(null)
-  const [correctionArtifacts, setCorrectionArtifacts] = useState<any[] | null>(null)
-  // shared epoch-selection handlers — used by the  modal AND the banner
-  // (USER 2026-09-06: an applied correction MUST be visible).
-  // EPOCHS ARE SELECTED, NEVER APPROVED (USER 2026-09-16: "todas viven, solo
-  // se seleccionan y la que se selecciona se muestra"). Approve deleted every
-  // other epoch and Undo the current one, so the session could only hold two
-  // states and one wrong click destroyed the other — pccr 2026-09-15 lost
-  // epochs 2 and 3 to two accidental Undos.
-  const refreshCorrectionEpochs = useCallback(async (sid?: string | null) => {
-    const s = sid || pendingSessionRef.current || activeSession
-    if (!s) return
-    try {
-      const r = await fetch(`/api/correction/epochs/${encodeURIComponent(s)}`)
-      if (r.ok) setCorrectionEpochs((await r.json()).epochs || [])
-    } catch { /* the list is a convenience; a failure leaves the last one */ }
-  }, [activeSession])
-  const selectCorrectionEpoch = useCallback(async (epoch: number) => {
-    const sid = pendingSessionRef.current || activeSession
-    if (!sid) return
-    setCorrectionRunning(true)
-    setStatusMessage(tt('correction.selecting', { epoch }))
-    try {
-      const headers: HeadersInit = { 'Content-Type': 'application/json' }
-      if (token) headers['Authorization'] = `Bearer ${token}`
-      const r = await fetch('/api/correction/select', {
-        method: 'POST', headers,
-        body: JSON.stringify({ session_id: sid, epoch }),
-      })
-      setStatusMessage(r.ok ? tt('correction.selected', { epoch })
-                            : tt('correction.selectFailed'))
-    } catch { setStatusMessage(tt('correction.selectFailed')) }
-    setCorrectionRunning(false)
-    refreshCorrectionStatus(pendingSessionRef.current || activeSession!)
-    refreshCorrectionEpochs(pendingSessionRef.current || activeSession!)
-  }, [activeSession, refreshCorrectionStatus, refreshCorrectionEpochs, token])
-  // pending state must surface ALWAYS (USER 2026-09-06: the banner appears
-  // as soon as the potree loads and stays — across session switches too —
-  // while the session holds more than one epoch). A long-running
-  // correction POST can outlive the browser request, so the truth is
-  // POLLED from the backend, not inferred from the fetch result.
-  useEffect(() => {
-    if (!activeSession) return
-    refreshCorrectionStatus(activeSession)
-    const iv = setInterval(() => refreshCorrectionStatus(activeSession), 15000)
-    return () => clearInterval(iv)
-  }, [activeSession, refreshCorrectionStatus, token])
   // ── Multi-scan project, VS-Code-style TABS (USER 2026-09-06): one tab
   // per open scan; the ACTIVE tab is the scan being viewed AND worked on
-  // (segmentation, brush, corrections, meshing, chat). Closing a tab loses
+  // (segmentation, brush, meshing, chat). Closing a tab loses
   // nothing; the scans list reopens it (double-click). The composition
   // reference is a  on the list row (one per project).
   type ScanTab = { key: string; label: string; date: string; kind: 'scan' | 'fused' }
@@ -248,7 +162,10 @@ function App() {
   const [allProjectScans, setAllProjectScans] = useState<Record<string, any[]>>({})
   const [scanTabs, setScanTabs] = useState<ScanTab[]>([])
   const [activeScanTab, setActiveScanTab] = useState<string | null>(null)
-  const [showFuseModal, setShowFuseModal] = useState(false)
+  // project whose scans are being fused — opened from the project row of the
+  // Sessions tab, so it is not necessarily the loaded one (USER 2026-09-24)
+  const [fuseSession, setFuseSession] = useState<string | null>(null)
+  const openFuse = useCallback((sid: string) => setFuseSession(sid), [])
   // scan requested for the NEXT project open (tree double-click on a
   // not-loaded project); null  the composition reference opens
   const [openScanKey, setOpenScanKey] = useState<string | null>(null)
@@ -373,30 +290,6 @@ function App() {
     setResumeCheckedFor(null)
     setInteractiveSessionId(sid)
   }, [])
-  const loadCorrectionLedger = useCallback(async (sid: string) => {
-    try {
-      const r = await fetch(`/api/correction/ledger/${sid}`)
-      if (r.ok) setCorrectionLedger((await r.json()).entries || [])
-    } catch { /* non-fatal */ }
-  }, [])
-  const loadCorrectionArtifacts = useCallback(async (sid: string) => {
-    try {
-      const r = await fetch(`/api/correction/artifacts/${sid}`)
-      if (r.ok) setCorrectionArtifacts((await r.json()).artifacts || [])
-    } catch { /* non-fatal */ }
-  }, [])
-  // per-stage progress while a correction runs (task_type "correction")
-  useEffect(() => {
-    if (!correctionRunning || !activeSession) { setCorrectionProgress(null); return }
-    const iv = setInterval(async () => {
-      try {
-        const d = await fetch(`/api/tasks/${activeSession}`).then(r => r.json())
-        const t = (d.tasks || []).find((x: any) => x.task_type === 'correction')
-        if (t) setCorrectionProgress({ pct: t.pct || 0, detail: t.detail || t.label || '' })
-      } catch { /* keep last */ }
-    }, 2000)
-    return () => clearInterval(iv)
-  }, [correctionRunning, activeSession])
   // leaving the brush turns the red preview off
   useEffect(() => {
     if (activeTool !== 'erase') {
@@ -1662,7 +1555,7 @@ function App() {
     let cancelled = false
     fetch(`/api/certify/state/${activeSession}`).then(r => (r.ok ? r.json() : null)).then(st => { if (!cancelled) setCertifyState(st) }).catch(() => {})
     return () => { cancelled = true }
-  }, [activeSession, certifyRefresh, correctionState])
+  }, [activeSession, certifyRefresh])
   // the certification kit lives in the Inspector's Acta tab
   useEffect(() => { if (showCertifyKit) layout.openInspector('acta') }, [showCertifyKit])  
   // active server tasks for the Jobs dock
@@ -1821,38 +1714,6 @@ function App() {
     } catch { report(t('instances.meshDeleteFailed', { detail: '' }), 'err') }
   }, [activeSession, confirmDanger, refreshTsdfMeshList, report, t])
 
-  const openCorrection = useCallback(() => {
-    if (!activeSession) return
-    setCorrectionSelected(new Set()); setCorrectionReport(null); setShowCorrectionModal(true)
-    refreshCorrectionStatus(activeSession); loadCorrectionLedger(activeSession); loadCorrectionArtifacts(activeSession)
-  }, [activeSession, refreshCorrectionStatus, loadCorrectionLedger, loadCorrectionArtifacts])
-
-  const runCorrectionOp = useCallback(async (kind: 'objects' | 'floor' | 'revisit') => {
-    if (!activeSession) return
-    setCorrectionRunning(true)
-    setCorrectionReport(null)
-    setStatusMessage(kind === 'objects' ? t('correction.analyzing') : kind === 'floor' ? t('correction.aligningFloor') : t('correction.detecting'))
-    try {
-      const headers: HeadersInit = { 'Content-Type': 'application/json' }
-      if (token) headers['Authorization'] = `Bearer ${token}`
-      const url = kind === 'objects' ? '/api/correction/run' : kind === 'floor' ? '/api/correction/floor' : '/api/correction/revisit'
-      const body = kind === 'objects'
-        ? { session_id: activeSession, instance_ids: Array.from(correctionSelected), override_scale_check: correctionOverrideScale }
-        : kind === 'floor' ? { session_id: activeSession, model: 'plane', keyframes: 'auto' } : { session_id: activeSession }
-      const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
-      const d = await r.json().catch(() => ({}))
-      setCorrectionReport(d.report || null)
-      if (r.ok && d.status === 'applied') setShowCorrectionModal(false)
-      if (r.status === 409) report(t('correction.busy'), 'warn')
-      else if (r.ok && d.status === 'applied') report(kind === 'revisit' ? t('correction.closuresApplied', { n: d.report?.solutions?.length || 0 }) : t('correction.applied'), 'ok')
-      else if (r.ok) report(t('correction.rejected', { reason: d.report?.rejection_reason || t('correction.seeReport') }), 'warn')
-      else report(t('correction.failed', { detail: typeof d.detail === 'string' ? d.detail : '' }), 'err')
-    } catch { report(t('correction.failed', { detail: '' }), 'err') }
-    setCorrectionRunning(false)
-    if (kind === 'objects') setCorrectionOverrideScale(false)
-    refreshCorrectionStatus(activeSession); loadCorrectionLedger(activeSession); loadCorrectionArtifacts(activeSession)
-  }, [activeSession, token, correctionSelected, correctionOverrideScale, refreshCorrectionStatus, loadCorrectionLedger, loadCorrectionArtifacts, report, t])
-
   const runObjectMeshing = useCallback(async () => {
     if (!activeSession || shapeBusyRef.current) return
     shapeBusyRef.current = true
@@ -2003,8 +1864,7 @@ function App() {
       { type: 'separator', id: 's4' },
       { id: 'segmentation', label: t('instances.segmentation'), icon: <Crosshair aria-hidden />, onSelect: () => activeSession && openSegmentationManager(activeSession) },
       { id: 'meshing', label: t('instances.meshing'), icon: <Puzzle aria-hidden />, onSelect: openTsdfModal },
-      { id: 'correction', label: t('instances.correction'), icon: <Wrench aria-hidden />, onSelect: openCorrection },
-      { id: 'fuse', label: t('instances.fuse'), icon: <Layers aria-hidden />, disabled: projectScans.filter(sc => sc.kind !== 'fused').length < 2, onSelect: () => setShowFuseModal(true) },
+      { id: 'fuse', label: t('sessions.fuse'), icon: <Layers aria-hidden />, disabled: projectScans.filter(sc => sc.kind !== 'fused').length < 2, onSelect: () => activeSession && openFuse(activeSession) },
       ...(hasCameraPoses ? [{ id: 'poses', label: t('menu.cameraPoses'), icon: <Camera aria-hidden />, checked: showCameraPoses, onSelect: () => setShowCameraPoses(v => !v) } as MenuEntry] : []),
     ] },
     { id: 'help', label: t('menu.help'), entries: [
@@ -2062,7 +1922,7 @@ function App() {
   const loadingOverlay = sessionLoading && !pipelineActiveHere && !viewerHasCloud
   const pipelineStages: ProgressStage[] = (pipelineRunning?.stages || []).filter(s => s.enabled).map(s => ({ id: s.id, label: s.label, status: s.status, pct: s.pct, detail: s.message }))
   const currentStage = pipelineRunning?.stages[pipelineRunning.current_stage_idx]
-  const epoch: number | null = certifyState?.epoch ?? correctionState?.epoch ?? null
+  const epoch: number | null = certifyState?.epoch ?? null
   // how many OTHER epochs the session can be shown in — not a pending
   // verdict (USER 2026-09-16: nothing waits for approval any more)
   const storedEpochs: number = Math.max((certifyState?.epochs?.length ?? 0) - 1, 0)
@@ -2114,12 +1974,11 @@ function App() {
                 onFlythrough={id => { if (activeSession !== id) handleSessionLoad(id); setFlythroughOpen(id) }}
                 onReconstruct={handleReconstruct} onPickVideo={handlePickVideo} onSegment={handleSegment} onOpenManager={openSegmentationManager}
                 onUnload={handleUnload} onRename={renameSession} onDelete={deleteSession} onCreate={createSession}
-                onOpenScan={openScanFromTree} onSetReference={setReference} />
+                onFuse={openFuse} onOpenScan={openScanFromTree} onSetReference={setReference} />
             )}
             {layout.state.leftTab === 'instances' && activeSession && (
               <InstancesPanel segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
                 placedObjects={placedObjects} shapeMeshes={shapeMeshes} tsdfMeshes={tsdfMeshes} selectedSegmentId={selectedSegmentId}
-                canFuse={projectScans.filter((sc: any) => sc.kind !== 'fused').length >= 2}
                 onSelectSegment={id => {
                   setSelectedSegmentId(id)
                   if (id == null) return
@@ -2149,11 +2008,11 @@ function App() {
                 onToggleShape={(m, v) => { setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setShapeVisibility(m.instanceId, v) }}
                 onToggleTsdf={(m, v) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setTsdfVisibility(m.folder, v) }}
                 onDeleteTsdf={deleteTsdfMesh}
-                onOpenSegmentation={() => openSegmentationManager(activeSession)} onOpenMeshing={openTsdfModal} onOpenCorrection={openCorrection} onOpenFuse={() => setShowFuseModal(true)} />
+                onOpenSegmentation={() => openSegmentationManager(activeSession)} onOpenMeshing={openTsdfModal} />
             )}
             {layout.state.leftTab === 'scans' && (
               <ScansPanel sessionId={activeSession} scans={projectScans} activeScanKey={activeScanTab}
-                onOpenScan={sc => activeSession && openScanFromTree(activeSession, sc)} onSetReference={sc => activeSession && setReference(activeSession, sc)} onFuse={() => setShowFuseModal(true)} />
+                onOpenScan={sc => activeSession && openScanFromTree(activeSession, sc)} onSetReference={sc => activeSession && setReference(activeSession, sc)} />
             )}
             {layout.state.leftTab === 'bim' && (
               <BIMNavigator models={bimModels} userRole={activeSession ? (user?.role || 'viewer') : 'viewer'}
@@ -2197,12 +2056,10 @@ function App() {
           <Tabs<string> className="stac-main__tabs" variant="chrome" size="sm" ariaLabel={t('scans.openTabs')}
             items={scanTabs.map(tab => {
               const sc = projectScans.find((s: any) => s.key === tab.key)
-              const isActive = tab.key === activeScanTab
               return {
                 id: tab.key, closable: true, title: `${tab.date} ${tab.label}${sc?.is_reference ? ` (${t('header.reference')})` : ''}`,
                 icon: sc?.is_reference ? <Star className="stac-scantabs__ref" aria-hidden /> : tab.kind === 'fused' ? <Layers aria-hidden /> : undefined,
                 label: tab.kind === 'fused' ? tab.label : `${tab.date} ${tab.label}`,
-                badge: isActive && correctionState?.status === 'applied' ? <AlertTriangle className="stac-scantabs__warn" aria-label={t('correction.pendingShort')} /> : undefined,
               }
             })}
             value={activeScanTab} onChange={key => { const tab = scanTabs.find(x => x.key === key); if (tab && tab.key !== activeScanTab) activateScan(activeSession, tab) }} onClose={closeScanTab} />
@@ -2338,10 +2195,10 @@ function App() {
               panels={{
                 console: <ConsolePanel logs={consoleLogs} />,
                 jobs: <JobsPanel pipeline={pipelineRunning ? { session_id: pipelineRunning.session_id, status: pipelineRunning.status, stages: pipelineStages } : null} onCancelPipeline={handlePipelineCancel}
-                  correction={correctionRunning ? correctionProgress : null} meshing={tsdfRunning ? tsdfOverall : null} object={shapeRunning ? shapeOverall : null}
+                  meshing={tsdfRunning ? tsdfOverall : null} object={shapeRunning ? shapeOverall : null}
                   resume={resumeBusy ? resumeProgress : null} extracting={extractingSessions} tasks={activeTasks} />,
                 timeline: <ScansPanel variant="timeline" sessionId={activeSession} scans={projectScans} activeScanKey={activeScanTab}
-                  onOpenScan={sc => activeSession && openScanFromTree(activeSession, sc)} onSetReference={sc => activeSession && setReference(activeSession, sc)} onFuse={() => setShowFuseModal(true)} />,
+                  onOpenScan={sc => activeSession && openScanFromTree(activeSession, sc)} onSetReference={sc => activeSession && setReference(activeSession, sc)} />,
                 report: activeSession && bimModels.length > 0 && segments.length > 0
                   ? <DeviationOverlay sessionId={activeSession} viewportRef={viewportRef} onClose={() => layout.setDockOpen(false)} />
                   : <EmptyState compact icon={<BarChart3 aria-hidden />} title={t('report.emptyTitle')} description={t('report.emptyDesc')} />,
@@ -2380,8 +2237,8 @@ function App() {
         <StatusBar serverAlive={serverAlive} connected={connected} sessionLabel={activeSession}
           scanLabel={activeScanRow ? `${activeScanRow.date} ${activeScanRow.label}` : null}
           message={statusMessage} epoch={epoch} storedEpochs={storedEpochs} cursor={cursor}
-          job={pipelineActiveHere && currentStage ? currentStage.label : correctionRunning ? t('jobs.correction') : tsdfRunning ? t('jobs.meshing') : null}
-          jobPct={pipelineActiveHere && currentStage ? currentStage.pct : correctionRunning ? correctionProgress?.pct ?? null : null}
+          job={pipelineActiveHere && currentStage ? currentStage.label : tsdfRunning ? t('jobs.meshing') : null}
+          jobPct={pipelineActiveHere && currentStage ? currentStage.pct : null}
           points={pointCount} fps={fps} consoleOpen={consoleOpen} onToggleConsole={() => setConsoleOpen(!consoleOpen)} />
       </div>
 
@@ -2398,12 +2255,16 @@ function App() {
           onClose={() => { setCallTarget(null); setIncomingCall(null) }} onIncomingHandled={() => setIncomingCall(null)} />
       )}
 
-      {showFuseModal && activeSession && (
-        <FuseScansModal project={activeSession} scans={projectScans} onClose={() => setShowFuseModal(false)} onStatus={setStatusMessage}
+      {fuseSession && (
+        <FuseScansModal project={fuseSession} scans={fuseSession === activeSession && projectScans.length ? projectScans : (allProjectScans[fuseSession] || [])}
+          onClose={() => setFuseSession(null)} onStatus={setStatusMessage}
           onFused={async () => {
-            const scans = await loadProjectScans(activeSession)
+            const sid = fuseSession
+            if (sid !== activeSession) { loadAllProjectScans([sid]); return }
+            // the loaded project opens its new fused scan as a tab
+            const scans = await loadProjectScans(sid)
             const fused = scans.filter(s => s.kind === 'fused').slice(-1)[0]
-            if (fused) activateScan(activeSession, { key: fused.key, label: fused.label, date: fused.date, kind: 'fused' })
+            if (fused) activateScan(sid, { key: fused.key, label: fused.label, date: fused.date, kind: 'fused' })
           }} />
       )}
 
@@ -2433,11 +2294,6 @@ function App() {
             if (d.ok) { setShowObjectLibrary(false); await viewportRef.current?.placeSceneObject(d.object) }
           } catch { report(t('library.addFailed'), 'err') }
         }} />
-
-      <CorrectionDialog open={showCorrectionModal} onClose={() => setShowCorrectionModal(false)} state={correctionState} report={correctionReport} running={correctionRunning} progress={correctionProgress}
-        segments={segments} selected={correctionSelected} onToggleSelected={id => setCorrectionSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}
-        overrideScale={correctionOverrideScale} onOverrideScale={setCorrectionOverrideScale} ledger={correctionLedger} artifacts={correctionArtifacts}
-        onRun={() => runCorrectionOp('objects')} onFloor={() => runCorrectionOp('floor')} onRevisit={() => runCorrectionOp('revisit')} epochs={correctionEpochs} onSelectEpoch={selectCorrectionEpoch} />
 
       <MeshingDialog open={showTsdfModal} onClose={() => setShowTsdfModal(false)} segments={segments} selected={tsdfSelected}
         onToggle={id => setTsdfSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}
