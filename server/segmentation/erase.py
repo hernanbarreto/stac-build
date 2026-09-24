@@ -730,15 +730,35 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
     # points are conserved (assigned_after − assigned_before == what left /
     # entered unsegmented). Any mismatch is reported, never swallowed.
     counts = np.bincount(classification, minlength=256)
+    # THE BYTE IS NOT THE INSTANCE ID. `write_classification` stores the ENCODED
+    # class (`class_map.json` → `class_of`): identity while every id fits in a
+    # byte, a compact 1..N index when they do not. This check read `counts[iid]`
+    # with the RAW id and therefore compared two different things on every
+    # session with ids above 255 — pccr 2026-09-23, ids up to 402: 88 loud
+    # "VERIFY FAILED" lines over data that balanced exactly (0 mismatches
+    # through the map, and the octree check agreed at 99.98 %). It also SKIPPED
+    # every id above 255, so the 48 instances most likely to be mis-encoded were
+    # the ones never verified. A check that cries wolf is worse than none: it
+    # teaches the reader to scroll past the real one.
+    # ONE reader of the map, the same the viewer, the propagation resume and the
+    # /segmentation endpoint use — `class_of` returns {} for a session written
+    # before the map existed, which means identity, exactly as those do.
+    from segmentation.republish import class_of as _class_of
+    _code = _class_of(output_dir)
     files_verified = True
     for inst in instances:
         iid = int(inst.get("instance_id", inst.get("id")))
-        if iid > 255:
-            continue
-        if int(counts[iid]) != len(inst.get("globalIndices") or []):
+        cls_code = _code.get(iid, iid)
+        if cls_code > 255:
             files_verified = False
-            print(f"[Erase] ⚠ VERIFY FAILED: class {iid} has "
-                  f"{int(counts[iid])} pts in classification.npy vs "
+            print(f"[Erase] ⚠ VERIFY FAILED: instance {iid} has no class byte "
+                  f"(map says {cls_code}) — the octree cannot paint it")
+            continue
+        if int(counts[cls_code]) != len(inst.get("globalIndices") or []):
+            files_verified = False
+            print(f"[Erase] ⚠ VERIFY FAILED: instance {iid} (class byte "
+                  f"{cls_code}) has {int(counts[cls_code])} pts in "
+                  f"classification.npy vs "
                   f"{len(inst.get('globalIndices') or [])} in result json")
     assigned_points_after = sum(
         len(i.get("globalIndices") or []) for i in instances)
