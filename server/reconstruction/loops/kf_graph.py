@@ -135,6 +135,28 @@ def _holdout_pairs(session, per_kf_points, offsets, stride, n_samp, max_nn_m, se
     return pairs
 
 
+def _odometry_sigma(pairs, T0):
+    """Per-link odometry σ (translation, rotation) measured from the held-out
+    pairs of the chain itself — the same derivation as the fork's in-run graph
+    (`_stac_odometry_sigma`): h/√d per link, (h/range)/√d of rotation, session
+    medians. None when no pair measured anything."""
+    st, sr = [], []
+    for f, g, p, q in pairs:
+        d = max(int(g) - int(f), 1)
+        h = float(np.median(np.linalg.norm(np.asarray(p) - np.asarray(q), axis=1)))
+        r = float(np.median(np.linalg.norm(np.asarray(q) - T0[g][:3, 3], axis=1)))
+        if not (np.isfinite(h) and np.isfinite(r) and r > 0):
+            continue
+        st.append(h / np.sqrt(d))
+        sr.append(np.degrees((h / r) / np.sqrt(d)))
+    if not st:
+        return None
+    rep = {"source": "held-out surface pairs (h/sqrt(d) per link; h/range for rotation)",
+           "session_median_m": float(np.median(st)), "session_median_deg": float(np.median(sr)),
+           "n_pairs": int(len(st)), "provenance": "tool_measured"}
+    return float(np.median(st)), float(np.median(sr)), rep
+
+
 def _held_pairs(pairs, X):
     """Per-held-out-pair disagreement (median NN distance) under the per-keyframe
     transforms X — the PAIRED sample `metric_lock.heldout_change` judges."""
@@ -224,7 +246,32 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     # and the loops can speak. Clamped both ways: no session makes the
     # odometry tighter than the configured floor, and one wild closure cannot
     # dissolve the chain.
-    sigma_odo_m = gc.sigma_odo_intra_m
+    #
+    # BASE (USER 2026-09-25, "sin números inventados"): the per-link σ is the
+    # chain's OWN held-out disagreement — a pair (f, f+d) disagrees by h on the
+    # surface both see, h/√d per link; over the range r of that surface it is
+    # (h/r)/√d of rotation. The session median of both. The constant
+    # sigma_odo_intra_m / sigma_odo_intra_deg are gone; a session whose held-out
+    # measures nothing cannot weigh its chain and returns IDENTITY, declared.
+    held = _holdout_pairs(session, per_kf, gc.holdout_offsets, gc.holdout_stride,
+                          gc.holdout_samples, gc.holdout_max_nn_m)
+    odo_meas = _odometry_sigma(held, T0)
+    if odo_meas is None:
+        report = {"version": 1, "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                  "verdict": "IDENTITY", "operator": operator, "n_kf": N,
+                  "n_loop_edges": len(loops), "n_loop_edges_active": 0,
+                  "s_metric_applied": s_metric,
+                  "identity_reason": "no held-out surface pair measures the chain — its "
+                                     "odometry cannot be weighed against the loop edges "
+                                     "(nothing is assumed in its place)",
+                  "gate_mode": gc.gate_mode, "gate_warnings": [],
+                  "elapsed_s": time.time() - t0}
+        (output_dir / REPORT_JSON).write_text(json.dumps(report, indent=1))
+        log(f"[kf-graph] IDENTITY: {report['identity_reason']}")
+        return report
+    sigma_odo_m, sigma_odo_deg, odo_rep = odo_meas
+    log(f"[kf-graph] odometry σ per link from {odo_rep['n_pairs']} held-out pair(s): "
+        f"{sigma_odo_m * 100:.2f} cm / {sigma_odo_deg:.3f}°")
     drift_rate = None
     drift_consensus = None
     if loops and N > 2:
@@ -254,7 +301,7 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
                 log(f"[kf-graph] odometry σ from the measured drift: "
                     f"{drift_rate * 100:.2f} cm/m over {D:.1f} m / {N - 1} links → "
                     f"{sigma_odo_m * 100:.1f} cm per link "
-                    f"(was {gc.sigma_odo_intra_m * 100:.1f} cm, {len(meas)} loop(s))")
+                    f"(held-out said {odo_rep['session_median_m'] * 100:.2f} cm, {len(meas)} loop(s))")
 
             # ── loops that measure the SAME stretch must agree ──────────────
             # pccr 2026-09-14: ten of eleven loops paired the end of the walk
@@ -297,14 +344,12 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
             drift_consensus = consensus
         else:
             log("[kf-graph] odometry σ: no loop measures a drift rate — "
-                f"keeping the configured {gc.sigma_odo_intra_m * 100:.1f} cm")
+                f"keeping the held-out {sigma_odo_m * 100:.2f} cm")
 
     drift_rep = None
     X_drift = None
 
-    gcfg = dict(sigma_odo_intra_m=sigma_odo_m, sigma_odo_intra_deg=gc.sigma_odo_intra_deg,
-                loop_sigma_rot_deg=gc.loop_sigma_rot_deg,
-                huber_delta_m=gc.huber_delta_m, huber_delta_deg=gc.huber_delta_deg,
+    gcfg = dict(huber_delta_m=gc.huber_delta_m, huber_delta_deg=gc.huber_delta_deg,
                 dense_max_unknowns=gc.dense_max_unknowns, lambda_init=gc.lambda_init,
                 lambda_max=gc.lambda_max, lm_diag_floor=gc.lm_diag_floor, tol=gc.tol,
                 rel_tol=gc.rel_tol, max_iters=gc.max_iters, pcg_tol=gc.pcg_tol,
@@ -315,7 +360,7 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
         pg = PoseGraph(T0, gcfg)
         for g in range(N - 1):
             Z = se3_inv(T0[g]) @ T0[g + 1]
-            pg.add_relative(g, g + 1, Z, gc.sigma_odo_intra_deg, sigma_odo_m,
+            pg.add_relative(g, g + 1, Z, sigma_odo_deg, sigma_odo_m,
                             huber=False, tag="odo")
         loop_ids = []
         for e in loops:
@@ -359,8 +404,6 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
                 srep["repeated_parallel"] = prep
         return pg, loop_ids, srep, plane_nodes
 
-    held = _holdout_pairs(session, per_kf, gc.holdout_offsets, gc.holdout_stride,
-                          gc.holdout_samples, gc.holdout_max_nn_m)
     I = np.tile(np.eye(4), (N, 1, 1))
     held_before_v = _held_pairs(held, I)
     held_before = float(np.median(held_before_v)) if held_before_v.size else float("nan")
@@ -410,7 +453,7 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
             f"for what it could not express")
         T_solved = np.einsum("nij,njk->nik", Xc, T0)
         fd = fit_drift(T_solved, loops, gc.drift_degree, gc.drift_iters,
-                       gc.odo_sigma_min_m, gc.sigma_odo_intra_deg,
+                       gc.odo_sigma_min_m, sigma_odo_deg,
                        gc.drift_max_step, gc.outlier_overlap_frac,
                        gc.drift_prior_rot_deg, gc.drift_prior_trans_m,
                        gc.drift_rel_tol, log=log)
@@ -527,8 +570,8 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
               "s_metric_applied": s_metric,
               # what the chain was allowed to bend, and why (provenance
               # tool_measured: both come from the loops, not from a constant)
-              "odometry": {"sigma_m": sigma_odo_m,
-                           "sigma_configured_m": gc.sigma_odo_intra_m,
+              "odometry": {"sigma_m": sigma_odo_m, "sigma_deg": sigma_odo_deg,
+                           "held_out": odo_rep,
                            "drift_rate_m_per_m": drift_rate,
                            "from_drift": bool(gc.odo_sigma_from_drift and drift_rate is not None),
                            "provenance": "tool_measured"},

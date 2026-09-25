@@ -2735,11 +2735,19 @@ correction_graph:
                                     # debe descartarse un duplicado detectado por SAM3": an
                                     # outlier keeps its vote, it just stops shouting, and the
                                     # factor lands in the report per edge.
-    sigma_odo_intra_m: 0.01         # odometry σ between consecutive keyframes of one chunk
-    sigma_odo_intra_deg: 0.20       # flat in the post-hoc graph (reconstruction/loops/kf_graph);
-                                    # the fork's in-run graph still adds the exact-seam residual
-                                    # and the two-copy uncertainty in quadrature at a seam
-    loop_sigma_rot_deg: 1.0         # rotation σ of a loop edge (translation σ is measured)
+                                    # NO sigma_odo_intra_m / sigma_odo_intra_deg /
+                                    # loop_sigma_rot_deg (USER 2026-09-25, "sin números
+                                    # inventados"). The chain's σ per link is MEASURED from the
+                                    # graph's own held-out pairs, per chunk (h/√d; h/range for
+                                    # rotation); a seam link adds the seam's measured residual.
+                                    # A loop edge's σ_rot is its measured σ_t over the lever arm
+                                    # of its correspondences. Why: on bufferStop the constant
+                                    # 1 cm composed with the two-copy disagreement of the SHARED
+                                    # frames (6.6 cm, handed to every frame by fallback) told the
+                                    # graph the chain was ~9 cm per link where it measures
+                                    # 1.3-1.7 cm, so eleven odometry-range bridges of 3-8 cm bent
+                                    # it and the held-out worsened 1.72→2.53 cm. A leftover key
+                                    # fails the load.
     huber_delta_m: 0.10             # Huber on loop + structural edges (odometry stays quadratic)
     huber_delta_deg: 2.0
     dense_max_unknowns: 12000       # 6·n_kf ≤ this (≈2000 keyframes) → dense Cholesky; beyond,

@@ -230,7 +230,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         _log = (lambda m: None) if quiet else log
         inst = (instance_edges(sess, cands_now, ccfg, cfg, log=_log,
                                sigma_floor_m=sigma_floor_m) if cands_now else [])
-        vis = visit_edges(sess, ccfg, ccert.visit_loops, cfg.graph.loop_sigma_rot_deg,
+        vis = visit_edges(sess, ccfg, ccert.visit_loops,
                           log=_log, sigma_floor_m=sigma_floor_m)
         return _subsample(inst, loop_density) + _subsample(vis, loop_density)
 

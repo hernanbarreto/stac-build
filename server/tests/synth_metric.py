@@ -504,8 +504,7 @@ def fork_scale_cfg(**over) -> dict:
 
 
 def fork_graph_cfg(**over) -> dict:
-    d = {"sigma_odo_intra_m": 0.01, "sigma_odo_intra_deg": 0.2, "loop_sigma_rot_deg": 1.0,
-         # mirrors config.yaml: the odometry σ is measured from the drift the
+    d = {# mirrors config.yaml: the odometry σ is measured from the drift the
          # loops see, and loops covering the same stretch must agree
          "odo_sigma_from_drift": False, "odo_sigma_min_m": 0.01, "odo_sigma_max_m": 0.50,
          "outlier_overlap_frac": 0.60, "outlier_mad_k": 3.0,

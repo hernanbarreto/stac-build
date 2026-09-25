@@ -310,7 +310,6 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print,
     up = -session.poses[:, :3, 1].mean(0); up = up / (np.linalg.norm(up) + 1e-12)
     Pu = np.outer(up, up)
     wb_rot = 1.0 / np.radians(vcfg.unobserved_sigma_deg) ** 2
-    wy_rot = 1.0 / np.radians(cfg.graph.loop_sigma_rot_deg) ** 2
     out, skipped = [], []
     for cand in candidates:
         if cand.get("verdict") not in ("loop", "ambiguous"):
@@ -409,7 +408,10 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print,
         Z = np.linalg.inv(Ti) @ np.linalg.inv(X) @ Tj
         R_i = Ti[:3, :3]
         info_t = _info_from_projection(sigma_t, float(vcfg.unobserved_sigma_m), mode, axis, R_i)
-        wy = wy_rot if full else wb_rot
+        # σ_rot is σ_t read over the lever arm: the copy's points as seen from
+        # the keyframe that carries the edge (no configured degree, 2026-09-25)
+        sigma_deg = _sigma_deg_over(sigma_t, session.xyz[idx_a], Ti[:3, 3])
+        wy = (1.0 / np.radians(sigma_deg) ** 2) if full else wb_rot
         info_rot = R_i.T @ (wy * Pu + wb_rot * (np.eye(3) - Pu)) @ R_i
         rot_deg = float(np.degrees(np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))))
         ks_a, ks_b = ks[np.abs(ks - i) <= int(vcfg.window_kf)], ks[np.abs(ks - j) <= int(vcfg.window_kf)]
@@ -422,7 +424,7 @@ def instance_edges(session, candidates: List[dict], ccfg, cfg, log=print,
                         shape=shape.shape, observability=mode,
                         observed_axis=(axis.tolist() if axis is not None else None), yaw_observed=bool(full),
                         s_ab=float(m["s_ab"]), copy_residual_m=float(m["residual_m"]), sigma_factors=factors,
-                        Z=Z, X=X, sigma_m=float(sigma_t), sigma_deg=float(cfg.graph.loop_sigma_rot_deg),
+                        Z=Z, X=X, sigma_m=float(sigma_t), sigma_deg=float(sigma_deg),
                         info_t=info_t, info_rot=info_rot))
         log(f"[loops-posthoc] instance {label}#{iid} ({cls}, {cand.get('verdict')}) kf {i}<->{j}: copies "
             f"{m['offset_before_m'] * 100:.1f} → {m['offset_after_m'] * 100:.1f} cm, closure |t| "
@@ -532,7 +534,20 @@ def _refine_region(session, rg: dict, joint: dict, ccfg, rng) -> dict:
     return out
 
 
-def visit_edges(session, ccfg, vcfg, loop_sigma_rot_deg: float, log=print,
+def _sigma_deg_over(sigma_t: float, points: np.ndarray, cam: np.ndarray) -> float:
+    """A translation error bar σ_t on surfaces ``range`` away from the camera
+    is σ_t/range of rotation — the same measurement read in angle. ``range`` is
+    the median distance of the points to the camera; with no points the edge
+    has no lever arm and the bar is left at the unobserved bound's scale
+    (returns None → caller uses wb)."""
+    pts = np.asarray(points, np.float64)
+    if pts.size == 0:
+        return float("nan")
+    r = float(np.median(np.linalg.norm(pts - np.asarray(cam, np.float64), axis=1)))
+    return float(np.degrees(float(sigma_t) / max(r, 1e-6)))
+
+
+def visit_edges(session, ccfg, vcfg, log=print,
                 sigma_floor_m: Optional[float] = None,
                 revisits: Optional[dict] = None) -> List[dict]:
     """Pose-graph loop edges from the revisited places: one edge per
@@ -595,7 +610,14 @@ def visit_edges(session, ccfg, vcfg, loop_sigma_rot_deg: float, log=print,
         info_t = _info_from_projection(sigma_t, float(vcfg.unobserved_sigma_m), mode, axis, R_i)
         Pu = np.outer(up, up)
         wb = 1.0 / np.radians(vcfg.unobserved_sigma_deg) ** 2
-        wy = (1.0 / np.radians(loop_sigma_rot_deg) ** 2) if cl.get("yaw_observed") else wb
+        # lever arm of the region: its block centre as seen from keyframe i
+        vol = rg.get("volume_m") or {}
+        centre = (np.asarray(vol["lo"], np.float64) + np.asarray(vol["hi"], np.float64)) / 2.0 \
+            if vol.get("lo") is not None and vol.get("hi") is not None else np.zeros((0, 3))
+        sigma_deg = _sigma_deg_over(sigma_t, centre[None, :] if centre.size else centre, Ti[:3, 3])
+        if not np.isfinite(sigma_deg):
+            sigma_deg = float(vcfg.unobserved_sigma_deg)
+        wy = (1.0 / np.radians(sigma_deg) ** 2) if cl.get("yaw_observed") else wb
         info_rot = R_i.T @ (wy * Pu + wb * (np.eye(3) - Pu)) @ R_i
         out.append({"i": i, "j": j, "region": rg.get("region"), "earlier_kfs": rg["earlier_kfs"],
                     "later_kfs": rg["later_kfs"], "accepted": True, "trusted": True,
@@ -611,7 +633,7 @@ def visit_edges(session, ccfg, vcfg, loop_sigma_rot_deg: float, log=print,
                     "duplicated": bool(rg.get("duplicated")), "shape": shape, "observability": mode,
                     "observed_axis": (axis.tolist() if axis is not None else None),
                     "yaw_observed": bool(cl.get("yaw_observed")), "source": "revisit", "bridge": -1,
-                    "Z": Z, "X": X, "sigma_m": float(sigma_t), "sigma_deg": float(loop_sigma_rot_deg),
+                    "Z": Z, "X": X, "sigma_m": float(sigma_t), "sigma_deg": float(sigma_deg),
                     "info_t": info_t, "info_rot": info_rot})
     for s in skipped:
         s.update({"accepted": False, "source": "revisit"})

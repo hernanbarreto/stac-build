@@ -39,6 +39,49 @@ mejor ni cerca que vggt"; the vendor single-chunk crash IS fixed in
 vendor/depth-anything-3, keep the patch). The code for all of these stays in
 the repo, selectable, OFF by default.
 
+## ⭐ THE CHAIN IS WORTH WHAT IT MEASURES — USER DECISION 2026-09-25
+**"criterio unificado y correcto, sin números inventados"** (after the SALAD
+gate's 5 m bar was replaced by his 1 m visit definition and the next bufferStop
+run came out NO better: 12 SALAD candidates entered, 11 of them intra-chunk
+pairs 1.2–3.7 m apart, the pose graph applied them — loop residual 94 → 2.8 cm —
+and its own held-out judge measured the chain got WORSE, 1.72 → 2.53 cm, CI
+entirely on the wrong side, applied anyway under advisory).
+
+THE MECHANISM was σ, not the gate. Each bridge is a ~40-frame mini-Omega with
+its own DA3 lock and enters with the σ of its exact fit (2.4–7.7 cm). The chain
+entered with `sigma_odo_intra_m` 1 cm composed with the TWO-COPY disagreement
+of the shared frames (6.6 cm — a SEAM quantity) handed to every frame, the 113
+non-shared ones by median fallback: ~9.4 cm per link, ~50 cm over 28 keyframes,
+where the chain's held-out inside a chunk measures 1.3–1.7 cm. Told the chain
+was 30× worse than it is, the graph bent it to satisfy measurements worse than
+what it already had. The 5 m gate had merely hidden this by never letting a
+short pair in.
+
+WIRED (fork `vggt_long.py` + post-hoc `reconstruction/loops/kf_graph.py` +
+`certify/loops_posthoc.py`):
+- **Odometry σ per link is MEASURED from the graph's own held-out pairs**,
+  computed BEFORE the graph: a pair (f, f+d) owned by one chunk disagrees by h
+  on the surface both see → h/√d per link; read over the range r of that
+  surface from the camera → (h/r)/√d of rotation. Median per chunk in the fork
+  (`_stac_odometry_sigma`, session median for a chunk with no pair), session
+  median post-hoc (`_odometry_sigma`). A seam link adds the seam's measured
+  residual in quadrature. The two-copy uncertainty no longer touches links. A
+  session whose held-out measures nothing returns IDENTITY and says so —
+  nothing is assumed in its place. Reported as `odometry_sigma` /
+  `odometry.held_out` in pose_graph.json / keyframe_graph.json.
+- **A loop edge's σ_rot is its σ_t over the lever arm of its correspondences**
+  (`measure_bridge.range_m`: median distance of the chunk-side points to the
+  window's cameras, the SHORTER side; a starved edge uses the baseline it
+  spans). Post-hoc instance edges use the copy's points from the keyframe,
+  revisit edges the region's block centre.
+- DELETED, a leftover FAILS the load: `correction_graph.graph.sigma_odo_intra_m`
+  (0.01), `sigma_odo_intra_deg` (0.20), `loop_sigma_rot_deg` (1.0).
+  `odo_sigma_from_drift` (OFF) still overrides σ_t when enabled; its clamps stay.
+- Rule 0 of the spatial gate stays at the user's `correction.visit_drift.
+  min_walk_m`; beyond it NOTHING is rejected by a distance — with the chain
+  weighed right, a bridge worse than the chain simply loses the vote, and the
+  2026-09-23 held-out judge says whether the geometry got better.
+
 ## ⭐ THE "CORRECTIONS" BUTTON IS GONE — USER DECISION 2026-09-24
 **"del apartado instances debe eliminarse el boton 'corrections' tanto de la
 ui como el codigo del backend pipeline"**. The correction is the automatic

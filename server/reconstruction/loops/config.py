@@ -203,9 +203,10 @@ class ScaleConfig:
 
 @dataclass(frozen=True)
 class GraphConfig:
-    sigma_odo_intra_m: float        # odometry σ between consecutive keyframes inside a chunk
-    sigma_odo_intra_deg: float
-    loop_sigma_rot_deg: float       # rotation σ of a loop edge (its translation σ is measured)
+    # NO sigma_odo_intra_m / sigma_odo_intra_deg / loop_sigma_rot_deg (USER
+    # 2026-09-25, "sin números inventados"): the chain's per-link σ is measured
+    # from the graph's own held-out pairs and a loop edge's σ_rot is its σ_t over
+    # the lever arm of its correspondences. A leftover key fails the load.
     odo_sigma_from_drift: bool      # derive the odometry σ from the MEASURED drift rate
     odo_sigma_min_m: float          # floor / ceiling of the derived odometry σ
     odo_sigma_max_m: float
@@ -654,10 +655,13 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
     if not isinstance(ho, (list, tuple)) or not ho or not all(isinstance(x, int) and x > 0 for x in ho):
         raise LoopsConfigError("correction_graph.graph.holdout_offsets must be a non-empty list "
                                "of positive integers")
+    for gone in ("sigma_odo_intra_m", "sigma_odo_intra_deg", "loop_sigma_rot_deg"):
+        if gone in gp:
+            raise LoopsConfigError(
+                f"config key {G}.{gone} must not exist: the odometry σ per link is "
+                f"measured from the graph's own held-out pairs and a loop edge's σ_rot "
+                f"from its σ_t over the lever arm of its correspondences (2026-09-25)")
     graph = GraphConfig(
-        sigma_odo_intra_m=_num(gp, "sigma_odo_intra_m", G, lo=0, lo_excl=True),
-        sigma_odo_intra_deg=_num(gp, "sigma_odo_intra_deg", G, lo=0, lo_excl=True),
-        loop_sigma_rot_deg=_num(gp, "loop_sigma_rot_deg", G, lo=0, lo_excl=True),
         odo_sigma_from_drift=_bool(gp, "odo_sigma_from_drift", G),
         odo_sigma_min_m=_num(gp, "odo_sigma_min_m", G, lo=0, lo_excl=True),
         odo_sigma_max_m=_num(gp, "odo_sigma_max_m", G, lo=0, lo_excl=True),
