@@ -480,7 +480,7 @@ def fork_loops_cfg(stac_server_dir: Optional[str] = None, **over) -> dict:
          "ambiguous_sigma_factor": 3.0, "nonstructural_sigma_factor": 2.0,
          "movable_labels": ["box", "person"], "min_shared_structural_labels": 1,
          "intra_chunk_loops": True, "bridge_extra_frames": 0,
-         "spatial": {"min_walk_m": 5.0, "drift_floor_m": 0.30, "drift_rate_m_per_m": 0.013,
+         "spatial": {"min_walk_m": 1.0, "drift_floor_m": 0.30, "drift_rate_m_per_m": 0.013,
                      "drift_floor_deg": 2.0, "drift_rate_deg_per_m": 0.10,
                      "frustum_tolerance_factor": 3.0, "frustum_margin_px": 4.0, "occlusion_tol_m": 0.30,
                      "min_depth_m": 0.3, "max_depth_m": 15.0, "min_frustum_frames": 2,
@@ -557,6 +557,9 @@ def raw_server_cfg(**over) -> dict:
     server/config.yaml; every key present)."""
     lp = fork_loops_cfg()
     sp = lp.pop("spatial")
+    # server-side there is no loops.spatial.min_walk_m: the gate reads the
+    # user's one definition of a visit, correction.visit_drift.min_walk_m
+    min_walk = sp.pop("min_walk_m")
     lp.pop("stac_server_dir")
     lp.pop("bridge_extra_frames")
     lp.pop("nonstructural_sigma_factor")      # lives in loops.semantic server-side
@@ -566,6 +569,7 @@ def raw_server_cfg(**over) -> dict:
         "structural": structural_cfg(),
         "certify": certify_cfg(),
         "witness": witness_cfg(),
+        "correction": {"visit_drift": {"min_walk_m": min_walk}},
         "loops": {"min_gap_keyframes": 30, "duplicate_min_sep_m": 0.20, "dbscan_eps_m": 0.15,
                   "dbscan_min_samples": 20, "cluster_min_points": 300, "bridge_extra_frames": 4,
                   "coverage_radius_m": 5.0, "min_coverage": 0.5,

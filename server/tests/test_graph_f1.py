@@ -271,6 +271,22 @@ def test_missing_key_names_the_key():
         load_loops_config(raw_server_cfg(**{"correction_graph.loop.starved_sigma_m": 0.01}))
 
 
+def test_the_walk_bar_is_the_users_one_definition_of_a_visit():
+    """USER 2026-09-25 ("criterio unificado y correcto, sin números
+    inventados"): the SALAD gate's rule 0 reads correction.visit_drift.min_walk_m
+    — there is no loops.spatial.min_walk_m, and one left there fails the load
+    instead of silently winning over the other definition."""
+    cfg = load_loops_config(raw_server_cfg(**{"correction.visit_drift.min_walk_m": 0.7}))
+    assert cfg.loops.spatial.min_walk_m == 0.7
+    with pytest.raises(LoopsConfigError, match="loops.spatial.min_walk_m must not exist"):
+        load_loops_config(raw_server_cfg(**{"loops.spatial.min_walk_m": 5.0}))
+    with pytest.raises(LoopsConfigError, match="correction.visit_drift.min_walk_m"):
+        load_loops_config(raw_server_cfg(**{"correction.visit_drift.min_walk_m": None}))
+    # and the fork receives the derived value inside Model.loops.spatial
+    from reconstruction.loops.config import fork_model_loops
+    assert fork_model_loops(cfg, "/x")["spatial"]["min_walk_m"] == 0.7
+
+
 def test_production_yaml_loads_and_flattens():
     import yaml
     raw = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())

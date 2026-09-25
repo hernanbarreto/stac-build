@@ -582,8 +582,14 @@ with a measurement, not to retune it.**
   (`correction.visit_drift`, 2026-09-18, written down in the session's
   `output/reproject/CRITERIOS.md`): `min_points`, `min_walk_m` (two
   visits under a metre of WALK apart are one pass with an occlusion in the
-  middle), and `min_visit_share`, today **0.0** — NOTHING is dropped for this
-  reason. USER 2026-09-22: *"no limites la cantidad de cierres y anclas nada, si
+  middle — SINCE 2026-09-25 THE ONE DEFINITION OF A VISIT IN THE WHOLE
+  SYSTEM: the SALAD spatial gate's rule 0 reads this same key. Its own
+  `loops.spatial.min_walk_m: 5.0` was invented, never in this ledger, and on
+  bufferStop's 12.7 m walk it rejected all 12 SALAD candidates, 1.2–3.7 m
+  apart, before geometry saw one. USER: *"criterio unificado y correcto, sin
+  números inventados"* → the key is gone, a leftover fails the load, what
+  passes the bar is judged by frustum/corridor/σ only), and `min_visit_share`,
+  today **0.0** — NOTHING is dropped for this reason. USER 2026-09-22: *"no limites la cantidad de cierres y anclas nada, si
   hay duplicados cuanto mas mejor"* + *"si elimina muchos puntos que no elimine
   porque sino los erosiona demasiado"*. A weak closure is now priced by its own
   sigma (the tangential residual), not rejected by a share. (History, and why

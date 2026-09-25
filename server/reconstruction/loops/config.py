@@ -86,10 +86,15 @@ class LoopEdgeConfig:
 
 @dataclass(frozen=True)
 class SpatialGateConfig:
-    min_walk_m: float               # a pair whose keyframes are closer than this ALONG THE WALK
-                                    # is odometry, not a revisit: the camera never left, so
-                                    # "returning" observes nothing the chain does not already
-                                    # know. Rejected before any frustum work
+    min_walk_m: float               # NOT a key of loops.spatial: it is the USER's one definition
+                                    # of "two visits", `correction.visit_drift.min_walk_m` (two
+                                    # passes under this much WALK apart are one pass with an
+                                    # occlusion in between). A pair closer than that along the
+                                    # walk is the same pass, not a revisit — rejected before any
+                                    # frustum work. Anything farther is judged by geometry
+                                    # (frustum, corridor, the edge's own σ), never by a distance
+                                    # (USER 2026-09-25: "criterio unificado y correcto, sin
+                                    # números inventados" — the gate's own 5.0 m is gone)
     drift_floor_m: float
     drift_rate_m_per_m: float
     frustum_tolerance_factor: float  # factor × δ(L) the frustum rule tolerates
@@ -533,8 +538,21 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
     if not isinstance(sp, dict):
         raise LoopsConfigError("config section loops.spatial is missing")
     S = "loops.spatial"
+    # ONE definition of "two visits" for the whole system (USER 2026-09-25):
+    # the gate reads the correction module's own bar instead of carrying a
+    # second number. A leftover loops.spatial.min_walk_m is refused, not
+    # ignored — two definitions is exactly the bug.
+    if "min_walk_m" in sp:
+        raise LoopsConfigError(
+            "config key loops.spatial.min_walk_m must not exist: the SALAD gate "
+            "reads correction.visit_drift.min_walk_m (one definition of a visit)")
+    vd = (raw.get("correction") or {}).get("visit_drift") \
+        if isinstance(raw.get("correction"), dict) else None
+    if not isinstance(vd, dict):
+        raise LoopsConfigError("config section correction.visit_drift is missing "
+                               "(the SALAD gate reads its min_walk_m)")
     spatial = SpatialGateConfig(
-        min_walk_m=_num(sp, "min_walk_m", S, lo=0),
+        min_walk_m=_num(vd, "min_walk_m", "correction.visit_drift", lo=0),
         drift_floor_m=_num(sp, "drift_floor_m", S, lo=0),
         drift_rate_m_per_m=_num(sp, "drift_rate_m_per_m", S, lo=0),
         frustum_tolerance_factor=_num(sp, "frustum_tolerance_factor", S, lo=1.0),

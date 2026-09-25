@@ -319,12 +319,14 @@ def gate_frame_pair(i: int, j: int, view, cfg,
     c = _cfg(cfg)
     L = walked_length_m(view.centres(), i, j)
     budget = drift_budget(L, c, budget_override)
-    # Rule 0 — the walk itself. A retrieval pair whose two keyframes are only
-    # metres apart ALONG THE TRAJECTORY is odometry wearing a revisit's clothes:
-    # the camera never left, so the pair observes nothing the chain does not
-    # already carry, and closing it stiffens a stretch that was never in doubt
-    # while the real long-range closure is absorbed. Measured alongside the
-    # others so every rule's numbers are in the record, whichever one fires.
+    # Rule 0 — the walk itself. Two keyframes under the USER's definition of a
+    # visit apart (`correction.visit_drift.min_walk_m`, the same bar the
+    # correction module uses) are the same pass with an occlusion in between,
+    # not a revisit: the pair observes nothing the chain does not already
+    # carry. Anything farther is a candidate and GEOMETRY decides (frustum,
+    # corridor, the edge's own σ) — there is no distance bar of the gate's own
+    # (USER 2026-09-25). Measured alongside the others so every rule's numbers
+    # are in the record, whichever one fires.
     min_walk = float(c["min_walk_m"])
     walk_ok = L >= min_walk
     fr = frustum_reciprocal(i, j, view, c, budget["delta_m"], budget["theta_deg"])

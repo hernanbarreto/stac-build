@@ -2222,7 +2222,10 @@ correction:
                                  # sigma medida, no un umbral.
     min_walk_m: 1.0              # two visits closer than this along the WALK
                                  # are one pass with an occlusion in between;
-                                 # nothing accumulates in that distance
+                                 # nothing accumulates in that distance.
+                                 # THE ONE DEFINITION OF A VISIT (USER 2026-09-25):
+                                 # the SALAD spatial gate (loops.spatial rule 0)
+                                 # reads this same key; it has no bar of its own.
     voxel_m: 0.10                # the grid the COMMON REGION is decided on: per
                                  # voxel, which visits SAW it (their masks, checked
                                  # against a per-keyframe Z-buffer). USER
@@ -3096,13 +3099,13 @@ loops:                              # candidate detector + spatial gate (§4.4/�
                                     # of an accepted loop endpoint counts as covered
   min_coverage: 0.5                 # below this the acta declares it and the kit shows it
   spatial:                          # §4.5 — SAM3/SALAD propose, geometry decides
-    min_walk_m: 5.0                 # rule 0: a pair whose two keyframes are closer than this
-                                    # ALONG THE TRAJECTORY is odometry, not a revisit — the camera
-                                    # never left, so closing it stiffens a stretch that was never
-                                    # in doubt while the real long-range closure is absorbed. The
-                                    # keyframe band above is a prefilter over indices; this is the
-                                    # same rule measured in metres, once the provisional chain
-                                    # exists. Rejected before any frustum work.
+                                    # rule 0 (the walk) has NO key here: it is the USER's one
+                                    # definition of "two visits", correction.visit_drift.min_walk_m
+                                    # (USER 2026-09-25: "criterio unificado y correcto, sin
+                                    # números inventados"). The gate's own 5.0 m was invented and
+                                    # on bufferStop (12.7 m walk) it rejected all 12 SALAD
+                                    # candidates (1.2–3.7 m) before geometry saw one. A leftover
+                                    # min_walk_m under this block FAILS the load.
     drift_floor_m: 0.30             # δ(L) = max(floor, rate·L): measured Omega drift 1.3 cm/m
     drift_rate_m_per_m: 0.013
     drift_floor_deg: 2.0            # θ(L) = max(floor, rate·L)
