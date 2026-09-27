@@ -1847,6 +1847,32 @@ reconstruction:
     calib_min_depth: 0.3               # min depth for calibration
     da3_max_range: 20.0                # clip max DA3 calibrated depth
 
+  # ── PRECISION PIPELINE (claude_stac.txt §3–§4; USER DECISION 2026-09-26) ─────
+  # One section per stage (F0..F9); the loader precision/config.py fails on any
+  # missing key. Every value that decides is tagged in its comment:
+  #   BOUND         — a cap/limit, deliberately generous, never a verdict
+  #   MEASURED      — replaced by a measurement at run time (the key seeds it)
+  #   USER DECISION — the user's own criterion, with the date
+  precision:
+    enabled: true
+    # F0 — session camera + exact grid-to-native mappings (precision/camera.py)
+    camera:
+      model: OPENCV                     # [fx, fy, cx, cy, k1, k2, p1, p2] in native pixels
+      init_from: auto                   # auto = Stray camera_matrix.csv when present, else omega
+      fx_spread_warn_pct: 2.0           # BOUND: per-frame omega focal spread (robust σ / median,
+                                        # %) above which camera.json carries an advisory warning
+      aspect_tol: 0.002                 # BOUND: relative pixel-aspect disagreement tolerated when
+                                        # a K is carried between two resolutions of one sensor
+      undistort_max_iter: 200           # BOUND: iteration cap of cv2.undistortPointsIter (point
+                                        # undistortion "to convergence", not cv2's default 5)
+      undistort_eps_px: 1.0e-12         # BOUND: the undistortion stops when a point's lens
+                                        # reprojection moves less than this (native px)
+    # F9 — runner (declared here so every stage heartbeats the same way)
+    runner:
+      heartbeat_s: 20                   # BOUND: seconds between progress lines of a long stage
+      perf_checkpoint_s: 180            # BOUND: seconds into a GPU stage at which the measured
+                                        # rate is compared with the expected one (abort with reason)
+
 
 # ── Post-Processing (CloudCompPy) ──────────────────────────────────
 # ── DINOv3 feature plan (USER 2026-09-04: 4 fases; ALL CODE IN, ALL OFF —
