@@ -156,3 +156,41 @@ def stop_semantic_service(pipe: Optional["WorkerPipe"] = None, stage: str = "",
             _say(f"[gpu] vLLM stopped — {free:.0f} GB VRAM free")
     except Exception as e:  # noqa: BLE001
         _say(f"[gpu] could not stop vLLM ({e}) — continuing with shared GPU")
+
+
+VLLM_PROCESS_PATTERN = "vllm serve"      # what stop_semantic_service kills and pgrep looks for
+
+
+def vllm_pids() -> list:
+    """PIDs of every process whose command line matches ``vllm serve`` (pgrep -f),
+    [] when none. RuntimeError when pgrep itself cannot run — a check that could
+    not look is not a check that found nothing."""
+    import subprocess
+    try:
+        out = subprocess.run(["pgrep", "-f", VLLM_PROCESS_PATTERN], capture_output=True,
+                             text=True)
+    except OSError as e:
+        raise RuntimeError(f"cannot verify the GPU handover: pgrep failed to run ({e})") from e
+    if out.returncode not in (0, 1):
+        raise RuntimeError(f"cannot verify the GPU handover: pgrep -f '{VLLM_PROCESS_PATTERN}' "
+                           f"exited {out.returncode} ({out.stderr.strip()})")
+    return [int(p) for p in out.stdout.split() if p.strip().isdigit()]
+
+
+def stop_semantic_service_verified(pipe: Optional["WorkerPipe"] = None, stage: str = "",
+                                   log=None) -> dict:
+    """:func:`stop_semantic_service`, then VERIFY no ``vllm serve`` process is left
+    (stop_semantic_service swallows its own failures and, after its wait, logs
+    "vLLM stopped" without looking again). Raises RuntimeError naming the PIDs
+    still alive — a stage that needs the whole GPU must not start on a shared one.
+    Returns the check for the caller's report: ``{"service_stopped": True,
+    "check": "pgrep -f 'vllm serve'", "remaining_pids": [], "free_gb": float|None}``."""
+    stop_semantic_service(pipe, stage=stage, log=log)
+    left = vllm_pids()
+    if left:
+        raise RuntimeError(
+            f"{stage or 'this stage'} needs the GPU without the semantic service, but "
+            f"{len(left)} '{VLLM_PROCESS_PATTERN}' process(es) are still running after the "
+            f"stop (PIDs {left}) — stop them (pkill -f '{VLLM_PROCESS_PATTERN}') and re-run")
+    return {"service_stopped": True, "check": f"pgrep -f '{VLLM_PROCESS_PATTERN}'",
+            "remaining_pids": [], "free_gb": gpu_free_gb()}

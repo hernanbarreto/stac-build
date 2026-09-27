@@ -51,12 +51,23 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if server_dir not in sys.path:
         sys.path.insert(0, server_dir)
 
+    # Frame selection 'parallax_lk' (reconstruction.simple.frame_selection, claude_stac.txt
+    # §4-F1) owns the frame quality too: intake I0 measures FEATURES (no percentile cull)
+    # and writes frames/frame_quality.json itself in the legacy shape, so the blur
+    # analysis below must not overwrite it. Resolved here, before Step 1; an unknown
+    # value fails now, naming itself.
+    _parallax_lk = _resolve_frame_selection(recon_cfg) == "parallax_lk"
+
     # ── Step 1: Frame quality analysis (blur detection) ──
     # Toggleable via reconstruction.blur_filter (default ON). OFF = keep ALL frames,
     # no Laplacian cull, no frame_quality.json gating in Step 2.
     blur_on = bool(recon_cfg.get("blur_filter", True))
     fq_path = frames_dir / "frame_quality.json"
-    if not blur_on:
+    if _parallax_lk:
+        pipe.send_log("Frame selection 'parallax_lk' → frame quality comes from intake I0 "
+                      "(frames/quality_features.json + legacy frame_quality.json) — "
+                      "skipping the blur analysis")
+    elif not blur_on:
         pipe.send_log("Blur filter OFF (reconstruction.blur_filter: false) — keeping ALL frames")
     elif not replace and fq_path.exists():
         pipe.send_log("Reusing existing frame_quality.json (replace=off — skipping blur analysis)")
@@ -84,12 +95,20 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     _simple_cfg = recon_cfg.get("simple") or {}
     _simple_on = bool(_simple_cfg.get("enabled", False))
     if _simple_on and mode not in ("fps", "motion"):
-        _sel = str(_simple_cfg.get("frame_selection", "motion")).lower()
+        # parallax_lk | motion | fps | dino | hf — anything else is a RuntimeError naming
+        # the value (the old coercion turned every other value into a silent 'motion').
+        _sel = _resolve_frame_selection(recon_cfg)
         pipe.send_log(f"SIMPLE pipeline ON → frame selection '{_sel}' "
                       f"overrides frames_selector '{mode}'")
-        mode = _sel if _sel in ("fps", "motion") else "motion"
+        mode = _sel
     sf_path = frames_dir / "selected_frames.json"
-    if not replace and sf_path.exists():
+    if mode == "parallax_lk":
+        # Intake I0 → I1 → I2 in-process (CPU; I2's VLM / SAM3 only when
+        # intake.content.enabled). replace on or off, the intake's marker decides step
+        # by step what is already measured (intake/run.py): nothing measured is redone,
+        # a missing or incomplete step runs.
+        _run_intake_selection(pipe, session_path, frames_dir, config, replace)
+    elif not replace and sf_path.exists():
         pipe.send_log("Reusing existing selected_frames.json (replace=off)")
     elif mode == "fps":
         # Temporal sampling: keep ~target_fps frames of the blur-valid set, spaced by
@@ -189,6 +208,14 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         pipe.send_progress(5, "Selecting keyframes (blur + DINO cosine)...", stage="reconstruction")
         sel = select_keyframes(str(frames_dir), config.get("frame_selection", {}))
         pipe.send_log(f"Selected {sel['selected_count']}/{sel['total_frames']} keyframes (dino)")
+    elif mode == "hf":
+        # The legacy H/F-ratio selector (ORB-SLAM style), selectable by name
+        # (claude_stac.txt §4-F1). NO FALLBACK, the dino pattern: it writes
+        # selected_frames.json itself and its failure is the stage's failure.
+        from frames.selector import select_keyframes_hf
+        pipe.send_progress(5, "Selecting keyframes (blur + H/F ratio)...", stage="reconstruction")
+        sel = select_keyframes_hf(str(frames_dir), config.get("frame_selection", {}))
+        pipe.send_log(f"Selected {sel['selected_count']}/{sel['total_frames']} keyframes (hf)")
     elif mode == "parallax":
         # GEOMETRIC keyframe selection for the SLAM backbone: triangulation angle, not
         # appearance. Needs per-frame depth+pose → DA3 runs depth-only on ALL blur-valid
@@ -275,7 +302,21 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         fcfg = dict(config.get("frame_selection", {}) or {})
         _dense_thr = fcfg.get("dino_threshold_dense", 0.99)
         _dpath = frames_dir / "da3_frames.json"
-        if mode == "dino" and blur_on:
+        if mode == "parallax_lk":
+            # The witness frames ARE the dense set (claude_stac.txt §3: keyframes for
+            # Ω / BA, witnesses for depth): witness_frames.json ∪ selected_frames.json,
+            # regardless of blur_filter (intake I0 replaced the blur cull). DECLARED:
+            # witnesses have no cap (§4-F1), and every legacy consumer of this file
+            # runs over ALL of them — the dense BA tracking (bundle_adjust, off) and
+            # the mapanything backend's non-cond DA3 set. The production vggtomega path
+            # does not read it (its DA3 anchors come from the keyframes).
+            _dpath, _doc = _write_intake_da3_frames(frames_dir)
+            da3_dense_frames_path = str(_dpath)
+            pipe.send_log(f"DA3-dense set: {_doc['selected_count']} frames = "
+                          f"{_doc['n_witness']} witness ∪ {_doc['n_keyframes']} keyframes "
+                          f"of {_doc['total_frames']} (parallax_lk) → da3_frames.json — a "
+                          f"legacy DA3 / dense-BA consumer runs over all of them")
+        elif mode == "dino" and blur_on:
             from frame_selector import dino_select_keyframes
             fcfg["dino_threshold"] = _dense_thr     # 0.99 — denser than the 0.98 keyframes
             # segment_id="dense" → writes selected_frames_segdense.json (a throwaway), NOT the main
@@ -1434,7 +1475,8 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap
     pipe.send_log(f"[omega-depth] wrote {n_written} per-frame omega depths for scale align")
 
 
-from workers.base import gpu_free_gb as _gpu_free_gb, stop_semantic_service
+from workers.base import (gpu_free_gb as _gpu_free_gb, stop_semantic_service,
+                          stop_semantic_service_verified)
 
 
 def _motion_keyframes(frames_dir: Path, quantum: float):
@@ -1470,6 +1512,180 @@ def _motion_keyframes(frames_dir: Path, quantum: float):
     if window:                      # tail: whatever motion was left still gets a view
         _flush(window)
     return chosen, len(entries), soft[0]
+
+
+# ── frame selection 'parallax_lk' (intake I0 → I1 → I2; claude_stac.txt §4-F1) ──
+
+FRAME_SELECTIONS = ("parallax_lk", "motion", "fps", "dino", "hf")
+
+
+def _resolve_frame_selection(recon_cfg: dict) -> str:
+    """The effective frame-selection mode of a reconstruction config (pure, no I/O).
+
+    ``reconstruction.frames_selector`` (legacy: none | stride | dino | parallax | fps |
+    motion) — unless the SIMPLE pipeline is on and that selector is neither fps nor
+    motion: then ``reconstruction.simple.frame_selection`` overrides it and must be one
+    of FRAME_SELECTIONS. Any other value, or a missing key, is a RuntimeError naming
+    it. Until 2026-09-27 anything but fps|motion was coerced to 'motion' silently, so
+    dino/hf could never be chosen from the SIMPLE block and a typo ran the wrong
+    selector without a word.
+
+    DELIBERATE CONTRACT CHANGE (2026-09-27): with the SIMPLE pipeline on, the key is
+    MANDATORY — the old code defaulted a missing key to 'motion'. A session YAML or a
+    config without it now fails at Step 1 for every backend, naming the key: that is
+    a configuration error to fix, not a regression (the repo rule: no silent
+    default). config.yaml carries it (parallax_lk)."""
+    recon_cfg = recon_cfg or {}
+    mode = str(recon_cfg.get("frames_selector", "none")).lower()
+    simple = recon_cfg.get("simple") or {}
+    if not bool(simple.get("enabled", False)) or mode in ("fps", "motion"):
+        return mode
+    if "frame_selection" not in simple:
+        raise RuntimeError("reconstruction.simple.frame_selection is missing — set one of "
+                           f"{FRAME_SELECTIONS} (there is no silent default)")
+    sel = str(simple.get("frame_selection")).lower()
+    if sel not in FRAME_SELECTIONS:
+        raise RuntimeError(f"reconstruction.simple.frame_selection = {sel!r} is not a frame "
+                           f"selection — valid: {FRAME_SELECTIONS}")
+    return sel
+
+
+def _ensure_semantic_or_fail(pipe: WorkerPipe, config: dict) -> None:
+    """Intake I2 (VLM content tags) needs the semantic service: healthcheck, auto-start
+    and wait exactly as the VLM worker does (semantic.service.ensure_service). When it
+    does not come up the stage FAILS with the reason the service reported — the intake
+    never tags nothing and calls it done."""
+    from semantic.service import ensure_service
+    said = []
+
+    def _log(m):
+        said.append(str(m))
+        pipe.send_log(m)
+
+    svc = (config.get("semantic") or {}).get("service") or {}
+    pipe.send_progress(4, "Intake I2: semantic service (Qwen3-VL) for the content tags...",
+                       stage="reconstruction")
+    if ensure_service(config, log=_log, cancelled=pipe.check_cancel):
+        return
+    if pipe.check_cancel():
+        raise RuntimeError("cancelled while waiting for the semantic service (intake I2)")
+    reason = said[-1] if said else "ensure_service returned False without a message"
+    raise RuntimeError(
+        f"intake I2 (content tags; intake.content.enabled: true) needs the semantic service "
+        f"at http://{svc.get('host', '127.0.0.1')}:{svc.get('port', 8799)} and it is not "
+        f"reachable — {reason}. Start it (bash scripts/serve_semantic.sh) or set "
+        f"intake.content.enabled: false; the intake does not fall back to untagged frames")
+
+
+def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path,
+                          config: dict, replace: bool) -> None:
+    """Frame selection 'parallax_lk': intake I0 → I1 → I2 in-process.
+
+    ALWAYS through intake.run.run_intake and its marker (<session>/intake/
+    intake_state.json): a step whose parameters, frame inventory and upstream
+    inputs match the marker is skipped — nothing already measured is re-measured
+    or overwritten — and a step that is missing or incomplete runs. So replace=off
+    reuses a finished intake as-is, and a previous run that died in I2 (the
+    semantic service did not come up, SAM3 failed) gets its I2 on the retry
+    instead of silently going on without content tags or exclusion masks (the old
+    shortcut reused selected_frames.json + witness_frames.json without reading the
+    marker). With intake.content.enabled the semantic service is ensured right
+    before I2 runs (a service that does not come up fails the stage with the
+    reason) and stopped — and verified gone — after the last tag, before the first
+    SAM3 call. A cancel is honoured inside every intake loop
+    (intake.quality.IntakeCancelled names where)."""
+    from intake.config import load_intake_config
+    from intake.run import run_intake
+
+    pipe.send_log(f"Frame selection 'parallax_lk' (replace={'on' if replace else 'off'}): the "
+                  f"intake marker decides step by step what is already measured")
+    icfg = load_intake_config(config)
+    pipe.send_progress(3, "Intake: quality features → parallax keyframes → content tags...",
+                       stage="reconstruction")
+    # GPU exclusivity (the SAM3 stage's own rule, workers/sam3_worker.py): vLLM serves
+    # the I2 tags, then is stopped BEFORE SAM3 segments the exclusion masks — the two
+    # never share the card, and the stop is VERIFIED (no 'vllm serve' left) before
+    # SAM3 loads; the next VLM consumer restarts it (ensure_service).
+    res = run_intake(session_path, icfg, log=pipe.send_log, progress=None,
+                     before_content=lambda: _ensure_semantic_or_fail(pipe, config),
+                     before_sam3=lambda: stop_semantic_service_verified(
+                         pipe, stage="intake I2 SAM3"),
+                     cancelled=pipe.check_cancel)
+    ran = [k for k, v in res["steps"].items() if v.get("ran")]
+    pipe.send_log(f"Intake steps run this time: {ran or 'none (every marker matched)'}")
+    s = res["summary"]
+    if s["n_keyframes"] < 2:
+        # two views is the structural minimum of a multi-view reconstruction (the fps
+        # and motion branches stop at the same count)
+        raise RuntimeError(f"parallax_lk selection produced {s['n_keyframes']} keyframe(s) "
+                           f"(quantum {icfg.parallax.parallax_quantum_px:g} px of measured "
+                           f"parallax) — not enough to reconstruct; see "
+                           f"{res['artifacts']['coverage_warnings']}")
+    pipe.send_log(f"Frame set: {s['n_keyframes']}/{s['n_frames']} keyframes (parallax_lk, "
+                  f"quantum {icfg.parallax.parallax_quantum_px:g} px), {s['n_witness']} witness "
+                  f"frames, {s['n_warnings']} coverage warning(s) → selected_frames.json / "
+                  f"witness_frames.json")
+
+
+def _intake_da3_frames(frames_dir: Path) -> dict:
+    """da3_frames.json for frame selection 'parallax_lk': the witness frames ∪ the
+    keyframes (frames/witness_frames.json ∪ frames/selected_frames.json, both written by
+    intake I1; keyframes ⊂ witnesses by construction, the union guards the contract).
+    v2 frame-list shape (``version`` "2.0", method 'parallax_lk_witness') plus the
+    artifact stamps (provenance, geometry_epoch, camera_epoch — carried over from the
+    intake's selected_frames.json — and intake_version); extra keys every v2 reader
+    ignores. ``total_frames`` is COUNTED on disk (the frame inventory) and must equal
+    what both intake documents recorded. RuntimeError naming a missing file or key, or
+    an inventory that disagrees."""
+    from intake.quality import QualityError, list_frames
+    docs = {}
+    for name in ("selected_frames.json", "witness_frames.json"):
+        p = frames_dir / name
+        if not p.exists():
+            raise RuntimeError(f"{p} does not exist — intake I1 did not run")
+        doc = json.loads(p.read_text())
+        for key in ("selected_files", "total_frames"):
+            if key not in doc:
+                raise RuntimeError(f"{p} lacks '{key}' (the v2 frame-list contract)")
+        if not isinstance(doc["selected_files"], list):
+            raise RuntimeError(f"{p} 'selected_files' is not a list (the v2 frame-list "
+                               f"contract)")
+        docs[name] = doc
+    sel = docs["selected_frames.json"]
+    for key in ("provenance", "geometry_epoch", "camera_epoch"):
+        if key not in sel:
+            raise RuntimeError(f"{frames_dir / 'selected_frames.json'} lacks '{key}' — it "
+                               f"was not written by intake I1 (re-run the intake)")
+    try:
+        total = len(list_frames(frames_dir))
+    except QualityError as e:
+        raise RuntimeError(str(e)) from e
+    for name, doc in docs.items():
+        if int(doc["total_frames"]) != total:
+            raise RuntimeError(f"{frames_dir / name} records total_frames "
+                               f"{doc['total_frames']} but {frames_dir} holds {total} frame(s) "
+                               f"— the intake ran on another frame inventory; re-run it")
+    kf = sel["selected_files"]
+    wit = docs["witness_frames.json"]["selected_files"]
+    files = sorted(set(kf) | set(wit), key=lambda f: int(os.path.splitext(f)[0]))
+    return {"version": "2.0", "method": "parallax_lk_witness", "total_frames": total,
+            "selected_count": len(files), "selected_files": files,
+            "provenance": sel["provenance"], "geometry_epoch": int(sel["geometry_epoch"]),
+            "camera_epoch": int(sel["camera_epoch"]),
+            "intake_version": docs["witness_frames.json"].get("version"),
+            "n_keyframes": len(kf), "n_witness": len(wit)}
+
+
+def _write_intake_da3_frames(frames_dir: Path) -> tuple:
+    """Build :func:`_intake_da3_frames` and write frames/da3_frames.json atomically
+    (tmp + os.replace — a reader never sees half a file). Returns (path, doc)."""
+    doc = _intake_da3_frames(frames_dir)
+    path = frames_dir / "da3_frames.json"
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump(doc, f)
+    os.replace(tmp, path)
+    return path, doc
 
 
 def _run_da3_anchor(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,

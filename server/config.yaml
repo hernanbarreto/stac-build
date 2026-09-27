@@ -182,6 +182,9 @@ phase4:
   enabled: true                       # disableable; when off, no frame is filtered
   sample_stride: 1                    # frame subsampling for the pre-filter
   escalate_to_vlm: true               # false -> classical only, ambiguous kept+flagged
+  # 4A keys below: SUPERSEDED by intake.quality (claude_stac.txt §2 / §4-F1). Read only by
+  # the stand-alone CLI `python -m phase4_qc.cli prefilter` (no pipeline stage calls it);
+  # they leave with that module in F9.
   blur_keep_above: 120.0              # Laplacian variance: clearly sharp -> keep (no VLM)
   blur_drop_below: 25.0               # clearly blurred -> drop (no VLM, logged)
   brightness_lo: 40.0                 # mean-luma acceptable band (0..255)
@@ -604,6 +607,139 @@ frame_selection:
                                        # which we try to rescue an anchor.
   rescue_min_sharpness_frac: 0.6       # min sharpness of a rescued frame, as a fraction of the
                                        # blur threshold (worst of laplacian/fft). Below it → leave the gap.
+
+
+# ── INTAKE (claude_stac.txt §3 I0–I2, §4-F1; USER DECISION 2026-09-26) ──────────
+# The frames enter the pipeline here: I0 quality FEATURES (no percentile gate),
+# I1 keyframes by MEASURED parallax + witness frames, I2 VLM content tags + SAM3
+# exclusion masks. Typed loader intake/config.py fails on any missing key.
+# Every value that decides is tagged in its comment:
+#   BOUND         — a cap/limit, deliberately generous, never a verdict
+#   MEASURED      — replaced by a measurement at run time (the key seeds it)
+#   USER DECISION — the user's own criterion, with the date
+intake:
+  runtime:
+    heartbeat_s: 20.0                  # BOUND: seconds between progress lines of a long loop
+  quality:                             # I0 — features, never a percentile gate
+    luma_lo: 40.0                      # BOUND: mean luma below this = unusable exposure ("dark")
+    luma_hi: 220.0                     # BOUND: mean luma above this = unusable exposure ("bright")
+    clip_frac_max: 0.25                # BOUND: share of clipped pixels above this = unusable ("clipped")
+    clip_lo: 5                         # BOUND: gray value at or below which a pixel counts as clipped dark
+    clip_hi: 250                       # BOUND: gray value at or above which a pixel counts as clipped bright
+    fft_max_side: 640                  # BOUND: analysis downscale (longest side) of the FFT sharpness
+                                       # feature — the legacy frames/quality.py scale, kept so fft
+                                       # scores stay comparable across sessions
+    diff_max_side: 320                 # BOUND: analysis downscale of inter_frame_diff — the legacy
+                                       # scale the 'motion' selector's keyframe_motion_quantum was
+                                       # measured on (734 units/m close-range, 160 in a hall)
+  parallax:                            # I1 — keyframes by parallax measured against the ANCHOR
+                                       # (the last keyframe): every seed's window MATCHED TO THE
+                                       # ANCHOR'S OWN WINDOW at every frame (a chained LK link only
+                                       # predicts; a per-window homography refined against the
+                                       # anchor, inverse compositional — no drift with the link
+                                       # count), homography + fundamental matrix, the rigid set and
+                                       # the q-quantile of the transfer error. Frame-rate independent
+                                       # (2026-09-27: the per-step sum, then chained tracks, were not).
+    grid_side: 32                      # BOUND: seed grid on the anchor (grid_side x grid_side points
+                                       # at process scale, the grid inset by half an LK window so
+                                       # every window lies in the anchor), never re-seeded in a window
+    process_scale: 0.25                # BOUND: tracking scale (LK runs on the downscaled gray;
+                                       # every result is reported in NATIVE px)
+    ransac_px: 1.0                     # BOUND: homography AND fundamental-matrix RANSAC bound, NATIVE px
+    parallax_quantum_px: 12.0          # BOUND: parallax (native px) from the anchor that closes a window
+    witness_min_parallax_px: 1.5       # BOUND: parallax from the last chosen witness (keyframes
+                                       # included) that makes a witness — the smallest parallax the
+                                       # intake acts on: a track moving more than this against a
+                                       # majority that did not translate is marked dynamic, and a
+                                       # track-loss keyframe needs at least this much measured
+    min_tracks: 40                     # BOUND: rigid tracks below this = tracking lost at that frame
+                                       # (with a measured view change the window closes on a
+                                       # track_loss keyframe; without one it is a coverage break: no
+                                       # keyframe, a pending anchor continues the measurement)
+    lk_win: 21                         # BOUND: LK window side at process scale (also the window every
+                                       # track is refined and checked on)
+    lk_levels: 3                       # BOUND: LK pyramid levels of the chain's prediction link
+    fb_max_px: 1.0                     # BOUND: forward-backward LK disagreement tolerated (native px)
+                                       # — per prediction link and on the rectified-tile consistency check
+    warn_static_disp_px: 0.5           # BOUND: median displacement from the anchor (native px) under
+                                       # max(this, rotation_floor_factor x floor) = static (warning only)
+    warn_rotation_min_disp_px: 4.0     # BOUND: displacement from the anchor at or above this = the
+                                       # view moved: with the parallax at its noise floor = pure
+                                       # rotation (warning); a track-loss keyframe needs this too
+    warn_min_run_frames: 5             # BOUND: consecutive flagged frames that make a coverage
+                                       # warning; an anchor whose tracks are lost within fewer frames
+                                       # flags its frames tracking_lost (the tracker cannot hold it)
+    parallax_quantile: 0.9             # BOUND: parallax = this quantile of the per-track symmetric
+                                       # transfer error of the RIGID tracks w.r.t. their least-squares
+                                       # homography (native px). The most parallax-exhibiting decile
+                                       # carries the off-plane signal; the median read a DOMINANT
+                                       # plane's tracker noise and made a translation read as a
+                                       # rotation (review 2026-09-27: box on 34 % of the view,
+                                       # 0.43 px/step median vs 2.91 px/step ground truth).
+                                       # Declared limit: off-plane structure on less than (1 - q)
+                                       # of the rigid tracks stays invisible, and structure on about
+                                       # (1 - q) makes the reading switch between its parallax and the
+                                       # background's. Also the dynamic_content bar (moving tracks
+                                       # above 1 - q would have moved the reading), the quantile of
+                                       # the twin's residual the appearance test is set on.
+    rotation_floor_factor: 1.5         # BOUND: "at its noise floor" = <= this x the MEASURED floor —
+                                       # hypot(warp twin: a zero-parallax video that follows the
+                                       # frame's homography, tracked exactly like the real one with the
+                                       # frame's own residuals as noise; consistency-check forward-backward /
+                                       # sqrt 2), never a constant. Used by: the pure_rotation warning,
+                                       # the static bar, the ROTATION verdict (the pinhole rotation must
+                                       # explain the homography majority at its floor while a plane
+                                       # translation does not), the dynamic_content moving bar, the
+                                       # measured-baseline bar of a track-loss keyframe, and the
+                                       # APPEARANCE test (a window whose normalised residual exceeds
+                                       # this x the twin's q-quantile residual is not the anchor's
+                                       # patch). Measured: the twin reads ~0.6-0.7x the real error of
+                                       # a still camera on the synthetic JPEG pipeline — this factor is
+                                       # what covers real (compression) noise beyond Gaussian noise.
+    keyframe_band_frac: 0.25           # BOUND: once the reading reaches the quantum the window is
+                                       # followed until it leaves [(1 - band), (1 + band)] x quantum;
+                                       # the keyframe is the sharpest frame (I0 sharp_rank) inside
+                                       # that SYMMETRIC band (the closest reading to the quantum when
+                                       # the sampling steps over the band) — the plan's "best
+                                       # sharp_rank within the window" with a baseline that does not
+                                       # depend on how many frames sampled the window. On track loss
+                                       # the band is applied to the largest measured reading.
+    rigidity_confidence: 0.95          # BOUND: declared confidence of the tests that decide whether
+                                       # the homography majority did not translate (still: H is
+                                       # the identity; rotation: complex eigenvalue pair below zero
+                                       # by bootstrap AND a pure pinhole rotation — focal length and
+                                       # principal point fitted — explains the majority at its floor).
+                                       # Then no rigid parallax exists and a minority moving on its own
+                                       # is excluded (dynamic_content) — the heldout_confidence
+                                       # doctrine: how sure before an exclusion, not a magnitude.
+    rigidity_bootstrap: 200            # BOUND: bootstrap resamples of the homography's eigenvalue
+                                       # evidence (fixed seed per anchor and frame: reproducible)
+    refine_max_iter: 30                # BOUND: iterations of the per-frame DIRECT refinement (every
+                                       # window's homography re-matched to the ANCHOR's own window,
+                                       # inverse compositional) — OpenCV's own LK default count, the
+                                       # tracker the prediction link already uses
+    refine_eps_px: 0.01                # BOUND: the refinement stops when its update moves the window's
+                                       # centre (the track) by no more than this (process px) —
+                                       # OpenCV's LK default epsilon; far under every bar measured
+                                       # downstream
+  content:                             # I2 — VLM content tags (vlm_proposed) + SAM3 exclusion masks
+    enabled: true                      # claude_stac.txt §4-F1: I2 (content tags + exclusion masks)
+                                       # is part of the intake
+    backend: qwen_local                # USER DECISION: local VLM (semantic.backends.<name>), no paid API
+    batch: 8                           # BOUND: images per VLM call (≤ semantic max_images_per_prompt)
+    max_tokens: 512                    # BOUND: VLM generation cap per call
+    exclusion_classes: [dynamic, occluder]      # USER DECISION (§4-F1): these EXCLUDE observations
+    weight_classes: [reflective, low_info]      # USER DECISION (§4-F1): these only WEIGH, never exclude
+    sam3_scope: all                    # claude_stac.txt §4-F1 (all keyframes + witness frames): SAM3
+                                       # segments every keyframe AND witness frame for the exclusion
+                                       # classes; the VLM tags stay vlm_proposed weights/evidence,
+                                       # SAM3 decides the masks. flagged_ranges (selectable) segments
+                                       # only the tagged keyframes + the witnesses between a tagged
+                                       # keyframe and its neighbours — a tag would then gate a mask.
+    prompts:                           # SAM3 open-vocabulary prompts per exclusion class (strings,
+                                       # not thresholds; the VLM fixes no parameter)
+      dynamic: [person, worker, moving vehicle, animal, train]
+      occluder: [hand, glove, helmet brim, object touching the lens]
 
 
 # ── Models: Segmentation (SAM 3 / SAM 3.1) ─────────────────────────
@@ -1391,7 +1527,13 @@ reconstruction:
   # Windows return ONLY when the sampled video still exceeds max_frames_single_pass.
   simple:
     enabled: true
-    frame_selection: motion             # "motion" (default) = parallax-uniform keyframes: one
+    frame_selection: parallax_lk        # parallax_lk | motion | fps | dino | hf.
+                                        # parallax_lk (USER DECISION 2026-09-26, claude_stac.txt
+                                        # §4-F1) = intake I1: LK tracks + robust homography, one
+                                        # keyframe per intake.parallax.parallax_quantum_px of
+                                        # MEASURED parallax (pure rotation adds none), sharpest
+                                        # frame per window, witness_frames.json alongside.
+                                        # "motion" (the previous default) = parallax-uniform keyframes: one
                                         # keyframe per keyframe_motion_quantum of accumulated
                                         # inter-frame pixel motion, sharpest frame per window.
                                         # Standing still adds ~no keyframes (dense low-baseline
