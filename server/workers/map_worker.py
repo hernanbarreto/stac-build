@@ -1456,7 +1456,19 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap
             k = int(Path(cp).stem.split("_")[1])
             cd = np.load(cp, allow_pickle=True).item()
             wp = np.asarray(cd["world_points"])            # [S,H,W,3] aligned world
+            if wp.ndim == 5:
+                wp = wp[0]
             ext = np.asarray(cd["extrinsic"])              # [S,4,4] c2w (RAW — fallback only)
+            if ext.ndim == 4:
+                ext = ext[0]
+            # claude_stac.txt §4-F3: every keyframe's omega record carries what the
+            # later stages read — depth, conf, the grid K and the aligned c2w
+            wconf = cd.get("world_points_conf")
+            wconf = (np.asarray(wconf).reshape(wp.shape[:3]) if wconf is not None else None)
+            Kin = cd.get("intrinsic")
+            Kin = np.asarray(Kin) if Kin is not None else None
+            if Kin is not None and Kin.ndim == 4:
+                Kin = Kin[0]
             S = wp.shape[0]
             start = k * step
             for j in range(S):
@@ -1467,12 +1479,18 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap
                 cam_c = c2w[:3, 3]
                 fwd = c2w[:3, 2]                           # camera +z in world
                 d = (wp[j] - cam_c) @ fwd                  # [H,W] depth along view axis
-                np.savez_compressed(out_dir / f"frame_{stems[gi]}.npz",
-                                    depth=d.astype(np.float32))
+                rec = {"depth": d.astype(np.float32),
+                       "pose_c2w": np.asarray(c2w, np.float64)}
+                if wconf is not None:
+                    rec["conf"] = wconf[j].astype(np.float32)
+                if Kin is not None:
+                    rec["K_omega"] = Kin[j].astype(np.float64)
+                np.savez_compressed(out_dir / f"frame_{stems[gi]}.npz", **rec)
                 n_written += 1
         except Exception as e:
             pipe.send_log(f"[omega-depth] chunk {cp} skipped ({e})", level="warning")
-    pipe.send_log(f"[omega-depth] wrote {n_written} per-frame omega depths for scale align")
+    pipe.send_log(f"[omega-depth] wrote {n_written} per-frame omega records (depth, conf, "
+                  f"K_omega, pose_c2w)")
 
 
 from workers.base import (gpu_free_gb as _gpu_free_gb, stop_semantic_service,

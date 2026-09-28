@@ -167,6 +167,25 @@ class GaugeConfig:
     instruments: Tuple[str, ...]    # scale instruments that may enter the model
 
 
+# ── F3: Omega ─────────────────────────────────────────────────────────────
+
+OMEGA_MODES = ("balanced", "max_size")
+
+
+@dataclass(frozen=True)
+class ResolutionProbeConfig:
+    enabled: bool
+    resolutions: Tuple[int, ...]    # the resolutions compared on the same window
+    mode: str                       # balanced (≈ res² pixels) | max_size (longest side = res)
+    window_frames: int              # BOUND: keyframes of the probe window
+    pair_samples: int               # BOUND: surface samples per frame pair
+
+
+@dataclass(frozen=True)
+class OmegaConfig:
+    resolution_probe: ResolutionProbeConfig
+
+
 # ── F9: runner (declared in F0 so every stage heartbeats the same way) ───
 
 @dataclass(frozen=True)
@@ -181,6 +200,7 @@ class PrecisionConfig:
     enabled: bool
     camera: CameraConfig
     gauge: GaugeConfig
+    omega: OmegaConfig
     runner: RunnerConfig
 
 
@@ -236,10 +256,24 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
             f"'{SECTION}.gauge.window_frames' x '.window_overlap_frac' shares fewer than 2 "
             f"frames between windows — two windows cannot be chained")
 
+    om = _sub(sec, "omega", "")
+    rp = _sub(om, "resolution_probe", "omega")
+    omega = OmegaConfig(resolution_probe=ResolutionProbeConfig(
+        enabled=_bool(rp, "enabled", "omega.resolution_probe"),
+        # Omega's patch is 16 px: a resolution below one patch has no token
+        resolutions=tuple(int(v) for v in _num_list(rp, "resolutions", "omega.resolution_probe",
+                                                     lo=16, integer=True)),
+        mode=_enum(rp, "mode", "omega.resolution_probe", OMEGA_MODES),
+        window_frames=_num(rp, "window_frames", "omega.resolution_probe", lo=2, integer=True),
+        # depth_pair_samples starves a pair under 500 samples
+        pair_samples=_num(rp, "pair_samples", "omega.resolution_probe", lo=500, integer=True),
+    ))
+
     rn = _sub(sec, "runner", "")
     runner = RunnerConfig(
         heartbeat_s=_num(rn, "heartbeat_s", "runner", lo=0.0, lo_excl=True),
         perf_checkpoint_s=_num(rn, "perf_checkpoint_s", "runner", lo=0.0, lo_excl=True),
     )
 
-    return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, runner=runner)
+    return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
+                           runner=runner)

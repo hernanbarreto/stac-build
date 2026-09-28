@@ -144,6 +144,20 @@ def _reindex(instances: List[dict], keep: np.ndarray,
 
 
 
+def instance_loops_of(kept) -> List[dict]:
+    """(candidate, drift) pairs → the keyframe-pair records of ``instance_loops.json``."""
+    return [
+        {"instance_id": int(c.instance_id), "label": c.label,
+         "visit_a": [int(dr.visit_a[0]), int(dr.visit_a[1])],
+         "visit_b": [int(dr.visit_b[0]), int(dr.visit_b[1])],
+         "i": int(round((dr.visit_a[0] + dr.visit_a[1]) / 2.0)),
+         "j": int(round((dr.visit_b[0] + dr.visit_b[1]) / 2.0)),
+         "t_m": [float(v) for v in np.asarray(dr.t, np.float64)],
+         "sigma_m": float(dr.worst_disagreement),
+         "provenance": "tool_measured"}
+        for c, dr in kept]
+
+
 def measure_epoch(output_dir: Path, cfg, rep_m: float,
                   log: Callable[[str], None] = print) -> dict:
     """The whole chain, steps 1 to 10, on the session as it stands.
@@ -252,11 +266,83 @@ def measure_epoch(output_dir: Path, cfg, rep_m: float,
                for o in (arep.get("objects") or [])}
     rep["scale_rows"] = vd.scale_rows(kept, poses, ks, log=log,
                                       rivals_of=_rivals)
+    # the re-identified objects as KEYFRAME PAIRS for the correspondence stage
+    # (claude_stac.txt §4-F3 → F4): each object's two visits, the drift measured
+    # between them and its σ — the disagreement of the two silhouette views that
+    # measure the same component (the determination test of step 7)
+    rep["instance_loops"] = instance_loops_of(kept)
     rep["_masklets"] = masklets          # for the cloud filter, same pass
     rep["_points_by_oid"] = pm
     rep["_ks"] = ks
     rep["_vis"] = vis
     return rep
+
+
+# ── EVIDENCE: measure, publish, apply nothing (claude_stac.txt §4-F3) ────
+
+MODES = ("measure", "apply", "verify")
+
+
+def _stamp_out(output_dir: Path, name: str, doc: dict) -> Path:
+    from correction.epoch import current_epoch
+    doc = {"version": 1, "source": "correction.visit_drift",
+           "measured_on_epoch": int(current_epoch(output_dir)),
+           "provenance": "tool_measured", **doc}
+    p = Path(output_dir) / name
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=1, default=float))
+    tmp.replace(p)
+    return p
+
+
+def measure(session_dir, log: Callable[[str], None] = print, cfg=None) -> dict:
+    """``mode: measure`` — the closures on the session AS IT STANDS (epoch 0 in the
+    EVIDENCE stage), published for the stages that consume them and nothing
+    applied: ``scale_loop_rows.json`` (the gauge's relative rows, F2) and
+    ``instance_loops.json`` (keyframe pairs per re-identified object with the σ of
+    its silhouette match, F4). Writes no epoch."""
+    session_dir = Path(session_dir)
+    output_dir = (session_dir / "output" if (session_dir / "output").is_dir()
+                  else session_dir)
+    vcfg = (cfg or __import__("correction.config", fromlist=["x"])
+            .load_correction_config()).visit_drift
+    rep_m = _repeatability_m(output_dir, vcfg.default_repeatability_m, log)
+    mrep = measure_epoch(output_dir, vcfg, rep_m, log=log)
+    _write_scale_rows(output_dir, mrep, log=log)
+    loops = mrep.get("instance_loops") or []
+    p = _stamp_out(output_dir, "instance_loops.json",
+                   {"repeatability_m": rep_m, "loops": loops})
+    log(f"[visit-drift] MEASURE: {len(mrep.get('scale_rows') or [])} scale row(s), "
+        f"{len(loops)} instance loop(s) → {p.name} (nothing applied)")
+    return {"mode": "measure", "n_scale_rows": len(mrep.get("scale_rows") or []),
+            "n_instance_loops": len(loops), "repeatability_m": rep_m,
+            "rejected": mrep.get("rejected", []), "provenance": "tool_measured"}
+
+
+def verify(session_dir, log: Callable[[str], None] = print, cfg=None) -> dict:
+    """``mode: verify`` — the closures re-measured on the CURRENT epoch (the
+    precision core's epoch N): what each duplicated object still shows, against
+    the session's own repeatability — the core's acceptance measurement
+    (``visit_drift_verify.json``). Writes no epoch."""
+    session_dir = Path(session_dir)
+    output_dir = (session_dir / "output" if (session_dir / "output").is_dir()
+                  else session_dir)
+    vcfg = (cfg or __import__("correction.config", fromlist=["x"])
+            .load_correction_config()).visit_drift
+    rep_m = _repeatability_m(output_dir, vcfg.default_repeatability_m, log)
+    mrep = measure_epoch(output_dir, vcfg, rep_m, log=log)
+    loops = mrep.get("instance_loops") or []
+    res = [float(np.linalg.norm(l["t_m"])) for l in loops]
+    doc = {"repeatability_m": rep_m,
+           "closures": [{**l, "residual_m": r} for l, r in zip(loops, res)],
+           "median_residual_m": float(np.median(res)) if res else None,
+           "n_within_repeatability": int(sum(1 for r in res if r <= rep_m)),
+           "n_closures": len(res)}
+    p = _stamp_out(output_dir, "visit_drift_verify.json", doc)
+    log(f"[visit-drift] VERIFY: {len(res)} closure(s), median residual "
+        + (f"{doc['median_residual_m'] * 100:.1f} cm" if res else "n/a")
+        + f" vs repeatability {rep_m * 100:.1f} cm → {p.name} (nothing applied)")
+    return {"mode": "verify", **doc, "provenance": "tool_measured"}
 
 
 # ── one pass ─────────────────────────────────────────────────────────────
@@ -617,8 +703,12 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--session", required=True)
+    ap.add_argument("--mode", choices=MODES, default="apply",
+                    help="measure: publish scale_loop_rows.json + instance_loops.json on "
+                         "the current epoch, apply nothing; apply: the correction epoch; "
+                         "verify: the residual closures on the current epoch")
     a = ap.parse_args(argv)
-    run(a.session)
+    {"measure": measure, "apply": run, "verify": verify}[a.mode](a.session)
     return 0
 
 

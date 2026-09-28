@@ -130,3 +130,12 @@ def test_gauge_windows_must_chain():
     raw["reconstruction"]["precision"]["gauge"]["instruments"] = ["da3_windows", "lidar9000"]
     with pytest.raises(PrecisionConfigError, match="instruments"):
         load_precision_config(raw)
+
+
+@pytest.mark.parametrize("key", ["enabled", "resolutions", "mode", "window_frames",
+                                 "pair_samples"])
+def test_resolution_probe_keys_are_mandatory(key):
+    raw = _raw()
+    del raw["reconstruction"]["precision"]["omega"]["resolution_probe"][key]
+    with pytest.raises(PrecisionConfigError, match=rf"resolution_probe\.{key}"):
+        load_precision_config(raw)

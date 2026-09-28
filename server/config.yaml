@@ -1998,6 +1998,18 @@ reconstruction:
       huber_k: 1.345                    # Huber's constant of the per-frame DA3/Omega gain
                                         # (statistics: 95 % efficiency under normal noise)
       instruments: [da3_windows, da3_mono, vio, stray, known_dims]
+    # F3 — Omega (precision/omega_probe.py): the resolution probe REPORTS, the user sets
+    # reconstruction.vggtomega.resolution / .mode
+    omega:
+      resolution_probe:
+        enabled: true
+        resolutions: [512, 768, 1024]   # compared on the same central window of keyframes
+                                        # (the only checkpoint is vggt_omega_1b_512.pt: trained
+                                        # at 512 — whether more pixels help is MEASURED here)
+        mode: balanced                  # balanced (≈ res² pixels, today's production) | max_size
+        window_frames: 32               # BOUND: keyframes of the probe window
+        pair_samples: 8000              # BOUND: surface samples per frame pair
+                                        # (metric_lock.depth_pair_samples' own default)
     # F9 — runner (declared here so every stage heartbeats the same way)
     runner:
       heartbeat_s: 20                   # BOUND: seconds between progress lines of a long stage
