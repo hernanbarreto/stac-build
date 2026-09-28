@@ -27,11 +27,19 @@ def test_production_pipeline_runs_the_whole_chain():
     from pipeline_manager import build_pipeline_stages, StageId
     raw = _raw()
     assert raw["pipeline"]["auto_segment"] is True, "the automatic segmentation must be ON"
-    assert raw["certify"]["auto_after_segmentation"] is True, "the automatic certification must be ON"
+    # USER 2026-09-28, F0-F7 validation: the pipeline stops at SAM3 on epoch 0 and
+    # scripts/run_precision_chain.sh runs F0 -> F7 on it (the gauge must start from
+    # epoch 0; the certification's correction is F8's). F9 wires the chain and the
+    # certification back into ONE command — this guard then returns to True.
+    precision_on = bool(raw["reconstruction"]["precision"]["enabled"])
+    assert raw["certify"]["auto_after_segmentation"] is (not precision_on), \
+        "the automatic certification is ON exactly when the precision chain is not"
     stages = build_pipeline_stages(backend=str(raw["reconstruction"]["backend"]))
     enabled = [s.id for s in stages if s.enabled]
     # reconstruction → VLM → SAM3 → cleaned cloud → certification, in this order
-    want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.VLM, StageId.SAM3, StageId.CERTIFY]
+    want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.VLM, StageId.SAM3]
+    if not precision_on:
+        want.append(StageId.CERTIFY)
     assert enabled[:len(want)] == want, enabled
     if raw["pipeline"]["auto_tsdf"] is False:
         assert StageId.TSDF not in enabled and StageId.PGSR not in enabled
@@ -50,7 +58,7 @@ def test_production_config_loads_through_every_typed_loader():
     assert cfg.certify.gates.mode == "advisory"
     assert cfg.graph.gate_mode == "advisory"
     assert cfg.loops.semantic.nonstructural_sigma_factor >= 1.0
-    assert cfg.certify.auto_after_segmentation is True
+    assert cfg.certify.auto_after_segmentation is (not bool(_raw()["reconstruction"]["precision"]["enabled"]))
     ccfg = load_correction_config(raw)
     assert ccfg.gates.mode == "advisory"
     assert ccfg.apply.potree_rebuild is True, "the certified epoch must carry its own octree"

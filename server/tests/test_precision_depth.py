@@ -406,6 +406,7 @@ def test_identical_sessions_give_bit_identical_depth(tmp_path, pcfg):
     and allocation history differ between the two): every array of every frame, and
     the calibration, are the same bits."""
     import torch
+    mode_before = torch.are_deterministic_algorithms_enabled()
     runs = []
     for name in ("a", "b"):
         (tmp_path / name).mkdir()
@@ -423,7 +424,8 @@ def test_identical_sessions_give_bit_identical_depth(tmp_path, pcfg):
     for k in runs[0][0]:
         assert runs[0][0][k] == runs[1][0][k], k
     assert runs[0][1] == runs[1][1]
-    assert not torch.are_deterministic_algorithms_enabled()   # the mode is scoped to the run
+    # the mode is scoped to the run: whatever the process had before, it has after
+    assert torch.are_deterministic_algorithms_enabled() == mode_before
 
 
 def test_the_sweep_core_is_bit_identical_and_nanmedian_is_its_own(scene):
