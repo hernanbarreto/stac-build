@@ -295,7 +295,11 @@ def _weighted_median_w(depth, w_unfolded, radius: int):
     # order on every device and run (an unstable sort may permute ties)
     ds, o = torch.sort(d, dim=0, stable=True)
     ws = torch.gather(w, 0, o)
-    cw = torch.cumsum(ws, 0)
+    # prefix sum in a fixed sequential order over the k² rows: torch.cumsum on a CUDA
+    # float tensor has no deterministic kernel (use_deterministic_algorithms raises)
+    cw = ws.clone()
+    for r in range(1, cw.shape[0]):
+        cw[r] += cw[r - 1]
     tot = cw[-1:]
     idx = torch.searchsorted(cw.T.contiguous(), (0.5 * tot).T.contiguous()).T
     med = torch.gather(ds, 0, idx.clamp(max=k * k - 1))[0]

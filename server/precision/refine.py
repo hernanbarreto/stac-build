@@ -335,9 +335,19 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
     base = RungResult("init", w2c0, [list(params0)], np.zeros(len(w2c0), int), float("nan"), 0, "")
     held = {"init": _heldout_of(base, held_g, solver, cfg)}
     rungs, best = {}, None
+    from precision.camera import CameraError
     for name in ("R0", "R1", "R2"):
         r = run_rung(name, w2c0, params0, wh, fit_g, X0, sig, cfg)
-        held[name] = _heldout_of(r, held_g, solver, cfg)
+        try:
+            held[name] = _heldout_of(r, held_g, solver, cfg)
+        except CameraError as e:
+            # a rung whose estimated distortion cannot be inverted over the held-out
+            # observations is not a camera: rejected with the reason, the ladder goes on
+            rungs[name] = {"params": r.params_by_block[0], "fit_rms_px": r.fit_rms_px,
+                           "taken": False, "rejected": f"distortion not invertible over the "
+                                                       f"held-out observations ({e})"}
+            log(f"{LOG_TAG} {name}: rejected — {rungs[name]['rejected']}")
+            continue
         verdict = None if best is None else _judge(held[best.name], held[name],
                                                    cfg.heldout_confidence)
         take = best is None or bool(verdict["improves"])
@@ -354,6 +364,10 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
             + ("" if verdict is None else
                f" — vs {best.name if not take else 'previous'}: "
                f"{'improves' if verdict['improves'] else 'worsens' if verdict['worsens'] else 'within noise'}"))
+    if best is None:
+        raise RefineError("every rung was rejected (its distortion is not invertible over the "
+                          "held-out observations) — the session camera cannot be refined; see "
+                          "the rung reasons in the log")
     # R3: focal per temporal block, only when the best rung leaves a temporal pattern
     blocks = np.arange(len(w2c0)) // int(cfg.focal_block_frames)
     per_frame: Dict[int, List[float]] = {}
@@ -372,14 +386,21 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                      block_of=blocks,
                      params_by_block0=[list(best.params_by_block[0])
                                        for _ in range(int(blocks.max()) + 1)])
-        held["R3"] = _heldout_of(r, held_g, solver, cfg)
-        verdict = _judge(held[best.name], held["R3"], cfg.heldout_confidence)
-        rungs["R3"].update({"tried": True, "params_by_block": r.params_by_block,
-                            "fit_rms_px": r.fit_rms_px,
-                            "heldout_median_px": float(np.median(list(held["R3"].values()))),
-                            "verdict_vs_best": verdict, "taken": bool(verdict["improves"])})
-        if verdict["improves"]:
-            best = r
+        try:
+            held["R3"] = _heldout_of(r, held_g, solver, cfg)
+        except CameraError as e:
+            held["R3"] = None
+            rungs["R3"].update({"tried": True, "taken": False,
+                                "rejected": f"distortion not invertible over the held-out "
+                                            f"observations ({e})"})
+        if held["R3"] is not None:
+            verdict = _judge(held[best.name], held["R3"], cfg.heldout_confidence)
+            rungs["R3"].update({"tried": True, "params_by_block": r.params_by_block,
+                                "fit_rms_px": r.fit_rms_px,
+                                "heldout_median_px": float(np.median(list(held["R3"].values()))),
+                                "verdict_vs_best": verdict, "taken": bool(verdict["improves"])})
+            if verdict["improves"]:
+                best = r
     return {"best": best, "rungs": rungs, "held": held, "X": X0, "fit_groups": fit_g,
             "held_groups": held_g, "prior_sigma_m": sig, "per_frame_heldout": pf}
 

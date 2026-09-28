@@ -319,7 +319,9 @@ def huber_location(r: np.ndarray, w0: np.ndarray, k: float, tol: float,
     for it in range(1, int(max_iter) + 1):
         mad = float(np.median(np.abs(r - mu)))
         if mad == 0.0:
-            return Gain(mu, True, it - 1, True)
+            # the scale vanished: the Huber limit is the WEIGHTED median (the prior
+            # weights decide which value more than half the weight shares)
+            return Gain(_weighted_median(r, w0), True, it - 1, True)
         z = np.abs(r - mu) / (MAD_TO_SIGMA * mad)
         w = w0 * np.where(z <= k, 1.0, k / np.maximum(z, 1e-12))
         new = float(np.sum(w * r) / np.sum(w))
