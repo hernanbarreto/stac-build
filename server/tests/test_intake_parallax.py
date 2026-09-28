@@ -41,7 +41,9 @@ PCFG = ParallaxConfig(grid_side=24, process_scale=0.5, ransac_px=1.0, parallax_q
                       witness_min_parallax_px=1.5, min_tracks=40, lk_win=15, lk_levels=3,
                       fb_max_px=1.0, warn_static_disp_px=0.5, warn_rotation_min_disp_px=4.0,
                       warn_min_run_frames=5, parallax_quantile=0.9, keyframe_band_frac=0.25,
-                      reference_max_eval=200, reference_ftol=1.0e-3)
+                      reference_max_eval=200, reference_tol=1.0e-12,
+                      focal_probe_frames=16, focal_probe_res=1008,
+                      focal_probe_model="depth-anything/DA3NESTED-GIANT-LARGE-1.1")
 NOISE_SIGMA = 2.0
 QUIET = (lambda *a, **k: None)
 WALK = dict(start=S.room_start_pose(x_m=1.2), direction="right")
@@ -50,7 +52,8 @@ WALK = dict(start=S.room_start_pose(x_m=1.2), direction="right")
 def _run(session_dir, scene, cam, poses, cfg=PCFG, **kw):
     sess = S.write_session(session_dir, scene, cam, poses, noise_sigma=NOISE_SIGMA, **kw)
     quality = Q.analyze_frames(sess.frames_dir, QCFG, log=QUIET, heartbeat_s=1e-6)
-    result = P.run_parallax(sess.frames_dir, quality, cfg, log=QUIET, heartbeat_s=1e-6)
+    # the session camera, as the focal probe would measure it (its pinhole part)
+    result = P.run_parallax(sess.frames_dir, quality, cfg, cam.K(), log=QUIET, heartbeat_s=1e-6)
     return sess, quality, result
 
 
@@ -118,9 +121,9 @@ def _cloud(rng, n=600):
     return np.c_[rng.uniform(-0.5, 0.5, n) * z, rng.uniform(-0.4, 0.4, n) * z, z]
 
 
-def _reading(a, b):
+def _reading(a, b, K):
     T = P.image_normaliser((640, 480))
-    x, H, _cost = P.fit_rotation(a, b, T, PCFG)
+    x, H, _cost = P.fit_rotation(a, b, T, PCFG, T @ K)
     return float(np.median(P.symmetric_transfer_error(H, P._inv3(H), a, b)))
 
 
@@ -132,32 +135,44 @@ def test_inv3_matches_numpy():
     assert P._inv3(np.zeros((3, 3))) is None
 
 
-def test_singular_intrinsics_are_non_finite_not_an_exception():
-    """A focal length the solver drives to exactly 0 must price itself out of
-    the fit, not abort the run (it did, at frame 10,091 of pccr 2026-08-24)."""
-    for x in ([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0]):
-        with np.errstate(all="ignore"):
-            assert not np.all(np.isfinite(P.rotation_any_k(np.array(x))))
+def test_rotation_fit_is_bit_identical_and_converged():
+    """Identical inputs → bit-identical solution, whatever the process allocated in
+    between (scipy 1.15's MINPACK LM did not: pccr 2026-08-24 gave 746 / 743 / 742
+    keyframes from the same frames); only R is fitted (the camera is measured), so any
+    start reaches the same minimum; a fit the evaluation bound stops is not a
+    measurement."""
+    import hashlib
+    from dataclasses import replace
     rng = np.random.default_rng(3)
     X = _cloud(rng)
     K = _pinhole(500.0)
+    R, _ = cv2.Rodrigues(np.array([0.01, 0.05, 0.0]))
     a = _project(K, np.eye(3), np.zeros(3), X)
-    b = _project(K, np.eye(3), np.array([0.05, 0.0, 0.0]), X)
+    b = _project(K, R, np.array([0.05, 0.0, 0.02]), X)
+    b = b + rng.normal(0, 0.3, b.shape)
     T = P.image_normaliser((640, 480))
-    # started ON the singularity: the fit completes (a result or None), it never raises
-    with np.errstate(all="ignore"):
-        P.fit_rotation(a, b, T, PCFG, np.array([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+    Kn = T @ K
+    junk, seen = [], set()
+    for k in range(12):
+        junk.append(np.empty(k * 13 + 5))           # a different allocation history
+        x, H, cost = P.fit_rotation(a, b, T, PCFG, Kn)
+        seen.add(hashlib.sha256(np.ascontiguousarray(H).tobytes()).hexdigest())
+    assert len(seen) == 1
+    # a start from elsewhere converges to the same minimum (well-posed)
+    x2, H2, _ = P.fit_rotation(a, b, T, PCFG, Kn, np.array([0.05, -0.02, 0.01]))
+    assert np.allclose(H2, H, atol=1e-9)
+    assert P.fit_rotation(a, b, T, replace(PCFG, reference_max_eval=1), Kn) is None
 
 
 def test_rotation_reads_zero_whatever_the_focal_length():
     rng = np.random.default_rng(1)
     X = _cloud(rng)
-    for f in (350.0, 600.0, 1100.0):           # the fit is started at the half-diagonal (400)
+    for f in (350.0, 600.0, 1100.0):           # the reference is the session's own camera
         K = _pinhole(f)
         R, _ = cv2.Rodrigues(np.array([0.02, 0.08, 0.01]))
         a = _project(K, np.eye(3), np.zeros(3), X)
         b = _project(K, R, np.zeros(3), X)
-        assert _reading(a, b) < 0.05, f
+        assert _reading(a, b, K) < 0.05, f
 
 
 def test_forward_walk_reads_its_baseline():
@@ -175,7 +190,7 @@ def test_forward_walk_reads_its_baseline():
         truth = float(np.median(np.hypot(*(b - a).T)))
         H, _ = cv2.findHomography(a, b, 0)
         hom = float(np.median(P.symmetric_transfer_error(H, np.linalg.inv(H), a, b)))
-        rot = _reading(a, b)
+        rot = _reading(a, b, K)
         assert abs(truth - rot) < abs(truth - hom), dz
         readings.append(rot)
     assert readings == sorted(readings)

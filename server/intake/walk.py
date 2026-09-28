@@ -239,8 +239,9 @@ def run_da3_windows(session_dir: Path, gcfg, python: str, log: Callable = print,
     log(f"{LOG_TAG} I3: DA3 {gcfg.model_id} over {len(windows)} window(s) of "
         f"{gcfg.window_frames} keyframes ({len(files)} keyframes, overlap "
         f"{gcfg.window_overlap_frac:g})")
+    env = dict(os.environ, CUBLAS_WORKSPACE_CONFIG=":4096:8")    # deterministic cuBLAS
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            bufsize=1)
+                            bufsize=1, env=env)
     for line in proc.stdout:
         line = line.strip()
         if line:

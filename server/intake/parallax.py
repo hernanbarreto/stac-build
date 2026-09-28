@@ -14,13 +14,19 @@ frames, in order), against the window's ANCHOR ``a``:
    when its forward–backward disagreement is ≤ ``fb_max_px`` (native px); a
    track that fails once is dead for the window (re-acquiring it from a stale
    position produced gross mismatches).
-2. The REFERENCE: the pure rotation of any pinhole, H = K·R·K⁻¹ with K free
-   (the homography a camera that did not translate induces), least squares
-   over the tracks, started from the RANSAC homography (``ransac_px``) and
-   warm-started from the previous frame. Least squares suffices once a failed
-   track stays dead: on a 42° pan the 0.9 quantile stays ≤ 1.6 px, while with
-   re-acquisition a few 580 px mismatches bent the fit to 12 px. A general homography is NOT the reference: it also explains the
-   expansion of a forward walk, which then read as no baseline.
+2. The REFERENCE: the pure rotation of the SESSION CAMERA, H = K·R·K⁻¹ with K
+   MEASURED once for the session (intake/focal.py: DA3 over frames spread over
+   the video) and only R fitted — the homography a camera that did not
+   translate induces. Least squares over the tracks, started from the rotation
+   nearest the RANSAC homography (``ransac_px``), warm-started from the
+   previous frame, solved TO CONVERGENCE (``reference_tol``; a fit the
+   ``reference_max_eval`` bound stops is not a measurement) with a
+   deterministic solver. A general homography is NOT the reference: it also
+   explains the expansion of a forward walk, which then read as no baseline;
+   neither is a K fitted per frame: it bends to absorb translation (pccr
+   2026-08-24: a free K settled at fx≈1e-4 px, skew≈−15, and the reading
+   depended on where the solver stopped — 746 / 743 / 742 keyframes from the
+   same frames).
 3. PARALLAX = the ``parallax_quantile`` (0.9) of the tracks' symmetric transfer
    error w.r.t. that rotation (native px): the image motion no rotation
    explains, read on the tracks that show the most of it. DECLARED DEVIATION
@@ -56,7 +62,7 @@ Every length is in NATIVE px; every parameter is a ``ParallaxConfig`` field
 read from ``intake.parallax`` in config.yaml.
 
 CLI: ``python -m intake.parallax --session <dir>`` (I0's
-``frames/quality_features.json`` must exist).
+``frames/quality_features.json`` and ``intake/focal_probe.json`` must exist).
 """
 
 from __future__ import annotations
@@ -235,19 +241,10 @@ def _nearest_rotation(M: np.ndarray) -> np.ndarray:
     return R
 
 
-def rotation_any_k(x: np.ndarray) -> np.ndarray:
-    """H = K·R·K⁻¹ of ``x`` = (fx, fy, skew, cx, cy, rotation vector): the
-    homography a pure ROTATION induces in a pinhole whose intrinsics are free.
-    Non-finite where K is singular (never raises)."""
-    # numpy scalars: a focal length the solver drove to 0 gives inf / NaN (which the
-    # residual prices out), where Python floats raise ZeroDivisionError — it did,
-    # at frame 10,091 of pccr 2026-08-24
-    fx, fy, sk, cx, cy = (np.float64(v) for v in x[:5])
-    K = np.array([[fx, sk, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
-    with np.errstate(divide="ignore", invalid="ignore"):
-        K_inv = np.array([[1.0 / fx, -sk / (fx * fy), (sk * cy - cx * fy) / (fx * fy)],
-                          [0.0, 1.0 / fy, -cy / fy], [0.0, 0.0, 1.0]])
-        return K @ _rotvec_to_matrix(np.asarray(x[5:8], dtype=np.float64)) @ K_inv
+def rotation_homography(w: np.ndarray, Kn: np.ndarray) -> np.ndarray:
+    """H = K·R(w)·K⁻¹: the homography a pure ROTATION w (rotation vector) of the camera
+    ``Kn`` (its intrinsics in the normalised frame) induces."""
+    return Kn @ _rotvec_to_matrix(w) @ _inv3(Kn)
 
 
 def _transfer_jacobian(M: np.ndarray, p: np.ndarray) -> np.ndarray:
@@ -275,16 +272,21 @@ def image_normaliser(native_wh: Tuple[int, int]) -> np.ndarray:
 
 
 def fit_rotation(a: np.ndarray, b: np.ndarray, T: np.ndarray, cfg: ParallaxConfig,
-                 x0: Optional[np.ndarray] = None
+                 Kn: np.ndarray, x0: Optional[np.ndarray] = None
                  ) -> Optional[Tuple[np.ndarray, np.ndarray, float]]:
-    """Least-squares fit of H = K·R·K⁻¹ (K free) to the tracks a → b (native
-    px), symmetric transfer residuals, MINPACK Levenberg–Marquardt in the
-    session's normalised frame ``T``, at most ``reference_max_eval``
-    evaluations, stopped when a step lowers the cost by less than
-    ``reference_ftol`` (relative). ``x0``: the start (normalised-frame parameters; the previous
-    frame's solution); None → a pinhole with focal = half-diagonal at the image
-    centre, rotation nearest the RANSAC homography. Returns (x, H native,
-    cost) or None when the fit fails."""
+    """Least-squares fit of the pure-rotation homography H = K·R·K⁻¹ of the session's
+    MEASURED camera (``Kn`` = T·K, intrinsics in the normalised frame ``T``; intake/
+    focal.py) to the tracks a → b (native px): only R, symmetric transfer residuals,
+    analytic Jacobian, solved TO CONVERGENCE by scipy's trust-region reflective method
+    with the exact solver — deterministic (scipy 1.15's MINPACK Levenberg–Marquardt
+    returned different solutions for identical inputs) and well-posed (a free K had no
+    unique minimum: it settled at fx≈1e-4 px, skew≈−15 on pccr).
+
+    Converged = step, cost change and gradient all under ``reference_tol``; a fit the
+    ``reference_max_eval`` bound stops first is NOT a measurement (None: the frame is
+    lost, reason rotation_fit_failed). ``x0``: the rotation vector to start from (the
+    previous frame's); None → the rotation nearest the RANSAC homography. Returns
+    (rotation vector, H native, cost) or None."""
     from scipy.optimize import least_squares
     cv2 = _cv2()
     an = _apply_h(T, np.asarray(a, dtype=np.float64))
@@ -292,59 +294,40 @@ def fit_rotation(a: np.ndarray, b: np.ndarray, T: np.ndarray, cfg: ParallaxConfi
     n = len(an)
     if n < 4:
         return None
-    x0 = (np.full(8, np.nan) if x0 is None else np.array(x0, dtype=np.float64))
-    if not np.all(np.isfinite(x0[:5])):
-        x0[:5] = (1.0, 1.0, 0.0, 0.0, 0.0)      # focal = half-diagonal, centred
-    if not np.all(np.isfinite(x0[5:])):
-        # the rotation nearest the RANSAC homography, seen through the start's K
+    Kn = np.asarray(Kn, dtype=np.float64)
+    Ki = _inv3(Kn)
+    if x0 is None or not np.all(np.isfinite(x0)):
         H0, _m = cv2.findHomography(an, bn, cv2.RANSAC, float(cfg.ransac_px) * float(T[0, 0]))
         if H0 is None or not np.all(np.isfinite(H0)):
             H0 = np.eye(3)
-        K0 = np.array([[x0[0], x0[2], x0[3]], [0.0, x0[1], x0[4]], [0.0, 0.0, 1.0]])
-        w0, _ = cv2.Rodrigues(_nearest_rotation(_inv3(K0) @ H0 @ K0))
-        x0[5:] = w0.ravel()
-    big = float(np.abs(an).max() + np.abs(bn).max())
+        w0, _ = cv2.Rodrigues(_nearest_rotation(Ki @ H0 @ Kn))
+        x0 = w0.ravel()
+    x0 = np.array(x0, dtype=np.float64)
 
     def resid(x):
-        H = rotation_any_k(x)
-        G = _inv3(H)
-        if G is None:
-            return np.full(4 * n, big)
-        r = np.r_[(_apply_h(H, an) - bn).ravel(), (_apply_h(G, bn) - an).ravel()]
-        return np.where(np.isfinite(r), r, big)
-
-    root_eps = math.sqrt(float(np.finfo(float).eps))
+        R = _rotvec_to_matrix(x)
+        H, G = Kn @ R @ Ki, Kn @ R.T @ Ki
+        return np.r_[(_apply_h(H, an) - bn).ravel(), (_apply_h(G, bn) - an).ravel()]
 
     def jac(x):
-        # the 3×3 model's derivative by central differences (cheap), the
-        # transfers' analytically: finite differences over the 4n residuals cost
-        # 9 residual evaluations per step and made a cold fit take seconds
-        H = rotation_any_k(x)
-        G = _inv3(H)
-        if G is None:
-            return np.zeros((4 * n, len(x)))
-        D = np.zeros((9, len(x)))
-        for k in range(len(x)):
-            h = root_eps * max(abs(float(x[k])), 1.0)
-            xp, xm = np.array(x, dtype=np.float64), np.array(x, dtype=np.float64)
-            xp[k] += h
-            xm[k] -= h
-            D[:, k] = (rotation_any_k(xp) - rotation_any_k(xm)).ravel() / (2.0 * h)
-        dG = -np.einsum("ki,jl->klij", G, G).reshape(9, 9)       # dG = −G·dH·G
-        out = np.r_[_transfer_jacobian(H, an).reshape(-1, 9) @ D,
-                    _transfer_jacobian(G, bn).reshape(-1, 9) @ dG @ D]
-        return np.where(np.isfinite(out), out, 0.0)
+        R, dR = cv2.Rodrigues(np.asarray(x, dtype=np.float64).reshape(3, 1))
+        dR = dR.reshape(3, 3, 3)                        # dR[k] = ∂R/∂w_k
+        H, G = Kn @ R @ Ki, Kn @ R.T @ Ki
+        dH = np.stack([(Kn @ dR[k] @ Ki).ravel() for k in range(3)], 1)
+        dG = np.stack([(Kn @ dR[k].T @ Ki).ravel() for k in range(3)], 1)
+        return np.r_[_transfer_jacobian(H, an).reshape(-1, 9) @ dH,
+                     _transfer_jacobian(G, bn).reshape(-1, 9) @ dG]
 
+    tol = float(cfg.reference_tol)
     try:
-        sol = least_squares(resid, np.asarray(x0, dtype=np.float64), jac=jac, method="lm",
-                            max_nfev=int(cfg.reference_max_eval),
-                            ftol=float(cfg.reference_ftol))
+        sol = least_squares(resid, x0, jac=jac, method="trf", tr_solver="exact",
+                            x_scale=np.ones(3), xtol=tol, ftol=tol, gtol=tol,
+                            max_nfev=int(cfg.reference_max_eval))
     except (ValueError, np.linalg.LinAlgError):
         return None
-    Hn = rotation_any_k(sol.x)
-    if not np.all(np.isfinite(Hn)):
-        return None
-    return sol.x, _inv3(T) @ Hn @ T, float(sol.cost)
+    if sol.status <= 0 or not np.all(np.isfinite(sol.x)):
+        return None                              # the bound, not convergence, stopped it
+    return sol.x, _inv3(T) @ rotation_homography(sol.x, Kn) @ T, float(sol.cost)
 
 
 # ── frames ───────────────────────────────────────────────────────────────
@@ -386,10 +369,11 @@ class _Frames:
 class _Window:
     """Tracks seeded on one anchor, each matched to the anchor at every frame."""
 
-    def __init__(self, anchor: int, frames: _Frames, cfg: ParallaxConfig):
+    def __init__(self, anchor: int, frames: _Frames, cfg: ParallaxConfig, Kn: np.ndarray):
         self.anchor = anchor
         self.frames = frames
         self.cfg = cfg
+        self.Kn = Kn                              # the session camera, normalised frame
         self.img = frames.small(anchor)
         g = self.img.astype(np.float64)
         self.ref = (float(g.mean()), float(g.std()))
@@ -433,24 +417,16 @@ class _Window:
         self.pred[idx[ok]] = b[ok].astype(np.float32)
         return to_native(a[ok], (sx, sy)), to_native(b[ok], (sx, sy)), fb[ok]
 
-    def measure(self, f: int, T: np.ndarray, x_seed: Optional[np.ndarray]) -> FrameMeasure:
+    def measure(self, f: int, T: np.ndarray) -> FrameMeasure:
         a, b, fb = self.match(f)
         n = len(a)
         nan = float("nan")
         if n < self.cfg.min_tracks:
             return FrameMeasure(f, self.anchor, n, nan, nan, nan, True, "too_few_tracks")
         disp = float(np.median(np.hypot(*(b - a).T)))
-        if self.x is not None:
-            fit = fit_rotation(a, b, T, self.cfg, self.x)
-        else:
-            # a window's first fit: from the nominal pinhole AND from the last
-            # window's intrinsics — the lower cost wins (the intrinsics are barely
-            # observable while the view has hardly moved, and a start carried from a
-            # fit that wandered read 180 px on a 5 cm step)
-            fits = [f_ for f_ in (fit_rotation(a, b, T, self.cfg, None),
-                                  fit_rotation(a, b, T, self.cfg, x_seed)
-                                  if x_seed is not None else None) if f_ is not None]
-            fit = min(fits, key=lambda f_: f_[2]) if fits else None
+        # warm-started from the previous frame of the window (speed only: the camera is
+        # fixed and the fit converges to the same minimum from any nearby start)
+        fit = fit_rotation(a, b, T, self.cfg, self.Kn, self.x)
         if fit is None:
             return FrameMeasure(f, self.anchor, n, disp, nan, float(np.median(fb)), True,
                                 "rotation_fit_failed")
@@ -467,16 +443,6 @@ class _Window:
         return FrameMeasure(f, self.anchor, n, disp,
                             float(np.quantile(sym, self.cfg.parallax_quantile)),
                             float(np.median(fb)), False, None)
-
-
-def _k_seed(x: Optional[np.ndarray]) -> Optional[np.ndarray]:
-    """A new window's start: the intrinsics of the last fit (the camera does not
-    change), the rotation re-initialised from the homography (x[5:] = NaN)."""
-    if x is None:
-        return None
-    out = np.array(x, dtype=np.float64)
-    out[5:] = np.nan
-    return out
 
 
 class _Progress:
@@ -506,7 +472,7 @@ def _sharpest(cands: Sequence[FrameMeasure], by_frame: Dict[int, Dict[str, Any]]
 
 
 def select_keyframes(chain: List[int], frames: _Frames, by_frame: Dict[int, Dict[str, Any]],
-                     cfg: ParallaxConfig, T: np.ndarray, prog: _Progress
+                     cfg: ParallaxConfig, T: np.ndarray, Kn: np.ndarray, prog: _Progress
                      ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[int, FrameMeasure]]:
     """(keyframes, windows, {frame: its last measurement})."""
     q = float(cfg.parallax_quantum_px)
@@ -516,17 +482,17 @@ def select_keyframes(chain: List[int], frames: _Frames, by_frame: Dict[int, Dict
                   "parallax_px": 0.0, "closed_by": "first_usable_frame"}]
     windows: List[Dict[str, Any]] = []
     records: Dict[int, FrameMeasure] = {}
-    anchor, anchor_is_kf, x_last = chain[0], True, None
+    anchor, anchor_is_kf = chain[0], True
     i = 1
     while i < len(chain):
-        win = _Window(anchor, frames, cfg)
+        win = _Window(anchor, frames, cfg, Kn)
         seen: List[FrameMeasure] = []
         closed_by, chosen, restart = "end", None, len(chain)
         j = i
         while j < len(chain):
             f = chain[j]
             prog.tick(f)
-            m = win.measure(f, T, _k_seed(x_last))
+            m = win.measure(f, T)
             records[f] = m
             if m.lost:
                 base = [s for s in seen if s.parallax_px >= cfg.witness_min_parallax_px]
@@ -539,7 +505,6 @@ def select_keyframes(chain: List[int], frames: _Frames, by_frame: Dict[int, Dict
                 else:
                     closed_by, restart = "coverage_break", j + 1
                 break
-            x_last = win.x
             seen.append(m)
             if m.parallax_px > hi:
                 band = [s for s in seen if lo <= s.parallax_px <= hi]
@@ -575,27 +540,24 @@ def select_keyframes(chain: List[int], frames: _Frames, by_frame: Dict[int, Dict
 
 def select_witnesses(chain: List[int], kf_frames: Sequence[int], frames: _Frames,
                      by_frame: Dict[int, Dict[str, Any]], cfg: ParallaxConfig, T: np.ndarray,
-                     prog: _Progress) -> List[Dict[str, Any]]:
+                     Kn: np.ndarray, prog: _Progress) -> List[Dict[str, Any]]:
     """Every usable frame whose parallax from the last CHOSEN witness reaches
     ``witness_min_parallax_px`` (or whose tracks from it are lost), plus every
     keyframe."""
     kf = set(int(k) for k in kf_frames)
     out = [{"frame": chain[0], "file": by_frame[chain[0]]["file"],
             "reason": "first_usable_frame", "parallax_px": 0.0}]
-    win = _Window(chain[0], frames, cfg)
-    x_last = None
+    win = _Window(chain[0], frames, cfg, Kn)
     for f in chain[1:]:
         prog.tick(f)
-        m = win.measure(f, T, _k_seed(x_last))
-        if not m.lost:
-            x_last = win.x
+        m = win.measure(f, T)
         reason = ("keyframe" if f in kf else "track_loss" if m.lost else
                   "parallax" if m.parallax_px >= cfg.witness_min_parallax_px else None)
         if reason is None:
             continue
         out.append({"frame": f, "file": by_frame[f]["file"], "reason": reason,
                     "parallax_px": None if m.lost else m.parallax_px})
-        win = _Window(f, frames, cfg)
+        win = _Window(f, frames, cfg, Kn)
     return out
 
 
@@ -685,10 +647,12 @@ def _check_inventory(paths: List[Path], rows: List[Dict[str, Any]], frames_dir: 
 
 
 def run_parallax(frames_dir: os.PathLike, quality: Dict[str, Any], cfg: ParallaxConfig,
-                 log: Callable = print, *, heartbeat_s: float, geometry_epoch: int = 0,
+                 K: np.ndarray, log: Callable = print, *, heartbeat_s: float,
+                 geometry_epoch: int = 0,
                  camera_epoch: int = 0, cancelled: Cancelled = None) -> Dict[str, Any]:
     """Keyframes, witnesses and coverage warnings over the usable frames of
-    ``frames_dir``. ``quality`` is the I0 report of the SAME frame inventory."""
+    ``frames_dir``. ``quality`` is the I0 report of the SAME frame inventory; ``K`` the
+    session camera's intrinsics in native px (intake/focal.py)."""
     if heartbeat_s <= 0:
         raise ParallaxError(f"heartbeat_s must be positive, got {heartbeat_s}")
     frames_dir = Path(frames_dir)
@@ -707,24 +671,33 @@ def run_parallax(frames_dir: os.PathLike, quality: Dict[str, Any], cfg: Parallax
             f"rejected by exposure ({', '.join(f'{k}={v}' for k, v in rejected.items())})")
     native_wh = (int(quality["native_w"]), int(quality["native_h"]))
     T = image_normaliser(native_wh)
+    K = np.asarray(K, dtype=np.float64)
+    if K.shape != (3, 3) or not np.all(np.isfinite(K)) or K[0, 0] <= 0 or K[1, 1] <= 0:
+        raise ParallaxError(f"the session K must be a finite 3x3 with positive focals, got {K}")
+    Kn = T @ K
     log(f"{LOG_TAG} {len(chain)}/{len(rows)} usable frame(s); LK grid {cfg.grid_side}x"
         f"{cfg.grid_side} at scale {cfg.process_scale:g} matched to the anchor; parallax = "
-        f"{cfg.parallax_quantile:g}-quantile of the residuals w.r.t. the rotation of any "
-        f"pinhole; quantum "
+        f"{cfg.parallax_quantile:g}-quantile of the residuals w.r.t. the rotation of the "
+        f"session camera (fx {K[0, 0]:.1f} px, measured); quantum "
         f"{cfg.parallax_quantum_px:g} px (band ±{cfg.keyframe_band_frac:g}), witness "
         f"{cfg.witness_min_parallax_px:g} px (native px)")
     frames = _Frames({int(p.stem): p for p in paths}, native_wh, cfg)
 
+    # BLAS single-threaded: the passes are sequential, and no reading may depend on how
+    # many threads split a reduction (identical inputs → bit-identical keyframes)
+    from threadpoolctl import threadpool_limits
+    _blas = threadpool_limits(limits=1)
     t0 = time.monotonic()
     prog = _Progress(log, "keyframes", len(chain), heartbeat_s, cancelled)
-    keyframes, windows, records = select_keyframes(chain, frames, by_frame, cfg, T, prog)
+    keyframes, windows, records = select_keyframes(chain, frames, by_frame, cfg, T, Kn, prog)
     dt = time.monotonic() - t0
     log(f"{LOG_TAG} keyframes: {len(keyframes)} in {dt:.1f} s "
         f"({prog.n} measurements, {prog.n / max(dt, 1e-9):.1f}/s)")
     t1 = time.monotonic()
     prog_w = _Progress(log, "witnesses", len(chain), heartbeat_s, cancelled)
     witnesses = select_witnesses(chain, [k["frame"] for k in keyframes], frames, by_frame,
-                                 cfg, T, prog_w)
+                                 cfg, T, Kn, prog_w)
+    _blas.restore_original_limits()
     dt = time.monotonic() - t1
     log(f"{LOG_TAG} witnesses: {len(witnesses)} in {dt:.1f} s "
         f"({prog_w.n} measurements, {prog_w.n / max(dt, 1e-9):.1f}/s)")
@@ -761,6 +734,7 @@ def run_parallax(frames_dir: os.PathLike, quality: Dict[str, Any], cfg: Parallax
         "native_w": native_wh[0],
         "native_h": native_wh[1],
         "params": asdict(cfg),
+        "K": K.tolist(),
         "inputs": {
             "frames_dir": str(frames_dir),
             "n_frames": len(paths),
@@ -882,7 +856,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     icfg = load_intake_config()
     frames_dir = session_dir / "frames"
     quality = load_quality(frames_dir)
-    result = run_parallax(frames_dir, quality, icfg.parallax, log=print,
+    from intake.focal import default_probe
+    K = default_probe()(session_dir, quality, icfg.parallax, print, None)
+    result = run_parallax(frames_dir, quality, icfg.parallax, K, log=print,
                           heartbeat_s=icfg.runtime.heartbeat_s,
                           **read_session_epochs(session_dir))
     p_kf, p_w, p_warn = write_selection(session_dir, result, icfg.parallax)

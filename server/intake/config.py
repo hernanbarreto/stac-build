@@ -144,6 +144,10 @@ REMOVED_KEYS: Dict[str, Dict[str, str]] = {
         **{k: _CUT_BACK for k in ("rotation_floor_factor",
                                   "rigidity_confidence", "rigidity_bootstrap",
                                   "refine_max_iter", "refine_eps_px")},
+        "reference_ftol": ("removed 2026-09-28: it STOPPED the rotation fit before convergence and "
+                           "the reading depended on where it stopped (with scipy 1.15's MINPACK "
+                           "the same inputs gave different keyframes run to run) — the fit now "
+                           "runs to reference_tol (intake/parallax.py fit_rotation)"),
         "step_null": ("removed 2026-09-27 with the per-step accumulation: parallax is "
                       "measured against the anchor keyframe and the warnings' noise "
                       "reference is always the warp twin + the chain's forward-backward "
@@ -193,9 +197,13 @@ class ParallaxConfig:
                                         # w.r.t. the rotation reference
     keyframe_band_frac: float           # BOUND: the keyframe's reading lies in
                                         # [(1 − band), (1 + band)] × quantum
-    reference_max_eval: int             # BOUND: residual evaluations of the rotation fit per frame
-    reference_ftol: float               # BOUND: the rotation fit stops when a step lowers its cost by
-                                        # less than this (relative)
+    reference_max_eval: int             # BOUND: residual evaluations of the rotation fit per frame;
+                                        # reaching it = NOT converged = the frame is not measured
+    reference_tol: float                # declared convergence tolerance of the rotation fit (step,
+                                        # cost change and gradient, scipy trf xtol/ftol/gtol)
+    focal_probe_frames: int             # BOUND: frames of the DA3 focal probe (spread over the video)
+    focal_probe_res: int                # DA3 process_res of the focal probe
+    focal_probe_model: str              # DA3 model of the focal probe
 
 
 @dataclass(frozen=True)
@@ -301,7 +309,10 @@ def _load_parallax(sec: Dict[str, Any]) -> ParallaxConfig:
         keyframe_band_frac=_num(p, "keyframe_band_frac", "parallax", lo=0.0, hi=1.0),
         reference_max_eval=_num(p, "reference_max_eval", "parallax", lo=1, integer=True),
         # MINPACK needs a positive tolerance; 1 would stop on the first step
-        reference_ftol=_num(p, "reference_ftol", "parallax", lo=0.0, hi=1.0, lo_excl=True),
+        reference_tol=_num(p, "reference_tol", "parallax", lo=0.0, hi=1.0, lo_excl=True),
+        focal_probe_frames=_num(p, "focal_probe_frames", "parallax", lo=2, integer=True),
+        focal_probe_res=_num(p, "focal_probe_res", "parallax", lo=14, integer=True),
+        focal_probe_model=_str(p, "focal_probe_model", "parallax"),
     )
     if out.keyframe_band_frac >= 1.0:
         raise IntakeConfigError(

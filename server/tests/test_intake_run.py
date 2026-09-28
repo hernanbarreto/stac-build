@@ -154,7 +154,21 @@ def _mtimes(session_dir):
     return {str(p): p.stat().st_mtime_ns for p in _artifacts(session_dir)}
 
 
+def _true_focal(*_a, **_k):
+    """The focal probe as DA3 would measure it: the rendering camera's pinhole K."""
+    return S.default_camera(W, H).K()
+
+
+@pytest.fixture(autouse=True)
+def _no_da3(monkeypatch):
+    """Every path that does not inject ``focal`` (the CLI, the map_worker) gets the
+    rendering camera's K instead of a DA3 run."""
+    import intake.focal as F
+    monkeypatch.setattr(F, "default_probe", lambda python=None: _true_focal)
+
+
 def _run(session_dir, icfg, **kw):
+    kw.setdefault("focal", _true_focal)
     kw.setdefault("tagger", SpyTagger())
     kw.setdefault("segmenter", RectSegmenter())
     kw.setdefault("log", Log())
@@ -266,7 +280,7 @@ def test_skip_content_then_content_only(session, icfg, monkeypatch):
     monkeypatch.setattr(Cn, "Sam3Segmenter", Boom)
     before = Counter()
     log = Log()
-    res = R.run_intake(session, icfg, log=log, skip_content=True, before_content=before)
+    res = R.run_intake(session, icfg, focal=_true_focal, log=log, skip_content=True, before_content=before)
     assert res["steps"]["quality"]["ran"] and res["steps"]["parallax"]["ran"]
     assert res["steps"]["content"] == {
         "ran": False, "reason": R.REASON_SKIP_CONTENT, "skipped": True,
@@ -299,7 +313,7 @@ def test_skip_content_then_content_only(session, icfg, monkeypatch):
     assert Cn.content_tags_path(session).exists()
 
     # skip_content with a content marker that still matches: the report is reused
-    res3 = R.run_intake(session, icfg, log=Log(), skip_content=True, tagger=Boom,
+    res3 = R.run_intake(session, icfg, focal=_true_focal, log=Log(), skip_content=True, tagger=Boom,
                         segmenter=Boom)
     assert res3["steps"]["content"] == {"ran": False, "reason": R.REASON_MATCHES,
                                         "skipped": False}
@@ -312,7 +326,7 @@ def test_skip_content_flags_a_stale_report(session, icfg):
     # would have to be re-measured; with skip_content it is left and declared STALE
     changed = replace(icfg, parallax=replace(icfg.parallax, parallax_quantum_px=6.0))
     log = Log()
-    res = R.run_intake(session, changed, log=log, skip_content=True, tagger=Boom,
+    res = R.run_intake(session, changed, focal=_true_focal, log=log, skip_content=True, tagger=Boom,
                        segmenter=Boom)
     assert res["steps"]["parallax"]["ran"] and \
         res["steps"]["parallax"]["reason"] == R.REASON_PARAMS_CHANGED
@@ -476,7 +490,7 @@ def test_hooks_run_in_order_and_epochs_are_stamped(session, icfg):
             doc = json.loads(path.read_text())
             assert doc["geometry_epoch"] == 5, path.name
     with pytest.raises(Q.IntakeCancelled, match="intake I0"):
-        R.run_intake(session, icfg, log=Log(), force=True, cancelled=lambda: True)
+        R.run_intake(session, icfg, focal=_true_focal, log=Log(), force=True, cancelled=lambda: True)
 
 
 # ── disabled content, laziness, CLI ──────────────────────────────────────
@@ -486,7 +500,7 @@ def test_disabled_content_writes_json_and_constructs_nothing(session, icfg, monk
     monkeypatch.setattr(Cn, "Sam3Segmenter", Boom)
     off = replace(icfg, content=replace(icfg.content, enabled=False))
     before = Counter()
-    res = R.run_intake(session, off, log=Log(), before_content=before)
+    res = R.run_intake(session, off, focal=_true_focal, log=Log(), before_content=before)
     assert res["steps"]["content"]["ran"] is True and before.n == 0
     content = json.loads(Cn.content_tags_path(session).read_text())
     assert content["enabled"] is False and content["provenance"] == "vlm_proposed"
@@ -501,10 +515,10 @@ def test_disabled_content_writes_json_and_constructs_nothing(session, icfg, monk
 
 def test_run_intake_needs_a_frames_dir(tmp_path, icfg):
     with pytest.raises(R.IntakeRunError, match="frames"):
-        R.run_intake(tmp_path, icfg, log=Log())
+        R.run_intake(tmp_path, icfg, focal=_true_focal, log=Log())
     (tmp_path / "frames").mkdir()
     with pytest.raises(R.IntakeRunError):
-        R.run_intake(tmp_path, icfg, log=Log())
+        R.run_intake(tmp_path, icfg, focal=_true_focal, log=Log())
 
 
 def test_cli_main(session, icfg, monkeypatch, capsys):

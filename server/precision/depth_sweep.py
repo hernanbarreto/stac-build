@@ -905,7 +905,8 @@ def run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> Di
             gx = ((inp.maps[0] - g.crop_x + 0.5) / g.scale_x - 0.5).astype(np.float32)
             gy = ((inp.maps[1] - g.crop_y + 0.5) / g.scale_y - 0.5).astype(np.float32)
             dn = cv2.remap(dd.astype(np.float32), gx, gy, cv2.INTER_NEAREST, borderValue=0)
-            cn = cv2.remap(CAL.da3_conf(dc).astype(np.float32), gx, gy, cv2.INTER_NEAREST,
+            # extract_da3_depth stores DA3's confidence already as expp1 − 1
+            cn = cv2.remap(np.asarray(dc, np.float32), gx, gy, cv2.INTER_NEAREST,
                            borderValue=np.nan)
             cal_da3.append(CAL.sample_pairs(d, dn, cn, t0m, dcfg.calib_samples_per_frame, rng))
         t_hb = _hb(pcfg.runner, t_hb, f"{LOG_TAG} consistency {n_done + 1}/{len(swept)}", log)

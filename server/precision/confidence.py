@@ -19,8 +19,9 @@ the lookup falls back to its confidence row (all distances pooled), and a row
 that is also starved to the model's global quantile. The report says how many
 cells did.
 
-DA3's confidence is the expp1 activation (1 + exp(x)); it is binned as
-``conf − 1`` (quantile bins are invariant to the transform — it only makes the
+DA3's confidence is the expp1 activation (1 + exp(x)); every DA3 npz of this
+repo already stores it as ``conf − 1`` (extract_da3_depth.py), the axis it is
+binned on (quantile bins are invariant to the transform — it only makes the
 reported edges readable).
 
 Output: ``output/precision/confidence_calibration.json``.
@@ -113,11 +114,6 @@ def lookup(table: Dict[str, Any], conf: np.ndarray, dist: np.ndarray) -> np.ndar
     ci = _bin(np.asarray(conf, np.float64), ce)
     di = _bin(np.asarray(dist, np.float64), de)
     return use[ci, di]
-
-
-def da3_conf(raw_conf: np.ndarray) -> np.ndarray:
-    """DA3's expp1 confidence on the calibration axis."""
-    return np.asarray(raw_conf, np.float64) - 1.0
 
 
 def write_calibration(output_dir: Path, reference: str, tables: Dict[str, Dict[str, Any]],

@@ -11,7 +11,19 @@ import torch
 import cv2
 from PIL import Image
 
+def _deterministic() -> None:
+    """Identical inputs → bit-identical depths (USER 2026-09-28: an engineering
+    measurement is reproducible run to run). cuBLAS reads its workspace config when
+    its handle is created, so this runs before anything touches CUDA."""
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.manual_seed(0)
+
+
 def main():
+    _deterministic()
     parser = argparse.ArgumentParser("Extract DA3 relative depth to NPY")
     parser.add_argument("--image_dir", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
@@ -197,6 +209,7 @@ def run_windows(args):
     for n, i in enumerate(todo):
         paths = windows[i]
         captured.clear()
+        torch.manual_seed(i)            # a window's draws depend on the window alone
         with torch.no_grad():
             pred = model.inference(paths, **res_kw)
         frames = np.array([int("".join(ch for ch in os.path.splitext(os.path.basename(p))[0]

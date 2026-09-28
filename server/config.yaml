@@ -636,8 +636,10 @@ intake:
                                        # intake/parallax.py): LK tracks matched to the window's
                                        # ANCHOR at every frame; parallax = a quantile of the tracks'
                                        # symmetric residual w.r.t. the pure ROTATION of any pinhole
-                                       # (K·R·K⁻¹, K free — a homography also explains a forward
-                                       # walk's expansion and read it as no baseline). All lengths
+                                       # (K·R·K⁻¹ with K the session camera MEASURED by the DA3
+                                       # focal probe, only R fitted — a general homography also
+                                       # explains a forward walk's expansion and read it as no
+                                       # baseline; a free K had no unique minimum). All lengths
                                        # in NATIVE px.
     grid_side: 32                      # BOUND: seed grid on each anchor (grid_side² tracks)
     process_scale: 0.25                # BOUND: tracking scale (LK on the downscaled gray)
@@ -669,11 +671,19 @@ intake:
                                        # while the reading stays within quantum × (1 ± this); the
                                        # keyframe is the SHARPEST frame (I0 sharp_rank) in that band
     reference_max_eval: 200            # BOUND: residual evaluations of the rotation fit per frame
-                                       # (warm-started from the previous frame)
-    reference_ftol: 1.0e-3             # BOUND: the rotation fit stops when a step lowers its cost by
-                                       # less than this share: the intrinsics are unidentifiable
-                                       # while the view barely moved and the solver crawls along
-                                       # that flat valley with the reading already settled
+                                       # (warm-started from the previous frame); reaching it means
+                                       # NOT converged and the frame is not measured (lost)
+    focal_probe_frames: 16             # BOUND: frames of the DA3 focal probe, spread uniformly over
+                                       # the video — the session camera's K is MEASURED once and
+                                       # the rotation reference fits only R (a per-frame focal
+                                       # bent to absorb translation; intake/focal.py)
+    focal_probe_res: 1008              # DA3 process_res of the probe (claude_stac.txt §4-F9:
+                                       # gauge process_res 1008 — the maximum-resolution instrument)
+    focal_probe_model: depth-anything/DA3NESTED-GIANT-LARGE-1.1   # the gauge's DA3 model
+    reference_tol: 1.0e-12             # declared convergence tolerance of the rotation fit (step,
+                                       # cost change and gradient): the reading is the minimum, not
+                                       # wherever a loose stop left it (USER 2026-09-28: identical
+                                       # inputs must give bit-identical keyframes)
   content:                             # I2 — VLM content tags (vlm_proposed) + SAM3 exclusion masks
     enabled: false                     # claude_stac.txt §4-F1: I2 (content tags + exclusion masks)
                                        # is part of the intake. USER 2026-09-28: OFF for the

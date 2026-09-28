@@ -34,6 +34,8 @@ import json
 import os
 import sys
 import time
+
+import numpy as np
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -334,6 +336,7 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
                skip_content: bool = False,
                before_content: Optional[Callable[[], Any]] = None,
                before_sam3: Optional[Callable[[], Any]] = None,
+               focal: Optional[Callable[..., Any]] = None,
                cancelled: Q.Cancelled = None) -> Dict[str, Any]:
     """I0 → I1 → I2 on ``<session>/frames`` with the resume marker
     ``<session>/intake/intake_state.json``.
@@ -353,7 +356,11 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
     forwarded to :func:`intake.content.run_content`, which calls it after the
     last VLM tag and before the first SAM3 call — the place a caller hands the
     GPU over (the map_worker stops vLLM there: the two never share the card).
-    ``cancelled()`` (optional) is polled inside every loop and raises
+    ``focal(session_dir, quality, parallax_cfg, log, cancelled)`` returns the session
+    camera's K (native px) that I1's rotation reference uses — default the DA3 probe
+    of :mod:`intake.focal` (GPU, in this interpreter), which reuses its own result
+    while its frames / resolution / model are unchanged; the K enters I1's identity,
+    so a different K re-runs I1. ``cancelled()`` (optional) is polled inside every loop and raises
     ``intake.quality.IntakeCancelled`` naming the step. ``progress(pct, msg)``
     is optional. Every artifact is stamped with the session's epochs, read
     once here (``intake.quality.read_session_epochs``).
@@ -424,17 +431,24 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
         {"action": "written", "reason": "I0 ran"}
     steps_out["quality"] = {"ran": run0, "reason": why0, "legacy_shim": shim_record}
 
+    # ── I1 prerequisite: the session camera, measured ────────────────────
+    _progress(progress, 8, "intake I1: the session camera (DA3 focal probe)")
+    if focal is None:
+        from intake.focal import default_probe
+        focal = default_probe()
+    K = np.asarray(focal(session_dir, quality, icfg.parallax, log, cancelled), np.float64)
+
     # ── I1 parallax ──────────────────────────────────────────────────────
     _progress(progress, 10, "intake I1: parallax keyframes + witness frames")
     ph1 = params_hash(icfg.parallax)
     in1 = {"frames": inventory, "quality": quality_identity(quality),
-           "stage_version": P.PARALLAX_VERSION}
+           "K": [float(v) for v in K.ravel()], "stage_version": P.PARALLAX_VERSION}
     run1, why1 = decide(old_state, "parallax", ph1, in1, force,
                         lambda: _parallax_problem(session_dir), marker_problem)
     if run1:
         log(f"{LOG_TAG} parallax: running ({why1})")
         t0 = time.monotonic()
-        result = P.run_parallax(frames_dir, quality, icfg.parallax, log=log, heartbeat_s=hb,
+        result = P.run_parallax(frames_dir, quality, icfg.parallax, K, log=log, heartbeat_s=hb,
                                 cancelled=cancelled, **epochs)
         p_kf, p_w, p_warn = P.write_selection(session_dir, result, icfg.parallax)
         state["steps"]["parallax"] = _entry(

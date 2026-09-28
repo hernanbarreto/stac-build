@@ -51,7 +51,7 @@ def test_real_config_loads_with_documented_shape():
     assert isinstance(p.warn_min_run_frames, int)
     assert 0 <= p.keyframe_band_frac < 1 and 0 < p.parallax_quantile <= 1
     assert isinstance(p.reference_max_eval, int) and p.reference_max_eval >= 1
-    assert 0 < p.reference_ftol < 1
+    assert 0 < p.reference_tol < 1
     c = cfg.content
     assert isinstance(c.enabled, bool) and c.backend
     assert isinstance(c.batch, int) and c.batch >= 1 and isinstance(c.max_tokens, int)
@@ -75,11 +75,11 @@ def test_shipped_values_and_their_provenance_tags():
     cfg = load_intake_config(_raw())
     p = cfg.parallax
     assert p.keyframe_band_frac == 0.25 and p.parallax_quantile == 0.9
-    assert p.reference_max_eval == 200 and p.reference_ftol == 1.0e-3
+    assert p.reference_max_eval == 200 and p.reference_tol == 1.0e-12
     assert cfg.content.sam3_scope == "all"
     lines = (SERVER / "config.yaml").read_text().splitlines()
     keys = ("sam3_scope:", "parallax_quantile:", "keyframe_band_frac:", "reference_max_eval:",
-            "reference_ftol:")
+            "reference_tol:")
     tag = {}
     for ln in lines:
         for key in keys:
@@ -87,10 +87,11 @@ def test_shipped_values_and_their_provenance_tags():
                 tag[key] = ln
     assert "claude_stac.txt §4-F1 (all keyframes + witness frames)" in tag["sam3_scope:"]
     assert "USER DECISION" not in tag["sam3_scope:"]
-    for key in keys[1:]:
+    for key in keys[1:-1]:
         assert "BOUND" in tag[key], key
+    assert "declared convergence tolerance" in tag["reference_tol:"]
     # the removed switches are gone from the shipped file
-    for gone in ("step_null:", "rotation_floor_factor:",
+    for gone in ("step_null:", "reference_ftol:", "rotation_floor_factor:",
                  "rigidity_confidence:", "rigidity_bootstrap:", "refine_max_iter:",
                  "refine_eps_px:"):
         assert not any(ln.strip().startswith(gone) for ln in lines), gone
@@ -144,7 +145,9 @@ def test_missing_section_fails():
     ("parallax", "warn_rotation_min_disp_px"), ("parallax", "warn_min_run_frames"),
     ("parallax", "parallax_quantile"), ("parallax", "keyframe_band_frac"),
     ("parallax", "reference_max_eval"),
-    ("parallax", "reference_ftol"),
+    ("parallax", "reference_tol"),
+    ("parallax", "focal_probe_frames"), ("parallax", "focal_probe_res"),
+    ("parallax", "focal_probe_model"),
     ("content", "enabled"), ("content", "backend"), ("content", "batch"),
     ("content", "max_tokens"), ("content", "exclusion_classes"), ("content", "weight_classes"),
     ("content", "sam3_scope"), ("content", "prompts"),
@@ -202,8 +205,8 @@ def test_range_errors_name_the_key():
     _expect(_set(raw, "parallax", "parallax_quantile", 0.0), "parallax.parallax_quantile")
     _expect(_set(raw, "parallax", "parallax_quantile", 1.5), "parallax.parallax_quantile")
     _expect(_set(raw, "parallax", "reference_max_eval", 0), "parallax.reference_max_eval")
-    _expect(_set(raw, "parallax", "reference_ftol", 0.0), "parallax.reference_ftol")
-    _expect(_set(raw, "parallax", "reference_ftol", 1.5), "parallax.reference_ftol")
+    _expect(_set(raw, "parallax", "reference_tol", 0.0), "parallax.reference_tol")
+    _expect(_set(raw, "parallax", "reference_tol", 1.5), "parallax.reference_tol")
     _expect(_set(raw, "content", "batch", 0), "content.batch")
     _expect(_set(raw, "content", "max_tokens", 0), "content.max_tokens")
 
