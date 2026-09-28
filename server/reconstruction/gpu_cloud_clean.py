@@ -16,7 +16,9 @@ Replicates cloudcompy_postprocess.py semantics step by step:
      provenance survives);
   4. SOR (knn mean-distance, keep < mean + nSigma·std) via the EXACT GPU
      grid kNN of reconstruction.grid_knn — every point's statistic is over
-     exactly knn neighbours, the isolated floater's included;
+     exactly knn neighbours; a point with no neighbour within the reach
+     (postprocessing.sor_reach_*) is isolated: dropped and kept out of
+     mean/std, as the old 27-cell box did;
   DETERMINISM (2026-09-28): nothing here reads the card's free VRAM. The
   voxel pick cuts the cloud into slabs of WHOLE cells (one global origin,
   count from N and postprocessing.clean_bounds) and the SOR's kNN is exact —
@@ -148,19 +150,34 @@ def _voxel_keep(xyz_np: np.ndarray, voxel: float, *, tile_points: int,
 def _sor_keep(xyz_np: np.ndarray, knn: int, n_sigma: float, cell_h: float, *,
               device: str, query_block: int, candidate_budget: int):
     """Boolean keep mask, mean distance to the EXACT ``knn`` nearest neighbours
-    (reconstruction.grid_knn) — every statistic over exactly ``knn`` distances,
-    the isolated floater included (its true distance, never +inf or the mean of
-    the few a box happened to hold). ``cell_h`` only sizes the first search
-    level. Global mu/sd in float64."""
+    (reconstruction.grid_knn), keep <= mu + n_sigma·sd.
+
+    ``cell_h`` is the REACH: a point with NO neighbour within ``cell_h`` is
+    ISOLATED — dropped, and kept OUT of mu/sd. That is what the old 27-cell box
+    did (such a point got +inf and was excluded), now stated as an exact radius.
+    It is not optional: with every floater inside the statistic, twenty points
+    10-30 m away grew sd until the cut-off went 13 mm → 313 mm and every
+    near-surface noise point survived. Every other point's statistic is over
+    exactly ``knn`` distances in the whole cloud; mu/sd in float64 over them."""
     import torch
     from reconstruction.grid_knn import grid_knn
     n = len(xyz_np)
     if n <= knn:
         raise ValueError(f"SOR needs more than knn={knn} points, got {n}")
     pts = torch.from_numpy(np.ascontiguousarray(xyz_np)).to(device)
-    mean_d = np.empty(n, np.float64)
-    for q, idx, d2 in grid_knn(pts, knn, cell_h, query_block=query_block,
-                               candidate_budget=candidate_budget):
+    kw = {"query_block": query_block, "candidate_budget": candidate_budget}
+    # isolated = the nearest neighbour lies beyond the reach (one exact radius
+    # level); they never enter the kNN pass, whose search would otherwise grow
+    # level after level across the empty space around them
+    iso = np.empty(n, bool)
+    for q, idx, _d2 in grid_knn(pts, 1, None, radius=cell_h, **kw):
+        iso[q.cpu().numpy()] = (idx[:, 0] < 0).cpu().numpy()
+    live = np.flatnonzero(~iso)
+    if len(live) == 0:
+        raise RuntimeError(f"SOR: no point has a neighbour within {cell_h} m")
+    mean_d = np.full(n, np.inf)
+    for q, idx, d2 in grid_knn(pts, knn, cell_h, queries=torch.from_numpy(live).to(device),
+                               **kw):
         # the exact squared distances come back to the host: numpy's sqrt is
         # IEEE correctly rounded on every path (torch's CPU sqrt is not), and
         # the sum runs in a fixed order
@@ -171,12 +188,15 @@ def _sor_keep(xyz_np: np.ndarray, knn: int, n_sigma: float, cell_h: float, *,
         mean_d[q.cpu().numpy()] = s / knn
     del pts
     _empty_cache(device)
-    if not np.isfinite(mean_d).all():
+    md = mean_d[live]
+    if not np.isfinite(md).all():
         raise RuntimeError("SOR: a point has fewer than knn neighbours in the whole cloud")
-    mu = float(mean_d.mean())
-    sd = float(mean_d.std())
+    mu = float(md.mean())
+    sd = float(md.std())
     thr = mu + n_sigma * sd
-    return mean_d <= thr, mu, sd
+    print(f"  [SOR] {int(iso.sum()):,} isolated pt(s) (no neighbour within "
+          f"{cell_h * 1000:g} mm) dropped and kept out of mean/std")
+    return (~iso) & (mean_d <= thr), mu, sd
 
 
 def _empty_cache(device: str) -> None:
@@ -192,6 +212,15 @@ def _clean_bounds() -> dict:
     return {k: int(v) for k, v in config_section(
         ("postprocessing", "clean_bounds"),
         ("tile_points", "knn_query_block", "knn_candidate_budget")).items()}
+
+
+def _sor_reach(voxel: float) -> float:
+    """The SOR's isolation reach (see :func:`_sor_keep`) =
+    max(postprocessing.sor_reach_voxels × voxel, postprocessing.sor_reach_min_m).
+    Missing key = FAIL."""
+    from reconstruction.grid_knn import config_section
+    c = config_section(("postprocessing",), ("sor_reach_voxels", "sor_reach_min_m"))
+    return max(float(c["sor_reach_voxels"]) * float(voxel), float(c["sor_reach_min_m"]))
 
 
 def main() -> int:
@@ -242,6 +271,7 @@ def main() -> int:
     # memory BOUNDS from config — the same slabs and blocks on any card; the
     # surviving set never depends on them nor on the card's free VRAM
     bounds = _clean_bounds()
+    sor_reach = _sor_reach(args.voxel_size)
     tile_pts = bounds["tile_points"]
     knn_kw = {"query_block": bounds["knn_query_block"],
               "candidate_budget": bounds["knn_candidate_budget"]}
@@ -449,11 +479,10 @@ def main() -> int:
         stats = {}
 
         def _sor_idx(p):
-            # cell_h sizes the FIRST level of the exact kNN only — performance,
-            # never the answer
+            # the reach decides which points are isolated (dropped, out of
+            # mean/std) — postprocessing.sor_reach_*
             mm, mu_, sd_ = _sor_keep(p, args.sor_knn, args.sor_sigma,
-                                     cell_h=max(args.voxel_size * 3.0, 0.01),
-                                     device=dev, **knn_kw)
+                                     cell_h=sor_reach, device=dev, **knn_kw)
             stats["mu"], stats["sd"] = mu_, sd_
             return np.flatnonzero(mm)
 

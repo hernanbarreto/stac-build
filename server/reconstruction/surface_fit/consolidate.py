@@ -450,12 +450,19 @@ def scene_consolidate(output_dir: Path,
 
     ``device`` / ``min_neighbors`` / ``query_block`` / ``candidate_budget``
     left None are read from postprocessing.scene_consolidate (a missing key
-    fails naming it), so every caller — pipeline, on-load rebuild, epoch
-    transaction — runs the same configuration.
+    fails naming it), and ``excluded_statuses`` left None from
+    witness.mls_excluded_statuses (the loops config loader), so every caller —
+    pipeline, on-load rebuild, epoch transaction — runs the same configuration.
     """
     from reconstruction.grid_knn import config_section, resolve_device
     cfg = config_section(("postprocessing", "scene_consolidate"),
                          ("device", "min_neighbors", "query_block", "candidate_budget"))
+    if excluded_statuses is None:
+        # the on-load rebuild and the epoch transaction never passed it, so
+        # their MLS moved the single_witness / mask_conflict points the
+        # pipeline's leaves alone
+        from reconstruction.loops.config import load_loops_config
+        excluded_statuses = load_loops_config().witness.mls_excluded_statuses
     dev = resolve_device(device if device is not None else str(cfg["device"]))
     min_nb = int(min_neighbors if min_neighbors is not None else cfg["min_neighbors"])
     knn_kw = {"query_block": int(query_block if query_block is not None

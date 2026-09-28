@@ -288,3 +288,48 @@ class TestDeterminism:
         _write_traced_ply(tmp_path / "cleaned_cloud.ply", self._cloud())
         with pytest.raises(RuntimeError, match="CUDA"):
             scene_consolidate(tmp_path, radius_m=0.03, device="cuda")
+
+
+# ── review 2026-09-28: every caller runs the same configuration ──
+
+def test_scene_consolidate_reads_the_excluded_statuses_itself(tmp_path):
+    """Called WITHOUT excluded_statuses (the on-load rebuild, the epoch
+    transaction), the MLS still leaves witness.mls_excluded_statuses alone."""
+    from numpy.lib import recfunctions as rfn
+    from reconstruction.loops.config import load_loops_config
+    from reconstruction.surface_fit.consolidate import (_read_ply_structured,
+                                                        _write_ply_structured,
+                                                        scene_consolidate)
+    from reconstruction.witness.status import STATUS_CODES, status_mask
+    excluded = load_loops_config().witness.mls_excluded_statuses
+    assert excluded
+    cloud = TestDeterminism()._cloud()
+    _write_traced_ply(tmp_path / "cleaned_cloud.ply", cloud)
+    header, data = _read_ply_structured(tmp_path / "cleaned_cloud.ply")
+    codes = np.array([STATUS_CODES["verified"]] + [STATUS_CODES[s] for s in excluded], np.uint8)
+    status = codes[np.arange(len(data)) % len(codes)]
+    data = rfn.append_fields(data, "status", status, usemask=False)
+    header = header.replace(b"end_header", b"property uchar status\nend_header")
+    _write_ply_structured(tmp_path / "cleaned_cloud.ply", header, data)
+    st = scene_consolidate(tmp_path, radius_m=0.03, device="cpu")
+    frozen = status_mask(status, excluded)
+    assert st["n_excluded_by_status"] == int(frozen.sum()) > 0
+    _, out = _read_ply_structured(tmp_path / "cleaned_cloud.ply")
+    for a in ("x", "y", "z"):
+        assert out[a][frozen].tobytes() == data[a][frozen].tobytes()
+    assert not np.array_equal(out["z"][~frozen], data["z"][~frozen])   # the rest moved
+
+
+@pytest.mark.parametrize("key", ["device", "min_neighbors", "query_block",
+                                 "candidate_budget"])
+def test_scene_consolidate_missing_key_fails_naming_it(tmp_path, monkeypatch, key):
+    import yaml
+    from reconstruction import grid_knn
+    from reconstruction.surface_fit.consolidate import scene_consolidate
+    raw = yaml.safe_load(grid_knn._CONFIG.read_text())
+    del raw["postprocessing"]["scene_consolidate"][key]
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(yaml.safe_dump(raw))
+    monkeypatch.setattr(grid_knn, "_CONFIG", cfg)
+    with pytest.raises(KeyError, match=rf"postprocessing\.scene_consolidate\.{key}"):
+        scene_consolidate(tmp_path, device="cpu")

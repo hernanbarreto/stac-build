@@ -220,15 +220,24 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
                 sys.path.insert(0, server_dir_str)
             from reconstruction.surface_fit.consolidate import scene_consolidate
             from reconstruction.loops.config import load_loops_config as _llc2
-            stats = scene_consolidate(
-                output_dir,
-                radius_m=sc_cfg.get("radius_m"),
-                min_radius_m=float(sc_cfg.get("min_radius_m", 0.02)),
-                max_radius_m=float(sc_cfg.get("max_radius_m", 0.06)),
-                iterations=int(sc_cfg.get("iterations", 2)),
-                normal_gate=float(sc_cfg.get("normal_gate", 0.25)),
-                excluded_statuses=_llc2(config).witness.mls_excluded_statuses,
-            )
+            try:
+                stats = scene_consolidate(
+                    output_dir,
+                    radius_m=sc_cfg.get("radius_m"),
+                    min_radius_m=float(sc_cfg.get("min_radius_m", 0.02)),
+                    max_radius_m=float(sc_cfg.get("max_radius_m", 0.06)),
+                    iterations=int(sc_cfg.get("iterations", 2)),
+                    normal_gate=float(sc_cfg.get("normal_gate", 0.25)),
+                    excluded_statuses=_llc2(config).witness.mls_excluded_statuses,
+                )
+            except BaseException:
+                # the cloud on disk is NOT this stage's deliverable: left there,
+                # the resume probe (cleaned_cloud.ply exists) would take it as
+                # done and ship it unconsolidated. The chunks are still on
+                # disk, so the re-run cleans again from them.
+                for _p in (output_ply, output_dir / "cleaned_cloud_raw.ply"):
+                    _p.unlink(missing_ok=True)
+                raise
             pipe.send_log(
                 f"[consolidate] {stats['n_points']:,} pts, r={stats['radius_m']:.3f}m, "
                 f"normals {stats['normals']}, mean move {stats['mean_move_mm']:.2f}mm "

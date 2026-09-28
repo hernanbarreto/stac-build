@@ -451,47 +451,53 @@ def swap_transaction(output_dir: Path, tx_info: dict, log=print) -> None:
     Rolls completed renames back on any mid-swap failure."""
     output_dir = Path(output_dir)
     tx = Path(tx_info["tx_dir"])
-    prev = output_dir / f"{PREV_PREFIX}{tx_info['epoch_from']}"
-    if prev.exists():
-        raise RuntimeError(
-            f"{prev} already exists — epoch {tx_info['epoch_from']} is already "
-            f"stored; the session is inconsistent")
-    prev.mkdir(parents=True)
-    journal_path = output_dir / SWAP_JOURNAL
-    journal = {"epoch": tx_info["epoch_from"],      # the state kept in prev/
-               "epoch_from": tx_info["epoch_from"],
-               "epoch_to": tx_info["epoch_to"],
-               "artifacts": tx_info["artifacts"]}
-    journal_path.write_text(json.dumps(journal, indent=1))
-    done: List[dict] = []
-    try:
-        for art in tx_info["artifacts"]:
-            rel = art["rel"]
-            cur = output_dir / rel
-            if art["existed_before"]:
-                target = prev / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                cur.rename(target)
-            staged = tx / rel
-            cur.parent.mkdir(parents=True, exist_ok=True)
-            staged.rename(cur)
-            done.append(art)
-    except BaseException:
-        # roll back what moved, restore the original state exactly
-        for art in reversed(done):
-            rel = art["rel"]
-            cur = output_dir / rel
-            back = tx / rel
-            back.parent.mkdir(parents=True, exist_ok=True)
-            if cur.exists():
-                cur.rename(back)
-            if art["existed_before"]:
-                (prev / rel).rename(cur)
-        shutil.rmtree(prev, ignore_errors=True)
-        journal_path.unlink(missing_ok=True)
-        raise
-    (prev / MANIFEST_NAME).write_text(json.dumps(journal, indent=1))
-    journal_path.unlink()
+    # output/potree (and cleaned_cloud.ply, which the preview build checks)
+    # move under the SAME cross-process lock every octree build swaps under,
+    # journal included — a build in another process never lands in the
+    # middle of this swap
+    from potree_converter import _potree_lock
+    with _potree_lock(output_dir):
+        prev = output_dir / f"{PREV_PREFIX}{tx_info['epoch_from']}"
+        if prev.exists():
+            raise RuntimeError(
+                f"{prev} already exists — epoch {tx_info['epoch_from']} is already "
+                f"stored; the session is inconsistent")
+        prev.mkdir(parents=True)
+        journal_path = output_dir / SWAP_JOURNAL
+        journal = {"epoch": tx_info["epoch_from"],      # the state kept in prev/
+                   "epoch_from": tx_info["epoch_from"],
+                   "epoch_to": tx_info["epoch_to"],
+                   "artifacts": tx_info["artifacts"]}
+        journal_path.write_text(json.dumps(journal, indent=1))
+        done: List[dict] = []
+        try:
+            for art in tx_info["artifacts"]:
+                rel = art["rel"]
+                cur = output_dir / rel
+                if art["existed_before"]:
+                    target = prev / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    cur.rename(target)
+                staged = tx / rel
+                cur.parent.mkdir(parents=True, exist_ok=True)
+                staged.rename(cur)
+                done.append(art)
+        except BaseException:
+            # roll back what moved, restore the original state exactly
+            for art in reversed(done):
+                rel = art["rel"]
+                cur = output_dir / rel
+                back = tx / rel
+                back.parent.mkdir(parents=True, exist_ok=True)
+                if cur.exists():
+                    cur.rename(back)
+                if art["existed_before"]:
+                    (prev / rel).rename(cur)
+            shutil.rmtree(prev, ignore_errors=True)
+            journal_path.unlink(missing_ok=True)
+            raise
+        (prev / MANIFEST_NAME).write_text(json.dumps(journal, indent=1))
+        journal_path.unlink()
     shutil.rmtree(tx, ignore_errors=True)
     log(f"  swap complete: epoch {tx_info['epoch_from']} → "
         f"{tx_info['epoch_to']} ({len(tx_info['artifacts'])} artifact(s); "
@@ -609,65 +615,68 @@ def select_epoch(output_dir: Path, epoch: int, log=print) -> dict:
     other. Now every epoch survives and selecting is free.
     """
     output_dir = Path(output_dir)
-    assert_no_interrupted_swap(output_dir)
-    epoch = int(epoch)
-    cur = current_epoch(output_dir)
-    if epoch == cur:
-        return {"epoch": cur, "changed": False}
-    src = output_dir / f"{PREV_PREFIX}{epoch}"
-    if not src.is_dir() or not (src / MANIFEST_NAME).is_file():
-        raise RuntimeError(f"epoch {epoch} is not in this session "
-                           f"({[e['epoch'] for e in available_epochs(output_dir)]})")
-    # Every artifact any epoch of this session ever staged, not just the ones
-    # in the chosen epoch's manifest: an epoch that came later may have created
-    # a file the chosen one never had (`depth_correction.json` of a depth
-    # correction, `floor_transform.npz` of a floor alignment). Swapping only
-    # the destination's list left that file live over older geometry — the
-    # cloud of epoch 1 with the depth sidecar of epoch 3.
-    arts = session_artifacts(output_dir)
-    if not arts:
-        raise RuntimeError(f"epoch {epoch} has no artifact manifest to restore")
-    dst = output_dir / f"{PREV_PREFIX}{cur}"
-    if dst.exists():
-        raise RuntimeError(f"{dst} already exists — the session is inconsistent")
-    dst.mkdir(parents=True)
-    journal_path = output_dir / SWAP_JOURNAL
-    journal_path.write_text(json.dumps(
-        {"select": epoch, "from": cur, "artifacts": arts}, indent=1))
-    done: List[dict] = []
-    stored: List[dict] = []
-    try:
-        for art in arts:
-            rel = art["rel"]
-            live = output_dir / rel
-            if live.exists():
-                (dst / rel).parent.mkdir(parents=True, exist_ok=True)
-                live.rename(dst / rel)
-                stored.append({"rel": rel, "existed_before": True})
-            keep = src / rel
-            if keep.exists():
-                live.parent.mkdir(parents=True, exist_ok=True)
-                keep.rename(live)
-            done.append(art)
-    except BaseException:
-        for art in reversed(done):
-            rel = art["rel"]
-            live = output_dir / rel
-            if live.exists():
-                (src / rel).parent.mkdir(parents=True, exist_ok=True)
-                live.rename(src / rel)
-            back = dst / rel
-            if back.exists():
-                back.rename(live)
-        shutil.rmtree(dst, ignore_errors=True)
-        journal_path.unlink(missing_ok=True)
-        raise
-    # the directory that held the chosen epoch now holds the one we left, and
-    # its manifest describes what actually landed there
-    (dst / MANIFEST_NAME).write_text(json.dumps(
-        {"epoch": cur, "artifacts": stored}, indent=1))
-    shutil.rmtree(src, ignore_errors=True)
-    journal_path.unlink()
+    # the same cross-process octree lock as swap_transaction (see there)
+    from potree_converter import _potree_lock
+    with _potree_lock(output_dir):
+        assert_no_interrupted_swap(output_dir)
+        epoch = int(epoch)
+        cur = current_epoch(output_dir)
+        if epoch == cur:
+            return {"epoch": cur, "changed": False}
+        src = output_dir / f"{PREV_PREFIX}{epoch}"
+        if not src.is_dir() or not (src / MANIFEST_NAME).is_file():
+            raise RuntimeError(f"epoch {epoch} is not in this session "
+                               f"({[e['epoch'] for e in available_epochs(output_dir)]})")
+        # Every artifact any epoch of this session ever staged, not just the ones
+        # in the chosen epoch's manifest: an epoch that came later may have created
+        # a file the chosen one never had (`depth_correction.json` of a depth
+        # correction, `floor_transform.npz` of a floor alignment). Swapping only
+        # the destination's list left that file live over older geometry — the
+        # cloud of epoch 1 with the depth sidecar of epoch 3.
+        arts = session_artifacts(output_dir)
+        if not arts:
+            raise RuntimeError(f"epoch {epoch} has no artifact manifest to restore")
+        dst = output_dir / f"{PREV_PREFIX}{cur}"
+        if dst.exists():
+            raise RuntimeError(f"{dst} already exists — the session is inconsistent")
+        dst.mkdir(parents=True)
+        journal_path = output_dir / SWAP_JOURNAL
+        journal_path.write_text(json.dumps(
+            {"select": epoch, "from": cur, "artifacts": arts}, indent=1))
+        done: List[dict] = []
+        stored: List[dict] = []
+        try:
+            for art in arts:
+                rel = art["rel"]
+                live = output_dir / rel
+                if live.exists():
+                    (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+                    live.rename(dst / rel)
+                    stored.append({"rel": rel, "existed_before": True})
+                keep = src / rel
+                if keep.exists():
+                    live.parent.mkdir(parents=True, exist_ok=True)
+                    keep.rename(live)
+                done.append(art)
+        except BaseException:
+            for art in reversed(done):
+                rel = art["rel"]
+                live = output_dir / rel
+                if live.exists():
+                    (src / rel).parent.mkdir(parents=True, exist_ok=True)
+                    live.rename(src / rel)
+                back = dst / rel
+                if back.exists():
+                    back.rename(live)
+            shutil.rmtree(dst, ignore_errors=True)
+            journal_path.unlink(missing_ok=True)
+            raise
+        # the directory that held the chosen epoch now holds the one we left, and
+        # its manifest describes what actually landed there
+        (dst / MANIFEST_NAME).write_text(json.dumps(
+            {"epoch": cur, "artifacts": stored}, indent=1))
+        shutil.rmtree(src, ignore_errors=True)
+        journal_path.unlink()
     log(f"  showing epoch {epoch} (was {cur}); every epoch of this session is "
         f"still on disk")
     return {"epoch": epoch, "previous": cur, "changed": True,
