@@ -2041,6 +2041,38 @@ reconstruction:
       permutations: 2000                # BOUND: resamples of the permutation / bootstrap tests
       seed: 0                           # their fixed seed
       min_witness_corr: 12              # BOUND: 2D-3D correspondences a witness needs for PnP
+    # F6 — prior-guided plane sweep at native resolution (precision/depth_sweep.py)
+    depth:
+      n_views: 8                        # BOUND: photometric / consistency views per keyframe
+      min_tri_deg: 1.0                  # view's median triangulation angle range (degrees):
+      max_tri_deg: 45.0                 # 1° = COLMAP's own min_triangulation_angle
+      n_hyp: 32                         # hypotheses uniform in inverse depth (+ the prior)
+      beta_max: 0.5                     # BOUND: cap of the relative search half-width; β itself
+                                        # is the calibrated |error| quantile of the prior
+      beta_quantile: 0.95               # declared confidence (as everywhere else)
+      patch_px: 7                       # ZNCC window side (odd)
+      best_k: 3                         # views aggregated per pixel (best k of n_views)
+      propagation_iters: 3              # edge-aware propagation rounds
+      null_frames: 24                   # BOUND: keyframes the ZNCC null distribution uses
+      null_confidence: 0.95             # declared confidence: floor = this null quantile
+      null_texture_bins: 8              # the floor per texture bin (reference window std)
+      tau_px_k: 2.0                     # τ_px = this × F5's held-out RMS
+      min_consistent_views: 2           # ≥ 2 cameras must agree (the 2026-08-19 recipe's rule)
+      prior_fill: keep                  # keep | drop — tier 1 is marked, never hidden
+      prior_fill_min_views: 2
+      view_samples: 256                 # BOUND: prior points per keyframe for view selection
+      min_scale_samples: 50             # BOUND: track depths that measure one keyframe's s_k
+      calib_conf_bins: 8                # confidence calibration bins (equal count)
+      calib_dist_bins: 4
+      calib_min_bin_samples: 200        # BOUND: a cell speaks for itself from this count
+      calib_samples_per_frame: 20000    # BOUND: calibration samples per keyframe
+      seed: 0
+      colmap:                           # A/B reference only (precision/depth_colmap.py)
+        binary: /workspace/miniforge3/envs/colmap/bin/colmap   # built WITH CUDA
+        window_radius: 5                # COLMAP's defaults
+        num_iterations: 5
+        geom_consistency: true
+        prior_points_per_image: 200     # BOUND: prior samples per keyframe → its depth range
     # F9 — runner (declared here so every stage heartbeats the same way)
     runner:
       heartbeat_s: 20                   # BOUND: seconds between progress lines of a long stage

@@ -226,6 +226,48 @@ class RefineConfig:
     min_witness_corr: int       # BOUND: 2D-3D correspondences a witness needs for PnP
 
 
+# ── F6: native-resolution depth ─────────────────────────────────────────
+
+PRIOR_FILL_MODES = ("keep", "drop")
+
+
+@dataclass(frozen=True)
+class ColmapConfig:
+    binary: str                 # the COLMAP executable built WITH CUDA (PatchMatch needs it)
+    window_radius: int          # COLMAP's own defaults (PatchMatchOptions)
+    num_iterations: int
+    geom_consistency: bool
+    prior_points_per_image: int  # BOUND: prior samples per keyframe feeding its depth range
+
+
+@dataclass(frozen=True)
+class DepthConfig:
+    n_views: int                # BOUND: photometric / consistency views per keyframe
+    min_tri_deg: float          # view's median triangulation angle range (degrees)
+    max_tri_deg: float
+    n_hyp: int                  # hypotheses in inverse depth (plus the prior itself)
+    beta_max: float             # BOUND: cap of the relative search half-width
+    beta_quantile: float        # declared confidence: β = this |error| quantile
+    patch_px: int               # ZNCC window side (odd)
+    best_k: int                 # views aggregated per pixel (best k of n_views)
+    propagation_iters: int      # edge-aware propagation rounds
+    null_frames: int            # BOUND: keyframes the ZNCC null distribution is measured on
+    null_confidence: float      # declared confidence: floor = this null quantile
+    null_texture_bins: int      # texture bins of the floor
+    tau_px_k: float             # τ_px = this × F5's held-out RMS
+    min_consistent_views: int   # views that must confirm a tier-0 depth
+    prior_fill: str             # keep | drop
+    prior_fill_min_views: int   # views that must confirm a tier-1 prior
+    view_samples: int           # BOUND: prior points per keyframe for view selection
+    min_scale_samples: int      # BOUND: track depths that measure one keyframe's s_k
+    calib_conf_bins: int        # calibration bins (equal count)
+    calib_dist_bins: int
+    calib_min_bin_samples: int  # BOUND: a calibration cell speaks for itself from this count
+    calib_samples_per_frame: int  # BOUND: calibration samples per keyframe
+    seed: int
+    colmap: ColmapConfig
+
+
 # ── F9: runner (declared in F0 so every stage heartbeats the same way) ───
 
 @dataclass(frozen=True)
@@ -243,6 +285,7 @@ class PrecisionConfig:
     omega: OmegaConfig
     tracks: TracksConfig
     refine: RefineConfig
+    depth: DepthConfig
     runner: RunnerConfig
 
 
@@ -354,6 +397,52 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     if refine.heldout_confidence >= 1.0:
         raise PrecisionConfigError(f"'{SECTION}.refine.heldout_confidence' must be below 1")
 
+    dp = _sub(sec, "depth", "")
+    cm = _sub(dp, "colmap", "depth")
+    depth = DepthConfig(
+        n_views=_num(dp, "n_views", "depth", lo=1, integer=True),
+        min_tri_deg=_num(dp, "min_tri_deg", "depth", lo=0.0),
+        max_tri_deg=_num(dp, "max_tri_deg", "depth", lo=0.0, hi=180.0, lo_excl=True),
+        n_hyp=_num(dp, "n_hyp", "depth", lo=3, integer=True),
+        beta_max=_num(dp, "beta_max", "depth", lo=0.0, hi=1.0, lo_excl=True),
+        beta_quantile=_num(dp, "beta_quantile", "depth", lo=0.0, hi=1.0, lo_excl=True),
+        patch_px=_num(dp, "patch_px", "depth", lo=3, integer=True),
+        best_k=_num(dp, "best_k", "depth", lo=1, integer=True),
+        propagation_iters=_num(dp, "propagation_iters", "depth", lo=0, integer=True),
+        null_frames=_num(dp, "null_frames", "depth", lo=1, integer=True),
+        null_confidence=_num(dp, "null_confidence", "depth", lo=0.0, hi=1.0, lo_excl=True),
+        null_texture_bins=_num(dp, "null_texture_bins", "depth", lo=1, integer=True),
+        tau_px_k=_num(dp, "tau_px_k", "depth", lo=0.0, lo_excl=True),
+        min_consistent_views=_num(dp, "min_consistent_views", "depth", lo=1, integer=True),
+        prior_fill=_enum(dp, "prior_fill", "depth", PRIOR_FILL_MODES),
+        prior_fill_min_views=_num(dp, "prior_fill_min_views", "depth", lo=1, integer=True),
+        view_samples=_num(dp, "view_samples", "depth", lo=8, integer=True),
+        min_scale_samples=_num(dp, "min_scale_samples", "depth", lo=1, integer=True),
+        calib_conf_bins=_num(dp, "calib_conf_bins", "depth", lo=1, integer=True),
+        calib_dist_bins=_num(dp, "calib_dist_bins", "depth", lo=1, integer=True),
+        calib_min_bin_samples=_num(dp, "calib_min_bin_samples", "depth", lo=1, integer=True),
+        calib_samples_per_frame=_num(dp, "calib_samples_per_frame", "depth", lo=1, integer=True),
+        seed=_num(dp, "seed", "depth", lo=0, integer=True),
+        colmap=ColmapConfig(
+            binary=_str(cm, "binary", "depth.colmap"),
+            window_radius=_num(cm, "window_radius", "depth.colmap", lo=1, integer=True),
+            num_iterations=_num(cm, "num_iterations", "depth.colmap", lo=1, integer=True),
+            geom_consistency=_bool(cm, "geom_consistency", "depth.colmap"),
+            prior_points_per_image=_num(cm, "prior_points_per_image", "depth.colmap", lo=2,
+                                        integer=True),
+        ),
+    )
+    if depth.patch_px % 2 == 0:
+        raise PrecisionConfigError(f"'{SECTION}.depth.patch_px' must be odd, got {depth.patch_px}")
+    if depth.max_tri_deg <= depth.min_tri_deg:
+        raise PrecisionConfigError(f"'{SECTION}.depth.max_tri_deg' must exceed min_tri_deg")
+    if depth.best_k > depth.n_views:
+        raise PrecisionConfigError(f"'{SECTION}.depth.best_k' ({depth.best_k}) exceeds "
+                                   f"n_views ({depth.n_views})")
+    if depth.beta_max >= 1.0 or depth.beta_quantile >= 1.0 or depth.null_confidence >= 1.0:
+        raise PrecisionConfigError(f"'{SECTION}.depth.beta_max', '.beta_quantile' and "
+                                   f"'.null_confidence' must be below 1")
+
     rn = _sub(sec, "runner", "")
     runner = RunnerConfig(
         heartbeat_s=_num(rn, "heartbeat_s", "runner", lo=0.0, lo_excl=True),
@@ -361,4 +450,4 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     )
 
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
-                           tracks=tracks, refine=refine, runner=runner)
+                           tracks=tracks, refine=refine, depth=depth, runner=runner)
