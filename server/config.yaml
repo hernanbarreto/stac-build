@@ -2250,6 +2250,15 @@ postprocessing:
   # Statistical Outlier Removal
   sor_knn: 8                           # neighbors (lower = keeps isolated objects)
   sor_sigma: 3.0                       # std multiplier (higher = keeps more points)
+  # BOUND — the SOR's isolation reach, max(sor_reach_voxels × voxel_size,
+  # sor_reach_min_m): the rule the cleaning always had (the 27-cell box of
+  # 3 voxels, ≥ 1 cm), declared here since 2026-09-28. A point with NO
+  # neighbour within it is dropped and kept OUT of the SOR's mean/std; every
+  # other point is judged on its exact kNN distance. Without it, twenty
+  # floaters 10-30 m away set the cut-off (13 mm → 313 mm) and every
+  # near-surface noise point survived.
+  sor_reach_voxels: 3.0
+  sor_reach_min_m: 0.01
 
   # Noise filter (only safe on small clouds <500K)
   noise_radius: 0.02

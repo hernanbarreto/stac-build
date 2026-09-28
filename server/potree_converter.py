@@ -8,6 +8,7 @@ Hernán Barreto — Ingerop IN3 Session IV
 import asyncio
 import errno
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -24,8 +25,25 @@ logger = logging.getLogger(__name__)
 # Path to PotreeConverter binary (compiled from vendor/)
 POTREE_BIN = Path(__file__).parent.parent / "vendor" / "PotreeConverter" / "build" / "PotreeConverter"
 
-# LAS / octree position quantum (m). 0.1 mm since 2026-09-28 (was 1 mm).
-LAS_SCALE_M = 1e-4
+# The LAS / octree position quantum is DERIVED from the cloud (2026-09-28; it
+# was a fixed 1 mm, then 0.1 mm): the finest power of two for which the
+# largest extent stays under 2**LAS_EXTENT_BITS quanta. PotreeConverter's
+# computeScaleOffset coarsens any scale finer than extent / 2**30, so 29 bits
+# is a 2x margin under that clamp — its "adjusted" branch never fires.
+LAS_EXTENT_BITS = 29
+
+
+def _las_scale(extent_m: float) -> float:
+    """Finest power of two ``s`` with ``extent_m / s < 2**LAS_EXTENT_BITS``.
+    A power of two keeps the quantisation reproducible: dividing by it is
+    exact in float64. Fails on a non-finite extent."""
+    if not math.isfinite(extent_m) or extent_m < 0:
+        raise ValueError(f"cloud extent {extent_m!r} m is not a finite size — "
+                         f"non-finite coordinates cannot be quantised")
+    # frexp: extent/2**bits = m·2**e with 0.5 <= m < 1, so 2**e is the smallest
+    # power of two strictly above it (and 1.0 for a zero extent)
+    return math.ldexp(1.0, math.frexp(extent_m / 2.0 ** LAS_EXTENT_BITS)[1])
+
 
 # One octree build per session output at a time ACROSS PROCESSES (2026-09-28).
 # The in-memory registry below only sees threads of one process; the preview
@@ -33,26 +51,44 @@ LAS_SCALE_M = 1e-4
 # worker subprocess, and both used to swap output/potree unserialised — the
 # final octree could be the preview, or a mix of both.
 LOCK_NAME = ".potree.lock"
+# Cadence of the wait — how often the lock is retried and how often the wait is
+# logged. Neither is a verdict: the wait has no deadline, it is only made visible.
+LOCK_POLL_S = 1.0
+LOCK_LOG_EVERY_S = 60.0
 
 
 @contextmanager
 def _potree_lock(output_dir: Path):
     """Exclusive flock on ``output_dir/.potree.lock`` for the body — waits as
-    long as it takes (the holder is building the octree this caller needs). The
-    kernel drops the lock with the holder's process, so it never goes stale."""
+    long as it takes (the holder is building the octree this caller needs),
+    logging every ``LOCK_LOG_EVERY_S`` how long and on whom (the holder writes
+    its pid into the lock file). The kernel drops the lock with the holder's
+    process, so it never goes stale."""
     import fcntl
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    fh = os.open(str(output_dir / LOCK_NAME), os.O_RDWR | os.O_CREAT, 0o666)
+    lock_path = output_dir / LOCK_NAME
+    fh = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o666)
     try:
-        try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as e:
-            if e.errno not in (errno.EACCES, errno.EAGAIN):
-                raise
-            logger.info(f"[Potree] another process is building {output_dir}/potree "
-                        f"— waiting for it")
-            fcntl.flock(fh, fcntl.LOCK_EX)
+        t0 = time.time()
+        next_log = t0
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+            now = time.time()
+            if now >= next_log:
+                try:
+                    holder = lock_path.read_text().strip() or "unknown holder"
+                except OSError as e:
+                    holder = f"holder unreadable: {e}"
+                logger.info(f"[Potree] waiting {now - t0:.0f}s for {output_dir}/potree "
+                            f"— the octree lock is held by {holder}")
+                next_log = now + LOCK_LOG_EVERY_S
+            time.sleep(LOCK_POLL_S)
         os.ftruncate(fh, 0)
         os.write(fh, f"pid={os.getpid()} since={time.time():.0f}\n".encode())
         yield
@@ -66,14 +102,23 @@ def _potree_lock(output_dir: Path):
 def _swap_in(new_dir: Path, potree_dir: Path, output_dir: Path) -> None:
     """Replace ``potree_dir`` with the freshly built ``new_dir`` (same
     filesystem: both live under ``output_dir``). The previous octree moves into
-    a UNIQUE directory first (never a name two builds in one second share) and
-    is deleted in the background; any rename error RAISES — a failed swap never
-    leaves the old and new octrees mixed in one directory."""
-    if potree_dir.exists():
-        old = Path(tempfile.mkdtemp(prefix="potree_old_", dir=str(output_dir)))
-        potree_dir.rename(old / "potree")
-        subprocess.Popen(["rm", "-rf", str(old)])
-    new_dir.rename(potree_dir)
+    a UNIQUE directory first (never a name two builds in one second share); the
+    new one is renamed in, and only THEN is the old one deleted in the
+    background. Any rename error RAISES: if the new octree cannot be moved in,
+    the old one is moved back first — a failed swap never leaves the session
+    without an octree, nor the old and new mixed in one directory."""
+    if not potree_dir.exists():
+        new_dir.rename(potree_dir)
+        return
+    old = Path(tempfile.mkdtemp(prefix="potree_old_", dir=str(output_dir)))
+    potree_dir.rename(old / "potree")
+    try:
+        new_dir.rename(potree_dir)
+    except BaseException:
+        (old / "potree").rename(potree_dir)
+        old.rmdir()
+        raise
+    subprocess.Popen(["rm", "-rf", str(old)])
 
 
 def _read_ply_vertices(ply_path: Path) -> np.ndarray:
@@ -158,16 +203,20 @@ def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: s
         float(data['y'].min()),
         float(data['z'].min()),
     ]
-    # 0.1 mm quantisation (was 1 mm — the measurement tools raycast the octree,
-    # so its grid IS their resolution). The offset is the minimum, so the
-    # stored integers run 0..extent/scale: they must stay inside the 30 bits
-    # PotreeConverter keeps (it silently coarsens the scale beyond, and LAS
-    # itself is int32) — a scene too large for that FAILS instead.
+    # The quantum comes from the cloud (the measurement tools raycast the
+    # octree, so its grid IS their resolution): the finest power of two that
+    # keeps the stored integers — 0..extent/scale, the offset being the
+    # minimum — under 2**LAS_EXTENT_BITS, inside the 30 bits PotreeConverter
+    # keeps without coarsening. The check re-verifies it; it can only trip on
+    # coordinates that are not finite.
     extent = max(float(data[a].max()) - float(data[a].min()) for a in ("x", "y", "z"))
-    if extent / LAS_SCALE_M >= 2 ** 30:
-        raise ValueError(f"{label}: extent {extent:.1f} m does not fit 30-bit integers "
-                         f"at {LAS_SCALE_M * 1000:g} mm — refusing to coarsen silently")
-    header.scales = [LAS_SCALE_M, LAS_SCALE_M, LAS_SCALE_M]
+    scale = _las_scale(extent)
+    if not extent / scale < 2 ** LAS_EXTENT_BITS:
+        raise ValueError(f"{label}: extent {extent!r} m does not fit "
+                         f"{LAS_EXTENT_BITS}-bit integers at scale {scale!r} m")
+    header.scales = [scale, scale, scale]
+    logger.info(f"[Potree] LAS quantum {scale:.3g} m (2^{math.frexp(scale)[1] - 1}) for "
+                f"a {extent:.2f} m extent")
 
     las = laspy.LasData(header)
     las.x = data['x'].astype(np.float64)

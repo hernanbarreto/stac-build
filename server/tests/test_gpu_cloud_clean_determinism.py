@@ -1,8 +1,9 @@
 """Deterministic cloud cleaning (2026-09-28): the voxel pick and the SOR of
 reconstruction.gpu_cloud_clean give the SAME surviving set whatever the card's
 free VRAM and whatever the memory bounds, and the SOR statistic is the exact
-kNN mean distance — including for the isolated floater the old 27-cell box
-averaged over "the few it had" (or called +inf).
+kNN mean distance. A point with no neighbour within the reach is isolated:
+dropped and kept out of mean/std, as the old 27-cell box did (+inf) — far
+floaters never set the cut-off.
 
 Runs on the CPU device: the torch code is the same on CUDA."""
 
@@ -46,6 +47,18 @@ def _brute_mean_knn(xyz: np.ndarray, k: int) -> np.ndarray:
     return out
 
 
+def _brute_nearest_d2(xyz: np.ndarray) -> np.ndarray:
+    """Squared distance to the nearest other point, same float64 arithmetic."""
+    p = xyz.astype(np.float64)
+    out = np.empty(len(p))
+    for i in range(len(p)):
+        d = p - p[i]
+        d2 = d[:, 0] * d[:, 0] + d[:, 1] * d[:, 1] + d[:, 2] * d[:, 2]
+        d2[i] = np.inf
+        out[i] = d2.min()
+    return out
+
+
 def test_voxel_pick_independent_of_tiling():
     xyz = _cloud(1)
     one = G._voxel_keep(xyz, 0.005, tile_points=len(xyz), device=DEV)
@@ -70,22 +83,23 @@ def test_voxel_pick_is_the_nearest_to_each_cell_centre():
     assert np.array_equal(keep, np.sort(np.array(list(best.values()))))
 
 
-def test_same_cloud_two_vram_budgets_bit_identical(monkeypatch):
-    """The free VRAM is not an input any more: two simulated cards give the
-    same cloud (and the functions never ask)."""
+def test_same_cloud_two_bound_sets_bit_identical(monkeypatch):
+    """voxel pick → SOR under two very different sets of memory bounds gives
+    the same bytes — and neither run asks the card for its free VRAM."""
+    def _no_vram_probe(*a, **k):
+        raise AssertionError("the cleaning must not read the card's free VRAM")
+    monkeypatch.setattr(torch.cuda, "mem_get_info", _no_vram_probe)
     xyz = _cloud(3)
     results = []
-    for free in (48 * 2 ** 30, 300 * 2 ** 20):
-        monkeypatch.setattr(torch.cuda, "mem_get_info",
-                            lambda *a, _f=free: (_f, 48 * 2 ** 30))
-        vk = G._voxel_keep(xyz, 0.004, tile_points=5000, device=DEV)
+    for tp, qb, cb in ((len(xyz), 1 << 20, 1 << 30), (997, 61, 2000)):
+        vk = G._voxel_keep(xyz, 0.004, tile_points=tp, device=DEV)
         sub = xyz[vk]
         keep, mu, sd = G._sor_keep(sub, 8, 1.0, 0.015, device=DEV,
-                                   query_block=4096, candidate_budget=1 << 20)
+                                   query_block=qb, candidate_budget=cb)
         results.append((vk, sub[keep], mu, sd))
-    (a, ca, mua, sda), (b, cb, mub, sdb) = results
+    (a, ca, mua, sda), (b, cb_, mub, sdb) = results
     assert np.array_equal(a, b)
-    assert ca.tobytes() == cb.tobytes()
+    assert ca.tobytes() == cb_.tobytes()
     assert (mua, sda) == (mub, sdb)
 
 
@@ -106,10 +120,15 @@ def test_sor_statistic_is_the_exact_knn_mean():
     assert np.array_equal(mean_d, ref)
     # and the floaters — far beyond one box of 1 cm — carry their true distance
     assert np.isfinite(mean_d).all() and mean_d[-12:].min() > 0.05
-    keep, mu, sd = G._sor_keep(xyz, k, 1.0, 0.01, device=DEV,
+    # the SOR: isolated = no neighbour within the reach (brute force), dropped
+    # and out of mu/sd; the others judged on their exact kNN mean
+    reach = 0.01
+    iso = _brute_nearest_d2(xyz) > reach * reach
+    assert 0 < iso.sum() < len(xyz) and iso[-12:].all()
+    keep, mu, sd = G._sor_keep(xyz, k, 1.0, reach, device=DEV,
                                query_block=333, candidate_budget=5000)
-    assert mu == float(ref.mean()) and sd == float(ref.std())
-    assert np.array_equal(keep, ref <= mu + sd)
+    assert mu == float(ref[~iso].mean()) and sd == float(ref[~iso].std())
+    assert np.array_equal(keep, ~iso & (ref <= mu + sd))
 
 
 def test_sor_independent_of_blocks():
@@ -143,7 +162,57 @@ def test_radius_knn_matches_brute_force():
         assert (got_i[i][m:] == -1).all() and np.isinf(got_d[i][m:]).all()
 
 
+def test_far_floaters_do_not_set_the_sor_cutoff():
+    """Review 2026-09-28: with the exact kNN and no isolation reach, twenty
+    floaters 10-30 m away grew sd until the cut-off kept EVERY near-surface
+    noise point. Isolated points are out of mean/std, so adding them changes
+    nothing for the rest — and the noise is still removed."""
+    rng = np.random.default_rng(11)
+    n_plane, n_noise, side = 20_000, 300, 1.4                 # ~1 pt/cm²
+    plane = np.column_stack([rng.uniform(0, side, n_plane), rng.uniform(0, side, n_plane),
+                             rng.normal(0, 0.001, n_plane)])
+    off = rng.uniform(0.01, 0.04, n_noise) * rng.choice([-1, 1], n_noise)
+    noise = np.column_stack([rng.uniform(0, side, n_noise),
+                             rng.uniform(0, side, n_noise), off])
+    u = rng.normal(size=(20, 3))
+    fly = side / 2 + u / np.linalg.norm(u, axis=1)[:, None] * rng.uniform(10, 30, 20)[:, None]
+    base = np.vstack([plane, noise]).astype(np.float32)
+    kw = dict(device=DEV, query_block=1 << 16, candidate_budget=1 << 22)
+    k0, mu0, sd0 = G._sor_keep(base, 8, 3.0, 0.015, **kw)
+    k1, mu1, sd1 = G._sor_keep(np.vstack([base, fly.astype(np.float32)]), 8, 3.0, 0.015, **kw)
+    assert (mu1, sd1) == (mu0, sd0)                            # the cut-off did not move
+    assert np.array_equal(k1[:len(base)], k0)                  # nor any survivor
+    assert not k1[len(base):].any()                            # every floater dropped
+    assert k0[n_plane:].mean() < 0.25                          # near-surface noise removed
+    assert k0[:n_plane].mean() > 0.99                          # the surface kept
+
+
 def test_bounds_come_from_config():
     b = G._clean_bounds()
     assert set(b) == {"tile_points", "knn_query_block", "knn_candidate_budget"}
     assert all(isinstance(v, int) and v > 0 for v in b.values())
+    assert G._sor_reach(0.005) == pytest.approx(0.015)         # max(3 × 5 mm, 1 cm)
+    assert G._sor_reach(0.001) == pytest.approx(0.01)
+
+
+@pytest.mark.parametrize("section,key", [
+    (("postprocessing", "clean_bounds"), "tile_points"),
+    (("postprocessing", "clean_bounds"), "knn_query_block"),
+    (("postprocessing", "clean_bounds"), "knn_candidate_budget"),
+    (("postprocessing",), "sor_reach_voxels"),
+    (("postprocessing",), "sor_reach_min_m"),
+])
+def test_missing_key_fails_naming_it(tmp_path, monkeypatch, section, key):
+    import yaml
+    from reconstruction import grid_knn
+    raw = yaml.safe_load(grid_knn._CONFIG.read_text())
+    sec = raw
+    for p in section:
+        sec = sec[p]
+    del sec[key]
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(yaml.safe_dump(raw))
+    monkeypatch.setattr(grid_knn, "_CONFIG", cfg)
+    dotted = ".".join(section + (key,))
+    with pytest.raises(KeyError, match=dotted.replace(".", r"\.")):
+        G._clean_bounds() if section[-1] == "clean_bounds" else G._sor_reach(0.005)

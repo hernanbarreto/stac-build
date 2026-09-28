@@ -322,18 +322,6 @@ async def _run_cloudcompy_postprocess_inner(session_id: str, postproc_config: di
         if process.returncode == 0 and output_ply.exists():
             file_size_mb = output_ply.stat().st_size / (1024 * 1024)
             print(f"[PostProc] ✅ Cleaned cloud saved: {output_ply} ({file_size_mb:.1f} MB)")
-            # Cascade cleanup (same as the pipeline cloudcompy worker): once cleaned_cloud
-            # exists, the per-chunk PLYs are baked in → delete them so they don't linger
-            # and don't re-trigger a rebuild on the next open.
-            _removed = 0
-            for _pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
-                for _f in scans_dir.glob(_pat):
-                    try:
-                        _f.unlink(); _removed += 1
-                    except Exception:
-                        pass
-            if _removed:
-                print(f"[PostProc] [cleanup] removed {_removed} chunk files (baked into cleaned_cloud)")
 
             # ── SAME machinery as the pipeline stage (USER 2026-09-04: one
             # single builder path): consolidate + DINOv3 fase-2/3 score and
@@ -355,8 +343,30 @@ async def _run_cloudcompy_postprocess_inner(session_id: str, postproc_config: di
                         normal_gate=float(_sc.get("normal_gate", 0.25)))
                     print(f"[PostProc] [consolidate] {_st}")
                 # (DINOv3 score DELETED by USER ORDER 2026-09-05)
-            await asyncio.get_event_loop().run_in_executor(
-                None, _finish_canonical)
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, _finish_canonical)
+            except BaseException:
+                # an unconsolidated cloud left on disk would be taken as done by
+                # the next open and by the pipeline's resume probe; the chunks
+                # are still there, so the next open rebuilds from them
+                for _p in (output_ply, scans_dir / "cleaned_cloud_raw.ply"):
+                    _p.unlink(missing_ok=True)
+                raise
+            # Cascade cleanup (same as the pipeline cloudcompy worker): once cleaned_cloud
+            # exists, the per-chunk PLYs are baked in → delete them so they don't linger
+            # and don't re-trigger a rebuild on the next open. AFTER the consolidation
+            # (2026-09-28): it now fails loudly, and without the chunks nothing could
+            # rebuild the cloud it failed on.
+            _removed = 0
+            for _pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
+                for _f in scans_dir.glob(_pat):
+                    try:
+                        _f.unlink(); _removed += 1
+                    except Exception:
+                        pass
+            if _removed:
+                print(f"[PostProc] [cleanup] removed {_removed} chunk files (baked into cleaned_cloud)")
             # merged_cloud → symlink to the canonical cloud (worker parity)
             try:
                 _mc = ctx.merged_cloud

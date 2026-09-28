@@ -2,6 +2,7 @@
 the chunks are concatenated into one LAS, and an octree marked as a preview is never
 taken for the clean cloud's — neither "up to date" nor reused."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -195,20 +196,111 @@ def test_converter_has_no_wall_clock_timeout(tmp_path, monkeypatch):
     assert "timeout" not in seen
 
 
-def test_las_keeps_a_tenth_of_a_millimetre(tmp_path):
+def test_las_quantum_is_the_finest_power_of_two_the_extent_allows(tmp_path):
     import laspy
-    d = _cloud(500, 9)
+    d = _cloud(500, 9)                                     # 10 m cube
     d["x"] += np.float32(123.45678)
     PC._vertices_to_las(d, tmp_path / "c.las", tmp_path, "test")
     las = laspy.read(tmp_path / "c.las")
-    assert list(las.header.scales) == [PC.LAS_SCALE_M] * 3
+    extent = max(float(d[a].max()) - float(d[a].min()) for a in ("x", "y", "z"))
+    s = las.header.scales[0]
+    assert list(las.header.scales) == [s] * 3
+    assert np.frexp(s)[0] == 0.5                           # a power of two
+    assert extent / s < 2 ** PC.LAS_EXTENT_BITS <= extent / (s / 2)   # the finest
     for a in ("x", "y", "z"):
         err = np.abs(np.asarray(las[a], np.float64) - d[a].astype(np.float64))
-        assert err.max() <= PC.LAS_SCALE_M / 2 + 1e-9, a
+        assert err.max() <= s / 2, a
 
 
-def test_las_extent_beyond_30_bits_fails(tmp_path):
+def test_las_quantum_follows_the_extent_and_never_meets_potrees_clamp():
+    for extent in (0.0, 1e-3, 12.9, 43.7, 2.0e5):
+        s = PC._las_scale(extent)
+        assert np.frexp(s)[0] == 0.5
+        assert extent / s < 2 ** 29                        # 2x under PotreeConverter's 2**30
+        assert extent == 0.0 or extent / (s / 2) >= 2 ** 29
+    assert PC._las_scale(2.0e5) > PC._las_scale(43.7)      # a larger scene, a coarser grid
+
+
+def test_las_non_finite_coordinates_fail(tmp_path):
     d = _cloud(10, 10)
-    d["x"][0] = 2.0e5                                      # 200 km at 0.1 mm
-    with pytest.raises(ValueError, match="30-bit"):
+    d["x"][0] = np.inf
+    with pytest.raises(ValueError, match="finite"):
         PC._vertices_to_las(d, tmp_path / "c.las", tmp_path, "test")
+
+
+def test_failed_rename_in_restores_the_old_octree(tmp_path, monkeypatch):
+    """The old octree is moved aside, then the NEW rename fails: the old one
+    goes back — the session is never left without an octree — and nothing is
+    deleted in the background."""
+    out = tmp_path / "output"
+    (out / "potree").mkdir(parents=True)
+    (out / "potree" / "old.bin").write_text("old")
+    ply = out / "cleaned_cloud.ply"
+    _write_ply(ply, _cloud(10, 11))
+    monkeypatch.setattr(PC, "_ply_to_las", lambda p, l: 10)
+    monkeypatch.setattr(PC, "_run_potree_converter", _fake_converter("new"))
+    popen = []
+    monkeypatch.setattr(PC.subprocess, "Popen", lambda *a, **k: popen.append(a))
+    real = Path.rename
+
+    def rename(self, target):
+        if Path(target) == out / "potree" and self.name == "potree" \
+                and not self.parent.name.startswith("potree_old_"):
+            raise OSError(28, "No space left on device")
+        return real(self, target)
+    monkeypatch.setattr(Path, "rename", rename)
+    assert PC.convert_ply_to_potree(tmp_path, force=True) is False
+    assert sorted(p.name for p in (out / "potree").iterdir()) == ["old.bin"]
+    assert not list(out.glob("potree_old_*")) and popen == []
+
+
+def test_lock_wait_is_logged_with_the_holder(tmp_path, monkeypatch, caplog):
+    """No deadline on the wait — but it is visible, and it names the holder."""
+    import logging
+    import threading
+    out = tmp_path / "output"
+    monkeypatch.setattr(PC, "LOCK_POLL_S", 0.01)
+    monkeypatch.setattr(PC, "LOCK_LOG_EVERY_S", 0.05)
+    got = threading.Event()
+
+    def waiter():
+        with PC._potree_lock(out):
+            got.set()
+    with caplog.at_level(logging.INFO, logger=PC.logger.name):
+        with PC._potree_lock(out):
+            t = threading.Thread(target=waiter)
+            t.start()
+            assert not got.wait(0.3)                       # still waiting
+        t.join(5)
+    assert got.is_set()
+    waits = [r.getMessage() for r in caplog.records if "waiting" in r.getMessage()]
+    assert len(waits) >= 2 and all(f"pid={os.getpid()}" in m for m in waits)
+
+
+def test_epoch_swap_waits_for_the_octree_lock(tmp_path, monkeypatch):
+    """correction.apply.swap_transaction moves output/potree under the same
+    cross-process lock as every octree build."""
+    import threading
+    from correction.apply import swap_transaction
+    monkeypatch.setattr(PC, "LOCK_POLL_S", 0.01)
+    out = tmp_path / "output"
+    (out / "potree").mkdir(parents=True)
+    (out / "potree" / "old.bin").write_text("old")
+    tx = out / "_tx_epoch_1"
+    (tx / "potree").mkdir(parents=True)
+    (tx / "potree" / "new.bin").write_text("new")
+    info = {"tx_dir": str(tx), "epoch_from": 0, "epoch_to": 1,
+            "artifacts": [{"rel": "potree", "existed_before": True}]}
+    done = threading.Event()
+
+    def swap():
+        swap_transaction(out, info, log=lambda m: None)
+        done.set()
+    with PC._potree_lock(out):
+        t = threading.Thread(target=swap)
+        t.start()
+        assert not done.wait(0.3)                          # blocked on the build's lock
+        assert sorted(p.name for p in (out / "potree").iterdir()) == ["old.bin"]
+    t.join(5)
+    assert done.is_set()
+    assert sorted(p.name for p in (out / "potree").iterdir()) == ["new.bin"]
