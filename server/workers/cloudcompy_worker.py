@@ -161,21 +161,6 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         size_mb = output_ply.stat().st_size / (1024 * 1024)
         pipe.send_log(f"Cleaned cloud: {size_mb:.1f} MB")
 
-        # Chunks are now redundant — their points + per-point traceability are
-        # baked into cleaned_cloud.ply, and nothing downstream (Potree, TSDF,
-        # segmentation) reads the chunks. Delete them (gate to keep if ever
-        # re-running ONLY cloudcompy without re-running reconstruction).
-        if config.get("postprocessing", {}).get("delete_chunks_after_merge", True):
-            removed = 0
-            for pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
-                for f in output_dir.glob(pat):
-                    try:
-                        f.unlink(); removed += 1
-                    except Exception:
-                        pass
-            if removed:
-                pipe.send_log(f"[cleanup] removed {removed} redundant chunk files (baked into cleaned_cloud)")
-
         # ── Link to project merged/ dir (new-style projects) ──
         # SourceContext.merged_cloud expects merged/merged_cloud.ply
         # but the pipeline writes to src_xxx/output/cleaned_cloud.ply.
@@ -221,33 +206,51 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         # count/order (→ colors, globalIndices) are preserved; the untouched
         # measurement is kept as cleaned_cloud_raw.ply (metric reference for
         # surface_fit residuals). Radius adapts to fine_register_report.json.
+        # A failure FAILS the stage (2026-09-28): it used to be "non-fatal,
+        # cloud kept raw", so a session could ship onion layers with nothing
+        # in the run saying the quality had dropped. `enabled: false` is the
+        # only declared skip.
         sc_cfg = postproc.get("scene_consolidate", {}) or {}
         if sc_cfg.get("enabled", True) and not light_resume:
             pipe.send_progress(93, "Consolidating cloud (normal-aware MLS)...",
                                stage="cloudcompy")
-            try:
-                import sys
-                server_dir_str = str(Path(__file__).resolve().parent.parent)
-                if server_dir_str not in sys.path:
-                    sys.path.insert(0, server_dir_str)
-                from reconstruction.surface_fit.consolidate import scene_consolidate
-                from reconstruction.loops.config import load_loops_config as _llc2
-                stats = scene_consolidate(
-                    output_dir,
-                    radius_m=sc_cfg.get("radius_m"),
-                    min_radius_m=float(sc_cfg.get("min_radius_m", 0.02)),
-                    max_radius_m=float(sc_cfg.get("max_radius_m", 0.06)),
-                    iterations=int(sc_cfg.get("iterations", 2)),
-                    normal_gate=float(sc_cfg.get("normal_gate", 0.25)),
-                    excluded_statuses=_llc2(config).witness.mls_excluded_statuses,
-                )
-                if stats:
-                    pipe.send_log(
-                        f"[consolidate] {stats['n_points']:,} pts, r={stats['radius_m']:.3f}m, "
-                        f"mean move {stats['mean_move_mm']:.2f}mm (p95 {stats['p95_move_mm']:.2f}mm)")
-            except Exception as e:
-                pipe.send_log(f"[consolidate] scene consolidation failed "
-                              f"(non-fatal, cloud kept raw): {e}", level="warning")
+            import sys
+            server_dir_str = str(Path(__file__).resolve().parent.parent)
+            if server_dir_str not in sys.path:
+                sys.path.insert(0, server_dir_str)
+            from reconstruction.surface_fit.consolidate import scene_consolidate
+            from reconstruction.loops.config import load_loops_config as _llc2
+            stats = scene_consolidate(
+                output_dir,
+                radius_m=sc_cfg.get("radius_m"),
+                min_radius_m=float(sc_cfg.get("min_radius_m", 0.02)),
+                max_radius_m=float(sc_cfg.get("max_radius_m", 0.06)),
+                iterations=int(sc_cfg.get("iterations", 2)),
+                normal_gate=float(sc_cfg.get("normal_gate", 0.25)),
+                excluded_statuses=_llc2(config).witness.mls_excluded_statuses,
+            )
+            pipe.send_log(
+                f"[consolidate] {stats['n_points']:,} pts, r={stats['radius_m']:.3f}m, "
+                f"normals {stats['normals']}, mean move {stats['mean_move_mm']:.2f}mm "
+                f"(p95 {stats['p95_move_mm']:.2f}mm)")
+
+        # Chunks are now redundant — their points + per-point traceability are
+        # baked into cleaned_cloud.ply, and nothing downstream (Potree, TSDF,
+        # segmentation) reads the chunks. Delete them (gate to keep if ever
+        # re-running ONLY cloudcompy without re-running reconstruction).
+        # AFTER the consolidation (2026-09-28): a consolidation failure now fails
+        # the stage, and with the chunks gone its re-run would take the light
+        # resume, which never consolidates — the raw cloud would ship silently.
+        if config.get("postprocessing", {}).get("delete_chunks_after_merge", True):
+            removed = 0
+            for pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
+                for f in output_dir.glob(pat):
+                    try:
+                        f.unlink(); removed += 1
+                    except Exception:
+                        pass
+            if removed:
+                pipe.send_log(f"[cleanup] removed {removed} redundant chunk files (baked into cleaned_cloud)")
 
         # ── DINOv3 multi-view feature score (fases 1/2, USER ORDER
         # 2026-09-04: implemented AND RUNNING; failures are FATAL — "nada

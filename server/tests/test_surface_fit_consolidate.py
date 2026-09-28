@@ -168,8 +168,8 @@ class TestSceneConsolidate:
         (tmp_path / "fine_register_report.json").write_text(json.dumps(
             {"sep_after_m": {"0-1": 0.015}}))
 
-        stats = scene_consolidate(tmp_path)
-        assert stats is not None
+        stats = scene_consolidate(tmp_path, device="cpu")
+        assert stats is not None and stats["normals"] == "pca_knn"
         assert abs(stats["radius_m"] - 0.03) < 1e-9     # 2×0.015, adaptativo
         assert (tmp_path / "cleaned_cloud_raw.ply").exists()
         out = o3d.io.read_point_cloud(str(tmp_path / "cleaned_cloud.ply"))
@@ -180,3 +180,111 @@ class TestSceneConsolidate:
         raw = np.asarray(o3d.io.read_point_cloud(
             str(tmp_path / "cleaned_cloud_raw.ply")).points)
         assert raw[:, 2].std() * 1000 > 4.0             # el crudo sigue bicapa
+
+
+
+# ── determinism (2026-09-28): the consolidated cloud depends on the cloud only ──
+
+def _write_traced_ply(path, pts):
+    """cleaned_cloud-style binary PLY: xyz float32 + rgb + provenance."""
+    n = len(pts)
+    dt = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("red", "u1"),
+                   ("green", "u1"), ("blue", "u1"), ("frame_global", "<i4"),
+                   ("pixel_row", "<i2"), ("pixel_col", "<i2")])
+    d = np.zeros(n, dt)
+    d["x"], d["y"], d["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
+    d["red"] = np.arange(n) % 251
+    d["frame_global"] = np.arange(n) % 7
+    d["pixel_row"] = np.arange(n) % 300
+    d["pixel_col"] = np.arange(n) % 500
+    types = {"<f4": "float", "|u1": "uchar", "<i4": "int", "<i2": "short"}
+    head = ["ply", "format binary_little_endian 1.0", f"element vertex {n}"]
+    head += [f"property {types[dt[k].str]} {k}" for k in dt.names] + ["end_header"]
+    with open(path, "wb") as f:
+        f.write(("\n".join(head) + "\n").encode())
+        d.tofile(f)
+
+
+class TestDeterminism:
+    def _cloud(self):
+        rng = np.random.default_rng(7)
+        n = 6000
+        a = np.column_stack([rng.uniform(0, 1.5, n), rng.uniform(0, 1, n),
+                             rng.normal(0, 0.002, n)])
+        ghost = a[: n // 2] + np.array([0, 0, 0.006])
+        fly = rng.uniform(-0.2, 1.7, (30, 3))
+        return np.vstack([a, ghost, fly])
+
+    def test_mls_independent_of_blocking(self):
+        """Jacobi passes + exact kNN + fixed-order sums: the same bits whether
+        the queries go in one block or in hundreds of tiny ones."""
+        from reconstruction.surface_fit.consolidate import (
+            consolidate_mls, estimate_oriented_normals)
+        cloud = self._cloud()
+        cams = np.array([[0.7, 0.5, 2.0]])
+        n1 = estimate_oriented_normals(cloud, cams, device="cpu",
+                                       query_block=1 << 20, candidate_budget=1 << 30)
+        n2 = estimate_oriented_normals(cloud, cams, device="cpu",
+                                       query_block=61, candidate_budget=700)
+        assert n1.tobytes() == n2.tobytes()
+        kw = dict(radius=0.03, iterations=2, max_points=None, normals=n1,
+                  device="cpu")
+        a = consolidate_mls(cloud, query_block=1 << 20, candidate_budget=1 << 30, **kw)
+        b = consolidate_mls(cloud, query_block=97, candidate_budget=2500, **kw)
+        assert a.tobytes() == b.tobytes()
+        assert a[: len(cloud) - 30, 2].std() < cloud[: len(cloud) - 30, 2].std()
+
+    def test_mls_is_jacobi(self):
+        """Every projection of a pass reads the PREVIOUS pass: the same cloud
+        visited in reverse order gives the same answer (a Gauss-Seidel update,
+        which read neighbours already moved in this pass, did not)."""
+        from reconstruction.surface_fit.consolidate import consolidate_mls
+        cloud = self._cloud()[:3000]
+        kw = dict(radius=0.03, iterations=1, max_points=None, device="cpu",
+                  query_block=50, candidate_budget=900)
+        full = consolidate_mls(cloud, **kw)
+        rev = consolidate_mls(cloud[::-1].copy(), **kw)[::-1]
+        # reversal changes only the tie order among equidistant neighbours
+        assert np.allclose(full, rev, rtol=0, atol=1e-12)
+
+    def test_scene_consolidate_same_bytes_any_blocking(self, tmp_path):
+        from reconstruction.surface_fit.consolidate import scene_consolidate
+        cloud = self._cloud()
+        outs = []
+        for qb, cb in ((1 << 20, 1 << 30), (113, 1500)):
+            d = tmp_path / f"s{qb}"
+            d.mkdir()
+            _write_traced_ply(d / "cleaned_cloud.ply", cloud)
+            st = scene_consolidate(d, radius_m=0.03, device="cpu",
+                                   query_block=qb, candidate_budget=cb)
+            assert st["normals"] == "pca_knn"      # no depth maps in this session
+            outs.append((d / "cleaned_cloud.ply").read_bytes())
+        assert outs[0] == outs[1]
+
+    def test_scene_consolidate_fails_loudly(self, tmp_path):
+        from reconstruction.surface_fit.consolidate import scene_consolidate
+        with pytest.raises(FileNotFoundError):
+            scene_consolidate(tmp_path, device="cpu")
+        (tmp_path / "cleaned_cloud.ply").write_bytes(
+            b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nend_header\n0\n")
+        with pytest.raises(ValueError):
+            scene_consolidate(tmp_path, device="cpu")
+
+    def test_trace_normals_exception_is_not_swallowed(self, tmp_path, monkeypatch):
+        from reconstruction import trace_normals
+        from reconstruction.surface_fit.consolidate import scene_consolidate
+
+        def boom(*a, **k):
+            raise RuntimeError("depth map corrupted")
+        monkeypatch.setattr(trace_normals, "normals_from_trace", boom)
+        _write_traced_ply(tmp_path / "cleaned_cloud.ply", self._cloud())
+        with pytest.raises(RuntimeError, match="depth map corrupted"):
+            scene_consolidate(tmp_path, radius_m=0.03, device="cpu")
+
+    def test_requested_cuda_never_falls_back(self, tmp_path, monkeypatch):
+        import torch
+        from reconstruction.surface_fit.consolidate import scene_consolidate
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        _write_traced_ply(tmp_path / "cleaned_cloud.ply", self._cloud())
+        with pytest.raises(RuntimeError, match="CUDA"):
+            scene_consolidate(tmp_path, radius_m=0.03, device="cuda")

@@ -9,9 +9,10 @@ Primary: CGAL WLOP via a satellite process in the CloudComPy310 env
 point is a local average of measured points.
 
 Fallback (CGAL env unavailable): robust moving-least-squares projection in
-the RIMLS spirit — per-point IRLS plane fit over k neighbours with a Gaussian
-residual weight that lets the dominant layer win, then projection onto it.
-Fully vectorized (batched eigh), scipy-only.
+the RIMLS spirit — per-point IRLS plane fit over the exact k nearest
+neighbours within the radius, with a Gaussian residual weight that lets the
+dominant layer win, then projection onto it. torch (CUDA or CPU, one
+algorithm), deterministic: see the MLS section and reconstruction.grid_knn.
 """
 
 from __future__ import annotations
@@ -160,62 +161,82 @@ def consolidate_wlop(xyz: np.ndarray, neighbor_radius_m: float = 0.06,
         return out
 
 
-# ── robust MLS (RIMLS-spirit), scipy-only ───────────────────────────
+# ── robust MLS (RIMLS-spirit) on the exact grid kNN ─────────────────
+#
+# DETERMINISM (2026-09-28): one algorithm on one declared device — the torch
+# code below runs identically on CUDA or CPU, the kNN is EXACT
+# (reconstruction.grid_knn: whole-cloud grid, one origin, no VRAM-sized tiles,
+# no per-cell candidate cap), every per-point sum runs in a fixed order, and an
+# MLS pass is a JACOBI update: all projections of a pass read the frozen
+# positions of the previous one. The result of a point therefore depends on
+# the cloud only — never on how the queries were blocked or on free memory.
+# There is no GPU→CPU fallback on an exception: a failure FAILS.
+
+_QUERY_BLOCK = 262144        # BOUND (memory only): queries per kNN block
+_CANDIDATE_BUDGET = 1 << 25  # BOUND (memory only): candidate pairs at once
+
+
+def _rowsum(x):
+    """Sum over dim 1 in a FIXED sequential order (elementwise adds) — the same
+    bits for a row whatever else is in the batch."""
+    s = x[:, 0]
+    for j in range(1, x.shape[1]):
+        s = s + x[:, j]
+    return s
+
 
 def estimate_oriented_normals(xyz: np.ndarray,
                               cam_centers: Optional[np.ndarray] = None,
-                              k: int = 18) -> np.ndarray:
+                              k: int = 18, device: Optional[str] = None,
+                              query_block: int = _QUERY_BLOCK,
+                              candidate_budget: int = _CANDIDATE_BUDGET) -> np.ndarray:
     """Per-point normals ORIENTED toward the nearest camera centre.
 
     Orientation is what lets consolidation tell a ghost layer of the SAME
     surface (same orientation → collapse) from the two REAL faces of a thin
     wall/panel (opposite orientation → keep apart). Cameras are always inside
-    the surveyed space, so nearest-camera orientation is consistent."""
-    from scipy.spatial import cKDTree
+    the surveyed space, so nearest-camera orientation is consistent.
 
-    # GPU-first (USER ORDER 2026-09-04): after the streaming cleanup deletes
-    # _tmp_results_aligned, the trace-normals fast path is gone and THIS
-    # fallback runs on scene-scale clouds — the CPU kNN-PCA burned hours on
-    # 255M pts while the GPU idled. Grid-hash kNN + batched smallest-eigvec
-    # on CUDA; the exact CPU path stays for CUDA-less boxes.
-    nrm = None
-    try:
-        import torch as _torch
-        if _torch.cuda.is_available():
-            pts64 = np.asarray(xyz, np.float64)
-            n = len(pts64)
-            nrm = np.zeros((n, 3), np.float64)
-            spacing_probe = pts64[:: max(1, n // 5000)]
-            t_probe = cKDTree(spacing_probe)
-            d_nn, _ = t_probe.query(spacing_probe, k=2, workers=8)
-            cell = float(max(np.median(d_nn[:, 1]) * 4.0, 0.01))
-            for qidx, idx, ok in _gpu_grid_knn(pts64, k, cell, _torch,
-                                               400_000):
-                nb = _torch.from_numpy(pts64[idx]).cuda()
-                ctr = nb.mean(dim=1, keepdim=True)
-                d = nb - ctr
-                cov = _torch.einsum("bkj,bkl->bjl", d, d)
-                v = _smallest_eigvec3_torch(cov, _torch).cpu().numpy()
-                v[~ok] = np.array([0.0, 0.0, 1.0])
-                nrm[qidx] = v
-                del nb, ctr, d, cov
-            _torch.cuda.empty_cache()
-    except Exception as _e:  # noqa: BLE001 — CPU path is the safety net
-        logger.warning("estimate_oriented_normals: GPU path failed (%s) — "
-                       "falling back to CPU kNN-PCA", _e)
-        nrm = None
-    if nrm is None:
-        from reconstruction.geometry.primitives import estimate_normals
-        nrm = estimate_normals(xyz, k=k, orient_outward=False)
+    Normal = smallest-eigenvalue direction of the point + its EXACT k nearest
+    neighbours (float64 PCA, reconstruction.grid_knn) on ``device`` (None =
+    CUDA when present, else CPU — the same algorithm on both)."""
+    import torch
+    from scipy.spatial import cKDTree
+    from reconstruction.grid_knn import grid_knn, resolve_device
+
+    dev = resolve_device(device)
+    pts64 = np.asarray(xyz, np.float64)
+    n = len(pts64)
+    nrm = np.tile(np.array([0.0, 0.0, 1.0]), (n, 1))
+    if n >= 4:
+        kk = int(min(k, n - 1))
+        # first-level cell of the exact search: performance only, never the answer
+        spacing_probe = pts64[:: max(1, n // 5000)]
+        d_nn, _ = cKDTree(spacing_probe).query(spacing_probe, k=2)
+        cell = float(max(np.median(d_nn[:, 1]) * 4.0, 0.01))
+        tp = torch.from_numpy(pts64).to(dev)
+        for q, idx, _d2 in grid_knn(tp, kk, cell, query_block=query_block,
+                                    candidate_budget=candidate_budget):
+            nb = tp[torch.cat([q[:, None], idx], dim=1)]        # self + k, all found
+            c = [_rowsum(nb[..., a]) / (kk + 1) for a in range(3)]
+            d = [nb[..., a] - c[a][:, None] for a in range(3)]
+            cov = torch.empty((len(q), 3, 3), dtype=torch.float64, device=dev)
+            for a in range(3):
+                for b in range(a, 3):
+                    cov[:, a, b] = cov[:, b, a] = _rowsum(d[a] * d[b])
+            nrm[q.cpu().numpy()] = _smallest_eigvec3_torch(cov, torch).cpu().numpy()
+        del tp
+        if dev.startswith("cuda"):
+            torch.cuda.empty_cache()
     if cam_centers is not None and len(cam_centers):
         tree = cKDTree(np.asarray(cam_centers, dtype=np.float64))
         _, ci = tree.query(xyz, workers=-1)
         to_cam = np.asarray(cam_centers)[ci] - xyz
         flip = np.einsum("ij,ij->i", nrm, to_cam) < 0
         nrm[flip] *= -1.0
-    else:  # fallback: outward from centroid (rooms scanned from inside)
-        ctr = xyz.mean(0)
-        flip = np.einsum("ij,ij->i", nrm, xyz - ctr) > 0
+    else:  # no cameras: outward from centroid (rooms scanned from inside)
+        ctr = pts64.mean(0)
+        flip = np.einsum("ij,ij->i", nrm, pts64 - ctr) > 0
         nrm[flip] *= -1.0
     return nrm
 
@@ -224,7 +245,8 @@ def _smallest_eigvec3_torch(A, _torch):
     """Smallest-eigenvalue eigenvector of a batch of symmetric 3x3 matrices,
     CLOSED FORM (trigonometric eigenvalues + row-cross eigenvector) — cusolver's
     batched syev rejects large float64 batches on this stack, and this needs no
-    solver at all. (B,3,3) -> (B,3), unit length."""
+    solver at all. (B,3,3) -> (B,3), unit length. Elementwise only (no
+    reductions), so a row's result never depends on the batch."""
     a00, a01, a02 = A[:, 0, 0], A[:, 0, 1], A[:, 0, 2]
     a11, a12, a22 = A[:, 1, 1], A[:, 1, 2], A[:, 2, 2]
     p1 = a01 ** 2 + a02 ** 2 + a12 ** 2
@@ -246,134 +268,57 @@ def _smallest_eigvec3_torch(A, _torch):
     c01 = _torch.cross(r0, r1, dim=1)
     c02 = _torch.cross(r0, r2, dim=1)
     c12 = _torch.cross(r1, r2, dim=1)
-    n01 = (c01 ** 2).sum(1); n02 = (c02 ** 2).sum(1); n12 = (c12 ** 2).sum(1)
+
+    def _sq(c):
+        return c[:, 0] * c[:, 0] + c[:, 1] * c[:, 1] + c[:, 2] * c[:, 2]
+    n01, n02, n12 = _sq(c01), _sq(c02), _sq(c12)
     v = _torch.where((n01 >= n02).unsqueeze(1) & (n01 >= n12).unsqueeze(1), c01,
                      _torch.where((n02 >= n12).unsqueeze(1), c02, c12))
-    nrm2 = _torch.linalg.norm(v, dim=1, keepdim=True)
+    nrm2 = _torch.sqrt(_sq(v)).unsqueeze(1)
     # degenerate (isotropic) neighbourhoods: any unit vector is valid — use +Y
     fallback = _torch.zeros_like(v); fallback[:, 1] = 1.0
     v = _torch.where(nrm2 > 1e-20, v / _torch.clamp(nrm2, min=1e-30), fallback)
     return v
 
 
-def _gpu_grid_knn(out_np: np.ndarray, k: int, cell_h: float, _torch,
-                  block: int, cand_per_cell: int = 64):
-    """GPU grid-hash kNN generator, SIZE-ADAPTIVE (USER ORDER 2026-09-04:
-    "debe adaptarse a todo, no se escribe para una nube en particular").
-
-    Yields (qidx (B,) global indices, idx (B,k+1) global neighbour indices,
-    valid (B,) bool). When the whole cloud fits the VRAM budget it runs
-    resident; otherwise it AUTO-TILES: spatial slabs along the longest axis,
-    slab bounds snapped to the cell grid, each processed with a one-cell
-    HALO so border points keep their true neighbours — identical results,
-    memory bounded per tile, any N."""
-    free_b, _tot = _torch.cuda.mem_get_info()
-    budget = int(free_b * 0.55)
-    n = len(out_np)
-    need = n * 40 + block * 27 * cand_per_cell * 12
-    n_tiles = max(1, int(np.ceil(need / max(budget, 1))))
-    if n_tiles == 1:
-        yield from _gpu_grid_knn_resident(
-            out_np, np.arange(n, dtype=np.int64), None, k, cell_h, _torch,
-            block, cand_per_cell)
-        return
-    ax = int(np.argmax(out_np.max(0) - out_np.min(0)))
-    v = out_np[:, ax]
-    lo_all = float(v.min())
-    qs = np.quantile(v, np.linspace(0, 1, n_tiles + 1))
-    # snap tile bounds to the cell grid so a cell never spans two tiles
-    qs = lo_all + np.round((qs - lo_all) / cell_h) * cell_h
-    qs[0], qs[-1] = -np.inf, np.inf
-    logger.info("gpu_knn: %s pts > VRAM budget — %d spatial tiles (axis %d)",
-                f"{n:,}", n_tiles, ax)
-    for t in range(n_tiles):
-        lo, hi = qs[t], qs[t + 1]
-        halo = np.flatnonzero((v >= lo - cell_h) & (v < hi + cell_h))
-        if len(halo) == 0:
-            continue
-        core_mask = (v[halo] >= lo) & (v[halo] < hi)
-        yield from _gpu_grid_knn_resident(
-            out_np[halo], halo, core_mask, k, cell_h, _torch,
-            block, cand_per_cell)
-        _torch.cuda.empty_cache()
-
-
-def _gpu_grid_knn_resident(pts_np: np.ndarray, gmap: np.ndarray,
-                           core_mask, k: int, cell_h: float, _torch,
-                           block: int, cand_per_cell: int = 64):
-    """Resident kNN over one tile. ``gmap`` maps local→global indices;
-    ``core_mask`` (or None=all) selects which local points to emit."""
-    dev = "cuda"
-    tp = _torch.from_numpy(pts_np.astype(np.float32)).to(dev)
-    n = len(pts_np)
-    tg = _torch.from_numpy(gmap).to(dev)
-    tcore = (None if core_mask is None
-             else _torch.from_numpy(np.asarray(core_mask)).to(dev))
-    key = None
-    for ax in range(3):
-        v = tp[:, ax]
-        c = _torch.floor((v - v.min()) / cell_h).to(_torch.int64)
-        dim = int(c.max().item()) + 2
-        key = c if key is None else key * dim + c
-        if ax == 0:
-            dims1 = None
-        elif ax == 1:
-            dims1 = dim
-        else:
-            dims2 = dim
-    order = _torch.argsort(key)
-    skey = key[order]
-    spts = tp[order]
-    uniq, counts = _torch.unique_consecutive(skey, return_counts=True)
-    starts = _torch.cumsum(counts, 0) - counts
-    offs = [(dx * dims1 + dy) * dims2 + dz
-            for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
-    C = cand_per_cell
-    ar = _torch.arange(C, device=dev)
-    qpos = (_torch.arange(n, device=dev) if tcore is None
-            else _torch.nonzero(tcore, as_tuple=True)[0])
-    nq = len(qpos)
-    for b0 in range(0, nq, block):
-        cidx = qpos[b0:b0 + block]
-        pk = key[cidx]
-        px = tp[cidx]
-        B = len(cidx)
-        cand = _torch.full((B, 27 * C), -1, device=dev, dtype=_torch.int64)
-        for oi, off in enumerate(offs):
-            pos = _torch.searchsorted(uniq, pk + off).clamp(max=len(uniq) - 1)
-            hit = uniq[pos] == pk + off
-            st = starts[pos]
-            cnt = counts[pos].clamp(max=C)
-            take = ar[None, :] < (cnt * hit)[:, None]
-            cand[:, oi * C:(oi + 1) * C] = _torch.where(
-                take, st[:, None] + ar[None, :], -1)
-        val = cand >= 0
-        d2 = ((spts[cand.clamp(min=0)] - px[:, None, :]) ** 2).sum(dim=2)
-        d2 = _torch.where(val, d2, _torch.inf)
-        k_eff = min(k + 1, d2.shape[1])
-        top = _torch.topk(d2, k_eff, dim=1, largest=False)
-        finite = _torch.isfinite(top.values)
-        n_valid = finite.sum(dim=1)
-        sel = _torch.gather(cand, 1, top.indices).clamp(min=0)
-        idx = tg[order[sel]]                       # local → GLOBAL indices
-        idx = _torch.where(finite, idx, tg[cidx][:, None])
-        yield (tg[cidx].cpu().numpy(), idx.cpu().numpy(),
-               (n_valid >= 6).cpu().numpy())
-        del cand, val, d2, top, sel, idx
+def _project_irls(q, nb, gate, sigma_r: float):
+    """IRLS plane through the weighted neighbourhood ``nb`` (B,K,3), then the
+    projection of ``q`` (B,3) onto it. ``gate`` (B,K) carries the normal
+    agreement and ZERO for the padding of a short neighbourhood. Every sum in
+    a fixed order (``_rowsum``)."""
+    import torch
+    w = gate
+    for _irls in range(3):
+        wsum = _rowsum(w)
+        ctr = [_rowsum(nb[..., a] * w) / wsum for a in range(3)]
+        d = [nb[..., a] - ctr[a][:, None] for a in range(3)]
+        cov = torch.empty((len(q), 3, 3), dtype=torch.float64, device=q.device)
+        for a in range(3):
+            for b in range(a, 3):
+                cov[:, a, b] = cov[:, b, a] = _rowsum(d[a] * d[b] * w) / wsum
+        nrm = _smallest_eigvec3_torch(cov, torch)
+        resid = (d[0] * nrm[:, 0:1] + d[1] * nrm[:, 1:2]) + d[2] * nrm[:, 2:3]
+        w = gate * torch.exp(-0.5 * (resid / sigma_r) ** 2)
+    h = ((q[:, 0] - ctr[0]) * nrm[:, 0] + (q[:, 1] - ctr[1]) * nrm[:, 1]) \
+        + (q[:, 2] - ctr[2]) * nrm[:, 2]
+    return q - h[:, None] * nrm
 
 
 def consolidate_mls(xyz: np.ndarray, radius: float = 0.06, k: int = 24,
                     iterations: int = 2, max_points: Optional[int] = 600_000,
                     normals: Optional[np.ndarray] = None,
-                    normal_gate: float = 0.25,
-                    block: int = 1_500_000) -> np.ndarray:
-    """Project each point onto a robust local plane of its k neighbours.
+                    normal_gate: float = 0.25, min_neighbors: int = 5,
+                    device: Optional[str] = None,
+                    query_block: int = _QUERY_BLOCK,
+                    candidate_budget: int = _CANDIDATE_BUDGET) -> np.ndarray:
+    """Project each point onto a robust local plane of its neighbourhood: the
+    EXACT k nearest neighbours within ``radius`` (plus the point itself).
 
     IRLS: per-neighbourhood PCA plane, then Gaussian residual reweighting
-    (σ = half the neighbour radius scale) so the locally dominant layer wins
-    and the ghost layer's pull fades; 2 passes collapse mm-scale double
-    layers. All heavy math is batched numpy (einsum + batched eigh),
-    processed in blocks so scene-scale clouds (20M+) fit in memory.
+    (σ = half the radius) so the locally dominant layer wins and the ghost
+    layer's pull fades; 2 passes collapse mm-scale double layers. A point with
+    fewer than ``min_neighbors`` neighbours within ``radius`` keeps its
+    measurement (a plane through fewer is not a surface estimate).
 
     NORMAL-AWARE mode (``normals`` given): each neighbour is additionally
     weighted by clip(n_i·n_j, 0)² — points on the opposite face of a thin
@@ -381,10 +326,16 @@ def consolidate_mls(xyz: np.ndarray, radius: float = 0.06, k: int = 24,
     REAL faces consolidate onto themselves instead of collapsing to a
     non-existent mid-surface (the metric-honesty requirement).
 
+    Each pass is a JACOBI update (every projection reads the previous pass's
+    frozen positions), so the result does not depend on the order or size of
+    the query blocks. ``device``: None = CUDA when present, else CPU — the
+    same algorithm on both, chosen once, never on an exception.
+
     With max_points=None the point count and ORDER are preserved exactly
     (only positions move) — callers may keep index-based references.
     """
-    from scipy.spatial import cKDTree
+    import torch
+    from reconstruction.grid_knn import grid_knn, resolve_device
 
     pts = np.asarray(xyz, dtype=np.float64)
     n = len(pts)
@@ -397,98 +348,49 @@ def consolidate_mls(xyz: np.ndarray, radius: float = 0.06, k: int = 24,
             normals = normals[sel]
         n = len(pts)
 
-    out = pts.copy()
+    dev = resolve_device(device)
     sigma_r = max(radius / 2.0, 1e-4)
-
-    # GPU inner loop: the per-block math (weighted centres, 3x3 covariances,
-    # batched eigh, IRLS reweighting) is what burned ~an hour of CPU on 35M-pt
-    # scenes — on the GPU it is seconds per block. The kNN stays on cKDTree
-    # (parallel, minutes); only the dense math moves. Falls back to numpy
-    # automatically when CUDA is unavailable.
-    _torch = None
-    try:
-        import torch as _torch
-        if not _torch.cuda.is_available():
-            _torch = None
-    except Exception:
-        _torch = None
-
-    def _project_block_gpu(q, nb, gate):
-        tq = _torch.from_numpy(q).cuda()
-        tnb = _torch.from_numpy(nb).cuda()
-        tw = (_torch.from_numpy(gate).cuda() if gate is not None
-              else _torch.ones(tnb.shape[:2], dtype=tq.dtype, device="cuda"))
-        tgate = tw.clone() if gate is not None else None
-        for _irls in range(3):
-            wsum = tw.sum(dim=1, keepdim=True)
-            ctr = (tnb * tw.unsqueeze(-1)).sum(dim=1) / wsum
-            d = tnb - ctr.unsqueeze(1)
-            cov = _torch.einsum("bkj,bkl,bk->bjl", d, d, tw) / wsum.unsqueeze(-1)
-            nrm = _smallest_eigvec3_torch(cov, _torch)
-            resid = _torch.einsum("bkj,bj->bk", tnb - ctr.unsqueeze(1), nrm)
-            w_res = _torch.exp(-0.5 * (resid / sigma_r) ** 2)
-            tw = tgate * w_res if tgate is not None else w_res
-        h = _torch.einsum("bj,bj->b", tq - ctr, nrm)
-        res = (tq - h.unsqueeze(1) * nrm).cpu().numpy()
-        del tq, tnb, tw, ctr, d, cov, nrm, resid, w_res
-        return res
-
+    cur = torch.from_numpy(np.ascontiguousarray(pts)).to(dev)
+    tn = (torch.from_numpy(np.asarray(normals, np.float64)).to(dev)
+          if normals is not None else None)
+    n_kept = 0
     for _ in range(int(iterations)):
-        if _torch is not None:
-            # GPU-first (USER 2026-09-04): grid-hash kNN replaces the
-            # cKDTree build+query — the last CPU burn of this stage
-            blocks = _gpu_grid_knn(out, k, max(radius / 2.0, 0.02),
-                                   _torch, min(block, 400_000))
-            for qidx, idx, ok in blocks:
-                q = out[qidx]
-                nb = out[idx]
-                gate = None
-                if normals is not None:
-                    gate = np.einsum("bj,bkj->bk", normals[qidx],
-                                     normals[idx])
-                    gate = np.clip(gate, 0.0, None) ** 2
-                    gate = np.maximum(gate, 1e-6)
-                    if normal_gate > 0:
-                        gate[gate < normal_gate ** 2] = 1e-6
-                proj = _project_block_gpu(q, nb, gate)
-                proj[~ok] = q[~ok]        # sparse spots: keep the measurement
-                out[qidx] = proj
-            continue
-        tree = cKDTree(out)
-        for b0 in range(0, n, block):
-            b1 = min(b0 + block, n)
-            q = out[b0:b1]
-            _, idx = tree.query(q, k=k + 1, workers=-1)   # includes self
-            nb = out[idx]                                 # (B, k+1, 3)
-            gate = None
-            if normals is not None:
-                gate = np.einsum("bj,bkj->bk", normals[b0:b1], normals[idx])
-                gate = np.clip(gate, 0.0, None) ** 2
-                gate = np.maximum(gate, 1e-6)             # keep self usable
-                if normal_gate > 0:
-                    gate[gate < normal_gate ** 2] = 1e-6
-            if _torch is not None:
-                out[b0:b1] = _project_block_gpu(q, nb, gate)
+        new = cur.clone()                    # Jacobi: reads stay on `cur`
+        n_kept = 0
+        for q, idx, _d2 in grid_knn(cur, k, None, radius=radius,
+                                    query_block=query_block,
+                                    candidate_budget=candidate_budget):
+            valid = idx >= 0
+            ok = valid.sum(dim=1) >= min_neighbors
+            n_kept += int((~ok).sum())       # sparse spots: keep the measurement
+            if not bool(ok.any()):
                 continue
-            w = gate if gate is not None else np.ones(idx.shape)
-            for _irls in range(3):
-                wsum = w.sum(axis=1, keepdims=True)
-                ctr = (nb * w[..., None]).sum(axis=1) / wsum      # (B,3)
-                d = nb - ctr[:, None, :]
-                cov = np.einsum("bkj,bkl,bk->bjl", d, d, w) / wsum[..., None]
-                _, vecs = np.linalg.eigh(cov)                     # ascending
-                nrm = vecs[:, :, 0]                               # (B,3)
-                resid = np.einsum("bkj,bj->bk", nb - ctr[:, None, :], nrm)
-                w_res = np.exp(-0.5 * (resid / sigma_r) ** 2)
-                if gate is not None:
-                    w = gate * w_res
-                else:
-                    w = w_res
-            h = np.einsum("bj,bj->b", q - ctr, nrm)
-            out[b0:b1] = q - h[:, None] * nrm
-    logger.info("consolidate: MLS projected %s pts (r=%.2gm, %d passes%s)",
+            q, idx, valid = q[ok], idx[ok], valid[ok]
+            nb_idx = torch.cat([q[:, None], idx.clamp(min=0)], dim=1)
+            present = torch.cat([torch.ones_like(valid[:, :1]), valid], dim=1).double()
+            if tn is not None:
+                nq, nn = tn[q], tn[nb_idx]
+                gate = (nq[:, None, 0] * nn[..., 0] + nq[:, None, 1] * nn[..., 1]) \
+                    + nq[:, None, 2] * nn[..., 2]
+                gate = torch.clamp(gate, min=0.0) ** 2
+                gate = torch.clamp(gate, min=1e-6)               # keep self usable
+                if normal_gate > 0:
+                    gate = torch.where(gate < normal_gate ** 2,
+                                       torch.full_like(gate, 1e-6), gate)
+                gate = gate * present
+            else:
+                gate = present
+            new[q] = _project_irls(cur[q], cur[nb_idx], gate, sigma_r)
+        cur = new
+    out = cur.cpu().numpy()
+    del cur, tn
+    if dev.startswith("cuda"):
+        torch.cuda.empty_cache()
+    logger.info("consolidate: MLS projected %s pts (r=%.2gm, %d passes%s, %s; "
+                "%s kept — fewer than %d neighbours within r)",
                 f"{n:,}", radius, iterations,
-                ", normal-aware" if normals is not None else "")
+                ", normal-aware" if normals is not None else "", dev,
+                f"{n_kept:,}", min_neighbors)
     return out
 
 
@@ -507,16 +409,15 @@ def adaptive_radius_m(output_dir: Path, min_radius_m: float = 0.02,
                       max_radius_m: float = 0.06) -> float:
     """Radius driven by stage-0 evidence: 2× the worst residual inter-chunk
     plane separation left by fine_register (its report), clamped. No report →
-    conservative max (unknown layering)."""
+    conservative max (unknown layering). A report that exists but cannot be
+    read FAILS — it never silently becomes "no report"."""
     rep = Path(output_dir) / "fine_register_report.json"
-    try:
-        seps = json.loads(rep.read_text()).get("sep_after_m", {})
-        worst = max(seps.values()) if seps else None
-    except Exception:
-        worst = None
-    if worst is None:
+    if not rep.exists():
         return float(max_radius_m)
-    return float(np.clip(2.0 * worst, min_radius_m, max_radius_m))
+    seps = json.loads(rep.read_text()).get("sep_after_m", {})
+    if not seps:
+        return float(max_radius_m)
+    return float(np.clip(2.0 * max(seps.values()), min_radius_m, max_radius_m))
 
 
 def scene_consolidate(output_dir: Path,
@@ -527,7 +428,11 @@ def scene_consolidate(output_dir: Path,
                       normal_gate: float = 0.25,
                       k: int = 24,
                       excluded_statuses=None,
-                      artifacts_dir: Optional[Path] = None) -> Optional[dict]:
+                      artifacts_dir: Optional[Path] = None,
+                      device: Optional[str] = None,
+                      min_neighbors: Optional[int] = None,
+                      query_block: Optional[int] = None,
+                      candidate_budget: Optional[int] = None) -> dict:
     """Stage-1 at SCENE level: consolidate cleaned_cloud.ply IN PLACE with
     normal-aware robust MLS so TSDF masking, Potree, segmentation and every
     fit see the thin surface instead of onion layers.
@@ -536,13 +441,32 @@ def scene_consolidate(output_dir: Path,
       segmentation globalIndices stay valid;
     - the untouched measurement is kept as cleaned_cloud_raw.ply — the stage-4
       charter reference (residuals ALWAYS against the original cloud);
-    - radius adapts to the fine_register report (adaptive_radius_m).
+    - radius adapts to the fine_register report (adaptive_radius_m);
+    - DETERMINISTIC (2026-09-28): exact kNN, Jacobi passes, fixed-order sums,
+      on the device postprocessing.scene_consolidate.device declares — the
+      same bits for the same cloud whatever the memory bounds or free VRAM.
+      Every failure RAISES (no GPU→CPU, no trace→PCA fallback on an
+      exception); the only skip is ``enabled: false``, the caller's.
+
+    ``device`` / ``min_neighbors`` / ``query_block`` / ``candidate_budget``
+    left None are read from postprocessing.scene_consolidate (a missing key
+    fails naming it), so every caller — pipeline, on-load rebuild, epoch
+    transaction — runs the same configuration.
     """
+    from reconstruction.grid_knn import config_section, resolve_device
+    cfg = config_section(("postprocessing", "scene_consolidate"),
+                         ("device", "min_neighbors", "query_block", "candidate_budget"))
+    dev = resolve_device(device if device is not None else str(cfg["device"]))
+    min_nb = int(min_neighbors if min_neighbors is not None else cfg["min_neighbors"])
+    knn_kw = {"query_block": int(query_block if query_block is not None
+                                 else cfg["query_block"]),
+              "candidate_budget": int(candidate_budget if candidate_budget is not None
+                                      else cfg["candidate_budget"])}
+
     output_dir = Path(output_dir)
     cloud_path = output_dir / "cleaned_cloud.ply"
     if not cloud_path.exists():
-        logger.warning("scene_consolidate: no cleaned_cloud.ply — skipping")
-        return None
+        raise FileNotFoundError(f"scene_consolidate: no cleaned_cloud.ply in {output_dir}")
     raw_path = output_dir / "cleaned_cloud_raw.ply"
 
     r = radius_m if radius_m else adaptive_radius_m(output_dir, min_radius_m,
@@ -554,21 +478,16 @@ def scene_consolidate(output_dir: Path,
     # xyz columns and write the file back byte-identical in layout.
     loaded = _read_ply_structured(cloud_path)
     if loaded is None:
-        logger.warning("scene_consolidate: unsupported PLY layout — skipping "
-                       "(cloud kept untouched)")
-        return None
+        raise ValueError(f"scene_consolidate: {cloud_path} is not a vertex-only "
+                         f"binary_little_endian PLY — refusing to guess its layout")
     header, data = loaded
     names = data.dtype.names or ()
     if not {"x", "y", "z"} <= set(names):
-        logger.warning("scene_consolidate: no x/y/z properties — skipping")
-        return None
+        raise ValueError(f"scene_consolidate: {cloud_path} has no x/y/z properties")
     pts = np.column_stack([np.asarray(data["x"], np.float64),
                            np.asarray(data["y"], np.float64),
                            np.asarray(data["z"], np.float64)])
     n = len(pts)
-    if n < 1000:
-        logger.warning("scene_consolidate: only %d pts — skipping", n)
-        return None
 
     # keep the raw measurement (charter reference) before touching anything
     if not raw_path.exists():
@@ -577,32 +496,34 @@ def scene_consolidate(output_dir: Path,
 
     cams = _load_camera_centers(output_dir)
     logger.info("scene_consolidate: %s pts, radius=%.3fm (adaptive), "
-                "%s camera centres, normal-aware", f"{n:,}", r,
-                len(cams) if cams is not None else 0)
+                "%s camera centres, normal-aware, %s", f"{n:,}", r,
+                len(cams) if cams is not None else 0, dev)
     # traced cloud → normals from the per-frame depth gradient (seconds, camera-
-    # oriented for free) instead of KDTree-PCA over every point (many minutes).
-    normals = None
-    if all(k_ in (data.dtype.names or ()) for k_ in
-           ("frame_global", "pixel_row", "pixel_col")):
-        try:
-            from reconstruction.trace_normals import normals_from_trace
-            # the depth maps, intrinsics and frame list live in the SESSION,
-            # not in the staging directory a correction epoch consolidates in
-            # (the transaction stages nine geometry artifacts and none of
-            # them). Without this the fast path can never fire inside an epoch
-            # and every certification pays the KDTree-PCA fallback — which on
-            # pccr 2026-09-14 asked the GPU for 7.73 GiB while vLLM held 24,
-            # got an OOM and fell to CPU kNN-PCA over 28 M points.
-            normals = normals_from_trace(
-                pts, np.asarray(data["frame_global"], np.int64),
-                np.asarray(data["pixel_row"], np.int64),
-                np.asarray(data["pixel_col"], np.int64),
-                Path(artifacts_dir or output_dir),
-                log=lambda m: logger.info("scene_consolidate: %s", m))
-        except Exception as _e:  # noqa: BLE001
-            logger.info("scene_consolidate: trace normals unavailable (%s)", _e)
+    # oriented for free) instead of kNN-PCA over every point. An EXCEPTION in
+    # it fails the stage; only a session that lacks the depth artifacts
+    # (normals_from_trace → None, declared in the log and the report) takes
+    # the PCA normals.
+    normals, normals_source = None, "pca_knn"
+    if all(k_ in names for k_ in ("frame_global", "pixel_row", "pixel_col")):
+        from reconstruction.trace_normals import normals_from_trace
+        # the depth maps, intrinsics and frame list live in the SESSION,
+        # not in the staging directory a correction epoch consolidates in
+        # (the transaction stages nine geometry artifacts and none of
+        # them). Without this the fast path can never fire inside an epoch
+        # and every certification pays the kNN-PCA path.
+        normals = normals_from_trace(
+            pts, np.asarray(data["frame_global"], np.int64),
+            np.asarray(data["pixel_row"], np.int64),
+            np.asarray(data["pixel_col"], np.int64),
+            Path(artifacts_dir or output_dir),
+            log=lambda m: logger.info("scene_consolidate: %s", m))
+        if normals is None:
+            logger.warning("scene_consolidate: the session has no depth maps for "
+                           "trace normals — PCA normals over the exact kNN")
+        else:
+            normals_source = "trace"
     if normals is None:
-        normals = estimate_oriented_normals(pts, cams)
+        normals = estimate_oriented_normals(pts, cams, device=dev, **knn_kw)
     # claude_stac.txt §6.3: the MLS never runs on mask_conflict /
     # single_witness points (witness.mls_excluded_statuses) — they neither
     # move nor pull their neighbours; the raw measurement stays theirs
@@ -614,15 +535,13 @@ def scene_consolidate(output_dir: Path,
         n_excluded = int((~allowed).sum())
         logger.info("scene_consolidate: %s pts excluded from the MLS (status in %s)",
                     f"{n_excluded:,}", list(excluded_statuses))
+    mls_kw = dict(radius=r, k=k, iterations=iterations, max_points=None,
+                  normal_gate=normal_gate, min_neighbors=min_nb, device=dev, **knn_kw)
     if allowed.all():
-        moved = consolidate_mls(pts, radius=r, k=k, iterations=iterations,
-                                max_points=None, normals=normals,
-                                normal_gate=normal_gate)
+        moved = consolidate_mls(pts, normals=normals, **mls_kw)
     else:
         moved = pts.copy()
-        moved[allowed] = consolidate_mls(pts[allowed], radius=r, k=k, iterations=iterations,
-                                         max_points=None, normals=normals[allowed],
-                                         normal_gate=normal_gate)
+        moved[allowed] = consolidate_mls(pts[allowed], normals=normals[allowed], **mls_kw)
     _bad = ~np.isfinite(moved).all(axis=1)
     if _bad.any():
         raise RuntimeError(
@@ -638,8 +557,10 @@ def scene_consolidate(output_dir: Path,
     _write_ply_structured(cloud_path, header, out)
     stats = {"n_points": int(n), "radius_m": float(r),
              "n_excluded_by_status": int(n_excluded),
-             "mean_move_mm": float(disp.mean() * 1000.0),
-             "p95_move_mm": float(np.percentile(disp, 95) * 1000.0),
+             "normals": normals_source, "device": dev,
+             "min_neighbors": min_nb,
+             "mean_move_mm": float(disp.mean() * 1000.0) if n else 0.0,
+             "p95_move_mm": float(np.percentile(disp, 95) * 1000.0) if n else 0.0,
              "raw_backup": raw_path.name}
     (output_dir / "scene_consolidate_report.json").write_text(
         json.dumps(stats, indent=2))
