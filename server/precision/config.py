@@ -211,6 +211,21 @@ class TracksConfig:
     dense_matcher: str          # none | roma (optional, off)
 
 
+# ── F5: joint refinement + witness localisation ─────────────────────────
+
+@dataclass(frozen=True)
+class RefineConfig:
+    min_tri_deg: float          # BOUND: a landmark's rays must span at least this (degrees)
+    huber_px: float             # BOUND: Huber scale of the reprojection loss (native px)
+    max_iterations: int         # BOUND: Ceres iterations per rung (reconstruction.colmap_ba)
+    ceres_threads: int          # BOUND: Ceres threads (its default takes every core)
+    focal_block_frames: int     # BOUND: keyframes per temporal focal block (rung R3)
+    heldout_confidence: float   # declared confidence of the held-out comparisons
+    permutations: int           # BOUND: permutation / bootstrap resamples of the tests
+    seed: int                   # their fixed seed
+    min_witness_corr: int       # BOUND: 2D-3D correspondences a witness needs for PnP
+
+
 # ── F9: runner (declared in F0 so every stage heartbeats the same way) ───
 
 @dataclass(frozen=True)
@@ -227,6 +242,7 @@ class PrecisionConfig:
     gauge: GaugeConfig
     omega: OmegaConfig
     tracks: TracksConfig
+    refine: RefineConfig
     runner: RunnerConfig
 
 
@@ -322,6 +338,22 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
             f"vendored (claude_stac.txt §4-F4: optional, off; its licence must be checked and "
             f"recorded in vendor/VENDORS.lock.md before it can be enabled)")
 
+    rf = _sub(sec, "refine", "")
+    refine = RefineConfig(
+        min_tri_deg=_num(rf, "min_tri_deg", "refine", lo=0.0, lo_excl=True),
+        huber_px=_num(rf, "huber_px", "refine", lo=0.0, lo_excl=True),
+        max_iterations=_num(rf, "max_iterations", "refine", lo=1, integer=True),
+        ceres_threads=_num(rf, "ceres_threads", "refine", lo=1, integer=True),
+        focal_block_frames=_num(rf, "focal_block_frames", "refine", lo=2, integer=True),
+        heldout_confidence=_num(rf, "heldout_confidence", "refine", lo=0.0, hi=1.0, lo_excl=True),
+        permutations=_num(rf, "permutations", "refine", lo=1, integer=True),
+        seed=_num(rf, "seed", "refine", lo=0, integer=True),
+        # PnP needs four points (P3P + one to choose)
+        min_witness_corr=_num(rf, "min_witness_corr", "refine", lo=4, integer=True),
+    )
+    if refine.heldout_confidence >= 1.0:
+        raise PrecisionConfigError(f"'{SECTION}.refine.heldout_confidence' must be below 1")
+
     rn = _sub(sec, "runner", "")
     runner = RunnerConfig(
         heartbeat_s=_num(rn, "heartbeat_s", "runner", lo=0.0, lo_excl=True),
@@ -329,4 +361,4 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     )
 
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
-                           tracks=tracks, runner=runner)
+                           tracks=tracks, refine=refine, runner=runner)

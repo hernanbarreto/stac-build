@@ -1,0 +1,140 @@
+"""F5 — joint refinement judged by held-out reprojection (claude_stac.txt §4-F5), on a
+synthetic Brown camera with known poses: a focal 3 % off with real distortion is
+recovered and the ladder takes the distortion rung; with a perfect camera and no
+distortion it stays at R0; witness frames localise against the fixed landmarks
+within the keyframes' own held-out error."""
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+pycolmap = pytest.importorskip("pycolmap")
+if not hasattr(pycolmap.Camera, "create_from_model_name"):
+    pytest.skip("pycolmap 4 (the mapanything env) is required", allow_module_level=True)
+
+from precision import refine as R                                # noqa: E402
+from precision.config import load_precision_config              # noqa: E402
+
+PC = load_precision_config()
+CFG = PC.refine
+SOLVER = {"max_iter": PC.camera.undistort_max_iter, "eps_px": PC.camera.undistort_eps_px}
+WH = (640, 480)
+
+
+def _rot(yaw_deg):
+    a = np.radians(yaw_deg)
+    return np.array([[np.cos(a), 0, np.sin(a)], [0, 1, 0], [-np.sin(a), 0, np.cos(a)]])
+
+
+def _scene(n_kf=14, n_pts=1500, seed=0):
+    """An OBSERVABLE camera: points 2-15 m around the path, the camera turning ±30°
+    and pitching while it walks — a focal is only measurable when the rays span
+    rotation and depth (a narrow straight walk leaves focal and depth
+    interchangeable, and the held-out rightly refuses to pick one)."""
+    rng = np.random.default_rng(seed)
+    ang = rng.uniform(-np.pi, np.pi, n_pts)
+    r = rng.uniform(2, 15, n_pts)
+    X = np.c_[r * np.sin(ang) * 0.6, rng.uniform(-2.5, 2.5, n_pts), 4 + r * np.abs(np.cos(ang))]
+    c2w = []
+    for k in range(n_kf):
+        T = np.eye(4)
+        pitch = np.radians(8 * np.sin(k))
+        Rx = np.array([[1, 0, 0], [0, np.cos(pitch), -np.sin(pitch)], [0, np.sin(pitch), np.cos(pitch)]])
+        T[:3, :3] = _rot(-30 + 60 * k / max(n_kf - 1, 1)) @ Rx
+        T[:3, 3] = [0.35 * k, 0.1 * np.sin(k), 0.15 * k]
+        c2w.append(T)
+    return X, np.array(c2w)
+
+
+def _observe(X, c2w, params, noise, seed, frames):
+    rng = np.random.default_rng(seed)
+    w2c = np.linalg.inv(c2w)
+    track, frame, uv = [], [], []
+    for i, T in enumerate(w2c):
+        z = (X @ T[:3, :3].T + T[:3, 3])[:, 2]
+        p = R.project(X, T, params)
+        ok = (z > 0) & (p[:, 0] >= 0) & (p[:, 0] < WH[0]) & (p[:, 1] >= 0) & (p[:, 1] < WH[1])
+        for j in np.flatnonzero(ok):
+            track.append(j)
+            frame.append(frames[i])
+            uv.append(p[j] + rng.normal(0, noise, 2))
+    return np.array(track), np.array(frame), np.array(uv)
+
+
+def _perturb(c2w, rot_deg, trans_m, seed):
+    rng = np.random.default_rng(seed)
+    out = c2w.copy()
+    for T in out[1:]:
+        T[:3, :3] = T[:3, :3] @ _rot(rng.normal(0, rot_deg))
+        T[:3, 3] += rng.normal(0, trans_m, 3)
+    return out
+
+
+def _split(track, frac=0.2, seed=0):
+    ids = np.unique(track)
+    rng = np.random.default_rng(seed)
+    held = set(ids[rng.random(len(ids)) < frac].tolist())
+    return np.array([1 if t in held else 0 for t in track], np.int8)
+
+
+def test_a_wrong_focal_and_real_distortion_are_recovered_by_the_distortion_rung():
+    X, c2w = _scene()
+    gt = [500.0, 500.0, 319.5, 239.5, -0.05, 0.01, 0.0, 0.0]
+    kf = list(range(len(c2w)))
+    track, frame, uv = _observe(X, c2w, gt, 0.3, 1, kf)
+    init = [515.0, 515.0, 319.5, 239.5, 0.0, 0.0, 0.0, 0.0]
+    core = R.refine_core(np.linalg.inv(_perturb(c2w, 0.2, 0.02, 2)), init, WH, track, frame, uv,
+                         _split(track), kf, 0.01, CFG, SOLVER, log=lambda *a: None)
+    best = core["best"]
+    assert best.name == "R2", core["rungs"]
+    fx = best.params_by_block[0][0]
+    assert abs(fx - 500.0) / 500.0 < 0.01, fx
+    assert abs(best.params_by_block[0][4] - (-0.05)) < 0.02
+    held_init = np.median(list(core["held"]["init"].values()))
+    held_best = np.median(list(core["held"]["R2"].values()))
+    assert held_best < held_init
+
+
+def test_a_perfect_camera_without_distortion_stays_at_R0():
+    X, c2w = _scene(seed=3)
+    gt = [500.0, 500.0, 319.5, 239.5, 0.0, 0.0, 0.0, 0.0]
+    kf = list(range(len(c2w)))
+    track, frame, uv = _observe(X, c2w, gt, 0.3, 4, kf)
+    core = R.refine_core(np.linalg.inv(_perturb(c2w, 0.1, 0.01, 5)), gt, WH, track, frame, uv,
+                         _split(track), kf, 0.01, CFG, SOLVER, log=lambda *a: None)
+    assert core["best"].name == "R0", core["rungs"]
+    assert not core["rungs"]["R1"]["taken"] and not core["rungs"]["R2"]["taken"]
+
+
+def test_witnesses_localise_within_the_keyframes_error():
+    X, c2w = _scene(seed=6)
+    gt = [500.0, 500.0, 319.5, 239.5, -0.05, 0.01, 0.0, 0.0]
+    kf = list(range(0, 2 * len(c2w), 2))                 # keyframes 0, 2, 4, …
+    track, frame, uv = _observe(X, c2w, gt, 0.3, 7, kf)
+    core = R.refine_core(np.linalg.inv(c2w), gt, WH, track, frame, uv, _split(track), kf, 0.01,
+                         CFG, SOLVER, log=lambda *a: None)
+    # witnesses halfway between keyframes (odd frame numbers)
+    wc2w = []
+    for k in range(len(c2w) - 1):
+        T = c2w[k].copy()
+        T[:3, 3] = 0.5 * (c2w[k, :3, 3] + c2w[k + 1, :3, 3])
+        wc2w.append(T)
+    wframes = [2 * k + 1 for k in range(len(wc2w))]
+    wt, wf, wuv = _observe(X, np.array(wc2w), gt, 0.3, 8, wframes)
+    bound = R.heldout_bound(R.heldout_leave_one_view_out(core["held_groups"], core["best"],
+                                                         SOLVER, CFG), CFG)
+    loc = R.localize_witnesses(core["best"], core["X"], wt, wf, wuv, wframes, WH, bound, CFG)
+    assert all(r["localized"] for r in loc.values()), loc
+    for k, f in enumerate(wframes):
+        c = np.asarray(loc[f]["c2w"])[:3, 3]
+        assert np.linalg.norm(c - wc2w[k][:3, 3]) < 0.02
+
+
+def test_prior_sigmas_grow_with_the_walk():
+    c = np.cumsum(np.ones((6, 3)) * [1.0, 0.0, 0.0], axis=0)
+    s = R.prior_sigmas(c, 0.01)
+    assert np.all(np.diff(s) >= 0) and s[0] > 0
+    assert abs(s[-1] - 0.01 * np.sqrt(5)) < 1e-12

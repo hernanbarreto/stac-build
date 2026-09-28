@@ -2029,6 +2029,18 @@ reconstruction:
       heldout_frac: 0.2                 # BOUND: share of the tracks held out of every fit (F5)
       seed: 0                           # the held-out split's fixed seed
       dense_matcher: none               # none | roma — optional and OFF (no licence recorded)
+    # F5 — joint pose + session camera refinement, witness localisation (precision/refine.py)
+    refine:
+      min_tri_deg: 2.0                  # BOUND: a landmark's rays span at least this (degrees)
+      huber_px: 1.0                     # BOUND: Huber scale of the reprojection loss (native px)
+      max_iterations: 500               # BOUND: Ceres iterations per rung (colmap_ba._tune_ceres)
+      ceres_threads: 8                  # BOUND: Ceres threads — its default (-1) takes every core
+                                        # of the machine; the pod's quota is ~30
+      focal_block_frames: 60            # BOUND: keyframes per temporal focal block (rung R3)
+      heldout_confidence: 0.95          # declared confidence (as everywhere else)
+      permutations: 2000                # BOUND: resamples of the permutation / bootstrap tests
+      seed: 0                           # their fixed seed
+      min_witness_corr: 12              # BOUND: 2D-3D correspondences a witness needs for PnP
     # F9 — runner (declared here so every stage heartbeats the same way)
     runner:
       heartbeat_s: 20                   # BOUND: seconds between progress lines of a long stage
