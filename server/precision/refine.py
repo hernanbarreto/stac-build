@@ -564,9 +564,12 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
 
 def _prior_cross_check(out: Path, kf, X, fit_g, best: RungResult, cam) -> dict:
     """Triangulated landmark depth vs Omega's depth at the observing keyframe's pixel
-    (Omega grid via F0) — reported, the landmarks are not moved by it."""
+    (Omega grid via F0) — reported, the landmarks are not moved by it. Omega's record
+    carries the units of the reconstruction BEFORE the metric lock, so the two are
+    compared as a ratio: its median is the scale between them, and the spread of the
+    ratios around it is the prior's relative depth error."""
     from precision.camera import native_to_grid, grid_like
-    rel = []
+    ratio = []
     for t, P in list(X.items())[:5000]:
         i, p = fit_g[t][0]
         npz = out / "omega_run" / "results_output" / f"frame_{kf[i]}.npz"
@@ -581,8 +584,12 @@ def _prior_cross_check(out: Path, kf, X, fit_g, best: RungResult, cam) -> dict:
         if not (0 <= v < d.shape[0] and 0 <= u < d.shape[1]) or d[v, u] <= 0:
             continue
         z_tri = float((best.w2c[i, :3, :3] @ P + best.w2c[i, :3, 3])[2])
-        rel.append(abs(z_tri - float(d[v, u])) / float(d[v, u]))
-    return {"n": len(rel), "median_rel": float(np.median(rel)) if rel else None}
+        ratio.append(z_tri / float(d[v, u]))
+    if not ratio:
+        return {"n": 0, "scale": None, "median_rel": None}
+    r = np.asarray(ratio)
+    s = float(np.median(r))
+    return {"n": int(r.size), "scale": s, "median_rel": float(np.median(np.abs(r / s - 1)))}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
