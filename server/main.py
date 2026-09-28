@@ -7670,6 +7670,12 @@ async def viewer_websocket(websocket: WebSocket):
                         from potree_converter import convert_chunks_preview_to_potree
                         _job_dir = pipeline_manager.job_session_dir(sid)
                         session_path = Path(_job_dir) if _job_dir else _ctx(sid).session_dir
+                        if (session_path / "output" / "fuse_report.json").exists():
+                            # the reconstruction stage ended with F7's fused cloud and
+                            # its own octree (USER 2026-09-28: the core runs inside the
+                            # stage) — there are no raw chunks to preview, the cloud
+                            # stage delivers the final cloud right after
+                            return
                         await viewer_manager.broadcast_text(json.dumps({
                             "type": "status",
                             "message": "Reconstruction done — building a preview of the raw cloud..."

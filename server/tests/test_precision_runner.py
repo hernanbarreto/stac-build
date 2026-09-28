@@ -63,11 +63,17 @@ def test_refuses_to_resume_on_another_epoch(tmp_path, pcfg):
         RN.run_chain(s, pcfg, log=lambda *a: None, steps=steps)
 
 
-def test_the_stage_is_wired_after_sam3():
+def test_the_core_runs_inside_the_reconstruction_stage():
+    """USER 2026-09-28: F0-F7 is part of the reconstruction, before the cloud stage;
+    there is no separate PRECISION stage and no visit_drift step in the chain."""
     from pipeline_manager import DEFAULT_STAGE_ORDER, STAGE_REGISTRY, StageId
-    o = DEFAULT_STAGE_ORDER
-    assert o.index(StageId.SAM3) < o.index(StageId.PRECISION) < o.index(StageId.CERTIFY)
-    assert STAGE_REGISTRY[StageId.PRECISION]["module"] == "workers.precision_worker"
+    assert not hasattr(StageId, "PRECISION")
+    assert all("precision" not in v["module"] for v in STAGE_REGISTRY.values())
+    assert DEFAULT_STAGE_ORDER.index(StageId.RECONSTRUCTION) < DEFAULT_STAGE_ORDER.index(StageId.CLOUDCOMPY)
     import workers.precision_worker as W
     assert callable(W.run)
-    assert [s.module for s in RN.STEPS][-1] == "precision.fuse"
+    import workers.map_worker as M
+    assert callable(M._run_precision_core) and callable(M._run_semantics_2d)
+    keys = [s.key for s in RN.STEPS]
+    assert keys[0] == "f0_camera" and keys[-1] == "f7_fuse", keys
+    assert not any("measure" in k or "visit_drift" in s.module for k, s in zip(keys, RN.STEPS)), keys

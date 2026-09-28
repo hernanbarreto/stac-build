@@ -29,19 +29,17 @@ class StageId(str, Enum):
     VLM = "vlm"
     SAM3 = "sam3"
     CERTIFY = "certify"
-    PRECISION = "precision"
     INSTANCE_CLEANER = "instance_cleaner"
 
 
 STAGE_REGISTRY = {
-    StageId.RECONSTRUCTION:   {"label": "Intake + Omega (F1-F3, epoch 0)", "icon": "🔨", "module": "workers.map_worker"},
-    StageId.CLOUDCOMPY:       {"label": "Cloud Cleaning (epoch 0)", "icon": "🧹", "module": "workers.cloudcompy_worker"},
+    StageId.RECONSTRUCTION:   {"label": "Reconstruction (intake · VLM+SAM3 · Ω · F0-F7)", "icon": "🔨", "module": "workers.map_worker"},
+    StageId.CLOUDCOMPY:       {"label": "Cloud → viewer (octree + segmentation)", "icon": "🧹", "module": "workers.cloudcompy_worker"},
     StageId.PGSR:             {"label": "Precision (PGSR)",  "icon": "💎", "module": "workers.pgsr_worker"},
     StageId.TSDF:             {"label": "TSDF Mesh",         "icon": "🧊", "module": "workers.tsdf_worker"},
     StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker"},
     StageId.SAM3:             {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
     StageId.CERTIFY:          {"label": "Certification",     "icon": "📐", "module": "workers.certify_worker"},
-    StageId.PRECISION:        {"label": "Precision core (F0-F7 → epoch N)", "icon": "🎯", "module": "workers.precision_worker"},
     StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
 }
 
@@ -73,9 +71,6 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
                            # cloud: it is on screen before segmentation starts.
     StageId.VLM,
     StageId.SAM3,
-    StageId.PRECISION,     # claude_stac.txt §3 EVIDENCE + CORE (F0 → F7) on the semantics
-                           # of epoch 0: its fused epoch IS the deliverable of "Reconstruir"
-                           # (reconstruction.precision.enabled; it replaces the certification)
     StageId.CERTIFY,
     StageId.PGSR,          # precision mode only: no-ops unless backend is
                            # vggtomega_pgsr (seeds from cleaned_cloud, so it runs
@@ -487,12 +482,6 @@ class PipelineManager:
         StageId.CERTIFY: ["certify_acta.json", "visit_drift_report.json", "quality",
                           "keyframe_graph.json", "loop_candidates.json", "duplicates.json",
                           "loop_semantics.json"],
-        # the precision core's records (its epochs are geometry epochs: a NEW
-        # reconstruction wipes output/ and starts again from epoch 0)
-        # (origins.npz is NOT listed: the live one may be epoch 0's — the epochs
-        # F2/F5/F7 publish are swapped by correction/apply, never deleted here)
-        StageId.PRECISION: ["precision", "depth_native", "depth_colmap", "fuse_report.json",
-                            "rejected_points.npz", "gauge.json", "omega_probe.json"],
         StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
     }
 
@@ -520,7 +509,6 @@ class PipelineManager:
             StageId.VLM,              # scene analysis ran on old keyframes
             StageId.SAM3,             # segmentation ran on old frames
             StageId.CERTIFY,          # the acta certified the old geometry
-            StageId.PRECISION,        # the core refines THIS reconstruction
             StageId.PGSR,             # PGSR trained on old poses/cloud
             StageId.TSDF,             # TSDF mesh integrated old depth/poses
             StageId.INSTANCE_CLEANER, # instance PLYs from old segmentation
@@ -528,12 +516,10 @@ class PipelineManager:
         StageId.VLM: [
             StageId.SAM3,             # SAM3 uses VLM categories
             StageId.CERTIFY,          # instance loops come from the segmentation
-            StageId.PRECISION,        # the evidence step measures the instances
             StageId.INSTANCE_CLEANER,
         ],
         StageId.SAM3: [
             StageId.CERTIFY,          # instance loops come from the segmentation
-            StageId.PRECISION,        # the evidence step measures the instances
             StageId.PGSR,             # dynamic masks come from SAM3 artifacts
             StageId.INSTANCE_CLEANER, # instances depend on segmentation
         ],
@@ -541,18 +527,12 @@ class PipelineManager:
             StageId.VLM,              # the semantic stages read THIS cloud
             StageId.SAM3,             # masks are projected onto THIS cloud
             StageId.CERTIFY,          # the loop certifies THIS cleaned cloud
-            StageId.PRECISION,        # the evidence step reads THIS cleaned cloud
             StageId.PGSR,             # the Gaussian seed is the cleaned cloud
             StageId.TSDF,             # TSDF masks to the old cleaned_cloud
             StageId.INSTANCE_CLEANER,
         ],
         StageId.CERTIFY: [
             StageId.PGSR,             # a mesh is built on the certified geometry
-            StageId.TSDF,
-        ],
-        StageId.PRECISION: [
-            StageId.CERTIFY,          # F8 certifies the fused epoch
-            StageId.PGSR,
             StageId.TSDF,
         ],
         StageId.PGSR: [
@@ -1003,9 +983,30 @@ class PipelineManager:
                             for d in ("omega_run/results_output",
                                       "da3_run/results_output", "results_output",
                                       "_tmp_results_aligned"))
-            if has_poses and (has_depth or (output_dir / "cleaned_cloud.ply").exists()):
-                return True, "poses + depth on disk"
-            return False, "no reconstruction artifacts"
+            if not (has_poses and (has_depth or (output_dir / "cleaned_cloud.ply").exists())):
+                return False, "no reconstruction artifacts"
+            # with the precision core inside this stage (USER 2026-09-28) the
+            # reconstruction is complete only when F7's fused cloud is the live one
+            precision_on = False
+            try:
+                from config import cfg as _c5
+                precision_on = bool(((_c5.get("reconstruction") or {}).get("precision") or {})
+                                    .get("enabled", False))
+            except Exception:
+                pass
+            if precision_on:
+                rep = output_dir / "fuse_report.json"
+                if not rep.exists():
+                    return False, "no fused cloud (F7) yet"
+                try:
+                    ep = json.loads(rep.read_text()).get("epoch_to")
+                    live = json.loads((output_dir / "geometry_epoch.json").read_text()).get("epoch")
+                except (OSError, ValueError):
+                    return False, "fuse_report.json / geometry_epoch.json unreadable"
+                if ep != live:
+                    return False, f"the live epoch {live} is not the fused one {ep}"
+                return True, f"fused cloud (epoch {ep}) on disk"
+            return True, "poses + depth on disk"
 
         if stage_id == StageId.CLOUDCOMPY:
             cloud = output_dir / "cleaned_cloud.ply"
@@ -1076,19 +1077,6 @@ class PipelineManager:
             if not meshes:
                 return False, "no scene TSDF mesh"
             return True, "scene mesh on disk"
-
-        if stage_id == StageId.PRECISION:
-            rep = output_dir / "fuse_report.json"
-            if not rep.exists():
-                return False, "no fused epoch (F7) yet"
-            try:
-                ep = json.loads(rep.read_text()).get("epoch_to")
-                live = json.loads((output_dir / "geometry_epoch.json").read_text()).get("epoch")
-            except (OSError, ValueError):
-                return False, "fuse_report.json / geometry_epoch.json unreadable"
-            if ep != live:
-                return False, f"the live epoch {live} is not the fused one {ep}"
-            return True, f"fused epoch {ep} is live"
 
         if stage_id == StageId.CERTIFY:
             acta = output_dir / "certify_acta.json"
@@ -1174,9 +1162,11 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
         pass
 
     def _enabled(stage_id: StageId) -> bool:
-        if stage_id == StageId.PRECISION:
-            # the evidence step measures the SAM3 instances of epoch 0
-            return precision_on and auto_segment
+        if precision_on and stage_id in (StageId.VLM, StageId.SAM3, StageId.CERTIFY):
+            # USER 2026-09-28: VLM + SAM3 run ONCE, inside the reconstruction stage
+            # (the intake), and the core F0-F7 runs there too; the certification
+            # (F8) does not run — the cloud stage projects the masks and delivers
+            return False
         if skip_cloudcompy and stage_id == StageId.CLOUDCOMPY:
             return False
         if not auto_segment and stage_id in _semantic_stages:

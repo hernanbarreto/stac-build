@@ -286,6 +286,12 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     selected_frames_path = str(sf_path)
     pipe.send_log(f"Using frames from {sf_path}")
 
+    # ── SEMANTICS, ONCE, HERE (USER 2026-09-28): VLM understand + SAM3 autoprompt
+    # on the keyframes, before any geometry. The masks are 2-D per keyframe and do
+    # not depend on the cloud; they are projected onto the points the cloud stage
+    # delivers after F7 (workers/cloudcompy_worker.py) — no model runs twice.
+    _run_semantics_2d(pipe, session_path, config)
+
     # ── Step 2b: DA3-dense fusion frame set ──
     # The asymmetric design feeds DA3 the FULL blur-valid set (a superset of the VGGT
     # keyframes) so it produces per-frame depth for every sharp frame → the TSDF fuses
@@ -445,6 +451,104 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         _run_pose_refine_step(pipe, output_dir, recon_cfg)
     # (DINOv3 fases 3/5 — feature-metric refine, scene/object anchor —
     # DELETED by USER ORDER 2026-09-05: "eliminá todo lo de dinov3 y fase 5")
+
+    # ── THE PRECISION CORE, INSIDE THE RECONSTRUCTION (USER 2026-09-28: "f0 a f7 es
+    # etapa de reconstrucción, antes de cloudcompy"): the chunks Omega left become
+    # the working cloud, F0 → F7 refine camera, poses and depth against the images
+    # and F7 publishes the fused cloud — the ONLY cloud the session keeps.
+    _run_precision_core(pipe, session_path, output_dir, config)
+
+
+def _run_semantics_2d(pipe: WorkerPipe, session_path: Path, config: dict) -> None:
+    """VLM understand + SAM3 (autoprompt, everything) ONCE, at the intake, on the
+    keyframes — USER 2026-09-28: "si ya corrés VLM y SAM3 al inicio que ahí mismo
+    genere todo, y después no se vuelva a correr al final". Both run as the
+    pipeline's own workers (workers/vlm_worker.py, workers/sam3_worker.py) hosted
+    by this stage: vLLM comes up for the VLM and is stopped before SAM3 loads.
+    The mask→cloud projection is NOT done here (no cloud yet): the SAM3 worker
+    leaves the 2-D masks and the cloud stage projects them after F7. Gated by
+    reconstruction.precision.enabled and pipeline.auto_segment."""
+    from precision.config import load_precision_config
+    from workers.base import run_stage_inline
+    if not load_precision_config(config).enabled:
+        return
+    if not bool((config.get("pipeline") or {}).get("auto_segment", True)):
+        pipe.send_log("pipeline.auto_segment is off — no VLM / SAM3 at the intake")
+        return
+    pipe.send_progress(4, "Scene analysis (VLM) on the keyframes...", stage="reconstruction")
+    run_stage_inline(pipe, "workers.vlm_worker", str(session_path), config,
+                     label="vlm", pct_range=(4.0, 4.5))
+    pipe.send_progress(4.5, "Segmentation (SAM3) on the keyframes...", stage="reconstruction")
+    run_stage_inline(pipe, "workers.sam3_worker", str(session_path), config,
+                     label="sam3", pct_range=(4.5, 5.0))
+    pipe.send_log("Semantics done at the intake: vlm_analysis.json + segmentation.json + "
+                  "seg_masks.npz (2-D) — projected onto the fused cloud by the cloud stage")
+
+
+def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
+                        config: dict) -> None:
+    """F0 → F7 on the reconstruction this stage just produced, then discard every
+    epoch but the fused one.
+
+    1. The chunk_*.ply Omega left are merged into ONE working cloud by the
+       cleaning worker with the epoch-0 recipe (conf gates, SOR, witnesses —
+       claude_stac.txt §4-F3), WITHOUT its octree and consolidation: this cloud
+       exists only for F2/F5 to warp and F7 to replace.
+    2. workers/precision_worker.py runs the core (precision/runner.py's step list,
+       each step its own subprocess, resumable).
+    3. USER 2026-09-28: "no quiero ninguna época 0, la única para visualizar debe
+       ser la N, el resto deben descartarse" — the previous-epoch copies the
+       transactional apply keeps (`_epoch_<N-1>/`, with their octrees), any
+       half-built `_tx_epoch_*` and the per-epoch replay files are deleted.
+    Gated by reconstruction.precision.enabled."""
+    import copy
+    from precision.config import load_precision_config
+    from workers.base import run_stage_inline
+    if not load_precision_config(config).enabled:
+        return
+
+    cfg = copy.deepcopy(config)
+    pp = cfg.setdefault("postprocessing", {})
+    if not isinstance(pp, dict):
+        pp = cfg["postprocessing"] = {}
+    pp["build_potree"] = False
+    sc = pp.get("scene_consolidate")
+    if not isinstance(sc, dict):
+        sc = pp["scene_consolidate"] = {}
+    sc["enabled"] = False
+    pipe.send_progress(84, "Merging the Omega chunks into the working cloud...",
+                       stage="reconstruction")
+    run_stage_inline(pipe, "workers.cloudcompy_worker", str(session_path), cfg,
+                     label="merge", pct_range=(84.0, 86.0))
+    if not (output_dir / "cleaned_cloud.ply").exists():
+        raise RuntimeError("the chunk merge produced no cleaned_cloud.ply — the precision "
+                           "core has nothing to refine")
+
+    pipe.send_progress(86, "Precision core F0 → F7...", stage="reconstruction")
+    run_stage_inline(pipe, "workers.precision_worker", str(session_path), config,
+                     label="precision", pct_range=(86.0, 99.0))
+
+    freed = _discard_previous_epochs(output_dir)
+    pipe.send_log(f"[epochs] only the fused epoch stays — {freed / 1048576:.0f} MB of "
+                  f"previous epochs discarded")
+    pipe.send_progress(99, "Fused cloud is the reconstruction", stage="reconstruction")
+
+
+def _discard_previous_epochs(output_dir: Path) -> int:
+    """Delete `_epoch_*/` (the previous epoch the apply keeps for Undo, octree
+    included), `_tx_epoch_*/` leftovers and `corrections/epoch_*.npz`. Returns
+    the bytes freed. The ledger (corrections.jsonl) and geometry_epoch.json stay:
+    the live epoch is the fused one and the record says so."""
+    freed = 0
+    for pattern in ("_epoch_*", "_tx_epoch_*"):
+        for d in output_dir.glob(pattern):
+            if d.is_dir() and not d.is_symlink():
+                freed += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+                shutil.rmtree(d, ignore_errors=True)
+    for f in (output_dir / "corrections").glob("epoch_*.npz"):
+        freed += f.stat().st_size
+        f.unlink(missing_ok=True)
+    return freed
 
 
 def _run_pose_refine_step(pipe: WorkerPipe, output_dir: Path, recon_cfg: dict):

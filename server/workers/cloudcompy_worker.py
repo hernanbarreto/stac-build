@@ -324,11 +324,31 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
             except Exception as e:
                 pipe.send_log(f"Floor alignment computation failed: {e}", level="warning")
 
-        # NOTE: the mask→cloud mapping used to run here, because SAM3 came
-        # first and could only write masklets — the cloud it needed did not
-        # exist yet. The stage order now puts CloudCompy BEFORE the semantic
-        # stages, so SAM3 finds the cloud on disk and does the projection
-        # itself, the moment it finishes. Nothing to defer any more.
+        # ── Deferred mask→cloud projection (USER 2026-09-28: VLM + SAM3 run ONCE,
+        # at the intake, on the keyframes; the points they are projected onto
+        # exist only after F7). A segmentation.json without a
+        # segmentation_result.json as new as the cloud → project now. No model
+        # is involved; a failure FAILS the stage with the reason.
+        seg_path = output_dir / "segmentation.json"
+        res_path = output_dir / "segmentation_result.json"
+        if seg_path.exists() and (not res_path.exists()
+                                  or res_path.stat().st_mtime < output_ply.stat().st_mtime):
+            pipe.send_progress(95.5, "Projecting the SAM3 masks onto the cloud...",
+                               stage="cloudcompy")
+            import json as _json
+            import sys as _sys2
+            _srv2 = str(Path(__file__).resolve().parent.parent)
+            if _srv2 not in _sys2.path:
+                _sys2.path.insert(0, _srv2)
+            from segmentation.pipeline import map_segmentation_to_cloud
+            seg_data = map_segmentation_to_cloud(output_dir)
+            if seg_data.get("error"):
+                raise RuntimeError(f"mask→cloud projection failed: {seg_data['error']}")
+            n_applied = len(seg_data.get("instances", []))
+            cov = seg_data.get("coverage")
+            pipe.send_log(f"Mapped {n_applied} instances onto the cloud"
+                          + (f" ({cov * 100:.1f}% coverage)" if cov is not None else ""))
+            (output_dir / "seg_broadcast.json").write_text(_json.dumps(seg_data))
 
         # ── Build Potree LOD octree (so the first viewer load is instant) ──
         # Runs as the final reconstruction step. Carries the per-point

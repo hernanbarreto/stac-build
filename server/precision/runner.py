@@ -1,13 +1,16 @@
 """The precision core of "Reconstruir" (claude_stac.txt §3): EVIDENCE + CORE, in order.
 
-    EVIDENCE  visit_drift MEASURE on epoch 0 (relative scale rows, instance loops)
     CORE      F0 session camera → F2 continuous gauge → F4 native tracks → F3 Omega
               resolution probe (report) → F5 joint refinement → F6 native depth
-              (+ COLMAP reference) → F7 witness fusion → epoch N
+              (+ COLMAP reference) → F7 witness fusion → the fused cloud
 
-It runs after the semantics of epoch 0 (VLM + SAM3) as the pipeline's PRECISION stage
-(workers/precision_worker.py), and by hand as ``python -m precision.runner --session
-<dir>`` — the ONE list of steps below serves both.
+It runs INSIDE the reconstruction stage, right after Omega and the chunk merge
+(USER 2026-09-28: "f0 a f7 es etapa de reconstrucción, antes de cloudcompy"), through
+workers/precision_worker.py, and by hand as ``python -m precision.runner --session
+<dir>`` — the ONE list of steps below serves both. The §3 EVIDENCE step (visit_drift
+MEASURE over the SAM3 instances) is not in the chain: the instances are projected onto
+the cloud only after F7; ``python -m correction.visit_drift_run --mode measure`` stays
+available by hand.
 
 Each step runs in its own env (the pycolmap-4 / VGGSfM steps need ``mapanything``) as
 a subprocess, deterministic (cuBLAS workspace, fixed threads, MKL reproducible mode,
@@ -51,8 +54,6 @@ class Step:
 
 STEPS: List[Step] = [
     Step("f0_camera", "F0 session camera", "da3", "precision.camera"),
-    Step("f3_measure", "F3 visit drift (measure)", "da3", "correction.visit_drift_run",
-         ("--mode", "measure")),
     Step("f2_gauge", "F2 continuous gauge", "da3", "precision.gauge"),
     Step("f4_tracks", "F4 native-pixel tracks", "mapanything", "precision.tracks", gpu=True),
     Step("f3_probe", "F3 Omega resolution probe (report)", "mapanything",

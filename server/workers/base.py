@@ -207,3 +207,103 @@ def stop_semantic_service_verified(pipe: Optional["WorkerPipe"] = None, stage: s
             f"stop (PIDs {left}) — stop them (pkill -f '{VLLM_PROCESS_PATTERN}') and re-run")
     return {"service_stopped": True, "check": f"pgrep -f '{VLLM_PROCESS_PATTERN}'",
             "remaining_pids": [], "free_gb": gpu_free_gb()}
+
+
+# ── Running one worker inside another (the reconstruction stage hosts the
+# semantics and the precision core — USER 2026-09-28) ────────────────────────
+
+def _kill_process_tree(process, timeout: float = 5.0) -> None:
+    """SIGTERM the child's process group (it setsid()'d in run_worker_safe, so its
+    own children — DA3, SAM3, the precision steps — share it), wait, SIGKILL what
+    is left. Mirrors PipelineManager._kill_stage_tree."""
+    import os
+    import signal
+    pid = process.pid
+    try:
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, PermissionError):
+        pgid = None
+    try:
+        if pgid is not None and pgid != os.getpgid(0):
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except (ProcessLookupError, PermissionError):
+        process.terminate()
+    process.join(timeout=timeout)
+    if process.is_alive():
+        try:
+            if pgid is not None and pgid != os.getpgid(0):
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                process.kill()
+        except (ProcessLookupError, PermissionError):
+            process.kill()
+        process.join(timeout=timeout)
+
+
+def run_stage_inline(pipe: "WorkerPipe", module_name: str, session_dir: str, config: dict, *,
+                     label: str, stage: str = "reconstruction",
+                     pct_range: tuple = (0.0, 100.0)) -> None:
+    """Run another worker module's ``run(conn, session_dir, config)`` as a child
+    process of THIS worker and relay what it says: logs verbatim (prefixed with
+    ``label``), progress rescaled into ``pct_range`` of ``stage``, a cancel
+    forwarded to the child and its whole process group killed. The child's
+    ``error`` / failed ``done`` — or a child that dies without one — raise a
+    RuntimeError naming the label and the reason (nothing fails silently). The
+    child is a 'spawn' process like every pipeline stage (CUDA-safe)."""
+    import importlib
+    from multiprocessing import get_context
+
+    mod = importlib.import_module(module_name)
+    ctx = get_context("spawn")
+    server_conn, worker_conn = ctx.Pipe()
+    proc = ctx.Process(target=mod.run, args=(worker_conn, session_dir, config),
+                       name=f"inline-{label}")
+    proc.start()
+    worker_conn.close()
+    lo, hi = float(pct_range[0]), float(pct_range[1])
+    error: Optional[dict] = None
+    done: Optional[dict] = None
+    try:
+        while True:
+            if pipe.check_cancel():
+                try:
+                    server_conn.send({"type": "cancel"})
+                except Exception:  # noqa: BLE001 — the child may be gone already
+                    pass
+                _kill_process_tree(proc)
+                raise RuntimeError(f"cancelled during {label}")
+            if not server_conn.poll(0.25):
+                if not proc.is_alive() and not server_conn.poll(0.0):
+                    break
+                continue
+            try:
+                msg = server_conn.recv()
+            except EOFError:
+                break
+            if not isinstance(msg, dict):
+                continue
+            kind = msg.get("type")
+            if kind == "log":
+                pipe.send_log(f"[{label}] {msg.get('msg', '')}", level=msg.get("level", "info"))
+            elif kind == "progress":
+                frac = max(0.0, min(100.0, float(msg.get("pct", 0.0)))) / 100.0
+                pipe.send_progress(lo + (hi - lo) * frac, f"{label}: {msg.get('msg', '')}",
+                                   stage=stage)
+            elif kind == "error":
+                error = msg
+                if msg.get("traceback"):
+                    pipe.send_log(str(msg["traceback"]), level="error")
+            elif kind == "done":
+                done = msg
+                break
+    finally:
+        proc.join(timeout=10)
+        if proc.is_alive():
+            _kill_process_tree(proc)
+        server_conn.close()
+    if error is not None or done is None or not done.get("success", False):
+        why = ((error or {}).get("msg") or (done or {}).get("detail")
+               or f"the worker died without reporting (exit code {proc.exitcode})")
+        raise RuntimeError(f"{label} failed: {why}")

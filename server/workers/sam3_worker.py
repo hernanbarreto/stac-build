@@ -103,6 +103,16 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
     n_instances = len(result.get("instances", []))
     pipe.send_log(f"Segmentation complete: {n_instances} instances")
 
+    # Segmented at the INTAKE (USER 2026-09-28: VLM + SAM3 run once, before any
+    # geometry): there is no cloud yet. The 2-D masks are the deliverable of this
+    # run; the cloud stage projects them onto the fused cloud after F7.
+    if not (output_dir / "cleaned_cloud.ply").exists():
+        pipe.send_log("No cloud on disk yet — the 2-D masks are kept; the mask→cloud "
+                      "projection runs in the cloud stage after the reconstruction")
+        pipe.send_progress(100, f"Segmentation complete: {n_instances} objects (2-D)",
+                           stage="sam3")
+        return
+
     # Apply to cleaned cloud
     pipe.send_progress(80, "Applying to point cloud...", stage="sam3")
 

@@ -27,19 +27,23 @@ def test_production_pipeline_runs_the_whole_chain():
     from pipeline_manager import build_pipeline_stages, StageId
     raw = _raw()
     assert raw["pipeline"]["auto_segment"] is True, "the automatic segmentation must be ON"
-    # USER 2026-09-28: "Reconstruir" runs F0-F7 complete — after SAM3 on epoch 0 the
-    # PRECISION stage (workers/precision_worker.py → precision/runner.py) replaces
-    # the certification's correction; the CERTIFY stage (F8) does not run.
+    # USER 2026-09-28: "Reconstruir" = ONE reconstruction stage that hosts the
+    # intake, VLM + SAM3 (once, on the keyframes), Omega and the core F0-F7, then
+    # the cloud stage projects the masks and delivers the fused cloud. No separate
+    # VLM / SAM3 / certification stage runs.
     precision_on = bool(raw["reconstruction"]["precision"]["enabled"])
     assert raw["certify"]["auto_after_segmentation"] is (not precision_on), \
         "the automatic certification is ON exactly when the precision chain is not"
     stages = build_pipeline_stages(backend=str(raw["reconstruction"]["backend"]))
     enabled = [s.id for s in stages if s.enabled]
-    # reconstruction → VLM → SAM3 → cleaned cloud → certification, in this order
-    want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.VLM, StageId.SAM3]
-    want.append(StageId.PRECISION if precision_on else StageId.CERTIFY)
     if precision_on:
-        assert StageId.CERTIFY not in enabled
+        want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY]
+        for off in (StageId.VLM, StageId.SAM3, StageId.CERTIFY):
+            assert off not in enabled, enabled
+    else:
+        # reconstruction → cleaned cloud → VLM → SAM3 → certification, in this order
+        want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.VLM, StageId.SAM3,
+                StageId.CERTIFY]
     assert enabled[:len(want)] == want, enabled
     if raw["pipeline"]["auto_tsdf"] is False:
         assert StageId.TSDF not in enabled and StageId.PGSR not in enabled

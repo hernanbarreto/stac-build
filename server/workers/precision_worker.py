@@ -1,10 +1,10 @@
 # STAC-Builder: Precision Worker (Subprocess)
-# claude_stac.txt §3 EVIDENCE + CORE as the pipeline stage after the semantics of
-# epoch 0 (USER 2026-09-28: "Reconstruir" builds the cloud WITH F0-F7, in place of
-# the old correction): visit_drift MEASURE → F0 camera → F2 gauge → F4 tracks →
-# F3 probe → F5 refinement → F6 native depth (+ COLMAP reference) → F7 witness
-# fusion → the published epoch IS the deliverable. The steps and their resume live
-# in precision/runner.py (the one list, also `python -m precision.runner`).
+# claude_stac.txt §3 CORE, hosted by the reconstruction stage right after Omega and
+# the chunk merge (USER 2026-09-28: "f0 a f7 es etapa de reconstrucción, antes de
+# cloudcompy"): F0 camera → F2 gauge → F4 tracks → F3 probe → F5 refinement → F6
+# native depth (+ COLMAP reference) → F7 witness fusion → the fused cloud IS the
+# reconstruction. The steps and their resume live in precision/runner.py (the one
+# list, also `python -m precision.runner`).
 
 import sys
 from pathlib import Path
