@@ -677,19 +677,17 @@ intake:
                                        # the video — the session camera's K is MEASURED once and
                                        # the rotation reference fits only R (a per-frame focal
                                        # bent to absorb translation; intake/focal.py)
-    focal_probe_res: 1008              # DA3 process_res of the probe (claude_stac.txt §4-F9:
-                                       # gauge process_res 1008 — the maximum-resolution instrument)
+    focal_probe_res: native            # DA3 process_res of the probe: the frames' long side (USER
+                                       # 2026-09-28: maximum resolution, never an upsampling)
     focal_probe_model: depth-anything/DA3NESTED-GIANT-LARGE-1.1   # the gauge's DA3 model
     reference_tol: 1.0e-12             # declared convergence tolerance of the rotation fit (step,
                                        # cost change and gradient): the reading is the minimum, not
                                        # wherever a loose stop left it (USER 2026-09-28: identical
                                        # inputs must give bit-identical keyframes)
   content:                             # I2 — VLM content tags (vlm_proposed) + SAM3 exclusion masks
-    enabled: false                     # claude_stac.txt §4-F1: I2 (content tags + exclusion masks)
-                                       # is part of the intake. USER 2026-09-28: OFF for the
-                                       # F0-F2 validation run ("sin vlm+sam3, lo probamos en otra
-                                       # etapa") — with sam3_scope all it would segment 742
-                                       # keyframes AND ~8,000 witnesses before Omega starts
+    enabled: true                      # claude_stac.txt §4-F1: I2 (content tags + exclusion masks)
+                                       # is part of the intake. USER 2026-09-28: ON for the F0-F7
+                                       # validation run ("si es necesario ... incluí vlm y sam3")
     backend: qwen_local                # USER DECISION: local VLM (semantic.backends.<name>), no paid API
     batch: 8                           # BOUND: images per VLM call (≤ semantic max_images_per_prompt)
     max_tokens: 512                    # BOUND: VLM generation cap per call
@@ -1275,8 +1273,13 @@ reconstruction:
     chunk_overlap: 250                  # 500/250 = few seams, wide-baseline chunks, 50% overlap
                                         # (~43 GB VRAM at 500 frames — needs the GPU to itself)
     loop_closure: true
-    resolution: 512                     # load_and_preprocess_images(image_resolution=…)
-    mode: "balanced"                    # "balanced" (≈res² tokens) | "max_size" (less VRAM)
+    resolution: native                  # USER 2026-09-28 ("trabajemos a máxima resolución"):
+                                        # native = the frames' long side rounded up to Omega's
+                                        # patch (16), mode forced to max_size → the Omega grid
+                                        # IS the native frame (pccr 464x832: grid 464x832; the
+                                        # old 512 balanced saw 384x688). An int = that value.
+    mode: "balanced"                    # "balanced" (≈res² tokens) | "max_size" (less VRAM);
+                                        # ignored when resolution is native
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
                                         # scales cloud + poses by s = median DA3/Omega depth).
                                         # false → up-to-scale (raw Omega isolation test).
@@ -1371,7 +1374,16 @@ reconstruction:
                                         # own median: equally spread chunks weigh the same,
                                         # whatever the absolute number. This only chooses
                                         # which chunks the log calls SUSPECT.
-    elastic_seam: true                  # per-frame seam consensus (run-6 behaviour). A2
+    elastic_seam: false                 # OFF 2026-09-28 (MEASURED on pccr 2026-08-24, 16 chunks of
+                                        # 89 kf): its per-frame fits between the two copies of the
+                                        # SAME frame rotated 21.6° median / 123° max at seam 2->3
+                                        # (rotation unobservable on the shared surfaces), were
+                                        # averaged as Rodrigues vectors and interpolated about the
+                                        # WORLD origin — frames moved up to 12.9 m (234 % of its
+                                        # own authority) and the scene came out scrambled. Back ON
+                                        # only after observability, SO(3) averaging and a screw
+                                        # about the points are in and an A/B measures a gain.
+                                        # History: per-frame seam consensus (run-6 behaviour). A2
                                         # 2026-07-11 tested false on test4: NO visible change
                                         # in serpenteado or duplicates — acquitted as the
                                         # visible-warp culprit despite its unsmoothed
@@ -1398,7 +1410,14 @@ reconstruction:
                                         # own residual floor), whatever the absolute size —
                                         # in metric_lock.demote_disproportionate_fits.
                                         # A number here still applies the old |t| cap on top.
-    intra_chunk: true                   # (KEEP ON) A4 2026-07-11 tested false on test4:
+    intra_chunk: false                  # OFF 2026-09-28 (MEASURED on pccr 2026-08-24): its field
+                                        # moved frames up to 1.75 m and 11.5° inside one chunk
+                                        # (1170 % of its own authority) from 6-DOF pair fits on
+                                        # planar surfaces (sliding and in-plane rotation
+                                        # unobservable), judged by the paired median that cannot
+                                        # see damage on a subset. Back ON only with per-DOF
+                                        # information, an SE(3) solve and a measured gain.
+                                        # History: (KEEP ON) A4 2026-07-11 tested false on test4:
                                         # serpenteado unchanged (it is intrinsic to omega's
                                         # feed-forward output, not our stages) and duplicates
                                         # slightly worse without it.
@@ -1997,7 +2016,8 @@ reconstruction:
                                         # _apply_depth_alignment)
       window_overlap_frac: 0.5          # BOUND: share of a window shared with the next — the
                                         # frames that chain the windows' poses into ONE walk
-      process_res: 504                  # BOUND: DA3 processing resolution (the model default)
+      process_res: native               # USER 2026-09-28 maximum resolution: the frames' long side
+                                        # rounded up to DA3's patch 14 (was 504, the model default)
       model_id: depth-anything/DA3NESTED-GIANT-LARGE-1.1
       knot_walk_m: 2.0                  # BOUND: knot spacing of the continuous scale model
       heldout_confidence: 0.95          # declared confidence of the held-out comparisons (the
@@ -2054,20 +2074,20 @@ reconstruction:
     # F6 — prior-guided plane sweep at native resolution (precision/depth_sweep.py)
     depth:
       n_views: 8                        # BOUND: photometric / consistency views per keyframe
-      min_tri_deg: 1.0                  # view's median triangulation angle range (degrees):
-      max_tri_deg: 45.0                 # 1° = COLMAP's own min_triangulation_angle
-      n_hyp: 32                         # hypotheses uniform in inverse depth (+ the prior)
-      beta_max: 0.5                     # BOUND: cap of the relative search half-width; β itself
+      min_tri_deg: 1.5                  # view's median triangulation angle range (degrees):
+      max_tri_deg: 25.0                 # claude_stac.txt §4-F9 skeleton values (starting points)
+      n_hyp: 64                         # hypotheses uniform in inverse depth (+ the prior)
+      beta_max: 0.10                    # BOUND: cap of the relative search half-width; β itself
                                         # is the calibrated |error| quantile of the prior
       beta_quantile: 0.95               # declared confidence (as everywhere else)
       patch_px: 7                       # ZNCC window side (odd)
-      best_k: 3                         # views aggregated per pixel (best k of n_views)
-      propagation_iters: 3              # edge-aware propagation rounds
+      best_k: 4                         # views aggregated per pixel (best k of n_views)
+      propagation_iters: 2              # edge-aware propagation rounds
       null_frames: 24                   # BOUND: keyframes the ZNCC null distribution uses
       null_confidence: 0.95             # declared confidence: floor = this null quantile
       null_texture_bins: 8              # the floor per texture bin (reference window std)
       tau_px_k: 2.0                     # τ_px = this × F5's held-out RMS
-      min_consistent_views: 2           # ≥ 2 cameras must agree (the 2026-08-19 recipe's rule)
+      min_consistent_views: 3           # §4-F9 skeleton (≥ 2 was the 2026-08-19 TSDF recipe)
       prior_fill: keep                  # keep | drop — tier 1 is marked, never hidden
       prior_fill_min_views: 2
       view_samples: 256                 # BOUND: prior points per keyframe for view selection
@@ -3000,9 +3020,11 @@ correction_graph:
     lambda_init: 1.0e-4             # Levenberg-Marquardt (Nielsen update)
     lambda_max: 1.0e+12
     lm_diag_floor: 1.0e-9
-    tol: 1.0e-8                     # ‖δ‖ below this → converged
-    rel_tol: 1.0e-6                 # relative cost improvement below this → converged
-    max_iters: 50
+    tol: 1.0e-8                     # converged: every node's step below this in radians AND in
+                                    # metres (per component — no norm mixing the two units)
+    max_iters: 1000                 # BOUND: reaching it = NOT converged → the graph is not
+                                    # applied (was 50 with a relative-cost stop: pccr 2026-09-28
+                                    # applied the 50th iterate with the cost still falling)
     pcg_tol: 1.0e-10
     pcg_max_iters: 2000
     min_loop_gain: 0.5              # gate: the loop residual (observed components) must drop by

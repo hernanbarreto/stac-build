@@ -1393,7 +1393,24 @@ def _apply_stac_model_keys(cfg: dict, config: dict) -> dict:
     return cfg
 
 
-def _build_vggtomega_config(config: dict) -> dict:
+def omega_native_resolution(frames_dir) -> int:
+    """``reconstruction.vggtomega.resolution: native`` — the frames' long side rounded
+    up to Omega's patch: with mode ``max_size`` the Omega grid IS the native frame
+    (pccr 464x832 → 832, grid 464x832, scale 1.0; the old 512 balanced saw 384x688)."""
+    import cv2 as _cv2m
+    from precision.camera import OMEGA_PATCH_SIZE
+    from intake.quality import list_frames
+    paths = list_frames(Path(frames_dir))
+    if not paths:
+        raise RuntimeError(f"no frame in {frames_dir} — the native resolution cannot be read")
+    img = _cv2m.imread(str(paths[0]), _cv2m.IMREAD_UNCHANGED)
+    if img is None:
+        raise RuntimeError(f"cannot read {paths[0]}")
+    long_side = max(img.shape[:2])
+    return int(-(-long_side // OMEGA_PATCH_SIZE) * OMEGA_PATCH_SIZE)
+
+
+def _build_vggtomega_config(config: dict, frames_dir=None) -> dict:
     """Load stac_vggtomega.yaml and override the same user-configurable params as the
     MapAnything path (chunk size/overlap/loop), keeping the Omega-specific keys."""
     import yaml as _yaml
@@ -1410,8 +1427,15 @@ def _build_vggtomega_config(config: dict) -> dict:
     cfg["Model"]["loop_enable"] = om.get("loop_closure", cfg["Model"].get("loop_enable", True))
     cfg["Model"]["frame_stride"] = 1
     cfg["Model"]["delete_temp_files"] = False
-    cfg["Model"]["omega_resolution"] = om.get("resolution", cfg["Model"].get("omega_resolution", 512))
-    cfg["Model"]["omega_mode"] = om.get("mode", cfg["Model"].get("omega_mode", "balanced"))
+    _res = om.get("resolution", cfg["Model"].get("omega_resolution", 512))
+    _mode = om.get("mode", cfg["Model"].get("omega_mode", "balanced"))
+    if _res == "native":
+        if frames_dir is None:
+            raise RuntimeError("reconstruction.vggtomega.resolution is 'native': the Omega "
+                               "config needs the session's frames to read it")
+        _res, _mode = omega_native_resolution(frames_dir), "max_size"
+    cfg["Model"]["omega_resolution"] = int(_res)
+    cfg["Model"]["omega_mode"] = _mode
     return _apply_stac_model_keys(cfg, config)
 
 
@@ -1447,11 +1471,33 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap
                             for n, l in zip(pnums, plines)}
                 break
     if not pose_map:
-        pipe.send_log("[omega-depth] no aligned camera_poses.txt found — falling back to "
-                      "raw chunk extrinsic (scale may be off)", level="warning")
+        # the raw chunk extrinsic is in another frame and scale (it underestimated s
+        # by ~1.37x): records built on it would be wrong, not approximate
+        raise RuntimeError("[omega-depth] no aligned camera_poses.txt / camera_frames.txt "
+                           "pair — the Omega records cannot be written in the aligned frame")
+
+    # the chunk layout exactly as the fork builds it (vggt_long.py), and every frame's
+    # OWNER — the chunk whose centre is nearest (loop_utils.metric_lock.frame_owner):
+    # the record of a shared frame carries the depth, conf, K and pose of the chunk
+    # that writes its points (traceability), never of whichever chunk came last
+    if N <= chunk_size or step <= 0:
+        _chunks = [(0, N)]
+    else:
+        _chunks = [(i * step, min(i * step + chunk_size, N))
+                   for i in range((N - overlap + step - 1) // step)]
+    _centres = [(a + b) / 2.0 for a, b in _chunks]
+
+    def _owner(g):
+        best, bd = -1, None
+        for kk, (a, b) in enumerate(_chunks):
+            if a <= g < b and (bd is None or abs(g - _centres[kk]) < bd):
+                best, bd = kk, abs(g - _centres[kk])
+        return best
 
     n_written = 0
-    for cp in sorted(glob.glob(str(aligned / "chunk_*.npy"))):
+    # numeric chunk order (a lexicographic glob put chunk_10 before chunk_2)
+    for cp in sorted(glob.glob(str(aligned / "chunk_*.npy")),
+                     key=lambda q: int(Path(q).stem.split("_")[1])):
         try:
             k = int(Path(cp).stem.split("_")[1])
             cd = np.load(cp, allow_pickle=True).item()
@@ -1475,12 +1521,17 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap
                 gi = start + j
                 if gi >= N:
                     break
-                c2w = pose_map.get(stems[gi], ext[j])     # ALIGNED pose; raw extrinsic fallback
+                if _owner(gi) != k:
+                    continue
+                if stems[gi] not in pose_map:
+                    raise RuntimeError(f"[omega-depth] frame {stems[gi]} has no aligned pose")
+                c2w = pose_map[stems[gi]]                 # the ALIGNED pose of record
                 cam_c = c2w[:3, 3]
                 fwd = c2w[:3, 2]                           # camera +z in world
                 d = (wp[j] - cam_c) @ fwd                  # [H,W] depth along view axis
                 rec = {"depth": d.astype(np.float32),
-                       "pose_c2w": np.asarray(c2w, np.float64)}
+                       "pose_c2w": np.asarray(c2w, np.float64),
+                       "chunk": np.int64(k), "frame_global": np.int64(gi)}
                 if wconf is not None:
                     rec["conf"] = wconf[j].astype(np.float32)
                 if Kin is not None:
@@ -1488,12 +1539,13 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap
                 np.savez_compressed(out_dir / f"frame_{stems[gi]}.npz", **rec)
                 n_written += 1
         except Exception as e:
-            pipe.send_log(f"[omega-depth] chunk {cp} skipped ({e})", level="warning")
+            raise RuntimeError(f"[omega-depth] chunk {cp} could not be recorded: {e}") from e
     pipe.send_log(f"[omega-depth] wrote {n_written} per-frame omega records (depth, conf, "
                   f"K_omega, pose_c2w)")
 
 
-from workers.base import (gpu_free_gb as _gpu_free_gb, stop_semantic_service,
+from workers.base import (gpu_free_gb as _gpu_free_gb, gpu_total_gb as _gpu_total_gb,
+                          stop_semantic_service,
                           stop_semantic_service_verified)
 
 
@@ -1866,7 +1918,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # measured and reported — it is evidence, not a verdict.
     from reconstruction.chunk_plan import (walk_length_m, plan_anchor_indices,
                                            plan_chunks, chunk_ranges)
-    vggt_config = _build_vggtomega_config(config)
+    vggt_config = _build_vggtomega_config(config, frames_dir)
     _va_cfg = recon_cfg.get("vggtomega", {}) or {}
     _anch_per_chunk = int(_simple_cfg.get("chunk_anchors", 3))
     _anchor_dir = output_dir / "da3_run" / "results_output"
@@ -2060,6 +2112,15 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         env = os.environ.copy()
         if device == "cpu":
             env["CUDA_VISIBLE_DEVICES"] = ""
+        # deterministic numerics (USER 2026-09-28: identical keyframes → bit-identical
+        # output): cuBLAS workspace, a FIXED thread count for every CPU library the
+        # fork uses (the pose graph, lstsq, SVD — a reduction's order must not depend on
+        # the machine's 252 cores or the cgroup's 30), MKL in its reproducible mode
+        env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        for _k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+            env[_k] = "8"
+        env["MKL_CBWR"] = "COMPATIBLE"
+        env["PYTHONHASHSEED"] = "0"
 
         pipe.send_progress(10, f"Starting VGGT-Long[Omega] ({tag})...", stage="reconstruction")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -2109,7 +2170,10 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # number). A positive value overrides it, for A/B work.
     _chunk_cfg = int(_simple_cfg.get("chunk_frames", 0) or 0)
     if _simple_on and _n_selected:
-        _free = _gpu_free_gb()
+        # the card's TOTAL memory decides the layout (a property of the card); FREE
+        # memory at this instant depends on vLLM teardown and fragmentation and made
+        # the chunk layout — the whole geometry — a function of transient GPU state
+        _free = _gpu_total_gb()
         if _chunk_cfg:
             _cap = _chunk_cfg
             _need = 4.0 + 0.086 * _cap
@@ -2121,13 +2185,12 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             pipe.send_log(f"SIMPLE: chunk capacity {_cap} frames "
                           f"(reconstruction.simple.chunk_frames, explicit)")
         elif _free is None:
-            _cap = 60
-            pipe.send_log("WARNING: free VRAM unreadable — falling back to 60 "
-                          "frames per chunk (the vendor default)", level="warning")
+            raise RuntimeError("the GPU's total memory cannot be read (nvidia-smi) — the "
+                               "chunk capacity cannot be decided")
         else:
             _cap = max(24, int((_free - 4.0) / 0.086))
             pipe.send_log(f"SIMPLE: chunk capacity {_cap} frames — {_free:.1f} GB "
-                          f"free, 4.0 GB base + 0.086 GB/frame (measured). "
+                          f"total on the card, 4.0 GB base + 0.086 GB/frame (measured). "
                           f"{_n_selected} keyframe(s) to place.")
         _chunk_cfg = _cap
         _max_walk0 = float(_simple_cfg.get("max_walk_single_pass_m", 0) or 0)
@@ -2458,7 +2521,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 shutil.rmtree(_t, ignore_errors=True)
             elif _t.exists():
                 _t.unlink()
-        vggt_config = _build_vggtomega_config(config)
+        vggt_config = _build_vggtomega_config(config, frames_dir)
         _apply_chunked_metric(vggt_config, _phase2, _ov2)
         # SALAD's non-local band in METRES OF WALK, not in a share of the keyframe
         # count: the walk is known now. `min_gap_frac` x n was 22 kf on pccr's 216

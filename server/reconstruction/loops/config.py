@@ -231,9 +231,8 @@ class GraphConfig:
     lambda_init: float
     lambda_max: float
     lm_diag_floor: float
-    tol: float
-    rel_tol: float
-    max_iters: int
+    tol: float                      # converged: every node's step below this in rad AND in m
+    max_iters: int                  # BOUND: reaching it = NOT converged (not applied)
     pcg_tol: float
     pcg_max_iters: int
     min_loop_gain: float            # gate: total loop residual must drop by this fraction
@@ -684,7 +683,6 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         lambda_max=_num(gp, "lambda_max", G, lo=0, lo_excl=True),
         lm_diag_floor=_num(gp, "lm_diag_floor", G, lo=0),
         tol=_num(gp, "tol", G, lo=0, lo_excl=True),
-        rel_tol=_num(gp, "rel_tol", G, lo=0, lo_excl=True),
         max_iters=_num(gp, "max_iters", G, lo=1, integer=True),
         pcg_tol=_num(gp, "pcg_tol", G, lo=0, lo_excl=True),
         pcg_max_iters=_num(gp, "pcg_max_iters", G, lo=1, integer=True),

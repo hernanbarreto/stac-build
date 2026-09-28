@@ -114,6 +114,19 @@ def run_worker_safe(worker_fn, conn: Connection, *args, **kwargs):
 
 # ── Exclusive-GPU helpers (shared by reconstruction / SAM3 workers) ──────────
 
+def gpu_total_gb() -> Optional[float]:
+    """TOTAL VRAM (GB) of GPU 0 via nvidia-smi — a property of the card, unlike the
+    free memory; None when it can't be read."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10)
+        return float(out.stdout.strip().splitlines()[0]) / 1024.0
+    except Exception:
+        return None
+
+
 def gpu_free_gb() -> Optional[float]:
     """Free VRAM (GB) of GPU 0 via nvidia-smi; None when it can't be read."""
     import subprocess

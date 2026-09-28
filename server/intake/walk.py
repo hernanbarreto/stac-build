@@ -208,6 +208,26 @@ def keyframe_files(frames_dir: Path) -> List[str]:
     return sorted(files, key=lambda f: int("".join(ch for ch in Path(f).stem if ch.isdigit())))
 
 
+DA3_PATCH = 14
+
+
+def da3_process_res(value, frames_dir: Path) -> int:
+    """DA3's process_res: an int as configured, or ``native`` — the frames' long side
+    rounded up to DA3's patch (USER 2026-09-28: maximum resolution; DA3 upper-bound-
+    resizes the long side, so this is the native frame and never an upsampling)."""
+    if value != "native":
+        return int(value)
+    import cv2
+    from intake.quality import list_frames
+    paths = list_frames(Path(frames_dir))
+    if not paths:
+        raise WalkError(f"no frame in {frames_dir} — the native resolution cannot be read")
+    img = cv2.imread(str(paths[0]), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise WalkError(f"cannot read {paths[0]}")
+    return int(-(-max(img.shape[:2]) // DA3_PATCH) * DA3_PATCH)
+
+
 def run_da3_windows(session_dir: Path, gcfg, python: str, log: Callable = print,
                     check_cancel: Optional[Callable[[], bool]] = None, *,
                     frames_dir: Optional[Path] = None, files: Optional[Sequence[str]] = None
@@ -225,7 +245,8 @@ def run_da3_windows(session_dir: Path, gcfg, python: str, log: Callable = print,
     windows = [[str(frames_dir / f) for f in files[a:b]] for a, b in plan]
     wdir = session_dir / "output" / WINDOWS_DIRNAME
     wdir.mkdir(parents=True, exist_ok=True)
-    spec = {"windows": windows, "process_res": gcfg.process_res, "model_id": gcfg.model_id}
+    res = da3_process_res(gcfg.process_res, frames_dir)
+    spec = {"windows": windows, "process_res": res, "model_id": gcfg.model_id}
     spec_path = wdir / "windows.json"
     old = json.loads(spec_path.read_text()) if spec_path.exists() else None
     if old != spec:
@@ -235,7 +256,7 @@ def run_da3_windows(session_dir: Path, gcfg, python: str, log: Callable = print,
     server_dir = Path(__file__).resolve().parent.parent
     cmd = [str(python), str(server_dir / "extract_da3_depth.py"), "--image_dir",
            str(frames_dir), "--output_dir", str(wdir), "--model", gcfg.model_id,
-           "--process_res", str(gcfg.process_res), "--windows_json", str(spec_path)]
+           "--process_res", str(res), "--windows_json", str(spec_path)]
     log(f"{LOG_TAG} I3: DA3 {gcfg.model_id} over {len(windows)} window(s) of "
         f"{gcfg.window_frames} keyframes ({len(files)} keyframes, overlap "
         f"{gcfg.window_overlap_frac:g})")
@@ -281,7 +302,8 @@ def measure_walk(session_dir: Path, gcfg, log: Callable = print, *,
         "method": "da3_windows_chained",
         "params": {"window_frames": gcfg.window_frames,
                    "window_overlap_frac": gcfg.window_overlap_frac,
-                   "process_res": gcfg.process_res, "model_id": gcfg.model_id},
+                   "process_res": json.loads((wdir / "windows.json").read_text())["process_res"],
+                   "model_id": gcfg.model_id},
         "n_keyframes": len(frames),
         "n_windows": len(windows),
         "all_windows_metric": all(w["is_metric"] == 1 for w in windows),

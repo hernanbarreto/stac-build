@@ -42,7 +42,7 @@ PCFG = ParallaxConfig(grid_side=24, process_scale=0.5, ransac_px=1.0, parallax_q
                       fb_max_px=1.0, warn_static_disp_px=0.5, warn_rotation_min_disp_px=4.0,
                       warn_min_run_frames=5, parallax_quantile=0.9, keyframe_band_frac=0.25,
                       reference_max_eval=200, reference_tol=1.0e-12,
-                      focal_probe_frames=16, focal_probe_res=1008,
+                      focal_probe_frames=16, focal_probe_res="native",
                       focal_probe_model="depth-anything/DA3NESTED-GIANT-LARGE-1.1")
 NOISE_SIGMA = 2.0
 QUIET = (lambda *a, **k: None)

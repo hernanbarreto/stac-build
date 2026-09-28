@@ -55,7 +55,8 @@ def test_summary_is_the_median_with_its_spread():
 
 def test_probe_is_reused_while_its_spec_is_unchanged(tmp_path, monkeypatch):
     from intake.config import load_intake_config
-    pc = load_intake_config().parallax
+    from dataclasses import replace
+    pc = replace(load_intake_config().parallax, focal_probe_res=1008)
     sess = tmp_path / "s"
     (sess / "frames").mkdir(parents=True)
     q = _quality()

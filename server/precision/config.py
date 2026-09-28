@@ -156,7 +156,7 @@ class GaugeConfig:
     window_frames: int          # BOUND: keyframes per DA3 multi-view window (one joint inference)
     window_overlap_frac: float  # BOUND: share of a window shared with the next (the frames
                                 # that chain two windows' poses into one walk)
-    process_res: int            # BOUND: DA3 processing resolution (long side, px)
+    process_res: Any            # DA3 processing resolution (long side, px) or "native"
     model_id: str               # DA3 checkpoint (the NESTED model: metric multi-view)
     knot_walk_m: float          # BOUND: knot spacing of the continuous scale model (m of walk)
     heldout_confidence: float   # declared confidence of the held-out comparisons
@@ -324,7 +324,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         window_frames=_num(g, "window_frames", "gauge", lo=4, integer=True),
         window_overlap_frac=_num(g, "window_overlap_frac", "gauge", lo=0.0, hi=1.0,
                                  lo_excl=True),
-        process_res=_num(g, "process_res", "gauge", lo=14, integer=True),
+        process_res=(_str(g, "process_res", "gauge") if g.get("process_res") == "native"
+                     else _num(g, "process_res", "gauge", lo=14, integer=True)),
         model_id=_str(g, "model_id", "gauge"),
         knot_walk_m=_num(g, "knot_walk_m", "gauge", lo=0.0, lo_excl=True),
         heldout_confidence=_num(g, "heldout_confidence", "gauge", lo=0.0, hi=1.0,

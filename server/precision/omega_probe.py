@@ -91,7 +91,7 @@ def omega_infer(session_dir: Path) -> Infer:
     from config import cfg as raw_cfg
     from workers.map_worker import _build_vggtomega_config
     from base_models.vggtomega_adapter import VGGTOmegaAdapter
-    vcfg = _build_vggtomega_config(raw_cfg)
+    vcfg = _build_vggtomega_config(raw_cfg, Path(session_dir) / "frames")
     ad = VGGTOmegaAdapter(vcfg, device="cuda" if torch.cuda.is_available() else "cpu")
     ad.load()
 

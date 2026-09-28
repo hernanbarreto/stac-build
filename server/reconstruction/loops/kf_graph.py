@@ -352,7 +352,7 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     gcfg = dict(huber_delta_m=gc.huber_delta_m, huber_delta_deg=gc.huber_delta_deg,
                 dense_max_unknowns=gc.dense_max_unknowns, lambda_init=gc.lambda_init,
                 lambda_max=gc.lambda_max, lm_diag_floor=gc.lm_diag_floor, tol=gc.tol,
-                rel_tol=gc.rel_tol, max_iters=gc.max_iters, pcg_tol=gc.pcg_tol,
+                max_iters=gc.max_iters, pcg_tol=gc.pcg_tol,
                 pcg_max_iters=gc.pcg_max_iters)
 
     def build():

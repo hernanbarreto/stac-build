@@ -514,7 +514,7 @@ def fork_graph_cfg(**over) -> dict:
          "drift_min_gain": 0.2,
          "huber_delta_m": 0.10, "huber_delta_deg": 2.0,
          "dense_max_unknowns": 12000, "lambda_init": 1e-4, "lambda_max": 1e12,
-         "lm_diag_floor": 1e-9, "tol": 1e-8, "rel_tol": 1e-6, "max_iters": 50,
+         "lm_diag_floor": 1e-9, "tol": 1e-8, "max_iters": 1000,
          "pcg_tol": 1e-10, "pcg_max_iters": 2000, "min_loop_gain": 0.5,
          "heldout_confidence": 0.95,
          "gate_mode": "advisory",

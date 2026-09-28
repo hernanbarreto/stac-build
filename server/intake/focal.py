@@ -73,11 +73,13 @@ def run_focal_probe(session_dir: Path, quality: Dict[str, Any], pcfg, *, python:
                     log: Callable = print,
                     cancelled: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
     """Measure (or reuse) the session K; returns the probe document."""
+    from intake.walk import da3_process_res
     session_dir = Path(session_dir)
     frames_dir = session_dir / "frames"
     files = probe_files(quality, pcfg.focal_probe_frames)
     spec = {"windows": [[str(frames_dir / f) for f in files]],
-            "process_res": int(pcfg.focal_probe_res), "model_id": str(pcfg.focal_probe_model)}
+            "process_res": da3_process_res(pcfg.focal_probe_res, frames_dir),
+            "model_id": str(pcfg.focal_probe_model)}
     out = session_dir / "intake" / FOCAL_NAME
     wdir = session_dir / "intake" / DIRNAME
     if out.exists():
