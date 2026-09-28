@@ -504,6 +504,32 @@ def solve_depth(pair_rows, obs_by_index: Dict[int, list], n: int, scale_only: bo
     return np.asarray(a[:n]), np.asarray(b[:n]), n_abs
 
 
+def heldout_tail_change(before, after, confidence: float, q: float = 90.0, n_boot: int = 2000,
+                        seed: int = 0) -> dict:
+    """The TAIL twin of ``metric_lock.heldout_change``: did the q-th percentile of
+    the paired held-out disagreements move by more than its own sampling noise?
+    Bootstrap over the pairs (fixed seed), improves / worsens = the whole
+    confidence interval of percentile(before) − percentile(after) on one side of
+    zero. A defect that lives in PART of the scene (a few frames compressed)
+    moves the tail and not the median — measured 2026-09-28 against ground truth:
+    120 keyframes, two clusters compressed 5-7 %, the median-only gate left a p90
+    depth error of 4.39 % that the solved correction brought to 0.06 %, while
+    clean, lying-track, broad and noise-only scenes decided the same with or
+    without the tail."""
+    b = np.asarray(before, np.float64).ravel()
+    a = np.asarray(after, np.float64).ravel()
+    if b.size == 0 or b.size != a.size:
+        return {"improves": False, "worsens": False, "n": int(b.size)}
+    rng = np.random.default_rng(int(seed))
+    idx = rng.integers(0, b.size, size=(int(n_boot), b.size))
+    d = np.percentile(b[idx], q, axis=1) - np.percentile(a[idx], q, axis=1)
+    alpha = (1.0 - float(confidence)) / 2.0
+    lo = float(np.percentile(d, 100.0 * alpha))
+    hi = float(np.percentile(d, 100.0 * (1.0 - alpha)))
+    return {"improves": bool(lo > 0.0), "worsens": bool(hi < 0.0), "n": int(b.size),
+            "q": float(q), "ci_low": lo, "ci_high": hi}
+
+
 def _verdict_with_correspondences(a, b, held4, obs_by_index: Dict[int, list], dcfg, sigma_rel: float,
                                   min_obs: int) -> dict:
     """The held-out judgement when the defect can be LOCAL (a few frames
@@ -522,7 +548,11 @@ def _verdict_with_correspondences(a, b, held4, obs_by_index: Dict[int, list], dc
     med_b, med_a = float(np.median(rb)), float(np.median(ra))
     from loop_utils.metric_lock import heldout_change
     _chg = heldout_change(rb, ra, confidence=float(dcfg.heldout_confidence))
-    improves = (bool(_chg["improves"]) or p90_b <= floor) and (med_a <= med_b + floor)
+    _tail = heldout_tail_change(rb, ra, confidence=float(dcfg.heldout_confidence))
+    # the median OR the tail must improve beyond its own noise, and neither may worsen
+    improves = ((bool(_chg["improves"]) or bool(_tail["improves"]) or p90_b <= floor)
+                and not bool(_chg["worsens"]) and not bool(_tail["worsens"])
+                and (med_a <= med_b + floor))
     per_frame_ok = True
     worst = 0.0
     for f, obs in obs_by_index.items():
@@ -538,6 +568,8 @@ def _verdict_with_correspondences(a, b, held4, obs_by_index: Dict[int, list], dc
         if dev > float(dcfg.bound) * sig + floor:
             per_frame_ok = False
     return {"improves": bool(improves), "p90_before": p90_b, "p90_after": p90_a,
+            "heldout_tail_improves": bool(_tail["improves"]),
+            "heldout_tail_worsens": bool(_tail["worsens"]),
             "med_before": med_b, "med_after": med_a,
             "bounded": bool(per_frame_ok), "correspondence_bound_worst": float(worst)}
 

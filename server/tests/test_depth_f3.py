@@ -23,8 +23,14 @@ from tests.synth_metric import (make_session, write_session_dir, write_aligned_c
                                 corridor_loop_scene, loop_trajectory)
 from tests.synth_correction import make_correction_cfg                          # noqa: E402
 
-N_KF = 40
-COMPRESSED = {6: (0.95, 0.02), 7: (0.95, 0.02), 8: (0.96, 0.0), 21: (0.93, 0.05), 22: (0.93, 0.05)}
+# 120 keyframes: with 40 the held-out split left 18 pairs, too few for ANY statistic to
+# confirm a local defect (measured 2026-09-28 — the gate stayed identity at 40 and 80
+# keyframes whatever it read, and the solved correction was right every time); the defect
+# keeps its share of the walk: two clusters, ~13 % of the keyframes, 4-7 % compressed
+N_KF = 120
+_K = round(0.0625 * N_KF)
+COMPRESSED = ({g: (0.95, 0.02) for g in range(N_KF // 6, N_KF // 6 + _K)}
+              | {g: (0.93, 0.05) for g in range(N_KF // 2, N_KF // 2 + _K)})
 
 
 def _instances(sess):
@@ -144,8 +150,9 @@ def test_depth_epoch_moves_points_along_rays_and_keeps_provenance(tmp_path, trut
         assert float(np.min(cosang)) > 0.999999
     side = json.loads((out / "depth_correction.json").read_text())
     assert side["version"] == 2 and set(side["k"]) == set(side["b"])
-    f0 = str(int(truth.frame_numbers[6]))
-    assert abs(side["k"][f0] * 0.95 - 1.0) < 0.01
+    g0 = min(COMPRESSED)                         # the first compressed keyframe
+    f0 = str(int(truth.frame_numbers[g0]))
+    assert abs(side["k"][f0] * COMPRESSED[g0][0] - 1.0) < 0.01
     # the ledger has the epoch, and SELECTING epoch 0 shows the corrupted cloud
     # exactly — including the depth sidecar, which only exists from epoch 1 on
     from correction.run import run_select
