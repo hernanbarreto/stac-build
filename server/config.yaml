@@ -675,8 +675,11 @@ intake:
                                        # while the view barely moved and the solver crawls along
                                        # that flat valley with the reading already settled
   content:                             # I2 — VLM content tags (vlm_proposed) + SAM3 exclusion masks
-    enabled: true                      # claude_stac.txt §4-F1: I2 (content tags + exclusion masks)
-                                       # is part of the intake
+    enabled: false                     # claude_stac.txt §4-F1: I2 (content tags + exclusion masks)
+                                       # is part of the intake. USER 2026-09-28: OFF for the
+                                       # F0-F2 validation run ("sin vlm+sam3, lo probamos en otra
+                                       # etapa") — with sam3_scope all it would segment 742
+                                       # keyframes AND ~8,000 witnesses before Omega starts
     backend: qwen_local                # USER DECISION: local VLM (semantic.backends.<name>), no paid API
     batch: 8                           # BOUND: images per VLM call (≤ semantic max_images_per_prompt)
     max_tokens: 512                    # BOUND: VLM generation cap per call
@@ -1476,7 +1479,10 @@ reconstruction:
   # Windows return ONLY when the sampled video still exceeds max_frames_single_pass.
   simple:
     enabled: true
-    frame_selection: motion             # parallax_lk | motion | fps | dino | hf.
+    frame_selection: parallax_lk        # parallax_lk | motion | fps | dino | hf.
+                                        # USER 2026-09-28 (validation run of F0-F2 on pccr
+                                        # 2026-08-24): parallax_lk — the F1 selector cut back to
+                                        # the spec (eebebe8). Was 'motion' below.
                                         # USER DECISION 2026-09-28: 'motion' (the validated selector)
                                         # stays the production default until F1's parallax_lk is
                                         # closed at 100 % against ground truth (open: forward-walk
@@ -1957,10 +1963,10 @@ reconstruction:
   #   MEASURED      — replaced by a measurement at run time (the key seeds it)
   #   USER DECISION — the user's own criterion, with the date
   precision:
-    enabled: false                      # the claude_stac.txt precision pipeline. OFF until F2's
-                                        # I3 (DA3 windows → walk before Omega) is validated on a
-                                        # real session (GPU); ON: map_worker measures the walk
-                                        # with I3 and plans the chunks from it (I4), no probe
+    enabled: true                       # the claude_stac.txt precision pipeline. USER 2026-09-28:
+                                        # ON for the F0-F2 validation run — map_worker measures
+                                        # the walk with I3 (DA3 windows) and plans the chunks
+                                        # from it (I4): one Omega pass, no probe, no pinned size
     # F0 — session camera + exact grid-to-native mappings (precision/camera.py)
     camera:
       model: OPENCV                     # [fx, fy, cx, cy, k1, k2, p1, p2] in native pixels

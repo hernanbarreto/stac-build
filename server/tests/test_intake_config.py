@@ -108,11 +108,12 @@ def test_removed_and_unknown_keys_fail_the_load():
         _expect(_set(raw, sec, "banana", 1), rf"intake\.{sec}\.banana' is not a parameter")
 
 
-def test_reconstruction_simple_frame_selection_is_the_validated_motion():
-    # USER DECISION 2026-09-28: 'motion' stays the production default until F1's
-    # parallax_lk is closed at 100 % against ground truth; parallax_lk stays selectable.
+def test_reconstruction_simple_frame_selection_is_a_known_selector():
+    # USER 2026-09-28: parallax_lk (F1, eebebe8) for the F0-F2 validation run on pccr
+    # 2026-08-24; 'motion' stays selectable. The key must name a selector map_worker knows.
+    from workers.map_worker import FRAME_SELECTIONS
     raw = _raw()
-    assert raw["reconstruction"]["simple"]["frame_selection"] == "motion"
+    assert raw["reconstruction"]["simple"]["frame_selection"] in FRAME_SELECTIONS
 
 
 def test_config_is_frozen():
