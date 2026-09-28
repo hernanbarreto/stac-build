@@ -144,6 +144,10 @@ class CameraConfig:
                                 # (cv2.undistortPointsIter) — it STOPS the solver
     undistort_eps_px: float     # BOUND: the solver stops when a point's reprojection
                                 # through the lens moves it less than this (native px)
+    undistort_roundtrip_ulps: int   # BOUND: float64 resolution of a round trip through the
+                                    # lens, in ulps of the camera's largest pixel magnitude —
+                                    # a point converged when re-distorted it lands within
+                                    # eps_px + this × ulp of where it was observed
 
 
 # ── F2: metric gauge along the walk ──────────────────────────────────────
@@ -164,7 +168,13 @@ class GaugeConfig:
                                     # leave-one-window-out (× the rows' weight per knot)
     huber_k: float              # Huber's tuning constant of the per-frame gain (statistics:
                                 # 1.345 = 95 % efficiency under normal noise)
-    instruments: Tuple[str, ...]    # scale instruments that may enter the model
+    huber_tol: float            # declared tolerance: the IRLS has converged when the log gain
+                                # moves less than this (× max(1, |gain|)) in one step
+    huber_max_iter: int         # BOUND: generous; a gain still moving here is NOT converged —
+                                # its row is excluded and reported, never used
+    instruments: Tuple[str, ...]    # scale instruments that may enter the model; the FIRST one
+                                    # judged is the default — another replaces it only when its
+                                    # held-out error is lower beyond the sample's noise
 
 
 # ── F3: Omega ─────────────────────────────────────────────────────────────
@@ -207,8 +217,10 @@ class TracksConfig:
     depth_edge_tol_rel: float   # BOUND: 2×2 depth spread / nearest depth above this = an edge
     vis_thresh: float           # BOUND: tracker visibility below this = not observed
     heldout_frac: float         # BOUND: share of the TRACKS held out of every fit
-    seed: int                   # the split's fixed seed
+    seed: int                   # the split's fixed seed (and the tracker run's torch seed)
     dense_matcher: str          # none | roma (optional, off)
+    tracker_weights_url: str    # the tracker checkpoint at a PINNED revision (never 'main')
+    tracker_weights_sha256: str     # its content: a file that does not hash to this is refused
 
 
 # ── F5: joint refinement + witness localisation ─────────────────────────
@@ -218,7 +230,7 @@ class RefineConfig:
     min_tri_deg: float          # BOUND: a landmark's rays must span at least this (degrees)
     huber_px: float             # BOUND: Huber scale of the reprojection loss (native px)
     max_iterations: int         # BOUND: Ceres iterations per rung (reconstruction.colmap_ba)
-    ceres_threads: int          # BOUND: Ceres threads (its default takes every core)
+    ceres_threads: int          # must stay 1 for bit-identical results (validated at load)
     focal_block_frames: int     # BOUND: keyframes per temporal focal block (rung R3)
     heldout_confidence: float   # declared confidence of the held-out comparisons
     permutations: int           # BOUND: permutation / bootstrap resamples of the tests
@@ -330,6 +342,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         aspect_tol=_num(cam, "aspect_tol", "camera", lo=0.0, lo_excl=True),
         undistort_max_iter=_num(cam, "undistort_max_iter", "camera", lo=1, integer=True),
         undistort_eps_px=_num(cam, "undistort_eps_px", "camera", lo=0.0, lo_excl=True),
+        undistort_roundtrip_ulps=_num(cam, "undistort_roundtrip_ulps", "camera", lo=1,
+                                      integer=True),
     )
 
     g = _sub(sec, "gauge", "")
@@ -346,6 +360,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
                                 lo_excl=True),
         smooth_grid=tuple(_num_list(g, "smooth_grid", "gauge", lo=0.0, min_len=1)),
         huber_k=_num(g, "huber_k", "gauge", lo=0.0, lo_excl=True),
+        huber_tol=_num(g, "huber_tol", "gauge", lo=0.0, lo_excl=True),
+        huber_max_iter=_num(g, "huber_max_iter", "gauge", lo=1, integer=True),
         instruments=tuple(_str_list(g, "instruments", "gauge", allowed=GAUGE_INSTRUMENTS)),
     )
     if gauge.window_overlap_frac >= 1.0 or gauge.heldout_confidence >= 1.0:
@@ -386,7 +402,14 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         heldout_frac=_num(tk, "heldout_frac", "tracks", lo=0.0, hi=1.0),
         seed=_num(tk, "seed", "tracks", lo=0, integer=True),
         dense_matcher=_enum(tk, "dense_matcher", "tracks", DENSE_MATCHERS),
+        tracker_weights_url=_str(tk, "tracker_weights_url", "tracks"),
+        tracker_weights_sha256=_str(tk, "tracker_weights_sha256", "tracks").lower(),
     )
+    if len(tracks.tracker_weights_sha256) != 64 or \
+            any(c not in "0123456789abcdef" for c in tracks.tracker_weights_sha256):
+        raise PrecisionConfigError(
+            f"'{SECTION}.tracks.tracker_weights_sha256' must be a sha256 (64 hex digits), got "
+            f"{tracks.tracker_weights_sha256!r}")
     if tracks.window_overlap_frac >= 1.0 or tracks.heldout_frac >= 1.0:
         raise PrecisionConfigError(
             f"'{SECTION}.tracks.window_overlap_frac' and '.heldout_frac' must be below 1")
@@ -411,6 +434,11 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     )
     if refine.heldout_confidence >= 1.0:
         raise PrecisionConfigError(f"'{SECTION}.refine.heldout_confidence' must be below 1")
+    if refine.ceres_threads != 1:
+        raise PrecisionConfigError(
+            f"'{SECTION}.refine.ceres_threads' = {refine.ceres_threads}: it must stay 1 — Ceres' "
+            f"multi-threaded evaluation and Schur accumulation sum in a run-dependent order, so "
+            f"the refined poses, camera and landmarks would not be bit-identical run to run")
 
     dp = _sub(sec, "depth", "")
     cm = _sub(dp, "colmap", "depth")

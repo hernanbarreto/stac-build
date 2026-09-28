@@ -38,7 +38,8 @@ def test_missing_key_names_the_key():
         load_precision_config(raw)
 
 
-@pytest.mark.parametrize("key", ["undistort_max_iter", "undistort_eps_px"])
+@pytest.mark.parametrize("key", ["undistort_max_iter", "undistort_eps_px",
+                                 "undistort_roundtrip_ulps"])
 def test_undistort_solver_keys_are_mandatory_and_bounded(key):
     raw = _raw()
     cam = raw["reconstruction"]["precision"]["camera"]
@@ -113,7 +114,7 @@ def test_no_decision_literals_outside_config(pkg):
 
 @pytest.mark.parametrize("key", ["window_frames", "window_overlap_frac", "process_res",
                                  "model_id", "knot_walk_m", "heldout_confidence",
-                                 "instruments"])
+                                 "huber_tol", "huber_max_iter", "instruments"])
 def test_gauge_keys_are_mandatory(key):
     raw = _raw()
     del raw["reconstruction"]["precision"]["gauge"][key]
@@ -149,4 +150,29 @@ def test_tracks_keys_are_mandatory_and_the_dense_matcher_stays_off():
     raw = copy.deepcopy(_raw())
     raw["reconstruction"]["precision"]["tracks"]["dense_matcher"] = "roma"
     with pytest.raises(PrecisionConfigError, match="VENDORS.lock.md"):
+        load_precision_config(raw)
+
+
+def test_tracker_weights_are_pinned_by_content():
+    t = load_precision_config(_raw()).tracks
+    assert "/resolve/main/" not in t.tracker_weights_url           # a revision, not a branch
+    assert len(t.tracker_weights_sha256) == 64
+    for key in ("tracker_weights_url", "tracker_weights_sha256"):
+        raw = _raw()
+        del raw["reconstruction"]["precision"]["tracks"][key]
+        with pytest.raises(PrecisionConfigError, match=rf"tracks\.{key}"):
+            load_precision_config(raw)
+    raw = _raw()
+    raw["reconstruction"]["precision"]["tracks"]["tracker_weights_sha256"] = "deadbeef"
+    with pytest.raises(PrecisionConfigError, match="64 hex"):
+        load_precision_config(raw)
+
+
+def test_ceres_threads_must_stay_one():
+    """More than one Ceres thread sums in a run-dependent order: the refinement would
+    not be bit-identical run to run (measured, see config.yaml) — refused at load."""
+    raw = _raw()
+    assert raw["reconstruction"]["precision"]["refine"]["ceres_threads"] == 1
+    raw["reconstruction"]["precision"]["refine"]["ceres_threads"] = 8
+    with pytest.raises(PrecisionConfigError, match="ceres_threads.*bit-identical"):
         load_precision_config(raw)

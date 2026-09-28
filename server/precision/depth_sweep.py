@@ -52,9 +52,16 @@ but the PRIOR is consistent prior-against-prior in ≥ ``prior_fill_min_views``
 a pixel that has neither stays discarded.
 
 Outputs: ``output/depth_native/frame_<n>.npz`` {depth f32, ncc f32,
-n_consistent u8, source u8, normal f16, residual_rel f16} +
+n_consistent u8, source u8, normal f32, residual_rel f32} +
 ``output/depth_native/report.json``; ``output/precision/confidence_calibration.json``
 re-measured against tier 0.
+
+Determinism: the whole run executes with torch's deterministic algorithms on (an op
+without a deterministic kernel raises instead of running), TF32 off and the seed set
+(``precision.tracks.deterministic_torch``); ties in the view ranking and in the
+propagation's weighted median are broken by a stable sort; the CLI fixes cuBLAS's
+workspace (CUBLAS_WORKSPACE_CONFIG) before CUDA initialises. Identical inputs give
+bit-identical arrays.
 
 Needs F5 APPLIED (its camera, its poses, its localised witnesses) — the witness
 poses live in F5's world. GPU when available.
@@ -284,7 +291,9 @@ def _weighted_median_w(depth, w_unfolded, radius: int):
     H, W = depth.shape
     d = F.unfold(depth[None, None], k, padding=radius)[0]
     w = torch.where(d > 0, w_unfolded, torch.zeros_like(w_unfolded))
-    ds, o = torch.sort(d, dim=0)
+    # STABLE: equal depths keep their window order, so the weights accumulate in one
+    # order on every device and run (an unstable sort may permute ties)
+    ds, o = torch.sort(d, dim=0, stable=True)
     ws = torch.gather(w, 0, o)
     cw = torch.cumsum(ws, 0)
     tot = cw[-1:]
@@ -328,6 +337,18 @@ def floor_of(table: Dict[str, Any], std: np.ndarray) -> np.ndarray:
 
 
 # ── consistency at native ────────────────────────────────────────────────
+
+def _nanmedian0(R):
+    """``torch.nanmedian(R, 0).values`` without its indices: the CUDA kernel that returns
+    them has no deterministic implementation (torch refuses it under deterministic
+    algorithms). The lower median of the non-NaN values along dim 0 — the same element
+    nanmedian picks — NaN where there is none (NaN sorts last)."""
+    import torch
+    n = (~torch.isnan(R)).sum(0)
+    s = torch.sort(R, dim=0, stable=True).values
+    med = torch.gather(s, 0, ((n - 1).clamp(min=0) // 2)[None])[0]
+    return torch.where(n > 0, med, torch.full_like(med, float("nan")))
+
 
 def consistency(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
                 nbr_depths: Sequence[np.ndarray], nbr_w2c: Sequence[np.ndarray],
@@ -378,8 +399,7 @@ def consistency(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
         n_cons += good.int()
         rels.append(torch.where(good, rel, torch.full_like(rel, float("nan"))))
     if rels:
-        R = torch.stack(rels)
-        res = torch.nanmedian(R, 0).values
+        res = _nanmedian0(torch.stack(rels))
     else:
         res = torch.full((H * W,), float("nan"), dtype=torch.float64, device=dev)
     return (n_cons.clamp(max=255).to(torch.uint8).reshape(H, W).cpu().numpy(),
@@ -462,7 +482,9 @@ def select_views(X: np.ndarray, C_ref: np.ndarray, cand_w2c: np.ndarray, K: np.n
         med = np.nanmedian(np.where(vis, ang, np.nan), axis=1) if vis.any() \
             else np.full(len(P), np.nan)
     ok = (covis > 0) & (med >= min_tri_deg) & (med <= max_tri_deg)
-    order = [int(i) for i in np.argsort(-covis) if ok[i]]
+    # STABLE: equal covisibility (common — it is a count over view_samples) keeps the
+    # candidate order; numpy's default sort may order ties differently across builds / CPUs
+    order = [int(i) for i in np.argsort(-covis, kind="stable") if ok[i]]
     return order[:int(n_views)], covis
 
 
@@ -678,6 +700,13 @@ def _hb(cfg_runner, t_last: float, msg: str, log: Callable) -> float:
 
 
 def run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> Dict[str, Any]:
+    """The F6 run under deterministic torch (see the module docstring)."""
+    from precision.tracks import deterministic_torch
+    with deterministic_torch(pcfg.depth.seed):
+        return _run_sweep(session_dir, pcfg, log=log, device=device)
+
+
+def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> Dict[str, Any]:
     from precision import confidence as CAL
     from intake.content import frame_file
     import cv2
@@ -876,10 +905,12 @@ def run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> Di
         ncons = np.where(src == SOURCE_PRIOR_FILL, n_p, n_s).astype(np.uint8)
         res = np.where(src == SOURCE_PRIOR_FILL, r_p, r_s)
         nrm = normals_from_depth(depth, inp.K)
+        # float32 everywhere: a precision product is not stored at half precision
+        # (float16 kept 3 significant digits of a normal and of the residual)
         np.savez_compressed(ddir / f"frame_{f}.npz", depth=depth.astype(np.float32),
                             ncc=np.where(z0 > 0, sc, np.nan).astype(np.float32),
                             n_consistent=ncons, source=src,
-                            normal=nrm.astype(np.float16), residual_rel=res.astype(np.float16))
+                            normal=nrm.astype(np.float32), residual_rel=res.astype(np.float32))
         cnt = {SOURCE_NAMES[k]: int((src == k).sum()) for k in SOURCE_NAMES}
         for k, v in cnt.items():
             counts_tot[k] += v
@@ -953,6 +984,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                  description="Prior-guided native-resolution plane sweep (F6).")
     ap.add_argument("--session", required=True)
     args = ap.parse_args(argv)
+    from precision.tracks import ensure_cublas_workspace
+    ensure_cublas_workspace()                   # before torch initialises CUDA
     run_sweep(Path(args.session), load_precision_config())
     return 0
 

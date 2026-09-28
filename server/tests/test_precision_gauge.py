@@ -8,7 +8,7 @@ v2 block of scale_diagnostics.json."""
 import json
 import math
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,11 +60,60 @@ def test_heldout_chooses_the_quieter_instrument():
     assert model["applied_instrument"] == "da3_mono"
     assert model["heldout_by_instrument"]["da3_mono"] < model["heldout_by_instrument"]["da3_windows"]
     assert model["choice_verdict"]["against"] == "da3_windows"
+    assert model["choice_verdict"]["improves"]
+    assert model["choice_verdict"]["decision"] == "lowest_heldout_beyond_noise"
     # the windows' own σ (0.01) was optimistic: the scatter measured held-out replaced
     # it, and it is the scatter this sample actually has (not the nominal 0.08)
     sw = model["sigma_by_instrument"]["da3_windows"]
     assert sw > 2 * 0.01
     assert 0.5 * sample_sigma < sw < 2.0 * sample_sigma
+
+
+def test_a_lower_heldout_within_the_noise_keeps_the_configured_default():
+    """Two instruments of the same quality: the mono one happens to hold out 20 % lower
+    on this sample, but the paired bootstrap cannot tell them apart — the default (the
+    first of gauge.instruments) stays, and the verdict says why."""
+    assert GCFG.instruments[0] == "da3_windows"
+    rows = _rows("da3_windows", 12, 6, 0.01, 3) + _rows("da3_mono", 12, 6, 0.01, 10)
+    model = G.solve(rows, WALK_M, GCFG, log=lambda *a: None)
+    held = model["heldout_by_instrument"]
+    assert held["da3_mono"] < 0.9 * held["da3_windows"]
+    v = model["choice_verdict"]
+    assert not v["improves"] and v["ci_low"] <= 0.0 <= v["ci_high"]
+    assert v["candidate"] == "da3_mono" and v["against"] == "da3_windows"
+    assert v["decision"] == "default_kept_within_noise"
+    assert model["applied_instrument"] == "da3_windows"
+
+
+def test_huber_iterates_to_its_tolerance_and_reports_a_capped_run():
+    rng = np.random.default_rng(8)
+    om = rng.uniform(1, 8, (40, 60))
+    inst = om * 1.25 * np.exp(rng.standard_t(2, om.shape) * 0.05)
+    g = G._log_gain(inst, om, None, GCFG)
+    assert g.converged and not g.mad_zero and 1 < g.iterations < GCFG.huber_max_iter
+    capped = G._log_gain(inst, om, None, replace(GCFG, huber_max_iter=1))
+    assert not capped.converged and capped.iterations == 1
+    assert G._log_gain(inst, om, None, GCFG) == g            # identical inputs, identical bits
+
+
+def test_huber_with_zero_mad_returns_the_agreeing_majority_exactly():
+    """More than half the pixels agree exactly: the MAD is 0, no scale is invented (the
+    old stand-in 1.0 made every pixel an inlier and the outliers pulled the mean) — the
+    limit of the estimate, the value the majority agrees on, comes back flagged."""
+    om = np.full((20, 30), 2.0)
+    inst = np.full((20, 30), 2.5)
+    inst[:8] = 40.0                                         # 40 % of garbage
+    g = G._log_gain(inst, om, None, GCFG)
+    assert g.converged and g.mad_zero
+    assert abs(g.log - math.log(1.25)) < 1e-15
+
+
+def test_non_converged_gains_leave_no_row_and_are_reported(tmp_path):
+    chainage = _write_session(tmp_path, _drift, _drift)
+    wins, mono, rep = G.da3_rows(tmp_path, chainage, 0.0, replace(GCFG, huber_max_iter=1))
+    assert wins == [] and mono == []
+    assert rep and all(not r["row"] and r["huber"]["not_converged"]
+                       and r["huber"]["mono_not_converged"] for r in rep)
 
 
 def test_relative_rows_constrain_differences_only():
@@ -95,8 +144,8 @@ def test_huber_gain_resists_outliers():
     om = rng.uniform(1, 8, (40, 60)).astype(np.float32)
     inst = om * 1.25 * np.exp(rng.normal(0, 0.01, om.shape)).astype(np.float32)
     inst[:4] = 50.0                                         # a band of garbage
-    g = G._log_gain(inst, om, np.ones_like(om), GCFG.huber_k)
-    assert abs(g - math.log(1.25)) < 0.01
+    g = G._log_gain(inst, om, np.ones_like(om), GCFG)
+    assert g.converged and abs(g.log - math.log(1.25)) < 0.01
 
 
 def _write_session(tmp, drift_windows, drift_mono, n=96, log_s0=0.0):
@@ -124,8 +173,9 @@ def _write_session(tmp, drift_windows, drift_mono, n=96, log_s0=0.0):
 
 def test_window_and_mono_rows_carry_the_drift(tmp_path):
     chainage = _write_session(tmp_path, _drift, _drift, log_s0=math.log(1.3))
-    wins, mono, rep = G.da3_rows(tmp_path, chainage, math.log(1.3), GCFG.huber_k)
+    wins, mono, rep = G.da3_rows(tmp_path, chainage, math.log(1.3), GCFG)
     assert len(wins) == len(rep) >= 5 and len(mono) == len(chainage)
+    assert all(r["row"] and not r["huber"]["not_converged"] for r in rep)
     for r in mono:
         assert abs(r.y - _drift(r.c)) < 1e-4               # the global scale is subtracted
     for r in wins:

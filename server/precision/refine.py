@@ -5,8 +5,9 @@ Unknowns: an SE(3) per keyframe, ONE session camera (OPENCV: fx, fy, cx, cy, k1,
 k2, p1, p2 — F0's ``camera.json``), the landmarks. Residuals: reprojection in
 NATIVE pixels under a Huber loss (``huber_px``). Engine: pycolmap / COLMAP's Ceres
 (``reconstruction.colmap_ba``: ``_tune_ceres``, ``_solve_checked`` — a rung that
-does not converge fails, no fallback), with Ceres' threads bounded
-(``ceres_threads`` — its default takes every core of the machine).
+does not converge fails, no fallback), Ceres on ONE thread (``ceres_threads`` must be
+1: its multi-threaded accumulation is not bit-reproducible) and every COLMAP RANSAC
+seeded (``seed``) — identical inputs give bit-identical outputs.
 
 Initialisation: the current keyframe poses (Omega × F2's gauge when it was
 applied), F0's camera, landmarks triangulated from the FIT tracks (F4
@@ -83,14 +84,12 @@ def K_of(params: Sequence[float]) -> np.ndarray:
 
 def normalized(uv: np.ndarray, params: Sequence[float], solver: dict) -> np.ndarray:
     """Distorted native pixels → normalised image coordinates (x/z, y/z) under the
-    OPENCV model, the undistortion iterated to convergence (F0's solver bounds)."""
-    import cv2
-    uv = np.asarray(uv, np.float64).reshape(-1, 1, 2)
-    crit = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, int(solver["max_iter"]),
-            float(solver["eps_px"]))
-    out = cv2.undistortPointsIter(uv, K_of(params), np.asarray(params[4:8], np.float64),
-                                  None, None, crit)
-    return out.reshape(-1, 2)
+    OPENCV model, the undistortion iterated to convergence (F0's solver bounds) and
+    verified by re-distortion (``precision.camera.undistort_normalized``: a point that
+    did not converge fails the call)."""
+    from precision.camera import undistort_normalized
+    return undistort_normalized(np.asarray(uv, np.float64).reshape(-1, 2), K_of(params),
+                                np.asarray(params[4:8], np.float64), **solver)
 
 
 def project(X: np.ndarray, w2c: np.ndarray, params: Sequence[float]) -> np.ndarray:
@@ -240,12 +239,21 @@ def run_rung(name: str, w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[in
     opts.ceres.loss_function_type = pycolmap.LossFunctionType.HUBER
     opts.ceres.loss_function_scale = float(cfg.huber_px)
     _tune_ceres(opts, int(cfg.max_iterations))
+    # ONE thread (the config refuses any other value): Ceres' multi-threaded evaluation
+    # and Schur accumulation sum in a run-dependent order — measured 1.8e-11 in the
+    # poses between two identical solves at 8 threads, bit for bit the same at 1
     opts.ceres.solver_options.num_threads = int(cfg.ceres_threads)
     bcfg = pycolmap.BundleAdjustmentConfig()
     for i in range(N):
         bcfg.add_image(i + 1)
     popts = pycolmap.PosePriorBundleAdjustmentOptions()
     popts.prior_position_fallback_stddev = float(np.max(sigmas))
+    # the adjuster first aligns the reconstruction to the priors by RANSAC; with COLMAP's
+    # default seed (-1) and its PRNG unseeded, every solve of identical inputs differed
+    # (measured) — both are fixed, so a rung does not depend on what ran before it
+    popts.alignment_ransac.random_seed = int(cfg.seed)
+    popts.alignment_ransac.num_threads = 1
+    pycolmap.set_random_seed(int(cfg.seed))
     summary = _solve_checked(pycolmap.create_pose_prior_bundle_adjuster(
         opts, popts, bcfg, priors, rec), f"refine {name}")
     w2c = np.tile(np.eye(4), (N, 1, 1))
@@ -315,6 +323,8 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                 kf_frames: Sequence[int], sigma_rel: float, cfg, solver: dict,
                 log: Callable = print) -> Dict[str, Any]:
     """The ladder over the keyframes. ``split`` per OBSERVATION (its track's split)."""
+    import pycolmap
+    pycolmap.set_random_seed(int(cfg.seed))           # COLMAP's PRNG: identical runs, identical bits
     fit_g = group_tracks(track[split == 0], frame[split == 0], uv[split == 0], kf_frames)
     held_g = group_tracks(track[split == 1], frame[split == 1], uv[split == 1], kf_frames)
     X0 = triangulate_tracks(fit_g, w2c0, params0, solver, cfg.min_tri_deg)
@@ -382,9 +392,17 @@ def localize_witnesses(best: RungResult, fit_track_X: Dict[int, np.ndarray],
     camera fixed (the best rung's; R3 → the block of the nearest keyframe is not
     known for a witness: its first block's camera)."""
     import pycolmap
+    pycolmap.set_random_seed(int(cfg.seed))
     params = best.params_by_block[0]
     cam = pycolmap.Camera.create_from_model_name(1, "OPENCV", float(params[0]), int(wh[0]), int(wh[1]))
     cam.params = [float(v) for v in params]
+    # explicit estimation options: COLMAP's defaults, but the LO-RANSAC seeded explicitly
+    # (its default seed is -1, the one that left the pose-prior alignment run-dependent)
+    # and single-threaded
+    est = pycolmap.AbsolutePoseEstimationOptions()
+    est.ransac.random_seed = int(cfg.seed)
+    est.ransac.num_threads = 1
+    ref = pycolmap.AbsolutePoseRefinementOptions()
     out = {}
     wset = set(int(w) for w in witness_frames)
     by_frame: Dict[int, List[Tuple[int, np.ndarray]]] = {}
@@ -398,7 +416,7 @@ def localize_witnesses(best: RungResult, fit_track_X: Dict[int, np.ndarray],
             continue
         p2 = np.array([p for _, p in obs], np.float64)
         p3 = np.array([fit_track_X[t] for t, _ in obs], np.float64)
-        res = pycolmap.estimate_and_refine_absolute_pose(p2, p3, cam)
+        res = pycolmap.estimate_and_refine_absolute_pose(p2, p3, cam, est, ref)
         if not res:
             out[f] = {"localized": False, "reason": "pnp_failed", "n": len(obs)}
             continue
