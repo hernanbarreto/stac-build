@@ -399,12 +399,23 @@ def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, gcfg
         raise GaugeError(f"no I3 window in {wdir} — run the DA3 windows first "
                          f"(python -m intake.walk --session <dir>)")
     rng = np.random.default_rng(BOOT_SEED)
+    # claude_stac.txt §4-F6: once the session's confidence calibration exists (F6,
+    # measured against the tier-0 depth), a DA3 pixel weighs 1/q² — q its calibrated
+    # |error| quantile at its confidence and distance — instead of the raw confidence
+    from precision import confidence as CAL
+    cal = CAL.load_calibration(out, reference="tier0")
+    cal_da3 = (cal or {}).get("models", {}).get("da3")
+    if not (cal_da3 and "abs_err_quantile" in cal_da3):
+        cal_da3 = None
     win_rows, mono_best, report = [], {}, []
     for gi, p in enumerate(paths):
         with np.load(p) as z:
             frames = [int(f) for f in z["frames"]]
             depth, conf = z["depth"], z["conf"]
             mono = z["depth_mono"] if "depth_mono" in z.files else None
+        if cal_da3 is not None:
+            q = CAL.lookup(cal_da3, np.nan_to_num(conf, nan=0.0), np.where(depth > 0, depth, 1.0))
+            conf = np.where((conf > 0) & (q > 0), 1.0 / np.maximum(q, 1e-12) ** 2, 0.0)
         gains, weights, near, cs = [], [], [], []
         huber = {"not_converged": [], "mono_not_converged": [], "mad_zero": []}
         n = len(frames)
@@ -445,7 +456,10 @@ def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, gcfg
                             meta={"window": p.name, "n_frames": len(g_arr)}))
         report.append({"window": p.name, "row": True, "c_m": float(np.mean(cs)), "log_s": s_w,
                        "sigma": sig, "log_s_near_band": float(np.nanmedian(near)),
-                       "n_frames": len(g_arr), "huber": huber})
+                       "n_frames": len(g_arr), "huber": huber,
+                       "pixel_weights": ("calibrated (confidence_calibration.json, epoch "
+                                         f"{cal.get('geometry_epoch')})" if cal_da3 is not None
+                                         else "da3 confidence")})
     mono_rows = [Row("da3_mono", v, float("nan"), gi, c=chainage[f], meta={"frame": f})
                  for f, (_c, v, gi) in sorted(mono_best.items())]
     return win_rows, mono_rows, report

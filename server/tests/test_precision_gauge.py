@@ -214,3 +214,34 @@ def test_gauge_refuses_a_corrected_epoch(tmp_path, monkeypatch):
     monkeypatch.setattr(E, "current_epoch", lambda out: 2)
     with pytest.raises(G.GaugeError, match="epoch 2"):
         G.run_gauge(tmp_path, GCFG, apply=False, log=lambda *a: None)
+
+
+def test_calibrated_confidence_sets_the_da3_pixel_weights(tmp_path):
+    """claude_stac.txt §4-F6: with the session's confidence calibration on disk, a DA3
+    pixel weighs 1/q² (q its calibrated |error| quantile) — low-confidence pixels that
+    carry a +30 % bias stop pulling the window's gain."""
+    from precision import confidence as CAL
+    chainage = _write_session(tmp_path, lambda c: 0.0, lambda c: 0.0)
+    wdir = tmp_path / "output" / "da3_windows"
+    for p in sorted(wdir.glob("window_*.npz")):
+        with np.load(p) as z:
+            d = {k: z[k] for k in z.files}
+        conf = np.full(d["depth"].shape, 0.9, np.float32)
+        conf[..., ::2] = 0.1                               # every other column: unreliable
+        d["depth"] = np.where(conf < 0.5, d["depth"] * 1.3, d["depth"]).astype(np.float32)
+        d["conf"] = conf
+        np.savez(p, **d)
+    raw_wins, _m, raw_rep = G.da3_rows(tmp_path, chainage, 0.0, GCFG)
+    rng = np.random.default_rng(0)
+    c = rng.uniform(0.0, 1.0, 20000)
+    err = np.where(c < 0.5, 0.3, 0.0) + rng.normal(0, 0.005, c.size)
+    table = CAL.calibrate(err, c, rng.uniform(1, 6, c.size), conf_bins=2, dist_bins=1,
+                          quantile=0.95, min_bin_samples=50)
+    CAL.write_calibration(tmp_path / "output", "tier0", {"da3": table},
+                          {"geometry_epoch": 2, "camera_epoch": 1}, {})
+    cal_wins, _m, cal_rep = G.da3_rows(tmp_path, chainage, 0.0, GCFG)
+    assert all("calibrated" in r["pixel_weights"] for r in cal_rep if r["row"])
+    assert all(r["pixel_weights"] == "da3 confidence" for r in raw_rep if r["row"])
+    raw_bias = np.median([abs(w.y) for w in raw_wins])
+    cal_bias = np.median([abs(w.y) for w in cal_wins])
+    assert cal_bias < 0.01 < raw_bias
