@@ -16,13 +16,8 @@ json`` (pipeline_manager.FRAMES_DIR_FILES), I1 re-measures the same frames
 into the same keyframes, and I2 — the only step that needs the VLM and SAM3
 — stays skipped.
 
-After I2 the EXCLUSION AUDIT (``intake.parallax.audit_exclusions``, CPU only)
-re-reads every keyframe's I1 reading without the tracks I2's masks exclude and
-warns (``excluded_parallax`` in ``coverage_warnings.json``) on a window that
-closed on an object moving on its own — I1 runs before the masks exist and
-cannot tell such an object from structure in two views. It re-runs whenever
-I1 or I2 ran (or its ``exclusion_audit.json`` is missing); it is not a marker
-step (its inputs are the two steps' outputs).
+I2's exclusion masks are consumed downstream (F4/F6/F7 exclude the
+observations they cover); I1 does not re-read its keyframes under them.
 
 This module decides nothing about frames: every threshold lives in the three
 stage modules and in ``config.yaml intake:``. It runs on CPU except for what
@@ -366,9 +361,8 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
     Returns the run record: ``steps`` {step: {ran, reason, ...}}, the three
     stage reports as they stand on disk after the pass (``quality``,
     ``parallax`` {selected_frames, witness_frames, coverage_warnings},
-    ``content`` or None), the exclusion audit (``exclusion_audit`` or None,
-    ``audit_step`` {ran, reason}), ``summary`` counts, ``artifacts`` paths
-    and the marker path."""
+    ``content`` or None), ``summary`` counts, ``artifacts`` paths and the
+    marker path."""
     t_run = time.monotonic()
     session_dir = Path(session_dir)
     frames_dir = session_dir / FRAMES_DIRNAME
@@ -446,8 +440,7 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
         state["steps"]["parallax"] = _entry(
             ph1, in1, [p_kf, p_w, p_warn], t0,
             {"n_keyframes": result["n_keyframes"], "n_witness": result["n_witness"],
-             "n_warnings": len(result["warnings"]), "floor_median_px": result["floor"]["median_px"],
-             "verdicts": result["verdicts"], "n_dynamic": result["n_dynamic"]})
+             "n_warnings": len(result["warnings"]), "n_lost": result["n_lost"]})
         write_state(session_dir, state)
     else:
         log(f"{LOG_TAG} parallax: skipped ({why1}: same parameters, same frames, same "
@@ -505,29 +498,6 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
         content_step = {"ran": True, "reason": why2, "skipped": False}
     steps_out["content"] = content_step
 
-    # ── I1 × I2: the exclusion audit ─────────────────────────────────────
-    # every keyframe's reading re-read without the tracks I2's masks exclude
-    # (intake.parallax.audit_exclusions); CPU only, re-run whenever I1 or I2 ran
-    audit: Optional[Dict[str, Any]] = None
-    p_audit = session_dir / INTAKE_DIRNAME / P.EXCLUSION_AUDIT_NAME
-    if content is None or not content.get("enabled"):
-        audit_step = {"ran": False, "reason": ("content not run in this pass" if
-                                               content is None else
-                                               "content disabled: no exclusion masks")}
-    elif run1 or content_step["ran"] or not p_audit.exists():
-        why_a = ("I1 ran" if run1 else "I2 ran" if content_step["ran"] else
-                 f"{p_audit.name} missing")
-        log(f"{LOG_TAG} exclusion audit: running ({why_a})")
-        audit = P.audit_exclusions(session_dir, Path(content["exclusion_masks"]["dir"]),
-                                   icfg.parallax, log=log, **epochs)
-        warnings_doc = _load_json(session_dir / INTAKE_DIRNAME / P.COVERAGE_WARNINGS_NAME,
-                                  "coverage_warnings.json")
-        audit_step = {"ran": True, "reason": why_a,
-                      "n_rests_on_excluded": audit["n_rests_on_excluded"]}
-    else:
-        audit = _load_json(p_audit, P.EXCLUSION_AUDIT_NAME)
-        audit_step = {"ran": False, "reason": "I1 and I2 unchanged, audit on disk"}
-
     _progress(progress, 100, "intake done")
     summary = {
         "n_frames": int(quality["n_frames"]),
@@ -557,8 +527,6 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
         "parallax": {"selected_frames": selected, "witness_frames": witness,
                      "coverage_warnings": warnings_doc},
         "content": content,
-        "exclusion_audit": audit,
-        "audit_step": audit_step,
         "summary": summary,
         "artifacts": {
             "quality_features": str(frames_dir / Q.QUALITY_FEATURES_NAME),
@@ -570,8 +538,6 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
                              else None),
             "exclusion_masks_dir": (str(Cn.exclusion_masks_dir(session_dir))
                                     if content is not None else None),
-            "keyframe_tracks": str(P.keyframe_tracks_path(session_dir)),
-            "exclusion_audit": str(p_audit) if audit is not None else None,
             "state": str(state_path(session_dir)),
         },
         "elapsed_s": round(time.monotonic() - t_run, 3),

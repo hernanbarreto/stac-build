@@ -49,9 +49,9 @@ def test_real_config_loads_with_documented_shape():
     assert isinstance(p.min_tracks, int) and isinstance(p.lk_win, int) and isinstance(p.lk_levels, int)
     assert p.warn_static_disp_px < p.warn_rotation_min_disp_px
     assert isinstance(p.warn_min_run_frames, int)
-    assert 0 < p.parallax_quantile <= 1 and p.rotation_floor_factor >= 1
-    assert 0 <= p.keyframe_band_frac < 1 and 0 < p.rigidity_confidence < 1
-    assert isinstance(p.rigidity_bootstrap, int) and p.rigidity_bootstrap >= 1
+    assert 0 <= p.keyframe_band_frac < 1 and 0 < p.parallax_quantile <= 1
+    assert isinstance(p.reference_max_eval, int) and p.reference_max_eval >= 1
+    assert 0 < p.reference_ftol < 1
     c = cfg.content
     assert isinstance(c.enabled, bool) and c.backend
     assert isinstance(c.batch, int) and c.batch >= 1 and isinstance(c.max_tokens, int)
@@ -70,18 +70,16 @@ def test_real_config_loads_with_documented_shape():
 
 
 def test_shipped_values_and_their_provenance_tags():
-    """The values the 2026-09-27 decisions settled, and honest tags: sam3_scope
-    cites the plan (keyframes AND witness frames), not a user statement; the
-    anchor-based parallax keys are BOUNDs."""
+    """The shipped values and honest tags: sam3_scope cites the plan (keyframes
+    AND witness frames), not a user statement; the parallax keys are BOUNDs."""
     cfg = load_intake_config(_raw())
     p = cfg.parallax
-    assert p.parallax_quantile == 0.9 and p.rotation_floor_factor == 1.5
-    assert p.keyframe_band_frac == 0.25
-    assert p.rigidity_confidence == 0.95 and p.rigidity_bootstrap == 200
+    assert p.keyframe_band_frac == 0.25 and p.parallax_quantile == 0.9
+    assert p.reference_max_eval == 200 and p.reference_ftol == 1.0e-3
     assert cfg.content.sam3_scope == "all"
     lines = (SERVER / "config.yaml").read_text().splitlines()
-    keys = ("sam3_scope:", "parallax_quantile:", "rotation_floor_factor:", "keyframe_band_frac:",
-            "rigidity_confidence:", "rigidity_bootstrap:")
+    keys = ("sam3_scope:", "parallax_quantile:", "keyframe_band_frac:", "reference_max_eval:",
+            "reference_ftol:")
     tag = {}
     for ln in lines:
         for key in keys:
@@ -91,8 +89,11 @@ def test_shipped_values_and_their_provenance_tags():
     assert "USER DECISION" not in tag["sam3_scope:"]
     for key in keys[1:]:
         assert "BOUND" in tag[key], key
-    # the per-step accumulation's switch is gone from the shipped file
-    assert not any(ln.strip().startswith("step_null:") for ln in lines)
+    # the removed switches are gone from the shipped file
+    for gone in ("step_null:", "rotation_floor_factor:",
+                 "rigidity_confidence:", "rigidity_bootstrap:", "refine_max_iter:",
+                 "refine_eps_px:"):
+        assert not any(ln.strip().startswith(gone) for ln in lines), gone
 
 
 def test_removed_and_unknown_keys_fail_the_load():
@@ -107,9 +108,11 @@ def test_removed_and_unknown_keys_fail_the_load():
         _expect(_set(raw, sec, "banana", 1), rf"intake\.{sec}\.banana' is not a parameter")
 
 
-def test_reconstruction_simple_frame_selection_is_parallax_lk():
+def test_reconstruction_simple_frame_selection_is_the_validated_motion():
+    # USER DECISION 2026-09-28: 'motion' stays the production default until F1's
+    # parallax_lk is closed at 100 % against ground truth; parallax_lk stays selectable.
     raw = _raw()
-    assert raw["reconstruction"]["simple"]["frame_selection"] == "parallax_lk"
+    assert raw["reconstruction"]["simple"]["frame_selection"] == "motion"
 
 
 def test_config_is_frozen():
@@ -138,9 +141,9 @@ def test_missing_section_fails():
     ("parallax", "min_tracks"), ("parallax", "lk_win"), ("parallax", "lk_levels"),
     ("parallax", "fb_max_px"), ("parallax", "warn_static_disp_px"),
     ("parallax", "warn_rotation_min_disp_px"), ("parallax", "warn_min_run_frames"),
-    ("parallax", "parallax_quantile"), ("parallax", "rotation_floor_factor"),
-    ("parallax", "keyframe_band_frac"), ("parallax", "rigidity_confidence"),
-    ("parallax", "rigidity_bootstrap"),
+    ("parallax", "parallax_quantile"), ("parallax", "keyframe_band_frac"),
+    ("parallax", "reference_max_eval"),
+    ("parallax", "reference_ftol"),
     ("content", "enabled"), ("content", "backend"), ("content", "batch"),
     ("content", "max_tokens"), ("content", "exclusion_classes"), ("content", "weight_classes"),
     ("content", "sam3_scope"), ("content", "prompts"),
@@ -193,17 +196,13 @@ def test_range_errors_name_the_key():
     _expect(_set(raw, "parallax", "min_tracks", 3), "parallax.min_tracks")
     _expect(_set(raw, "parallax", "lk_levels", -1), "parallax.lk_levels")
     _expect(_set(raw, "parallax", "warn_min_run_frames", 0), "parallax.warn_min_run_frames")
-    _expect(_set(raw, "parallax", "parallax_quantile", 0.0), "parallax.parallax_quantile")
-    _expect(_set(raw, "parallax", "parallax_quantile", 1.5), "parallax.parallax_quantile")
-    _expect(_set(raw, "parallax", "rotation_floor_factor", 0.9), "parallax.rotation_floor_factor")
     _expect(_set(raw, "parallax", "keyframe_band_frac", -0.1), "parallax.keyframe_band_frac")
     _expect(_set(raw, "parallax", "keyframe_band_frac", 1.0), "parallax.keyframe_band_frac")
-    _expect(_set(raw, "parallax", "rigidity_confidence", 0.0), "parallax.rigidity_confidence")
-    _expect(_set(raw, "parallax", "rigidity_confidence", 1.0), "parallax.rigidity_confidence")
-    _expect(_set(raw, "parallax", "rigidity_bootstrap", 0), "parallax.rigidity_bootstrap")
-    _expect(_set(raw, "parallax", "rigidity_bootstrap", 2.5), "parallax.rigidity_bootstrap")
-    assert load_intake_config(_set(raw, "parallax", "parallax_quantile", 1.0)).parallax \
-        .parallax_quantile == 1.0                                   # the maximum is a quantile
+    _expect(_set(raw, "parallax", "parallax_quantile", 0.0), "parallax.parallax_quantile")
+    _expect(_set(raw, "parallax", "parallax_quantile", 1.5), "parallax.parallax_quantile")
+    _expect(_set(raw, "parallax", "reference_max_eval", 0), "parallax.reference_max_eval")
+    _expect(_set(raw, "parallax", "reference_ftol", 0.0), "parallax.reference_ftol")
+    _expect(_set(raw, "parallax", "reference_ftol", 1.5), "parallax.reference_ftol")
     _expect(_set(raw, "content", "batch", 0), "content.batch")
     _expect(_set(raw, "content", "max_tokens", 0), "content.max_tokens")
 
@@ -323,3 +322,4 @@ def test_no_decision_literals_outside_intake_config():
             offenders.append(f"{py.relative_to(SERVER)}:{lineno} = {val}")
     assert not offenders, ("decision-looking float literals outside intake/config.py: "
                            f"{offenders}")
+

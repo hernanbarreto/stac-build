@@ -229,15 +229,6 @@ def test_end_to_end_artifacts_stamps_and_noop_second_run(session, icfg):
     assert s["n_exclusion_masks"] == len(content["exclusion_masks"]["frames"])
     assert log.has("quality: running") and log.has("parallax: running") \
         and log.has("content: running")
-    # the exclusion audit ran on I1's keyframe tracks under I2's masks
-    assert res["audit_step"]["ran"] and res["audit_step"]["reason"] == "I1 ran"
-    audit = json.loads((session / "intake" / P.EXCLUSION_AUDIT_NAME).read_text())
-    _stamped(audit, "tool_measured")
-    assert len(audit["keyframes"]) == len(keyframes) - 1
-    assert res["exclusion_audit"]["n_rests_on_excluded"] == audit["n_rests_on_excluded"]
-    assert [w for w in warnings["warnings"] if w["kind"] == "excluded_parallax"] == \
-        audit["warnings"]
-    assert warnings["exclusion_audit"]["n_keyframes"] == len(audit["keyframes"])
 
     # ── second run, identical inputs: nothing is written, nothing is called ──
     mt = _mtimes(session)
@@ -254,7 +245,6 @@ def test_end_to_end_artifacts_stamps_and_noop_second_run(session, icfg):
         and log2.has("content: skipped")
     assert res2["summary"] == res["summary"]
     assert res2["content"]["frames"] == content["frames"]
-    assert res2["audit_step"] == {"ran": False, "reason": "I1 and I2 unchanged, audit on disk"}
 
 
 def test_force_reruns_everything(session, icfg):

@@ -136,8 +136,14 @@ SAM3_SCOPES = ("flagged_ranges", "all")
 # Keys the loader REFUSES because the code that read them is gone — a leftover in a
 # config or a session YAML fails the load naming the key and the reason (a key
 # nothing reads would only pretend to configure something).
+_CUT_BACK = ("removed 2026-09-28 when I1 was cut back to the claude_stac.txt §4-F1 spec "
+             "(quantile of the residual w.r.t. the rotation reference; no rigidity bootstrap, "
+             "window refinement or noise-floor twin) — intake/parallax.py")
 REMOVED_KEYS: Dict[str, Dict[str, str]] = {
     "parallax": {
+        **{k: _CUT_BACK for k in ("rotation_floor_factor",
+                                  "rigidity_confidence", "rigidity_bootstrap",
+                                  "refine_max_iter", "refine_eps_px")},
         "step_null": ("removed 2026-09-27 with the per-step accumulation: parallax is "
                       "measured against the anchor keyframe and the warnings' noise "
                       "reference is always the warp twin + the chain's forward-backward "
@@ -165,38 +171,31 @@ class QualityConfig:
 
 @dataclass(frozen=True)
 class ParallaxConfig:
-    """I1 — windows matched to the anchor, rigid set, parallax quantum, witnesses, warnings."""
-    grid_side: int                      # seed grid per anchor (grid_side² points at process scale,
-                                        # inset by half an LK window)
+    """I1 — tracks matched to the anchor, parallax w.r.t. the rotation reference,
+    quantum, witnesses, warnings (intake/parallax.py)."""
+    grid_side: int                      # seed grid per anchor (grid_side² points at process scale)
     process_scale: float                # tracking scale (LK runs on the downscaled gray)
-    ransac_px: float                    # BOUND: homography / fundamental RANSAC bound, native px
-    parallax_quantum_px: float          # BOUND: parallax (native px) from the anchor that closes a
-                                        # window
+    ransac_px: float                    # BOUND: RANSAC bound of the homography that starts the
+                                        # rotation fit, native px
+    parallax_quantum_px: float          # BOUND: parallax (native px) from the anchor that makes a
+                                        # keyframe
     witness_min_parallax_px: float      # BOUND: parallax from the last chosen witness that makes a
-                                        # witness; also the motion that marks a track dynamic and the
-                                        # least a track-loss keyframe must have measured
-    min_tracks: int                     # BOUND: rigid tracks below this = tracking lost at that frame
-    lk_win: int                         # LK window side at process scale (prediction, refinement,
-                                        # consistency check)
-    lk_levels: int                      # LK pyramid levels of the prediction link
+                                        # witness; also the least parallax that counts as a baseline
+                                        # (track-loss keyframe, pure_rotation warning)
+    min_tracks: int                     # BOUND: fewer matched tracks = frame not measured (lost)
+    lk_win: int                         # LK window side at process scale
+    lk_levels: int                      # LK pyramid levels
     fb_max_px: float                    # BOUND: forward-backward LK disagreement tolerated (native px)
-    warn_static_disp_px: float          # BOUND: displacement under max(this, factor × floor) = still
-    warn_rotation_min_disp_px: float    # BOUND: displacement from which the view moved (pure-rotation
-                                        # warning; a track-loss keyframe needs it)
-    warn_min_run_frames: int            # BOUND: consecutive flagged frames that make a coverage
-                                        # warning; an anchor lost sooner flags tracking_lost
-    parallax_quantile: float            # BOUND: parallax = this quantile of the per-track symmetric
-                                        # transfer error w.r.t. the rigid tracks' LS homography
-    rotation_floor_factor: float        # BOUND: "at its noise floor" = ≤ factor × the measured floor —
-                                        # pure rotation, static, rotation verdict, dynamic moving bar,
-                                        # track-loss baseline, appearance (× the twin's residual)
-    keyframe_band_frac: float           # BOUND: the keyframe's reading lies in the symmetric band
+    warn_static_disp_px: float          # BOUND: median displacement from the anchor under this = still
+    warn_rotation_min_disp_px: float    # BOUND: displacement from which the view moved (pure_rotation)
+    warn_min_run_frames: int            # BOUND: consecutive flagged frames that make a coverage warning
+    parallax_quantile: float            # BOUND: parallax = this quantile of the tracks' residuals
+                                        # w.r.t. the rotation reference
+    keyframe_band_frac: float           # BOUND: the keyframe's reading lies in
                                         # [(1 − band), (1 + band)] × quantum
-    rigidity_confidence: float          # BOUND: declared confidence of the still / pure-rotation tests
-    rigidity_bootstrap: int             # BOUND: bootstrap resamples of the rotation evidence
-    refine_max_iter: int                # BOUND: iterations of the direct window refinement per frame
-    refine_eps_px: float                # BOUND: the refinement stops when its update moves the
-                                        # window's centre (the track) by no more than this (process px)
+    reference_max_eval: int             # BOUND: residual evaluations of the rotation fit per frame
+    reference_ftol: float               # BOUND: the rotation fit stops when a step lowers its cost by
+                                        # less than this (relative)
 
 
 @dataclass(frozen=True)
@@ -298,21 +297,12 @@ def _load_parallax(sec: Dict[str, Any]) -> ParallaxConfig:
         # a quantile lives in (0, 1]; 1.0 is the maximum residual
         parallax_quantile=_num(p, "parallax_quantile", "parallax", lo=0.0, hi=1.0,
                                lo_excl=True),
-        # a factor under 1 would call a frame "at its floor" while it reads above it
-        rotation_floor_factor=_num(p, "rotation_floor_factor", "parallax", lo=1.0),
         # a band of 1 would admit the anchor's own neighbour; 0 = the closing frame only
         keyframe_band_frac=_num(p, "keyframe_band_frac", "parallax", lo=0.0, hi=1.0),
-        # a confidence lives in (0, 1): 1 would never decide, 0 always
-        rigidity_confidence=_num(p, "rigidity_confidence", "parallax", lo=0.0, hi=1.0,
-                                 lo_excl=True),
-        rigidity_bootstrap=_num(p, "rigidity_bootstrap", "parallax", lo=1, integer=True),
-        refine_max_iter=_num(p, "refine_max_iter", "parallax", lo=1, integer=True),
-        refine_eps_px=_num(p, "refine_eps_px", "parallax", lo=0.0, lo_excl=True),
+        reference_max_eval=_num(p, "reference_max_eval", "parallax", lo=1, integer=True),
+        # MINPACK needs a positive tolerance; 1 would stop on the first step
+        reference_ftol=_num(p, "reference_ftol", "parallax", lo=0.0, hi=1.0, lo_excl=True),
     )
-    if out.rigidity_confidence >= 1.0:
-        raise IntakeConfigError(
-            f"'{SECTION}.parallax.rigidity_confidence' = {out.rigidity_confidence} must be "
-            f"below 1 — a test at confidence 1 never rejects anything")
     if out.keyframe_band_frac >= 1.0:
         raise IntakeConfigError(
             f"'{SECTION}.parallax.keyframe_band_frac' = {out.keyframe_band_frac} must be "
