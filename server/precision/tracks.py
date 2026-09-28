@@ -21,6 +21,11 @@ Windows:
   witness    each run of witness frames with the two keyframes around it — the
              correspondences F5 localises the witnesses with
 
+Determinism: the tracker's weights are the file whose sha256 is declared
+(``tracker_weights_url`` at a pinned revision, ``tracker_weights_sha256``; recorded in
+tracks.json, any other file refused) and every tracker call runs with torch's
+deterministic algorithms on, TF32 off and the ``seed`` set (:func:`deterministic_torch`).
+
 Every track is assigned to the fit or the held-out set once (``heldout_frac``,
 fixed ``seed``). Output ``output/precision/tracks.npz`` (v2 = the v1 keys at the
 tracker grid + ``obs_uv_native``, ``obs_uv_sigma``, ``track_split``,
@@ -32,9 +37,11 @@ CLI (the mapanything env, GPU): ``python -m precision.tracks --session <dir>``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -211,9 +218,91 @@ def tracker_grid(native_w: int, native_h: int, long_side: int, stride: int) -> T
     return w, h
 
 
-def vggsfm_track_fn(device: str = "cuda") -> TrackFn:
+# ── determinism (shared with F6) ─────────────────────────────────────────
+
+# cuBLAS is deterministic only with a fixed workspace (NVIDIA / torch docs); with
+# ``torch.use_deterministic_algorithms`` on, torch refuses every cuBLAS call without it
+CUBLAS_WORKSPACE_ENV = "CUBLAS_WORKSPACE_CONFIG"
+CUBLAS_WORKSPACE_DETERMINISTIC = (":4096:8", ":16:8")
+
+
+def ensure_cublas_workspace() -> None:
+    """Set CUBLAS_WORKSPACE_CONFIG (:4096:8) when unset — it must be in the environment
+    BEFORE torch initialises CUDA, so every GPU CLI calls this first."""
+    import os
+    os.environ.setdefault(CUBLAS_WORKSPACE_ENV, CUBLAS_WORKSPACE_DETERMINISTIC[0])
+
+
+@contextmanager
+def deterministic_torch(seed: int):
+    """torch with deterministic algorithms ON (an op without a deterministic kernel
+    RAISES instead of running), cuDNN deterministic and not benchmarking, TF32 off (full
+    float32 arithmetic on Ampere) and the RNGs seeded; the previous state is restored on
+    exit. On CUDA the cuBLAS workspace must already be fixed (:func:`ensure_cublas_workspace`
+    before CUDA initialises) — refused otherwise, naming why."""
+    import os
+    import torch
+    if torch.cuda.is_available() and \
+            os.environ.get(CUBLAS_WORKSPACE_ENV) not in CUBLAS_WORKSPACE_DETERMINISTIC:
+        if torch.cuda.is_initialized():
+            raise RuntimeError(f"{CUBLAS_WORKSPACE_ENV} is not one of "
+                               f"{CUBLAS_WORKSPACE_DETERMINISTIC} and CUDA is already "
+                               f"initialised — cuBLAS cannot be made deterministic now; set it "
+                               f"before torch touches the GPU (the precision CLIs do)")
+        ensure_cublas_workspace()
+    prev = (torch.are_deterministic_algorithms_enabled(),
+            torch.is_deterministic_algorithms_warn_only_enabled(),
+            torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark,
+            torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32)
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.manual_seed(int(seed))                      # CPU and every CUDA device
+    try:
+        yield
+    finally:
+        torch.use_deterministic_algorithms(prev[0], warn_only=prev[1])
+        (torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark,
+         torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32) = prev[2:]
+
+
+# ── the tracker weights, pinned by content ───────────────────────────────
+
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def verified_checkpoint(url: str, sha256: str, log: Callable = print) -> Path:
+    """The checkpoint at ``url`` (a pinned revision) in torch hub's cache — downloaded
+    once, the download itself hash-checked — whose content hashes to ``sha256``. A cached
+    file that does not (another revision, a corrupt copy) is refused: the tracks are
+    never made by weights nobody declared."""
+    import torch
+    from urllib.parse import urlparse
+    dst = Path(torch.hub.get_dir()) / "checkpoints" / Path(urlparse(url).path).name
+    if not dst.exists():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        log(f"{LOG_TAG} downloading {url} → {dst}")
+        torch.hub.download_url_to_file(url, str(dst), hash_prefix=sha256, progress=False)
+    got = file_sha256(dst)
+    if got != sha256:
+        raise TracksError(f"{dst} hashes to sha256 {got}, the configured tracker weights are "
+                          f"{sha256} (precision.tracks.tracker_weights_sha256) — another file "
+                          f"with the same name; delete it to fetch {url}")
+    return dst
+
+
+def vggsfm_track_fn(weights_url: str, weights_sha256: str, device: str = "cuda",
+                    log: Callable = print) -> TrackFn:
     """The fork's VGGSfM tracker: coarse tracks, then ``refine_track`` WITH its score
-    (the fine heatmap's standard deviation, px — the observation's σ)."""
+    (the fine heatmap's standard deviation, px — the observation's σ). The weights are
+    the file whose sha256 is ``weights_sha256`` (:func:`verified_checkpoint`)."""
     import torch
     root = Path(__file__).resolve().parents[2] / "vendor" / "VGGT-Long" / "base_models" / "vggt"
     if str(root) not in sys.path:
@@ -222,8 +311,8 @@ def vggsfm_track_fn(device: str = "cuda") -> TrackFn:
     from dependency.track_modules.track_refine import refine_track
     dev = torch.device(device if torch.cuda.is_available() else "cpu")
     tk = TrackerPredictor()
-    url = "https://huggingface.co/facebook/VGGSfM/resolve/main/vggsfm_v2_tracker.pt"
-    tk.load_state_dict(torch.hub.load_state_dict_from_url(url))
+    ckpt = verified_checkpoint(weights_url, weights_sha256, log=log)
+    tk.load_state_dict(torch.load(str(ckpt), map_location="cpu", weights_only=True))
     tk = tk.to(dev).eval()
 
     def fn(images: np.ndarray, queries: np.ndarray, frames: List[int]):
@@ -321,7 +410,14 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
             grid_like(omap, d.shape[1], d.shape[0], "omega_npz")
         return depth_edges(d, tcfg.depth_edge_tol_rel), g
 
-    track_fn = track_fn or vggsfm_track_fn()
+    # the tracker's weights are recorded by content; an injected track_fn (a ground-truth
+    # stand-in) is said to be one
+    weights = {"injected_track_fn": True}
+    if track_fn is None:
+        ensure_cublas_workspace()                 # before the tracker touches the GPU
+        track_fn = vggsfm_track_fn(tcfg.tracker_weights_url, tcfg.tracker_weights_sha256,
+                                   log=log)
+        weights = {"url": tcfg.tracker_weights_url, "sha256": tcfg.tracker_weights_sha256}
     obs = {k: [] for k in ("track", "frame", "uv", "uv_native", "sigma", "vis", "window",
                            "loop", "kind")}
     tq = {k: [] for k in ("id", "frame", "uv")}
@@ -342,7 +438,10 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
             if len(q) == 0:
                 continue
             order = [qi] + [k for k in range(len(win.frames)) if k != qi]
-            uv, vis, sig = track_fn(imgs[order], q, [win.frames[k] for k in order])
+            # deterministic kernels, re-seeded per call: a window's tracks do not depend on
+            # the windows tracked before it
+            with deterministic_torch(tcfg.seed):
+                uv, vis, sig = track_fn(imgs[order], q, [win.frames[k] for k in order])
             inv = np.argsort(order)
             uv, vis, sig = uv[inv], vis[inv], sig[inv]
             good = vis > tcfg.vis_thresh
@@ -379,6 +478,7 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
     epochs = read_session_epochs(session_dir)
     meta = {"version": TRACKS_VERSION, "provenance": PROVENANCE, **epochs,
             "tracker_grid": gmap.to_dict(), "native_wh": [nw, nh],
+            "tracker_weights": weights,
             "params": {k: getattr(tcfg, k) for k in tcfg.__dataclass_fields__}}
     tmp = pdir / (TRACKS_NAME + ".tmp.npz")
     np.savez_compressed(
@@ -430,6 +530,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                  description="Native-pixel sub-pixel tracks (F4).")
     ap.add_argument("--session", required=True)
     args = ap.parse_args(argv)
+    ensure_cublas_workspace()                   # before torch initialises CUDA
     run_tracks(Path(args.session), load_precision_config().tracks)
     return 0
 

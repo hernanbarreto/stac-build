@@ -29,10 +29,15 @@ smoothness whose weight λ is chosen by leave-one-window-out (the grid is
 dimensionless: λ × the rows' total weight per knot). σ of a row = max(its own,
 its instrument's measured scatter — 1.4826 × MAD of the residuals of the
 instrument fitted alone). Each absolute instrument is fitted alone and judged
-held-out (leave-one-window-out RMS in log units); the applied one is the one with
-the lowest held-out error, fitted with the relative rows; every instrument is
-reported (``sigma_by_instrument``, ``heldout_by_instrument``) and the choice
-carries the bootstrap verdict against the runner-up (``heldout_change``).
+held-out (leave-one-window-out RMS in log units); the applied one is the DEFAULT
+(the first of ``gauge.instruments`` that was judged) unless the one with the lowest
+held-out error beats it beyond the sample's noise (``heldout_change`` improves) —
+a lower RMS within the noise switches nothing. It is fitted with the relative rows;
+every instrument is reported (``sigma_by_instrument``, ``heldout_by_instrument``)
+and the choice carries its verdict and decision (``choice_verdict``).
+
+Each per-frame gain is a Huber IRLS iterated to ``huber_tol``; one that reaches
+``huber_max_iter`` still moving is not converged — its row is excluded and reported.
 
 The application: keyframe k gets s_k = exp x(c_k) — depth × s_k about its own
 camera, the camera moved so the walk stays continuous (c'_k = c'_{k−1} +
@@ -51,7 +56,7 @@ import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -233,24 +238,43 @@ def solve(rows: Sequence[Row], c_max: float, gcfg, log: Callable = print) -> Dic
         raise GaugeError("no absolute instrument spans two I3 windows — nothing can be held "
                          "out, the gauge cannot choose (instruments present: "
                          f"{sorted(by_inst) or 'none'})")
-    ranked = sorted(judged, key=judged.get)
-    chosen = ranked[0]
-    verdict = None
-    if len(ranked) > 1:
-        other = ranked[1]
-        common = sorted(set(per_group_by[chosen]) & set(per_group_by[other]))
-        if common:
-            verdict = heldout_change([per_group_by[other][g] for g in common],
-                                     [per_group_by[chosen][g] for g in common],
-                                     confidence=float(gcfg.heldout_confidence))
-            verdict["against"] = other
+    # the configured order decides unless the held-out says otherwise BEYOND its noise:
+    # the default is the first instrument of ``gauge.instruments`` that was judged; the one
+    # with the lowest held-out error replaces it only when heldout_change IMPROVES (a
+    # lower RMS inside the sample's noise is not evidence — no noise-driven switch)
+    order = [k for k in gcfg.instruments if k in judged] + sorted(set(judged) - set(gcfg.instruments))
+    default = order[0]
+    lowest = min(order, key=lambda k: judged[k])          # ties → the configured order
+    chosen, verdict = default, None
+
+    def _versus(before: str, after: str) -> Dict[str, Any]:
+        """Paired over the windows both instruments were held out on (none → neither)."""
+        common = sorted(set(per_group_by[before]) & set(per_group_by[after]))
+        return heldout_change([per_group_by[before][g] for g in common],
+                              [per_group_by[after][g] for g in common],
+                              confidence=float(gcfg.heldout_confidence))
+
+    if lowest != default:
+        verdict = _versus(default, lowest)
+        verdict.update({"against": default, "candidate": lowest})
+        if verdict["improves"]:
+            chosen = lowest
+            verdict["decision"] = "lowest_heldout_beyond_noise"
+        else:
+            verdict["decision"] = "default_kept_within_noise"
+    elif len(order) > 1:
+        runner = min(order[1:], key=lambda k: judged[k])
+        verdict = _versus(runner, default)
+        verdict.update({"against": runner, "candidate": default,
+                        "decision": "default_is_lowest"})
     final_rows = list(by_inst[chosen]) + rel
     lam, e = choose_lambda(final_rows, knots, grid)
     x = fit(final_rows, knots, lam)
     log(f"{LOG_TAG} instruments held-out (log RMS): "
         + ", ".join(f"{k} {v:.4f}" for k, v in sorted(judged.items(), key=lambda kv: kv[1]))
-        + f" → {chosen}" + (f" (vs {verdict['against']}: "
-                            f"{'better beyond its noise' if verdict['improves'] else 'within the noise'})"
+        + f" → {chosen}" + (f" ({verdict['decision']}: {verdict['candidate']} vs "
+                            f"{verdict['against']} "
+                            f"{'better beyond the noise' if verdict['improves'] else 'within the noise'})"
                             if verdict else "")
         + f"; {len(rel)} relative row(s); λ {lam:g}; s along the walk "
           f"{math.exp(x.min()):.4f}–{math.exp(x.max()):.4f}")
@@ -275,10 +299,42 @@ def continuous_transforms(centres: np.ndarray, s: np.ndarray) -> Tuple[np.ndarra
 
 # ── rows ─────────────────────────────────────────────────────────────────
 
+class Gain(NamedTuple):
+    log: float                  # the Huber M-estimate of log(inst / omega)
+    converged: bool             # the IRLS stopped by ``huber_tol``, not by ``huber_max_iter``
+    iterations: int
+    mad_zero: bool              # more than half the pixels agree exactly (see huber_location)
+
+
+def huber_location(r: np.ndarray, w0: np.ndarray, k: float, tol: float,
+                   max_iter: int) -> Gain:
+    """Huber M-estimate of the location of ``r`` (prior weights ``w0``), the scale
+    re-measured every step as 1.4826 × MAD about the current estimate, iterated until
+    one step moves it less than ``tol`` × max(1, |μ|); ``max_iter`` only bounds a
+    non-converging run, which is REPORTED (converged False), never used as an answer.
+    MAD = 0: more than half the samples sit exactly on the estimate — the Huber
+    estimate's limit as its scale → 0 is that value (L1 → the median), returned as
+    converged and flagged; no stand-in scale is invented."""
+    mu = float(np.median(r))
+    for it in range(1, int(max_iter) + 1):
+        mad = float(np.median(np.abs(r - mu)))
+        if mad == 0.0:
+            return Gain(mu, True, it - 1, True)
+        z = np.abs(r - mu) / (MAD_TO_SIGMA * mad)
+        w = w0 * np.where(z <= k, 1.0, k / np.maximum(z, 1e-12))
+        new = float(np.sum(w * r) / np.sum(w))
+        if abs(new - mu) <= float(tol) * max(1.0, abs(mu)):
+            return Gain(new, True, it, False)
+        mu = new
+    return Gain(mu, False, int(max_iter), False)
+
+
 def _log_gain(inst: np.ndarray, omega: np.ndarray, conf: Optional[np.ndarray],
-              huber_k: float) -> Optional[float]:
-    """Huber M-estimate (tuning ``huber_k``) of log(inst/omega) over the pixels valid in
-    both, weighted by ``conf`` (the instrument's confidence), at omega's grid."""
+              gcfg) -> Optional[Gain]:
+    """Huber M-estimate (``huber_k``, to ``huber_tol``) of log(inst/omega) over the pixels
+    valid in both, weighted by ``conf`` (the instrument's confidence), at omega's grid.
+    None with fewer than four common pixels; a non-converged estimate comes back flagged
+    — the caller excludes it."""
     H, W = omega.shape
 
     def _fit(a):
@@ -294,19 +350,10 @@ def _log_gain(inst: np.ndarray, omega: np.ndarray, conf: Optional[np.ndarray],
         m &= np.isfinite(conf) & (conf > 0)
     if m.sum() < 4:
         return None
-    r = np.log(inst[m]) - np.log(omega[m])
+    r = np.log(inst[m].astype(np.float64)) - np.log(omega[m].astype(np.float64))
     w0 = conf[m].astype(np.float64) if conf is not None else np.ones(int(m.sum()))
-    mu = float(np.median(r))
-    for _ in range(50):                     # IRLS to convergence (a fixed-point, few steps)
-        sc = MAD_TO_SIGMA * float(np.median(np.abs(r - mu))) or 1.0
-        z = np.abs(r - mu) / sc
-        w = w0 * np.where(z <= huber_k, 1.0, huber_k / np.maximum(z, 1e-12))
-        new = float(np.sum(w * r) / np.sum(w))
-        if abs(new - mu) <= 1e-12 * max(1.0, abs(mu)):
-            mu = new
-            break
-        mu = new
-    return mu
+    return huber_location(r, w0, float(gcfg.huber_k), float(gcfg.huber_tol),
+                          int(gcfg.huber_max_iter))
 
 
 def _weighted_median(v: np.ndarray, w: np.ndarray) -> float:
@@ -334,9 +381,12 @@ def applied_global_scale(output_dir: Path) -> float:
     return float(m.read_text().strip().split("=")[-1])
 
 
-def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, huber_k: float
+def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, gcfg
              ) -> Tuple[List[Row], List[Row], List[dict]]:
-    """(da3_windows rows, da3_mono rows, per-window report incl. the near-band variant)."""
+    """(da3_windows rows, da3_mono rows, per-window report incl. the near-band variant).
+    A frame whose Huber gain did not converge gives no gain: the window's report lists
+    it (``huber.not_converged`` / ``huber.mono_not_converged``; ``huber.mad_zero`` the
+    frames whose gain is the agreeing majority's exact value)."""
     from reconstruction.scale_align import _ratio
     from intake.walk import WINDOWS_DIRNAME
     out = Path(session_dir) / "output"
@@ -354,24 +404,35 @@ def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, huber
             depth, conf = z["depth"], z["conf"]
             mono = z["depth_mono"] if "depth_mono" in z.files else None
         gains, weights, near, cs = [], [], [], []
+        huber = {"not_converged": [], "mono_not_converged": [], "mad_zero": []}
         n = len(frames)
         for i, f in enumerate(frames):
             if f not in omega or f not in chainage:
                 continue
-            g = _log_gain(depth[i], omega[f], conf[i], huber_k)
+            g = _log_gain(depth[i], omega[f], conf[i], gcfg)
             if g is None:
                 continue
-            gains.append(g - log_s0)
+            if mono is not None:
+                gm = _log_gain(mono[i], omega[f], None, gcfg)
+                centrality = abs(i - (n - 1) / 2.0)
+                if gm is not None and not gm.converged:
+                    huber["mono_not_converged"].append(f)
+                elif gm is not None and (f not in mono_best or centrality < mono_best[f][0]):
+                    mono_best[f] = (centrality, gm.log - log_s0, gi)
+            if not g.converged:
+                huber["not_converged"].append(f)
+                continue
+            if g.mad_zero:
+                huber["mad_zero"].append(f)
+            gains.append(g.log - log_s0)
             weights.append(float(np.nansum(conf[i])))
             cs.append(chainage[f])
             nr = _ratio(depth[i], omega[f], conf=conf[i])
             near.append(math.log(nr) - log_s0 if nr and nr > 0 else float("nan"))
-            if mono is not None:
-                gm = _log_gain(mono[i], omega[f], None, huber_k)
-                centrality = abs(i - (n - 1) / 2.0)
-                if gm is not None and (f not in mono_best or centrality < mono_best[f][0]):
-                    mono_best[f] = (centrality, gm - log_s0, gi)
         if len(gains) < 2:
+            if any(huber.values()):             # a window the non-converged gains emptied
+                report.append({"window": p.name, "row": False, "n_frames": len(gains),
+                               "huber": huber})
             continue
         g_arr, w_arr = np.array(gains), np.array(weights)
         s_w = _weighted_median(g_arr, w_arr)
@@ -380,9 +441,9 @@ def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, huber
         sig = float(np.std(boots))
         win_rows.append(Row("da3_windows", s_w, sig, gi, c=float(np.mean(cs)),
                             meta={"window": p.name, "n_frames": len(g_arr)}))
-        report.append({"window": p.name, "c_m": float(np.mean(cs)), "log_s": s_w,
+        report.append({"window": p.name, "row": True, "c_m": float(np.mean(cs)), "log_s": s_w,
                        "sigma": sig, "log_s_near_band": float(np.nanmedian(near)),
-                       "n_frames": len(g_arr)})
+                       "n_frames": len(g_arr), "huber": huber})
     mono_rows = [Row("da3_mono", v, float("nan"), gi, c=chainage[f], meta={"frame": f})
                  for f, (_c, v, gi) in sorted(mono_best.items())]
     return win_rows, mono_rows, report
@@ -418,10 +479,11 @@ def vio_rows(session_dir: Path, frames: List[int], chainage: Dict[int, float],
 
 
 def stray_rows(session_dir: Path, omega: Dict[int, np.ndarray], chainage: Dict[int, float],
-               group_of: Callable[[float], int], log_s0: float, huber_k: float
-               ) -> Optional[List[Row]]:
+               group_of: Callable[[float], int], log_s0: float, gcfg,
+               not_converged: Optional[List[int]] = None) -> Optional[List[Row]]:
     """Per keyframe: Stray LiDAR depth (``depth/<frame:06d>.png``, millimetres, weighted
-    by ``confidence/<frame:06d>.png``) over Omega's. None without Stray depth."""
+    by ``confidence/<frame:06d>.png``) over Omega's. None without Stray depth. A frame
+    whose Huber gain did not converge gives no row (appended to ``not_converged``)."""
     import cv2
     sd = Path(session_dir)
     ddir, cdir = sd / "depth", sd / "confidence"
@@ -439,10 +501,13 @@ def stray_rows(session_dir: Path, omega: Dict[int, np.ndarray], chainage: Dict[i
         c = cv2.imread(str(cp), cv2.IMREAD_UNCHANGED) if cp.exists() else None
         # millimetres → metres (a unit, not a parameter)
         g = _log_gain(d.astype(np.float32) / 1000.0, om,
-                      c.astype(np.float32) if c is not None else None, huber_k)
-        if g is not None:
-            rows.append(Row("stray", g - log_s0, float("nan"), group_of(chainage[f]),
-                            c=chainage[f], meta={"frame": f}))
+                      c.astype(np.float32) if c is not None else None, gcfg)
+        if g is not None and not g.converged:
+            if not_converged is not None:
+                not_converged.append(f)
+        elif g is not None:
+            rows.append(Row("stray", g.log - log_s0, float("nan"), group_of(chainage[f]),
+                            c=chainage[f], meta={"frame": f, "huber_mad_zero": g.mad_zero}))
     return rows or None
 
 
@@ -532,7 +597,7 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
     wins, mono, win_report = [], [], []
     inst = set(gcfg.instruments)
     if {"da3_windows", "da3_mono"} & inst:
-        wins, mono, win_report = da3_rows(session_dir, chainage, log_s0, gcfg.huber_k)
+        wins, mono, win_report = da3_rows(session_dir, chainage, log_s0, gcfg)
     if "da3_windows" in inst:
         rows += wins
     if "da3_mono" in inst:
@@ -550,9 +615,10 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
         rows += vr or []
         if not vr:
             absent.append("vio")
+    stray_not_converged: List[int] = []
     if "stray" in inst:
         sr = stray_rows(session_dir, omega_depths(out), chainage, group_of, log_s0,
-                        gcfg.huber_k)
+                        gcfg, stray_not_converged)
         rows += sr or []
         if not sr:
             absent.append("stray")
@@ -570,12 +636,13 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
     k_kf, t_kf = continuous_transforms(session.poses[:, :3, 3], s_kf)
     doc = {"version": GAUGE_VERSION, "provenance": PROVENANCE, "geometry_epoch": epoch,
            "params": {"knot_walk_m": gcfg.knot_walk_m, "smooth_grid": list(gcfg.smooth_grid),
-                      "huber_k": gcfg.huber_k,
+                      "huber_k": gcfg.huber_k, "huber_tol": gcfg.huber_tol,
+                      "huber_max_iter": gcfg.huber_max_iter,
                       "heldout_confidence": gcfg.heldout_confidence,
                       "instruments": list(gcfg.instruments)},
            "log_s_applied_global": log_s0, "walk_length_m": walk["walk_length_m"],
            **model, "instruments_absent": absent,
-           "windows": win_report,
+           "windows": win_report, "stray_huber_not_converged": stray_not_converged,
            "seams_reported_not_rows": _seams(out),
            "s_keyframes": {"min": float(s_kf.min()), "max": float(s_kf.max())},
            "camera_shift_max_m": float(np.linalg.norm(t_kf, axis=1).max()),

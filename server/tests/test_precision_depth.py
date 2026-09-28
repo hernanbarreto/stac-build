@@ -386,7 +386,7 @@ def test_run_sweep_end_to_end_on_a_synthetic_session(tmp_path, pcfg):
     assert not (out / DS.DEPTH_DIRNAME / DS.WORK_DIRNAME).exists()
     with np.load(out / DS.DEPTH_DIRNAME / "frame_10.npz") as z:
         depth, src, ncc = z["depth"], z["source"], z["ncc"]
-        assert z["normal"].dtype == np.float16 and z["residual_rel"].dtype == np.float16
+        assert z["normal"].dtype == np.float32 and z["residual_rel"].dtype == np.float32
     _, gt = render(REF)
     ok, box, wall, flat = _regions(gt)
     t0 = (src == DS.SOURCE_SWEEP) & ok
@@ -399,6 +399,52 @@ def test_run_sweep_end_to_end_on_a_synthetic_session(tmp_path, pcfg):
     # re-running reads β from the tier-0 calibration of this epoch
     doc2 = DS.run_sweep(s, pcfg, log=logs.append, device="cpu")
     assert doc2["beta_source"] == "tier0"
+
+
+def test_identical_sessions_give_bit_identical_depth(tmp_path, pcfg):
+    """Two sessions built from the same inputs, swept one after the other (torch's RNG
+    and allocation history differ between the two): every array of every frame, and
+    the calibration, are the same bits."""
+    import torch
+    runs = []
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+        s, _ = _session(tmp_path / name, pcfg)
+        torch.rand(1000 + len(runs))                     # someone used the RNG in between
+        DS.run_sweep(s, pcfg, log=lambda *a: None, device="cpu")
+        out = s / "output"
+        arrays = {}
+        for p in sorted((out / DS.DEPTH_DIRNAME).glob("frame_*.npz")):
+            with np.load(p) as z:
+                arrays.update({(p.name, k): (z[k].dtype.str, z[k].tobytes()) for k in z.files})
+        cal = json.loads((out / "precision" / CAL.CALIBRATION_NAME).read_text())["models"]
+        runs.append((arrays, cal))
+    assert runs[0][0].keys() == runs[1][0].keys() and len(runs[0][0]) >= 6 * 4
+    for k in runs[0][0]:
+        assert runs[0][0][k] == runs[1][0][k], k
+    assert runs[0][1] == runs[1][1]
+    assert not torch.are_deterministic_algorithms_enabled()   # the mode is scoped to the run
+
+
+def test_the_sweep_core_is_bit_identical_and_nanmedian_is_its_own(scene):
+    ref, gt, views = scene
+    z0 = (gt * (1 + prior_error(gt.shape))).astype(np.float32)
+    beta = np.full(gt.shape, 0.15, np.float32)
+    cs = DS.contrast_sigma(ref, np.ones_like(ref, bool))
+    from precision.tracks import deterministic_torch
+    with deterministic_torch(0):
+        a = DS.sweep_frame(_frame(ref, views), z0, beta, 16, 2, cs)
+        b = DS.sweep_frame(_frame(ref, views), z0, beta, 16, 2, cs)
+    for k in a:
+        assert a[k].tobytes() == b[k].tobytes(), k
+    # the deterministic replacement of torch.nanmedian(·, 0) picks the same element
+    rng = np.random.default_rng(1)
+    R = torch.as_tensor(rng.random((5, 400)))
+    R[torch.as_tensor(rng.random((5, 400)) < 0.4)] = float("nan")
+    ref_med = torch.nanmedian(R, 0).values
+    got = DS._nanmedian0(R)
+    assert torch.equal(torch.isnan(got), torch.isnan(ref_med))
+    assert torch.equal(got[~torch.isnan(got)], ref_med[~torch.isnan(ref_med)])
 
 
 def test_run_sweep_refuses_an_unapplied_refinement(tmp_path, pcfg):

@@ -109,6 +109,48 @@ def test_observations_land_in_native_pixels_with_the_trackers_error(sess):
         assert k in tr, k                                                # the v1 keys stay
 
 
+def test_identical_runs_write_identical_bits_and_say_which_tracker(sess):
+    T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    a = T.load_tracks_v2(sess.session_dir)
+    rep = T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    b = T.load_tracks_v2(sess.session_dir)
+    assert a.keys() == b.keys()
+    for k in a:
+        assert a[k].dtype == b[k].dtype and a[k].tobytes() == b[k].tobytes(), k
+    assert rep["tracker_weights"] == {"injected_track_fn": True}
+
+
+def test_tracker_weights_are_refused_unless_their_content_matches(tmp_path, monkeypatch):
+    """The weights are pinned by CONTENT: a file under the same name that hashes otherwise
+    (the moving 'main' revision, a corrupt copy) is refused — nothing is downloaded when
+    the file is present."""
+    import hashlib
+    torch = pytest.importorskip("torch")
+    monkeypatch.setattr(torch.hub, "get_dir", lambda: str(tmp_path))
+    ck = tmp_path / "checkpoints"
+    ck.mkdir()
+    (ck / "w.pt").write_bytes(b"weights at the pinned revision")
+    url = "https://example.invalid/repo/resolve/0123456789abcdef/w.pt"
+    sha = hashlib.sha256(b"weights at the pinned revision").hexdigest()
+    assert T.verified_checkpoint(url, sha, log=lambda *a: None) == ck / "w.pt"
+    (ck / "w.pt").write_bytes(b"weights after 'main' moved")
+    with pytest.raises(T.TracksError, match="hashes to sha256"):
+        T.verified_checkpoint(url, sha, log=lambda *a: None)
+
+
+def test_deterministic_torch_is_scoped():
+    torch = pytest.importorskip("torch")
+    before = torch.are_deterministic_algorithms_enabled()
+    with T.deterministic_torch(TCFG.seed):
+        assert torch.are_deterministic_algorithms_enabled()
+        assert torch.backends.cudnn.deterministic and not torch.backends.cudnn.benchmark
+        assert not torch.backends.cuda.matmul.allow_tf32 and not torch.backends.cudnn.allow_tf32
+        x = torch.rand(4)
+    with T.deterministic_torch(TCFG.seed):
+        assert torch.equal(torch.rand(4), x)                 # seeded
+    assert torch.are_deterministic_algorithms_enabled() == before
+
+
 def test_the_split_is_deterministic_and_per_track(sess):
     T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
     a = T.load_tracks_v2(sess.session_dir)["track_split"].copy()

@@ -358,37 +358,88 @@ def _cv2():
     return cv2
 
 
+def _check_solver(max_iter, eps_px, roundtrip_ulps) -> None:
+    for name, v, integer in (("undistort_max_iter", max_iter, True),
+                             ("undistort_eps_px", eps_px, False),
+                             ("undistort_roundtrip_ulps", roundtrip_ulps, True)):
+        ok = not isinstance(v, bool) and (isinstance(v, (int, np.integer)) if integer
+                                          else isinstance(v, (int, float, np.floating)))
+        if not ok or not (v > 0):
+            raise CameraError(f"the point undistortion needs a positive "
+                              f"{'integer ' if integer else ''}{name} "
+                              f"(reconstruction.precision.camera.{name}), got {v!r}")
+
+
+def _undistort_verified(uv: np.ndarray, K: np.ndarray, dist: np.ndarray, P: Optional[np.ndarray],
+                        max_iter: int, eps_px: float, roundtrip_ulps: int) -> np.ndarray:
+    """cv2.undistortPointsIter (output normalised when ``P`` is None, else pixels under
+    ``P`` = K), then the proof it converged: cv2 stops at ``max_iter`` or ``eps_px`` and
+    reports neither, so every point is RE-DISTORTED through the lens and must land within
+    eps_px + roundtrip_ulps × ulp of where it was observed — eps_px is the solver's own
+    stop, the ulp term (ulp of the camera's largest pixel magnitude) the float64 resolution
+    of re-evaluating the round trip in another order of operations. A point that does not
+    is not undistorted: the call fails naming how many and how far."""
+    _check_solver(max_iter, eps_px, roundtrip_ulps)
+    cv2 = _cv2()
+    uv = np.asarray(uv, dtype=np.float64)
+    pts = uv.reshape(-1, 1, 2)
+    if pts.shape[0] == 0:
+        return uv.copy()
+    crit = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, int(max_iter), float(eps_px))
+    out = cv2.undistortPointsIter(pts, K, dist, None, P, crit).reshape(-1, 2)
+    xn = out if P is None else np.stack([(out[:, 0] - K[0, 2]) / K[0, 0],
+                                         (out[:, 1] - K[1, 2]) / K[1, 1]], axis=1)
+    obj = np.stack([xn[:, 0], xn[:, 1], np.ones(len(xn))], axis=1).reshape(-1, 1, 3)
+    back, _ = cv2.projectPoints(obj, np.zeros(3), np.zeros(3), K, dist)
+    err = np.linalg.norm(back.reshape(-1, 2) - pts.reshape(-1, 2), axis=1)
+    mag = max(float(np.abs(pts).max()), abs(float(K[0, 0])), abs(float(K[1, 1])),
+              abs(float(K[0, 2])), abs(float(K[1, 2])))
+    tol = float(eps_px) + int(roundtrip_ulps) * float(np.spacing(mag))
+    bad = ~(err <= tol)                                 # NaN is not converged either
+    if bad.any():
+        raise CameraError(
+            f"point undistortion did not converge for {int(bad.sum())} of {len(err)} point(s): "
+            f"re-distorted they land up to {float(np.nanmax(np.where(bad, err, 0.0))):.3g} px "
+            f"(NaN: {int(np.isnan(err).sum())}) from where they were observed, tolerance "
+            f"{tol:.3g} px (undistort_max_iter {int(max_iter)}; dist {np.asarray(dist).tolist()})")
+    return out.reshape(uv.shape)
+
+
 def undistort_points(uv: np.ndarray, cam: CameraModel, *, max_iter: int,
-                     eps_px: float) -> np.ndarray:
+                     eps_px: float, roundtrip_ulps: int) -> np.ndarray:
     """Distorted native pixels → undistorted native pixels under the SAME K
     (the undistorted image plane of ``undistort_maps``). Iterated to
     convergence, not cv2's default 5 steps: the solver stops after
     ``max_iter`` iterations or when a point's lens reprojection moves it less
     than ``eps_px`` native px — ``reconstruction.precision.camera.
     undistort_max_iter`` / ``undistort_eps_px`` (:func:`undistort_solver`
-    reads both from a loaded config)."""
-    if isinstance(max_iter, bool) or not isinstance(max_iter, (int, np.integer)) or max_iter < 1:
-        raise CameraError(f"undistort_points needs a positive integer max_iter "
-                          f"(reconstruction.precision.camera.undistort_max_iter), got {max_iter!r}")
-    if isinstance(eps_px, bool) or not (float(eps_px) > 0.0):
-        raise CameraError(f"undistort_points needs a positive eps_px "
-                          f"(reconstruction.precision.camera.undistort_eps_px), got {eps_px!r}")
-    cv2 = _cv2()
+    reads them from a loaded config) — and every point is then VERIFIED by
+    re-distorting it (``roundtrip_ulps``): one that did not converge fails the
+    call, it is never returned."""
+    _check_solver(max_iter, eps_px, roundtrip_ulps)
     uv = np.asarray(uv, dtype=np.float64)
-    shp = uv.shape
-    pts = uv.reshape(-1, 1, 2)
     if not np.any(cam.dist()):
         return uv.copy()
-    crit = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, int(max_iter), float(eps_px))
-    out = cv2.undistortPointsIter(pts, cam.K(), cam.dist(), None, cam.K(), crit)
-    return out.reshape(shp)
+    return _undistort_verified(uv, cam.K(), cam.dist(), cam.K(), max_iter, eps_px, roundtrip_ulps)
+
+
+def undistort_normalized(uv: np.ndarray, K: np.ndarray, dist: Sequence[float], *, max_iter: int,
+                         eps_px: float, roundtrip_ulps: int) -> np.ndarray:
+    """Distorted native pixels → normalised image coordinates (x/z, y/z) under
+    (K, dist) — the same solver and the same verification as
+    :func:`undistort_points` (the refinement's rungs carry their own camera)."""
+    uv = np.asarray(uv, dtype=np.float64)
+    return _undistort_verified(uv.reshape(-1, 2), np.asarray(K, np.float64),
+                               np.asarray(dist, np.float64), None, max_iter, eps_px,
+                               roundtrip_ulps).reshape(uv.shape)
 
 
 def undistort_solver(camera_cfg) -> dict:
-    """``{"max_iter", "eps_px"}`` for :func:`undistort_points` from a loaded
-    ``precision.config.CameraConfig``."""
+    """``{"max_iter", "eps_px", "roundtrip_ulps"}`` for :func:`undistort_points`
+    from a loaded ``precision.config.CameraConfig``."""
     return {"max_iter": int(camera_cfg.undistort_max_iter),
-            "eps_px": float(camera_cfg.undistort_eps_px)}
+            "eps_px": float(camera_cfg.undistort_eps_px),
+            "roundtrip_ulps": int(camera_cfg.undistort_roundtrip_ulps)}
 
 
 def distort_points(uv_undist: np.ndarray, cam: CameraModel) -> np.ndarray:

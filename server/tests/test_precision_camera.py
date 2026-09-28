@@ -357,25 +357,55 @@ def test_mask_grid_differs_from_omega_grid_when_omega_cropped():
 
 
 def test_undistort_solver_comes_from_config_and_is_the_one_used():
-    """The iteration cap and the stop tolerance are reconstruction.precision.
-    camera keys (no literal in precision/camera.py); the cap really caps: one
-    iteration leaves a visible residual the configured solver removes; a bad
-    value is refused naming the key."""
+    """The iteration cap, the stop tolerance and the round-trip resolution are
+    reconstruction.precision.camera keys (no literal in precision/camera.py);
+    the cap never decides silently: one iteration leaves a residual the
+    re-distortion check REFUSES (cv2 reports neither cap nor stop), the
+    configured solver converges and passes it; a bad value is refused naming
+    the key."""
     pytest.importorskip("cv2")
     solver = _solver()
-    assert set(solver) == {"max_iter", "eps_px"}
+    assert set(solver) == {"max_iter", "eps_px", "roundtrip_ulps"}
     assert isinstance(solver["max_iter"], int) and solver["max_iter"] >= 1
     assert solver["eps_px"] > 0
+    assert isinstance(solver["roundtrip_ulps"], int) and solver["roundtrip_ulps"] >= 1
     cam = _cam((-0.12, 0.03, 0.001, -0.0005))
     rng = np.random.default_rng(5)
     uv = np.stack([rng.uniform(10, 454, 500), rng.uniform(10, 822, 500)], axis=1)
     d = C.distort_points(uv, cam)
     full = np.abs(C.undistort_points(d, cam, **solver) - uv).max()
-    one = np.abs(C.undistort_points(d, cam, max_iter=1, eps_px=solver["eps_px"]) - uv).max()
-    assert full < 1e-6 < one
+    assert full < 1e-6
+    with pytest.raises(C.CameraError, match="did not converge"):
+        C.undistort_points(d, cam, **{**solver, "max_iter": 1})
+    K, dist = cam.K(), cam.dist()
+    with pytest.raises(C.CameraError, match="did not converge"):
+        C.undistort_normalized(d, K, dist, **{**solver, "max_iter": 1})
+    xn = C.undistort_normalized(d, K, dist, **solver)
+    assert np.abs(xn * [cam.fx, cam.fy] + [cam.cx, cam.cy] - uv).max() < 1e-6
     for bad in ({"max_iter": 0, "eps_px": 1e-6}, {"max_iter": 2.5, "eps_px": 1e-6},
-                {"max_iter": True, "eps_px": 1e-6}, {"max_iter": 5, "eps_px": 0.0}):
-        with pytest.raises(C.CameraError, match="undistort_(max_iter|eps_px)"):
-            C.undistort_points(d, cam, **bad)
+                {"max_iter": True, "eps_px": 1e-6}, {"max_iter": 5, "eps_px": 0.0},
+                {"max_iter": 5, "eps_px": 1e-6, "roundtrip_ulps": 0}):
+        with pytest.raises(C.CameraError, match="undistort_(max_iter|eps_px|roundtrip_ulps)"):
+            C.undistort_points(d, cam, **{"roundtrip_ulps": 16, **bad})
     with pytest.raises(TypeError):
         C.undistort_points(d, cam)                          # no default, no global read
+
+
+def test_converged_points_pass_at_the_float64_floor_of_large_frames():
+    """At 4K the round trip of a CONVERGED point (200 and 1000 iterations give the same
+    bits) reads 1.2–1.9e-12 px — at the float64 floor, above eps 1e-12 alone: the check
+    accepts it through the ulp term and still refuses a capped solve."""
+    pytest.importorskip("cv2")
+    solver = _solver()
+    W, H = 3840, 2160
+    g = C.grid_full_frame_resize(W, H, W, H, "native")
+    cam = C.CameraModel(W, H, (0.8 * W, 0.8 * W, (W - 1) / 2, (H - 1) / 2, -0.3, 0.1, 0.0, 0.0),
+                        "synthetic", 0, g)
+    u, v = np.meshgrid(np.linspace(0, W - 1, 97), np.linspace(0, H - 1, 55))
+    uv = np.stack([u.ravel(), v.ravel()], axis=1)
+    a = C.undistort_points(uv, cam, **solver)
+    b = C.undistort_points(uv, cam, **{**solver, "max_iter": 5 * solver["max_iter"]})
+    assert np.array_equal(a, b)                             # converged: more iterations, same bits
+    assert np.linalg.norm(C.distort_points(a, cam) - uv, axis=1).max() > solver["eps_px"]
+    with pytest.raises(C.CameraError, match="did not converge"):
+        C.undistort_points(uv, cam, **{**solver, "max_iter": 5})

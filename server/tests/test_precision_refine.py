@@ -16,11 +16,12 @@ if not hasattr(pycolmap.Camera, "create_from_model_name"):
     pytest.skip("pycolmap 4 (the mapanything env) is required", allow_module_level=True)
 
 from precision import refine as R                                # noqa: E402
+from precision.camera import undistort_solver                   # noqa: E402
 from precision.config import load_precision_config              # noqa: E402
 
 PC = load_precision_config()
 CFG = PC.refine
-SOLVER = {"max_iter": PC.camera.undistort_max_iter, "eps_px": PC.camera.undistort_eps_px}
+SOLVER = undistort_solver(PC.camera)
 WH = (640, 480)
 
 
@@ -131,6 +132,44 @@ def test_witnesses_localise_within_the_keyframes_error():
     for k, f in enumerate(wframes):
         c = np.asarray(loc[f]["c2w"])[:3, 3]
         assert np.linalg.norm(c - wc2w[k][:3, 3]) < 0.02
+
+
+def _bits(core):
+    b = core["best"]
+    held = core["held"][b.name]
+    return (b.name, b.w2c.tobytes(), np.asarray(b.params_by_block).tobytes(), b.fit_rms_px,
+            list(held.keys()), np.array(list(held.values())).tobytes(),
+            {t: X.tobytes() for t, X in core["X"].items()})
+
+
+def test_the_ladder_and_the_witnesses_are_bit_identical_run_to_run():
+    """Identical inputs → identical bits, whatever ran before: the same ladder (every
+    rung a pose-prior BA whose alignment RANSAC is seeded, Ceres on one thread) and the
+    same witness PnP (LO-RANSAC seeded) twice, with a different allocation history and
+    COLMAP's PRNG advanced in between."""
+    X, c2w = _scene(seed=6)
+    gt = [500.0, 500.0, 319.5, 239.5, -0.05, 0.01, 0.0, 0.0]
+    kf = list(range(0, 2 * len(c2w), 2))
+    track, frame, uv = _observe(X, c2w, gt, 0.3, 7, kf)
+    init = [510.0, 510.0, 319.5, 239.5, 0.0, 0.0, 0.0, 0.0]
+    w2c0 = np.linalg.inv(_perturb(c2w, 0.2, 0.02, 9))
+    wc2w = c2w[:-1].copy()
+    wc2w[:, :3, 3] = 0.5 * (c2w[:-1, :3, 3] + c2w[1:, :3, 3])
+    wframes = [2 * k + 1 for k in range(len(wc2w))]
+    wt, wf, wuv = _observe(X, wc2w, gt, 0.3, 8, wframes)
+    runs = []
+    for rep in range(2):
+        junk = [np.random.default_rng(rep).random(1000 * (rep + 1) + 17) for _ in range(5)]
+        pycolmap.set_random_seed(12345 + rep)             # someone else used the PRNG
+        core = R.refine_core(w2c0, init, WH, track, frame, uv, _split(track), kf, 0.01, CFG,
+                             SOLVER, log=lambda *a: None)
+        loc = R.localize_witnesses(core["best"], core["X"], wt, wf, wuv, wframes, WH, 1e9, CFG)
+        runs.append((_bits(core), {f: (np.asarray(r["c2w"]).tobytes(), r["rms_px"])
+                                   for f, r in loc.items()}))
+        del junk
+    assert runs[0][0] == runs[1][0]
+    assert runs[0][1] == runs[1][1]
+    assert all(np.isfinite(r[1]) for r in runs[0][1].values())
 
 
 def test_prior_sigmas_grow_with_the_walk():
