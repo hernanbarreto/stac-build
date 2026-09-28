@@ -368,7 +368,7 @@ def pcfg():
     return replace(p, depth=replace(p.depth, n_views=3, best_k=2, n_hyp=16, null_frames=2,
                                     min_scale_samples=50, calib_min_bin_samples=50,
                                     calib_samples_per_frame=2000, view_samples=128,
-                                    propagation_iters=1))
+                                    propagation_iters=1, min_consistent_views=2))
 
 
 def test_run_sweep_end_to_end_on_a_synthetic_session(tmp_path, pcfg):

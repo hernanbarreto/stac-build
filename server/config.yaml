@@ -2103,6 +2103,17 @@ reconstruction:
         num_iterations: 5
         geom_consistency: true
         prior_points_per_image: 200     # BOUND: prior samples per keyframe → its depth range
+    # F7 — witness fusion + provenance v2 (precision/fuse.py)
+    fuse:
+      min_witness_views: 3              # §4-F9 skeleton: consistent views a tier-0 point needs
+      voxel_m: 0.004                    # §4-F9 skeleton: one point per 4 mm cell — the best
+                                        # evidence (views, then ZNCC), never an average
+      sor: false                        # §4-F7: OFF by default, selectable (GPU SOR)
+      sor_knn: 8
+      sor_std: 2.0
+      sor_cell_m: 0.012                 # BOUND: SOR neighbour cell (3 × voxel, gpu_cloud_clean's rule)
+      noise_filter: false               # CloudComPy's noise filter runs in its own env: not
+                                        # available to the fusion (true fails with the reason)
     # F9 — runner (declared here so every stage heartbeats the same way)
     runner:
       heartbeat_s: 20                   # BOUND: seconds between progress lines of a long stage
@@ -3136,7 +3147,11 @@ certify:                            # §4.8 ensemble witness + §9 certification
                                     # What it costs when on: the objective, the gates and
                                     # the regression verdict are not measured — the verdict
                                     # is the user's eye on the two epochs.
-  auto_after_segmentation: true     # the ONE switch of the automatic certification: (a) the
+  auto_after_segmentation: false    # USER 2026-09-28 F0-F7 validation: the pipeline stops at
+                                    # SAM3 on epoch 0 and scripts/run_precision_chain.sh runs
+                                    # F0→F7 (the gauge starts from epoch 0; the certification's
+                                    # correction is F8's). History: the ONE switch of the automatic
+                                    # certification: (a) the
                                     # pipeline's CERTIFY stage after the cleaned cloud
                                     # (USER 2026-09-13: no button, no manual trigger) and (b) a
                                     # re-run when the Segmentation Manager closes (instances

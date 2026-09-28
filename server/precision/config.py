@@ -268,6 +268,19 @@ class DepthConfig:
     colmap: ColmapConfig
 
 
+# ── F7: witness fusion ───────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class FuseConfig:
+    min_witness_views: int      # consistent views a tier-0 point needs to enter the cloud
+    voxel_m: float              # dedup cell: one point (the best evidence) per voxel
+    sor: bool                   # GPU statistical outlier removal on the fused cloud (OFF)
+    sor_knn: int                # its neighbours
+    sor_std: float              # its σ multiple
+    sor_cell_m: float           # BOUND: its neighbour-search cell (gpu_cloud_clean)
+    noise_filter: bool          # CloudComPy noise filter — not available to the fusion
+
+
 # ── F9: runner (declared in F0 so every stage heartbeats the same way) ───
 
 @dataclass(frozen=True)
@@ -286,6 +299,7 @@ class PrecisionConfig:
     tracks: TracksConfig
     refine: RefineConfig
     depth: DepthConfig
+    fuse: FuseConfig
     runner: RunnerConfig
 
 
@@ -444,6 +458,17 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         raise PrecisionConfigError(f"'{SECTION}.depth.beta_max', '.beta_quantile' and "
                                    f"'.null_confidence' must be below 1")
 
+    fu = _sub(sec, "fuse", "")
+    fuse = FuseConfig(
+        min_witness_views=_num(fu, "min_witness_views", "fuse", lo=1, integer=True),
+        voxel_m=_num(fu, "voxel_m", "fuse", lo=0.0, lo_excl=True),
+        sor=_bool(fu, "sor", "fuse"),
+        sor_knn=_num(fu, "sor_knn", "fuse", lo=1, integer=True),
+        sor_std=_num(fu, "sor_std", "fuse", lo=0.0, lo_excl=True),
+        sor_cell_m=_num(fu, "sor_cell_m", "fuse", lo=0.0, lo_excl=True),
+        noise_filter=_bool(fu, "noise_filter", "fuse"),
+    )
+
     rn = _sub(sec, "runner", "")
     runner = RunnerConfig(
         heartbeat_s=_num(rn, "heartbeat_s", "runner", lo=0.0, lo_excl=True),
@@ -451,4 +476,5 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     )
 
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
-                           tracks=tracks, refine=refine, depth=depth, runner=runner)
+                           tracks=tracks, refine=refine, depth=depth, fuse=fuse,
+                           runner=runner)
