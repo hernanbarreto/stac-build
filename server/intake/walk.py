@@ -308,6 +308,51 @@ def measure_walk(session_dir: Path, gcfg, log: Callable = print, *,
     return doc
 
 
+REVISIT_REFERENCE_NAME = "salad_revisit_reference.json"
+
+
+def revisit_reference(session_dir: Path) -> Dict[str, Any]:
+    """The GEOMETRIC revisits the loop detector's appearance bar is calibrated on
+    (``LoopModels.LoopModel.calibrate_threshold``): the I3 windows chained into one
+    metric trajectory give every keyframe's camera centre and viewing direction;
+    two keyframes see the same place when their cameras stand closer than the
+    scene's median depth (every window's median DA3 depth, median over the
+    windows) AND look less than half the field of view apart (from the windows'
+    own K) — both bars measured on the session. Written to
+    ``output/salad_revisit_reference.json``; returns it.
+
+    Why: SALAD's fixed 0.65 (measured on pccr 2026-08-31, 216 keyframes) proposed
+    six pairs on pccr 2026-08-24 (746 keyframes), all 11-13 keyframes apart,
+    while this trajectory held 26 revisit episodes > 10 m of walk apart."""
+    session_dir = Path(session_dir)
+    wdir = session_dir / "output" / WINDOWS_DIRNAME
+    spec = json.loads((wdir / "windows.json").read_text())
+    windows = [load_window(wdir / f"window_{i:04d}.npz") for i in range(len(spec["windows"]))]
+    poses, _seams = chain_windows(windows)
+    frames = sorted(poses)
+    med_depth, hfov = [], []
+    for w in windows:
+        with np.load(w["path"]) as z:
+            d, c, K = z["depth"], z["conf"], z["intrinsics"]
+            valid = (c > 0) & np.isfinite(d) & (d > 0)
+            if valid.any():
+                med_depth.append(float(np.median(d[valid])))
+            width = d.shape[-1]
+            hfov.extend(2.0 * np.arctan(width / (2.0 * K[:, 0, 0])))
+    if not med_depth or not hfov:
+        raise WalkError("the I3 windows carry no valid depth — no revisit reference")
+    doc = {"version": 1, "provenance": PROVENANCE,
+           "frames": [int(f) for f in frames],
+           "centres": [poses[f][:3, 3].tolist() for f in frames],
+           "forward": [poses[f][:3, 2].tolist() for f in frames],
+           "dist_bar_m": float(np.median(med_depth)),
+           "cos_bar": float(np.cos(0.5 * float(np.median(hfov)))),     # half the FOV
+           "hfov_rad": float(np.median(hfov))}
+    out = session_dir / "output" / REVISIT_REFERENCE_NAME
+    out.write_text(json.dumps(doc))
+    return doc
+
+
 def load_walk(session_dir: Path) -> Optional[Dict[str, Any]]:
     p = Path(session_dir) / "intake" / WALK_NAME
     return json.loads(p.read_text()) if p.exists() else None

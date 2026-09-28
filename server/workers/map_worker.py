@@ -1724,6 +1724,11 @@ def _run_da3_anchor(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         pipe.send_log("DA3 anchor extraction cancelled by user", level="warning")
 
 
+def math_deg(rad: float) -> float:
+    import math
+    return math.degrees(float(rad))
+
+
 def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                    selected_frames_path: str, recon_cfg: dict, config: dict):
     """VGGT-Omega backbone: DA3 per-frame metric depth (anchor) + VGGT-Long[Omega] poses
@@ -2148,6 +2153,16 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                               f"the measured walk")
                 _sal["min_gap"] = int(_band)
                 _sal["min_gap_frac"] = 0.0
+            if _sal is not None:
+                # SALAD's appearance bar calibrated on the session's GEOMETRIC revisits
+                # (the DA3-window walk) — LoopModels.LoopModel.calibrate_threshold
+                from intake.walk import revisit_reference, REVISIT_REFERENCE_NAME
+                _ref = revisit_reference(output_dir.parent)
+                _sal["revisit_reference"] = str(output_dir / REVISIT_REFERENCE_NAME)
+                pipe.send_log(f"[loops] SALAD revisit reference: {len(_ref['frames'])} "
+                              f"keyframes, revisit = cameras < {_ref['dist_bar_m']:.2f} m "
+                              f"(scene median depth) and < "
+                              f"{math_deg(_ref['hfov_rad']) / 2.0:.1f}° apart (half the FOV)")
             _persist_chunk_plan(_fx, _ov, _n_selected, "walk-planned", _walk=_walk0)
             pipe.send_log(f"SIMPLE chunked-metric (I4): walk {_walk0:.1f} m measured by the "
                           f"DA3 windows → {len(chunk_ranges(_n_selected, _fx, _ov))} chunks of "
