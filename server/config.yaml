@@ -1351,7 +1351,13 @@ reconstruction:
     frame_ownership: true               # one frame → one writer in overlaps
     depth_graph: true                   # cross-frame depth agreement stage (in-run, per-frame
                                         # affine along rays, model ladder + authority bound)
-    blend_copies: true                  # two-copy consensus on overlap frames
+    blend_copies: false                 # OFF 2026-09-28: the per-pixel MEAN of a shared frame's two
+                                        # copies presumes they coincide (its own doc: "runs AFTER
+                                        # the elastic consensus") — with elastic_seam off they
+                                        # disagree by the seam residual (5-53 cm on pccr) and the
+                                        # mean is a surface no view measured; a point must stay
+                                        # ONE frame's pixel (traceability). Ownership decides
+                                        # which copy writes. History: two-copy consensus
     scale_drift: true                   # per-chunk LINEAR scale drift. (Pre-order note: A3
                                         # 2026-07-11 tested false on test4: serpenteado
                                         # unchanged and duplicates got MUCH worse (spread
