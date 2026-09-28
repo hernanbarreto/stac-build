@@ -1515,13 +1515,10 @@ reconstruction:
   simple:
     enabled: true
     frame_selection: parallax_lk        # parallax_lk | motion | fps | dino | hf.
-                                        # USER 2026-09-28 (validation run of F0-F2 on pccr
-                                        # 2026-08-24): parallax_lk — the F1 selector cut back to
-                                        # the spec (eebebe8). Was 'motion' below.
-                                        # USER DECISION 2026-09-28: 'motion' (the validated selector)
-                                        # stays the production default until F1's parallax_lk is
-                                        # closed at 100 % against ground truth (open: forward-walk
-                                        # under-reading). parallax_lk stays selectable.
+                                        # USER 2026-09-28: parallax_lk — F1 of claude_stac.txt is
+                                        # the intake of "Reconstruir" (§8: precision.enabled +
+                                        # parallax_lk). 'motion' (the previous default) stays
+                                        # selectable.
                                         # parallax_lk (USER DECISION 2026-09-26, claude_stac.txt
                                         # §4-F1) = intake I1: LK tracks matched to the anchor,
                                         # parallax w.r.t. the rotation of any pinhole, one
@@ -1999,9 +1996,15 @@ reconstruction:
   #   USER DECISION — the user's own criterion, with the date
   precision:
     enabled: true                       # the claude_stac.txt precision pipeline. USER 2026-09-28:
-                                        # ON for the F0-F2 validation run — map_worker measures
-                                        # the walk with I3 (DA3 windows) and plans the chunks
-                                        # from it (I4): one Omega pass, no probe, no pinned size
+                                        # "Reconstruir" runs F0-F7 complete, in place of the old
+                                        # correction: map_worker measures the walk with I3 (DA3
+                                        # windows) and plans the chunks from it (I4) before ONE
+                                        # Omega pass; after SAM3 the PRECISION stage
+                                        # (workers/precision_worker.py → precision/runner.py) runs
+                                        # visit_drift MEASURE → F0 → F2 → F4 → F3 probe → F5 →
+                                        # F6 (+COLMAP A/B) → F7 and the fused epoch is the
+                                        # deliverable. F8/F9 (certification, precision report)
+                                        # do not run.
     # F0 — session camera + exact grid-to-native mappings (precision/camera.py)
     camera:
       model: OPENCV                     # [fx, fy, cx, cy, k1, k2, p1, p2] in native pixels
@@ -2155,6 +2158,9 @@ reconstruction:
       heartbeat_s: 20                   # BOUND: seconds between progress lines of a long stage
       perf_checkpoint_s: 180            # BOUND: seconds into a GPU stage at which the measured
                                         # rate is compared with the expected one (abort with reason)
+      python_da3: /workspace/miniforge3/envs/da3/bin/python
+      python_mapanything: /workspace/miniforge3/envs/mapanything/bin/python
+      threads: 8                        # BOUND: fixed CPU threads of every step (determinism)
 
 
 # ── Post-Processing (CloudCompPy) ──────────────────────────────────
@@ -3217,10 +3223,10 @@ certify:                            # §4.8 ensemble witness + §9 certification
                                     # What it costs when on: the objective, the gates and
                                     # the regression verdict are not measured — the verdict
                                     # is the user's eye on the two epochs.
-  auto_after_segmentation: false    # USER 2026-09-28 F0-F7 validation: the pipeline stops at
-                                    # SAM3 on epoch 0 and scripts/run_precision_chain.sh runs
-                                    # F0→F7 (the gauge starts from epoch 0; the certification's
-                                    # correction is F8's). History: the ONE switch of the automatic
+  auto_after_segmentation: false    # USER 2026-09-28: F0-F7 replace the certification's
+                                    # correction — after SAM3 on epoch 0 the pipeline's PRECISION
+                                    # stage runs the chain (reconstruction.precision.enabled) and
+                                    # the CERTIFY stage (F8) does not run. History: the ONE switch of the automatic
                                     # certification: (a) the
                                     # pipeline's CERTIFY stage after the cleaned cloud
                                     # (USER 2026-09-13: no button, no manual trigger) and (b) a

@@ -300,6 +300,9 @@ class RunnerConfig:
     heartbeat_s: float          # BOUND: seconds between progress lines of a long stage
     perf_checkpoint_s: float    # BOUND: seconds into a GPU stage at which the measured
                                 # rate is compared with the expected one (abort with reason)
+    python_da3: str             # the interpreter of the da3 env (F0, F2, F3 measure, F6, F7)
+    python_mapanything: str     # the interpreter of the mapanything env (F4, F3 probe, F5)
+    threads: int                # BOUND: fixed CPU threads of every step (determinism)
 
 
 @dataclass(frozen=True)
@@ -501,6 +504,9 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     runner = RunnerConfig(
         heartbeat_s=_num(rn, "heartbeat_s", "runner", lo=0.0, lo_excl=True),
         perf_checkpoint_s=_num(rn, "perf_checkpoint_s", "runner", lo=0.0, lo_excl=True),
+        python_da3=_str(rn, "python_da3", "runner"),
+        python_mapanything=_str(rn, "python_mapanything", "runner"),
+        threads=_num(rn, "threads", "runner", lo=1, integer=True),
     )
 
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,

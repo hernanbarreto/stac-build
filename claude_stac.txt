@@ -1,634 +1,541 @@
-# PROMPT — Nube métrica de grado industrial: poses globales, escala cerrada, profundidad por testigos (STAC Build)
+# PROMPT FINAL — STAC-Build PRECISION PIPELINE: intake por paralaje, gauge métrico continuo, cámara de sesión, refinamiento conjunto, profundidad a píxel nativo, fusión por testigos, certificación (nivel RealityScan 2.0)
 
 > Pegar íntegro en Claude Code en la raíz del repo `stac-build`, con el submódulo
-> `vendor/VGGT-Long` (fork `hernanbarreto/VGGT-Long`) inicializado y escribible.
-> Leer primero, completos: `CLAUDE.md`; `server/config.yaml` (secciones `reconstruction`,
-> `postprocessing`, `tsdf`, `segmentation`, `semantic`); `server/workers/map_worker.py`
-> (camino `vggtomega`: `_apply_chunked_metric`, `_metricize_and_orient`,
-> `_emit_omega_depth`, `_build_vggtomega_config`); `vendor/VGGT-Long/vggt_long.py`
-> completo; `vendor/VGGT-Long/loop_utils/{metric_lock,sim3utils,sim3loop,loop_refinement}.py`;
-> `vendor/VGGT-Long/configs/{base_config,stac_vggtomega}.yaml`;
-> `server/reconstruction/{scale_align,orient,chunk_plan,mv_consistency,vggt_tracks,pose_refine,gpu_cloud_clean}.py`;
-> `server/segmentation/` (SAM3, tracking y re-identificación de instancias, `session_io`);
-> `server/semantic/` (cliente vLLM/Qwen); y `server/correction/` si existe.
+> `vendor/VGGT-Long` (fork `hernanbarreto/VGGT-Long`, rama `stac-g1-baseline`) inicializado y
+> escribible, y `vendor/vggt-omega` clonado. Este prompt reemplaza cualquier prompt anterior
+> sobre el "núcleo de precisión".
+> Leer primero, completos y en este orden: `CLAUDE.md`; `server/config.yaml` (secciones
+> `reconstruction`, `tsdf`, `correction`, `certify`, `segmentation`, `autoprompt`, `phase4`,
+> `postprocessing`); `server/workers/map_worker.py` completo (frame selection `fps|motion|dino|
+> parallax`, `_motion_keyframes`, `_run_da3_anchor`, `_metricize_and_orient`, `_apply_chunked_metric`,
+> `_emit_omega_depth`, `_build_vggtomega_config`, el bloque "THE WALK DECIDES");
+> `server/pipeline_manager.py` (orden RECONSTRUCTION → VLM → SAM3 → CLOUDCOMPY → CERTIFY, resume,
+> cascada); `server/frames/{quality,selector,storage}.py`; `server/reconstruction/{scale_align,
+> scale_model,da3_anchor,orient,chunk_plan,mv_consistency,native_depth,vggt_tracks,bundle_adjust,
+> run_bundle_adjust,colmap_ba,run_colmap_ba,pose_refine,dynamic_masks}.py`;
+> `server/reconstruction/witness/{depth_tracks,frames,mv_votes,status}.py`;
+> `server/reconstruction/certify/{run,scale_stage,repeatability,kit,api}.py`;
+> `server/correction/{visit_drift,visit_drift_run,apply,session,config,floor}.py`;
+> `server/segmentation/{pipeline,session_io,manager,mask_filter}.py` (`rebuild_instance_store`,
+> grilla de máscaras 384×688, `oid = instance_id − 1`); `server/segmentation/autoprompt/`;
+> `server/phase5_qa/tools.py` (`measure_between`); `server/cloudcompy_postprocess.py`;
+> `server/potree_converter.py`; `server/extract_da3_depth.py`;
+> `server/tests/{conftest,synth_metric,synth_correction}.py`;
+> `vendor/VGGT-Long/vggt_long.py` (`_stac_write_origins`, `_stac_metric_lock`, `_stac_depth_graph`,
+> `_stac_intra_chunk`, `process_long_sequence`, `run`); `vendor/VGGT-Long/base_models/
+> vggtomega_adapter.py`; `vendor/VGGT-Long/loop_utils/{metric_lock,sim3utils}.py`;
+> `vendor/VGGT-Long/configs/stac_vggtomega.yaml`; `vendor/vggt-omega/vggt_omega/utils/load_fn.py`
+> (`load_and_preprocess_images`: recorte y reescala en `balanced`/`max_size` — de ahí sale el
+> mapeo píxel-Ω → píxel nativo).
 >
-> **ESTE PROMPT PIDE IMPLEMENTACIÓN DE CÓDIGO COMPLETA.** El resultado es código
-> funcionando en el repo y en el fork, tests verdes, y un kit de validación visual en la UI
-> para que el usuario juzgue el resultado. **No escribas ni modifiques ningún archivo `.md`.**
-> **No termines el turno hasta cumplir la Definition of Done (§13) o chocar con un bloqueo
-> real (§14).**
+> **ESTE PROMPT PIDE IMPLEMENTACIÓN DE CÓDIGO COMPLETA, POR FASES, CON TESTS Y COMMIT POR FASE.**
+> El entregable es código funcionando en el repo y en el fork, tests verdes, y los artefactos de
+> evidencia (JSON + nube por época) para que el usuario juzgue en su viewer.
+> **No escribas ni modifiques ningún archivo `.md`**, con DOS excepciones: el bloque de decisión
+> de `CLAUDE.md` que §2 ordena reemplazar, y una línea en `vendor/VENDORS.lock.md` si se vendoriza
+> algo nuevo (con su licencia). Nada de análisis, planes ni documentación aparte.
+> **No pidas permiso entre fases.** Terminada una fase (tests verdes, commit hecho), seguí con la
+> siguiente. Parás sólo ante un bloqueo real (§9) o al cumplir la Definition of Done (§8).
 
 ---
 
-## 0. Rol, entregable y la regla de validación
+## 0. Rol y regla de validación
 
-Actuás como ingeniero senior de un sistema de **medición**: la nube que produce este
-pipeline se usa para control dimensional de obra, y cada número que sale de ella puede ser
-cuestionado por un tercero. El objetivo es una nube **métrica, globalmente consistente, sin
-deriva, sin duplicados, sin voladores**, con cada punto respaldado por testigos y cada
-transformación registrada.
+Actuás como ingeniero senior de un sistema de MEDICIÓN monocular métrica para control
+dimensional de obra. Cada número que sale de esta nube puede ser cuestionado por un tercero;
+cada punto debe poder decir de qué frame y píxel salió, cuántas vistas lo confirmaron, con qué
+residuo y en qué época.
 
 **Regla de validación, no negociable.** Vos implementás, medís y presentás evidencia. **La
 validación del resultado la hace el usuario, visualmente, en su viewer.** Nunca escribas
-"validado", "verificado visualmente", "el resultado es correcto" ni ningún equivalente
-sobre la calidad de la nube. Lo que sí hacés: correr los tests automáticos, correr el arnés
-de métricas (§10) sobre las escenas de prueba, y entregar en la UI el kit de validación
-(§11) con el que el usuario compara antes/después. Tu mensaje final reporta números y
-dónde mirar; el veredicto es de él.
+"validado", "verificado", "correcto", "subpíxel logrado" ni equivalentes sobre la calidad de la
+nube, las poses o la cámara. Lo que hacés: correr los tests sintéticos (sin GPU) de cada fase,
+dejar cada corrida GPU lista con el comando exacto para que el usuario la lance, y reportar
+números y dónde mirar. El veredicto es de él.
 
-Entrega completa, no incremental. Sin "TODO", "por ahora", fallbacks silenciosos ni
-literales de decisión fuera de `config.yaml`. Convenciones del repo: código y comentarios
-en inglés; decisiones del usuario citadas con fecha.
+Entrega completa, no incremental. Sin "TODO", "por ahora", fallbacks silenciosos ni literales de
+decisión fuera de `config.yaml` (regla del ledger de CLAUDE.md: un número que ACEPTA, RECHAZA,
+DETIENE o CAPA vive en `config.yaml` como dataclass tipada y, donde se pueda, se reemplaza por
+una MEDICIÓN). Convenciones del repo: código, YAML, docstrings y comentarios en inglés;
+`config.yaml` con dataclasses tipadas cuya clave faltante falla al cargar nombrándola; gates
+ADVISORY (medidos y declarados, la corrección se aplica; `veto` sólo para evaluación); cada
+artefacto derivado estampado con `geometry_epoch` y `camera_epoch`; resume seguro por marcador;
+fail-hard con la razón exacta; heartbeat de progreso en toda etapa larga; checkpoint de
+rendimiento en los primeros minutos de toda corrida GPU; un job GPU por vez. Los tests sin GPU
+los corrés vos (`pytest`); esta instrucción supera, sólo para tests sin GPU, la nota "NOR TESTS"
+de CLAUDE.md. Las corridas GPU las lanza el usuario. El tiempo de cómputo NO es criterio de
+diseño; la memoria sí (procesar por frame o por ventana).
 
-**Ejecución por fases (§12b).** El trabajo se hace en cuatro fases secuenciales. Al cerrar
-cada fase: sus tests verdes, commit (fork primero, puntero del submódulo después, en el
-mismo commit de `stac-build`), y **se continúa sin pedir permiso**. Las fases estructuran el
-trabajo y protegen contra la degradación de sesiones largas; no son puntos de espera. Si el
-contexto se agota, cada commit de fase deja el repo ejecutable y el mensaje final indica la
-fase y el paso exacto donde retomar.
+## 1. Diagnóstico medido (por qué el pipeline actual tiene techo)
 
-**Reintentos acotados.** Ante un test que no pasa tras `3` intentos razonados, detenerse:
-reportar estado, error exacto, hipótesis y pedir dirección. Nunca "arreglar" un test
-borrándolo, debilitándolo, marcándolo `skip`/`xfail`, ni relajando tolerancias para que
-pase; nunca revertir código de una fase anterior ya verde para forzar el paso de otra.
-Un bloqueo real (información ausente) se reporta al final con la pregunta exacta y con
-todo lo demás implementado.
+Front-end (intake):
+1. `frames/quality.py` rechaza el 15 % peor de cada video POR CONSTRUCCIÓN (percentil): un video
+   nítido pierde su 15 % "menos nítido", uno movido conserva el 85 % borroso. `phase4` aplica un
+   segundo filtro de blur con criterios distintos (Laplacian 120/25 absolutos + VLM en banda
+   ambigua). Dos filtros incompatibles.
+2. `_motion_keyframes` usa diferencia de gris a 320 px como "paralaje": una rotación pura o un
+   cambio de luz producen keyframes sin baseline — exactamente lo que dispara la deriva de Ω.
+   `select_keyframes_hf` (homografía vs fundamental) y `select_keyframes_parallax` ya contienen la
+   idea correcta; el default es el proxy más débil.
+3. Una sola densidad de frames para dos consumidores opuestos (Ω quiere pocos y separados; la
+   profundidad y los testigos quieren muchos). La historia 250→80→250→60 del quantum es esa
+   contradicción.
+4. La sonda mide la caminata sobre una pasada que derivó (44 m sobre ~19 reales en pccr), decide
+   el chunking con ese error y cuesta una segunda ronda de DA3 y de Ω.
 
----
+Reconstrucción y métrica:
+5. DA3 nested giant **monocular por keyframe** (`extract_da3_depth.py --per_frame`): ±8–15 % de
+   escala por frame (`mad_rel` 10.3 % pccr; held-out 5–10 % en `docs/scale_ab_results.md`). Todo
+   el metro depende del instrumento más ruidoso. La banda near-25 % y "12 anchors porque 24/32
+   empeoran el jackknife" son síntomas de ese ruido.
+6. Ω 1B-512 `balanced` → depth+conf en 688×384 (0.26 MP de 0.9–2.8 MP); `load_state_dict(
+   strict=False)` sin reporte; desproyección con la K por-frame de Ω.
+7. `scale_align`: UN escalar s. La corrección post-hoc (`visit_drift`) ya midió que el error
+   dominante es RADIAL y crece con la distancia: deriva de escala a lo largo del recorrido.
+8. Ninguna etapa refina la profundidad en producción (PGSR/TSDF fuera del flujo, `native_depth`
+   off, `mv_consistency` sólo pre-TSDF). Piso de Ω medido por el repo: ~1.5 % de desacuerdo
+   entre frames a 10 de distancia (`_stac_depth_graph`): 4.5 cm a 3 m, 15 cm a 10 m. PatchMatch
+   con poses correctas rinde 0.1–0.3 % en superficie con textura.
+9. Sin modelo de lente ni cámara única (no existe `distort`; K por frame; `colmap_ba` con
+   `refine_focal_length/principal_point/extra_params = False`; tracks a la grilla DA3; prior 2 m).
+   Que el BA "haya degradado" y `pgsr.pose_refine` perdiera su A/B es lo esperable con eso.
+10. Las etapas del fork (elastic, intra, depth_graph, blend, seams, escalera de escala) ajustan Ω
+    contra Ω: redistribuyen error, no introducen información. Sólo `depth_tracks` y `photobundle`
+    usan la imagen, separados y con gate propio.
+11. `visit_drift` corrige de forma excepcional en escenas con objetos revisitados en dos visitas y
+    no hace nada en las demás: un corrector que depende de la suerte de la escena es el síntoma
+    de un error generado antes, no el mecanismo.
+12. Las confianzas (`conf_percentile 20`, `conf_min_norm 0.10`, `conf_threshold_coef 0.6`,
+    `scale_conf_top_frac 0.10`) vetan puntos por un percentil inventado, y la confianza de VGGT es
+    sistemáticamente baja en superficie plana sin textura: el gate cambia ruido por agujeros.
 
-## 1. Diagnóstico de partida (verificado en el código el 2026-09-11)
+## 2. Decisiones que este prompt SUPERSEDE y las que se mantienen
 
-| # | Hallazgo | Ubicación | Consecuencia |
-|---|----------|-----------|--------------|
-| P1 | **El cierre de loop se detecta y se descarta.** Con `exact_seam_align` y todas las costuras exitosas, `loop_enable_opt = False`: SALAD detecta, se computan puentes, el optimizador nunca corre. | `vggt_long.py` `process_long_sequence`, bloque `"[exact-seam] all seams exact — loop optimizer SKIPPED"` | `loop_closure: true` es letra muerta en producción. Los recorridos no cierran nunca. |
-| P2 | Los puentes de loop se alinean con `weighted_align_point_maps` (ajuste grueso, 25-30 cm) aunque comparten frames con ambos chunks; no reciben anclas DA3 propias (heredan la mediana). | `process_long_sequence`, bloque `for item in self.loop_predict_list`; `_stac_metric_lock` | Las aristas de loop son de decímetros contra costuras de milímetros. Por eso P1 tenía razón a medias. |
-| P3 | Todas las restricciones activas son locales: costuras (vecinos), `intra_chunk` (extremos clampeados a cero), `depth_graph` (pares cercanos). Ninguna cruza el recorrido. | `_stac_intra_chunk`, `_stac_depth_graph`, YAML | Minimizar error local ≠ minimizar error acumulado. 43 costuras perfectas pueden sumar medio metro. |
-| P4 | `solve_scale_graph` es una cadena: costuras σ=0,003, anclas σ=0,08/√n, sin filas de loop. | `metric_lock.py` `solve_scale_graph` | La escala hace un paseo aleatorio a lo largo del recorrido; nada la cierra. |
-| P5 | El optimizador del vendor (`sim3loop`) es por chunk, no por keyframe. | `loop_utils/sim3loop.py` | La deriva intra-chunk no es corregible por el grafo aunque corriera. |
-| P6 | `mv_consistency` corre solo pre-TSDF (máscaras para la malla); la nube —la verdad— no pasa por verificación multi-vista. | `tsdf.mv_consistency`, `reconstruction/mv_consistency.py` | Voladores y profundidad inconsistente entran a la nube y se tratan estadísticamente (SOR/MLS). |
-| P7 | `depth_graph` (afín `z'=a·z+b` por frame, a lo largo del rayo) es la primitiva correcta pero solo usa pares cercanos y proyecciones, no correspondencias reales ni pares de loop. | `_stac_depth_graph`, `metric_lock.py` `solve_depth_graph` | Las dos visitas del mismo objeto nunca reconcilian profundidad. |
-| P8 | Detección de loops solo por apariencia (SALAD, `similarity_threshold: 0.85`) sin verificación semántica ni geométrica fuerte. | `configs/base_config.yaml` `Loop`, `get_loop_pairs` | En arquitectura repetitiva (andenes) el umbral estricto pierde revisitas reales; sin él, falsos positivos. |
-| P9 | `elastic_seam` sin evidencia de aporte (A2 2026-07-11: sin cambio visible al apagar); `blend_copies` promedia copias después de que `frame_ownership` eligió un escritor. | YAML, `_stac_elastic_seams`, `_stac_blend_copies` | Deuda: fuentes de deformación sin rastro. |
-| P10 | `pose_refine.py` (E-full) es numpy en CPU; matado el 04/09 por tiempo. `bundle_adjust` degradó con `prior_stddev_m: 2.0` peleando contra las anclas. | `reconstruction/pose_refine.py`, YAML | No hay refinamiento de poses vivo. |
+Reemplazá en `CLAUDE.md` (única edición .md) los bloques/líneas siguientes por UN bloque nuevo
+`## ⭐ PRECISION PIPELINE — USER DECISION 2026-09-26` que resuma §3 y las claves de config, sin
+narrativa larga:
+- "DOCTRINE: the VGGT-Ω cloud is the truth and nothing modifies it" → la nube Ω es la ÉPOCA 0
+  (baseline, nunca se borra); el pipeline de precisión produce épocas nuevas que el usuario compara
+  y aprueba con Approve/Undo.
+- `bundle_adjust.enabled: false — do NOT re-enable` → reemplazado por §4-F5 (cámara de sesión +
+  distorsión + gauge medido); el BA viejo queda como referencia seleccionable.
+- `scale: global_median, 12 anchors`, `scale_anchor_frames: 0` (DA3 mono en todos los kf) →
+  reemplazados por el gauge de §4-F2 (ventanas multi-vista + escala continua a lo largo del
+  recorrido; el mono queda como instrumento comparado).
+- `native_depth_method: off`, "PGSR = etapa de precisión" → §4-F6.
+- SOR/noise como filtro principal → §4-F7 (testigos); quedan opcionales, off por defecto.
+- `frame_selection: motion` + `keyframe_motion_quantum` + `frame_quality.threshold_pct` +
+  `phase4` 4A como filtro separado → §4-F1 (intake por paralaje, calidad como features, VLM de
+  contenido).
+- "THE WALK DECIDES, THE SINGLE PASS IS ITS PROBE" (re-run tras medir la caminata sobre la pasada
+  Ω) → §4-F2/I4: la caminata se mide con las ventanas DA3 ANTES de Ω, el plan de chunks se
+  decide antes de Ω, no hay re-run. Se conservan `max_walk_single_pass_m`, `chunk_walk_m`,
+  `chunk_frames` (capacidad de la GPU) como reglas, leyendo la caminata de I3.
+- "THE DRIFT IS DEPTH, NOT POSE" y "CORRECTION ALGORITHM (visit drift IS the correction)" →
+  se conservan como MEDICIÓN; `visit_drift` cambia de rol: evidencia antes del núcleo y
+  verificador después (§4-F8). Su época de escala no se aplica cuando el gauge corrió.
+- Alineación de piso automática por keyframe → métrica de certificación (planaridad por
+  chainage); aplicable a pedido.
+- Confianzas como gate de la nube → sólo para la época 0; en las épocas del núcleo son pesos
+  calibrados (§4-F6) y los puntos entran por testigos (§4-F7).
 
----
-
-## 2. Doctrina (no negociable)
-
-1. **La nube es la verdad y se gana el título**: cada punto lleva `frame_global`, `pixel_row`,
-   `pixel_col`, `confidence` y, tras este trabajo, `mv_votes`, `mask_votes` y `status`.
-   Nada se borra: se marca. El viewer oculta, el archivo conserva, el acta cuenta.
-2. **Precisión local ya resuelta, no se toca**: costuras exactas (`robust_rigid` sobre
-   correspondencias píxel a píxel) y `frame_ownership` + `ownership_backfill` quedan como
-   están. Son la odometría del sistema.
-3. **La escala nunca se negocia en las poses.** Pegado y grafo de poses en SE(3). La escala
-   vive en su propio grafo (§5). Los loops **miden** escala (Sim3) y **aplican** en SE(3).
-4. **Un grafo distribuye restricciones verificadas; nunca propone.** Toda arista tiene
-   incertidumbre medida. Sin arista confiable, no hay arista.
-5. **Las personas y los modelos proponen; la geometría mide.** SAM3 propone candidatos de
-   loop e identidad de instancias, y **la geometría decide si esa identidad es posible**
-   (§4.5): SAM3 no es consciente del espacio, el sistema sí. Qwen clasifica y describe;
-   ninguno mueve un punto. La
-   corrección manual por objetos marcados es la **misma arista** que un loop automático,
-   aportada por una persona.
-6. **Fail-fast, transaccional, sin `except Exception: pass`.** Cada etapa deja la sesión
-   intacta si falla. Cada resultado aplicado es una época en el ledger.
-7. **Nada hardcodeado**: todo en `server/config.yaml` con validación al cargar; los
-   valores actuales de producción son los defaults.
-8. **Memoria GPU y datos por chunk.** Los `chunk_*.npy` se procesan uno o dos a la vez,
-   nunca todos en memoria; tensores liberados explícitamente (`del` +
-   `torch.cuda.empty_cache()`) entre etapas e iteraciones del bucle; ninguna estructura
-   densa de tamaño `n_puntos × n_keyframes`. Toda etapa declara su pico de memoria en el
-   acta.
-9. **No tocar la receta pinneada en `CLAUDE.md`**: `conf_percentile`, resolución 512,
-   checkpoint `vggt_omega_1b_512.pt`, tamaño de chunk 60/30 legado, `using_sim3: false`
-   para el pegado. Este trabajo agrega capas; no reabre esas decisiones.
-
----
+Se MANTIENEN intactos: `correction/` (épocas transaccionales, ledger, replay, silhouettes),
+la segmentación SAM3/autoprompt y el instance store, el chat espacial, la regla "el VLM propone,
+nunca mide", el ledger de números arbitrarios, gates advisory, `geometry_epoch`, trazabilidad
+por punto, SALAD para loops, el modo chunked del fork como inicialización para recorridos que
+superan la capacidad de la GPU, la orientación Y-up/piso en y=0 desde poses.
 
 ## 3. Arquitectura objetivo
 
-```
-                 ┌──────────── CAPA 1: POSES (SE(3), por keyframe) ────────────┐
- chunks Omega ──▶ metric_lock ─▶ costuras exactas ─▶ [puentes de loop EXACTOS] ─▶ GRAFO
-                                                     ▲ SALAD + SAM3 + manual     │
-                 ┌──────────── CAPA 2: ESCALA (log-lineal, por chunk) ──────────┤
-                 anclas DA3 + costuras + FILAS DE LOOP + medida/consenso/VIO ─▶ s_k
-                 ┌──────────── CAPA 3: PROFUNDIDAD Y TESTIGOS (por punto) ──────┤
-                 depth_graph con tracks + pares de loop ─▶ mv_votes, mask_votes, status
-                                                                                 │
-                 ┌──────────── BUCLE DE CERTIFICACIÓN ────────────────────────────┘
-                 medir → gates → época → repetir hasta convergencia → acta + kit visual
-```
+Paquete nuevo `server/precision/` (un stage por archivo, `config.py` con dataclasses leídas de
+`reconstruction.precision`, `provenance.py` con el esquema único de trazabilidad, `runner.py`
+con orquestación, resume por stage, cancel y heartbeat) y paquete nuevo `server/intake/` (I0–I4).
+`pipeline_manager` pasa a este orden:
 
-Cada capa reutiliza código existente y se conecta por archivos versionados por época en la
-sesión (ver §8).
+    INTAKE      I0 quality features → I1 keyframes por paralaje + witness_frames
+                → I2 VLM content tags + SAM3 máscaras de exclusión (dynamic/occluder)
+                → I3 DA3 ventanas multi-vista (filas de gauge + caminata métrica + poses locales)
+                → I4 plan de chunks (antes de Ω, sin re-run)
+    OMEGA       P1 UNA pasada Ω (carga estricta; sonda 512/1024 opcional) → época 0 (baseline)
+    SEMÁNTICA-1 VLM understand + SAM3 2D completo + store 3D sobre época 0 (como hoy)
+    EVIDENCIA   visit_drift en modo MEASURE sobre época 0 → filas de escala relativas + loops de
+                instancias (no aplica nada)
+    NÚCLEO      P0 cámara de sesión → P2 gauge continuo (ventanas I3 + filas) → P3 tracks nativo
+                (keyframes + witness) → P4 refine (poses + cámara + landmarks; witness por PnP)
+                → P5 profundidad nativa (sweep guiado + COLMAP referencia) + calibración de
+                confianzas → P6 fusión por testigos (tiers) → época N
+    SEMÁNTICA-2 rebuild del store 3D sobre época N (máscaras via mapeo F0) → CloudComPy (off)
+    CERTIFY     visit_drift en modo VERIFY sobre época N (cierre residual = aceptación del núcleo)
+                → dimensiones conocidas (opcional, roles test|gauge, completables desde el viewer)
+                → precision_report + acta → Approve/Undo
 
----
+Principios que atraviesan todos los stages:
+- **Una cámara por sesión.** El teléfono es una cámara. Por-frame sólo lo que un held-out
+  demuestre (rung R3 de F5).
+- **Píxel nativo como sistema de coordenadas.** Toda observación 2D se guarda en píxeles del
+  frame nativo con el mapeo exacto desde la grilla del modelo que la produjo.
+- **Dos conjuntos de frames.** `keyframes` (pocos, paralaje uniforme: la columna vertebral de Ω y
+  del BA) y `witness_frames` (muchos: localizados contra los landmarks, testigos de profundidad).
+- **Evidencia de imagen, no Ω-contra-Ω.** Toda corrección de pose/cámara/profundidad se paga con
+  residuos en la imagen (reproyección, ZNCC) o con un sensor externo (Stray LiDAR, VIO,
+  dimensión conocida).
+- **Todo gate es una medición.** Held-out fijo (semilla) + bootstrap de la diferencia pareada
+  (`metric_lock.heldout_change`); `improves`/`worsens`/`undecided`; advisory.
+- **La confianza pesa, no veta.** Un punto entra por testigos; la confianza del modelo es un peso
+  calibrado por sesión.
+- **Nada se borra, todo se estampa.** Épocas, provenance por punto, rechazados con motivo,
+  resume por marcador, JSON por stage, `vlm_proposed`/`tool_measured`/`human_validated`.
 
-## 4. Capa 1 — Poses: grafo global sobre restricciones exactas
+## 4. Fases (cada una: objetivo → algoritmo → archivos → config → salidas → tests → comando GPU → commit)
 
-### 4.1 Puentes de loop exactos (resuelve P1, P2)
-En `process_long_sequence`, para cada `item` de `loop_predict_list`:
-- El puente `single_chunk_predictions` contiene frames que **pertenecen** a `chunk_a` y a
-  `chunk_b` (rangos `item[0][1]` y `item[0][3]`). Alinear el puente contra cada chunk con
-  `robust_rigid` sobre las correspondencias píxel a píxel de esos frames compartidos —
-  exactamente como las costuras— en lugar de `weighted_align_point_maps`. Fallback al fit
-  del vendor solo si `robust_rigid` se declara starved, y **registrado** como arista de
-  baja confianza (σ distinta), nunca en silencio.
-- Antes de alinear, el puente pasa por `metric_lock`: planificar y extraer anclas DA3 para
-  los frames del puente (reusar `plan_anchor_indices` / `_ensure_anchors` del worker sobre
-  la ventana del puente; `config.correction_graph.loop.anchors_per_bridge`, default 3).
-  Sin anclas propias, la escala del puente es la del grafo de escala (§5), no "la mediana",
-  y se registra.
-- `compute_sim3_ab` produce `(s_ab, R_ab, t_ab)`. **`s_ab` se conserva como medición** para
-  §5 y para el diagnóstico; a la lista de aristas de pose va la parte SE(3).
-- Eliminar el bloque que pone `loop_enable_opt = False`. En su lugar: `loop_enable_opt`
-  depende de que exista al menos una arista de loop con σ ≤
-  `config.correction_graph.loop.max_edge_sigma_m`.
+### F0 — Cámara de sesión y píxel nativo (`server/precision/camera.py`)
+- Verificá y forzá que `frames/` esté a resolución nativa del video (si algo reescala, corregilo
+  con test). `camera.json`: `{width, height, model: "OPENCV", params: [fx, fy, cx, cy, k1, k2, p1,
+  p2], source, camera_epoch, omega_grid: {w, h, crop_x, crop_y, scale_x, scale_y}, mask_grid:
+  {w, h, ...}}` (la grilla de máscaras SAM3 384×688 también se mapea).
+- Inicialización de K: mediana robusta de las K por-frame de Ω llevada a nativo por el mapeo
+  derivado de `load_and_preprocess_images` (modo, resolución, recorte centrado, múltiplo de 14);
+  reportá `fx_spread_pct`. Con `camera_matrix.csv` de Stray, esa K es `source: stray` y Ω pasa
+  a cross-check reportado. Distorsión inicial 0; la refina F5.
+- Funciones puras con test de ida y vuelta: `omega_px_to_native`, `native_to_omega_px`,
+  `mask_px_to_native`, `undistort_points`, `distort_points`, `undistort_maps` (cv2).
+- Config `precision.camera: {model: OPENCV, init_from: auto|omega|stray, fx_spread_warn_pct}`.
+- Tests: grilla sintética con marcadores pasada por el MISMO `load_and_preprocess_images` → el
+  mapeo recupera las posiciones nativas con error < 1e-6 px; ida y vuelta de distorsión.
+- Commit: `feat(precision): session camera model and exact grid-to-native-pixel mappings`.
 
-### 4.2 Verificación de loops: Sim3 mide, SE(3) aplica, dos testigos más (resuelve P8)
-Un candidato `(i, j)` de SALAD (o de §4.4) se acepta solo si pasa, en este orden:
-0. **Plausibilidad espacial (§4.5)**: SAM3 y SALAD no son conscientes del espacio; el
-   sistema sí. Antes de gastar un puente, el candidato debe ser compatible con las poses,
-   los intrínsecos y la nube cruda bajo un presupuesto de deriva. Si no lo es, no es un
-   loop: es un error de identidad y se trata como tal (§4.5).
-1. **Geométrico**: `robust_rigid` del puente contra ambos chunks con residuo mediano ≤
-   `loop.max_residual_m` y ≥ `loop.min_correspondences`.
-2. **Escala**: `|log s_ab|` ≤ `loop.scale_tol_log` → arista de pose + fila de escala.
-   `|log s_ab|` > tol → **no se descarta**: se registra como `scale_break` con las
-   costuras entre `i` y `j` como sospechosas (§5.3) y la arista de pose entra con σ
-   inflada por `loop.scale_break_sigma_factor`.
-3. **Atención (opcional, config-gated, default off hasta A/B)**: score de validez del par
-   con una capa de atención del backbone (misma idea que VGGT-SLAM 2.0: una capa del
-   agregador sirve para verificar si dos frames ven la misma escena sin fine-tuning).
-   Implementar como `loop.attention_verify: false` con umbral configurable; sacar la capa
-   y el score de los `camera_and_register_tokens` que el modelo ya expone. Si al medir en
-   las escenas de prueba no reduce falsos positivos, queda implementado y OFF.
-4. **Semántico**: si ambos frames tienen instancias SAM3, la intersección de etiquetas
-   estructurales (no móviles, lista `loop.movable_labels`) debe ser ≥
-   `loop.min_shared_structural_labels`; instancias móviles no cuentan a favor ni en contra.
+### F1 — Intake: calidad como features, keyframes por paralaje, witness frames, VLM de contenido (`server/intake/{quality,parallax,content}.py`)
+- **I0 quality features.** Por frame: `fft`, `laplacian`, `luma_mean`, `clip_frac`, `sharp_rank`
+  → `frames/quality_features.json`. NINGÚN rechazo por percentil. Rechazo absoluto sólo por
+  exposición imposible (`luma_lo/hi`, `clip_frac_max` como COTAS) con motivo en el manifiesto.
+  `frames/quality.py` y `phase4` 4A quedan reemplazados (4B, la checklist de recaptura, se
+  mantiene y corre sobre la época N).
+- **I1 paralaje real.** Tracks LK (cv2, grilla `grid_side`, escala `process_scale`) entre frames
+  consecutivos; homografía robusta (RANSAC, cota `ransac_px`); paralaje del paso = mediana del
+  residuo simétrico de transferencia NO explicado por la homografía (px a escala nativa). Quantum
+  en píxeles de paralaje (`parallax_quantum_px`, cota). Rotación pura → paralaje ~0 → sin
+  keyframe; el tramo queda en `intake/coverage_warnings.json` (rotación pura, quieto, oscuro).
+  Dentro de cada ventana de quantum se elige el frame con mejor `sharp_rank` entre los que tienen
+  tracks válidos. `keyframes.json` (reemplaza `selected_frames.json` v2, manteniendo el nombre y
+  las claves v2 para los consumidores) y `witness_frames.json`: todo frame usable con paralaje
+  acumulado ≥ `witness_min_parallax_px` respecto del último witness elegido (dedup), sin tope.
+  `select_keyframes_hf`, `motion`, `dino`, `fps` quedan seleccionables por config; default
+  `parallax_lk`.
+- **I2 VLM de contenido.** Por keyframe (batch, prompt corto, backend `qwen_local` de
+  `server/semantic/`): etiquetas `dynamic` (persona, equipo en movimiento, tren), `occluder`
+  (mano, casco, objeto pegado a la lente), `reflective` (vidrio, espejo, agua, pantalla),
+  `low_info` (pared lisa llena, piso, cielo), con provenance `vlm_proposed`. Para `dynamic` y
+  `occluder`: SAM3 2D con ese vocabulario mínimo (sin autoprompt completo) sobre keyframes Y
+  witness frames → `intake/exclusion_masks/<frame>.png` (255 = excluido) en grilla nativa
+  (reutilizá la lógica de unión de `reconstruction/dynamic_masks.py`). Las máscaras EXCLUYEN
+  observaciones en F4/F6/F7; `reflective` y `low_info` sólo PESAN (van a provenance y al reporte),
+  nunca excluyen. El VLM no fija ningún parámetro.
+- Config `intake: {quality: {luma_lo, luma_hi, clip_frac_max}, parallax: {grid_side, process_scale,
+  ransac_px, parallax_quantum_px, witness_min_parallax_px, min_tracks}, content: {enabled,
+  backend, batch, exclusion_classes: [dynamic, occluder], weight_classes: [reflective, low_info]}}`.
+- Tests: secuencia sintética con rotación pura (0 keyframes nuevos, aviso emitido), traslación
+  (keyframes a intervalos de paralaje), cambio de luz sin movimiento (0 keyframes); witness dedup;
+  VLM mock → máscaras y provenance.
+- Comando: `python -m intake.run --session <dir>`.
+- Commit: `feat(intake): parallax keyframes, witness frames, quality features and VLM content masks`.
 
-### 4.3 Grafo SE(3) por keyframe (resuelve P3, P5, P10)
-Nuevo módulo `vendor/VGGT-Long/loop_utils/pose_graph.py` (dentro del fork, porque opera
-sobre los `chunk_*.npy` alineados antes de escribir salidas):
-- **Nodos**: todos los keyframes.
-- **Aristas de odometría**: para cada par de keyframes consecutivos, la pose relativa de la
-  cadena ya alineada (costuras exactas + `intra_chunk` + `elastic` si sigue activo), con
-  σ_odo = residuo de costura medido (mm) o `graph.sigma_odo_intra_m` dentro del chunk.
-- **Aristas de loop**: las de §4.1/§4.2, con su σ medido.
-- **Prior de gravedad**: la dirección "abajo" de `orient` como prior débil de rotación
-  por nodo (`graph.sigma_gravity_deg`), para que el grafo no pueda inclinar el mundo.
-- **Gauge**: keyframe 0 fijo.
-- **Solver (especificación fija, no reinventar)**: solo `torch` + `torch.linalg`, sin
-  g2o/GTSAM/Ceres. Estado por nodo `T_i ∈ SE(3)` como `(R_i ∈ SO(3), t_i)`. Actualización
-  por **perturbación izquierda en el álgebra** `T_i ← Exp(δ_i) · T_i`, `δ_i ∈ ℝ⁶`
-  (ω, ν). Implementar `so3_exp`/`so3_log` (Rodrigues, con la serie para ángulos pequeños)
-  y `se3_exp`/`se3_log` explícitos y testeados (round-trip, casos límite). Residuo de
-  arista `(i, j)` con medición `Z_ij`: `r_ij = Log(Z_ij⁻¹ · T_i⁻¹ · T_j) ∈ ℝ⁶`, pesado por
-  `Σ_ij⁻¹` (σ de la arista). Jacobianos por **autograd de torch sobre las perturbaciones
-  δ** en el estado actual (evita jacobianos analíticos a mano; verificar con diferencias
-  finitas en un test). Levenberg-Marquardt: normal equations `(JᵀWJ + λ·diag)·δ = −JᵀWr`,
-  resueltas con `torch.linalg.cholesky`/`cholesky_solve` densas para `6·n_kf ≤
-  graph.dense_max_unknowns` (default 12 000 ≈ 2 000 keyframes) y gradiente conjugado
-  precondicionado por bloques para tamaños mayores; λ adaptativo (Nielsen). Huber en
-  aristas de loop y estructurales (`graph.huber_delta_m`, `graph.huber_delta_deg`), no en
-  odometría. Gauge: `δ_0 ≡ 0`. Convergencia por `‖δ‖ < graph.tol` o mejora relativa del
-  costo `< graph.rel_tol`, con `graph.max_iters` como tope de seguridad. Todo en float64
-  para el solve (los datos entran en float32). Tests: gradiente vs diferencias finitas,
-  cierre exacto en un grafo sintético sin ruido, invariancia al gauge, y que con λ→∞ la
-  solución tiende a la identidad.
-- **Aplicación**: la corrección por keyframe se aplica a `world_points`, `extrinsic` y
-  `depth` de los `chunk_*.npy` alineados **como transformación rígida por frame** (puntos y
-  cámara juntos: profundidad por rayo invariante, provenance intacta). Los frames de solape
-  reciben una única corrección (el owner), como ya hace `intra_chunk`.
-- **Gate**: se aplica solo si el residuo de loop total baja ≥ `graph.min_loop_gain` **y** el
-  residuo de costuras held-out (misma estrategia que `chunk_field_verdict`) no empeora más
-  de `graph.max_seam_degradation_m`. Si no, identidad y reporte.
-- Reemplaza al `sim3loop` por chunk en el camino `vggtomega`; el vendor queda intacto para
-  los otros backends.
+### F2 — Gauge métrico continuo + caminata + plan de chunks (`server/precision/gauge.py`, `server/intake/walk.py`, `reconstruction/chunk_plan.py`)
+- **I3 ventanas DA3 multi-vista** sobre `keyframes`: rama conjunta de `extract_da3_depth.py`
+  (`model.inference(images)` sin `--per_frame`), ventanas de `window_frames` con solape
+  `window_overlap_frac`, `process_res`. Salida por ventana: depth métrica por frame, conf, poses
+  DA3 de la ventana, K. Confirmá en `vendor/depth-anything-3` (fork privado; si no está
+  disponible, leé el paquete instalado en el env `da3`) que el nested devuelve profundidad
+  MÉTRICA en multi-vista; si devuelve up-to-scale, la rama métrica se toma del mono de la misma
+  ventana y `gauge.json` dice cuál fue el caso.
+- **Caminata métrica.** Encadenando las poses DA3 de ventanas consecutivas por sus frames
+  compartidos (Sim(3)/SE(3) sobre centros compartidos, escala 1 si métrico) se obtiene una
+  trayectoria de keyframes con error sólo local → `walk_length_m` y chainage por keyframe
+  (`intake/walk.json`). Esta es la caminata que decide; la de la pasada Ω se sigue midiendo y
+  reportando como evidencia, nunca decide.
+- **I4 plan de chunks antes de Ω.** `chunk_plan.plan_chunks` lee `walk.json`: capacidad GPU
+  (`chunk_frames: 0` = medida) ≥ n_kf y walk ≤ `max_walk_single_pass_m` → una pasada; si no,
+  ventanas de `chunk_walk_m` al 50 % (clamp existente). El re-run desaparece: `map_worker` corre
+  Ω una sola vez con ese plan. Los anchors por chunk del `metric_lock` del fork se alimentan de
+  las ventanas I3 (mismos npz, sin segunda ronda DA3).
+- **Filas de escala** (log-espacio, cada una con σ medida):
+  ABSOLUTAS: ventana DA3 (gain Huber DA3/Ω sobre todos los píxeles válidos ponderados por conf,
+  y también la variante near-band actual — ambas reportadas; s_w = mediana ponderada, σ_w =
+  bootstrap sobre frames); mono por frame (instrumento actual); VIO (`vio_scale.py`); Stray
+  LiDAR (ratio LiDAR/Ω por frame); dimensiones conocidas con rol `gauge` (F8).
+  RELATIVAS: seams del modo chunked, `scale_loop_rows` de visit_drift (EVIDENCIA sobre época 0),
+  `da3_trend_rows`.
+- **Modelo continuo.** x(c) = log s(c) lineal a trozos con nudos cada `knot_walk_m`, mínimos
+  cuadrados ponderados 1/σ² + suavidad (segunda diferencia) con λ elegido por
+  leave-one-window-out (medición). Instrumento aplicado = el que gana el held-out; todos
+  reportados (`sigma_by_instrument`, `heldout_by_instrument`).
+- **Aplicación.** Por keyframe k: s_k = exp x(c_k); depth × s_k alrededor de su propia cámara +
+  traslación que mantiene la caminata continua (reusá `visit_drift_run.scale_epoch` /
+  `scale_transforms` / `warp_subset`). `scale_diagnostics.json` conserva sus claves v1 y agrega
+  `v2`. `correction.visit_drift.scale_epoch` se apaga automáticamente cuando el gauge corrió
+  (`skip_when_gauge_applied`), para no aplicar dos veces.
+- Config `precision.gauge: {window_frames, window_overlap_frac, process_res, knot_walk_m,
+  heldout_confidence, instruments: {da3_windows, da3_mono, vio, stray, known_dims}}`.
+- Tests: escena sintética con deriva de escala conocida a lo largo de la caminata → recuperada
+  dentro de σ; ventanas con ruido mayor que mono → el held-out elige mono; caminata sintética →
+  `walk_length_m` dentro del error local; plan de chunks reproducible.
+- Comando: `python -m precision.gauge --session <dir>` (incluye I3/I4 si faltan).
+- Commit: `feat(precision): continuous metric gauge along the walk, DA3-window walk and pre-omega chunk plan`.
 
-### 4.4 SAM3 como detector de loops (resuelve P8 en arquitectura repetitiva)
-Nuevo `server/reconstruction/loops/instance_loops.py`:
-- Una instancia re-identificada por continuidad de tracking (lo que ya hace
-  `segmentation/`) que aparece en dos ventanas temporales disjuntas separadas por más de
-  `loops.min_gap_keyframes` es un candidato `(i, j)` (frames centrales de cada ventana).
-- Una instancia cuyos puntos, tras la primera pasada, caen en **dos clusters 3D
-  disjuntos** (distancia entre centroides > `loops.duplicate_min_sep_m` y sin puntos
-  puente) es un candidato de loop **y** la métrica de duplicado de §10.
-- **Toda identidad propuesta por SAM3 pasa por §4.5 antes de ser candidato.** Una
-  re-identificación que la geometría declare implausible no genera loop: genera una
-  **división de instancia** (la instancia fusionada se parte en dos, con registro en el
-  ledger de segmentación y en el acta) y, opcionalmente, un aviso al usuario.
-- Los candidatos se escriben en el mismo `loop_closures.txt` que consume `get_loop_pairs`
-  (el fork ya lo lee si existe), con una columna `source` (`salad` | `instance` | `manual`)
-  y pasan la misma verificación de §4.2.
-- **Manual = misma arista**: si existe `server/correction/`, la corrección por objetos
-  marcados produce un candidato `manual` con las ventanas de las dos visitas; su solver
-  actual (distribución por keyframe hacia atrás) se reemplaza por una arista en este grafo
-  cuando el grafo está disponible, y el ledger registra ambos caminos.
-- Qwen (`server/semantic/`) se usa **solo** para clasificar instancias en
-  `structural | movable | dynamic` (prompt con la imagen y la máscara; salida JSON
-  validada) y alimentar `loop.movable_labels` por sesión. Nunca aporta geometría.
+### F3 — Ω: carga estricta, sonda de resolución, época 0 y evidencia (`vggtomega_adapter.py`, `server/precision/omega_probe.py`, `correction/visit_drift_run.py`)
+- `load_state_dict(strict=False)` → `missing_keys`/`unexpected_keys` al log y a `omega_load.json`;
+  si falta un tensor de `aggregator`, `camera_head` o `depth_head`, fail-hard nombrándolo.
+- `_emit_omega_depth` emite por keyframe `depth`, `conf`, `K_omega`, `pose_c2w` (verificá; si no,
+  agregalo). Ω recibe SÓLO `keyframes` (los witness no entran a Ω).
+- Sonda de resolución: `precision.omega.resolution_probe: {enabled, resolutions, mode, window_frames}`
+  sobre la misma ventana; mide desacuerdo intra-ventana de profundidad (`depth_pair_samples` +
+  `pair_depth_relation`) y, cuando F4/F5 existan, reproyección held-out por resolución →
+  `omega_probe.json`. Reporta; el usuario fija el valor de config.
+- Época 0 = la nube Ω actual con su receta validada (conf gates, SOR) — sin cambios.
+- `visit_drift` gana `mode: measure|apply|verify`. En EVIDENCIA corre `measure` sobre época 0 y
+  publica `scale_loop_rows.json` (para F2) e `instance_loops.json` (pares de keyframes por
+  instancia re-identificada, con σ del silhouette match) para F4; no aplica nada.
+- Tests: adapter con modelo mock; informe de claves; `visit_drift` en `measure` no escribe época.
+- Comando: `python -m precision.omega_probe --session <dir>`.
+- Commit: `feat(precision): strict omega load, resolution probe, epoch-0 evidence export`.
 
----
+### F4 — Correspondencias subpíxel en píxel nativo (`server/precision/tracks.py`, extiende `reconstruction/vggt_tracks.py`)
+- Tracker VGGSfM vendorizado (coarse + `track_refine` fine sobre recortes) a su resolución máxima;
+  TODA salida en píxel nativo (F0). `tracks.npz` v2: `obs_uv_native`, `obs_uv_sigma`,
+  `track_split` (0 fit / 1 held-out, `heldout_frac`, semilla fija), `window_id`, `is_loop_pair`,
+  `frame_kind` (keyframe|witness), más las claves v1.
+- Queries: grilla + máximos de gradiente (Shi-Tomasi, `corner_quality`) fuera de las máscaras de
+  exclusión de I2 y fuera de bordes de profundidad del prior (`depth_edge_tol_rel`). Ventanas
+  solapadas de keyframes + pares de loop (SALAD `loop_closures.txt` + `instance_loops.json`) +
+  ventanas witness→keyframe (cada witness con sus dos keyframes vecinos) para la localización de
+  F5.
+- Opcional, off por defecto: `dense_matcher: none|roma`; verificar licencia antes de vendorizar
+  y anotarla en `VENDORS.lock.md`.
+- Tests: escena sintética renderizada (planos texturizados, cámara Brown, poses conocidas) →
+  RMS px de tracks vs GT reportado; split determinista; exclusión respetada.
+- Comando: `python -m precision.tracks --session <dir>`.
+- Commit: `feat(precision): native-pixel subpixel tracks with held-out split, loops and witness windows`.
 
-### 4.5 Plausibilidad espacial de la identidad (SAM3 propone; poses + intrínsecos + nube deciden)
-Nuevo `server/reconstruction/loops/spatial_gate.py`. Aplica a **todo** candidato de loop
-(SALAD, instancia, manual) y a todo duplicado detectado.
+### F5 — Refinamiento conjunto y localización de witness (`server/precision/refine.py`, reusa `reconstruction/colmap_ba.py`)
+Incógnitas: SE(3) por keyframe, cámara de sesión (fx, fy, cx, cy, k1, k2, p1, p2), landmarks.
+Residuos: reproyección Huber en píxel nativo. Motor: pycolmap/Ceres (`_tune_ceres` se mantiene).
+- Inicialización: poses Ω × gauge F2, cámara F0, landmarks por triangulación multi-vista de
+  tracks fit (ángulo ≥ `min_tri_deg`), profundidad del prior como inicial y cross-check.
+- Gauge: NO prior de 2 m. Escala fijada por filas de F2: prior blando sobre distancias entre
+  centros consecutivos con σ = σ_gauge(c) × distancia (`prior_position_std` por keyframe) y, si
+  hay dimensión conocida `gauge`/Stray/VIO, sus filas con su σ.
+- Escalera de rungs, cada uno juzgado por reproyección held-out (tracks split=1, nunca
+  optimizados) con `heldout_change` bootstrap pareado por track: R0 cámara fija → R1 + fx, fy,
+  cx, cy → R2 + k1, k2, p1, p2 → R3 focal por bloques temporales (`focal_block_frames`, sólo si
+  R2 deja residuo sistemático en el tiempo y el held-out mejora — EIS del teléfono). Se aplica
+  el rung con mejor held-out; todos en `refine.json`.
+- **Localización de witness frames** (segunda pasada, patrón `refine_poses_ba_twopass`): PnP +
+  refinamiento de cada witness contra los landmarks fijos usando sus tracks witness→keyframe,
+  cámara de sesión fija; `witness_poses.txt` (época N, formato de `camera_poses.txt`) con RMS
+  por frame; un witness cuyo RMS supera el bootstrap del held-out de keyframes queda
+  `unlocalized` (no testifica) con motivo.
+- Diagnóstico rolling shutter (declarado, no corregido): residuo held-out por fila de imagen vs
+  velocidad angular; correlación reportada.
+- Salida: `camera.json` (camera_epoch+1), poses keyframes época N+1 por el mecanismo de épocas,
+  `witness_poses.txt`, `refine.json`, `refine_residuals.npz`.
+- Tests: BA sintético con cámara Brown conocida y poses perturbadas → parámetros recuperados
+  dentro de la tolerancia del propio bootstrap; con distorsión sintética 0 la escalera elige R0;
+  witness sintéticos localizados dentro del error de keyframes.
+- Comando: `python -m precision.refine --session <dir>`.
+- Commit: `feat(precision): joint pose + session camera refinement and witness localization judged by held-out reprojection`.
 
-**Presupuesto de deriva.** Dos observaciones separadas por un recorrido de longitud `L`
-(metros caminados entre las dos ventanas, según la trayectoria actual) pueden estar
-desplazadas por deriva acumulada hasta
-`δ(L) = max(loops.drift_floor_m, loops.drift_rate_m_per_m · L)` en traslación y
-`θ(L) = max(loops.drift_floor_deg, loops.drift_rate_deg_per_m · L)` en rotación.
-Cuando el grafo de poses ya corrió una vez, `δ` y `θ` se reemplazan por la incertidumbre
-acumulada de la cadena de odometría entre `i` y `j` (suma de σ de costuras + σ intra-chunk),
-que es la medida real y no un default. Los defaults salen de lo medido (1,3 cm/m) y son
-configurables.
+### F6 — Profundidad a resolución nativa + calibración de confianzas (`server/precision/{depth_sweep,depth_colmap,confidence}.py`)
+- **Plane-sweep guiado por prior (propio, torch, determinista).** Por keyframe i: prior
+  z0 = depth Ω × s_k llevada a nativo con el guided filter de `native_depth.py`; normal n0 del
+  prior. Vistas vecinas: `n_views` entre keyframes Y witness localizados, elegidas por
+  covisibilidad y ángulo de triangulación en [`min_tri_deg`, `max_tri_deg`], cámara y poses de
+  F5, imágenes undistorted (mapas F0), píxeles de exclusión I2 fuera. Hipótesis: `n_hyp` en
+  inverso de profundidad en [z0(1−β), z0(1+β)] más z0; β por píxel desde la confianza del prior
+  calibrada (abajo), con cota `beta_max`. Cada hipótesis es un plano (z, n0) → homografía por
+  vista → ZNCC sobre parche P×P; agregación robusta mejor-k de N (oclusión). Mejor hipótesis +
+  refinamiento subpíxel parabólico en inverso de profundidad. `propagation_iters` iteraciones
+  edge-aware (mediana ponderada por color entre vecinos, re-evaluada). Piso de ruido de ZNCC
+  MEDIDO por distribución nula (parches de vistas barajadas), no un umbral.
+- **Consistencia geométrica a nativo.** Reproyección a cada vecino: consistente si
+  |z_ij − d_j|/d_j < τ_rel y reproyección < τ_px en ≥ `min_consistent_views` (lógica de
+  `mv_consistency.py` movida a nativo). τ_px = `tau_px_k` × RMS held-out de F5; τ_rel desde el
+  desacuerdo intra-ventana medido en F3.
+- **Tiers.** Píxel con ZNCC sobre el piso de ruido y consistente → `source 0` (tier 0). Píxel sin
+  señal ZNCC pero cuyo prior es consistente prior-contra-prior en ≥ `prior_fill_min_views` →
+  `source 1` (tier 1, `prior_fill`). Sin ninguna de las dos → descartado con motivo. Config
+  `prior_fill: keep|drop` (default keep: lo descartado no se puede mirar, lo marcado sí).
+- **Calibración de confianzas por sesión** (`confidence.py`): con la profundidad tier 0 como
+  referencia, error relativo del prior Ω por bin de confianza Ω, y de DA3 por bin de confianza
+  DA3 (expp1−1), por bin de distancia → `confidence_calibration.json`. Esa curva fija β por píxel
+  y los pesos de las filas del gauge; reemplaza a `conf_percentile`/`conf_min_norm`/
+  `scale_conf_top_frac` en las épocas del núcleo (la época 0 conserva sus gates).
+- **Referencia A/B: COLMAP PatchMatch** (`pycolmap.patch_match_stereo`, `geom_consistency=True`)
+  sobre imágenes undistorted con el modelo de F5; `depth_min/max` por imagen desde landmarks y
+  prior. Sólo comparación. Licencias: COLMAP/pycolmap BSD; OpenMVS (AGPL) no, salvo orden del
+  usuario.
+- Salida: `depth_native/frame_<n>.npz` {depth f32, ncc f32, n_consistent u8, source u8, normal
+  f16, residual_rel f16} + `depth_native/report.json` (por frame y global: % tier 0/1/descartado,
+  ZNCC mediano, sweep-vs-COLMAP donde ambos existan).
+- Tests: escena sintética texturizada con GT → error del sweep vs GT por bin de distancia y vs
+  el prior (mejora en textura; sin textura queda tier 1 o descarte, nunca inventa); calibración
+  sintética recupera la curva conf→error inyectada.
+- Comandos: `python -m precision.depth_sweep --session <dir>`,
+  `python -m precision.depth_colmap --session <dir>`.
+- Commit: `feat(precision): prior-guided native-resolution plane-sweep depth, tiers and per-session confidence calibration`.
 
-**Reglas (todas en el acta con valor/umbral/veredicto):**
-1. **Separación de clusters.** Para candidatos por instancia o por duplicado: distancia
-   entre los centroides de los dos clusters 3D (nube cruda, poses actuales) ≤ δ(L)
-   → compatible con "mismo objeto + deriva" → candidato de loop. Distancia > δ(L) por más
-   de `loops.identity_reject_factor` → **no es deriva**: SAM3 fusionó dos objetos distintos
-   → división de instancia, no loop. Zona intermedia → candidato con σ inflada y marcado
-   `ambiguous` para el kit visual.
-2. **Frustum recíproco.** Transformar el cluster de la visita B a los frames de la visita A
-   con las poses actuales y ensanchar por δ(L)/θ(L): debe proyectar dentro de la imagen
-   (margen `loops.frustum_margin_px`) y a profundidad dentro de
-   `[loops.min_depth_m, loops.max_depth_m]` en al menos `loops.min_frustum_frames` frames
-   de A; y viceversa. Si en ningún frame es visible ni con el presupuesto de deriva, no es el
-   mismo objeto. (Un objeto visto desde el lado opuesto sigue siendo el mismo: el frustum
-   evalúa visibilidad, no orientación de caras.)
-3. **Tamaño y forma.** Dimensiones de modelo de la primitiva ajustada a cada cluster (los
-   mismos `primitives` del diseño de fusión: extents soportados, diámetro, ancho entre
-   jambas) deben coincidir dentro de `loops.size_tol` (relativa). Distintas → no es el mismo
-   objeto, aunque SAM3 y SALAD digan que sí.
-4. **Topología del recorrido.** Si entre `i` y `j` la trayectoria no sale de un corredor y
-   el objeto pertenece a una clase repetitiva (`loops.repetitive_labels`, p. ej. columna,
-   luminaria, señal), el candidato requiere además ≥ `loops.min_context_instances`
-   instancias estructurales vecinas que también pasen las reglas 1–3 (el contexto, no el
-   objeto aislado, es lo que distingue una columna de la siguiente).
-5. Para candidatos SALAD sin instancias: reglas 2 y 4 sobre los frustums de los frames `i`
-   y `j` y sobre la nube cruda en su vecindad.
+### F7 — Fusión por testigos y provenance (`server/precision/{fuse,provenance}.py`)
+- Desproyección de `depth_native` (tier 0 y, si `prior_fill: keep`, tier 1) con cámara y poses
+  F5. Un punto ENTRA sólo con ≥ `min_witness_views` vistas consistentes (tier 1 con
+  `prior_fill_min_views`). Dedup por voxel `voxel_m` conservando el punto de mejor evidencia
+  (n_consistent, luego ZNCC), no un promedio. SOR/noise de `cloudcompy_postprocess.py`: OFF por
+  defecto, seleccionables.
+- `origins.npz` v2 (superconjunto de v1, mismos nombres v1): `frame_global, pixel_row, pixel_col`
+  (nativo), `n_consistent, ncc, source (tier), residual_rel, content_flags (reflective/low_info),
+  geometry_epoch, camera_epoch`. Loader único en `provenance.py` (v1 y v2); test de
+  compatibilidad con `session_io`, `correction/`, `witness/`, `certify/`, `mask_filter`.
+- `rejected_points.npz` con `reason` (u8: insufficient_witnesses, inconsistent, prior_fill_dropped,
+  excluded_mask, dedup, unlocalized_frame) y las mismas columnas de provenance.
+- Publicación: PLY + origins + Potree por el apply transaccional existente (`correction/apply.py`,
+  `_tx_epoch_<N>`), `geometry_epoch` incrementado, época 0 intacta. El viewer expone el tier
+  como atributo filtrable (patrón del slider de confianza: preview en vivo).
+- Tests: ningún punto con menos testigos que el mínimo; cada punto reconstruye frame y píxel
+  exactos; v1/v2; rechazados suman con la nube el total de candidatos.
+- Commit: `feat(precision): witness-based fusion with tiers, full provenance and rejected set`.
 
-**Reevaluación.** Después de cada corrida del grafo de poses, los candidatos rechazados por
-regla 1 en zona intermedia y las divisiones de instancia se reevalúan con las poses
-corregidas y la incertidumbre real: lo que era deriva vuelve como loop; lo que era fusión
-errónea se confirma. Todo queda en el ledger.
+### F8 — Semántica sobre la época N, verificación y certificación (`server/precision/certify.py`, `pipeline_manager.py`, `segmentation/`, `correction/`, UI mínima)
+- **SEMÁNTICA-2**: tras la época N, `rebuild_instance_store` sobre la nube nueva; el lookup
+  máscara↔punto usa `mask_px_to_native` (F0). Las máscaras 2D NO se recalculan. `mask_filter` y
+  los OBB corren sobre la época N.
+- **visit_drift VERIFY**: re-mide los cierres sobre la época N. El cierre residual contra la
+  repetibilidad de la sesión (`certify.repeatability.session_repeatability`) es la métrica de
+  aceptación del núcleo y va al acta como tal. `apply` sigue disponible (advisory, Approve/Undo)
+  para lo que el núcleo dejó; su `scale_epoch` queda apagada si el gauge corrió. La alineación
+  de piso pasa a métrica (planaridad del piso por chainage) con `correction.floor.auto_apply:
+  false`; aplicable a pedido.
+- **Dimensiones conocidas, opcionales, con roles.** `ground_truth.json` por sesión: lista de
+  `{id, kind: two_points|instance_extent, a, b | instance_id, axis?, nominal_m, role: test|gauge,
+  note, provenance: human_validated}`. Si no existe, `known_dims` se apaga solo y el reporte deja
+  la sección `pending` con el esquema vacío. Endpoint `POST /api/precision/known_dims` y un botón
+  en la herramienta de medir del viewer ("guardar como dimensión conocida", rol elegible) que
+  escribe la entrada y re-corre SOLO `precision.certify` (y, si el rol es `gauge`, propone una
+  época de escala por el mecanismo de `scale_epoch`, advisory). Una dimensión `gauge` se reporta
+  como `fit`, nunca como `error`; sólo las `test` certifican.
+- **`precision_report.json` por época** (todo `tool_measured`): error en dimensiones `test`
+  (época 0 vs N); RMS de ajuste de plano por bin de distancia sobre instancias planas
+  (`surface_fit`, roles wall/floor/ceiling); planaridad del piso por chainage; reproyección
+  held-out por rung y RMS de witness (F5); σ de escala por instrumento y elegido (F2); histograma
+  de testigos, % tier 0/1, % rechazados por motivo (F7); sweep-vs-COLMAP (F6); desacuerdo
+  intra-ventana por resolución (F3); cierre residual visit_drift (verify); avisos de cobertura
+  de intake. Integrado al acta del kit (`certify/kit.py`) sin cambiar Approve/Undo.
+- `phase4` 4B (recaptura) corre sobre la época N.
+- Tests: reporte sobre la escena sintética con GT → errores reportados coinciden con los reales
+  dentro de σ; sin `ground_truth.json` → `pending`, sin fallo; rol `gauge` nunca aparece como
+  error; verify no escribe época.
+- Commit: `feat(precision): semantics rebuild on new epoch, visit-drift verification, optional known dimensions with roles, precision report`.
 
+### F9 — Runner, config, integración (`server/precision/runner.py`, `server/intake/run.py`, `pipeline_manager.py`, `map_worker.py`, `config.yaml`)
+- `pipeline_manager` implementa el orden de §3 con resume por stage (marcadores + JSON), cascada,
+  cancel, heartbeat `heartbeat_s`, checkpoint de rendimiento `perf_checkpoint_s` (tasa medida vs
+  esperada, abortar con razón), vLLM descargado durante GPU pesado como hoy. `map_worker` corre
+  Ω UNA vez con el plan de I4 y nunca re-run.
+- Bloque `reconstruction.precision:` + `intake:` en `config.yaml` con TODAS las claves de §4
+  (dataclasses; clave faltante falla nombrándola; cada valor que decide lleva en su comentario
+  COTA / MEDIDO / DECISIÓN DEL USUARIO). Esqueleto mínimo (valores iniciales son cotas o
+  puntos de partida a medir, no decisiones):
 
-### 4.6 Restricciones estructurales: la obra como su propio control
-El caso que rompe cualquier grafo de loops es la ida y vuelta por un corredor recto: un
-cierre al final ata la posición del extremo, pero la combadura lateral y la guiñada del
-tramo intermedio quedan casi inobservables y el grafo las **reparte** en vez de eliminarlas.
-Dos defensas, ambas obligatorias:
+      intake:
+        quality:  {luma_lo: 40.0, luma_hi: 220.0, clip_frac_max: 0.25}
+        parallax: {grid_side: 32, process_scale: 0.25, ransac_px: 1.0, parallax_quantum_px: 12.0,
+                   witness_min_parallax_px: 1.5, min_tracks: 40}
+        content:  {enabled: true, backend: qwen_local, batch: 8,
+                   exclusion_classes: [dynamic, occluder], weight_classes: [reflective, low_info]}
+      reconstruction:
+        simple:
+          frame_selection: parallax_lk        # parallax_lk | motion | dino | fps | hf (legacy)
+          walk_source: da3_windows            # da3_windows (decides) | omega_pass (evidence only)
+        precision:
+          enabled: true
+          camera:   {model: OPENCV, init_from: auto, fx_spread_warn_pct: 2.0}
+          omega:    {resolution_probe: {enabled: true, resolutions: [512, 1024], mode: max_size, window_frames: 60}}
+          gauge:    {window_frames: 12, window_overlap_frac: 0.5, process_res: 1008, knot_walk_m: 3.0,
+                     heldout_confidence: 0.95,
+                     instruments: {da3_windows: true, da3_mono: true, vio: true, stray: true, known_dims: true}}
+          tracks:   {win: 32, stride: 16, grid_side: 48, corner_quality: 0.01, heldout_frac: 0.25, seed: 0,
+                     loop_window: 8, depth_edge_tol_rel: 0.05, dense_matcher: none}
+          refine:   {min_tri_deg: 2.0, rungs: [R0, R1, R2, R3], focal_block_frames: 60,
+                     heldout_confidence: 0.95, ceres_max_iter: 500, witness_localize: true}
+          depth:    {n_views: 8, best_k: 4, min_tri_deg: 1.5, max_tri_deg: 25.0, n_hyp: 64, beta_max: 0.10,
+                     patch: 7, propagation_iters: 2, min_consistent_views: 3, prior_fill_min_views: 2,
+                     tau_px_k: 2.0, prior_fill: keep, reference: colmap_patchmatch}
+          confidence: {calibrate: true, bins_conf: 10, bins_distance_m: [0, 2, 4, 8, 16]}
+          fuse:     {min_witness_views: 3, voxel_m: 0.004, sor: false, noise_filter: false}
+          certify:  {plane_bins_m: [0, 2, 4, 8, 16], known_dims: {file: ground_truth.json, optional: true}}
+          runner:   {heartbeat_s: 20, perf_checkpoint_s: 180}
+        correction:
+          visit_drift: {pipeline_mode_pre: measure, pipeline_mode_post: verify,
+                        scale_epoch: {skip_when_gauge_applied: true}}
+          floor: {auto_apply: false}
 
-**a) Densidad de loops.** Los loops por instancia (§4.4) existen para esto: en una ida y
-vuelta cada objeto estructural se ve dos veces → aristas cruzadas a lo largo de todo el
-recorrido. Métrica `loop_coverage`: fracción de la trayectoria (en metros) a menos de
-`loops.coverage_radius_m` de alguna arista de loop aceptada. Por debajo de
-`loops.min_coverage` el acta lo declara y el kit visual lo muestra.
+- Tests de integración sin GPU: pipeline de punta a punta sobre la escena sintética con modelos
+  mock (Ω/DA3/VLM/SAM3 reemplazados por GT + ruido + máscaras sintéticas) → época N+1, origins v2,
+  rejected, precision_report; resume a mitad no repite stages; cancel limpia; sesión con
+  `ground_truth.json` y sin él.
+- Edición de `CLAUDE.md` según §2.
+- Commit: `feat(precision): pipeline order, runner, config block and end-to-end integration`.
 
-**b) Restricciones estructurales** (`server/reconstruction/loops/structural.py`), como
-aristas adicionales del grafo de §4.3, todas robustas (Huber), todas solo sobre instancias
-clasificadas `structural` (§4.4), todas con tolerancia configurable porque la obra real no
-es perfecta, y todas registradas con su residuo:
-- **Datum de piso**: patches de piso (por keyframe, `orient`/`align_floor` ya los detectan)
-  sobre un plano común a lo largo del recorrido; escalones y pendientes se detectan como
-  discontinuidades del perfil (misma lógica que el modelo `plane`/`profile` de la fusión) y
-  no se fuerzan. Ataca la deriva vertical (el "chimney 16 cm apart in y" de test4).
-- **Planaridad de muros largos**: un muro segmentado como una instancia a lo largo de
-  decenas de metros es una restricción directa contra la combadura lateral, justamente en
-  la dirección que los loops no observan. Residuo tolerado `structural.wall_tol_m`.
-- **Verticalidad de columnas** y **paralelismo/coplanaridad de elementos repetidos**
-  (luminarias, rieles de guía) cuando la clase lo justifica.
-- **Geometría normativa ferroviaria como ancla de escala**: trocha, gálibo, altura y borde
-  de andén son dimensiones reguladas presentes en toda escena de metro. Cuando una
-  instancia de esas clases se segmenta con nitidez, su dimensión de modelo (primitivas)
-  contra el valor normativo configurado (`structural.regulated_dims`, cargado por proyecto,
-  vacío por defecto) entra como **fila absoluta del grafo de escala (§5.2)** con σ real.
-  Es la misma vía que la medida del usuario, sin que el usuario mida.
+## 5. Reglas transversales (obligatorias en cada fase)
+- Cero literales de decisión en el código; cotas en config; umbrales reemplazados por mediciones
+  (bootstrap held-out, distribución nula, CV); un test por paquete que falla si aparece un literal
+  que decide (patrón `test_correction_config.py`).
+- Cada stage escribe su JSON con entradas, parámetros efectivos, números medidos y veredicto
+  advisory; cada artefacto lleva `geometry_epoch` y `camera_epoch`.
+- Provenance por punto siempre; nada se descarta sin `reason`; toda etiqueta VLM es `vlm_proposed`.
+- Resume por marcador; un stage re-ejecutado sobre datos ya corregidos lo detecta y falla con la
+  instrucción exacta (patrón `_stac_depth_graph_applied`).
+- Logs con progreso y tasa en toda etapa larga; el usuario lanza las corridas GPU; al cierre de
+  cada fase dejás el comando exacto y el artefacto a mirar.
+- Código, YAML y comentarios en inglés. Tests en `server/tests/test_intake_*.py` y
+  `test_precision_*.py`, sin GPU, sobre `server/tests/synth_precision.py` (extensión de
+  `synth_metric.py`: escena de planos y cajas texturizadas, cámara Brown, render por raycast numpy
+  con profundidad/poses GT, secuencia de frames con rotación pura / traslación / cambio de luz,
+  máscaras dinámicas sintéticas, perturbaciones configurables de pose, escala a lo largo de la
+  caminata, distorsión y ruido).
+- Compatibilidad: todo consumidor de `selected_frames.json`, `origins.npz`, `camera_poses.txt`,
+  `scale_diagnostics.json`, `segmentation_result.json` sigue funcionando (tests de contrato).
+- Un job GPU por vez; performance checkpoint en los primeros minutos; nada de tiempo como
+  criterio de calidad.
 
-### 4.7 Autoridad acotada y saturación
-Toda etapa correctiva (grafo de poses, grafo de escala, profundidad, `intra_chunk`,
-`elastic` si sigue activo) declara en config su **autoridad máxima** por keyframe/chunk y
-reporta la fracción usada. Saturación (> `authority.saturation_warn`) es bandera en el acta
-y en el kit visual. Para el grafo de poses: una corrección por keyframe mayor que el
-presupuesto de deriva δ(L) del §4.5 no es deriva, es un loop falso → **veto de esa arista**
-y re-solve sin ella, con registro.
+## 6. Orden de ejecución y commits
+F0 → F1 → F2 → F3 → F4 → F5 → F6 → F7 → F8 → F9. Cada fase: implementación completa → `pytest`
+(nuevos + suite existente) verde → commit con el mensaje indicado → siguiente fase sin
+preguntar. Si una fase descubre que una anterior necesita un cambio, se corrige en la misma fase
+y se anota en el mensaje de commit.
 
-### 4.8 Incertidumbre intrínseca gratis
-Cada frame de solape es predicho dos veces (chunk A y chunk B). El desacuerdo píxel a píxel
-entre ambas predicciones —ya calculado en `seam_relative_scale` y hoy descartado— es una
-estimación de incertidumbre del modelo para ese frame. Persistirlo por frame
-(`omega_run/uncert_<frame>.npy`) y usarlo como σ por píxel en los testigos (§6) y como
-componente de σ en las aristas de odometría (§4.3). Opcional, config-gated: pasada
-adicional de Omega con límites de chunk desplazados (`certify.ensemble_offset_frames`)
-para una tercera predicción por frame en corridas de certificación.
+## 7. Qué reportás al final (mensaje final, sin adjetivos de calidad)
+Por fase: archivos creados/modificados, tests (cantidad, verdes), hash de commit. Por sesión de
+prueba que el usuario corra: `intake/coverage_warnings.json` y conteos keyframes/witness,
+`walk.json`, `gauge.json` (σ por instrumento, elegido), `omega_probe.json`, `refine.json` (RMS
+fit/held-out por rung, parámetros de cámara, witness localizados/unlocalized),
+`depth_native/report.json` (% tier 0/1/descartado, sweep vs COLMAP), `confidence_calibration.json`,
+`precision_report.json` (incluido el cierre residual de visit_drift verify); y la lista exacta de
+qué mirar en el viewer (época 0 vs N, tier 1, rechazados). Ningún veredicto de calidad.
 
-### 4.9 Puentes con frames no-keyframe
-Los puentes de loop pueden incorporar frames del video que no son keyframes (están en
-disco; no forman parte de la cadena, no agregan deriva) para densificar las correspondencias
-exactas en la revisita, donde los keyframes pueden haber caído lejos del mismo punto de
-vista. Configurable (`loops.bridge_extra_frames`), con el mismo filtro de blur del selector.
+## 8. Definition of Done
+- Diez fases implementadas, integradas y commiteadas; `pytest` completo verde.
+- Con `reconstruction.precision.enabled: true` y `frame_selection: parallax_lk`, una sesión real
+  lanzada por el usuario produce, en una sola ronda de DA3 y una sola pasada de Ω: época 0
+  intacta, `camera.json`, `walk.json`, `gauge.json`, `tracks.npz` v2, `refine.json`,
+  `witness_poses.txt`, `depth_native/`, `confidence_calibration.json`, época N con `origins.npz`
+  v2 y `rejected_points.npz`, store 3D reconstruido sobre la época N, `precision_report.json` y el
+  acta con Approve/Undo.
+- Sin `ground_truth.json` el pipeline completa igual y el reporte deja la sección `pending`;
+  con él, `test` certifica y `gauge` se reporta como `fit`.
+- Ningún literal de decisión fuera de `config.yaml`; ningún gate que no sea una medición.
+- `CLAUDE.md` con el único bloque nuevo de §2 y los bloques superados reemplazados.
 
-## 5. Capa 2 — Escala: de cadena a grafo (resuelve P4)
-
-### 5.1 Filas de loop en `solve_scale_graph`
-Extender la firma con `loop_rel: {(i_chunk, j_chunk): (log_r, sigma)}` y agregar una fila
-por loop: `x_j − x_i = log r_loop` con peso `1/σ_loop`. `r_loop = s_ab` medido en §4.1.
-`σ_loop` = `scale.sigma_loop` (default calibrado en el set sintético; orden 0,005).
-
-### 5.2 Anclas absolutas con σ real
-Filas absolutas adicionales (una por fuente, todas configurables):
-- Medida del usuario / consenso multi-escaneo (si existe `server/fusion/metric.py` o
-  `consensus.py`): σ = la que ellos reportan.
-- VIO (`vio_scale.py`): σ = `scale.sigma_vio`.
-- Dimensiones normativas (§4.6): σ = `scale.sigma_regulated` por clase.
-- DA3: sigue con `sigma_anchor = 0.08/√n`.
-El metro lo fija lo más preciso; DA3 pasa a cross-check y su acuerdo se reporta.
-
-### 5.3 Diagnóstico de ruptura de escala
-Cuando un loop se registra como `scale_break` (§4.2), resolver el grafo de escala con y sin
-esa fila; la costura cuyo residuo más crece al incluirla es la sospechosa. Se reporta en
-`scale_graph.json` y en el kit visual (§11) como "salto de escala entre chunks k y k+1,
-magnitud X %". No se corrige automáticamente más allá de lo que el grafo ya distribuye.
-
-### 5.4 `scale_drift` y `scale_align`
-`scale_drift` se mantiene; su salida por chunk (`s_frames`) se escribe en
-`scale_graph.json` en vez de quedar implícita. `scale_align` (global, `_metricize_and_orient`)
-sigue como verificador: `s ≈ 1` esperado; su dispersión y su desvío de 1 son métricas de
-salud en §10; un desvío > `scale.verify_max_dev` es fallo de sesión, no advertencia.
-
----
-
-## 6. Capa 3 — Profundidad y testigos (resuelve P6, P7)
-
-### 6.1 `mv_votes` sobre la nube
-Reusar `mv_consistency.compute_frame_consistency` con las poses finales del grafo, pero
-volcando el resultado **por punto de la nube** vía provenance (`frame_global`, píxel):
-`mv_votes` = número de keyframes vecinos que acuerdan dentro de `tau_rel`. Se calcula en
-GPU (mismo módulo), se escribe como campo escalar en `cleaned_cloud.ply` y
-`cleaned_cloud_raw.ply`, y **no borra nada**.
-
-### 6.2 `mask_votes` sobre la nube
-Nuevo `server/reconstruction/witness/mask_votes.py`: para cada instancia SAM3, proyectar
-sus puntos en cada keyframe que la observa (poses finales); por punto, contar vistas en
-las que la proyección cae dentro de la máscara de **la misma** instancia (`inside`), en
-otra instancia (`conflict`) o en fondo (`background`). Este es el voto de pluralidad
-multi-vista que usa `facebookresearch/r3d` (`build_scene`) para asignar puntos a objetos;
-acá se usa como testigo por punto, no para asignar. Campos: `mask_votes`, `mask_conflicts`.
-Erosión de máscara configurable (`witness.mask_erosion_px`) para no penalizar bordes.
-
-### 6.3 `status` por punto y voladores
-`status ∈ {verified, single_witness, mask_conflict, dynamic, unobserved}` por reglas
-configurables (`witness.rules`): p. ej. `verified` si `mv_votes ≥ 2` y
-`mask_conflicts ≤ 1`; `single_witness` si solo lo respalda su frame de origen;
-`mask_conflict` si `mask_conflicts > mask_votes`; `dynamic` si la instancia fue clasificada
-así (§4.4). El viewer muestra `status` como color (§11). `gpu_cloud_clean` (voxel + SOR)
-corre **después** y solo sobre `verified | unobserved`, como red final; el número de puntos
-por estado va al acta. La MLS de `scene_consolidate` no se ejecuta sobre `mask_conflict` ni
-`single_witness`.
-
-### 6.4 Profundidad por correspondencias (tracks) y pares de loop
-- `vggt_tracks.extract_tracks` (tracker VGGSfM vendorizado) sobre ventanas de keyframes
-  cercanos **y** sobre los pares de loop verificados.
-- Con las poses finales, triangular cada track (DLT + refino robusto) y comparar la
-  profundidad triangulada con la del keyframe en ese píxel → observaciones
-  `(frame, z_obs, z_tri, peso)`.
-- Resolver el mismo modelo afín por frame de `depth_graph` (`solve_depth_graph` con
-  `z' = a·z + b`, gauge media cero) alimentado por estas observaciones **además** de las
-  proyecciones actuales; aplicar con `apply_depth_correction` (a lo largo del rayo: poses y
-  provenance intactas).
-- Gate: el desacuerdo de profundidad multi-vista (la métrica que ya usa `depth_graph_verdict`)
-  debe bajar en held-out; si no, identidad.
-- Donde no hay textura (tracks escasos), los bordes de máscara SAM3 aportan correspondencias
-  de contorno: muestrear puntos del contorno de una instancia en el frame i, proyectarlos al
-  frame j con la profundidad actual, y medir el desplazamiento al contorno de la misma
-  instancia en j (distancia de Chamfer 2D). Ese residuo entra al mismo solver como
-  observación de profundidad de baja σ solo si el contorno es nítido
-  (`witness.contour_min_gradient`).
-
----
-
-## 7. Qué se elimina o se audita (resuelve P9, P10)
-
-- `elastic_seam`: implementar el A/B de variable única en el arnés (§10) con
-  `elastic_seam: true/false` sobre las escenas de prueba y reportar. **No cambiar el
-  default**; el usuario decide con los números y su viewer.
-- `blend_copies`: leer `_stac_blend_copies` y `frame_owner`; si el blend promedia copias
-  que `ownership` ya decidió como no-escritoras, el blend pasa a operar **solo** sobre la
-  copia owner (no-op para las demás). Si operan sobre cosas distintas, dejar como está y
-  documentarlo en el docstring con la prueba.
-- `pose_refine.py` (CPU, E-full): queda fuera del flujo; el grafo de §4.3 es su
-  reemplazo. No borrar el archivo; marcar en su docstring que está superseded y por qué.
-- `bundle_adjust`: sin cambios; sigue OFF.
-
----
-
-## 8. Época, ledger, transaccionalidad
-
-- Reusar `server/correction/` (época geométrica, ledger append-only, `apply` transaccional,
-  `epoch_<N>.npz` por keyframe). Si no existe, crear el núcleo mínimo ahí con esa
-  especificación; nunca una copia dentro de este trabajo.
-- Cada etapa que mueve geometría (grafo de poses, grafo de escala, corrección de
-  profundidad, cambio de `status`) es una época con: entradas, aristas/observaciones, gates
-  con valor/umbral/veredicto, transformación por keyframe, operador (`auto` o usuario).
-- Los artefactos derivados (TSDF, surface_fit, Potree, BIM) heredan la época y se marcan
-  `stale` cuando cambia.
-- Toda escritura va a directorio de transacción y swap atómico. Lock por sesión.
-
----
-
-## 9. Bucle de certificación
-
-`server/reconstruction/certify/run.py`:
-```
-for it in range(config.certify.max_iters):
-    loops   = measure_loops_sim3(...)  # §4.1–4.5: candidatos, gate espacial, puentes, s_ab
-    scales  = scale_graph(loops, ...)  # §5: PRIMERO la escala (filas de loop + anclas)
-    apply(scales)
-    loops   = remeasure_loops_se3(...) # con la escala cerrada, aristas SE(3) exactas
-    poses   = pose_graph(loops, structural_constraints, ...)  # §4.3 + §4.6
-    depth   = depth_correction(...)    # §6.4
-    cloud   = rebuild + witnesses(...) # §6.1–6.3
-    m       = metrics(cloud, poses, scales)   # §10
-    if not gates(m, prev): rollback(it); break
-    ledger.epoch(it, m)
-    if improvement(m, prev) < config.certify.eps: break
-```
-Orden obligatorio dentro de cada iteración: **escala → poses → profundidad**. Corregir
-poses sobre una escala no cerrada hace que el cierre no converja.
-Cada iteración es una época; el rollback devuelve a la anterior; el acta final lista las
-iteraciones, sus métricas y en cuál se detuvo y por qué.
-
----
-
-## 10. Arnés de métricas (automático; es evidencia, no veredicto)
-
-`server/reconstruction/quality/`:
-1. **Residuo de loop** (m): por arista, antes y después del grafo.
-2. **Residuo de costuras** (m): mediana y p95, antes y después (no debe empeorar).
-3. **Error de cierre de recorrido**: para recorridos que vuelven al inicio, distancia entre
-   la primera y la última observación del mismo punto/instancia.
-4. **Duplicados automáticos**: instancias con clusters 3D disjuntos (§4.4); objetivo 0.
-5. **Escala**: `s` de `scale_align` (desvío de 1 y dispersión), acuerdo DA3↔grafo,
-   `scale_break` detectados.
-6. **Testigos**: % de puntos por `status`; `mv_votes` medio; `mask_conflicts` total.
-7. **Desacuerdo de profundidad multi-vista** (la métrica de `depth_graph_verdict`) antes
-   y después.
-8. **Dimensiones conocidas**: si la sesión tiene medidas registradas (fusión/métrica),
-   error p50/p95 antes y después.
-9. **Cobertura de loops** (§4.6a) y **saturación de autoridad** por etapa (§4.7).
-10. **Ensayo de respuesta conocida** (`quality/known_answer.py`): sobre una sesión real,
-    inyectar en un chunk una perturbación rígida y de escala conocidas y correr el bucle;
-    reportar el error de recuperación. Así se verifica un instrumento en campo.
-11. **Ensayo de colapso** (`quality/envelope.py`): aumentar la perturbación inyectada por
-    pasos hasta que los gates fallen; el último nivel recuperado es la **envolvente
-    operativa declarada** de la sesión (deriva máxima corregible en m y %, número mínimo de
-    loops). Va al acta. Grado industrial no es "no falla": es saber cuándo está fuera de
-    especificación y decirlo.
-12. **Suite adversarial** (sintética, §12, y reales cuando existan): corredor recto ida y
-    vuelta, hall simétrico de columnas idénticas, vidrio y reflejos, personas en movimiento,
-    tramos de rotación pura, tramos quieto. Criterio: **ninguna falla en silencio**; toda
-    falla se declara con causa en el acta.
-13. **Determinismo**: dos corridas de la misma sesión producen la misma acta dentro de
-    tolerancia float (semillas fijas, `torch.use_deterministic_algorithms` donde exista, y
-    donde no, tolerancia declarada por métrica).
-Salida: `quality/report.json` por época + comparación entre épocas. Sintético (§12) y real.
-
----
-
-## 11. Kit de validación visual (en la UI; el usuario juzga)
-
-En el viewer existente (Potree/Three.js), sin nuevas dependencias:
-- **Toggle antes/después** por época (carga la nube de la época N y N−1 con offset de color).
-- **Trayectoria con aristas**: odometría en gris, loops aceptados en verde, `scale_break`
-  en naranja, candidatos rechazados en rojo con la razón al pasar el mouse.
-- **Color por `status`** y por `mv_votes`; slider de umbral.
-- **Lista de duplicados** con "volar a" cada uno y su residuo; vacía = objetivo.
-- **Panel de acta**: métricas de §10 por época, gates con valor/umbral/veredicto.
-- **Lista de atención**: el kit abre con los N lugares donde el sistema está menos seguro
-  (loops `ambiguous`, etapas saturadas, `scale_break`, regiones con menor `mv_votes`,
-  tramos sin cobertura de loops, instancias divididas), cada uno con "volar a". El operador
-  mira primero donde la incertidumbre es mayor, no donde la nube queda linda.
-- **Botón Aprobar/Deshacer época** (mismo flujo que el módulo de corrección).
-Nada de esto sustituye el ojo del usuario: es lo que él necesita para mirar donde importa.
-
----
-
-## 12. Tests obligatorios (`server/tests/test_graph_*.py`, `test_witness_*.py`, y en el fork)
-
-Generador sintético sin GPU: trayectoria con revisitas (dos o tres loops), chunks 60/30,
-deriva rígida y de escala inyectadas por chunk, objetos (planos, cilindros, cajas) con
-máscaras sintéticas y algunos móviles, voladores y píxeles inconsistentes inyectados.
-1. **Puentes exactos**: residuo de arista de loop ≤ σ esperado; fallback registrado como
-   baja confianza cuando se fuerza starved.
-2. **Verificación**: candidato con escala fuera de tolerancia → `scale_break` (no
-   descartado); candidato falso (dos lugares distintos) → rechazado por geometría.
-3. **Grafo de poses**: cierra los loops inyectados dentro de tolerancia; las costuras
-   held-out no se degradan más de `max_seam_degradation_m`; con loops contradictorios el
-   gate deja identidad.
-4. **Grafo de escala**: con filas de loop recupera los `s_k` inyectados; localiza la
-   costura de ruptura inyectada.
-5. **Detector de instancias**: instancia en dos clusters → candidato; tras el grafo, cero
-   duplicados.
-5b. **Gate espacial**: dos objetos idénticos a distancia ≫ δ(L) fusionados por una
-   máscara sintética → división de instancia, sin loop; el mismo objeto con deriva
-   inyectada ≤ δ(L) → loop; objeto fuera de frustum → rechazado; tras el grafo, la
-   reevaluación cambia el veredicto de los casos intermedios correctamente.
-6. **Testigos**: voladores inyectados terminan `single_witness`; fugas de máscara
-   `mask_conflict`; nada borrado; conteos en el acta.
-7. **Profundidad por tracks**: compresión de profundidad inyectada por frame recuperada
-   dentro de tolerancia; gate de held-out veta cuando no mejora.
-7b. **Restricciones estructurales**: corredor sintético ida y vuelta con un solo loop al
-   final → sin restricciones queda combadura residual medible; con datum de piso + muro
-   plano la combadura cae bajo tolerancia; un escalón real no se aplana.
-7c. **Autoridad**: una arista de loop falsa que exige más que δ(L) es vetada y el re-solve
-   converge sin ella.
-7d. **Respuesta conocida y envolvente**: perturbación inyectada recuperada dentro de
-   tolerancia; la envolvente reportada es monótona con la densidad de loops.
-7e. **Determinismo**: dos corridas → misma acta dentro de tolerancia.
-8. **Bucle**: converge y se detiene; rollback deja la época anterior bit a bit.
-9. **Provenance**: todos los campos sobreviven; `globalIndices` de segmentación válidos.
-10. **Config**: claves faltantes → error nombrado; cero literales de decisión fuera de
-    `config.py`.
-11. Los tests existentes (repo y fork) siguen verdes; `ui` compila.
-
----
-
-## 12b. Ejecución por fases (estructura, no permisos)
-
-| Fase | Contenido | Tests que la cierran | Commit |
-|---|---|---|---|
-| **F1 — Loops exactos y escala cerrada** | §4.1 puentes exactos + anclas propias; §4.2 verificación (0–4); §4.4 detector por instancias y duplicados; §4.5 gate espacial; §4.9 frames extra; §5 grafo de escala con filas de loop, anclas absolutas, `scale_break`; quitar el skip de `loop_enable_opt`. | §12: 1, 2, 4, 5, 5b, 10 | fork → submódulo |
-| **F2 — Grafo SE(3) y estructura** | §4.3 solver y aplicación; §4.6 restricciones estructurales y cobertura; §4.7 autoridad; §4.8 incertidumbre; §7 auditorías; reemplazo de `sim3loop` en `vggtomega`. | §12: 3, 7b, 7c + tests del solver | fork → submódulo |
-| **F3 — Testigos, profundidad, certificación** | §6 (`mv_votes`, `mask_votes`, `status`, tracks, contornos); §8 épocas/ledger; §9 bucle; §10 arnés completo (incl. respuesta conocida, envolvente, adversarial, determinismo). | §12: 6, 7, 7d, 7e, 8, 9, 11 | stac-build |
-| **F4 — Kit de validación visual** | §11 completo. Se recomienda ejecutarla como **sesión aparte** de Claude Code tras el commit de F3 (dominio distinto: UI). | `ui` compila + smoke test del kit sobre una sesión sintética | stac-build |
-
-Reglas: una fase no empieza hasta que la anterior tiene sus tests verdes y su commit. La
-configuración (`config.yaml`) de cada fase se agrega en esa fase, con validación. Ningún
-código de una fase cerrada se modifica en otra salvo por un fallo de test documentado en el
-commit. El mensaje de cierre de cada fase (en el chat, no en un archivo) lista qué quedó
-implementado, sus métricas sintéticas y su pico de memoria.
-
-
-## 13. Definition of Done
-
-- [ ] El optimizador de loops corre en producción con puentes exactos y anclas propias;
-      no existe el skip de `loop_enable_opt`.
-- [ ] Verificación de loops: geometría + escala (medida, no descartada) + semántica; atención
-      implementada y config-gated.
-- [ ] Grafo SE(3) por keyframe con odometría, loops, prior de gravedad y gates; aplicado
-      como rígido por frame; `sim3loop` fuera del camino `vggtomega`.
-- [ ] Detector de loops por instancias SAM3 y por duplicados 3D; corrección manual como la
-      misma arista; Qwen solo clasifica.
-- [ ] Gate de plausibilidad espacial (§4.5) aplicado a todo candidato antes del puente:
-      presupuesto de deriva, frustum recíproco, tamaño por primitivas, contexto en clases
-      repetitivas; identidades implausibles → división de instancia, nunca loop.
-- [ ] Restricciones estructurales (datum de piso, muros, columnas, dimensiones normativas
-      como anclas de escala) como aristas del grafo, robustas y config-gated; métrica de
-      cobertura de loops.
-- [ ] Autoridad acotada por etapa con saturación reportada; veto de aristas que exigen más
-      que el presupuesto de deriva.
-- [ ] Incertidumbre de doble predicción persistida y usada en testigos y odometría; puentes
-      con frames no-keyframe.
-- [ ] Orden escala → poses → profundidad en cada iteración.
-- [ ] Ensayo de respuesta conocida, ensayo de colapso con envolvente declarada, suite
-      adversarial sin fallas silenciosas, determinismo verificado, lista de atención en el
-      kit visual.
-- [ ] `solve_scale_graph` con filas de loop y anclas absolutas; `scale_break` diagnosticado
-      y localizado; `scale_align` como verificador con fallo duro.
-- [ ] `mv_votes`, `mask_votes`, `mask_conflicts`, `status` en la nube; limpieza y MLS solo
-      sobre estados permitidos; nada borrado.
-- [ ] Profundidad por tracks y contornos sobre pares cercanos y de loop, con gate.
-- [ ] Bucle de certificación con épocas, rollback y acta.
-- [ ] Arnés de métricas con reporte por época; A/B de `elastic_seam` ejecutado y reportado
-      sin cambiar el default; auditoría de `blend_copies` resuelta en código.
-- [ ] Kit de validación visual en la UI.
-- [ ] Todo en `config.yaml` (`correction_graph:`, `witness:`, `certify:`, `loops:`,
-      `scale:` nuevos) con validación; cero literales; sin `except Exception: pass`.
-- [ ] Tests de §12 verdes junto con los existentes; `ui` compila.
-- [ ] Cuatro fases cerradas con tests verdes y commits coordinados fork → submódulo →
-      stac-build; ningún test borrado, debilitado, saltado ni con tolerancias relajadas.
-- [ ] Solver SE(3) según la especificación de §4.3, con sus tests numéricos.
-- [ ] Ningún `.md` creado ni modificado. Ninguna frase que declare el resultado validado.
-- [ ] Mensaje final: números del arnés en las escenas de prueba, dónde mirar en el kit
-      visual, y bloqueos reales si los hubo.
-
----
-
-## 14. Restricciones
-
-- No modificar la receta pinneada (`CLAUDE.md`), ni `using_sim3` del pegado, ni el
-  checkpoint, ni la resolución, ni `conf_percentile`, ni el tamaño de chunk.
-- No agregar dependencias de licencia no comercial. `facebookresearch/r3d` se usa como
-  referencia de técnica (voto de pluralidad, OBB alineada a gravedad, VLM como llamador de
-  herramientas), no como dependencia.
-- No cambiar el orden de puntos de la nube.
-- Qwen y SAM3 nunca generan ni mueven geometría.
-- No crear ni editar archivos `.md`. No declarar validación visual.
-- Preguntar solo ante un bloqueo real; lo demás se decide, se implementa, se justifica en
-  docstring.
+## 9. Bloqueo real (lo único que justifica parar)
+Un peso o repo gated inaccesible (Ω, DA3 fork privado), una licencia que impide vendorizar algo
+necesario, o una API del vendor cuyo comportamiento no puede establecerse leyendo su código
+(por ejemplo, si el DA3 nested en multi-vista no devuelve profundidad métrica y tampoco expone su
+rama métrica). En ese caso: implementá todo lo que no depende del bloqueo, dejá el stage con
+fail-hard que nombra el bloqueo, y reportalo. Todo lo demás se resuelve leyendo el código y
+midiendo.

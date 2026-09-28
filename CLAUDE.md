@@ -1,5 +1,24 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐ READ FIRST — USER DECISION 2026-09-28 (overrides any older rule below)
+- **F0→F9 of `claude_stac.txt` are ABSOLUTE PRIORITY.** Precision is not
+  negotiable; NO over-engineering — the result must be 100 % reliable, not
+  endlessly refined. Implement each phase against its §4 spec only.
+- **Never start a phase until the previous one is CLOSED** (implemented, wired,
+  tests green, committed).
+- I MAY run tests, launch agents and workflows — whatever is needed — **as long
+  as the pod is never saturated in memory or CPU; the pod must always stay
+  operational.** (Supersedes "I never launch ... NOR TESTS" below; GPU pipeline
+  runs are still launched by the user.)
+- **Real pod limits = cgroup v1, not `free`/`nproc`: 117 GB RAM, ~30 CPUs.**
+  Over 117 GB the whole container dies (dozens of restarts 2026-09-27/28 from
+  fanned-out agents). Baseline (backend + vLLM) ≈ 25 GB. Cap every heavy job:
+  `(ulimit -v 30000000; OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
+  MKL_NUM_THREADS=2 OPENCV_NUM_THREADS=2 timeout <s> taskset -c 0-7 nice -n 15
+  /workspace/miniforge3/envs/da3/bin/python ...)`; watch
+  `/sys/fs/cgroup/memory/memory.usage_in_bytes` during long jobs; at most 2–3
+  concurrent agents, each told these caps.
+
 ## ⭐ BEST CONFIGURATION TO DATE — USER-VERIFIED 2026-08-19 (do NOT change)
 The user validated this exact config visually as **the best reconstruction
 configuration we have** ("quedó la mejor configuración... de momento no tocamos

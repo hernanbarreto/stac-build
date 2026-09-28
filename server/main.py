@@ -7809,22 +7809,39 @@ async def viewer_websocket(websocket: WebSocket):
                     # AFTER the early delivery → the viewer must reload the
                     # certified cloud (the acta says which epoch it left)
                     _certified = False
+                    _new_epoch = None
                     try:
                         _acta_p = _ctx(sid).output_dir / "certify_acta.json"
                         if _acta_p.exists():
                             _acta = json.loads(_acta_p.read_text())
                             _certified = (_acta.get("epoch_final") is not None
                                           and _acta.get("epoch_final") != _acta.get("epoch_initial"))
+                            if _certified:
+                                _new_epoch = _acta.get("epoch_final")
                     except Exception as _e:  # noqa: BLE001
                         print(f"[Pipeline] certify acta lookup failed (non-fatal): {_e}")
+                    # the PRECISION stage (F0-F7) ends with F7's transactional swap: the
+                    # fused epoch is live when fuse_report.json names the epoch the session
+                    # is in (the same probe pipeline_manager uses to call the stage done)
+                    try:
+                        _fuse_p = _ctx(sid).output_dir / "fuse_report.json"
+                        _ge_p = _ctx(sid).output_dir / "geometry_epoch.json"
+                        if _fuse_p.exists() and _ge_p.exists():
+                            _fused_to = json.loads(_fuse_p.read_text()).get("epoch_to")
+                            _live = json.loads(_ge_p.read_text()).get("epoch")
+                            if _fused_to is not None and _fused_to == _live and _live != 0:
+                                _certified = True
+                                _new_epoch = _live
+                    except Exception as _e:  # noqa: BLE001
+                        print(f"[Pipeline] fuse report lookup failed (non-fatal): {_e}")
 
                     if sid in _cloud_ready_sent and not _certified:
                         print(f"[Pipeline] cloud already sent after cloudcompy — skipping rebuild")
                     elif sid in _cloud_ready_sent and _certified:
-                        # the certification's transactional swap already built the
-                        # octree of the new epoch — broadcast it, do not rebuild
-                        print(f"[Pipeline] certification produced epoch {_acta.get('epoch_final')} — "
-                              f"reloading the viewer with the corrected cloud")
+                        # the stage's transactional swap already built the octree of
+                        # the new epoch — broadcast it, do not rebuild
+                        print(f"[Pipeline] the pipeline produced epoch {_new_epoch} — "
+                              f"reloading the viewer with that cloud")
                         await _correction_notify_viewer(sid, _ctx(sid).output_dir)
                     else:
                         _cloud_ready_sent.add(sid)
