@@ -7631,11 +7631,67 @@ async def viewer_websocket(websocket: WebSocket):
                             await _notify_cloud_ready(sid)
                     except Exception as _e:
                         print(f"[Pipeline] early cloud delivery failed (non-fatal): {_e}")
+                    # PREVIEW: the raw reconstruction exists the moment its stage ends;
+                    # VLM + SAM3 run for an hour before CloudCompy cleans it, and a
+                    # viewer with no cloud shows the full-screen progress splash over
+                    # the canvas all that time. Shown now, the progress rides as a
+                    # banner (USER 2026-09-28: "no me debe tapar la nube").
+                    try:
+                        _rc = next((st for st in job_dict.get("stages", [])
+                                    if st.get("id") == "reconstruction"), None)
+                        _cc = next((st for st in job_dict.get("stages", [])
+                                    if st.get("id") == "cloudcompy"), None)
+                        if (_rc and _rc.get("status") == "done"
+                                and not (_cc and _cc.get("status") == "done")
+                                and sid not in _preview_sent and sid not in _cloud_ready_sent):
+                            _preview_sent.add(sid)
+                            asyncio.create_task(_notify_preview(sid))
+                    except Exception as _e:
+                        print(f"[Pipeline] preview cloud delivery failed (non-fatal): {_e}")
 
                 # The cloud is DONE when cloudcompy finishes — the TSDF/texrecon that
                 # follows takes hours and does not touch it. Send it the moment it exists
                 # so the user inspects the cloud while the mesh still bakes.
                 _cloud_ready_sent = set()
+                _preview_sent = set()
+
+                async def _notify_preview(sid):
+                    try:
+                        from potree_converter import convert_chunks_preview_to_potree
+                        _job_dir = pipeline_manager.job_session_dir(sid)
+                        session_path = Path(_job_dir) if _job_dir else _ctx(sid).session_dir
+                        await viewer_manager.broadcast_text(json.dumps({
+                            "type": "status",
+                            "message": "Reconstruction done — building a preview of the raw cloud..."
+                        }))
+                        _loop = asyncio.get_event_loop()
+                        ok = await _loop.run_in_executor(None, convert_chunks_preview_to_potree,
+                                                         session_path)
+                        if not ok or sid in _cloud_ready_sent:
+                            return          # no preview, or the clean cloud already went out
+                        def _meta():
+                            out = session_path / "output"
+                            points = json.loads((out / "potree" / "metadata.json")
+                                                .read_text()).get("points", 0)
+                            has_conf = False
+                            first = next(iter(sorted(out.glob("chunk_*.ply"))), None)
+                            if first is not None:
+                                with open(first, "rb") as fp:
+                                    for hl in fp:
+                                        if b"confidence" in hl:
+                                            has_conf = True
+                                        if hl.startswith(b"end_header"):
+                                            break
+                            return points, has_conf
+                        points, has_conf = await _loop.run_in_executor(None, _meta)
+                        await viewer_manager.broadcast_text(json.dumps({
+                            "type": "potree_ready", "session_id": sid,
+                            "url": f"/potree/{sid}/", "points": points,
+                            "hasConfidence": has_conf, "preview": True,
+                        }))
+                        print(f"[Pipeline] ✅ preview cloud sent for {sid} ({points:,} pts)")
+                    except Exception as e:
+                        print(f"[Pipeline] preview cloud error (non-fatal): {e}")
 
                 async def _notify_cloud_ready(sid):
                     # Convert to Potree octree and notify viewer

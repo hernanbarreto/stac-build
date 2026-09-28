@@ -21,14 +21,9 @@ logger = logging.getLogger(__name__)
 POTREE_BIN = Path(__file__).parent.parent / "vendor" / "PotreeConverter" / "build" / "PotreeConverter"
 
 
-def _ply_to_las(ply_path: Path, las_path: Path) -> int:
-    """Convert binary PLY (with or without origin/confidence fields) to LAS 1.4 with RGB.
-    
-    If PLY contains a `confidence` field, it is mapped to LAS `intensity` (uint16, 0–65535).
-    Returns the number of points converted.
-    """
-    import laspy
-
+def _read_ply_vertices(ply_path: Path) -> np.ndarray:
+    """The vertex records of a binary little-endian PLY as a structured array
+    (field names as written, red/green/blue aliased to r/g/b)."""
     # ── Parse PLY header: build the dtype from the ACTUAL property list ──
     # (never guess the layout — clouds arrive as float32 or float64 xyz, with
     # or without confidence/origins, and in whatever property order the writer
@@ -67,17 +62,33 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
                 break
 
         ply_dtype = np.dtype(fields)
-        data = np.frombuffer(f.read(), dtype=ply_dtype, count=n_pts)
+        return np.frombuffer(f.read(), dtype=ply_dtype, count=n_pts)
 
+
+def _ply_to_las(ply_path: Path, las_path: Path) -> int:
+    """Convert binary PLY (with or without origin/confidence fields) to LAS 1.4 with RGB.
+
+    If PLY contains a `confidence` field, it is mapped to LAS `intensity` (uint16, 0–65535).
+    Returns the number of points converted.
+    """
+    return _vertices_to_las(_read_ply_vertices(ply_path), las_path, ply_path.parent,
+                            ply_path.name)
+
+
+def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: str) -> int:
+    """Write PLY vertex records (see :func:`_read_ply_vertices`) as LAS 1.4 with RGB;
+    ``class_dir/classification.npy`` is applied when its length matches."""
+    import laspy
+    ply_dtype = data.dtype
     has_origins = "frame_global" in ply_dtype.names
     has_confidence = "confidence" in ply_dtype.names
     if not {"x", "y", "z", "r", "g", "b"} <= set(ply_dtype.names):
         raise ValueError(f"PLY missing xyz/rgb properties: {ply_dtype.names}")
 
     if len(data) == 0:
-        raise ValueError(f"Empty point cloud: {ply_path}")
+        raise ValueError(f"Empty point cloud: {label}")
 
-    logger.info(f"[Potree] Read {len(data):,} points from {ply_path.name}")
+    logger.info(f"[Potree] Read {len(data):,} points from {label}")
     if has_confidence:
         logger.info(f"[Potree] Confidence field detected — mapping to LAS intensity")
 
@@ -104,7 +115,7 @@ def _ply_to_las(ply_path: Path, las_path: Path) -> int:
     las.blue = data['b'].astype(np.uint16) * 256
 
     # Per-point segment classification (0=unsegmented, 1..N=segment ID)
-    class_npy = ply_path.parent / "classification.npy"
+    class_npy = Path(class_dir) / "classification.npy"
     if class_npy.exists():
         class_arr = np.load(class_npy)
         if len(class_arr) == len(data):
@@ -258,6 +269,11 @@ import threading as _threading
 _potree_active: dict = {}      # session key → {"since", "ply", "ply_mtime"}
 _potree_reg = _threading.Lock()  # guards the dict only (microseconds)
 
+# An octree built from the raw reconstruction chunks (convert_chunks_preview_to_potree)
+# carries this file: it is never "up to date" for cleaned_cloud.ply and never reused
+# in its place — the clean build always replaces it.
+PREVIEW_MARKER = ".preview"
+
 
 def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: Path = None,
                           potree_dir_override: Path = None) -> bool:
@@ -308,6 +324,7 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
             # need: same source PLY, octree newer than it → reuse
             meta = potree_dir / "metadata.json"
             if meta.exists() and ply_path.exists() \
+                    and not (potree_dir / PREVIEW_MARKER).exists() \
                     and meta.stat().st_mtime > ply_path.stat().st_mtime:
                 logger.info("[Potree] finished build already covers the "
                             "current cloud — reusing it")
@@ -322,8 +339,10 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
 def _convert_ply_to_potree_inner(output_dir: Path, ply_path: Path,
                                  potree_dir: Path, force: bool) -> bool:
 
-    # Skip if already converted and PLY hasn't changed (unless forced)
-    if not force and potree_dir.exists() and (potree_dir / "metadata.json").exists():
+    # Skip if already converted and PLY hasn't changed (unless forced); a preview
+    # octree of the raw chunks is never the clean cloud's
+    if not force and potree_dir.exists() and (potree_dir / "metadata.json").exists() \
+            and not (potree_dir / PREVIEW_MARKER).exists():
         potree_mtime = (potree_dir / "metadata.json").stat().st_mtime
         ply_mtime = ply_path.stat().st_mtime
         if potree_mtime > ply_mtime:
@@ -371,6 +390,62 @@ def _convert_ply_to_potree_inner(output_dir: Path, ply_path: Path,
         import traceback
         traceback.print_exc()
         return False
+
+
+def convert_chunks_preview_to_potree(session_dir: Path) -> bool:
+    """Octree of the RAW reconstruction — every ``output/chunk_*.ply`` concatenated —
+    so the viewer shows the cloud the moment the reconstruction stage ends instead of
+    after VLM + SAM3 + CloudCompy (USER 2026-09-28: "si hay nube el avance debe
+    mostrarse de otra forma, no me debe tapar la nube"). Built into ``output/potree``
+    with :data:`PREVIEW_MARKER`; the CloudCompy build replaces it. False when there
+    are no chunks or their layouts differ."""
+    output_dir = Path(session_dir) / "output"
+    potree_dir = output_dir / "potree"
+    chunks = sorted(output_dir.glob("chunk_*.ply"))
+    if not chunks:
+        logger.warning(f"[Potree] preview: no chunk_*.ply in {output_dir}")
+        return False
+    key = str(output_dir.resolve())
+    import time as _time
+    while True:
+        with _potree_reg:
+            if key not in _potree_active:
+                _potree_active[key] = {"since": _time.time(), "ply": "preview",
+                                       "ply_mtime": 0.0}
+                break
+        _time.sleep(3)
+    try:
+        parts = [_read_ply_vertices(c) for c in chunks]
+        if len({p.dtype for p in parts}) != 1:
+            logger.warning("[Potree] preview: the chunks' PLY layouts differ — no preview")
+            return False
+        data = np.concatenate(parts)
+        del parts
+        with tempfile.TemporaryDirectory(dir=str(output_dir)) as tmpdir:
+            tmp = Path(tmpdir)
+            # classification.npy belongs to the clean cloud — never applied here
+            n = _vertices_to_las(data, tmp / "preview.las", tmp, f"{len(chunks)} chunk PLY(s)")
+            del data
+            if not _run_potree_converter(tmp / "preview.las", tmp / "potree"):
+                return False
+            (tmp / "potree" / PREVIEW_MARKER).write_text(f"{n} points from {len(chunks)} chunks\n")
+            if potree_dir.exists():
+                old = output_dir / f"potree_old_{int(_time.time())}"
+                try:
+                    potree_dir.rename(old)
+                    subprocess.Popen(["rm", "-rf", str(old)])
+                except OSError:
+                    pass
+            subprocess.run(["mkdir", "-p", str(potree_dir)])
+            subprocess.run(["cp", "-a", f"{tmp / 'potree'}/.", str(potree_dir)])
+        logger.info(f"[Potree] ✅ preview octree of the raw reconstruction ({n:,} points)")
+        return True
+    except Exception as e:
+        logger.error(f"[Potree] preview failed (non-fatal): {e}")
+        return False
+    finally:
+        with _potree_reg:
+            _potree_active.pop(key, None)
 
 
 async def convert_ply_to_potree_async(
