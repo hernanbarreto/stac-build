@@ -186,6 +186,31 @@ class OmegaConfig:
     resolution_probe: ResolutionProbeConfig
 
 
+# ── F4: native-pixel tracks ───────────────────────────────────────────────
+
+DENSE_MATCHERS = ("none", "roma")
+
+
+@dataclass(frozen=True)
+class TracksConfig:
+    tracker_long_side: int      # BOUND: the tracker's input long side (native when smaller —
+                                # never upsampled)
+    tracker_stride: int         # the tracker network's stride: its input sides are multiples
+    window_frames: int          # BOUND: frames per tracking window
+    window_overlap_frac: float  # BOUND: share of a keyframe window shared with the next
+    query_frames_per_window: int    # BOUND: query frames spread over a keyframe window
+    loop_half_window: int       # BOUND: keyframes on each side of a loop pair's ends
+    grid_side: int              # BOUND: query grid columns (rows follow the aspect)
+    max_corners: int            # BOUND: Shi-Tomasi corners per query frame
+    corner_quality: float       # BOUND: Shi-Tomasi quality level (share of the best corner)
+    corner_min_distance_px: float   # BOUND: minimum corner spacing (tracker px)
+    depth_edge_tol_rel: float   # BOUND: 2×2 depth spread / nearest depth above this = an edge
+    vis_thresh: float           # BOUND: tracker visibility below this = not observed
+    heldout_frac: float         # BOUND: share of the TRACKS held out of every fit
+    seed: int                   # the split's fixed seed
+    dense_matcher: str          # none | roma (optional, off)
+
+
 # ── F9: runner (declared in F0 so every stage heartbeats the same way) ───
 
 @dataclass(frozen=True)
@@ -201,6 +226,7 @@ class PrecisionConfig:
     camera: CameraConfig
     gauge: GaugeConfig
     omega: OmegaConfig
+    tracks: TracksConfig
     runner: RunnerConfig
 
 
@@ -269,6 +295,33 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         pair_samples=_num(rp, "pair_samples", "omega.resolution_probe", lo=500, integer=True),
     ))
 
+    tk = _sub(sec, "tracks", "")
+    tracks = TracksConfig(
+        tracker_long_side=_num(tk, "tracker_long_side", "tracks", lo=16, integer=True),
+        tracker_stride=_num(tk, "tracker_stride", "tracks", lo=1, integer=True),
+        window_frames=_num(tk, "window_frames", "tracks", lo=3, integer=True),
+        window_overlap_frac=_num(tk, "window_overlap_frac", "tracks", lo=0.0, hi=1.0),
+        query_frames_per_window=_num(tk, "query_frames_per_window", "tracks", lo=1, integer=True),
+        loop_half_window=_num(tk, "loop_half_window", "tracks", lo=0, integer=True),
+        grid_side=_num(tk, "grid_side", "tracks", lo=2, integer=True),
+        max_corners=_num(tk, "max_corners", "tracks", lo=0, integer=True),
+        corner_quality=_num(tk, "corner_quality", "tracks", lo=0.0, hi=1.0, lo_excl=True),
+        corner_min_distance_px=_num(tk, "corner_min_distance_px", "tracks", lo=0.0),
+        depth_edge_tol_rel=_num(tk, "depth_edge_tol_rel", "tracks", lo=0.0, lo_excl=True),
+        vis_thresh=_num(tk, "vis_thresh", "tracks", lo=0.0, hi=1.0),
+        heldout_frac=_num(tk, "heldout_frac", "tracks", lo=0.0, hi=1.0),
+        seed=_num(tk, "seed", "tracks", lo=0, integer=True),
+        dense_matcher=_enum(tk, "dense_matcher", "tracks", DENSE_MATCHERS),
+    )
+    if tracks.window_overlap_frac >= 1.0 or tracks.heldout_frac >= 1.0:
+        raise PrecisionConfigError(
+            f"'{SECTION}.tracks.window_overlap_frac' and '.heldout_frac' must be below 1")
+    if tracks.dense_matcher != "none":
+        raise PrecisionConfigError(
+            f"'{SECTION}.tracks.dense_matcher' = {tracks.dense_matcher!r}: no dense matcher is "
+            f"vendored (claude_stac.txt §4-F4: optional, off; its licence must be checked and "
+            f"recorded in vendor/VENDORS.lock.md before it can be enabled)")
+
     rn = _sub(sec, "runner", "")
     runner = RunnerConfig(
         heartbeat_s=_num(rn, "heartbeat_s", "runner", lo=0.0, lo_excl=True),
@@ -276,4 +329,4 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     )
 
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
-                           runner=runner)
+                           tracks=tracks, runner=runner)

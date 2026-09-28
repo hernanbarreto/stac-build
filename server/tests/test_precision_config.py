@@ -139,3 +139,14 @@ def test_resolution_probe_keys_are_mandatory(key):
     del raw["reconstruction"]["precision"]["omega"]["resolution_probe"][key]
     with pytest.raises(PrecisionConfigError, match=rf"resolution_probe\.{key}"):
         load_precision_config(raw)
+
+
+def test_tracks_keys_are_mandatory_and_the_dense_matcher_stays_off():
+    raw = _raw()
+    del raw["reconstruction"]["precision"]["tracks"]["heldout_frac"]
+    with pytest.raises(PrecisionConfigError, match=r"tracks\.heldout_frac"):
+        load_precision_config(raw)
+    raw = copy.deepcopy(_raw())
+    raw["reconstruction"]["precision"]["tracks"]["dense_matcher"] = "roma"
+    with pytest.raises(PrecisionConfigError, match="VENDORS.lock.md"):
+        load_precision_config(raw)

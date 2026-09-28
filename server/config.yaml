@@ -2010,6 +2010,25 @@ reconstruction:
         window_frames: 32               # BOUND: keyframes of the probe window
         pair_samples: 8000              # BOUND: surface samples per frame pair
                                         # (metric_lock.depth_pair_samples' own default)
+    # F4 — native-pixel sub-pixel tracks (precision/tracks.py; the fork's VGGSfM tracker)
+    tracks:
+      tracker_long_side: 1024           # BOUND: tracker input long side (native when smaller,
+                                        # never upsampled — VGGSfM's own working size)
+      tracker_stride: 8                 # the tracker network's stride (input sides multiples)
+      window_frames: 24                 # BOUND: frames per tracking window (reconstruction/
+                                        # vggt_tracks.py's validated window)
+      window_overlap_frac: 0.5          # BOUND: keyframe windows overlap by half
+      query_frames_per_window: 2        # BOUND: query frames spread over a keyframe window
+      loop_half_window: 4               # BOUND: keyframes on each side of a loop pair's ends
+      grid_side: 48                     # BOUND: query grid columns (vggt_tracks' validated grid)
+      max_corners: 512                  # BOUND: Shi-Tomasi corners added per query frame
+      corner_quality: 0.01              # BOUND: Shi-Tomasi quality level (OpenCV's own scale)
+      corner_min_distance_px: 8         # BOUND: minimum corner spacing (tracker px)
+      depth_edge_tol_rel: 0.05          # BOUND: the loops.witness.tracks convention (2×2 spread)
+      vis_thresh: 0.2                   # BOUND: vggt_tracks' validated visibility gate
+      heldout_frac: 0.2                 # BOUND: share of the tracks held out of every fit (F5)
+      seed: 0                           # the held-out split's fixed seed
+      dense_matcher: none               # none | roma — optional and OFF (no licence recorded)
     # F9 — runner (declared here so every stage heartbeats the same way)
     runner:
       heartbeat_s: 20                   # BOUND: seconds between progress lines of a long stage
