@@ -14,9 +14,13 @@ Replicates cloudcompy_postprocess.py semantics step by step:
      is a greedy min-distance pick; the voxel-grid pick matches its density
      within the cell-diagonal bound and keeps REAL points, never averages —
      provenance survives);
-  4. SOR (knn mean-distance, keep < mean + nSigma·std) via GPU grid-hash
-     kNN. A point whose 27-cell neighbourhood holds no neighbours has
-     mean distance +inf — exactly the isolated outlier SOR drops;
+  4. SOR (knn mean-distance, keep < mean + nSigma·std) via the EXACT GPU
+     grid kNN of reconstruction.grid_knn — every point's statistic is over
+     exactly knn neighbours, the isolated floater's included;
+  DETERMINISM (2026-09-28): nothing here reads the card's free VRAM. The
+  voxel pick cuts the cloud into slabs of WHOLE cells (one global origin,
+  count from N and postprocessing.clean_bounds) and the SOR's kNN is exact —
+  identical input gives a bit-identical cloud on any card, for any bound;
   5. noise filter NOT implemented — requesting it fails loudly (production
      skips it: skip_noise true since the O(n²) hang);
   6. normals disabled (as in the CPU script);
@@ -64,179 +68,130 @@ def _read_ply(path: str):
         return np.fromfile(f, dtype=np.dtype(props), count=n)
 
 
-def _tiles_for(n_pts: int, bytes_per_pt: int, extra: int = 0):
-    """SIZE-ADAPTIVE (USER 2026-09-04: the system adapts to ANY cloud, it is
-    never written for one in particular): number of spatial tiles so the
-    working set fits 55% of the FREE VRAM."""
-    import torch
-    free_b, _ = torch.cuda.mem_get_info()
-    budget = int(free_b * 0.55)
-    return max(1, int(np.ceil((n_pts * bytes_per_pt + extra)
-                              / max(budget, 1))))
+def _slab_bounds(ca: np.ndarray, n_tiles: int) -> np.ndarray:
+    """Integer cell bounds [b_t, b_t+1) along the slab axis, placed where the
+    cumulative point count crosses t·N/n_tiles — computed from the SAME integer
+    cell index the voxel key uses, so a cell can never straddle two slabs."""
+    cum = np.cumsum(np.bincount(ca))
+    n = int(cum[-1])
+    targets = [(t * n) // n_tiles for t in range(1, n_tiles)]
+    inner = np.searchsorted(cum, targets, side="right")
+    return np.concatenate([[0], inner, [len(cum)]]).astype(np.int64)
 
 
-def _slab_bounds(xyz: np.ndarray, cell: float, n_tiles: int):
-    """(axis, snapped quantile bounds) — bounds land on the cell grid so a
-    cell never spans two slabs."""
-    ax = int(np.argmax(xyz.max(0) - xyz.min(0)))
-    v = xyz[:, ax]
-    lo = float(v.min())
-    qs = np.quantile(v, np.linspace(0, 1, n_tiles + 1))
-    qs = lo + np.round((qs - lo) / cell) * cell
-    qs[0], qs[-1] = -np.inf, np.inf
-    return ax, qs
-
-
-def _voxel_keep_dev(dev_xyz, voxel: float, origin=None):
-    """Resident: surviving point per voxel (nearest to cell centre).
-    ``origin``: GLOBAL grid origin — tiles MUST share it or cell boundaries
-    shift per tile (measured: 11/786k picks differed without it)."""
-    import torch
-    n = len(dev_xyz)
-    dev = dev_xyz.device
-    key = None
-    d2 = torch.zeros(n, device=dev, dtype=torch.float32)
-    for ax in range(3):
-        v = dev_xyz[:, ax]
-        mn = v.min() if origin is None else float(origin[ax])
-        c = torch.floor((v - mn) / voxel).to(torch.int64)
-        dim = int(c.max().item()) + 1
-        key = c if key is None else key * dim + c
-        d2 += (v - ((c.to(v.dtype) + 0.5) * voxel + mn)) ** 2
-        del c
-    uniq, inv = torch.unique(key, return_inverse=True)
-    del key
-    best = torch.full((len(uniq),), torch.inf, device=dev, dtype=d2.dtype)
-    best.scatter_reduce_(0, inv, d2, reduce="amin")
-    win = d2 <= best[inv] * (1 + 1e-6)
-    del best
-    idx = torch.arange(n, device=dev)
-    first = torch.full((len(uniq),), n, device=dev, dtype=torch.int64)
-    first.scatter_reduce_(0, inv[win], idx[win], reduce="amin")
-    return first[first < n]
-
-
-def _voxel_keep(xyz_np: np.ndarray, voxel: float):
-    """Global indices surviving the voxel pick, tiled to fit any N (cells
-    never span slabs → per-slab picks are globally exact, no halo needed)."""
+def _voxel_keep_dev(xyz_np: np.ndarray, cells_np: np.ndarray, origin: np.ndarray,
+                    voxel: float, device: str) -> np.ndarray:
+    """Local indices of the surviving point per voxel of one slab: the point
+    nearest the cell centre (float64), ties to the lowest index — every cell of
+    the slab is whole, so the pick is the global one."""
     import torch
     n = len(xyz_np)
-    n_tiles = _tiles_for(n, 44)
-    if n_tiles == 1:
-        d = torch.from_numpy(xyz_np).float().cuda()
-        keep = _voxel_keep_dev(d, voxel).cpu().numpy()
-        del d
-        torch.cuda.empty_cache()
-        return np.sort(keep)
-    print(f"  [adaptive] {n:,} pts → {n_tiles} spatial tiles (VRAM budget)")
-    gmin = xyz_np.min(0)
-    ax, qs = _slab_bounds(xyz_np, voxel, n_tiles)
-    v = xyz_np[:, ax]
+    p = torch.from_numpy(np.ascontiguousarray(xyz_np)).to(device).double()
+    c = torch.from_numpy(cells_np).to(device)
+    cl = c - c.min(dim=0).values                     # slab-local key, same cells
+    dims = [int(v) + 1 for v in cl.max(dim=0).values.tolist()]
+    if dims[0] * dims[1] * dims[2] >= 2 ** 63:
+        raise ValueError(f"voxel key overflow: {dims} cells of {voxel} m in one slab")
+    key = (cl[:, 0] * dims[1] + cl[:, 1]) * dims[2] + cl[:, 2]
+    del cl
+    d2 = None
+    for a in range(3):
+        ctr = float(origin[a]) + (c[:, a].double() + 0.5) * voxel
+        da = p[:, a] - ctr
+        d2 = da * da if d2 is None else d2 + da * da
+    del c, p
+    uniq, inv = torch.unique(key, return_inverse=True)
+    del key
+    best = torch.full((len(uniq),), torch.inf, device=device, dtype=torch.float64)
+    best.scatter_reduce_(0, inv, d2, reduce="amin")
+    win = d2 == best[inv]
+    del best, d2
+    idx = torch.arange(n, device=device)
+    first = torch.full((len(uniq),), n, device=device, dtype=torch.int64)
+    first.scatter_reduce_(0, inv[win], idx[win], reduce="amin")
+    return first.cpu().numpy()
+
+
+def _voxel_keep(xyz_np: np.ndarray, voxel: float, *, tile_points: int,
+                device: str) -> np.ndarray:
+    """Global indices surviving the voxel pick. ONE grid (origin = the cloud's
+    minimum, cells in float64); the cloud is cut into slabs of WHOLE cells along
+    its longest axis, their count from N and the declared ``tile_points`` BOUND
+    only — the same slabs on any card, and the same survivors for any count."""
+    n = len(xyz_np)
+    if n == 0:
+        return np.empty(0, np.int64)
+    origin = xyz_np.min(0).astype(np.float64)
+    ax = int(np.argmax(xyz_np.max(0).astype(np.float64) - origin))
+    ca = np.floor((xyz_np[:, ax].astype(np.float64) - origin[ax]) / voxel).astype(np.int64)
+    n_tiles = max(1, -(-n // int(tile_points)))
+    bounds = _slab_bounds(ca, n_tiles)
+    if n_tiles > 1:
+        print(f"  [tiles] {n:,} pts → {n_tiles} slabs of whole {voxel * 1000:g} mm "
+              f"cells (bound {int(tile_points):,} pts/slab)")
     out = []
-    for t in range(n_tiles):
-        sl = np.flatnonzero((v >= qs[t]) & (v < qs[t + 1]))
+    for t in range(len(bounds) - 1):
+        sl = (np.arange(n, dtype=np.int64) if n_tiles == 1
+              else np.flatnonzero((ca >= bounds[t]) & (ca < bounds[t + 1])))
         if len(sl) == 0:
             continue
-        d = torch.from_numpy(xyz_np[sl]).float().cuda()
-        keep_local = _voxel_keep_dev(d, voxel, origin=gmin).cpu().numpy()
-        out.append(sl[keep_local])
-        del d
-        torch.cuda.empty_cache()
+        cells = np.empty((len(sl), 3), np.int64)
+        for a in range(3):
+            cells[:, a] = (ca[sl] if a == ax else np.floor(
+                (xyz_np[sl, a].astype(np.float64) - origin[a]) / voxel).astype(np.int64))
+        out.append(sl[_voxel_keep_dev(xyz_np[sl], cells, origin, voxel, device)])
+        del cells
+    _empty_cache(device)
     return np.sort(np.concatenate(out))
 
 
-def _sor_meand_dev(dev_xyz, core_local, knn: int, cell_h: float,
-                   cand_per_cell: int = 48, block: int = 200_000):
-    """Resident: mean kNN distance for the ``core_local`` points of one
-    (slab+halo) tile. Returns a float32 CPU array aligned with core_local."""
+def _sor_keep(xyz_np: np.ndarray, knn: int, n_sigma: float, cell_h: float, *,
+              device: str, query_block: int, candidate_budget: int):
+    """Boolean keep mask, mean distance to the EXACT ``knn`` nearest neighbours
+    (reconstruction.grid_knn) — every statistic over exactly ``knn`` distances,
+    the isolated floater included (its true distance, never +inf or the mean of
+    the few a box happened to hold). ``cell_h`` only sizes the first search
+    level. Global mu/sd in float64."""
     import torch
-    dev = dev_xyz.device
-    mins = dev_xyz.min(dim=0).values
-    cell = torch.floor((dev_xyz - mins) / cell_h).to(torch.int64)
-    dims = cell.max(dim=0).values + 2
-    key = (cell[:, 0] * dims[1] + cell[:, 1]) * dims[2] + cell[:, 2]
-    del cell
-    order = torch.argsort(key)
-    skey = key[order]
-    sxyz = dev_xyz[order]
-    uniq, counts = torch.unique_consecutive(skey, return_counts=True)
-    starts = torch.cumsum(counts, 0) - counts
-    offs = [(dx * dims[1] + dy) * dims[2] + dz
-            for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
-    C = cand_per_cell
-    nq = len(core_local)
-    out = np.empty(nq, np.float32)
-    ar = torch.arange(C, device=dev)
-    tcore = torch.from_numpy(core_local).to(dev)
-    for b0 in range(0, nq, block):
-        cidx = tcore[b0:b0 + block]
-        pk = key[cidx]
-        px = dev_xyz[cidx]
-        B = len(cidx)
-        cand = torch.full((B, 27 * C), -1, device=dev, dtype=torch.int64)
-        for oi, off in enumerate(offs):
-            pos = torch.searchsorted(uniq, pk + off)
-            pos = pos.clamp(max=len(uniq) - 1)
-            hit = uniq[pos] == pk + off
-            st = starts[pos]
-            cnt = counts[pos].clamp(max=C)
-            take = ar[None, :] < (cnt * hit)[:, None]
-            cand[:, oi * C:(oi + 1) * C] = torch.where(
-                take, st[:, None] + ar[None, :], -1)
-        val = cand >= 0
-        cxyz = sxyz[cand.clamp(min=0)]
-        d2 = ((cxyz - px[:, None, :]) ** 2).sum(dim=2)
-        d2 = torch.where(val, d2, torch.inf)
-        k_eff = min(knn + 1, d2.shape[1])
-        small = torch.topk(d2, k_eff, dim=1, largest=False).values
-        # drop the self-distance (first ~0 column) and average the next knn
-        small = torch.sqrt(small[:, 1:knn + 1])
-        finite = torch.isfinite(small)
-        cnt_f = finite.sum(dim=1).clamp(min=1)
-        md = torch.where(finite, small, torch.zeros_like(small)).sum(dim=1) \
-            / cnt_f
-        md = torch.where(finite.any(dim=1), md,
-                         torch.tensor(torch.inf, device=dev))
-        out[b0:b0 + block] = md.float().cpu().numpy()
-        del cand, val, cxyz, d2, small
-    return out
-
-
-def _sor_keep(xyz_np: np.ndarray, knn: int, n_sigma: float, cell_h: float):
-    """Boolean keep mask (global stats), tiled with a one-cell halo so the
-    slab borders keep their true neighbours — adapts to any N."""
-    import torch
+    from reconstruction.grid_knn import grid_knn
     n = len(xyz_np)
-    n_tiles = _tiles_for(n, 44)
-    mean_d = np.empty(n, np.float32)
-    if n_tiles == 1:
-        d = torch.from_numpy(xyz_np).float().cuda()
-        mean_d[:] = _sor_meand_dev(d, np.arange(n, dtype=np.int64),
-                                   knn, cell_h)
-        del d
-        torch.cuda.empty_cache()
-    else:
-        print(f"  [adaptive] {n:,} pts → {n_tiles} spatial tiles "
-              f"(VRAM budget, halo {cell_h * 100:.0f}cm)")
-        ax, qs = _slab_bounds(xyz_np, cell_h, n_tiles)
-        v = xyz_np[:, ax]
-        for t in range(n_tiles):
-            halo = np.flatnonzero((v >= qs[t] - cell_h)
-                                  & (v < qs[t + 1] + cell_h))
-            if len(halo) == 0:
-                continue
-            core_mask = (v[halo] >= qs[t]) & (v[halo] < qs[t + 1])
-            core_local = np.flatnonzero(core_mask).astype(np.int64)
-            d = torch.from_numpy(xyz_np[halo]).float().cuda()
-            mean_d[halo[core_local]] = _sor_meand_dev(
-                d, core_local, knn, cell_h)
-            del d
-            torch.cuda.empty_cache()
-    fin = np.isfinite(mean_d)
-    mu = float(mean_d[fin].astype(np.float64).mean())
-    sd = float(mean_d[fin].astype(np.float64).std())
+    if n <= knn:
+        raise ValueError(f"SOR needs more than knn={knn} points, got {n}")
+    pts = torch.from_numpy(np.ascontiguousarray(xyz_np)).to(device)
+    mean_d = np.empty(n, np.float64)
+    for q, idx, d2 in grid_knn(pts, knn, cell_h, query_block=query_block,
+                               candidate_budget=candidate_budget):
+        # the exact squared distances come back to the host: numpy's sqrt is
+        # IEEE correctly rounded on every path (torch's CPU sqrt is not), and
+        # the sum runs in a fixed order
+        d = np.sqrt(d2.cpu().numpy())
+        s = d[:, 0].copy()
+        for j in range(1, knn):
+            s += d[:, j]
+        mean_d[q.cpu().numpy()] = s / knn
+    del pts
+    _empty_cache(device)
+    if not np.isfinite(mean_d).all():
+        raise RuntimeError("SOR: a point has fewer than knn neighbours in the whole cloud")
+    mu = float(mean_d.mean())
+    sd = float(mean_d.std())
     thr = mu + n_sigma * sd
     return mean_d <= thr, mu, sd
+
+
+def _empty_cache(device: str) -> None:
+    if str(device).startswith("cuda"):
+        import torch
+        torch.cuda.empty_cache()
+
+
+def _clean_bounds() -> dict:
+    """postprocessing.clean_bounds — memory BOUNDS, never decisions (the
+    surviving set is bit-identical for any value). Missing key = FAIL."""
+    from reconstruction.grid_knn import config_section
+    return {k: int(v) for k, v in config_section(
+        ("postprocessing", "clean_bounds"),
+        ("tile_points", "knn_query_block", "knn_candidate_budget")).items()}
 
 
 def main() -> int:
@@ -270,6 +225,9 @@ def main() -> int:
         os.sched_setaffinity(0, set(range(min(8, os.cpu_count() or 8))))
     except Exception:  # noqa: BLE001
         pass
+    server_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if server_dir not in sys.path:
+        sys.path.insert(0, server_dir)
     import torch
     if not torch.cuda.is_available():
         print("[GPU-clean] ❌ CUDA not available — refusing (use the "
@@ -281,6 +239,12 @@ def main() -> int:
               "CloudComPy path")
         return 1
     dev = "cuda"
+    # memory BOUNDS from config — the same slabs and blocks on any card; the
+    # surviving set never depends on them nor on the card's free VRAM
+    bounds = _clean_bounds()
+    tile_pts = bounds["tile_points"]
+    knn_kw = {"query_block": bounds["knn_query_block"],
+              "candidate_budget": bounds["knn_candidate_budget"]}
     t_pipe = time.time()
 
     chunk_files = sorted(glob.glob(os.path.join(args.input_dir,
@@ -367,9 +331,6 @@ def main() -> int:
                   "cannot compute per-point witnesses")
             return 1
         tw = time.time()
-        server_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if server_dir not in sys.path:
-            sys.path.insert(0, server_dir)
         from reconstruction.loops.config import load_loops_config
         from reconstruction.witness.frames import load_session_frames
         from reconstruction.witness.run import witness_fields, summarize
@@ -457,7 +418,7 @@ def main() -> int:
         n_b = len(xyz)
         print("[Step 2/6] Removing near-duplicate points "
               "(micro-voxel 0.1mm)...")
-        m = _net(lambda p: _voxel_keep(p, 1e-4))
+        m = _net(lambda p: _voxel_keep(p, 1e-4, tile_points=tile_pts, device=dev))
         _apply(m)
         if eligible is not None:
             eligible = eligible[m]
@@ -470,7 +431,8 @@ def main() -> int:
     n_b = len(xyz)
     print(f"[Step 3/6] Voxel spatial subsampling "
           f"({args.voxel_size * 1000:.1f}mm)...")
-    m = _net(lambda p: _voxel_keep(p, args.voxel_size))
+    m = _net(lambda p: _voxel_keep(p, args.voxel_size, tile_points=tile_pts,
+                                   device=dev))
     _apply(m)
     if eligible is not None:
         eligible = eligible[m]
@@ -487,8 +449,11 @@ def main() -> int:
         stats = {}
 
         def _sor_idx(p):
+            # cell_h sizes the FIRST level of the exact kNN only — performance,
+            # never the answer
             mm, mu_, sd_ = _sor_keep(p, args.sor_knn, args.sor_sigma,
-                                     cell_h=max(args.voxel_size * 3.0, 0.01))
+                                     cell_h=max(args.voxel_size * 3.0, 0.01),
+                                     device=dev, **knn_kw)
             stats["mu"], stats["sd"] = mu_, sd_
             return np.flatnonzero(mm)
 
@@ -516,7 +481,7 @@ def main() -> int:
         larger = args.voxel_size / ((args.max_points / n_b) ** (1 / 3))
         print(f"  🔧 Capping to {args.max_points:,} pts "
               f"(voxel={larger * 1000:.1f}mm)...")
-        m = _net(lambda p: _voxel_keep(p, larger))
+        m = _net(lambda p: _voxel_keep(p, larger, tile_points=tile_pts, device=dev))
         _apply(m)
         if eligible is not None:
             eligible = eligible[m]

@@ -6,10 +6,14 @@ Hernán Barreto — Ingerop IN3 Session IV
 """
 
 import asyncio
+import errno
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional, Awaitable
 
@@ -19,6 +23,57 @@ logger = logging.getLogger(__name__)
 
 # Path to PotreeConverter binary (compiled from vendor/)
 POTREE_BIN = Path(__file__).parent.parent / "vendor" / "PotreeConverter" / "build" / "PotreeConverter"
+
+# LAS / octree position quantum (m). 0.1 mm since 2026-09-28 (was 1 mm).
+LAS_SCALE_M = 1e-4
+
+# One octree build per session output at a time ACROSS PROCESSES (2026-09-28).
+# The in-memory registry below only sees threads of one process; the preview
+# build runs in the backend while the clean build runs in the CloudCompy
+# worker subprocess, and both used to swap output/potree unserialised — the
+# final octree could be the preview, or a mix of both.
+LOCK_NAME = ".potree.lock"
+
+
+@contextmanager
+def _potree_lock(output_dir: Path):
+    """Exclusive flock on ``output_dir/.potree.lock`` for the body — waits as
+    long as it takes (the holder is building the octree this caller needs). The
+    kernel drops the lock with the holder's process, so it never goes stale."""
+    import fcntl
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fh = os.open(str(output_dir / LOCK_NAME), os.O_RDWR | os.O_CREAT, 0o666)
+    try:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if e.errno not in (errno.EACCES, errno.EAGAIN):
+                raise
+            logger.info(f"[Potree] another process is building {output_dir}/potree "
+                        f"— waiting for it")
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        os.ftruncate(fh, 0)
+        os.write(fh, f"pid={os.getpid()} since={time.time():.0f}\n".encode())
+        yield
+    finally:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        finally:
+            os.close(fh)
+
+
+def _swap_in(new_dir: Path, potree_dir: Path, output_dir: Path) -> None:
+    """Replace ``potree_dir`` with the freshly built ``new_dir`` (same
+    filesystem: both live under ``output_dir``). The previous octree moves into
+    a UNIQUE directory first (never a name two builds in one second share) and
+    is deleted in the background; any rename error RAISES — a failed swap never
+    leaves the old and new octrees mixed in one directory."""
+    if potree_dir.exists():
+        old = Path(tempfile.mkdtemp(prefix="potree_old_", dir=str(output_dir)))
+        potree_dir.rename(old / "potree")
+        subprocess.Popen(["rm", "-rf", str(old)])
+    new_dir.rename(potree_dir)
 
 
 def _read_ply_vertices(ply_path: Path) -> np.ndarray:
@@ -103,7 +158,16 @@ def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: s
         float(data['y'].min()),
         float(data['z'].min()),
     ]
-    header.scales = [0.001, 0.001, 0.001]
+    # 0.1 mm quantisation (was 1 mm — the measurement tools raycast the octree,
+    # so its grid IS their resolution). The offset is the minimum, so the
+    # stored integers run 0..extent/scale: they must stay inside the 30 bits
+    # PotreeConverter keeps (it silently coarsens the scale beyond, and LAS
+    # itself is int32) — a scene too large for that FAILS instead.
+    extent = max(float(data[a].max()) - float(data[a].min()) for a in ("x", "y", "z"))
+    if extent / LAS_SCALE_M >= 2 ** 30:
+        raise ValueError(f"{label}: extent {extent:.1f} m does not fit 30-bit integers "
+                         f"at {LAS_SCALE_M * 1000:g} mm — refusing to coarsen silently")
+    header.scales = [LAS_SCALE_M, LAS_SCALE_M, LAS_SCALE_M]
 
     las = laspy.LasData(header)
     las.x = data['x'].astype(np.float64)
@@ -236,11 +300,13 @@ def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
 
     logger.info(f"[Potree] Running: {' '.join(cmd)}")
 
+    # NO wall-clock timeout (2026-09-28): 600 s on a slow disk discarded a whole
+    # correction epoch as if its geometry were wrong. Duration is not a verdict;
+    # a hung converter is the heartbeat/cancel path's to detect and kill.
     result = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
-        timeout=600,  # 10 min max
     )
 
     if result.returncode != 0:
@@ -298,39 +364,41 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
         logger.warning(f"[Potree] No {ply_path.name} found in {output_dir}")
         return False
 
-    # ── serialize builds per session: check-and-wait, no disk locks ──
+    # ── serialize builds per session: in-process registry (reuse) + flock
+    # (every process — the preview in the backend, the clean build in the
+    # CloudCompy worker, the correction transaction) ──
     key = str(output_dir.resolve())
-    import time as _time
     waited = False
     while True:
         with _potree_reg:
             active = _potree_active.get(key)
             if active is None:
                 _potree_active[key] = {
-                    "since": _time.time(),
+                    "since": time.time(),
                     "ply": str(ply_path),
                     "ply_mtime": ply_path.stat().st_mtime,
                 }
                 break
         if not waited:
             logger.info(f"[Potree] another build is running for this "
-                        f"session (since {_time.time()-active['since']:.0f}s)"
+                        f"session (since {time.time()-active['since']:.0f}s)"
                         f" — waiting for it to finish")
             waited = True
-        _time.sleep(3)
+        time.sleep(3)
     try:
-        if waited:
-            # the build we waited for may have produced exactly what we
-            # need: same source PLY, octree newer than it → reuse
-            meta = potree_dir / "metadata.json"
-            if meta.exists() and ply_path.exists() \
-                    and not (potree_dir / PREVIEW_MARKER).exists() \
-                    and meta.stat().st_mtime > ply_path.stat().st_mtime:
-                logger.info("[Potree] finished build already covers the "
-                            "current cloud — reusing it")
-                return True
-        return _convert_ply_to_potree_inner(
-            output_dir, ply_path, potree_dir, force)
+        with _potree_lock(output_dir):
+            if waited:
+                # the build we waited for may have produced exactly what we
+                # need: same source PLY, octree newer than it → reuse
+                meta = potree_dir / "metadata.json"
+                if meta.exists() and ply_path.exists() \
+                        and not (potree_dir / PREVIEW_MARKER).exists() \
+                        and meta.stat().st_mtime > ply_path.stat().st_mtime:
+                    logger.info("[Potree] finished build already covers the "
+                                "current cloud — reusing it")
+                    return True
+            return _convert_ply_to_potree_inner(
+                output_dir, ply_path, potree_dir, force)
     finally:
         with _potree_reg:
             _potree_active.pop(key, None)
@@ -357,31 +425,19 @@ def _convert_ply_to_potree_inner(output_dir: Path, ply_path: Path,
         # output_dir), NOT /tmp: /tmp here is the container overlay (~20GB, ~7.8 free)
         # and a 128M-point LAS (~4.4GB) + UNCOMPRESSED octree overflows it →
         # PotreeConverter crashes. /workspace has tens of GB free.
-        import time
         with tempfile.TemporaryDirectory(dir=str(output_dir)) as tmpdir:
             tmpdir_path = Path(tmpdir)
             tmp_las_path = tmpdir_path / "cleaned_cloud.las"
             tmp_potree_dir = tmpdir_path / "potree"
-            
+
             n_points = _ply_to_las(ply_path, tmp_las_path)
             logger.info(f"[Potree] Converted {n_points:,} points to LAS in RAM/tmp")
 
             success = _run_potree_converter(tmp_las_path, tmp_potree_dir)
 
             if success:
-                # Evitar borrar la carpeta vieja previniendo Errno 22 por bloqueo
-                if potree_dir.exists():
-                    old_potree = output_dir / f"potree_old_{int(time.time())}"
-                    try:
-                        potree_dir.rename(old_potree)
-                        subprocess.Popen(["rm", "-rf", str(old_potree)]) 
-                    except OSError:
-                        pass
-                
-                # Copiado nativo relámpago a través de bash para evitar colapso de Windows
-                subprocess.run(["mkdir", "-p", str(potree_dir)]) 
-                subprocess.run(["cp", "-a", f"{tmp_potree_dir}/.", str(potree_dir)])
-                logger.info(f"[Potree] Successfully transferred chunks to Windows mount {potree_dir} in record time")
+                _swap_in(tmp_potree_dir, potree_dir, output_dir)
+                logger.info(f"[Potree] octree swapped into {potree_dir}")
 
             return success
 
@@ -398,46 +454,54 @@ def convert_chunks_preview_to_potree(session_dir: Path) -> bool:
     after VLM + SAM3 + CloudCompy (USER 2026-09-28: "si hay nube el avance debe
     mostrarse de otra forma, no me debe tapar la nube"). Built into ``output/potree``
     with :data:`PREVIEW_MARKER`; the CloudCompy build replaces it. False when there
-    are no chunks or their layouts differ."""
+    are no chunks, their layouts differ, or the CLEAN cloud already exists — the
+    preview never lands on top of (or races) the octree of cleaned_cloud.ply: it
+    holds the same cross-process lock as the clean build and re-checks under it."""
     output_dir = Path(session_dir) / "output"
     potree_dir = output_dir / "potree"
+    cleaned = output_dir / "cleaned_cloud.ply"
     chunks = sorted(output_dir.glob("chunk_*.ply"))
     if not chunks:
         logger.warning(f"[Potree] preview: no chunk_*.ply in {output_dir}")
         return False
+    if cleaned.exists():
+        logger.info("[Potree] preview skipped: cleaned_cloud.ply exists — its octree is the one")
+        return False
     key = str(output_dir.resolve())
-    import time as _time
     while True:
         with _potree_reg:
             if key not in _potree_active:
-                _potree_active[key] = {"since": _time.time(), "ply": "preview",
+                _potree_active[key] = {"since": time.time(), "ply": "preview",
                                        "ply_mtime": 0.0}
                 break
-        _time.sleep(3)
+        time.sleep(3)
     try:
-        parts = [_read_ply_vertices(c) for c in chunks]
-        if len({p.dtype for p in parts}) != 1:
-            logger.warning("[Potree] preview: the chunks' PLY layouts differ — no preview")
-            return False
-        data = np.concatenate(parts)
-        del parts
-        with tempfile.TemporaryDirectory(dir=str(output_dir)) as tmpdir:
-            tmp = Path(tmpdir)
-            # classification.npy belongs to the clean cloud — never applied here
-            n = _vertices_to_las(data, tmp / "preview.las", tmp, f"{len(chunks)} chunk PLY(s)")
-            del data
-            if not _run_potree_converter(tmp / "preview.las", tmp / "potree"):
+        with _potree_lock(output_dir):
+            if cleaned.exists():
+                logger.info("[Potree] preview skipped: cleaned_cloud.ply appeared while "
+                            "waiting — its octree is the one")
                 return False
-            (tmp / "potree" / PREVIEW_MARKER).write_text(f"{n} points from {len(chunks)} chunks\n")
-            if potree_dir.exists():
-                old = output_dir / f"potree_old_{int(_time.time())}"
-                try:
-                    potree_dir.rename(old)
-                    subprocess.Popen(["rm", "-rf", str(old)])
-                except OSError:
-                    pass
-            subprocess.run(["mkdir", "-p", str(potree_dir)])
-            subprocess.run(["cp", "-a", f"{tmp / 'potree'}/.", str(potree_dir)])
+            parts = [_read_ply_vertices(c) for c in chunks]
+            if len({p.dtype for p in parts}) != 1:
+                logger.warning("[Potree] preview: the chunks' PLY layouts differ — no preview")
+                return False
+            data = np.concatenate(parts)
+            del parts
+            with tempfile.TemporaryDirectory(dir=str(output_dir)) as tmpdir:
+                tmp = Path(tmpdir)
+                # classification.npy belongs to the clean cloud — never applied here
+                n = _vertices_to_las(data, tmp / "preview.las", tmp,
+                                     f"{len(chunks)} chunk PLY(s)")
+                del data
+                if not _run_potree_converter(tmp / "preview.las", tmp / "potree"):
+                    return False
+                (tmp / "potree" / PREVIEW_MARKER).write_text(
+                    f"{n} points from {len(chunks)} chunks\n")
+                if cleaned.exists():
+                    logger.info("[Potree] preview discarded: cleaned_cloud.ply appeared "
+                                "during the build — its octree is the one")
+                    return False
+                _swap_in(tmp / "potree", potree_dir, output_dir)
         logger.info(f"[Potree] ✅ preview octree of the raw reconstruction ({n:,} points)")
         return True
     except Exception as e:

@@ -2137,6 +2137,17 @@ postprocessing:
                               # grid-hash kNN. false = CloudComPy CPU path
                               # (single-core; ~1h at 521M pts on pccr_v1).
                               # Noise filter stays CPU-only (production skips it).
+  # Memory BOUNDS of the GPU cleaning — never decisions (2026-09-28). The
+  # voxel pick cuts the cloud into slabs of WHOLE cells (one global origin,
+  # slab count = ceil(N / tile_points)) and the SOR runs an EXACT kNN over the
+  # whole cloud in query blocks. The surviving point set is bit-identical for
+  # ANY value here and on ANY card; it used to follow the card's FREE VRAM
+  # (torch.cuda.mem_get_info), per-tile cell origins and a one-cell halo.
+  # A card too small for a slab/block FAILS loudly, it never answers differently.
+  clean_bounds:
+    tile_points: 50000000          # BOUND: points per voxel-pick slab (~100 B/pt on the card)
+    knn_query_block: 262144        # BOUND: SOR queries per kNN block
+    knn_candidate_budget: 33554432 # BOUND: kNN candidate pairs evaluated at once
 
   # ── Scene-level consolidation (surface_fit stage 1 at scene scale) ──
   # After CloudComPy writes cleaned_cloud.ply, a normal-aware robust MLS
@@ -2153,6 +2164,20 @@ postprocessing:
     iterations: 2
     normal_gate: 0.25           # neighbours with oriented-normal agreement below
                                 # this are excluded (opposite faces never merge)
+    # DETERMINISTIC since 2026-09-28: exact kNN (the k nearest within the radius,
+    # reconstruction.grid_knn), Jacobi passes, fixed-order sums. It used to tile
+    # by the card's FREE VRAM with a per-tile cell origin, update the cloud in
+    # place while later blocks read it, and fall back GPU→CPU / trace→PCA
+    # normals on any exception — the consolidated cloud depended on what else
+    # was on the card. Every failure now FAILS the stage; `enabled: false` is
+    # the only skip.
+    device: cuda                # where the MLS runs; unavailable = the stage FAILS
+    min_neighbors: 5            # BOUND (pre-existing, was "≥6 incl. self" in the
+                                # 27-cell box): a point with fewer neighbours
+                                # within the radius keeps its measurement
+    query_block: 262144         # BOUND, memory only: queries per kNN block —
+    candidate_budget: 33554432  # …and candidate pairs at once. The result is
+                                # bit-identical for ANY value of these two.
 
   # Pipeline toggles
   skip_duplicates: true
