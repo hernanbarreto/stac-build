@@ -259,9 +259,15 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
                 for k, v in rej.items()}
 
     if fcfg.sor:
+        import torch
+        from config import cfg as _raw
         from reconstruction.gpu_cloud_clean import _sor_keep
+        cb = _raw["postprocessing"]["clean_bounds"]            # the cleaning's own bounds
         keep, mu, sd = _sor_keep(xyz, int(fcfg.sor_knn), float(fcfg.sor_std),
-                                 float(fcfg.sor_cell_m))
+                                 float(fcfg.sor_cell_m),
+                                 device="cuda" if torch.cuda.is_available() else "cpu",
+                                 query_block=int(cb["knn_query_block"]),
+                                 candidate_budget=int(cb["knn_candidate_budget"]))
         drop = ~keep
         for k in PV.V2_FIELDS:
             rejected[k] = np.concatenate([rejected[k], origins[k][drop]])
