@@ -34,14 +34,14 @@ class StageId(str, Enum):
 
 
 STAGE_REGISTRY = {
-    StageId.RECONSTRUCTION:   {"label": "3D Reconstruction", "icon": "🔨", "module": "workers.map_worker"},
-    StageId.CLOUDCOMPY:       {"label": "Cloud Cleaning",    "icon": "🧹", "module": "workers.cloudcompy_worker"},
+    StageId.RECONSTRUCTION:   {"label": "Intake + Omega (F1-F3, epoch 0)", "icon": "🔨", "module": "workers.map_worker"},
+    StageId.CLOUDCOMPY:       {"label": "Cloud Cleaning (epoch 0)", "icon": "🧹", "module": "workers.cloudcompy_worker"},
     StageId.PGSR:             {"label": "Precision (PGSR)",  "icon": "💎", "module": "workers.pgsr_worker"},
     StageId.TSDF:             {"label": "TSDF Mesh",         "icon": "🧊", "module": "workers.tsdf_worker"},
     StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker"},
     StageId.SAM3:             {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
     StageId.CERTIFY:          {"label": "Certification",     "icon": "📐", "module": "workers.certify_worker"},
-    StageId.PRECISION:        {"label": "Precision (F0–F7)", "icon": "🎯", "module": "workers.precision_worker"},
+    StageId.PRECISION:        {"label": "Precision core (F0-F7 → epoch N)", "icon": "🎯", "module": "workers.precision_worker"},
     StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
 }
 
@@ -456,9 +456,8 @@ class PipelineManager:
                       # a NEW reconstruction is geometry epoch 0 again: the
                       # epoch marker, the depth-correction sidecar, the exact
                       # per-epoch transforms and any pending tx/prev dirs are
-                      # cleared. corrections.jsonl (the ledger) is NEVER
-                      # deleted — history survives; replay re-keys by
-                      # frame_global (USER 2026-09-08).
+                      # cleared (USER 2026-09-28: a Replace leaves nothing but
+                      # the frames and the video — the ledger goes with it).
                       "geometry_epoch.json", "depth_correction.json",
                       "corrections/epoch_*.npz", "chunk_plan.json",
                       "_tx_epoch_*", "_epoch_*", "scale_diagnostics.json"],
@@ -484,7 +483,7 @@ class PipelineManager:
         # the certification's records (the acta, the per-epoch quality reports,
         # the post-hoc graph, the candidates/duplicates lists). Its epochs are
         # correction artifacts: a NEW reconstruction wipes output/ (epoch 0
-        # again) — the ledger corrections.jsonl is never deleted.
+        # again), the ledger included (USER 2026-09-28).
         StageId.CERTIFY: ["certify_acta.json", "visit_drift_report.json", "quality",
                           "keyframe_graph.json", "loop_candidates.json", "duplicates.json",
                           "loop_semantics.json"],
@@ -563,18 +562,25 @@ class PipelineManager:
 
     @staticmethod
     def _wipe_outputs_for_replace(session_dir: Path, output_dir: Path):
-        """Replace mode: delete the WHOLE output/ dir before anything runs.
+        """Replace mode: the session keeps NOTHING but its two inputs.
 
-        Per-stage cleanup is not enough. It only ran for stages that were about to
-        run, and the resume probes ran first — so a session whose every stage
-        probed "complete" (e.g. artifacts from an older architecture) skipped the
-        cleanup entirely and Replace silently did nothing.
+        USER 2026-09-28: "cuando lanzo reconstruir que borra todo, debe borrar
+        todo, no debe dejar nada más que los frames y el video original ... ningún
+        archivo, carpeta, absolutamente nada más". What survives: the frame images
+        (``frames/*.jpg|jpeg|png``) and ``source_video.*``. Everything else in the
+        session directory goes, whatever wrote it — output/, intake/ (its marker
+        made I0/I1 reuse a previous run's keyframes), the SAM3 ``frames_valid/``
+        copy, the intake's JSON inside frames/, viewer prefs, the corrections
+        ledger, a half-deleted ``.*.wiping-*`` directory. output/ is recreated
+        empty for the run.
 
-        Also removes the derived caches OUTSIDE output/ that are pure functions of
-        it, or the stale ones get served: merged_cloud.ply, its Potree octree
-        (convert_ply_to_potree skips when metadata.json exists), the floor
-        transform, the frame-selection files reconstruction regenerates, and the
-        BIM/sábana artifacts tied to the old cloud.
+        Per-stage cleanup is not enough: it only ran for stages about to run, after
+        the resume probes — a session whose every stage probed "complete" skipped
+        it and Replace silently did nothing.
+
+        Also removes the project-level derivatives of the cloud that just went
+        away (merged_cloud.ply, its Potree octree, the floor transform, the
+        BIM/sábana artifacts), or the stale ones get served.
         """
         import os as _os
         import shutil as _shutil
@@ -597,42 +603,28 @@ class PipelineManager:
             return True
 
         deleted = []
-        # The ledger is the ONE thing a Replace must not take with it: a new
-        # reconstruction is geometry epoch 0 again, but the history of every
-        # human-directed correction survives it and replay re-keys those runs by
-        # frame_global onto the new chain (USER 2026-09-08). Deleting output/
-        # wholesale — which is what this function does, and rightly so — used to
-        # take corrections.jsonl along, against the rule two comments in this
-        # file already stated. Read it out before the wipe, put it back after.
-        from correction.epoch import LEDGER_FILE
-        ledger_bytes = None
-        ledger_path = output_dir / LEDGER_FILE
-        try:
-            if ledger_path.is_file():
-                ledger_bytes = ledger_path.read_bytes()
-        except OSError as e:  # noqa: BLE001 — a Replace must not fail over this
-            logger.warning(f"[Pipeline] Replace: could not preserve {LEDGER_FILE} ({e})")
-
-        if _rm_tree(output_dir):
-            deleted.append("output/")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if ledger_bytes is not None:
-            try:
-                ledger_path.write_bytes(ledger_bytes)
-                n_records = ledger_bytes.count(b"\n")
-                logger.info(f"[Pipeline] Replace: {LEDGER_FILE} preserved "
-                            f"({n_records} record(s)) — append-only, a new "
-                            f"reconstruction never erases the history")
-            except OSError as e:  # noqa: BLE001
-                logger.warning(f"[Pipeline] Replace: could not restore {LEDGER_FILE} ({e})")
-
-        # frame selection + quality: reconstruction rebuilds these
+        from intake.quality import FRAME_SUFFIXES   # the frame images the intake reads
         frames_dir = session_dir / "frames"
-        if frames_dir.exists():
-            for pattern in PipelineManager.FRAMES_DIR_FILES:
-                for f in frames_dir.glob(pattern):
-                    f.unlink(missing_ok=True)
+        for entry in sorted(session_dir.iterdir()) if session_dir.is_dir() else []:
+            if entry.is_file() and entry.name.startswith("source_video"):
+                continue                                    # the original video
+            if entry == frames_dir and entry.is_dir() and not entry.is_symlink():
+                for f in sorted(entry.iterdir()):
+                    if f.is_file() and f.suffix.lower() in FRAME_SUFFIXES:
+                        continue                            # a frame image
+                    if f.is_dir() and not f.is_symlink():
+                        _rm_tree(f)
+                    else:
+                        f.unlink(missing_ok=True)
                     deleted.append(f"frames/{f.name}")
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                if _rm_tree(entry):
+                    deleted.append(f"{entry.name}/")
+            else:
+                entry.unlink(missing_ok=True)
+                deleted.append(entry.name)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         # project-level derivatives of output/ (merged cloud, its octree, floor)
         try:
