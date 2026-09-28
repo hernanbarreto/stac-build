@@ -1997,7 +1997,11 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         if _missing:
             _run_da3_anchor(pipe, frames_dir, output_dir, sorted(set(_missing)), recon_cfg)
 
-    def _omega_pass(cfg_v, tag):
+    def _omega_pass(cfg_v, tag, sel_path=None):
+        # sel_path: the keyframe list this pass runs on — the walk probe runs on
+        # an evenly-strided subset of selected_frames.json, every other pass on
+        # the full set
+        sel_path = sel_path or selected_frames_path
         vggt_config_path = output_dir / "vggt_omega_config.yaml"
         with open(vggt_config_path, "w") as f:
             yaml.dump(cfg_v, f, default_flow_style=False)
@@ -2011,8 +2015,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             raise FileNotFoundError(f"run_mapanything.sh not found: {script_path}")
         cmd = ["bash", str(script_path), "--image_dir", str(frames_dir),
                "--config", str(vggt_config_path), "--save_dir", str(vggt_save_dir)]
-        if selected_frames_path:
-            cmd.extend(["--selected_frames", selected_frames_path])
+        if sel_path:
+            cmd.extend(["--selected_frames", str(sel_path)])
         env = os.environ.copy()
         if device == "cpu":
             env["CUDA_VISIBLE_DEVICES"] = ""
@@ -2044,6 +2048,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         return True
 
     _chunked_already = False
+    _probe_sel = None             # set when the first pass is the strided walk probe
     # AS MANY KEYFRAMES PER CHUNK AS THE CARD ALLOWS — USER ORDER 2026-09-23:
     # *"vamos a armar los chunk de la mayor cantidad de frames posibles, si hay
     # mas de uno, con el solape del 50% ... eso lo va a determinar el GPU, lo
@@ -2110,18 +2115,74 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                           f"Adjustment stage ON: "
                           f"{'intra_chunk' if vggt_config['Model']['intra_chunk'] else 'NONE'} "
                           f"(the seam stages need 2+ chunks and stand down by themselves).")
-        elif _scale_align_on:
-            _ov = _chunk_cfg // 2
+        elif _scale_align_on and int(_simple_cfg.get("chunk_frames_over_walk", 0) or 0) > 0:
+            # A PINNED size (chunk_frames_over_walk) needs no walk probe: the probe only
+            # sizes the chunks, and on pccr 2026-08-24 it read 1526.6 m over a walk the
+            # chunked run measured at 104.8 m (14.6x — one Omega pass over ~105 m drifts
+            # past any use), which made 110 chunks of 24 kf (~1.9 m each). Chunked
+            # directly at the pinned size; SALAD's band in keyframes is the one
+            # definition of a visit (correction.visit_drift.min_walk_m) at the pin's own
+            # density — chunk_frames_over_walk keyframes per chunk_walk_m metres.
+            _fx = int(_simple_cfg.get("chunk_frames_over_walk"))
+            _cw = float(_simple_cfg.get("chunk_walk_m", 12.0) or 12.0)
+            if _fx > _chunk_cfg:
+                raise RuntimeError(
+                    f"reconstruction.simple.chunk_frames_over_walk = {_fx} keyframes per chunk "
+                    f"exceeds what the card holds ({_chunk_cfg}) — lower it")
+            _ov = _fx // 2
             _chunked_already = True
-            _anchor_idx = plan_anchor_indices(_n_selected, _chunk_cfg, _ov,
-                                              _anch_per_chunk)
+            _anchor_idx = plan_anchor_indices(_n_selected, _fx, _ov, _anch_per_chunk)
             _ensure_anchors([_sel_files[i] for i in _anchor_idx])
-            _apply_chunked_metric(vggt_config, _chunk_cfg, _ov)
-            _persist_chunk_plan(_chunk_cfg, _ov, _n_selected, "direct-chunked")
-            pipe.send_log(f"SIMPLE chunked-metric: {_n_selected} keyframes > "
-                          f"{_chunk_cfg} → "
-                          f"{len(chunk_ranges(_n_selected, _chunk_cfg, _ov))} chunks "
-                          f"of {_chunk_cfg} (overlap {_ov}), ONE pass")
+            _apply_chunked_metric(vggt_config, _fx, _ov)
+            _visit_m = float(((config.get("correction") or {}).get("visit_drift") or {})
+                             .get("min_walk_m", 0) or 0)
+            _sal = (vggt_config.get("Loop") or {}).get("SALAD")
+            if _sal is not None and _visit_m > 0:
+                import math as _math
+                _band = max(int(_sal["min_gap"]), int(_math.ceil(_visit_m * _fx / _cw)))
+                pipe.send_log(f"[loops] SALAD non-local band: {_band} kf = {_visit_m:g} m of "
+                              f"walk at the pinned {_fx} kf / {_cw:g} m")
+                _sal["min_gap"] = int(_band)
+                _sal["min_gap_frac"] = 0.0
+            _persist_chunk_plan(_fx, _ov, _n_selected, "pinned-chunked")
+            pipe.send_log(f"SIMPLE chunked-metric (pinned): {_n_selected} keyframes > "
+                          f"{_chunk_cfg} (card capacity) → "
+                          f"{len(chunk_ranges(_n_selected, _fx, _ov))} chunks of {_fx} "
+                          f"(overlap {_ov}) from reconstruction.simple.chunk_frames_over_walk; "
+                          f"no walk probe")
+        elif _scale_align_on:
+            # THE WALK DECIDES EVEN WHEN THE WHOLE SET DOES NOT FIT THE CARD —
+            # USER 2026-09-28: *"que no sea por memoria sino los 12m, siempre"*.
+            # This branch used to chunk DIRECTLY at the card's capacity: pccr
+            # 2026-08-24 (1329 kf, A100 80 GB) became 3 chunks of 870 frames,
+            # seams 3.5-5.1 m apart, and the run was OOM-killed. The walk that
+            # sizes the chunks needs a metric pass, so the first pass is a PROBE
+            # over an evenly-strided subset that fits: the strided walk traces
+            # the same trajectory, and its over-measurement when it drifts is the
+            # same self-correcting signal as the single pass's (see THE WALK
+            # DECIDES below). The probe is never the result — the full set is
+            # always re-run chunked at chunk_walk_m.
+            _stride = -(-_n_selected // _chunk_cfg)
+            _probe_files = list(_sel_files[::_stride])
+            _probe_doc = dict(_sel) if isinstance(_sel, dict) else {}
+            _probe_doc.update({"method": f"walk_probe_stride_{_stride}",
+                               "total_frames": _n_selected,
+                               "selected_count": len(_probe_files),
+                               "selected_files": _probe_files})
+            _probe_path = output_dir / "walk_probe_frames.json"
+            _probe_path.write_text(json.dumps(_probe_doc))
+            _probe_sel = str(_probe_path)
+            vggt_config["Model"]["chunk_size"] = max(len(_probe_files), 2)
+            vggt_config["Model"]["overlap"] = 0
+            vggt_config["Model"]["loop_enable"] = False
+            vggt_config["Model"]["intra_chunk"] = bool(_va_cfg.get("intra_chunk", False))
+            (output_dir / "chunk_plan.json").unlink(missing_ok=True)
+            pipe.send_log(f"SIMPLE walk probe: {_n_selected} keyframes > {_chunk_cfg} "
+                          f"(card capacity) → ONE pass over every {_stride}th keyframe "
+                          f"({len(_probe_files)} frames) to MEASURE the walk; the full "
+                          f"set is then re-run chunked at "
+                          f"{float(_simple_cfg.get('chunk_walk_m', 12.0) or 12.0):g} m "
+                          f"of walk per chunk (the probe is not the result)")
         else:
             vggt_config["Model"]["chunk_size"] = _chunk_cfg
             vggt_config["Model"]["overlap"] = _chunk_cfg // 2
@@ -2129,7 +2190,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                           f"scale_align is OFF → windowed mode without the metric "
                           f"lock ({_chunk_cfg}/{_chunk_cfg // 2})", level="warning")
         _apply_conf_filter(vggt_config)
-    if not _omega_pass(vggt_config, "chunked-metric" if _chunked_already else "single-pass"):
+    _tag1 = ("walk-probe" if _probe_sel else
+             "chunked-metric" if _chunked_already else "single-pass")
+    if not _omega_pass(vggt_config, _tag1, sel_path=_probe_sel):
         return
 
     # ── metric scale + orientation (runs after EVERY pass) ──
@@ -2141,7 +2204,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                       level="warning")
         return
 
-    def _metricize_and_orient(cfg_v, tag):
+    def _metricize_and_orient(cfg_v, tag, sel_path=None):
         """Emit omega depth → scale_align (global; in chunked-metric mode the chunks are
         already locked, so this is the residual/VERIFICATION pass — its spread is the
         health metric) → bake upright orientation. Returns the walk length in meters."""
@@ -2150,7 +2213,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         _emit_omega_depth(vggt_save_dir, output_dir,
                           int(cfg_v["Model"]["chunk_size"]),
                           int(cfg_v["Model"]["overlap"]),
-                          selected_frames_path, pipe)
+                          sel_path or selected_frames_path, pipe)
         from reconstruction.scale_align import run as _scale_run
         _s = _scale_run(output_dir, dry_run=False,
                         log=lambda m: pipe.send_log(f"[scale-align] {m}"),
@@ -2220,8 +2283,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                           f"({_mb:.0f} MB freed)")
         return _walk
 
-    _walk_m = _metricize_and_orient(vggt_config, "chunked-metric" if _chunked_already
-                                    else "single-pass")
+    _walk_m = _metricize_and_orient(vggt_config, _tag1, sel_path=_probe_sel)
 
     # The walk lands in the plan as EVIDENCE (the plan is written before the pass,
     # so the size never waited for it). Reading it back against the real walk is
@@ -2267,22 +2329,35 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _fixed2 = int(_simple_cfg.get("chunk_frames_over_walk", 0) or 0)
     _chunk_walk = float(_simple_cfg.get("chunk_walk_m", 12.0) or 12.0)
     _phase2, _ov2 = 0, 0          # 0 = the single pass stands, nothing re-runs
-    if (_simple_on and not _chunked_already and _max_walk > 0
-            and _walk_m > _max_walk and _scale_align_on):
+    # The chunk is sized by the WALK alone; the card's capacity is only the
+    # physical ceiling a 12 m chunk cannot exceed (it binds only when 12 m of
+    # this walk holds more keyframes than the card can take — logged if so).
+    _max_chunk = int(_chunk_cfg or _n_selected)
+    if (_simple_on and not _chunked_already and _scale_align_on
+            and (_probe_sel or (_max_walk > 0 and _walk_m > _max_walk))):
         if _fixed2:
             _phase2, _ov2 = _fixed2, _fixed2 // 2
         else:
-            _phase2, _ov2 = plan_chunks(_n_selected, _walk_m, _chunk_walk)
-        if _phase2 >= _n_selected:
+            _phase2, _ov2 = plan_chunks(_n_selected, _walk_m, _chunk_walk,
+                                        max_size=max(_max_chunk, 24))
+            _want = int(round(_chunk_walk * _n_selected / max(_walk_m, 1e-6)))
+            if _want > _phase2 and _phase2 < _n_selected:
+                pipe.send_log(f"[chunk-plan] {_chunk_walk:g} m of this walk is {_want} "
+                              f"keyframes; the card holds {_phase2} per chunk — chunks "
+                              f"of {_phase2} ({_phase2 * _walk_m / _n_selected:.1f} m)",
+                              level="warning")
+        if _phase2 >= _n_selected and not _probe_sel:
             pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > {_max_walk:g} m but "
                           f"{_chunk_walk:g} m per chunk needs {_phase2} keyframes of "
                           f"{_n_selected} — one chunk already covers it, keeping the "
                           f"single pass")
             _phase2 = 0
     if _phase2:
-        pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > {_max_walk:g} m → the single "
-                      f"pass either covers a long walk or drifted; either way it is "
-                      f"re-run CHUNKED at {_phase2}/{_ov2} "
+        pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m "
+                      + ("(strided probe) → the full set" if _probe_sel else
+                         f"> {_max_walk:g} m → the single pass either covers a long "
+                         f"walk or drifted; either way it")
+                      + f" is re-run CHUNKED at {_phase2}/{_ov2} "
                       f"({len(chunk_ranges(_n_selected, _phase2, _ov2))} chunks, "
                       f"{_chunk_walk:g} m of walk each)")
         pipe.send_progress(40, f"Walk {_walk_m:.1f} m — re-running chunked "
@@ -2306,6 +2381,24 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 _t.unlink()
         vggt_config = _build_vggtomega_config(config)
         _apply_chunked_metric(vggt_config, _phase2, _ov2)
+        # SALAD's non-local band in METRES OF WALK, not in a share of the keyframe
+        # count: the walk is known now. `min_gap_frac` x n was 22 kf on pccr's 216
+        # and 133 kf on 1329 (pccr 2026-08-24: 0 candidates, nothing closed). The
+        # bar is the system's ONE definition of two visits,
+        # correction.visit_drift.min_walk_m (USER 2026-09-25), translated to
+        # keyframes through this walk's measured m/kf; the configured floor stays.
+        _visit_m = float(((config.get("correction") or {}).get("visit_drift") or {})
+                         .get("min_walk_m", 0) or 0)
+        _sal = (vggt_config.get("Loop") or {}).get("SALAD")
+        if _sal is not None and _visit_m > 0 and _walk_m > 0:
+            import math as _math
+            _band = max(int(_sal["min_gap"]),
+                        int(_math.ceil(_visit_m / (_walk_m / _n_selected))))
+            pipe.send_log(f"[loops] SALAD non-local band from the walk: {_band} kf = "
+                          f"{_visit_m:g} m of walk at {_walk_m / _n_selected * 100:.1f} cm/kf "
+                          f"(was {_sal['min_gap_frac']:g} x {_n_selected} kf)")
+            _sal["min_gap"] = int(_band)
+            _sal["min_gap_frac"] = 0.0
         _persist_chunk_plan(_phase2, _ov2, _n_selected, "chunked-metric", _walk=_walk_m)
         _apply_conf_filter(vggt_config)
         _chunked_already = True

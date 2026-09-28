@@ -1043,7 +1043,9 @@ def test_the_walk_limit_and_the_rerun_size_are_configured():
     s = cfg["reconstruction"]["simple"]
     assert float(s["max_walk_single_pass_m"]) == 15.0
     assert float(s["chunk_walk_m"]) == 12.0, "the re-run is sized in WALKED METRES"
-    assert int(s["chunk_frames_over_walk"]) == 0, "0 = metres decide; >0 pins a size"
+    # USER 2026-09-28: pinned to 152 (12 m on pccr 2026-08-24) after the walk probe
+    # read 14.6x the walk; 0 = metres decide again once F2 measures the walk
+    assert int(s["chunk_frames_over_walk"]) >= 0, "0 = metres decide; >0 pins a size"
     assert int(s["scale_anchor_frames"]) == 0, "DA3 anchors every keyframe"
     assert int(s["chunk_frames"]) == 0, "the single pass takes what the card allows"
 
@@ -1082,12 +1084,13 @@ def test_a_short_walk_never_re_runs():
     judged better, and a scene whose whole walk fits in one chunk-of-metres
     keeps it too — a re-run into a single chunk is the same pass twice."""
     src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
-    assert "_walk_m > _max_walk and _scale_align_on" in src, \
-        "the limit and the metric lock both guard the re-run"
+    assert ("and _scale_align_on\n            and (_probe_sel or (_max_walk > 0 and "
+            "_walk_m > _max_walk)))") in src, \
+        "the limit and the metric lock both guard the re-run (or the strided walk probe)"
     assert "_max_walk > 0" in src, "0 disables the re-run entirely"
     assert "_phase2, _ov2 = 0, 0" in src, \
         "nothing re-runs unless the walk asks for it"
-    i = src.index("if _phase2 >= _n_selected:")
+    i = src.index("if _phase2 >= _n_selected and not _probe_sel:")
     j = src.index("keeping the \n", i) if "keeping the \n" in src[i:i + 400] else i
     assert j >= i, "one chunk already covering the walk keeps the single pass"
 
