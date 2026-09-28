@@ -1780,6 +1780,23 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 pipe.send_log(f"SIMPLE: + {len(_extra)} per-chunk anchor(s) for the "
                               f"{_cf_anchor}/{_cf_anchor // 2} layout in the SAME DA3 "
                               f"round → {len(_anchor_files)} frames, ONE extraction")
+    # ── F2 (claude_stac.txt §4-F2): I3 DA3 windows → the metric WALK, BEFORE Omega ──
+    # The walk sizes the chunks (I4 below) and the windows leave every keyframe's
+    # metric anchor on disk — the per-frame DA3 round that follows finds them all
+    # and skips. A single Omega pass is no instrument for it: over pccr 2026-08-24
+    # it read 1526.6 m for a walk its chunked run measured at 104.8 m.
+    _walk_doc = None
+    if _scale_align_on and _sel_files:
+        from precision.config import load_precision_config
+        _pc = load_precision_config(config)
+        if _pc.enabled:
+            from intake.walk import run_da3_windows, measure_walk
+            pipe.send_progress(5, "Gauge I3: DA3 multi-view windows → metric walk...",
+                               stage="reconstruction")
+            run_da3_windows(output_dir.parent, _pc.gauge, sys.executable, log=pipe.send_log,
+                            check_cancel=pipe.check_cancel, frames_dir=frames_dir,
+                            files=_sel_files)
+            _walk_doc = measure_walk(output_dir.parent, _pc.gauge, log=pipe.send_log)
     if _scale_align_on:
         pipe.send_progress(6, "VGGT-Omega: extracting DA3 metric depth (per-frame)...",
                            stage="reconstruction")
@@ -2090,7 +2107,34 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                           f"free, 4.0 GB base + 0.086 GB/frame (measured). "
                           f"{_n_selected} keyframe(s) to place.")
         _chunk_cfg = _cap
-        if _n_selected <= _chunk_cfg:
+        _max_walk0 = float(_simple_cfg.get("max_walk_single_pass_m", 0) or 0)
+        _cw0 = float(_simple_cfg.get("chunk_walk_m", 12.0) or 12.0)
+        _walk0 = float(_walk_doc["walk_length_m"]) if _walk_doc else None
+        if _walk0 is not None and _scale_align_on and not (
+                _n_selected <= _chunk_cfg and (_max_walk0 <= 0 or _walk0 <= _max_walk0)):
+            # I4 (claude_stac.txt §4-F2): the MEASURED walk sizes the chunks before
+            # Omega runs — one pass, no probe, no re-run, no pinned size
+            _fx, _ov = plan_chunks(_n_selected, _walk0, _cw0, max_size=max(_chunk_cfg, 24))
+            _chunked_already = True
+            _anchor_idx = plan_anchor_indices(_n_selected, _fx, _ov, _anch_per_chunk)
+            _ensure_anchors([_sel_files[i] for i in _anchor_idx])
+            _apply_chunked_metric(vggt_config, _fx, _ov)
+            _visit_m = float(((config.get("correction") or {}).get("visit_drift") or {})
+                             .get("min_walk_m", 0) or 0)
+            _sal = (vggt_config.get("Loop") or {}).get("SALAD")
+            if _sal is not None and _visit_m > 0 and _walk0 > 0:
+                import math as _math
+                _band = max(int(_sal["min_gap"]),
+                            int(_math.ceil(_visit_m / (_walk0 / _n_selected))))
+                pipe.send_log(f"[loops] SALAD non-local band: {_band} kf = {_visit_m:g} m of "
+                              f"the measured walk")
+                _sal["min_gap"] = int(_band)
+                _sal["min_gap_frac"] = 0.0
+            _persist_chunk_plan(_fx, _ov, _n_selected, "walk-planned", _walk=_walk0)
+            pipe.send_log(f"SIMPLE chunked-metric (I4): walk {_walk0:.1f} m measured by the "
+                          f"DA3 windows → {len(chunk_ranges(_n_selected, _fx, _ov))} chunks of "
+                          f"{_fx} keyframes ({_cw0:g} m of walk, overlap {_ov}); ONE Omega pass")
+        elif _n_selected <= _chunk_cfg:
             vggt_config["Model"]["chunk_size"] = max(_n_selected, 2)
             vggt_config["Model"]["overlap"] = 0
             vggt_config["Model"]["loop_enable"] = False
@@ -2333,7 +2377,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # physical ceiling a 12 m chunk cannot exceed (it binds only when 12 m of
     # this walk holds more keyframes than the card can take — logged if so).
     _max_chunk = int(_chunk_cfg or _n_selected)
-    if (_simple_on and not _chunked_already and _scale_align_on
+    # with the walk MEASURED before Omega (F2 I4) the pass's own walk is evidence only —
+    # it never re-runs anything
+    if (_simple_on and not _chunked_already and _scale_align_on and _walk_doc is None
             and (_probe_sel or (_max_walk > 0 and _walk_m > _max_walk))):
         if _fixed2:
             _phase2, _ov2 = _fixed2, _fixed2 // 2

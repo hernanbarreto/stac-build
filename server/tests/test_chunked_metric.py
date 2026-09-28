@@ -1084,8 +1084,8 @@ def test_a_short_walk_never_re_runs():
     judged better, and a scene whose whole walk fits in one chunk-of-metres
     keeps it too — a re-run into a single chunk is the same pass twice."""
     src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
-    assert ("and _scale_align_on\n            and (_probe_sel or (_max_walk > 0 and "
-            "_walk_m > _max_walk)))") in src, \
+    assert ("and _scale_align_on and _walk_doc is None\n            and (_probe_sel or "
+            "(_max_walk > 0 and _walk_m > _max_walk)))") in src, \
         "the limit and the metric lock both guard the re-run (or the strided walk probe)"
     assert "_max_walk > 0" in src, "0 disables the re-run entirely"
     assert "_phase2, _ov2 = 0, 0" in src, \

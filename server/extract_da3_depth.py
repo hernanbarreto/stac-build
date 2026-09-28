@@ -26,9 +26,17 @@ def main():
                              "default 504). Phase C detail transfer uses ~1008 so the "
                              "depth carries detail above the omega grid's Nyquist. "
                              "ViT cost grows ~quadratically — keyframes only.")
+    parser.add_argument("--windows_json", type=str, default=None,
+                        help="MULTI-VIEW WINDOWS (intake I3, claude_stac.txt §4-F2): a JSON "
+                             "{'windows': [[image path, ...], ...]}; each window is ONE joint "
+                             "inference and lands in <output_dir>/window_<i:04d>.npz (frames, "
+                             "depth, conf, extrinsics w2c, intrinsics, scale_factor, "
+                             "is_metric). Existing window files are kept (resume).")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+    if args.windows_json:
+        return run_windows(args)
 
     images = sorted(glob.glob(os.path.join(args.image_dir, "*.jpg")) + 
                     glob.glob(os.path.join(args.image_dir, "*.png")))
@@ -138,6 +146,66 @@ def main():
             np.save(os.path.join(args.output_dir, stem + "_intrinsics.npy"), intrinsics[i])
 
     print("[DA3 Extractor] Finished successfully.")
+
+def _np(x):
+    if x is None:
+        return None
+    return x.cpu().numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
+
+
+def run_windows(args):
+    """One joint DA3 inference per window. The NESTED model aligns its multi-view
+    depth to its own metric branch with one least-squares factor per window and
+    scales the extrinsics' translations by the same factor (model/da3.py
+    _apply_depth_alignment: is_metric = 1), so each window's poses are metric."""
+    import json
+    import sys
+    import time
+    with open(args.windows_json) as f:
+        windows = json.load(f)["windows"]
+    todo = [i for i in range(len(windows))
+            if not os.path.exists(os.path.join(args.output_dir, f"window_{i:04d}.npz"))]
+    if not todo:
+        print(f"[DA3 windows] all {len(windows)} windows already exist. Skipping.")
+        return
+    print(f"[DA3 windows] {len(todo)} of {len(windows)} windows need processing")
+    da3_src = os.path.join(os.path.dirname(__file__), "../vendor/depth-anything-3/src")
+    if da3_src not in sys.path:
+        sys.path.insert(0, da3_src)
+    from depth_anything_3.api import DepthAnything3
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = DepthAnything3.from_pretrained(args.model).to(device)
+    model.eval()
+    if device.type == "cuda" and next(model.parameters()).device.type != "cuda":
+        raise RuntimeError("model did not reach the GPU — aborting instead of "
+                           "silently burning CPU")
+    res_kw = {"process_res": int(args.process_res)} if args.process_res else {}
+    t0 = time.time()
+    for n, i in enumerate(todo):
+        paths = windows[i]
+        with torch.no_grad():
+            pred = model.inference(paths, **res_kw)
+        frames = np.array([int("".join(ch for ch in os.path.splitext(os.path.basename(p))[0]
+                                       if ch.isdigit())) for p in paths], dtype=np.int64)
+        conf = np.clip(_np(pred.conf) - 1.0, 0, None)       # expp1 activation, as above
+        ext = _np(pred.extrinsics)
+        out = os.path.join(args.output_dir, f"window_{i:04d}.npz")
+        tmp = out + ".tmp.npz"
+        np.savez(tmp, frames=frames, depth=_np(pred.depth).astype(np.float32),
+                 conf=conf.astype(np.float32), extrinsics=ext.astype(np.float64),
+                 intrinsics=_np(pred.intrinsics).astype(np.float64),
+                 scale_factor=np.float64(pred.scale_factor if pred.scale_factor is not None
+                                         else np.nan),
+                 is_metric=np.int64(pred.is_metric))
+        os.replace(tmp, out)
+        el = time.time() - t0
+        print(f"[DA3 windows] window {n + 1}/{len(todo)} ({len(paths)} frames, "
+              f"is_metric={int(pred.is_metric)}, scale {pred.scale_factor}) — "
+              f"{el:.0f}s, ~{el / (n + 1) * (len(todo) - n - 1):.0f}s left", flush=True)
+    if device.type == "cuda":
+        print(f"[DA3 windows] peak VRAM: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+    print("[DA3 windows] Finished successfully.")
+
 
 if __name__ == "__main__":
     main()

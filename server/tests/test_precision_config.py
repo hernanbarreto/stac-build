@@ -109,3 +109,24 @@ def test_no_decision_literals_outside_config(pkg):
             offenders.append(f"{py.relative_to(SERVER)}:{lineno} = {val}")
     assert not offenders, ("decision-looking float literals outside "
                            f"{pkg}/config.py: {offenders}")
+
+
+@pytest.mark.parametrize("key", ["window_frames", "window_overlap_frac", "process_res",
+                                 "model_id", "knot_walk_m", "heldout_confidence",
+                                 "instruments"])
+def test_gauge_keys_are_mandatory(key):
+    raw = _raw()
+    del raw["reconstruction"]["precision"]["gauge"][key]
+    with pytest.raises(PrecisionConfigError, match=rf"gauge\.{key}"):
+        load_precision_config(raw)
+
+
+def test_gauge_windows_must_chain():
+    raw = copy.deepcopy(_raw())
+    raw["reconstruction"]["precision"]["gauge"]["window_overlap_frac"] = 0.02
+    with pytest.raises(PrecisionConfigError, match="cannot be chained"):
+        load_precision_config(raw)
+    raw = copy.deepcopy(_raw())
+    raw["reconstruction"]["precision"]["gauge"]["instruments"] = ["da3_windows", "lidar9000"]
+    with pytest.raises(PrecisionConfigError, match="instruments"):
+        load_precision_config(raw)

@@ -1957,7 +1957,10 @@ reconstruction:
   #   MEASURED      — replaced by a measurement at run time (the key seeds it)
   #   USER DECISION — the user's own criterion, with the date
   precision:
-    enabled: true
+    enabled: false                      # the claude_stac.txt precision pipeline. OFF until F2's
+                                        # I3 (DA3 windows → walk before Omega) is validated on a
+                                        # real session (GPU); ON: map_worker measures the walk
+                                        # with I3 and plans the chunks from it (I4), no probe
     # F0 — session camera + exact grid-to-native mappings (precision/camera.py)
     camera:
       model: OPENCV                     # [fx, fy, cx, cy, k1, k2, p1, p2] in native pixels
@@ -1970,6 +1973,20 @@ reconstruction:
                                         # undistortion "to convergence", not cv2's default 5)
       undistort_eps_px: 1.0e-12         # BOUND: the undistortion stops when a point's lens
                                         # reprojection moves less than this (native px)
+    # F2 — metric gauge along the walk (precision/gauge.py, intake/walk.py)
+    gauge:
+      window_frames: 32                 # BOUND: keyframes per DA3 multi-view window (I3: one
+                                        # joint inference of the NESTED model — its depth and pose
+                                        # translations are metric, model/da3.py
+                                        # _apply_depth_alignment)
+      window_overlap_frac: 0.5          # BOUND: share of a window shared with the next — the
+                                        # frames that chain the windows' poses into ONE walk
+      process_res: 504                  # BOUND: DA3 processing resolution (the model default)
+      model_id: depth-anything/DA3NESTED-GIANT-LARGE-1.1
+      knot_walk_m: 2.0                  # BOUND: knot spacing of the continuous scale model
+      heldout_confidence: 0.95          # declared confidence of the held-out comparisons (the
+                                        # same bar as correction_graph.graph.heldout_confidence)
+      instruments: [da3_windows, da3_mono, vio, stray, known_dims]
     # F9 — runner (declared here so every stage heartbeats the same way)
     runner:
       heartbeat_s: 20                   # BOUND: seconds between progress lines of a long stage

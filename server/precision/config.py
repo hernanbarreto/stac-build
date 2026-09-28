@@ -146,6 +146,23 @@ class CameraConfig:
                                 # through the lens moves it less than this (native px)
 
 
+# ── F2: metric gauge along the walk ──────────────────────────────────────
+
+GAUGE_INSTRUMENTS = ("da3_windows", "da3_mono", "vio", "stray", "known_dims")
+
+
+@dataclass(frozen=True)
+class GaugeConfig:
+    window_frames: int          # BOUND: keyframes per DA3 multi-view window (one joint inference)
+    window_overlap_frac: float  # BOUND: share of a window shared with the next (the frames
+                                # that chain two windows' poses into one walk)
+    process_res: int            # BOUND: DA3 processing resolution (long side, px)
+    model_id: str               # DA3 checkpoint (the NESTED model: metric multi-view)
+    knot_walk_m: float          # BOUND: knot spacing of the continuous scale model (m of walk)
+    heldout_confidence: float   # declared confidence of the held-out comparisons
+    instruments: Tuple[str, ...]    # scale instruments that may enter the model
+
+
 # ── F9: runner (declared in F0 so every stage heartbeats the same way) ───
 
 @dataclass(frozen=True)
@@ -159,6 +176,7 @@ class RunnerConfig:
 class PrecisionConfig:
     enabled: bool
     camera: CameraConfig
+    gauge: GaugeConfig
     runner: RunnerConfig
 
 
@@ -191,10 +209,31 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         undistort_eps_px=_num(cam, "undistort_eps_px", "camera", lo=0.0, lo_excl=True),
     )
 
+    g = _sub(sec, "gauge", "")
+    gauge = GaugeConfig(
+        # two windows chain through at least two shared frames: a window needs four
+        window_frames=_num(g, "window_frames", "gauge", lo=4, integer=True),
+        window_overlap_frac=_num(g, "window_overlap_frac", "gauge", lo=0.0, hi=1.0,
+                                 lo_excl=True),
+        process_res=_num(g, "process_res", "gauge", lo=14, integer=True),
+        model_id=_str(g, "model_id", "gauge"),
+        knot_walk_m=_num(g, "knot_walk_m", "gauge", lo=0.0, lo_excl=True),
+        heldout_confidence=_num(g, "heldout_confidence", "gauge", lo=0.0, hi=1.0,
+                                lo_excl=True),
+        instruments=tuple(_str_list(g, "instruments", "gauge", allowed=GAUGE_INSTRUMENTS)),
+    )
+    if gauge.window_overlap_frac >= 1.0 or gauge.heldout_confidence >= 1.0:
+        raise PrecisionConfigError(
+            f"'{SECTION}.gauge.window_overlap_frac' and '.heldout_confidence' must be below 1")
+    if int(round(gauge.window_frames * gauge.window_overlap_frac)) < 2:
+        raise PrecisionConfigError(
+            f"'{SECTION}.gauge.window_frames' x '.window_overlap_frac' shares fewer than 2 "
+            f"frames between windows — two windows cannot be chained")
+
     rn = _sub(sec, "runner", "")
     runner = RunnerConfig(
         heartbeat_s=_num(rn, "heartbeat_s", "runner", lo=0.0, lo_excl=True),
         perf_checkpoint_s=_num(rn, "perf_checkpoint_s", "runner", lo=0.0, lo_excl=True),
     )
 
-    return PrecisionConfig(enabled=enabled, camera=camera, runner=runner)
+    return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, runner=runner)
