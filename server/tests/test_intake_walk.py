@@ -137,3 +137,15 @@ def test_a_missing_window_names_itself(tmp_path):
     (tmp_path / "output" / W.WINDOWS_DIRNAME / "window_0001.npz").unlink()
     with pytest.raises(W.WalkError, match="window_0001"):
         W.measure_walk(tmp_path, G, log=lambda *a: None)
+
+
+def test_chunk_plan_from_the_measured_walk_is_reproducible():
+    """I4: the measured walk sizes the chunks — the same walk, the same plan, and
+    each chunk ~chunk_walk_m of it (pccr 2026-08-24: 1329 kf over 104.8 m)."""
+    from reconstruction.chunk_plan import plan_chunks, chunk_ranges
+    a = plan_chunks(1329, 104.8, 12.0, max_size=870)
+    assert a == plan_chunks(1329, 104.8, 12.0, max_size=870)
+    size, ov = a
+    assert ov == size // 2
+    assert abs(size * 104.8 / 1329 - 12.0) < 0.1
+    assert chunk_ranges(1329, size, ov)[-1][1] == 1329

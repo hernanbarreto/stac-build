@@ -180,9 +180,23 @@ def run_windows(args):
         raise RuntimeError("model did not reach the GPU — aborting instead of "
                            "silently burning CPU")
     res_kw = {"process_res": int(args.process_res)} if args.process_res else {}
+    # the NESTED model computes each frame's MONOCULAR metric depth (its metric
+    # branch) and discards it after aligning the multi-view depth to it — kept here
+    # as `depth_mono`, the gauge's per-frame instrument, from the SAME inference
+    captured = {}
+    inner = getattr(model, "model", None)
+    if inner is not None and hasattr(inner, "_apply_depth_alignment"):
+        _orig_align = inner._apply_depth_alignment
+
+        def _capture(output, metric_output):
+            captured["mono"] = metric_output.depth.detach().float().cpu().numpy()
+            return _orig_align(output, metric_output)
+
+        inner._apply_depth_alignment = _capture
     t0 = time.time()
     for n, i in enumerate(todo):
         paths = windows[i]
+        captured.clear()
         with torch.no_grad():
             pred = model.inference(paths, **res_kw)
         frames = np.array([int("".join(ch for ch in os.path.splitext(os.path.basename(p))[0]
@@ -191,7 +205,17 @@ def run_windows(args):
         ext = _np(pred.extrinsics)
         out = os.path.join(args.output_dir, f"window_{i:04d}.npz")
         tmp = out + ".tmp.npz"
-        np.savez(tmp, frames=frames, depth=_np(pred.depth).astype(np.float32),
+        extra = {}
+        depth = _np(pred.depth).astype(np.float32)
+        mono = captured.get("mono")
+        if mono is not None:
+            mono = mono.reshape((-1,) + mono.shape[-2:])
+            if mono.shape == depth.shape:
+                extra["depth_mono"] = mono.astype(np.float32)
+            else:
+                print(f"[DA3 windows] window {i}: mono depth {mono.shape} ≠ depth "
+                      f"{depth.shape} — not stored")
+        np.savez(tmp, frames=frames, depth=depth, **extra,
                  conf=conf.astype(np.float32), extrinsics=ext.astype(np.float64),
                  intrinsics=_np(pred.intrinsics).astype(np.float64),
                  scale_factor=np.float64(pred.scale_factor if pred.scale_factor is not None

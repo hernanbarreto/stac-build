@@ -190,6 +190,8 @@ class VisitDriftConfig:
     default_repeatability_m: float  # used only when uncertainty.json is absent
     grid_aspect_tol: float          # mask grid vs trace grid, relative disagreement
     min_depth_m: float              # a point nearer than this is not in front of the camera
+    skip_when_gauge_applied: bool   # the depth (scale) stage stands down when the precision
+                                    # gauge already applied its epoch (claude_stac.txt §4-F2)
 
 
 @dataclass(frozen=True)
@@ -288,6 +290,7 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
                                      lo=0.0, lo_excl=True),
         grid_aspect_tol=_num(vd_, "grid_aspect_tol", "visit_drift", lo=0.0, lo_excl=True),
         min_depth_m=_num(vd_, "min_depth_m", "visit_drift", lo=0.0, lo_excl=True),
+        skip_when_gauge_applied=_bool(vd_, "skip_when_gauge_applied", "visit_drift"),
     )
 
     ev = section.get("evidence")

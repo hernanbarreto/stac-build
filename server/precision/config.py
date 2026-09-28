@@ -160,6 +160,10 @@ class GaugeConfig:
     model_id: str               # DA3 checkpoint (the NESTED model: metric multi-view)
     knot_walk_m: float          # BOUND: knot spacing of the continuous scale model (m of walk)
     heldout_confidence: float   # declared confidence of the held-out comparisons
+    smooth_grid: Tuple[float, ...]  # BOUND: the dimensionless smoothness weights searched by
+                                    # leave-one-window-out (× the rows' weight per knot)
+    huber_k: float              # Huber's tuning constant of the per-frame gain (statistics:
+                                # 1.345 = 95 % efficiency under normal noise)
     instruments: Tuple[str, ...]    # scale instruments that may enter the model
 
 
@@ -220,6 +224,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         knot_walk_m=_num(g, "knot_walk_m", "gauge", lo=0.0, lo_excl=True),
         heldout_confidence=_num(g, "heldout_confidence", "gauge", lo=0.0, hi=1.0,
                                 lo_excl=True),
+        smooth_grid=tuple(_num_list(g, "smooth_grid", "gauge", lo=0.0, min_len=1)),
+        huber_k=_num(g, "huber_k", "gauge", lo=0.0, lo_excl=True),
         instruments=tuple(_str_list(g, "instruments", "gauge", allowed=GAUGE_INSTRUMENTS)),
     )
     if gauge.window_overlap_frac >= 1.0 or gauge.heldout_confidence >= 1.0:

@@ -547,7 +547,13 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
     if cfg is None:
         from correction.config import load_correction_config
         cfg = cfg or load_correction_config()
-    dep = solve_depth(output_dir, log=log, cfg=cfg)
+    from precision.gauge import gauge_applied
+    if cfg.visit_drift.skip_when_gauge_applied and gauge_applied(output_dir):
+        log("[correction] DEPTH stands down: the precision gauge already applied the "
+            "continuous scale along the walk (gauge.json) — not applied twice")
+        dep = None
+    else:
+        dep = solve_depth(output_dir, log=log, cfg=cfg)
     _pc(_FLOOR_PCT, "correction: solving the floor on that geometry")
     if dep is None:
         log("[correction] no depth correction — the floor runs on its own")
