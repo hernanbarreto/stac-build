@@ -32,7 +32,8 @@ from correction import diagnose, floor as floor_mod, gates, ledger, solve
 from correction.apply import (assert_no_interrupted_swap, available_epochs,
                               stage_transaction, swap_transaction)
 from correction.config import CorrectionConfig, load_correction_config
-from correction.epoch import current_epoch, epoch_path
+from correction.epoch import (EPOCH_KIND_NEW_CLOUD, current_epoch, epoch_kind,
+                              epoch_path)
 from correction.invalidate import update_instance_store
 from correction.report import build_report, save_report
 from correction.session import load_session
@@ -228,6 +229,65 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
     return report
 
 
+def _session_frames(output_dir: Path, moves: list) -> List[int]:
+    """The keyframe list the store is keyed by: the session's own
+    (``camera_frames.txt``, one real frame number per pose row), else the
+    frames of the transforms being composed, else nothing."""
+    from segmentation.session_io import _load_frame_index_map
+    frames = _load_frame_index_map(output_dir)
+    if frames:
+        return [int(f) for f in frames]
+    out: List[int] = []
+    for mv, _ in moves:
+        for f in mv["frames"]:
+            if int(f) not in out:
+                out.append(int(f))
+    return out
+
+
+def compose_moves(moves: list, frames: List[int], log: Callable = print):
+    """ONE per-keyframe transform equal to applying ``moves`` in order.
+
+    Each move is ``(npz, inverse)``: the persisted warp of one epoch —
+    ``p' = R·(c + (p − c)·(k z + b)/z) + t`` about the keyframe's own camera
+    ``c`` and optical axis, ``z`` the depth along it — applied inverted while
+    climbing to the common ancestor. Two such warps compose into one of the
+    same form: ``R = R₂R₁``, ``t = R₂t₁ + t₂``, ``k = k₁k₂``, ``b = k₂b₁ + b₂``
+    (the camera moves rigidly with the pose, so the second depth op acts along
+    the same ray at ``z₁ = k₁z + b₁``). With no move it is the identity —
+    what a ``new_cloud`` edge is worth. Keyed by real frame number; a frame a
+    transform names that the session no longer has is declared and skipped.
+    """
+    n = len(frames)
+    R = np.tile(np.eye(3), (n, 1, 1))
+    t = np.zeros((n, 3))
+    k = np.ones(n)
+    b = np.zeros(n)
+    idx = {int(f): i for i, f in enumerate(frames)}
+    for mv, inverse in moves:
+        Rm, tm, km = mv["R_kf"], mv["t_kf"], mv["k_kf"]
+        bm = np.asarray(mv["b_kf"])
+        if inverse:
+            Rm = np.transpose(Rm, (0, 2, 1))
+            tm = -np.einsum('nij,nj->ni', Rm, mv["t_kf"])
+            km = 1.0 / mv["k_kf"]
+            bm = -bm / mv["k_kf"]      # inverse of z' = k z + b is z = z'/k − b/k
+        missing = 0
+        for j, f in enumerate(mv["frames"]):
+            i = idx.get(int(f))
+            if i is None:
+                missing += 1
+                continue
+            R[i] = Rm[j] @ R[i]
+            t[i] = Rm[j] @ t[i] + tm[j]
+            b[i] = km[j] * b[i] + bm[j]
+            k[i] = k[i] * km[j]
+        if missing:
+            log(f"  {missing} keyframe(s) of a stored transform are not in the "
+                f"session's frame list — their findings cannot follow")
+    return R, t, k, b
+
+
 def run_select(output_dir, epoch: int, operator: str = "user",
                log: Callable = print) -> dict:
     """Show the session in one of its epochs. Nothing is approved or undone.
@@ -244,6 +304,13 @@ def run_select(output_dir, epoch: int, operator: str = "user",
     DOWN to the chosen one. Ancestry, not arithmetic: a correction run on top
     of an older epoch branches the history, so cur and epoch are not always on
     the same line (`epoch_path`).
+
+    A ``new_cloud`` epoch (F7 witness fusion) is an IDENTITY edge: it rebuilt
+    the cloud under the same cameras, so no per-keyframe warp exists and none
+    is required — the store's points and OBBs are refit from the swapped cloud
+    and its segmentation, only the findings' anchors need a transform. The
+    store is updated exactly ONCE per select, with the composition of the
+    transform edges on the path (the identity when there is none).
     """
     from correction.apply import select_epoch
     output_dir = Path(output_dir)
@@ -257,6 +324,10 @@ def run_select(output_dir, epoch: int, operator: str = "user",
     # exact, so the store lands on the geometry, never near it
     moves = []
     for e, inverse in epoch_path(output_dir, cur, epoch):
+        if epoch_kind(output_dir, e) == EPOCH_KIND_NEW_CLOUD:
+            log(f"  epoch {e} is a new cloud under the same cameras — the store "
+                f"follows it with the identity")
+            continue
         try:
             moves.append((ledger.load_epoch_npz(output_dir, e), inverse))
         except RuntimeError as err:
@@ -280,20 +351,13 @@ def run_select(output_dir, epoch: int, operator: str = "user",
         log(f"  epoch record did not travel with the geometry — rewritten to "
             f"epoch {epoch}")
 
-    for mv, inverse in moves:
-        R, t, k, b, frames = (mv["R_kf"], mv["t_kf"], mv["k_kf"],
-                              np.asarray(mv["b_kf"]), mv["frames"])
-        if inverse:
-            R = np.transpose(R, (0, 2, 1))
-            t = -np.einsum('nij,nj->ni', R, mv["t_kf"])
-            k = 1.0 / mv["k_kf"]
-            b = -b / mv["k_kf"]        # inverse of z' = k z + b is z = z'/k − b/k
-        try:
-            update_instance_store(output_dir, R, t, k, frames, log=log, b_kf=b)
-        except RuntimeError as e:
-            log(f"  instance-store refresh failed (the geometry IS at epoch "
-                f"{epoch}; the store stays stale until the next rebuild): {e}")
-            break
+    frames = _session_frames(output_dir, moves)
+    R, t, k, b = compose_moves(moves, frames, log=log)
+    try:
+        update_instance_store(output_dir, R, t, k, frames, log=log, b_kf=b)
+    except RuntimeError as e:
+        log(f"  instance-store refresh failed (the geometry IS at epoch "
+            f"{epoch}; the store stays stale until the next rebuild): {e}")
     res["ok"] = True
     res["available"] = [e["epoch"] for e in available_epochs(output_dir)]
     log(f"[correction] session shown at epoch {epoch} "
