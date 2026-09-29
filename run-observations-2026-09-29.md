@@ -198,15 +198,20 @@ reconstruction stage (pccr scan 2026-08-31, 289 kf / 2100 witness, walk 17.5 m):
     OBB-centre-vs-centroid offsets I measured — median 28 cm, 5.5 m on an 11 m
     wall — are mostly legitimate: an OBB centre is the extent's midpoint, not
     the centroid.)
-26. **Segmentation "muy incompleta" — cause found, NOT a cloud problem**: SAM3
-    3.1's masklets are healthy (71 objects, median 26 keyframes each, max 156;
-    only 3 ≤ 3 frames — the 08-29 "masklets die" regression did not recur).
-    What is missing is DETECTION: prompts are applied only at
-    models.segmentation.prompt_search_frames [0, 15] of each 250-frame batch,
-    so objects first seen later in the walk are never proposed ('black metal
-    desk' → 2 objects, 'black office chair' → 1, 'white folding table' /
-    'doorbell panel' / 'conduit' / 'exposed ceiling pipes' → 0 masklets). USER
-    DECISION NEEDED: re-prompt every N keyframes (more SAM3 time) — e.g. every 30.
+26. **Segmentation "muy incompleta" — FIRST DIAGNOSIS WAS WRONG (corrected
+    2026-09-29 14:xx)**: prompt_search_frames does NOT limit detection — SAM3's
+    text prompt is applied to ALL frames (find_text_batch, "to be applied to
+    *all* frames"), and every add_prompt RESETS the session
+    (sam3_multiplex_tracking.add_prompt → reset_state), so prompting every 2
+    keyframes (USER request) would keep only the last prompt: a no-op. NOT
+    configured; told the user. Real candidates (SAM3.1 builder,
+    model_builder.py ~719-750): new_det_thresh 0.7 for a NEW object (detection
+    0.5), masklet confirmation = 3 consecutive detections + hotstart 15 frames —
+    on parallax-spaced keyframes an object seen in < 3 consecutive keyframes is
+    never confirmed; and the VLM consolidation 30 concepts → 21 groups ('white
+    folding table', 'doorbell panel', 'conduit' → 0 masklets). NEXT: measure
+    (SAM3 detector scores on the keyframes where the desks are visible) — GPU,
+    after the night chain.
 27. **COLMAP tier 2 implemented** (c7920ab): depth_colmap writes each keyframe's
     COLMAP depth with confirmations/contradictions by the sweep's own rule; F7
     admits it where the sweep measured nothing (source 20, tier 0 > 2 > 1,
