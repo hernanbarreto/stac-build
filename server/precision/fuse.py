@@ -474,7 +474,7 @@ def publish(session_dir: Path, result: Dict[str, Any], log: Callable = print) ->
         if (out / sib).exists():
             np.save(tx / sib, np.zeros(len(data), dt))
             art(sib)
-    (tx / EPOCH_FILE).write_text(json.dumps(make_epoch_record(epoch_to, cid, epoch_from),
+    (tx / EPOCH_FILE).write_text(json.dumps(make_epoch_record(epoch_to, cid, epoch_from, kind="new_cloud"),
                                             indent=1))
     art(EPOCH_FILE)
     from potree_converter import convert_ply_to_potree
