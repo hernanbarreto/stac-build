@@ -124,6 +124,7 @@ def test_build_runs_the_recipe_and_registers(tmp_path, monkeypatch):
     monkeypatch.setattr(potree_converter, "convert_ply_to_potree", fake_potree)
     cfg = {"reconstruction": {"simple": {"conf_percentile": 0.0, "conf_min_norm": 0.0}},
            "postprocessing": {"voxel_size": 0.005, "sor_knn": 8, "sor_sigma": 3.0,
+                              "noise_radius": 0.01, "noise_sigma": 1.0, "conf_min_norm": 0.0,
                               "scene_consolidate": {"enabled": False}}}
     rep = E0.build_epoch0_cloud(s, cfg, from_records=True, log=lambda *a: None)
     assert rep["n_points"] == 123 and (out / "_epoch_0" / "cleaned_cloud.ply").exists()
