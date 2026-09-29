@@ -175,6 +175,47 @@ reconstruction stage (pccr scan 2026-08-31, 289 kf / 2100 witness, walk 17.5 m):
     (noted) · 4 mask_sky stays · 16 keep `_epoch_0/`, selectable from the UI ·
     1 exclusion never targets trains/vehicles.
 
+24. **NIGHT RUN 2026-09-29 — the door's layers, measured**: #125 (404 k pts) spans
+    p05 −13 … p95 +11 cm along its normal, fed by the SAME 44 keyframes that see it
+    — Omega's per-frame depth noise (±4 % at 2.5 m), not a revisit; each prior
+    entered because its adjacent keyframes (sharing the error) agreed within
+    τ_rel while the layers sit 10 cm apart, and the consuming fusion merges only
+    within 2.5 cm. → F6 now (fd56ef0): contradiction over EVERY view whose frustum
+    sees the point (best depth of each: swept where signalled, prior elsewhere);
+    tier 1 needs an agreeing view ≥ correction.visit_drift.min_walk_m (1 m) of
+    walk away (14c: measured, then hardened — the user's "medir primero" rule was
+    honoured by this measurement); F7 runs the CloudCompy recipe (voxel + SOR,
+    postprocessing params) inside, reasons voxel/sor. COST: the all-view
+    contradiction made F6's consistency pass ~15× slower (289 keyframes × up to
+    ~100 covisible views: ~90 min vs 6). A cost bound (max contradiction views
+    by covisibility rank) is the next lever if it stays this slow.
+25. **OBBs "not on the objects" — cause found**: opening the session in the
+    viewer (main.py session-load fallback) ran a RANSAC floor leveling on the
+    fused cloud — a baked-orientation session — found 2.4° / −28 cm and SAVED
+    floor_transform.npz (10:06); the OBBs were then computed in that frame.
+    Fixed (guard on .orientation_applied, identity, nothing saved); the wrong
+    npz set aside as floor_transform.npz.wrong-ransac-20260929. (The raw
+    OBB-centre-vs-centroid offsets I measured — median 28 cm, 5.5 m on an 11 m
+    wall — are mostly legitimate: an OBB centre is the extent's midpoint, not
+    the centroid.)
+26. **Segmentation "muy incompleta" — cause found, NOT a cloud problem**: SAM3
+    3.1's masklets are healthy (71 objects, median 26 keyframes each, max 156;
+    only 3 ≤ 3 frames — the 08-29 "masklets die" regression did not recur).
+    What is missing is DETECTION: prompts are applied only at
+    models.segmentation.prompt_search_frames [0, 15] of each 250-frame batch,
+    so objects first seen later in the walk are never proposed ('black metal
+    desk' → 2 objects, 'black office chair' → 1, 'white folding table' /
+    'doorbell panel' / 'conduit' / 'exposed ceiling pipes' → 0 masklets). USER
+    DECISION NEEDED: re-prompt every N keyframes (more SAM3 time) — e.g. every 30.
+27. **COLMAP tier 2 implemented** (c7920ab): depth_colmap writes each keyframe's
+    COLMAP depth with confirmations/contradictions by the sweep's own rule; F7
+    admits it where the sweep measured nothing (source 20, tier 0 > 2 > 1,
+    viewer confidence = views / n_views); switch depth.colmap.as_tier.
+28. **Epoch-0 cloud after F7** (9019988): precision/epoch0_cloud.py — chunks (or
+    the Omega records via the exact prescale→epoch-0 similarity, 0.9707) through
+    the cleaner recipe + consolidation + octree into _epoch_0/, registered in the
+    manifest; map_worker runs it before deleting the chunks.
+
 **Why:** each is a decision the user must take, not a bug to fix silently.
 **How to apply:** raise them together when the run ends; implement only what he
 approves. See [[user-wants-results-fast]].

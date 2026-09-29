@@ -105,8 +105,17 @@ def _load_inputs(session_dir: Path, pcfg):
     rep = json.loads(rep_p.read_text())
     epochs = read_session_epochs(session_dir)
     if any(rep.get(k) != v for k, v in epochs.items()):
-        raise FuseError(f"depth_native was measured on {({k: rep.get(k) for k in epochs})}, the "
-                        f"session is at {epochs} — re-run F6 on the current epoch")
+        # a NEW-CLOUD epoch (a previous F7) moves no camera: F6's depth still belongs to
+        # these poses, so F7 can be re-run (e.g. with COLMAP as tier 2) on a published session
+        from correction.epoch import epoch_kind
+        same_cam = rep.get("camera_epoch") == epochs.get("camera_epoch")
+        g0, g1 = int(rep.get("geometry_epoch", -1)), int(epochs["geometry_epoch"])
+        later = list(range(g0 + 1, g1 + 1)) if g0 >= 0 else []
+        kinds = {e: epoch_kind(out, e) for e in later}
+        if not (same_cam and later and all(k == "new_cloud" for k in kinds.values())):
+            raise FuseError(f"depth_native was measured on {({k: rep.get(k) for k in epochs})}, the "
+                            f"session is at {epochs} and the epochs in between are {kinds or 'none'} "
+                            f"— re-run F6 on the current epoch")
     cam = load_camera_json(out / "camera.json")
     kf, c2w = _read_poses(out / "camera_poses.txt", out / "camera_frames.txt")
     m1, m2, K = undistort_maps(cam)
