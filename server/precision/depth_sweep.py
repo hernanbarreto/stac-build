@@ -1060,6 +1060,7 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
         best_margin[j] = np.where(meas, tau_rel, bj).astype(np.float32)
     n_far_only = 0
     n_contra_views_tot = 0
+    n_indep_views_tot = 0
     counts_tot = {k: 0 for k in SOURCE_NAMES.values()}
     per_frame = {}
     cal_omega, cal_da3 = [], []
@@ -1101,13 +1102,24 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
             b_p = np.where(b_p_all.astype(np.int32) > g_p_all.astype(np.int32), b_p_all, 0).astype(np.uint8)
         else:
             b_s, b_p = b_s_near, b_p_near
-        # INDEPENDENCE: an agreeing view a visit of walk away from this keyframe
+        # INDEPENDENCE: an agreeing view a VISIT of walk away — searched among EVERY
+        # keyframe that sees the point (USER 2026-09-29: "buscá testigos entre todos los
+        # KF, no importa de cuáles, siempre que se haya recorrido entre cada uno más de
+        # 1 m" — the ACCUMULATED walk between the two, chainage, not their distance). The
+        # 8 nearest views (the first version) are all < 0.5 m of walk away and never qualified.
         indep = None
         if min_walk > 0:
             indep = np.zeros(z0.shape, bool)
-            for j, g in zip(nb, good_p):
-                if np.isfinite(chain[j]) and np.isfinite(chain[i]) and \
-                        abs(chain[j] - chain[i]) >= min_walk:
+            far = [j for j in contra_views.get(i, []) if j in best_depth and np.isfinite(chain[j])
+                   and np.isfinite(chain[i]) and abs(chain[j] - chain[i]) >= min_walk]
+            far = far[:int(dcfg.contradiction_views)]            # most covisible first (cost cap)
+            n_indep_views_tot += len(far)
+            if far:
+                _, _, _, good_far = consistency(z0, inp.K, inp.kf_w2c[i], [best_depth[j] for j in far],
+                                                [inp.kf_w2c[j] for j in far], tau_rel, inp.tau_px,
+                                                device=dev, return_good=True,
+                                                nbr_bad_margin=[best_margin[j] for j in far])
+                for g in good_far:
                     indep |= g
         excl = read_exclusion(session_dir, f, inp.maps)
         low = conf_floor_mask(c0, z0 > 0, conf_floor)
