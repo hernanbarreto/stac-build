@@ -34,7 +34,8 @@ if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
 from correction.ledger import load_epoch_npz  # noqa: E402
-from correction.epoch import epoch_lineage  # noqa: E402
+from correction.epoch import (EPOCH_KIND_NEW_CLOUD, epoch_kind,  # noqa: E402
+                              epoch_lineage)
 from correction.session import read_ply, read_poses, write_ply, \
     write_poses  # noqa: E402
 from segmentation.session_io import _load_frame_index_map  # noqa: E402
@@ -104,6 +105,18 @@ def replay(session_dir: Path, to_epoch: int,
     poses_path = Path(poses_path) if poses_path else \
         output_dir / "camera_poses.txt"
     out_dir = Path(out_dir) if out_dir else output_dir / "replay"
+
+    lineage = epoch_lineage(output_dir, int(to_epoch))
+    # a new-cloud epoch (F7 witness fusion) is not a warp of the previous
+    # cloud — nothing applied to an epoch-0 cloud reproduces it. Refused
+    # before a byte is read, by name, so the caller knows which epoch and why.
+    for parent, ep in zip(lineage, lineage[1:]):
+        if epoch_kind(output_dir, ep) == EPOCH_KIND_NEW_CLOUD:
+            raise RuntimeError(
+                f"replay: epoch {ep} is a NEW CLOUD rebuilt from the depth maps "
+                f"(kind new_cloud), not a transform of epoch {parent} — no "
+                f"per-keyframe warp reproduces it. Replay to epoch {parent} at "
+                f"most, or select epoch {ep} to see it")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     header, data = read_ply(cloud_path)
@@ -119,7 +132,6 @@ def replay(session_dir: Path, to_epoch: int,
         raise RuntimeError("camera_frames.txt does not match the pose file — "
                            "cannot key the replay by real frame numbers")
 
-    lineage = epoch_lineage(output_dir, int(to_epoch))
     # rows of the ORIGINAL cloud still alive — an epoch may delete points
     # (the visit-drift filter does), and replaying only the motion would hand
     # back a cloud the session never had

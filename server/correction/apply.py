@@ -600,6 +600,128 @@ def available_epochs(output_dir: Path) -> List[dict]:
     return sorted(out, key=lambda r: r["epoch"])
 
 
+def _read_manifest(output_dir: Path, epoch: int) -> Optional[dict]:
+    """``{"epoch_to": int | None, "entries": {rel: entry}}`` of the stored
+    epoch's manifest, or None when the epoch has no stored directory.
+
+    ``epoch_to`` is the epoch the session went to when it LEFT ``epoch`` — the
+    swap journal's ``epoch_to`` (the child a correction produced) or the
+    ``epoch_to`` a select writes (the epoch it showed). A manifest without one
+    was written by the select of before 2026-09-29, which stored EVERY artifact
+    the session had ever staged: for it, an unnamed file did not exist.
+    """
+    man = output_dir / f"{PREV_PREFIX}{int(epoch)}" / MANIFEST_NAME
+    if not man.is_file():
+        return None
+    try:
+        data = json.loads(man.read_text())
+    except (OSError, ValueError):
+        raise RuntimeError(f"{man} is unreadable — the session is inconsistent")
+    entries: Dict[str, dict] = {}
+    for a in data.get("artifacts", []):
+        rel = str(a.get("rel", ""))
+        if rel and not rel.startswith(EPOCH_NPZ_DIR + "/"):
+            entries[rel] = a
+    to = data.get("epoch_to")
+    try:
+        to = int(to) if to is not None else None
+    except (TypeError, ValueError):
+        to = None
+    if to == int(epoch):                # a self-reference names no departure
+        to = None
+    return {"epoch_to": to, "entries": entries}
+
+
+def _resolve_at(output_dir: Path, epoch: int, rel: str, live: int) -> Tuple[str, Optional[int]]:
+    """Where ``rel`` as it was AT ``epoch`` lives today.
+
+    Returns ``("live", None)`` — unchanged between ``epoch`` and the live
+    state, so the live file IS that version; ``("absent", None)`` — the epoch
+    had no such file; or ``("stored", j)`` — the file ``_epoch_<j>/<rel>``.
+
+    A stored directory is a DELTA: ``_epoch_<j>/`` holds j's version of the
+    files the departure from j replaced, and nothing else. A file it does not
+    name was unchanged by that departure, so its version at j is its version
+    at the epoch the session went to — follow ``epoch_to`` until a manifest
+    names the file or the live epoch is reached. On a linear session that is
+    exactly the path from the target upward. An entry with ``same_as_epoch``
+    was renamed out of this directory by an earlier select and is that other
+    epoch's copy now (see `select_epoch`).
+    """
+    e = int(epoch)
+    seen = set()
+    while True:
+        if e == live:
+            return "live", None
+        if e in seen:
+            raise RuntimeError(
+                f"the manifests of this session loop around epoch {e} — "
+                f"the session is inconsistent")
+        seen.add(e)
+        m = _read_manifest(output_dir, e)
+        if m is None:
+            raise RuntimeError(
+                f"epoch {e} has no stored directory but the session's history "
+                f"passes through it — the session is inconsistent "
+                f"({PREV_PREFIX}{e}/ was removed?)")
+        ent = m["entries"].get(rel)
+        if ent is not None:
+            alias = ent.get("same_as_epoch")
+            if alias is not None:
+                e = int(alias)
+                continue
+            p = output_dir / f"{PREV_PREFIX}{e}" / rel
+            existed = ent.get("existed_before")
+            if existed is None:             # a manifest without the flag
+                existed = p.exists()
+            if not existed:
+                return "absent", None
+            if not p.exists():
+                raise RuntimeError(
+                    f"{p} is named in its manifest but missing — the session "
+                    f"is inconsistent")
+            return "stored", e
+        if m["epoch_to"] is None:           # a full store: unnamed = absent
+            return "absent", None
+        e = m["epoch_to"]
+
+
+def _path_union(output_dir: Path, epoch: int, live: int) -> List[str]:
+    """Every artifact named by a manifest on the history from ``epoch`` up to
+    the live state — the only files whose version can differ between the two.
+    A full store (a manifest without ``epoch_to``) on the way widens it to
+    every artifact the session ever staged, since it names only what existed.
+    """
+    rels: List[str] = []
+    seen_rel = set()
+
+    def _add(rel: str) -> None:
+        if rel not in seen_rel:
+            seen_rel.add(rel)
+            rels.append(rel)
+
+    e, seen = int(epoch), set()
+    while e != live and e not in seen:
+        seen.add(e)
+        m = _read_manifest(output_dir, e)
+        if m is None:
+            break
+        for rel in m["entries"]:
+            _add(rel)
+        if m["epoch_to"] is None:
+            for a in session_artifacts(output_dir):
+                _add(a["rel"])
+            break
+        e = m["epoch_to"]
+    return rels
+
+
+def _write_manifest_atomic(path: Path, data: dict) -> None:
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=1))
+    tmp.replace(path)
+
+
 def select_epoch(output_dir: Path, epoch: int, log=print) -> dict:
     """Show the session in the state of ``epoch``. Nothing is destroyed.
 
@@ -613,6 +735,21 @@ def select_epoch(output_dir: Path, epoch: int, log=print) -> dict:
     previous epoch and Undo used to delete the current one; between them a
     session could only ever hold two states, and choosing wrong destroyed the
     other. Now every epoch survives and selecting is free.
+
+    WHAT MOVES (2026-09-29): the stored directories are DELTAS — `_epoch_<j>/`
+    holds j's version of the files the departure from j replaced, nothing
+    else (pccr: `_epoch_1/` poses and sidecar only, `_epoch_2/` cloud, octree
+    and segmentation only). Restoring the chosen epoch from its own directory
+    alone left every other file at the live version — epoch 1 with epoch 3's
+    fused cloud. Now every file named on the history between the two epochs
+    is resolved by `_resolve_at`: the version at the target is taken from the
+    first stored directory upward that holds it, a file unchanged all the way
+    stays live, a file introduced above the target leaves the live set. A file
+    taken from a directory ABOVE the target is renamed, not copied, and that
+    directory's manifest entry becomes ``same_as_epoch: <target>`` — the copy
+    now lives with the target, and resolving through the pointer finds it
+    wherever the target is later filed. The directory the session leaves is
+    written with ``epoch_to`` so the same resolution works back up.
     """
     output_dir = Path(output_dir)
     # the same cross-process octree lock as swap_transaction (see there)
@@ -627,57 +764,81 @@ def select_epoch(output_dir: Path, epoch: int, log=print) -> dict:
         if not src.is_dir() or not (src / MANIFEST_NAME).is_file():
             raise RuntimeError(f"epoch {epoch} is not in this session "
                                f"({[e['epoch'] for e in available_epochs(output_dir)]})")
-        # Every artifact any epoch of this session ever staged, not just the ones
-        # in the chosen epoch's manifest: an epoch that came later may have created
-        # a file the chosen one never had (`depth_correction.json` of a depth
-        # correction, `floor_transform.npz` of a floor alignment). Swapping only
-        # the destination's list left that file live over older geometry — the
-        # cloud of epoch 1 with the depth sidecar of epoch 3.
-        arts = session_artifacts(output_dir)
-        if not arts:
+        rels = _path_union(output_dir, epoch, cur)
+        if not rels:
             raise RuntimeError(f"epoch {epoch} has no artifact manifest to restore")
+        # resolve everything BEFORE the first rename: an inconsistent session
+        # is refused with nothing touched
+        plan: List[dict] = []
+        for rel in rels:
+            where, j = _resolve_at(output_dir, epoch, rel, cur)
+            if where == "live":
+                continue
+            plan.append({"rel": rel, "live_exists": (output_dir / rel).exists(),
+                         "src_epoch": j})
         dst = output_dir / f"{PREV_PREFIX}{cur}"
         if dst.exists():
             raise RuntimeError(f"{dst} already exists — the session is inconsistent")
         dst.mkdir(parents=True)
         journal_path = output_dir / SWAP_JOURNAL
         journal_path.write_text(json.dumps(
-            {"select": epoch, "from": cur, "artifacts": arts}, indent=1))
-        done: List[dict] = []
+            {"select": epoch, "from": cur, "artifacts": plan}, indent=1))
+        done: List[Tuple[str, str, Optional[Path]]] = []
         stored: List[dict] = []
+        pointers: Dict[int, List[str]] = {}
+        manifests_before: Dict[Path, str] = {}
         try:
-            for art in arts:
-                rel = art["rel"]
+            for step in plan:
+                rel = step["rel"]
                 live = output_dir / rel
-                if live.exists():
+                if step["live_exists"]:
                     (dst / rel).parent.mkdir(parents=True, exist_ok=True)
                     live.rename(dst / rel)
+                    done.append(("live", rel, None))
                     stored.append({"rel": rel, "existed_before": True})
-                keep = src / rel
-                if keep.exists():
-                    live.parent.mkdir(parents=True, exist_ok=True)
-                    keep.rename(live)
-                done.append(art)
+                else:
+                    stored.append({"rel": rel, "existed_before": False})
+                j = step["src_epoch"]
+                if j is None:                # absent at the target: it leaves
+                    continue
+                keep = output_dir / f"{PREV_PREFIX}{j}" / rel
+                live.parent.mkdir(parents=True, exist_ok=True)
+                keep.rename(live)
+                done.append(("src", rel, keep))
+                if j != epoch:
+                    pointers.setdefault(j, []).append(rel)
+            # the directories a file was taken from now point at its new home
+            for j, taken in pointers.items():
+                man = output_dir / f"{PREV_PREFIX}{j}" / MANIFEST_NAME
+                manifests_before[man] = man.read_text()
+                data = json.loads(manifests_before[man])
+                for a in data.get("artifacts", []):
+                    if a.get("rel") in taken:
+                        a["same_as_epoch"] = epoch
+                        a.pop("existed_before", None)
+                _write_manifest_atomic(man, data)
         except BaseException:
-            for art in reversed(done):
-                rel = art["rel"]
+            for man, text in manifests_before.items():
+                man.write_text(text)
+            for what, rel, keep in reversed(done):
                 live = output_dir / rel
-                if live.exists():
-                    (src / rel).parent.mkdir(parents=True, exist_ok=True)
-                    live.rename(src / rel)
-                back = dst / rel
-                if back.exists():
-                    back.rename(live)
+                if what == "src":
+                    keep.parent.mkdir(parents=True, exist_ok=True)
+                    live.rename(keep)
+                else:
+                    (dst / rel).rename(live)
             shutil.rmtree(dst, ignore_errors=True)
             journal_path.unlink(missing_ok=True)
             raise
-        # the directory that held the chosen epoch now holds the one we left, and
-        # its manifest describes what actually landed there
+        # the directory of the epoch we left describes what landed there and
+        # where the session went, so a file it does not name resolves onward
         (dst / MANIFEST_NAME).write_text(json.dumps(
-            {"epoch": cur, "artifacts": stored}, indent=1))
+            {"epoch": cur, "epoch_from": cur, "epoch_to": epoch, "select": True,
+             "artifacts": stored}, indent=1))
         shutil.rmtree(src, ignore_errors=True)
         journal_path.unlink()
-    log(f"  showing epoch {epoch} (was {cur}); every epoch of this session is "
-        f"still on disk")
+    log(f"  showing epoch {epoch} (was {cur}): {len(plan)} artifact(s) moved, "
+        f"{len(rels) - len(plan)} unchanged between the two; every epoch of this "
+        f"session is still on disk")
     return {"epoch": epoch, "previous": cur, "changed": True,
             "available": [e["epoch"] for e in available_epochs(output_dir)]}

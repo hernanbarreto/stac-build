@@ -22,6 +22,22 @@ EPOCH_FILE = "geometry_epoch.json"
 EPOCH_DIR_PREFIX = "_epoch_"
 LEDGER_FILE = "corrections.jsonl"
 
+# What an epoch IS relative to its parent:
+#   transform — the previous geometry warped per keyframe; the exact warp is
+#               persisted in corrections/epoch_<N>.npz, so the instance store
+#               can follow it and `correction.replay` can reproduce it;
+#   new_cloud — a cloud REBUILT from the depth maps under the same cameras
+#               (F7 witness fusion, precision/fuse.py). No camera moves, so no
+#               warp exists: the store follows it with the identity and refits
+#               its points from the swapped cloud, and replay cannot cross it.
+EPOCH_KIND_TRANSFORM = "transform"
+EPOCH_KIND_NEW_CLOUD = "new_cloud"
+EPOCH_KINDS = (EPOCH_KIND_TRANSFORM, EPOCH_KIND_NEW_CLOUD)
+# ledger `kind`s whose run publishes a new cloud — read only for records written
+# before `kind` existed (pccr epoch 3, 2026-09-29), never for a record that
+# carries its own kind
+_LEDGER_KINDS_NEW_CLOUD = ("fuse",)
+
 
 def read_epoch(output_dir) -> Dict[str, Any]:
     """The session's current epoch record (epoch 0 when no file exists).
@@ -46,11 +62,60 @@ def current_epoch(output_dir) -> int:
 
 
 def make_epoch_record(epoch: int, correction_id: str,
-                      parent_epoch: int) -> Dict[str, Any]:
+                      parent_epoch: int,
+                      kind: str = EPOCH_KIND_TRANSFORM) -> Dict[str, Any]:
+    if kind not in EPOCH_KINDS:
+        raise ValueError(f"unknown epoch kind {kind!r} (one of {EPOCH_KINDS})")
     return {"epoch": int(epoch),
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "correction_id": correction_id,
-            "parent_epoch": int(parent_epoch)}
+            "parent_epoch": int(parent_epoch),
+            "kind": kind}
+
+
+def _epoch_record_path(output_dir: Path, epoch: int) -> Path:
+    """Where epoch ``epoch``'s record lives: the live file when it is the
+    epoch being shown, its stored directory otherwise."""
+    if int(epoch) == current_epoch(output_dir):
+        return output_dir / EPOCH_FILE
+    return output_dir / f"{EPOCH_DIR_PREFIX}{int(epoch)}" / EPOCH_FILE
+
+
+def epoch_kind(output_dir, epoch: int) -> str:
+    """``transform`` or ``new_cloud`` for epoch ``epoch`` (see EPOCH_KINDS).
+
+    Read from the epoch's own record. A record written before ``kind`` existed
+    is classified from the ledger run that published it (``kind: fuse`` is a
+    new cloud); with no such run it is a transform — what every epoch was
+    until F7. Epoch 0 is the original reconstruction, a transform of nothing.
+    """
+    output_dir = Path(output_dir)
+    epoch = int(epoch)
+    if epoch == 0:
+        return EPOCH_KIND_TRANSFORM
+    rec_p = _epoch_record_path(output_dir, epoch)
+    if rec_p.is_file():
+        try:
+            kind = json.loads(rec_p.read_text()).get("kind")
+        except (OSError, ValueError, TypeError):
+            kind = None
+        if kind in EPOCH_KINDS:
+            return kind
+    ledger_p = output_dir / LEDGER_FILE
+    if ledger_p.exists():
+        for line in ledger_p.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if (entry.get("type") == "run"
+                    and entry.get("verdict") != "rejected"
+                    and entry.get("epoch_to") == epoch
+                    and entry.get("kind") in _LEDGER_KINDS_NEW_CLOUD):
+                return EPOCH_KIND_NEW_CLOUD
+    return EPOCH_KIND_TRANSFORM
 
 
 def epoch_lineage(output_dir, epoch: int,
