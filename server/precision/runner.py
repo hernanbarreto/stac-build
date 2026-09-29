@@ -182,7 +182,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                                  description="The precision core F0 → F7 on a session.")
     ap.add_argument("--session", required=True)
     args = ap.parse_args(argv)
-    run_chain(Path(args.session), load_precision_config())
+    # by hand the card is not shared either: vLLM (the chat) is stopped, verified,
+    # before every GPU step — the same rule the pipeline's worker applies
+    from workers.base import stop_semantic_service_verified
+
+    def _before_gpu(label: str) -> None:
+        stop_semantic_service_verified(None, stage=f"precision {label}", log=print)
+
+    run_chain(Path(args.session), load_precision_config(), before_gpu=_before_gpu)
     return 0
 
 

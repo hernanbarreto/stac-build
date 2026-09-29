@@ -4,6 +4,7 @@
 #
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
+import json
 import subprocess
 import re
 from pathlib import Path
@@ -346,8 +347,19 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         # is involved; a failure FAILS the stage with the reason.
         seg_path = output_dir / "segmentation.json"
         res_path = output_dir / "segmentation_result.json"
-        if seg_path.exists() and (not res_path.exists()
-                                  or res_path.stat().st_mtime < output_ply.stat().st_mtime):
+
+        def _result_is_stale() -> bool:
+            if not res_path.exists():
+                return True
+            if res_path.stat().st_mtime < output_ply.stat().st_mtime:
+                return True
+            try:      # F7 stages a "pending" stub next to its cloud: no instances yet
+                doc = json.loads(res_path.read_text())
+                return bool(doc.get("pending")) or not doc.get("instances")
+            except (OSError, ValueError):
+                return True
+
+        if seg_path.exists() and _result_is_stale():
             pipe.send_progress(95.5, "Projecting the SAM3 masks onto the cloud...",
                                stage="cloudcompy")
             import json as _json
