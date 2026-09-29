@@ -177,9 +177,14 @@ class RungResult:
     w2c: np.ndarray
     params_by_block: List[List[float]]      # one camera, or one per focal block (R3)
     block_of: np.ndarray                    # keyframe → camera block
-    fit_rms_px: float
+    fit_rms_px: float                       # MEDIAN per-landmark reprojection error (px) of the
+                                            # fit tracks — pccr 2026-09-29 R0: pycolmap's MEAN read
+                                            # 1e146 px from a few landmarks the solve sent to
+                                            # infinity while Ceres' Huber cost was 0.76 px
     n_points: int
     termination: str
+    n_degenerate: int = 0                   # landmarks with a non-finite error or one beyond the
+                                            # image diagonal — counted, never in the statistic
 
 
 def run_rung(name: str, w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
@@ -259,11 +264,15 @@ def run_rung(name: str, w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[in
     w2c = np.tile(np.eye(4), (N, 1, 1))
     for i in range(N):
         w2c[i, :3, :4] = np.asarray(rec.image(i + 1).cam_from_world().matrix())
-    # pycolmap 4 reports the STORED point errors: refresh them, or the mean reads 0
+    # pycolmap 4 reports the STORED point errors: refresh them, or they read 0
     rec.update_point_3d_errors()
+    errs = np.array([float(pt.error) for pt in rec.points3D.values()], np.float64)
+    diag = float(np.hypot(wh[0], wh[1]))
+    ok = np.isfinite(errs) & (errs >= 0.0) & (errs <= diag)
+    fit_med = float(np.median(errs[ok])) if ok.any() else float("nan")
     return RungResult(name, w2c, [list(rec.camera(b + 1).params) for b in blocks], block_of,
-                      float(rec.compute_mean_reprojection_error()), n_pts,
-                      str(getattr(summary, "termination_type", "")))
+                      fit_med, n_pts, str(getattr(summary, "termination_type", "")),
+                      int((~ok).sum()))
 
 
 # ── the refinement ───────────────────────────────────────────────────────
@@ -359,7 +368,9 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                        "verdict_vs_best": verdict, "taken": take}
         if take:
             best = r
-        log(f"{LOG_TAG} {name}: fit {r.fit_rms_px:.3f} px, held-out median "
+        log(f"{LOG_TAG} {name}: fit median {r.fit_rms_px:.3f} px"
+            + (f" ({r.n_degenerate} degenerate landmark(s) left out)" if r.n_degenerate else "")
+            + f", held-out median "
             f"{rungs[name]['heldout_median_px']} px"
             + ("" if verdict is None else
                f" — vs {best.name if not take else 'previous'}: "
