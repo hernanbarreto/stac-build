@@ -2811,9 +2811,16 @@ correction:
                                 # not two views of one frame and the points cannot be sampled
                                 # against the masks — it raises rather than sampling the wrong
                                 # pixels.
-    skip_when_gauge_applied: true   # claude_stac.txt §4-F2: when precision/gauge.py already
-                                # published its continuous scale epoch, this correction's depth
-                                # (scale) stage stands down — the same drift applied twice
+    skip_when_gauge_applied: false  # USER 2026-09-29: the depth correction from the closures
+                                # applies ALSO after the precision gauge, on the RESIDUAL —
+                                # measured on the corrected geometry: the closure rows are
+                                # re-measured on the current epoch (stale stamp → re-measure,
+                                # still stale → no depth), and the DA3 trend / anchor /
+                                # absolute rows stand down (scale_stage.stand_down_for_gauge),
+                                # so the gauge's drift is never applied twice. pccr epoch 6: 3
+                                # genuine closures of 8-22 cm, ~90 % radial, start <-> end of
+                                # the walk. true = the depth stage stands down entirely after
+                                # the gauge (the 2026-09-28 behaviour)
     min_depth_m: 0.05           # a point closer than this to the camera centre is not in front
                                 # of it: the projection divides by z and a point at or behind
                                 # the lens lands anywhere on the raster. Dropped from the
