@@ -26,7 +26,10 @@ def swept(tmp_path_factory):
     pc = replace(p, depth=replace(p.depth, n_views=3, best_k=2, n_hyp=16, null_frames=2,
                                   min_scale_samples=50, calib_min_bin_samples=50,
                                   calib_samples_per_frame=2000, view_samples=128,
-                                  propagation_iters=1, min_consistent_views=2))
+                                  propagation_iters=1, min_consistent_views=2),
+                 # the synthetic cloud is sparser than the cleaner's reach (15 mm): the
+                 # fusion is tested without the recipe, the recipe's wiring separately
+                 fuse=replace(p.fuse, cleaning=False))
     s, _ = T._session(tmp_path_factory.mktemp("fuse"), pc)
     DS.run_sweep(s, pc, log=lambda *a: None, device="cpu")
     return s, pc
@@ -74,10 +77,33 @@ def test_fusion_is_deterministic(swept):
     assert a.tobytes() == b.tobytes()
 
 
-def test_noise_filter_fails_with_its_reason(swept):
+def test_cleaning_recipe_drops_with_reasons_and_the_accounting_closes(swept, monkeypatch):
+    """The cloud stage's recipe (voxel pick + SOR, gpu_cloud_clean's own functions and the
+    postprocessing parameters) runs inside F7; every dropped point carries its reason."""
+    from dataclasses import replace
+    import reconstruction.gpu_cloud_clean as GC
     s, pc = swept
-    with pytest.raises(FU.FuseError, match="CloudComPy"):
-        FU.fuse(s, replace(pc, fuse=replace(pc.fuse, noise_filter=True)))
+    calls = {}
+
+    def fake_sor(xyz, knn, n_sigma, cell_h, *, device, query_block, candidate_budget):
+        calls["sor"] = (knn, n_sigma)
+        keep = np.ones(len(xyz), bool)
+        keep[:3] = False                                  # three outliers, by fiat
+        return keep, 0.005, 0.001
+
+    monkeypatch.setattr(GC, "_sor_keep", fake_sor)
+    res = FU.fuse(s, replace(pc, fuse=replace(pc.fuse, cleaning=True)), log=lambda *a: None)
+    rep = res["report"]
+    from config import cfg as raw
+    assert calls["sor"] == (int(raw["postprocessing"]["sor_knn"]), float(raw["postprocessing"]["sor_sigma"]))
+    assert rep["params"]["cleaning_recipe"]["voxel_size"] == raw["postprocessing"]["voxel_size"]
+    assert rep["rejected_by_reason"]["sor"] == 3 and rep["rejected_by_reason"]["voxel"] >= 0
+    assert rep["n_points"] + rep["n_rejected"] == rep["n_candidates"]
+    reasons = res["rejected"]["reason"]
+    assert (reasons == PV.REJECT_REASONS["sor"]).sum() == 3
+    off = FU.fuse(s, pc, log=lambda *a: None)
+    assert off["report"]["params"]["cleaning_recipe"] is None
+    assert off["report"]["n_points"] == rep["n_points"] + 3 + rep["rejected_by_reason"]["voxel"]
 
 
 def test_publish_is_a_selectable_epoch_readable_by_v1_consumers(swept, monkeypatch, tmp_path):

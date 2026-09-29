@@ -131,8 +131,8 @@ def _candidate_codes(src: np.ndarray, n_cons: np.ndarray, fcfg, dcfg):
     """(entering mask, reject reason per pixel (0 = none / not a candidate))."""
     from precision.depth_sweep import (DISCARD_CONTRADICTED, DISCARD_EXCLUDED,
                                        DISCARD_INCONSISTENT, DISCARD_LOW_CONF,
-                                       DISCARD_PRIOR_FILL_DROPPED, SOURCE_PRIOR_FILL,
-                                       SOURCE_SWEEP)
+                                       DISCARD_NOT_INDEPENDENT, DISCARD_PRIOR_FILL_DROPPED,
+                                       SOURCE_PRIOR_FILL, SOURCE_SWEEP)
     R = PV.REJECT_REASONS
     t0 = src == SOURCE_SWEEP
     t1 = src == SOURCE_PRIOR_FILL
@@ -145,6 +145,7 @@ def _candidate_codes(src: np.ndarray, n_cons: np.ndarray, fcfg, dcfg):
     reason[src == DISCARD_EXCLUDED] = R["excluded_mask"]
     reason[src == DISCARD_LOW_CONF] = R["prior_low_conf"]
     reason[src == DISCARD_CONTRADICTED] = R["contradicted"]
+    reason[src == DISCARD_NOT_INDEPENDENT] = R["prior_not_independent"]
     return enter, reason
 
 
@@ -163,10 +164,7 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
     PLY header lines, 'origins': v2 columns, 'rejected': columns, 'report': dict}."""
     from precision.depth_sweep import DEPTH_DIRNAME, SOURCE_PRIOR_FILL, SOURCE_SWEEP
     fcfg, dcfg = pcfg.fuse, pcfg.depth
-    if fcfg.noise_filter:
-        raise FuseError("precision.fuse.noise_filter: CloudComPy's noise filter runs in its "
-                        "own env (CloudComPy310) and is not available to the fusion — set it "
-                        "false (SOR is available: precision.fuse.sor)")
+    from config import cfg as _raw                       # the postprocessing recipe's parameters
     session_dir = Path(session_dir)
     out = session_dir / "output"
     ddir = out / DEPTH_DIRNAME
@@ -338,25 +336,44 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
     rejected = {k: (np.concatenate(v) if v else np.zeros(0, PV.V2_DTYPES.get(k, np.uint8)))
                 for k, v in rej.items()}
 
-    if fcfg.sor:
+    if fcfg.cleaning:
+        # THE CLEANING WE ALWAYS RAN (USER 2026-09-29), on the fused cloud: the cloud
+        # stage's GPU recipe — voxel pick, then statistical outlier removal — with the
+        # same functions and the same `postprocessing:` parameters; every dropped point
+        # keeps its provenance in rejected_points.npz with its reason
         import torch
-        from config import cfg as _raw
-        from reconstruction.gpu_cloud_clean import _sor_keep
-        cb = _raw["postprocessing"]["clean_bounds"]            # the cleaning's own bounds
-        keep, mu, sd = _sor_keep(xyz, int(fcfg.sor_knn), float(fcfg.sor_std),
-                                 float(fcfg.sor_cell_m),
-                                 device="cuda" if torch.cuda.is_available() else "cpu",
-                                 query_block=int(cb["knn_query_block"]),
-                                 candidate_budget=int(cb["knn_candidate_budget"]))
-        drop = ~keep
-        for k in PV.V2_FIELDS:
-            rejected[k] = np.concatenate([rejected[k], origins[k][drop]])
-            origins[k] = origins[k][keep]
-        rejected["reason"] = np.concatenate([rejected["reason"],
-                                             np.full(int(drop.sum()), PV.REJECT_REASONS["sor"], np.uint8)])
-        rej_counts["sor"] += int(drop.sum())
-        xyz, rgb = xyz[keep], rgb[keep]
-        log(f"{LOG_TAG} SOR (k {fcfg.sor_knn}, {fcfg.sor_std} σ) removed {int(drop.sum()):,} point(s)")
+        from reconstruction.gpu_cloud_clean import _clean_bounds, _sor_keep, _sor_reach, _voxel_keep
+        pp = _raw["postprocessing"]
+        bounds = _clean_bounds()
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+
+        def _drop(keep: np.ndarray, reason: str) -> None:
+            nonlocal xyz, rgb
+            drop = ~keep
+            for k in PV.V2_FIELDS:
+                rejected[k] = np.concatenate([rejected[k], origins[k][drop]])
+                origins[k] = origins[k][keep]
+            rejected["reason"] = np.concatenate(
+                [rejected["reason"], np.full(int(drop.sum()), PV.REJECT_REASONS[reason], np.uint8)])
+            rej_counts[reason] += int(drop.sum())
+            xyz, rgb = xyz[keep], rgb[keep]
+
+        vox = float(pp["voxel_size"])
+        idx = _voxel_keep(xyz, vox, tile_points=int(bounds["tile_points"]), device=dev)
+        keep = np.zeros(len(xyz), bool)
+        keep[np.asarray(idx, np.int64)] = True
+        n0 = len(xyz)
+        _drop(keep, "voxel")
+        log(f"{LOG_TAG} cleaning: voxel {vox * 1000:.1f} mm kept {len(xyz):,} of {n0:,}")
+        if not bool(pp.get("skip_sor", False)):
+            keep, mu, sd = _sor_keep(xyz, int(pp["sor_knn"]), float(pp["sor_sigma"]),
+                                     cell_h=_sor_reach(vox), device=dev,
+                                     query_block=int(bounds["knn_query_block"]),
+                                     candidate_budget=int(bounds["knn_candidate_budget"]))
+            n0 = len(xyz)
+            _drop(np.asarray(keep, bool), "sor")
+            log(f"{LOG_TAG} cleaning: SOR (knn {pp['sor_knn']}, {pp['sor_sigma']} σ) kept "
+                f"{len(xyz):,} of {n0:,} (mean d {mu * 1000:.1f} mm σ {sd * 1000:.1f} mm)")
 
     data = cloud_array(xyz, rgb, origins)
     n_rej = int(len(rejected["reason"]))
@@ -366,6 +383,10 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
     tiers = origins["source"]
     report = {"version": FUSE_VERSION, "provenance": PROVENANCE, **epochs,
               "params": {"fuse": {k: getattr(fcfg, k) for k in fcfg.__dataclass_fields__},
+                         "cleaning_recipe": ({"voxel_size": _raw["postprocessing"]["voxel_size"],
+                                              "sor_knn": _raw["postprocessing"]["sor_knn"],
+                                              "sor_sigma": _raw["postprocessing"]["sor_sigma"]}
+                                             if fcfg.cleaning else None),
                          "prior_fill": dcfg.prior_fill,
                          "prior_fill_min_views": dcfg.prior_fill_min_views},
               "n_keyframes": len(frames_used), "n_candidates": n_cand,

@@ -42,7 +42,9 @@ REJECT_REASONS = {"insufficient_witnesses": 1, "inconsistent": 2, "prior_fill_dr
                   "excluded_mask": 4, "dedup": 5, "unlocalized_frame": 6, "sor": 7,
                   "prior_low_conf": 8,      # tier-1 prior under the session's confidence floor
                   "contradicted": 9,        # a view sees free space through the point
-                  "fused": 10}              # consumed by a winner within the consistency tolerance
+                  "fused": 10,              # consumed by a winner within the consistency tolerance
+                  "prior_not_independent": 11,  # tier-1 prior confirmed only within one visit of walk
+                  "voxel": 12}              # the cleaning recipe's voxel pick (postprocessing.voxel_size)
 REJECT_NAMES = {v: k for k, v in REJECT_REASONS.items()}
 CONTENT_FLAG_BITS = {"reflective": 1, "low_info": 2}
 

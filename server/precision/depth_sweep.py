@@ -100,13 +100,15 @@ DISCARD_PRIOR_FILL_DROPPED = 5   # tier 1 under prior_fill: drop
 DISCARD_EXCLUDED = 6             # I2 exclusion mask
 DISCARD_LOW_CONF = 7             # tier-1 prior under the pipeline's ONE confidence floor
 DISCARD_CONTRADICTED = 8         # a consistency view sees FREE SPACE through the point
+DISCARD_NOT_INDEPENDENT = 9      # tier-1 prior confirmed only by views within one visit of walk
 SOURCE_NAMES = {SOURCE_SWEEP: "tier0", SOURCE_PRIOR_FILL: "tier1_prior_fill",
                 DISCARD_NO_PRIOR: "no_prior", DISCARD_NO_SIGNAL: "no_signal",
                 DISCARD_INCONSISTENT: "inconsistent",
                 DISCARD_PRIOR_FILL_DROPPED: "prior_fill_dropped",
                 DISCARD_EXCLUDED: "excluded_mask",
                 DISCARD_LOW_CONF: "prior_low_conf",
-                DISCARD_CONTRADICTED: "contradicted"}
+                DISCARD_CONTRADICTED: "contradicted",
+                DISCARD_NOT_INDEPENDENT: "prior_not_independent"}
 
 GRAY_MAX = float(np.iinfo(np.uint8).max)          # 8-bit frames, read on [0, 1]
 # the std of 8-bit rounding noise on the [0, 1] scale (a uniform error of one
@@ -360,10 +362,13 @@ def _nanmedian0(R):
 
 def consistency(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
                 nbr_depths: Sequence[np.ndarray], nbr_w2c: Sequence[np.ndarray],
-                tau_rel: float, tau_px: float, device=None) -> Tuple[np.ndarray, np.ndarray]:
+                tau_rel: float, tau_px: float, device=None, return_good: bool = False):
     """(n_consistent u8, residual_rel f32 = median |z_ij − d_j|/d_j over the
-    consistent views, NaN where none) for one depth map against its neighbours'.
-    A neighbour's depth ≤ 0 is 'no measurement there'."""
+    consistent views, NaN where none, n_contradict u8 = views that measured a surface
+    FARTHER along the ray — free space through the point) for one depth map against
+    the given views'. With ``return_good`` a fourth item: the per-view agreement
+    masks (bool H×W each), for rules about WHICH views agree. A view's depth ≤ 0 is
+    'no measurement there'."""
     import torch
     dev = device or "cpu"
     H, W = depth_i.shape
@@ -379,6 +384,7 @@ def consistency(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
     n_cons = torch.zeros(H * W, dtype=torch.int32, device=dev)
     n_bad = torch.zeros(H * W, dtype=torch.int32, device=dev)
     rels = []
+    goods = []
     for dj, Tj in zip(nbr_depths, nbr_w2c):
         Tj = torch.as_tensor(Tj, dtype=torch.float64, device=dev)
         Pj = Tj[:3, :3] @ Pw + Tj[:3, 3:4]
@@ -412,13 +418,16 @@ def consistency(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
         n_cons += good.int()
         n_bad += bad.int()
         rels.append(torch.where(good, rel, torch.full_like(rel, float("nan"))))
+        if return_good:
+            goods.append(good.reshape(H, W).cpu().numpy())
     if rels:
         res = _nanmedian0(torch.stack(rels))
     else:
         res = torch.full((H * W,), float("nan"), dtype=torch.float64, device=dev)
-    return (n_cons.clamp(max=255).to(torch.uint8).reshape(H, W).cpu().numpy(),
-            res.reshape(H, W).cpu().numpy().astype(np.float32),
-            n_bad.clamp(max=255).to(torch.uint8).reshape(H, W).cpu().numpy())
+    out = (n_cons.clamp(max=255).to(torch.uint8).reshape(H, W).cpu().numpy(),
+           res.reshape(H, W).cpu().numpy().astype(np.float32),
+           n_bad.clamp(max=255).to(torch.uint8).reshape(H, W).cpu().numpy())
+    return out + (goods,) if return_good else out
 
 
 def pair_mismatch(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
@@ -454,7 +463,8 @@ def assign_tiers(sig: np.ndarray, n_s: np.ndarray, z0: np.ndarray, n_p: np.ndarr
                  excl: Optional[np.ndarray], min_consistent_views: int,
                  prior_fill_min_views: int, prior_fill: str,
                  bad_s: Optional[np.ndarray] = None, bad_p: Optional[np.ndarray] = None,
-                 low_conf: Optional[np.ndarray] = None) -> np.ndarray:
+                 low_conf: Optional[np.ndarray] = None,
+                 independent: Optional[np.ndarray] = None) -> np.ndarray:
     """``source`` per pixel from the ZNCC signal, the sweep's and the prior's consistent
     view counts, their CONTRADICTION counts (views that see free space through the
     point), the prior, the confidence floor and the exclusion mask.
@@ -463,7 +473,10 @@ def assign_tiers(sig: np.ndarray, n_s: np.ndarray, z0: np.ndarray, n_p: np.ndarr
     views contradicting it; a prior (tier 1) — Omega's own depth with no image
     evidence of its own — stands only when NO view contradicts it and Omega's
     confidence there is above the pipeline's floor (pccr 2026-09-29: 95 % of the
-    fused cloud was tier 1 admitted on agreements alone → layers and floaters)."""
+    fused cloud was tier 1 admitted on agreements alone → layers and floaters), and
+    — when ``independent`` is given — at least one agreeing view stands a VISIT of
+    walk away (pccr's door: 24 cm of layers, all confirmed by adjacent keyframes
+    whose Omega depths share the same error)."""
     src = np.full(sig.shape, DISCARD_NO_SIGNAL, np.uint8)
     bs = np.zeros(sig.shape, np.uint8) if bad_s is None else bad_s
     bp = np.zeros(sig.shape, np.uint8) if bad_p is None else bad_p
@@ -477,11 +490,17 @@ def assign_tiers(sig: np.ndarray, n_s: np.ndarray, z0: np.ndarray, n_p: np.ndarr
     src[enough1 & ~tier1] = DISCARD_CONTRADICTED
     if low_conf is not None:
         src[tier1 & low_conf] = DISCARD_LOW_CONF
+    if independent is not None:
+        src[tier1 & ~low_conf_or_false(low_conf, sig.shape) & ~independent] = DISCARD_NOT_INDEPENDENT
     src[tier0] = SOURCE_SWEEP
     src[z0 <= 0] = DISCARD_NO_PRIOR
     if excl is not None:
         src[excl] = DISCARD_EXCLUDED
     return src
+
+
+def low_conf_or_false(low_conf: Optional[np.ndarray], shape) -> np.ndarray:
+    return np.zeros(shape, bool) if low_conf is None else np.asarray(low_conf, bool)
 
 
 def conf_floor_mask(conf: np.ndarray, valid: np.ndarray, conf_min_norm: float) -> np.ndarray:
@@ -581,9 +600,16 @@ def load_inputs(session_dir: Path, pcfg) -> SweepInputs:
                               "world, the keyframes do not — apply F5 first (it publishes a "
                               "selectable epoch; epoch 0 stays intact)")
     if ref.get("epoch_to") != epochs["geometry_epoch"]:
-        raise DepthSweepError(f"F5 published epoch {ref.get('epoch_to')}, the session is at "
-                              f"{epochs['geometry_epoch']} — the witness poses belong to F5's "
-                              f"epoch; re-run F5 on the current one")
+        # a NEW-CLOUD epoch (F7's fused cloud) moves no camera: F5's poses and witness
+        # poses still hold across it, so F6/F7 can be re-run after F7 published
+        from correction.epoch import epoch_kind
+        later = list(range(int(ref.get("epoch_to")) + 1, int(epochs["geometry_epoch"]) + 1))
+        kinds = {e: epoch_kind(out, e) for e in later} if later else {}
+        if not later or any(k != "new_cloud" for k in kinds.values()):
+            raise DepthSweepError(f"F5 published epoch {ref.get('epoch_to')}, the session is at "
+                                  f"{epochs['geometry_epoch']} and the epochs in between are "
+                                  f"{kinds or 'none'} — the witness poses belong to F5's epoch; "
+                                  f"re-run F5 on the current one")
     cam = load_camera_json(out / "camera.json")
     kf, kf_c2w = _read_poses(out / "camera_poses.txt", out / "camera_frames.txt")
     wp, wf = pdir / WITNESS_POSES_NAME, pdir / WITNESS_FRAMES_NAME
@@ -850,6 +876,7 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
     all_w2c = np.concatenate([inp.kf_w2c, inp.wit_w2c], 0)
     photo_views: Dict[int, List[int]] = {}
     cons_views: Dict[int, List[int]] = {}
+    contra_views: Dict[int, List[int]] = {}      # EVERY keyframe whose frustum sees the prior
     no_cover: Dict[int, List[int]] = {}
     has_prior = np.zeros(n_kf, bool)
     t_hb = time.time()
@@ -879,9 +906,14 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
                                     dcfg.n_views, dcfg.min_tri_deg, dcfg.max_tri_deg)
         photo_views[i] = [int(others[o]) for o in order]
         kf_others = others[others < n_kf]
-        order_k, _ = select_views(Xw, c2w[:3, 3], all_w2c[kf_others], inp.K, inp.wh,
-                                  dcfg.n_views, dcfg.min_tri_deg, dcfg.max_tri_deg)
+        order_k, covis_k = select_views(Xw, c2w[:3, 3], all_w2c[kf_others], inp.K, inp.wh,
+                                        dcfg.n_views, dcfg.min_tri_deg, dcfg.max_tri_deg)
         cons_views[i] = [int(kf_others[o]) for o in order_k]
+        # the CONTRADICTION test asks every view that sees the point, whatever its
+        # angle: a floater is seen through by the far side of the room, not by the
+        # eight nearest keyframes (USER 2026-09-29: "ampliar las vistas que ven a
+        # los puntos")
+        contra_views[i] = [int(kf_others[j]) for j in np.flatnonzero(covis_k > 0)]
         no_cover[i] = [int(others[j]) for j in np.flatnonzero(covis == 0) if others[j] < n_kf]
         t_hb = _hb(pcfg.runner, t_hb, f"{LOG_TAG} priors + views: {i + 1}/{n_kf}", log)
 
@@ -983,6 +1015,29 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
                               "tier-1 prior too") from e
     log(f"{LOG_TAG} tier-1 prior gated by the pipeline's confidence floor "
         f"(reconstruction.simple.conf_min_norm {conf_floor:g}, min-max per keyframe)")
+    # a tier-1 prior needs a witness from ANOTHER VISIT: the system's one definition of
+    # a visit (correction.visit_drift.min_walk_m) — adjacent keyframes share Omega's error
+    try:
+        min_walk = float(_raw_cfg["correction"]["visit_drift"]["min_walk_m"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise DepthSweepError("correction.visit_drift.min_walk_m is missing — the tier-1 "
+                              "independence rule reads the one definition of a visit") from e
+    if min_walk > 0 and chain is None:
+        raise DepthSweepError("intake/walk.json is missing — the independence of a tier-1 "
+                              "witness is measured in metres of walk")
+    log(f"{LOG_TAG} tier-1 prior needs an agreeing view ≥ {min_walk:g} m of walk away "
+        f"(correction.visit_drift.min_walk_m)")
+    # every keyframe's depth for the contradiction test: the swept depth where it has
+    # signal, Omega's prior elsewhere — loaded once (≈ 1.5 MB per keyframe)
+    best_depth: Dict[int, np.ndarray] = {}
+    for j in swept:
+        fj = inp.kf[j]
+        pj = np.load(work / f"prior_{fj}.npy")
+        sj = np.load(work / f"sweep_{fj}.npy")
+        gj = np.load(work / f"signal_{fj}.npy")
+        best_depth[j] = np.where(gj & (sj > 0), sj, pj).astype(np.float32)
+    n_far_only = 0
+    n_contra_views_tot = 0
     counts_tot = {k: 0 for k in SOURCE_NAMES.values()}
     per_frame = {}
     cal_omega, cal_da3 = [], []
@@ -995,20 +1050,47 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
         sig = np.load(work / f"signal_{f}.npy")
         z0 = np.load(work / f"prior_{f}.npy")
         c0 = np.load(work / f"pconf_{f}.npy")
-        nb = [j for j in cons_views.get(i, []) if (work / f"sweep_{inp.kf[j]}.npy").exists()]
+        nb = [j for j in cons_views.get(i, []) if j in best_depth]
         nd_ = [np.where(np.load(work / f"signal_{inp.kf[j]}.npy"),
                         np.load(work / f"sweep_{inp.kf[j]}.npy"), 0) for j in nb]
         np_ = [np.load(work / f"prior_{inp.kf[j]}.npy") for j in nb]
         nw = [inp.kf_w2c[j] for j in nb]
-        n_s, r_s, b_s = consistency(np.where(sig, d, 0), inp.K, inp.kf_w2c[i], nd_, nw, tau_rel,
+        # AGREEMENT over the nearest views (the tier thresholds keep their meaning)
+        n_s, r_s, b_s_near, good_s = consistency(np.where(sig, d, 0), inp.K, inp.kf_w2c[i], nd_,
+                                                 nw, tau_rel, inp.tau_px, device=dev,
+                                                 return_good=True)
+        n_p, r_p, b_p_near, good_p = consistency(z0, inp.K, inp.kf_w2c[i], np_, nw, tau_rel,
+                                                 inp.tau_px, device=dev, return_good=True)
+        # CONTRADICTION over EVERY view that sees the point, with its best depth
+        ca = [j for j in contra_views.get(i, []) if j in best_depth]
+        n_contra_views_tot += len(ca)
+        if ca:
+            cd_ = [best_depth[j] for j in ca]
+            cw_ = [inp.kf_w2c[j] for j in ca]
+            _, _, b_s = consistency(np.where(sig, d, 0), inp.K, inp.kf_w2c[i], cd_, cw_, tau_rel,
                                     inp.tau_px, device=dev)
-        n_p, r_p, b_p = consistency(z0, inp.K, inp.kf_w2c[i], np_, nw, tau_rel, inp.tau_px,
+            _, _, b_p = consistency(z0, inp.K, inp.kf_w2c[i], cd_, cw_, tau_rel, inp.tau_px,
                                     device=dev)
+        else:
+            b_s, b_p = b_s_near, b_p_near
+        # INDEPENDENCE: an agreeing view a visit of walk away from this keyframe
+        indep = None
+        if min_walk > 0:
+            indep = np.zeros(z0.shape, bool)
+            for j, g in zip(nb, good_p):
+                if np.isfinite(chain[j]) and np.isfinite(chain[i]) and \
+                        abs(chain[j] - chain[i]) >= min_walk:
+                    indep |= g
         excl = read_exclusion(session_dir, f, inp.maps)
         low = conf_floor_mask(c0, z0 > 0, conf_floor)
         src = assign_tiers(sig, n_s, z0, n_p, excl, dcfg.min_consistent_views,
                            dcfg.prior_fill_min_views, dcfg.prior_fill,
-                           bad_s=b_s, bad_p=b_p, low_conf=low)
+                           bad_s=b_s, bad_p=b_p, low_conf=low, independent=indep)
+        # what the far views alone caught: rejected now, not by the nearest ones
+        near_src = assign_tiers(sig, n_s, z0, n_p, excl, dcfg.min_consistent_views,
+                                dcfg.prior_fill_min_views, dcfg.prior_fill,
+                                bad_s=b_s_near, bad_p=b_p_near, low_conf=low, independent=indep)
+        n_far_only += int(((src == DISCARD_CONTRADICTED) & (near_src != DISCARD_CONTRADICTED)).sum())
         depth = np.where(src == SOURCE_SWEEP, d, np.where(src == SOURCE_PRIOR_FILL, z0, 0))
         ncons = np.where(src == SOURCE_PRIOR_FILL, n_p, n_s).astype(np.uint8)
         nbad = np.where(src == SOURCE_PRIOR_FILL, b_p, b_s).astype(np.uint8)
@@ -1034,6 +1116,7 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
             "prior_vs_tier0_median_rel": (float(np.median(np.abs(z0[t0m] / d[t0m] - 1)))
                                           if t0m.any() else None),
             "boundary_hypothesis_frac": boundary_frac.get(i),
+            "n_contradiction_views": len(ca),
             "s_k": float(s_k[i]), "s_k_samples": int(s_n[i]),
             "s_k_independent": float(s_k_raw[i])}
         cal_omega.append(CAL.sample_pairs(d, z0, c0, t0m, dcfg.calib_samples_per_frame, rng))

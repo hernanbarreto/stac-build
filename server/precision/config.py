@@ -287,11 +287,8 @@ class DepthConfig:
 class FuseConfig:
     min_witness_views: int      # consistent views a tier-0 point needs to enter the cloud
     voxel_m: float              # dedup cell: one point (the best evidence) per voxel
-    sor: bool                   # GPU statistical outlier removal on the fused cloud (OFF)
-    sor_knn: int                # its neighbours
-    sor_std: float              # its σ multiple
-    sor_cell_m: float           # BOUND: its neighbour-search cell (gpu_cloud_clean)
-    noise_filter: bool          # CloudComPy noise filter — not available to the fusion
+    cleaning: bool              # the CloudCompy stage's recipe (postprocessing: voxel + SOR, the
+                                # same functions and parameters) on the fused cloud, inside F7
 
 
 # ── F9: runner (declared in F0 so every stage heartbeats the same way) ───
@@ -495,12 +492,13 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     fuse = FuseConfig(
         min_witness_views=_num(fu, "min_witness_views", "fuse", lo=1, integer=True),
         voxel_m=_num(fu, "voxel_m", "fuse", lo=0.0, lo_excl=True),
-        sor=_bool(fu, "sor", "fuse"),
-        sor_knn=_num(fu, "sor_knn", "fuse", lo=1, integer=True),
-        sor_std=_num(fu, "sor_std", "fuse", lo=0.0, lo_excl=True),
-        sor_cell_m=_num(fu, "sor_cell_m", "fuse", lo=0.0, lo_excl=True),
-        noise_filter=_bool(fu, "noise_filter", "fuse"),
+        cleaning=_bool(fu, "cleaning", "fuse"),
     )
+    for stale in ("sor", "sor_knn", "sor_std", "sor_cell_m", "noise_filter"):
+        if stale in fu:
+            raise PrecisionConfigError(f"reconstruction.precision.fuse.{stale} no longer exists — the "
+                              f"cleaning of the fused cloud is ONE switch, fuse.cleaning, and "
+                              f"its parameters are the postprocessing: block's (USER 2026-09-29)")
 
     rn = _sub(sec, "runner", "")
     runner = RunnerConfig(

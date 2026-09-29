@@ -2166,12 +2166,14 @@ reconstruction:
       min_witness_views: 3              # §4-F9 skeleton: consistent views a tier-0 point needs
       voxel_m: 0.004                    # §4-F9 skeleton: one point per 4 mm cell — the best
                                         # evidence (views, then ZNCC), never an average
-      sor: false                        # §4-F7: OFF by default, selectable (GPU SOR)
-      sor_knn: 8
-      sor_std: 2.0
-      sor_cell_m: 0.012                 # BOUND: SOR neighbour cell (3 × voxel, gpu_cloud_clean's rule)
-      noise_filter: false               # CloudComPy's noise filter runs in its own env: not
-                                        # available to the fusion (true fails with the reason)
+      cleaning: true                    # USER 2026-09-29: "el filtro, el que corrimos siempre con
+                                        # cloudcompy, toda la sesión de limpieza" — the cloud
+                                        # stage's recipe (reconstruction/gpu_cloud_clean: voxel
+                                        # pick at postprocessing.voxel_size, then SOR with
+                                        # postprocessing.sor_knn / sor_sigma, same functions and
+                                        # bounds) runs on the fused cloud inside F7, each dropped
+                                        # point in rejected_points.npz with its reason (voxel, sor).
+                                        # (History, §4-F7: SOR/noise off by default, selectable.)
     # F9 — runner (declared here so every stage heartbeats the same way)
     runner:
       heartbeat_s: 20                   # BOUND: seconds between progress lines of a long stage

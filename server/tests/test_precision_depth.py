@@ -369,6 +369,15 @@ def _session(tmp_path, pcfg):
                      conf=np.full((gh, gw), 2.0, np.float32), pose_c2w=c)
     np.savetxt(out / "camera_poses.txt", np.stack([c.ravel() for c in kf_c2w]))
     (out / "camera_frames.txt").write_text(" ".join(map(str, kf)))
+    # the DA3 walk (I3): chainage per keyframe — the sweep pools s_k along it and
+    # asks a tier-1 witness from another visit (correction.visit_drift.min_walk_m)
+    cen = np.array([c[:3, 3] for c in kf_c2w])
+    chain = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(cen, axis=0), axis=1))])
+    (s / "intake").mkdir(exist_ok=True)
+    (s / "intake" / "walk.json").write_text(json.dumps(
+        {"version": 1, "walk_length_m": float(chain[-1]), "n_keyframes": len(kf),
+         "chainage": [{"frame": int(f), "chainage_m": float(c)} for f, c in zip(kf, chain)],
+         "windows": []}))
     np.savetxt(pdir / WITNESS_POSES_NAME, np.stack([c.ravel() for c in wit_c2w]))
     (pdir / WITNESS_FRAMES_NAME).write_text(" ".join(map(str, wit)))
     (pdir / REFINE_NAME).write_text(json.dumps({"applied": True, "epoch_to": 1}))
