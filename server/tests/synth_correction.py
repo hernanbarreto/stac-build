@@ -103,7 +103,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
                         "search_margin_m": 1.20,
                         "default_repeatability_m": 0.0477,
                         "grid_aspect_tol": 0.01, "min_depth_m": 0.05,
-                        "skip_when_gauge_applied": True},
+                        "skip_when_gauge_applied": False},
     }}
     for dotted, value in overrides.items():
         node = raw["correction"]

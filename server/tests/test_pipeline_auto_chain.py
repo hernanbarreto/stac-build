@@ -68,6 +68,9 @@ def test_production_config_loads_through_every_typed_loader():
     ccfg = load_correction_config(raw)
     assert ccfg.gates.mode == "advisory"
     assert ccfg.apply.potree_rebuild is True, "the certified epoch must carry its own octree"
+    # USER 2026-09-29: the closures correct the depth ALSO after the precision
+    # gauge, on the residual (scale_stage.stand_down_for_gauge keeps it single)
+    assert ccfg.visit_drift.skip_when_gauge_applied is False
     # the fork receives the same modes
     from reconstruction.loops.config import fork_model_graph, fork_model_loops
     assert fork_model_graph(cfg)["gate_mode"] == "advisory"

@@ -393,6 +393,16 @@ def solve_depth(output_dir: Path, log: Callable[[str], None] = print,
     DECLARED LIMIT: the anchors show a CONTINUOUS drift and seven chunks can
     only spell a STAIRCASE — with `sigma_seam_log` 0.02 over six seams the
     model tops out near 12 % and pccr needs ~14 %.
+
+    AFTER THE PRECISION GAUGE (USER 2026-09-29) this runs on the RESIDUAL: the
+    gauge set the scale continuously along the walk, the closures re-measured
+    on the corrected geometry say what is left, and the scale stage lets only
+    them drive the graph (`scale_stage.stand_down_for_gauge`) — the DA3 trend,
+    anchor and absolute rows would apply the gauge's drift a second time. The
+    unit stays the Omega chunk (`chunk_plan.json` → `frame_owner`, the same
+    nearest-centre rule that writes the records' ``chunk`` field). DECLARED: a
+    single-pass session is ONE chunk — one degree of freedom, its size, which
+    the gauge holds — so there the closures cannot move anything.
     """
     from correction.config import load_correction_config
     from correction.epoch import current_epoch
@@ -406,16 +416,24 @@ def solve_depth(output_dir: Path, log: Callable[[str], None] = print,
     # correction changes the very depths they are made of, so rows from an
     # older epoch ask for a correction already in the geometry and compound it
     rows_file = output_dir / "scale_loop_rows.json"
-    stamp = (json.loads(rows_file.read_text()).get("measured_on_epoch")
-             if rows_file.exists() else None)
+
+    def _stamp():
+        return (json.loads(rows_file.read_text()).get("measured_on_epoch")
+                if rows_file.exists() else None)
     now = int(current_epoch(output_dir))
-    if stamp != now:
+    if _stamp() != now:
         vcfg = (cfg or load_correction_config()).visit_drift
         rep_m = _repeatability_m(output_dir, vcfg.default_repeatability_m, log)
         _write_scale_rows(output_dir, measure_epoch(output_dir, vcfg, rep_m,
                                                     log=log), log=log)
-    if not rows_file.exists():
-        log("[depth] no closure could be measured — no depth row to solve")
+    # a re-measurement that finds nothing writes nothing, so the file can still
+    # be the OLD epoch's — and it used to be solved as if it were current
+    stamp = _stamp()
+    if stamp != now:
+        log("[depth] no closure could be measured on epoch "
+            f"{now}" + (f" (the rows on file were measured on epoch {stamp} — "
+                        f"not used)" if stamp is not None else "")
+            + " — no depth row to solve")
         return None
 
     session = load_session(output_dir)
@@ -634,11 +652,18 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
         from correction.config import load_correction_config
         cfg = cfg or load_correction_config()
     from precision.gauge import gauge_applied
-    if cfg.visit_drift.skip_when_gauge_applied and gauge_applied(output_dir):
+    after_gauge = gauge_applied(output_dir)
+    if cfg.visit_drift.skip_when_gauge_applied and after_gauge:
         log("[correction] DEPTH stands down: the precision gauge already applied the "
             "continuous scale along the walk (gauge.json) — not applied twice")
         dep = None
     else:
+        if after_gauge:
+            # USER 2026-09-29: the closures ALSO correct after the gauge, on the
+            # RESIDUAL — measured on this epoch, the gauge's own rows stood down
+            log("[correction] DEPTH on the RESIDUAL after the precision gauge: only the "
+                "closures measured on the current epoch drive it (the DA3 trend, anchor "
+                "and absolute rows stand down — the gauge already spent them)")
         dep = solve_depth(output_dir, log=log, cfg=cfg)
     _pc(_FLOOR_PCT, "correction: solving the floor on that geometry")
     if dep is None:
@@ -648,7 +673,9 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
         pre = {"R_kf": np.tile(np.eye(3), (len(k_kf), 1, 1)),
                "t_kf": t_kf, "k_kf": k_kf}
         stages.append({"stage": "depth", "r_per_chunk": srep.get("r"),
-                       "k_min": float(k_kf.min()), "k_max": float(k_kf.max())})
+                       "k_min": float(k_kf.min()), "k_max": float(k_kf.max()),
+                       "after_gauge": bool(after_gauge),
+                       "stood_down_for_gauge": srep.get("stood_down_for_gauge")})
 
     log("[correction] 2/2 — FLOOR on that geometry, composed and applied ONCE")
     from correction.run import run_floor

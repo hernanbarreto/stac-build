@@ -10,7 +10,11 @@ seam residual).
 Unknowns: one correction factor r_k per reconstruction chunk. Applied per
 keyframe through the correction package: depth × r_k about the keyframe's
 own camera plus the translation that keeps the walk continuous (each chunk
-scales about its first keyframe, the shift accumulates along the chain).
+scales about the first keyframe it owns, the shift accumulates along the chain).
+
+After the precision gauge (claude_stac.txt §4-F2) only the closures measured on
+the current epoch enter: the anchor, DA3 trend and absolute rows are not
+relative to that geometry and stand down (`stand_down_for_gauge`).
 """
 
 from __future__ import annotations
@@ -365,10 +369,70 @@ def earn_the_right(r_free, closures, chain, sigma_seam: float,
     return rep
 
 
+def stand_down_for_gauge(output_dir, s_da3: Dict[int, float], abs_rows: list,
+                         trend_rep: List[dict], vd_rows: List[dict], vd_epoch: Optional[int],
+                         log: Callable = print) -> Optional[dict]:
+    """After the precision gauge, only what is MEASURED ON THE CURRENT GEOMETRY
+    may drive this graph: the visit-drift closures stamped with the live epoch
+    (USER 2026-09-29 — the depth correction from the closures applies ALSO
+    after the gauge, on the RESIDUAL, never applying the gauge's drift twice).
+    Returns what stands down (None when the gauge did not apply).
+
+    Read from the code, none of the other rows is relative to that geometry:
+      · DA3 TREND rows are the lock-time anchor agreements minus the depth
+        factor the epoch chain says was applied (`applied_depth_factor`). The
+        chain stops at the first epoch without a persisted transform, and the
+        core's corrected cloud (`precision/corrected_cloud.py`) is a
+        ``new_cloud`` epoch with none — so on a precision session the row is
+        the RAW lock-time drift between chunks, the very drift the gauge
+        already removed (pccr epoch 6: −19.7 % between chunks 0-1, +12.6 %
+        between 4-5, at σ 0.012-0.014 — tighter than any closure).
+      · ANCHOR rows read the `epochs` history of scale_diagnostics.json, which
+        the gauge's epoch appends with NO depth factor (`apply_pose_epoch`
+        passes an empty map) and the corrected cloud does not append at all:
+        they restate the lock, not the current geometry. (Their `moved` test is
+        also defeated by the history's 6-decimal rounding — on pccr every
+        chunk read "moved", so none ever stood down.)
+      · ABSOLUTE rows (`scale_absolute_rows.json`) carry no epoch stamp: nothing
+        says which geometry they were measured on. The gauge is the session's
+        absolute scale (its own `known_dims` instrument included).
+      · visit-drift rows stamped with an OLDER epoch ask for a correction the
+        geometry may already hold.
+
+    What holds the size then: the gauge. The remaining rows are all RELATIVE
+    (closures and seams), so `solve_scale_graph` returns the minimum-norm
+    solution — the geometric mean of the factors is 1 and the session's size is
+    the one the gauge set (CLAUDE.md, 2026-09-19 block)."""
+    from precision.gauge import gauge_applied
+    from correction.epoch import current_epoch
+    if not gauge_applied(output_dir):
+        return None
+    now = int(current_epoch(output_dir))
+    stale = bool(vd_rows) and vd_epoch != now
+    rep = {"reason": "the precision gauge applied (gauge.json): only the closures measured "
+                     f"on the current epoch ({now}) drive the depth — the rows below are not "
+                     "relative to the current geometry and would apply the gauge's drift twice",
+           "current_epoch": now,
+           "anchor_rows": sorted(int(k) for k in s_da3),
+           "da3_trend_rows": list(trend_rep),
+           "absolute_rows": len(abs_rows),
+           "visit_drift_rows_stale": ({"n": len(vd_rows), "measured_on_epoch": vd_epoch}
+                                      if stale else None)}
+    log(f"[scale-posthoc] precision gauge applied — stood down: {len(rep['anchor_rows'])} "
+        f"anchor row(s), {len(trend_rep)} DA3 trend row(s), {len(abs_rows)} absolute row(s)"
+        + (f", {len(vd_rows)} closure row(s) measured on epoch {vd_epoch} (stale, now {now})"
+           if stale else "")
+        + " — the closures measured on the current epoch are what drive the depth")
+    return rep
+
+
 def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, log: Callable = print
                       ) -> dict:
     """Per-chunk correction factors from the post-hoc rows. Returns the
-    report: r per chunk, the rows, the gate, "applied"."""
+    report: r per chunk, the rows, the gate, "applied".
+
+    After the precision gauge only the rows measured on the current geometry
+    enter (`stand_down_for_gauge`)."""
     _vendor_on_path()
     from loop_utils.metric_lock import solve_scale_graph
     from loop_utils.loop_bridges import loop_scale_row
@@ -378,13 +442,24 @@ def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, 
     s_da3, n_anch, moved = anchor_rows(output_dir, owner, session.frames)
     abs_rows = absolute_rows(output_dir)
     vd_rows, vd_epoch = loop_rows_artifact(output_dir)
+    trend_rel, trend_rep = da3_trend_rows(output_dir, owner, session.frames)
+    gauge_rep = stand_down_for_gauge(output_dir, s_da3, abs_rows, trend_rep, vd_rows,
+                                     vd_epoch, log=log)
+    if gauge_rep is not None:
+        s_da3, n_anch, moved, abs_rows, trend_rel, trend_rep = {}, {}, {}, [], {}, []
+        if gauge_rep["visit_drift_rows_stale"]:
+            vd_rows = []
     loop_rel: Dict[Tuple[int, int], Tuple[float, float]] = {}
     rows_used = []
+    n_intra = 0
     for m in list(loop_measurements) + list(vd_rows):
         if not m.get("scale_trusted") or "s_ab" not in m:
             continue
         ci, cj = int(owner[int(m["i"])]), int(owner[int(m["j"])])
         if ci == cj:
+            # both visits in one chunk: a relative row between a chunk and
+            # itself constrains nothing a per-chunk factor can change
+            n_intra += 1
             continue
         extent = float(m.get("extent_m", 0.0))
         sig = max(float(scfg.sigma_loop_min_log),
@@ -402,7 +477,6 @@ def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, 
     # the SHAPE of the DA3 drift, as relative rows between consecutive chunks.
     # Same fusion as the loop rows: several sources on one chunk pair are one
     # weighted measurement, not two votes.
-    trend_rel, trend_rep = da3_trend_rows(output_dir, owner, session.frames)
     for key, (log_r, sig) in trend_rel.items():
         if key in loop_rel:
             lr, sg = loop_rel[key]
@@ -438,6 +512,7 @@ def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, 
     rep = {"n_chunks": n_chunks, "chunk_ranges": [list(r) for r in ranges],
            "visit_drift_rows": len(vd_rows), "visit_drift_epoch": vd_epoch,
            "da3_trend_rows": trend_rep, "anchor_rows_stood_down": stood_down,
+           "stood_down_for_gauge": gauge_rep, "loop_rows_intra_chunk": n_intra,
            "loop_rows": rows_used, "anchor_rows": {str(k): {"s": s_da3[k], "n": n_anch[k]} for k in s_da3},
            "absolute_rows": [{"chunk": k, "log_s": ls, "sigma": sg, "source": src} for k, ls, sg, src in abs_rows],
            "sigma_seam_log": float(scfg.sigma_seam_log), "sigma_anchor_log": float(scfg.sigma_anchor_log)}
@@ -448,8 +523,17 @@ def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, 
     # r ≡ 1 and stays identity below the row σ; nothing pulls the chunks back
     # toward the raw DA3 medians the lock overruled (pccr 2026-09-13).
     if not s_da3 and not loop_rel and not abs_rows:
-        rep.update({"r": [1.0] * n_chunks, "applied": False,
-                    "reason": "no anchor, loop or absolute row — nothing to solve (identity)"})
+        reason = "no anchor, loop or absolute row — nothing to solve (identity)"
+        if gauge_rep is not None:
+            # DECLARED: a single-pass session is ONE chunk, so its only degree of
+            # freedom is the session's size — the gauge's. Every closure is then
+            # relative inside that one chunk and cannot move it.
+            reason = (f"after the precision gauge no closure measured on epoch "
+                      f"{gauge_rep['current_epoch']} spans two chunks ({n_intra} inside one"
+                      + (f"; the session is ONE chunk — its only degree of freedom is its "
+                         f"size, which the gauge holds" if n_chunks == 1 else "")
+                      + ") — nothing to solve (identity)")
+        rep.update({"r": [1.0] * n_chunks, "applied": False, "reason": reason})
         log(f"[scale-posthoc] IDENTITY — {rep['reason']}")
         return rep
     r = np.asarray(solve_scale_graph(
@@ -509,21 +593,32 @@ def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, 
 def scale_transforms(session, ranges: List[Tuple[int, int]], owner: np.ndarray, r: np.ndarray
                      ) -> Tuple[np.ndarray, np.ndarray]:
     """(k_kf, t_kf): depth factor per keyframe (its chunk's r) and the
-    translation that scales every chunk about its first keyframe while the
-    chain stays continuous across the seams."""
+    translation that scales every chunk about the first keyframe it OWNS while
+    the chain stays continuous across the seams: every step of the walk is
+    scaled by the factor of the chunk that owns its first keyframe.
+
+    The pivot is the first OWNED keyframe (`owner`, the Omega records' `chunk`
+    field), not the first keyframe of the chunk's range: with the 50 % overlap
+    of a chunked plan the range starts inside the previous chunk's frames, and
+    pivoting there opened a camera step of (r_k − r_{k−1})·(owned start − range
+    start) at every ownership boundary — pccr's 83/41 plan puts ~21 keyframes
+    (~1.2 m of walk) between the two. Without overlap the two are the same
+    keyframe."""
     n = session.n_kf
     r = np.asarray(r, np.float64)
     k_kf = np.array([float(r[int(owner[g])]) for g in range(n)])
     t_kf = np.zeros((n, 3))
     centres = session.poses[:, :3, 3]
     shift = np.zeros(3)
-    prev_ref = None
-    for k, (a, _b) in enumerate(ranges):
-        c_ref = centres[int(a)]
-        if prev_ref is not None:
-            shift = shift + (float(r[k - 1]) - 1.0) * (c_ref - prev_ref)
+    prev_ref, prev_k = None, None
+    for k in range(len(ranges)):
         sel = np.flatnonzero(owner == k)
+        if not len(sel):
+            continue
+        c_ref = centres[int(sel[0])]
+        if prev_ref is not None:
+            shift = shift + (float(r[prev_k]) - 1.0) * (c_ref - prev_ref)
         for g in sel:
             t_kf[g] = (float(r[k]) - 1.0) * (centres[g] - c_ref) + shift
-        prev_ref = c_ref
+        prev_ref, prev_k = c_ref, k
     return k_kf, t_kf

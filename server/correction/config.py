@@ -190,8 +190,9 @@ class VisitDriftConfig:
     default_repeatability_m: float  # used only when uncertainty.json is absent
     grid_aspect_tol: float          # mask grid vs trace grid, relative disagreement
     min_depth_m: float              # a point nearer than this is not in front of the camera
-    skip_when_gauge_applied: bool   # the depth (scale) stage stands down when the precision
-                                    # gauge already applied its epoch (claude_stac.txt §4-F2)
+    skip_when_gauge_applied: bool   # true: the depth (scale) stage stands down when the
+                                    # precision gauge already applied its epoch (§4-F2);
+                                    # false: it corrects the residual, closures only
 
 
 @dataclass(frozen=True)
