@@ -45,6 +45,7 @@ SECTION = "autoprompt.vlm_sampling"
 AXIS_CHAINAGE = "chainage_m"
 AXIS_INDEX = "keyframe_index"
 AXIS_COVER = "coverage"
+AXIS_ALL = "all_keyframes"
 # keys that decided the sampling before this module and must not linger in a
 # config that no longer reads them (a leftover would look like a decision)
 REMOVED_KEYS = {"understand_sample": "autoprompt.vlm_sampling.spacing_kf"}
@@ -56,6 +57,8 @@ class VLMSamplingConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class VLMSampling:
+    all_keyframes: bool         # USER 2026-09-29: the VLM sees EVERY keyframe (no density, no
+                                # thinning — max_calls is not applied in this mode, declared)
     spacing_m: float            # one VLM frame per this many metres of walked chainage
     spacing_kf: int             # without chainage: one VLM frame per this many keyframes
     tile_rows: int              # crop grid per sampled frame; 1 x 1 = no crops
@@ -110,7 +113,11 @@ def load_vlm_sampling(config: dict) -> VLMSampling:
                 f"'autoprompt.{old}' was REMOVED (the VLM frames are spread along the "
                 f"walk now) — delete it; the density is '{new}'")
     sec = _req(ap, "vlm_sampling")
+    all_kf = _req(sec, "all_keyframes")
+    if not isinstance(all_kf, bool):
+        raise VLMSamplingConfigError(f"'{SECTION}.all_keyframes' must be true or false, got {all_kf!r}")
     cfg = VLMSampling(
+        all_keyframes=all_kf,
         spacing_m=_num(sec, "spacing_m", lo=0.0, lo_excl=True),
         spacing_kf=_num(sec, "spacing_kf", integer=True, lo=1),
         tile_rows=_num(sec, "tile_rows", integer=True, lo=1),
@@ -196,7 +203,9 @@ class SamplingPlan:
 
     def summary(self) -> str:
         unit = {"chainage_m": "m", "keyframe_index": "keyframe(s)"}.get(self.axis, "")
-        how = (f"uniform along the walk by {self.axis}, one every "
+        how = ("EVERY keyframe (all_keyframes: the density and the call bound are not applied)"
+               if self.axis == AXIS_ALL else
+               f"uniform along the walk by {self.axis}, one every "
                f"{self.effective_spacing:.3g} {unit}" if self.effective_spacing is not None
                else "the coverage cover")
         s = (f"VLM sampling: {len(self.frames)}/{self.n_keyframes} keyframe(s), {how} "
@@ -244,14 +253,22 @@ def plan_vlm_frames(files: Sequence[str], cfg: VLMSampling, *,
     ``chainage`` (``{video frame: metres}`` covering every file) makes the axis
     the walked distance; without it the axis is the keyframe index.
     ``preselected`` (the optional coverage cover) replaces the density rule —
-    only the bound thins it. ``max_calls`` always holds."""
+    only the bound thins it. ``max_calls`` holds in every mode but ``all_keyframes``
+    (USER 2026-09-29: "el VLM debe ver todos los KF"), where every keyframe is shown
+    and the plan says the bound was not applied."""
     files = list(files)
     if not files:
         raise ValueError("no keyframes to sample for the VLM")
     n_max = max(1, cfg.max_calls // cfg.calls_per_frame)
     pos_of = {f: i for i, f in enumerate(files)}
 
-    if preselected:
+    if cfg.all_keyframes:
+        sel = list(range(len(files)))
+        n_before = len(sel)
+        n_max = len(sel)                          # the bound is not applied: every keyframe
+        axis, conf_sp, eff_sp = AXIS_ALL, 1.0, 1.0
+        positions = np.arange(len(files), dtype=float)
+    elif preselected:
         sel = [pos_of[f] for f in preselected if f in pos_of]
         n_before = len(sel)
         if len(sel) > n_max:

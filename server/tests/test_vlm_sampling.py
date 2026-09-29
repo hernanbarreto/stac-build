@@ -32,7 +32,7 @@ CONFIG_YAML = Path(__file__).resolve().parents[1] / "config.yaml"
 
 
 def _cfg(**kw):
-    base = dict(spacing_m=0.5, spacing_kf=8, tile_rows=2, tile_cols=2,
+    base = dict(all_keyframes=False, spacing_m=0.5, spacing_kf=8, tile_rows=2, tile_cols=2,
                 tile_overlap_frac=0.2, max_calls=10_000)
     base.update(kw)
     return VLMSampling(**base)
@@ -225,7 +225,7 @@ def test_the_autoprompter_runs_the_plan_records_every_call_and_folds_only_synony
     files = _session(tmp_path, n_kf=40)
     fake = _FakeVLM((64, 36), broken_every=7)
     monkeypatch.setattr(sc, "get_semantic_client", lambda **kw: fake)
-    cfg = _config(spacing_kf=8, tile_rows=2, tile_cols=2, max_calls=300)
+    cfg = _config(all_keyframes=False, spacing_kf=8, tile_rows=2, tile_cols=2, max_calls=300)
     res = AutoPrompter(tmp_path, tmp_path / "output", config=cfg).run()
 
     vlm = json.loads((tmp_path / "output" / "vlm_analysis.json").read_text())
@@ -262,7 +262,7 @@ def test_a_vocabulary_derived_under_another_sampling_is_not_reused(tmp_path, mon
     (out / "autoprompt_concepts.json").write_text(json.dumps(
         {"version": 1, "prompts": ["only the old list"]}))
     monkeypatch.setattr(sc, "get_semantic_client", lambda **kw: _FakeVLM((64, 36)))
-    cfg = _config(spacing_kf=8, tile_rows=1, tile_cols=1, max_calls=300)
+    cfg = _config(all_keyframes=False, spacing_kf=8, tile_rows=1, tile_cols=1, max_calls=300)
     res = AutoPrompter(tmp_path, out, config=cfg).run()
     assert "only the old list" not in res.prompt
     rec = json.loads((out / "autoprompt_concepts.json").read_text())
@@ -295,7 +295,7 @@ def test_past_the_prompt_bound_every_name_is_recorded_not_prompted(tmp_path, mon
     from segmentation.census import build_census
     _session(tmp_path, n_kf=40)
     monkeypatch.setattr(sc, "get_semantic_client", lambda **kw: _FakeVLM((64, 36)))
-    cfg = _config(spacing_kf=8, tile_rows=2, tile_cols=2, max_calls=300)
+    cfg = _config(all_keyframes=False, spacing_kf=8, tile_rows=2, tile_cols=2, max_calls=300)
     cfg["autoprompt"]["max_sam3_prompts"] = 2
     res = AutoPrompter(tmp_path, tmp_path / "output", config=cfg).run()
     # every crop names the two small things, every full frame the other four:
@@ -348,9 +348,30 @@ def test_the_vlm_stage_fails_on_a_config_error_instead_of_falling_back(tmp_path,
     monkeypatch.setitem(sys.modules, "scene_analyzer", fake_sa)
     monkeypatch.setattr(vlm_worker, "_ensure_semantic_service", lambda pipe, cfg: True)
     monkeypatch.setattr(sc, "get_semantic_client", lambda **kw: _FakeVLM((64, 36)))
-    cfg = _config(spacing_kf=8, tile_rows=1, tile_cols=1, max_calls=300)
+    cfg = _config(all_keyframes=False, spacing_kf=8, tile_rows=1, tile_cols=1, max_calls=300)
     sec, _, key = drop.rpartition(".")
     del (cfg["autoprompt"][sec] if sec else cfg["autoprompt"])[key]
     with pytest.raises(VLMSamplingConfigError, match=f"autoprompt.{drop}"):
         vlm_worker._vlm_work(_Pipe(), str(tmp_path), cfg)
     assert not fallback, "fell back to InternVL3 on a config error"
+
+
+def test_all_keyframes_shows_every_keyframe_and_does_not_thin():
+    """USER 2026-09-29: "el VLM debe ver todos los KF" — no density, no bound."""
+    files = _files(289, step=7)
+    plan = plan_vlm_frames(files, _cfg(all_keyframes=True, max_calls=300))
+    assert [f["keyframe_index"] for f in plan.frames] == list(range(289))
+    assert plan.axis == "all_keyframes" and not plan.bound_reached
+    assert plan.n_calls == 289 * 5
+
+
+def test_production_shows_every_keyframe():
+    raw = yaml.safe_load(CONFIG_YAML.read_text())
+    assert load_vlm_sampling(raw).all_keyframes is True
+
+
+def test_all_keyframes_is_strict():
+    raw = yaml.safe_load(CONFIG_YAML.read_text())
+    del raw["autoprompt"]["vlm_sampling"]["all_keyframes"]
+    with pytest.raises(VLMSamplingConfigError, match="all_keyframes"):
+        load_vlm_sampling(raw)

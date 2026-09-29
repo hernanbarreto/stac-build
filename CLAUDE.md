@@ -19,6 +19,49 @@
   `/sys/fs/cgroup/memory/memory.usage_in_bytes` during long jobs; at most 2–3
   concurrent agents, each told these caps.
 
+## ⭐ F6 MAX COVERAGE → f7_cloud, SILHOUETTE FLYERS, VLM ON EVERY KEYFRAME — USER 2026-09-29 (night)
+Validated list, implemented and merged the same night (tests: 353 green on main):
+- **F6 = maximum coverage** (`precision.depth.prior_requires_confirmation: false`): every
+  prior pixel not measured by the sweep is tier 1 (Omega × s_k) — the "≥ 3 views within
+  τ_rel" confirmation discarded 49 % of pccr as 'inconsistent' because τ_rel IS the
+  MEDIAN prior disagreement (half of all comparisons fail by construction). Kept: tier 0
+  (sweep confirmed), the contradiction majority vote with each view's own error
+  (`depth.contradiction: true` — the flyer filter by views), the confidence floor.
+  RETIRED: the 'independent witness ≥ 1 m of walk' rule (code 9 only read, never written).
+  Keyframes the sweep never ran on get their prior too.
+- **Chain (cloud.source omega_corrected)**: F0 F2 F4 F3 F5 → **F6 sweep → f7_cloud** →
+  chunk check. `f7_cloud` reads F6's depth_native maps (grid/metric/epochs checked in
+  `load_f6`), then the cloud stage's recipe. `f7_fuse` (witness fusion) does not run;
+  `fusion` still selects it.
+- **Silhouette flyer filter** (`precision/silhouette_filter.py`, in f7_cloud after the
+  witnesses, before the consolidation; `precision.cloud.silhouette_filter`): a point of a
+  masklet is projected to EVERY keyframe where that masklet has a mask (not only other
+  visits — parallax inside one visit counts), ranked by parallax on the birth ray, ≥
+  `refine.min_tri_deg`, unoccluded by that view's own F6 depth (`loops.witness.
+  occlusion_tol_rel`); it leaves when inside its label's dilated mask in fewer than
+  `silhouette_min_inside_frac` (0.5 = majority) of ≥ `silhouette_min_votes` views, or
+  inside another label's mask and never its own. Same label never conflicts; unsegmented
+  points untouched. Measured cost ~3.8 M (point, view) pairs/s on 2 CPU threads.
+- **Segmentation** (intake): the VLM saw **8 of 289 keyframes** (the coverage cover needs a
+  cloud that does not exist at I2) and `aggregate` dropped **22 of 52 phrases** silently
+  (one per head noun). Now `autoprompt.vlm_sampling.all_keyframes: true` (USER: *"el VLM debe
+  ver todos los KF"*: every keyframe + 2×2 crops, 1 445 sequential calls on pccr; the density
+  keys and `max_calls` are not applied in that mode), only true synonyms merge, every phrase's
+  fate is recorded in `output/segmentation_census.json` (+ `[census]` log), SAM3 prompts
+  bounded by `autoprompt.max_sam3_prompts` (150; ~49 s per prompt at 289 kf), SAM3
+  detection/confirmation thresholds in `models.segmentation.sam3_thresholds` per version
+  (defaults = the vendor's: 3.1 0.4/0.65, 3.0 0.5/0.7), wired in `sam3_wrapper.load_model`,
+  a bad value fails the stage. The SEGMENTATION SAM3 already runs on every keyframe; the
+  EXCLUSION pass (`intake.content.sam3_scope`) stays `flagged_ranges` (USER 2026-09-28).
+- **Visit-closure depth on the residual** (`correction.visit_drift.skip_when_gauge_applied:
+  false`): after the gauge only what is measured on the CURRENT geometry drives (loop rows;
+  the DA3-trend / anchor rows stand down, reported); the 'ramp' verdict can no longer resize
+  the session after the gauge (review finding, fixed); false identities priced out by their
+  tangential residual; composed with the floor in ONE epoch. The translation stage stays
+  deleted.
+- CONDITIONAL, not built: SE(3) intra-chunk — only if the chunk check still says INTRA
+  after a full run with all of the above.
+
 ## ⭐ THE PRODUCT IS THE CORRECTED OMEGA CLOUD — USER DECISION 2026-09-29 (evening)
 **"hasta ahora la mejor nube"** (pccr epoch 6) — and **"que quede todo en el pipeline
 … todo integrado, nada debe ejecutarse a mano por fuera"**. After a day of F6/F7

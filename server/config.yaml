@@ -438,6 +438,10 @@ autoprompt:
                                       # (USER 2026-09-29: "debe segmentar todo, absolutamente preciso y
                                       # completo"). segmentation/autoprompt/vlm_sampling.py. Every run
                                       # records what it looked at in output/segmentation_census.json.
+    all_keyframes: true               # USER 2026-09-29: "el VLM debe ver todos los KF" — every keyframe
+                                      # (and its crops) goes to the VLM; the density keys below and
+                                      # max_calls are not applied in this mode (the plan + census say
+                                      # so). pccr: 289 kf x 5 calls = 1 445 VLM calls, sequential.
     spacing_m: 0.5                    # one VLM keyframe per 0.5 m of walked chainage (intake/walk.json,
                                       # when it covers the keyframes — a re-run; the walk is measured
                                       # after I2), spread uniformly, both ends in. A DENSITY, not a
