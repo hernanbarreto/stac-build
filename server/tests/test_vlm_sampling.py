@@ -47,7 +47,7 @@ def _files(n, step=1):
 def test_production_config_loads_and_is_bounded():
     raw = yaml.safe_load(CONFIG_YAML.read_text())
     cfg = load_vlm_sampling(raw)
-    assert cfg.calls_per_frame == 1 + cfg.tile_rows * cfg.tile_cols
+    assert cfg.calls_per_frame == 1 + cfg.n_tiles
     assert cfg.max_calls >= cfg.calls_per_frame
     assert raw["autoprompt"]["understand_cover"] is False, \
         "the cover cannot measure at the intake (no cloud of this run)"
@@ -213,6 +213,7 @@ def _session(tmp_path, n_kf=40):
 def _config(**sampling):
     raw = yaml.safe_load(CONFIG_YAML.read_text())
     raw["autoprompt"]["consolidate_prompts"] = False
+    raw["autoprompt"]["merge_synonyms"] = False       # this test counts the understanding calls
     raw["autoprompt"]["vlm_sampling"].update(sampling)
     raw["reconstruction"]["simple"]["enabled"] = True
     return raw

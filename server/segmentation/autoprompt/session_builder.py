@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -87,6 +88,12 @@ class AutoPrompter:
         self.understand_cover_overlap = float(cfg.get("understand_cover_overlap", 0.50))
         self.consolidate_prompts = bool(cfg.get("consolidate_prompts", True))
         self.consolidate_passes = int(cfg.get("consolidate_passes", 3))
+        # USER 2026-09-29: the second VLM pass fuses the names that mean the same
+        # thing BEFORE the SAM3 bound (strict key, no hidden default)
+        if cfg and "merge_synonyms" not in cfg:
+            raise KeyError("config.yaml is missing 'autoprompt.merge_synonyms' (true: a second "
+                           "VLM pass fuses the names that mean the same thing)")
+        self.merge_synonyms = bool(cfg.get("merge_synonyms")) if cfg else False
         self.reuse_vocabulary = bool(cfg.get("reuse_vocabulary", True))
         self.confidence_threshold = cfg.get("confidence_threshold", 0.5)
         self.iou_threshold = cfg.get("association_iou_threshold", 0.25)
@@ -370,6 +377,29 @@ class AutoPrompter:
             # FEWEST calls are not prompted (the understanding's own order:
             # proposals incl. same-name variants, then first seen), each one
             # declared here, in autoprompt_concepts.json and in the census.
+            # ── THE MERGE PASS (USER 2026-09-29): a second VLM pass over the NAMES
+            # fuses the ones that mean the same thing, BEFORE the bound — the bound
+            # then spends its budget on distinct objects, not on wordings (pccr, first
+            # run with every keyframe × 5 views: 1 900 names, 150 prompts spent on
+            # 'white wall' / 'white painted wall' / 'beige wall' …, 'black office
+            # desk' never prompted).
+            synonyms: dict[str, str] = {}
+            if self.merge_synonyms and not _reused and len(phrases) > 1:
+                from .consolidate_prompts import merge_synonyms
+                from .scene_understanding import _head_noun
+                prog(23, f"merging synonyms over {len(phrases)} names")
+                synonyms = merge_synonyms(
+                    client, understanding.scene_type if understanding else "", phrases,
+                    _head_noun, log=lambda m: print(f"[autoprompt] {m}"))
+                if synonyms:
+                    _props = Counter()
+                    for fu in (understanding.per_frame if understanding else []):
+                        for o in dict.fromkeys(fu.objects):
+                            c = understanding.merged.get(o, o)
+                            _props[synonyms.get(c, c)] += 1
+                    _order = {p: i for i, p in enumerate(phrases)}
+                    phrases = sorted((p for p in phrases if p not in synonyms),
+                                     key=lambda p: (-_props[p], _order[p]))
             from .vlm_sampling import load_max_sam3_prompts
             max_prompts = load_max_sam3_prompts(self._config)
             overflow: list[str] = []
@@ -393,7 +423,8 @@ class AutoPrompter:
             # one thing is a language judgement over the WHOLE list, which is
             # exactly what a per-frame prompt can never have.
             consolidation = None
-            if self.consolidate_prompts and len(phrases) > 1 and not _reused:
+            if self.consolidate_prompts and not self.merge_synonyms and len(phrases) > 1 \
+                    and not _reused:
                 from .consolidate_prompts import consolidate
                 prog(23, f"consolidating {len(phrases)} concepts")
                 consolidation = consolidate(
@@ -455,6 +486,7 @@ class AutoPrompter:
                 "passes": (consolidation.passes if consolidation else 0),
                 "reused": bool(_reused),
                 "not_prompted_bound": overflow,
+                "synonyms": synonyms,
                 "derived_under": signature,
                 "scene_type": (understanding.scene_type if understanding else None),
             }
@@ -483,7 +515,8 @@ class AutoPrompter:
                 "census": self._census_record(
                     plan, calls, self._concept_fates(
                         understanding, phrases, reused=bool(_reused),
-                        consolidation=consolidation, bounded_out=prompt_bound),
+                        consolidation=consolidation, bounded_out=prompt_bound,
+                        synonyms=synonyms),
                     reused=bool(_reused), prompt_bound=prompt_bound),
             }
             vlm_path = self.output_dir / "vlm_analysis.json"
@@ -622,7 +655,8 @@ class AutoPrompter:
     @staticmethod
     def _concept_fates(understanding, prompts: list[str], *, reused: bool,
                        consolidation, detection_path: bool = False,
-                       bounded_out: dict | None = None) -> list[dict]:
+                       bounded_out: dict | None = None,
+                       synonyms: dict | None = None) -> list[dict]:
         """What became of EVERY phrase the VLM proposed (USER 2026-09-29: no
         concept may disappear without a recorded reason). One entry per distinct
         phrase, with the calls that proposed it and exactly one fate:
@@ -657,6 +691,9 @@ class AutoPrompter:
         out = []
         for phrase, by in proposed.items():
             carrier = understanding.merged.get(phrase, phrase)
+            same_as = (synonyms or {}).get(carrier)
+            if same_as is not None:
+                carrier = same_as
             rec = {"concept": phrase, "proposed_by": by, "n_proposals": len(by),
                    "head_noun": _head_noun(phrase)}
             if detection_path:
@@ -667,6 +704,8 @@ class AutoPrompter:
             elif carrier in prompt_set:
                 rec.update(fate="prompt" if carrier == phrase else "merged", prompt=carrier,
                            reason=None if carrier == phrase else (
+                               f"the merge pass (VLM) judged it the same thing as "
+                               f"'{carrier}'" if same_as is not None else
                                f"same name as '{carrier}' — differs only in case, "
                                f"spacing, punctuation, a leading article / count word "
                                f"or a plural ending (same_name_key)"))

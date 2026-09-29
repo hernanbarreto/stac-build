@@ -194,6 +194,89 @@ def _one_pass(client, scene_type: str, phrases: list[str], max_tokens: int,
     return out
 
 
+_MERGE_SYSTEM = (
+    "You are merging SYNONYMS in the object list of a 3D scan. The list was written "
+    "frame by frame, so one object often appears under several wordings. Return "
+    "STRICT JSON only."
+)
+
+
+def _merge_prompt(scene_type: str, phrases: list[str]) -> str:
+    listing = "\n".join(f"- {p}" for p in phrases)
+    return (
+        f"These phrases name things seen in ONE {scene_type or 'place'}:\n\n{listing}\n\n"
+        "Merge ONLY the phrases that MEAN THE SAME THING — the same kind of object with "
+        "the same colour and material, worded differently ('white painted wall' = "
+        "'white wall'; 'metal conduit pipe' = 'metal conduit'). Everything else stays "
+        "separate:\n"
+        "- a different COLOUR or MATERIAL is a different object ('white wall' ≠ 'beige "
+        "wall' ≠ 'red painted wall'; 'glass door' ≠ 'wooden door');\n"
+        "- a different KIND of object is a different object ('desk' ≠ 'workbench' ≠ "
+        "'table'; 'door' ≠ 'doorway'; 'door' ≠ 'door frame');\n"
+        "- when unsure, keep them separate.\n"
+        "Return JSON:\n"
+        '{"groups": [{"name": "<the plainest phrase FROM THE LIST>", '
+        '"same_as": ["<other phrases from the list that mean exactly the same>"]}]}\n'
+        "Use the phrases EXACTLY as written; list only groups with at least one "
+        "'same_as'. Output ONLY the JSON."
+    )
+
+
+def merge_synonyms(client, scene_type: str, phrases: list[str], head_of: Callable[[str], str],
+                   max_tokens: int = 4096,
+                   log: Callable[[str], None] = print) -> dict[str, str]:
+    """USER 2026-09-29: *"una segunda pasada de VLM sobre los prompts para fundir los
+    que significan lo mismo"*. One VLM call per HEAD-NOUN family with 2+ phrases
+    (all the '… wall's together, all the '… door's together): the question is
+    small and focused, and two phrases with different heads are never merged.
+    Returns {alias: name}; every phrase not in it stays a prompt. Only 'same
+    meaning' merges (the 2026-09-22 lesson: colour / material / kind differences
+    are different objects — 'white workbench' ← 'desk' destroyed a desk)."""
+    from semantic.types import system, user
+    families: dict[str, list[str]] = {}
+    for p in phrases:
+        families.setdefault(head_of(p), []).append(p)
+    alias_of: dict[str, str] = {}
+    n_calls = 0
+    for head, fam in families.items():
+        if len(fam) < 2:
+            continue
+        n_calls += 1
+        try:
+            resp = client.chat([system(_MERGE_SYSTEM), user(_merge_prompt(scene_type, fam))],
+                               max_tokens=max_tokens, consumer="phase1.merge_synonyms")
+        except Exception as e:  # noqa: BLE001 — declared: the family stays unmerged
+            log(f"[merge] '{head}' ({len(fam)} phrases): call failed ({e}) — kept as is")
+            continue
+        d = _parse(resp.content or "")
+        if d is None or not isinstance(d.get("groups"), list):
+            log(f"[merge] '{head}' ({len(fam)} phrases): nothing parseable — kept as is")
+            continue
+        known = {_norm(p): p for p in fam}
+        for g in d["groups"]:
+            if not isinstance(g, dict):
+                continue
+            name = known.get(_norm(g.get("name", "")))
+            if name is None or name in alias_of:
+                continue
+            for raw in (g.get("same_as") or []):
+                other = known.get(_norm(raw))
+                if other is None or other == name or other in alias_of or \
+                        any(v == other for v in alias_of.values()):
+                    continue
+                alias_of[other] = name
+    # a name that was itself merged away points to its final carrier
+    for a in list(alias_of):
+        seen = {a}
+        while alias_of[a] in alias_of and alias_of[a] not in seen:
+            seen.add(alias_of[a])
+            alias_of[a] = alias_of[alias_of[a]]
+    log(f"[merge] {len(phrases)} phrase(s) in {len(families)} head-noun famil(y/ies), "
+        f"{n_calls} VLM call(s): {len(alias_of)} merged as the same thing → "
+        f"{len(phrases) - len(alias_of)} concept(s)")
+    return alias_of
+
+
 def consolidate(client, scene_type: str, phrases: list[str],
                 max_passes: int = 3, max_tokens: int = 4096,
                 log: Callable[[str], None] = print) -> Consolidation:
