@@ -7325,6 +7325,13 @@ async def viewer_websocket(websocket: WebSocket):
                                     print(f"[Viewer] Floor transform loaded for Potree cloud")
                                 except Exception as e:
                                     print(f"[Viewer] ⚠️ Could not load floor_transform: {e}")
+                            elif (output_dir / ".orientation_applied").exists():
+                                # reconstruction/orient.py baked +Y up and the floor at y=0 from
+                                # the camera poses: the raw cloud IS the display frame. A RANSAC
+                                # leveling here re-tilts it (pccr 2026-09-29: 2.4° and −28 cm found
+                                # on the fused cloud at session load, saved, and every OBB then sat
+                                # in a frame the octree was not shown in). Identity, nothing saved.
+                                print("[Viewer] orientation baked from camera poses — floor transform identity")
                             else:
                                 # Fallback: compute from cleaned_cloud.ply if available
                                 cleaned_path = output_dir / "cleaned_cloud.ply"
