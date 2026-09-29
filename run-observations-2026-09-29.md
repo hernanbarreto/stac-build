@@ -167,6 +167,14 @@ reconstruction stage (pccr scan 2026-08-31, 289 kf / 2100 witness, walk 17.5 m):
     resolution" adds almost nothing over Omega's 688×384; precision scans need a
     higher-resolution, higher-bitrate capture.
 
+23. **USER DECISIONS 2026-09-29 on the open items**: 2 → B (launch with
+    chunk_walk_m 5 m; implement the Omega coherence probe during the run, for
+    the next one) · 14c → A (keep tier-1 rule: 3 views + no contradiction +
+    confidence floor; measure adjacency in this run before hardening) · 14j → A
+    (τ_rel measured per run) · 14k → A (confidence slider hides tier 1) · 22 → A
+    (noted) · 4 mask_sky stays · 16 keep `_epoch_0/`, selectable from the UI ·
+    1 exclusion never targets trains/vehicles.
+
 **Why:** each is a decision the user must take, not a bug to fix silently.
 **How to apply:** raise them together when the run ends; implement only what he
 approves. See [[user-wants-results-fast]].
