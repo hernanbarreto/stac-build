@@ -41,7 +41,8 @@ import numpy as np
 LOG_TAG = "[epoch0-cloud]"
 TMP_DIRNAME = "_tx_epoch0"
 EPOCH0_DIRNAME = "_epoch_0"
-SKY_CONF = 1e-5            # the fork's sky mask: conf ≤ this is 'no geometry', not a low score
+SKY_CONF = 10 ** -5        # the fork's own sentinel (vggt_long._stac_conf_threshold): conf ≤ this
+                           # is the sky mask, 'no geometry' — not a score of ours
 
 
 class Epoch0Error(RuntimeError):
@@ -191,15 +192,18 @@ def chunks_from_omega_records(session_dir: Path, tmp: Path, *, conf_percentile: 
 def clean_cmd(config: dict, input_dir: Path, output_ply: Path) -> List[str]:
     """The cloud stage's cleaner command (workers/cloudcompy_worker.py), without the
     witness filter: it needs the epoch's own per-frame depth and poses."""
-    postproc = config.get("postprocessing", {}) or {}
+    postproc = config.get("postprocessing") or {}
+    try:
+        keys = {k: postproc[k] for k in ("voxel_size", "sor_knn", "sor_sigma", "noise_radius",
+                                         "noise_sigma", "conf_min_norm")}
+    except KeyError as e:
+        raise Epoch0Error(f"postprocessing.{e.args[0]} is missing — the epoch-0 cloud runs the "
+                          f"cloud stage's exact recipe, nothing is assumed in its place") from e
     cmd = [sys.executable, "-m", "reconstruction.gpu_cloud_clean",
            "--input-dir", str(input_dir), "--output", str(output_ply),
-           "--voxel-size", str(postproc.get("voxel_size", 0.001)),
-           "--sor-knn", str(postproc.get("sor_knn", 6)),
-           "--sor-sigma", str(postproc.get("sor_sigma", 1.0)),
-           "--noise-radius", str(postproc.get("noise_radius", 0.01)),
-           "--noise-sigma", str(postproc.get("noise_sigma", 1.0)),
-           "--conf-min-norm", str(postproc.get("conf_min_norm", 0.0))]
+           "--voxel-size", str(keys["voxel_size"]), "--sor-knn", str(keys["sor_knn"]),
+           "--sor-sigma", str(keys["sor_sigma"]), "--noise-radius", str(keys["noise_radius"]),
+           "--noise-sigma", str(keys["noise_sigma"]), "--conf-min-norm", str(keys["conf_min_norm"])]
     if int(postproc.get("max_points", 0) or 0) > 0:
         cmd += ["--max-points", str(postproc["max_points"])]
     for flag in ("skip_duplicates", "skip_sor", "skip_noise", "skip_normals"):
@@ -257,7 +261,7 @@ def build_epoch0_cloud(session_dir: Path, config: dict, *, input_dir: Optional[P
                 raise Epoch0Error(f"no chunk_*.ply in {src} — Omega's raw cloud is gone (use "
                                   f"--from-omega-npz to rebuild it from the records)")
         if progress:
-            progress(20.0, "epoch 0: cleaning Omega's cloud with the postprocessing recipe")
+            progress(20, "epoch 0: cleaning Omega's cloud with the postprocessing recipe")
         cleaned = tmp / "cleaned_cloud.ply"
         cmd = clean_cmd(config, src, cleaned)
         server_dir = Path(__file__).resolve().parent.parent
@@ -273,18 +277,22 @@ def build_epoch0_cloud(session_dir: Path, config: dict, *, input_dir: Optional[P
         sc = (config.get("postprocessing") or {}).get("scene_consolidate") or {}
         if sc.get("enabled", True):
             if progress:
-                progress(60.0, "epoch 0: consolidating (normal-aware MLS)")
+                progress(60, "epoch 0: consolidating (normal-aware MLS)")
             from reconstruction.surface_fit.consolidate import scene_consolidate
             from reconstruction.loops.config import load_loops_config
+            try:
+                sck = {k: sc[k] for k in ("min_radius_m", "max_radius_m", "iterations", "normal_gate")}
+            except KeyError as e:
+                raise Epoch0Error(f"postprocessing.scene_consolidate.{e.args[0]} is missing") from e
             stats = scene_consolidate(
-                tmp, radius_m=sc.get("radius_m"), min_radius_m=float(sc.get("min_radius_m", 0.02)),
-                max_radius_m=float(sc.get("max_radius_m", 0.06)), iterations=int(sc.get("iterations", 2)),
-                normal_gate=float(sc.get("normal_gate", 0.25)),
+                tmp, radius_m=sc.get("radius_m"), min_radius_m=float(sck["min_radius_m"]),
+                max_radius_m=float(sck["max_radius_m"]), iterations=int(sck["iterations"]),
+                normal_gate=float(sck["normal_gate"]),
                 excluded_statuses=load_loops_config(config).witness.mls_excluded_statuses)
             rep["consolidate"] = {k: stats[k] for k in ("n_points", "radius_m", "mean_move_mm")
                                   if k in stats}
         if progress:
-            progress(80.0, "epoch 0: Potree octree")
+            progress(80, "epoch 0: Potree octree")
         from potree_converter import convert_ply_to_potree
         ok = convert_ply_to_potree(session_dir, force=True, ply_override=cleaned,
                                    potree_dir_override=tmp / "potree")

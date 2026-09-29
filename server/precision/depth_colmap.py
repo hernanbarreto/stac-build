@@ -250,17 +250,37 @@ def run_colmap(session_dir: Path, pcfg, keep_workspace: bool = False,
     kind = "geometric" if ccfg.geom_consistency else "photometric"
     cdir = out / COLMAP_DIRNAME
     cdir.mkdir(parents=True, exist_ok=True)
-    per_frame, missing = {}, []
+    per_frame, missing, dms = {}, [], {}
     for f in sources:
         p = ws / "stereo" / "depth_maps" / f"{image_name(f)}.{kind}.bin"
         if not p.exists():
             missing.append(f)
             continue
         dm = read_colmap_array(p).astype(np.float32)
-        np.savez_compressed(cdir / f"frame_{f}.npz", depth=dm)
+        dm = np.where(np.isfinite(dm) & (dm > 0), dm, 0.0).astype(np.float32)
+        dms[f] = dm
         sw = out / DS.DEPTH_DIRNAME / f"frame_{f}.npz"
         if sw.exists():
             per_frame[str(f)] = compare(sw, dm)
+    # TIER-2 EVIDENCE (USER 2026-09-29): COLMAP's depth judged by the sweep's own rule —
+    # confirmations and contradictions against the neighbours' COLMAP depths, at the
+    # sweep's τ_rel / τ_px — so F7 can admit it exactly as it admits tier 0
+    tau_rel, tau_px = float(rep["tau_rel"]), float(rep["tau_px"])
+    kf_index = {int(f): i for i, f in enumerate(inp.kf)}
+    dev = DS._device()
+    n_t2 = 0
+    for f, dm in dms.items():
+        nb = [g for g in sources[f] if g in dms]
+        if nb:
+            n_c, r_c, n_b = DS.consistency(dm, inp.K, inp.kf_w2c[kf_index[f]], [dms[g] for g in nb],
+                                           [inp.kf_w2c[kf_index[g]] for g in nb], tau_rel, tau_px,
+                                           device=dev)
+        else:
+            n_c = np.zeros(dm.shape, np.uint8); n_b = np.zeros(dm.shape, np.uint8)
+            r_c = np.full(dm.shape, np.nan, np.float32)
+        n_t2 += int(((dm > 0) & (n_c >= int(pcfg.fuse.min_witness_views)) & (n_b < n_c)).sum())
+        np.savez_compressed(cdir / f"frame_{f}.npz", depth=dm, n_consistent=n_c, n_contradict=n_b,
+                            residual_rel=r_c.astype(np.float32))
     agg = {}
     for key in ("tier0_median_rel", "tier1_median_rel", "colmap_coverage", "sweep_tier0_coverage"):
         v = [r[key] for r in per_frame.values() if r.get(key) is not None]
@@ -268,6 +288,7 @@ def run_colmap(session_dir: Path, pcfg, keep_workspace: bool = False,
     rep["colmap_ab"] = {"colmap_binary": str(binary), "depth_kind": kind,
                         "params": {k: getattr(ccfg, k) for k in ccfg.__dataclass_fields__},
                         "keyframes_only": True, "n_frames": len(per_frame),
+                        "tier2_candidates": n_t2, "tau_rel": tau_rel, "tau_px": tau_px,
                         "missing_depth_maps": missing, "median_over_frames": agg,
                         "per_frame": per_frame, "seconds": round(time.time() - t0, 1)}
     rep_path.write_text(json.dumps(rep, indent=1, default=float))
@@ -275,7 +296,8 @@ def run_colmap(session_dir: Path, pcfg, keep_workspace: bool = False,
         shutil.rmtree(ws, ignore_errors=True)
     log(f"{LOG_TAG} {len(per_frame)} frame(s) compared: sweep tier 0 vs COLMAP median "
         f"{(agg['tier0_median_rel'] or float('nan')) * 100:.2f} % (median over frames), "
-        f"COLMAP coverage {(agg['colmap_coverage'] or 0) * 100:.1f} % → {rep_path}")
+        f"COLMAP coverage {(agg['colmap_coverage'] or 0) * 100:.1f} %; tier-2 candidates "
+        f"(consistent, ≥ {pcfg.fuse.min_witness_views} views) {n_t2:,} px → {rep_path}")
     return rep["colmap_ab"]
 
 

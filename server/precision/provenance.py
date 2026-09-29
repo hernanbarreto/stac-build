@@ -38,6 +38,14 @@ V2_DTYPES = {"frame_global": np.int32, "pixel_row": np.int32, "pixel_col": np.in
              "pixel_u_und": np.int32, "pixel_v_und": np.int32, "n_consistent": np.uint8,
              "ncc": np.float32, "source": np.uint8, "residual_rel": np.float32,
              "content_flags": np.uint8, "geometry_epoch": np.int16, "camera_epoch": np.int16}
+# ``source`` of a fused point: depth_sweep's SOURCE_SWEEP (0, tier 0: photometric
+# measurement) and SOURCE_PRIOR_FILL (1, tier 1: Omega's prior confirmed by other
+# views), plus TIER 2 — COLMAP PatchMatch's geometric depth (USER 2026-09-29: a second
+# measuring instrument, switchable: precision.depth.colmap.as_tier), judged by the
+# same consistency rule as tier 0 and ranked between the two
+SOURCE_COLMAP = 20
+SOURCE_NAMES_FUSED = {0: "tier0", 1: "tier1_prior_fill", SOURCE_COLMAP: "tier2_colmap"}
+
 REJECT_REASONS = {"insufficient_witnesses": 1, "inconsistent": 2, "prior_fill_dropped": 3,
                   "excluded_mask": 4, "dedup": 5, "unlocalized_frame": 6, "sor": 7,
                   "prior_low_conf": 8,      # tier-1 prior under the session's confidence floor

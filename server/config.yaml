@@ -2152,10 +2152,17 @@ reconstruction:
       calib_min_bin_samples: 200        # BOUND: a cell speaks for itself from this count
       calib_samples_per_frame: 20000    # BOUND: calibration samples per keyframe
       seed: 0
-      colmap:                           # A/B reference only (precision/depth_colmap.py)
-        enabled: false                  # USER 2026-09-29: out of the automatic chain — it changes
-                                        # nothing in the cloud and costs ~60 min on 289 keyframes;
-                                        # `python -m precision.depth_colmap --session <dir>` by hand
+      colmap:                           # COLMAP PatchMatch (precision/depth_colmap.py)
+        enabled: true                   # USER 2026-09-29: back in the chain as a depth SOURCE —
+                                        # on pccr it covered 31 % of the pixels where the sweep's
+                                        # tier 0 had 2 % (464×832 @ 1.2 Mbit/s video), agreeing
+                                        # 4.3 % with it where both exist. ~60 min on 289 keyframes.
+        as_tier: true                   # its geometric depth enters F7 as TIER 2 (source 20,
+                                        # "tier2_colmap" in origins/PLY), judged by the same
+                                        # consistency rule as tier 0 (≥ min_witness_views, no more
+                                        # contradictions than confirmations), ranked tier 0 > 2 > 1.
+                                        # false = A/B comparison only (the 2026-09-28 role) — the
+                                        # switch to see how it coexists with the cloud.
         binary: /workspace/miniforge3/envs/colmap/bin/colmap   # built WITH CUDA
         window_radius: 5                # COLMAP's defaults
         num_iterations: 5

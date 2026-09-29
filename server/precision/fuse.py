@@ -78,8 +78,11 @@ def evidence(n_consistent: np.ndarray, ncc: np.ndarray,
     count). pccr 2026-09-29: ordered by views alone, 87,901 tier-0 depths lost their
     voxel to a tier-1 prior with more self-agreeing neighbours."""
     from precision.depth_sweep import SOURCE_SWEEP
-    tier = (np.asarray(source) == SOURCE_SWEEP).astype(np.float64) * TIER_WEIGHT \
-        if source is not None else 0.0
+    if source is not None:
+        src = np.asarray(source)
+        tier = ((src == SOURCE_SWEEP).astype(np.float64) * 2 + (src == PV.SOURCE_COLMAP)) * TIER_WEIGHT
+    else:
+        tier = 0.0
     return tier + np.asarray(n_consistent, np.float64) * 4 + (np.nan_to_num(ncc, nan=-1.0) + 1.0)
 
 
@@ -135,11 +138,12 @@ def _candidate_codes(src: np.ndarray, n_cons: np.ndarray, fcfg, dcfg):
                                        SOURCE_PRIOR_FILL, SOURCE_SWEEP)
     R = PV.REJECT_REASONS
     t0 = src == SOURCE_SWEEP
+    t2 = src == PV.SOURCE_COLMAP
     t1 = src == SOURCE_PRIOR_FILL
-    enter = (t0 & (n_cons >= int(fcfg.min_witness_views))) | \
+    enter = ((t0 | t2) & (n_cons >= int(fcfg.min_witness_views))) | \
         (t1 & (n_cons >= int(dcfg.prior_fill_min_views)))
     reason = np.zeros(src.shape, np.uint8)
-    reason[(t0 | t1) & ~enter] = R["insufficient_witnesses"]
+    reason[(t0 | t1 | t2) & ~enter] = R["insufficient_witnesses"]
     reason[src == DISCARD_INCONSISTENT] = R["inconsistent"]
     reason[src == DISCARD_PRIOR_FILL_DROPPED] = R["prior_fill_dropped"]
     reason[src == DISCARD_EXCLUDED] = R["excluded_mask"]
@@ -174,6 +178,8 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
     # ── pass 0: every keyframe's entering pixels and its consistency views ──
     per: Dict[int, Dict[str, np.ndarray]] = {}
     kf_index = {int(f): i for i, f in enumerate(kf)}
+    cdir = out / "depth_colmap"
+    n_tier2 = 0
     views: Dict[int, List[int]] = {}
     n_cand = 0
     rej_counts = {k: 0 for k in PV.REJECT_REASONS}
@@ -183,11 +189,28 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
         if not p.exists():
             continue
         with np.load(p) as z:
-            depth, src, ncons = z["depth"].astype(np.float32), z["source"], z["n_consistent"]
+            depth, src, ncons = z["depth"].astype(np.float32), z["source"].copy(), z["n_consistent"].copy()
+            res_np = z["residual_rel"].astype(np.float32)
+        t2 = np.zeros(depth.shape, bool)
+        cp = cdir / f"frame_{f}.npz"
+        if dcfg.colmap.as_tier and cp.exists():
+            with np.load(cp) as z2:
+                if "n_consistent" in z2.files:
+                    cd, cn, cb = z2["depth"].astype(np.float32), z2["n_consistent"], z2["n_contradict"]
+                    cr = z2["residual_rel"].astype(np.float32)
+                    # TIER 2: where the sweep measured nothing, COLMAP's consistent depth
+                    # replaces the prior (its evidence is the same rule as tier 0's)
+                    t2 = ((src != SOURCE_SWEEP) & (cd > 0) & (cn >= int(fcfg.min_witness_views))
+                          & (cb.astype(np.int32) < cn.astype(np.int32)))
+                    depth = np.where(t2, cd, depth)
+                    src = np.where(t2, np.uint8(PV.SOURCE_COLMAP), src).astype(np.uint8)
+                    ncons = np.where(t2, cn, ncons).astype(np.uint8)
+                    res_np = np.where(t2, cr, res_np).astype(np.float32)
+        n_tier2 += int(t2.sum())
         enter, reason = _frame_codes(src, ncons, c2w[i], fcfg, dcfg)
         n_cand += int(enter.sum() + (reason > 0).sum())
         per[i] = {"depth": np.where(enter, depth, 0.0).astype(np.float32), "src": src,
-                  "ncons": ncons, "enter": enter, "reason": reason,
+                  "ncons": ncons, "res": res_np, "t2": t2, "enter": enter, "reason": reason,
                   "consumed": np.zeros(depth.shape, bool), "winner": np.zeros(depth.shape, bool)}
         pf = (rep.get("per_frame") or {}).get(str(int(f))) or {}
         views[i] = [kf_index[int(v)] for v in pf.get("consistency_views", []) if int(v) in kf_index]
@@ -205,7 +228,7 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
     # per 2 cm floor cell, 53 mm apart — because the 4 mm dedup below is 14× finer
     # than the consistency tolerance. The winner keeps its own coordinates.
     n_fused = 0
-    for tier in (SOURCE_SWEEP, SOURCE_PRIOR_FILL):
+    for tier in (SOURCE_SWEEP, PV.SOURCE_COLMAP, SOURCE_PRIOR_FILL):
         for i in sorted(per):
             d = per[i]
             cand = d["enter"] & (d["src"] == tier) & ~d["consumed"]
@@ -232,6 +255,8 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
                 same = per[j]["enter"][v, u] & (dj > 0) & (np.abs(z - dj) <= tau_rel * dj)
                 if tier == SOURCE_PRIOR_FILL:
                     same &= per[j]["src"][v, u] == SOURCE_PRIOR_FILL
+                elif tier == PV.SOURCE_COLMAP:
+                    same &= per[j]["src"][v, u] != SOURCE_SWEEP     # never a measured pixel
                 per[j]["consumed"][v[same], u[same]] = True
     for i, d in per.items():
         fused = d["consumed"] & d["enter"] & ~d["winner"]
@@ -249,7 +274,7 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
         if not rr.size:
             continue
         with np.load(ddir / f"frame_{f}.npz") as z:
-            ncc = z["ncc"]
+            ncc = np.where(d["t2"], np.nan, z["ncc"]).astype(np.float32)
         X = backproject(d["depth"], rr, cc, K, c2w[i])
         keys.append(pack_keys(np.floor(X / voxel).astype(np.int64)))
         score.append(evidence(d["ncons"][rr, cc], ncc[rr, cc], d["src"][rr, cc]).astype(np.float32))
@@ -299,8 +324,8 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
         if not p.exists() or i not in per:
             continue
         with np.load(p) as z:
-            depth, src, ncons, ncc = z["depth"], z["source"], z["n_consistent"], z["ncc"]
-            res = z["residual_rel"].astype(np.float32)
+            ncc = np.where(per[i]["t2"], np.nan, z["ncc"]).astype(np.float32)
+        depth, src, ncons, res = per[i]["depth"], per[i]["src"], per[i]["ncons"], per[i]["res"]
         enter, reason = per[i]["enter"], per[i]["reason"]
         flags = PV.content_flags_of(tags.get(int(f)))
         W = depth.shape[1]
@@ -375,7 +400,7 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
             log(f"{LOG_TAG} cleaning: SOR (knn {pp['sor_knn']}, {pp['sor_sigma']} σ) kept "
                 f"{len(xyz):,} of {n0:,} (mean d {mu * 1000:.1f} mm σ {sd * 1000:.1f} mm)")
 
-    data = cloud_array(xyz, rgb, origins)
+    data = cloud_array(xyz, rgb, origins, views_full=int(dcfg.n_views))
     n_rej = int(len(rejected["reason"]))
     if len(data) + n_rej != n_cand:
         raise FuseError(f"{len(data)} points + {n_rej} rejected ≠ {n_cand} candidates — the "
@@ -395,12 +420,15 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
                          "n_fused": int(n_fused), "order": "tier, views, ZNCC"},
               "rejected_by_reason": rej_counts,
               "points_by_tier": {"tier0": int(np.sum(tiers == SOURCE_SWEEP)),
+                                 "tier2_colmap": int(np.sum(tiers == PV.SOURCE_COLMAP)),
                                  "tier1_prior_fill": int(np.sum(tiers == SOURCE_PRIOR_FILL))},
+              "colmap_as_tier": {"enabled": bool(dcfg.colmap.as_tier), "n_pixels_tier2": int(n_tier2)},
               "witness_histogram": {str(int(v)): int(c) for v, c in
                                     zip(*np.unique(origins["n_consistent"], return_counts=True))},
               "seconds": round(time.time() - t0, 1),
-              "viewer_channels": {"confidence": "ZNCC for tier 0, 0 for tier 1 (slider > 0 "
-                                                "hides tier 1)",
+              "viewer_channels": {"confidence": "ZNCC for tier 0, confirming views / n_views for "
+                                                "tier 2 (COLMAP), 0 for tier 1 (slider > 0 hides "
+                                                "tier 1)",
                                   "mv_votes": "consistent views", "status": "verified"}}
     return {"data": data, "origins": origins, "rejected": rejected, "report": report}
 
@@ -416,7 +444,8 @@ PLY_FIELDS = [("x", "<f8", "double"), ("y", "<f8", "double"), ("z", "<f8", "doub
               ("status", "u1", "uchar")]
 
 
-def cloud_array(xyz: np.ndarray, rgb: np.ndarray, o: Dict[str, np.ndarray]) -> np.ndarray:
+def cloud_array(xyz: np.ndarray, rgb: np.ndarray, o: Dict[str, np.ndarray],
+                views_full: Optional[int] = None) -> np.ndarray:
     from precision.depth_sweep import SOURCE_SWEEP
     from reconstruction.witness.status import STATUS_CODES
     data = np.empty(len(xyz), dtype=[(n, t) for n, t, _ in PLY_FIELDS])
@@ -425,8 +454,12 @@ def cloud_array(xyz: np.ndarray, rgb: np.ndarray, o: Dict[str, np.ndarray]) -> n
     for k in ("frame_global", "pixel_row", "pixel_col", "pixel_u_und", "pixel_v_und",
               "n_consistent", "ncc", "source", "residual_rel", "content_flags"):
         data[k] = o[k]
-    data["confidence"] = np.where(o["source"] == SOURCE_SWEEP,
-                                  np.clip(np.nan_to_num(o["ncc"], nan=0.0), 0.0, 1.0), 0.0)
+    # tier 0: its ZNCC; tier 2: its share of confirming views; tier 1: 0 (the slider hides it)
+    full = float(views_full) if views_full else 1.0
+    conf = np.where(o["source"] == SOURCE_SWEEP, np.clip(np.nan_to_num(o["ncc"], nan=0.0), 0.0, 1.0), 0.0)
+    conf = np.where(o["source"] == PV.SOURCE_COLMAP,
+                    np.clip(o["n_consistent"].astype(np.float64) / full, 0.0, 1.0), conf)
+    data["confidence"] = conf.astype(np.float32)
     data["mv_votes"] = o["n_consistent"]
     data["status"] = STATUS_CODES["verified"]
     return data
