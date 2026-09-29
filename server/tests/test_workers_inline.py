@@ -40,8 +40,9 @@ class _Pipe:
 @pytest.fixture
 def fake_module(tmp_path, monkeypatch):
     (tmp_path / "fake_inline_worker.py").write_text(FAKE)
-    monkeypatch.syspath_prepend(str(tmp_path))
-    # the spawned child re-imports through sys.path handed over by multiprocessing
+    # the hosted child is a subprocess (python -m workers.inline_child): it finds
+    # the fake module through PYTHONPATH
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
     return "fake_inline_worker"
 
 

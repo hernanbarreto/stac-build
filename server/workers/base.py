@@ -85,9 +85,12 @@ def run_worker_safe(worker_fn, conn: Connection, *args, **kwargs):
     # killpg — a plain terminate() on the worker orphaned its children, which
     # kept running and holding GPU memory. Deliberately-persistent services
     # (vLLM) detach with start_new_session and are unaffected.
+    # A worker HOSTED by another worker (workers/inline_child.py, env
+    # STAC_INLINE_CHILD) stays in its host's group, so that same killpg reaches it.
     try:
         import os
-        os.setsid()
+        if not os.environ.get("STAC_INLINE_CHILD"):
+            os.setsid()
     except Exception:
         pass
     pipe = WorkerPipe(conn)
@@ -212,74 +215,75 @@ def stop_semantic_service_verified(pipe: Optional["WorkerPipe"] = None, stage: s
 # ── Running one worker inside another (the reconstruction stage hosts the
 # semantics and the precision core — USER 2026-09-28) ────────────────────────
 
-def _kill_process_tree(process, timeout: float = 5.0) -> None:
-    """SIGTERM the child's process group (it setsid()'d in run_worker_safe, so its
-    own children — DA3, SAM3, the precision steps — share it), wait, SIGKILL what
-    is left. Mirrors PipelineManager._kill_stage_tree."""
-    import os
-    import signal
-    pid = process.pid
+def _terminate(proc, timeout: float = 5.0) -> None:
+    """SIGTERM the hosted child, wait, SIGKILL what is left. The child shares the
+    host's process group (no setsid, STAC_INLINE_CHILD), so the pipeline's own
+    killpg on a cancelled stage reaches it and its subprocesses as well."""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
     try:
-        pgid = os.getpgid(pid)
-    except (ProcessLookupError, PermissionError):
-        pgid = None
-    try:
-        if pgid is not None and pgid != os.getpgid(0):
-            os.killpg(pgid, signal.SIGTERM)
-        else:
-            process.terminate()
-    except (ProcessLookupError, PermissionError):
-        process.terminate()
-    process.join(timeout=timeout)
-    if process.is_alive():
+        proc.wait(timeout=timeout)
+    except Exception:  # noqa: BLE001 — subprocess.TimeoutExpired
+        proc.kill()
         try:
-            if pgid is not None and pgid != os.getpgid(0):
-                os.killpg(pgid, signal.SIGKILL)
-            else:
-                process.kill()
-        except (ProcessLookupError, PermissionError):
-            process.kill()
-        process.join(timeout=timeout)
+            proc.wait(timeout=timeout)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def run_stage_inline(pipe: "WorkerPipe", module_name: str, session_dir: str, config: dict, *,
                      label: str, stage: str = "reconstruction",
-                     pct_range: tuple = (0.0, 100.0)) -> None:
-    """Run another worker module's ``run(conn, session_dir, config)`` as a child
-    process of THIS worker and relay what it says: logs verbatim (prefixed with
-    ``label``), progress rescaled into ``pct_range`` of ``stage``, a cancel
-    forwarded to the child and its whole process group killed. The child's
-    ``error`` / failed ``done`` — or a child that dies without one — raise a
-    RuntimeError naming the label and the reason (nothing fails silently). The
-    child is a 'spawn' process like every pipeline stage (CUDA-safe)."""
-    import importlib
-    from multiprocessing import get_context
+                     pct_range: tuple = (0.0, 100.0), cancel_grace_s: float = 30.0) -> None:
+    """Run another worker module's ``run(conn, session_dir, config)`` as a child of
+    THIS worker and relay what it says: logs verbatim (prefixed with ``label``),
+    progress rescaled into ``pct_range`` of ``stage``, a cancel forwarded to the
+    child (which stops its own subprocesses and reports) and enforced after
+    ``cancel_grace_s``. The child's ``error`` / failed ``done`` — or a child that
+    dies without one — raise a RuntimeError naming the label and the reason.
 
-    mod = importlib.import_module(module_name)
-    ctx = get_context("spawn")
-    server_conn, worker_conn = ctx.Pipe()
-    proc = ctx.Process(target=mod.run, args=(worker_conn, session_dir, config),
-                       name=f"inline-{label}")
-    proc.start()
-    worker_conn.close()
+    The child is a plain subprocess (``python -m workers.inline_child``) speaking
+    the stage protocol over a multiprocessing Pipe handed down by fd: the pipeline's
+    stage workers are daemonic multiprocessing processes and Python forbids those
+    to spawn multiprocessing children (pccr 2026-09-28: "daemonic processes are not
+    allowed to have children" was the first thing the hosted VLM stage said)."""
+    import os
+    import subprocess
+    import sys
+    from multiprocessing import Pipe
+    from pathlib import Path
+
+    server_dir = Path(__file__).resolve().parent.parent
+    host_conn, child_conn = Pipe()
+    fd = child_conn.fileno()
+    env = dict(os.environ)
+    env["STAC_INLINE_CHILD"] = "1"
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "workers.inline_child", module_name, session_dir, str(fd)],
+        cwd=str(server_dir), env=env, pass_fds=(fd,))
+    child_conn.close()
+    host_conn.send(config)
     lo, hi = float(pct_range[0]), float(pct_range[1])
     error: Optional[dict] = None
     done: Optional[dict] = None
+    cancel_sent_at: Optional[float] = None
     try:
         while True:
-            if pipe.check_cancel():
+            if cancel_sent_at is None and pipe.check_cancel():
                 try:
-                    server_conn.send({"type": "cancel"})
+                    host_conn.send({"type": "cancel"})
                 except Exception:  # noqa: BLE001 — the child may be gone already
                     pass
-                _kill_process_tree(proc)
+                cancel_sent_at = time.time()
+            if cancel_sent_at is not None and time.time() - cancel_sent_at > cancel_grace_s:
+                _terminate(proc)
                 raise RuntimeError(f"cancelled during {label}")
-            if not server_conn.poll(0.25):
-                if not proc.is_alive() and not server_conn.poll(0.0):
+            if not host_conn.poll(0.25):
+                if proc.poll() is not None and not host_conn.poll(0.0):
                     break
                 continue
             try:
-                msg = server_conn.recv()
+                msg = host_conn.recv()
             except EOFError:
                 break
             if not isinstance(msg, dict):
@@ -299,11 +303,14 @@ def run_stage_inline(pipe: "WorkerPipe", module_name: str, session_dir: str, con
                 done = msg
                 break
     finally:
-        proc.join(timeout=10)
-        if proc.is_alive():
-            _kill_process_tree(proc)
-        server_conn.close()
+        try:
+            proc.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            _terminate(proc)
+        host_conn.close()
+    if cancel_sent_at is not None:
+        raise RuntimeError(f"cancelled during {label}")
     if error is not None or done is None or not done.get("success", False):
         why = ((error or {}).get("msg") or (done or {}).get("detail")
-               or f"the worker died without reporting (exit code {proc.exitcode})")
+               or f"the worker died without reporting (exit code {proc.returncode})")
         raise RuntimeError(f"{label} failed: {why}")

@@ -693,7 +693,8 @@ intake:
     max_tokens: 512                    # BOUND: VLM generation cap per call
     exclusion_classes: [dynamic, occluder]      # USER DECISION (§4-F1): these EXCLUDE observations
     weight_classes: [reflective, low_info]      # USER DECISION (§4-F1): these only WEIGH, never exclude
-    sam3_scope: all                    # claude_stac.txt §4-F1 (all keyframes + witness frames): SAM3
+    sam3_scope: flagged_ranges         # USER 2026-09-28 (pccr: "all" measured 31 h — 414 sessions of 274 s).
+                                       # History, claude_stac.txt §4-F1 (all keyframes + witness frames): SAM3
                                        # segments every keyframe AND witness frame for the exclusion
                                        # classes; the VLM tags stay vlm_proposed weights/evidence,
                                        # SAM3 decides the masks. flagged_ranges (selectable) segments
@@ -705,7 +706,10 @@ intake:
       occluder: [hand, glove, helmet brim, object touching the lens]
 models:
   segmentation:
-    version: "sam3"                    # ROLLBACK A/B (user 2026-08-29 night): masklets die after
+    version: "sam3.1"                  # USER 2026-09-28: 3.1 — with parallax_lk's ~2000 keyframes, 3.0
+                                       # measured 1.1 s/frame (250 frames in 274 s): the intake's
+                                       # exclusion pass alone projected to 31 h; 3.1 is 6x faster.
+                                       # History — ROLLBACK A/B (user 2026-08-29 night): masklets die after
                                        # 2-4 keyframes under 3.1 ("antes no pasaba") — testing
                                        # whether 3.0 keeps them alive across all 12.
                                        # "sam3" | "sam3.1" (Object Multiplex). 3.1 measured on
