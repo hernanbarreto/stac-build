@@ -2153,6 +2153,9 @@ reconstruction:
       calib_samples_per_frame: 20000    # BOUND: calibration samples per keyframe
       seed: 0
       colmap:                           # A/B reference only (precision/depth_colmap.py)
+        enabled: false                  # USER 2026-09-29: out of the automatic chain — it changes
+                                        # nothing in the cloud and costs ~60 min on 289 keyframes;
+                                        # `python -m precision.depth_colmap --session <dir>` by hand
         binary: /workspace/miniforge3/envs/colmap/bin/colmap   # built WITH CUDA
         window_radius: 5                # COLMAP's defaults
         num_iterations: 5

@@ -118,11 +118,18 @@ def resume_point(state: dict, steps: Sequence[Step], epoch_now: int) -> int:
     return n
 
 
+def chain_steps(pcfg, steps: Sequence[Step] = STEPS) -> List[Step]:
+    """The steps this configuration runs: the COLMAP A/B reference only when
+    precision.depth.colmap.enabled (it changes no geometry)."""
+    return [s for s in steps if not (s.key == "f6_colmap" and not pcfg.depth.colmap.enabled)]
+
+
 def run_chain(session_dir: Path, pcfg, *, log: Callable = print,
               progress: Optional[Callable[[float, str], None]] = None,
               cancelled: Optional[Callable[[], bool]] = None,
               before_gpu: Optional[Callable[[str], None]] = None,
-              steps: Sequence[Step] = STEPS) -> dict:
+              steps: Optional[Sequence[Step]] = None) -> dict:
+    steps = chain_steps(pcfg) if steps is None else steps
     session_dir = Path(session_dir).resolve()
     rcfg = pcfg.runner
     py = {"da3": rcfg.python_da3, "mapanything": rcfg.python_mapanything}

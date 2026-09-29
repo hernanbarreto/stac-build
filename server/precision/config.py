@@ -245,6 +245,7 @@ PRIOR_FILL_MODES = ("keep", "drop")
 
 @dataclass(frozen=True)
 class ColmapConfig:
+    enabled: bool               # the A/B reference runs in the chain (it changes no geometry)
     binary: str                 # the COLMAP executable built WITH CUDA (PatchMatch needs it)
     window_radius: int          # COLMAP's own defaults (PatchMatchOptions)
     num_iterations: int
@@ -470,6 +471,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         calib_samples_per_frame=_num(dp, "calib_samples_per_frame", "depth", lo=1, integer=True),
         seed=_num(dp, "seed", "depth", lo=0, integer=True),
         colmap=ColmapConfig(
+            enabled=_bool(cm, "enabled", "depth.colmap"),
             binary=_str(cm, "binary", "depth.colmap"),
             window_radius=_num(cm, "window_radius", "depth.colmap", lo=1, integer=True),
             num_iterations=_num(cm, "num_iterations", "depth.colmap", lo=1, integer=True),
