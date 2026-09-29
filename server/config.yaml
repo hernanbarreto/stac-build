@@ -702,7 +702,9 @@ intake:
                                        # keyframe and its neighbours — a tag would then gate a mask.
     prompts:                           # SAM3 open-vocabulary prompts per exclusion class (strings,
                                        # not thresholds; the VLM fixes no parameter)
-      dynamic: [person, worker, moving vehicle, animal, train]
+      dynamic: [person, worker, animal]   # USER 2026-09-29: never "train" or "moving vehicle" — a parked
+                                          # train or vehicle IS geometry to measure (rail depot scan); a
+                                          # moving one is a capture condition the operator controls
       occluder: [hand, glove, helmet brim, object touching the lens]
 models:
   segmentation:
