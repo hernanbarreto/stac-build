@@ -294,3 +294,49 @@ def caption_object(
         import traceback
         traceback.print_exc()
         return _fallback(label)
+
+
+def caption_object_qwen(
+    frames: List[str],
+    masks: Dict[str, np.ndarray],
+    label: str,
+    max_views: int = 4,
+) -> Dict[str, str]:
+    """The same structured description, from the session's Qwen3-VL service (the
+    pipeline's VLM, already up — no second VLM on the GPU). The object is shown ISOLATED
+    in its ``max_views`` best views (everything else darkened, as the InternVL path).
+    Same return contract: ``{category, shape, material, detail, caption}``; on any
+    failure the label in every field, declared in the log."""
+    if not frames or not masks:
+        return _fallback(label)
+    t0 = time.time()
+    crops = []
+    for fp in _select_best_views(frames, masks, max_views):
+        mask = masks.get(Path(fp).name)
+        if mask is None:
+            continue
+        img = Image.open(fp).convert("RGB")
+        if mask.shape != (img.height, img.width):
+            mask = np.array(Image.fromarray(mask.astype(np.uint8) * 255).resize(
+                (img.width, img.height), Image.NEAREST)) > 127
+        crops.append(_create_isolated_crop(img, mask))
+    if not crops:
+        return _fallback(label)
+    try:
+        from semantic.client import get_semantic_client
+        from semantic.types import user
+        client = get_semantic_client(consumer="shaper.caption")
+        prompt = _CAPTION_PROMPT.replace("<image>\n", "").format(label=label)
+        if len(crops) > 1:
+            prompt = ("The images are views of the SAME object from different viewpoints.\n"
+                      + prompt)
+        resp = client.chat([user(prompt, images=crops)], max_tokens=256)
+        raw = resp.content or ""
+        fields = _parse_fields(raw, fallback_label=label)
+        fields["caption"] = _compose_caption(fields, fallback_label=label)
+        logger.info(f"Caption (Qwen3-VL) for '{label}' ({time.time() - t0:.1f}s, "
+                    f"{len(crops)} view(s)): [{fields['category']}] {fields['caption'][:90]}")
+        return fields
+    except Exception as e:  # noqa: BLE001 — declared, the label stands in
+        logger.error(f"Qwen3-VL captioning failed for '{label}': {e}")
+        return _fallback(label)

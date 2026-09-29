@@ -785,7 +785,7 @@
     "noSegments": "No hay {@instances} en esta {@session}",
     "noSegmentsDesc": "Ejecutá la segmentación primero: el mallado es por objeto.",
     "object": "Objeto ({n})",
-    "objectHint": "Reconstrucción generativa de objeto (MeshFlow): activo visual, no métrico",
+    "objectHint": "Reconstrucción generativa de objeto (ShapeR: nube del objeto + vistas + descripción)",
     "objectRunning": "Objeto {done}/{total}",
     "mesh": "Malla ({n})",
     "meshHint": "Superficies RANSAC + Poisson desde la propia nube del objeto; ambas mallas para comparar",

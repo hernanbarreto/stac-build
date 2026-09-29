@@ -785,7 +785,7 @@
     "noSegments": "No {@instances} in this {@session}",
     "noSegmentsDesc": "Run the segmentation first: meshing is per object.",
     "object": "Object ({n})",
-    "objectHint": "Generative object reconstruction (MeshFlow): visual asset, not metric",
+    "objectHint": "Generative object reconstruction (ShapeR: object cloud + views + description)",
     "objectRunning": "Object {done}/{total}",
     "mesh": "Mesh ({n})",
     "meshHint": "RANSAC surfaces + Poisson from the object's own cloud; both meshes, for comparison",

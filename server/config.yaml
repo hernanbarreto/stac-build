@@ -2687,6 +2687,22 @@ surface_fit:
 # <folder>_visual.glb and carry "metric": false in meta.json.
 # Routing: architectural classes (surface_fit.fitted_roles) never reach
 # MeshFlow; oversized segments stay on the TSDF path.
+shaper:                       # USER 2026-09-29: ShapeR REPLACES MeshFlow behind the UI's generative
+                              # (Object) button — "debe reemplazar ShapeR a meshflow". Per object: the
+                              # segment's metric points + multi-view frames (object projections as the
+                              # mask) + a Qwen3-VL description → vendor/ShapeR (env `shaper`,
+                              # checkpoints in vendor/ShapeR/checkpoints) → output/shape/<obj>/<obj>.glb
+  engine: shaper              # shaper | meshflow (the MeshFlow path stays selectable)
+  preset: quality             # vendor preset: quality (16 views, 50 steps — the released ckpt's
+                              # tuning), balance (16/25), speed (4/10)
+  max_views: 32               # views stored per object PKL; the preset picks its 16 from these
+  min_view_points: 50         # a view needs this many of the object's points to be kept
+  grayscale: true             # the released checkpoint is trained on Aria SLAM (grayscale) frames
+  image_format: png           # lossless per-view frames in the PKL
+  auto_caption: true          # Qwen3-VL (the pipeline's VLM service) describes each object from its
+                              # isolated best views; a manual caption from the UI wins
+  fit_to_cloud: true          # coverage-aware fit of the generated mesh to the segment's cloud
+
 meshflow:
   steps: 28                   # flow-matching denoise steps (vendor default)
   guidance_scale: 2.5         # CFG — only effective when a reference image is provided

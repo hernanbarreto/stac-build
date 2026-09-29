@@ -4024,7 +4024,8 @@ def _shape_set_overall(session_id: str, **kw):
 
 async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
                                    ply_paths: List[Path],
-                                   inst_id_by_pkl: Dict[str, int]):
+                                   inst_id_by_pkl: Dict[str, int],
+                                   engine: str = "meshflow"):
     """Spawn run_meshflow.sh and parse [BATCH] events for live UI progress.
 
     Single-flight globally (see _meshflow_subprocess above). Output GLBs are
@@ -4052,21 +4053,42 @@ async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
             return
 
     server_dir = Path(__file__).resolve().parent
-    script = server_dir / "run_meshflow.sh"
+    if engine == "shaper":
+        # USER 2026-09-29: ShapeR replaces MeshFlow behind the generative button.
+        # ONE PKL per object (segment points + multi-view frames + description).
+        scfg = (cfg or {}).get("shaper") or {}
+        for _k in ("preset", "fit_to_cloud"):
+            if _k not in scfg:
+                raise RuntimeError(f"config.yaml is missing 'shaper.{_k}'")
+        cmd = ["bash", str(server_dir / "run_shaper.sh"),
+               "--pkls", *[str(p) for p in ply_paths],
+               "--output_dir", str(output_dir / "shape"),
+               "--config", str(scfg["preset"])]
+        if not bool(scfg["fit_to_cloud"]):
+            cmd += ["--no_fit_to_cloud"]
+        # the GPU: ShapeR needs it whole — the chat VLM (vLLM) steps aside, back after
+        try:
+            from workers.base import stop_semantic_service_verified
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: stop_semantic_service_verified(None, stage="shaper", log=print))
+        except Exception as _e:  # noqa: BLE001 — declared
+            print(f"[Shape] ⚠ could not stop the VLM service before ShapeR: {_e}")
+    else:
+        script = server_dir / "run_meshflow.sh"
+        mcfg = (cfg or {}).get("meshflow", {}) or {}
+        cmd = [
+            "bash", str(script),
+            "--plys", *[str(p) for p in ply_paths],
+            "--steps", str(mcfg.get("steps", 28)),
+            "--guidance_scale", str(mcfg.get("guidance_scale", 2.5)),
+            "--seed", str(mcfg.get("seed", 42)),
+            "--dtype", str(mcfg.get("dtype", "fp16")),
+        ]
+        if mcfg.get("num_verts"):
+            cmd += ["--num_verts", str(mcfg["num_verts"])]
 
-    mcfg = (cfg or {}).get("meshflow", {}) or {}
-    cmd = [
-        "bash", str(script),
-        "--plys", *[str(p) for p in ply_paths],
-        "--steps", str(mcfg.get("steps", 28)),
-        "--guidance_scale", str(mcfg.get("guidance_scale", 2.5)),
-        "--seed", str(mcfg.get("seed", 42)),
-        "--dtype", str(mcfg.get("dtype", "fp16")),
-    ]
-    if mcfg.get("num_verts"):
-        cmd += ["--num_verts", str(mcfg["num_verts"])]
-
-    print(f"[Shape] ▶ starting MeshFlow generation of {len(ply_paths)} object(s)")
+    print(f"[Shape] ▶ starting {'ShapeR' if engine == 'shaper' else 'MeshFlow'} generation of "
+          f"{len(ply_paths)} object(s)")
     print(f"[Shape]   PLYs: {[p.name for p in ply_paths]}")
     print(f"[Shape]   PLY→instance map: {inst_id_by_pkl}")
     print(f"[Shape]   cmd: {' '.join(cmd[:6])} ... (+{len(cmd)-6} args)")
@@ -4155,6 +4177,12 @@ async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
             _shape_set(session_id, inst_id, **update)
 
     rc = await proc.wait()
+    if engine == "shaper":
+        # the chat VLM comes back the moment ShapeR frees the GPU (USER 2026-08-28: always on)
+        try:
+            _semantic_reload_if_idle("shaper done")
+        except Exception as _e:  # noqa: BLE001 — declared
+            print(f"[Shape] ⚠ VLM reload after ShapeR failed: {_e}")
     # Release the single-flight slot so the next /shape/export can spawn.
     async with _meshflow_subprocess_lock:
         if _meshflow_subprocess is proc:
@@ -4272,8 +4300,39 @@ async def export_shape_inputs(request: Request):
 
         loop = asyncio.get_event_loop()
         mcfg = (cfg or {}).get("meshflow", {}) or {}
+        scfg = (cfg or {}).get("shaper") or {}
+        engine = str(scfg.get("engine") or "meshflow")
+        print(f"[Shape]   engine={engine}")
+
+        def _export_shaper():
+            from segmentation.shaper_export import export_shaper_pkls
+            from segmentation.object_captioner import caption_object_qwen
+            for _k in ("max_views", "min_view_points", "grayscale", "image_format", "auto_caption"):
+                if _k not in scfg:
+                    raise RuntimeError(f"config.yaml is missing 'shaper.{_k}'")
+            manual = {int(k): v for k, v in (body.get("captions") or {}).items()}
+            auto_cap = bool(body.get("auto_caption", scfg["auto_caption"]))
+            pkls = export_shaper_pkls(
+                output_dir=output_dir, frames_dir=frames_dir, segments_result=segments_result,
+                session_dir=output_dir.parent, obj_ids=instance_ids,
+                caption_fn=caption_object_qwen if auto_cap else None, captions=manual,
+                image_format=str(scfg["image_format"]), grayscale=bool(scfg["grayscale"]),
+                max_views=int(scfg["max_views"]), min_view_points=int(scfg["min_view_points"]))
+            done = {p.stem for p in pkls}
+            skipped = []
+            for inst in segments_result.get("instances", []):
+                iid = inst.get("id", inst.get("instance_id"))
+                if instance_ids and iid not in instance_ids:
+                    continue
+                lab = inst.get("label", f"object_{iid}")
+                if f"{lab.replace(' ', '_').replace('/', '_')[:30]}_{iid}" not in done:
+                    skipped.append({"instance_id": int(iid), "label": lab,
+                                    "reason": "no usable view / too few points (see the export log)"})
+            return pkls, skipped
 
         def _export():
+            if engine == "shaper":
+                return _export_shaper()
             from segmentation.mesh_export import export_segment_plys
             return export_segment_plys(
                 output_dir=output_dir,
@@ -4339,7 +4398,7 @@ async def export_shape_inputs(request: Request):
                 try:
                     await _run_meshflow_subprocess(
                         session_id, output_dir, exported,
-                        inst_id_by_stem,
+                        inst_id_by_stem, engine=engine,
                     )
                 except Exception as e:
                     import traceback
