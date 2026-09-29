@@ -49,6 +49,17 @@ def _vlm_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if pipe.check_cancel():
         return
 
+    # The auto-prompter's strict keys (which frames / crops the VLM is shown, the
+    # BOUND on SAM3 prompts) are read HERE, before the try below: its broad except
+    # falls back to InternVL3, and a missing or renamed key must fail the stage
+    # naming it — not silently change where the SAM3 prompts come from.
+    from segmentation.autoprompt.vlm_sampling import (VLMSamplingConfigError,
+                                                      load_max_sam3_prompts,
+                                                      load_vlm_sampling)
+    if autoprompt_cfg.get("enabled", True):
+        load_vlm_sampling(config)
+        load_max_sam3_prompts(config)
+
     # Phase 1 DEFAULT: Qwen3-VL grounded auto-prompter over the shared semantic
     # service. It writes output/vlm_analysis.json itself (richer, box-aware) and
     # returns the (prompt, frame_map) contract the SAM3 worker consumes.
@@ -75,6 +86,8 @@ def _vlm_work(pipe: WorkerPipe, session_dir: str, config: dict):
                 f"Auto-prompter: {result.n_accepted} instances accepted, "
                 f"{result.n_review} in review queue; classes={result.per_class_counts}"
             )
+        except VLMSamplingConfigError:
+            raise                          # a config error is never a fallback
         except Exception as e:  # noqa: BLE001
             pipe.send_log(f"Auto-prompter failed ({e}); falling back to InternVL3",
                           level="warning")

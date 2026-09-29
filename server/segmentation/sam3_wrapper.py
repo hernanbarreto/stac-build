@@ -39,57 +39,93 @@ SAM3_THRESHOLD_KEYS = ("score_threshold_detection", "new_det_thresh", "hotstart_
 _SAM3_PROB_KEYS = ("score_threshold_detection", "new_det_thresh")
 
 
+class SAM3ConfigError(RuntimeError):
+    """A missing / invalid ``models.segmentation.sam3_thresholds`` key, or a
+    vendor model that lacks one of the attributes it configures. It is NEVER a
+    per-prompt failure: ``pipeline._run_sam3_batched`` re-raises it instead of
+    skipping the category, so a bad key fails the stage naming it — instead of
+    every prompt ending at zero masklets, which the census would read as
+    "thresholds too strict"."""
+
+
+def segmentation_config() -> dict:
+    """``models.segmentation`` of the config ``load_model`` builds from."""
+    return (cfg.get("models", {}) or {}).get("segmentation", {}) or {}
+
+
+def sam3_build_version(scfg: dict) -> str:
+    """The model ``load_model`` BUILDS for ``scfg`` — and so the threshold block
+    that applies: 3.1 only when configured AND on CUDA; every other case builds
+    the 3.0 video model (GPU, or the CPU fallback), whatever the configured
+    version."""
+    version = str((scfg or {}).get("version", "sam3"))
+    return "sam3.1" if (version == "sam3.1" and torch.cuda.is_available()) else "sam3"
+
+
+def check_sam3_thresholds(scfg: Optional[dict] = None) -> Dict[str, Any]:
+    """Validate the threshold block of the model that WILL be built (the SAM3
+    worker calls this before any frame is touched; ``load_model`` before the
+    vendor builder). Raises :class:`SAM3ConfigError` naming the key."""
+    scfg = segmentation_config() if scfg is None else scfg
+    return sam3_thresholds(scfg, sam3_build_version(scfg))
+
+
 def sam3_thresholds(scfg: dict, version: str) -> Dict[str, Any]:
     """``models.segmentation.sam3_thresholds.<version>`` — strict: a missing
-    key fails naming it, a value out of its range fails naming it."""
+    key fails naming it, a value out of its range fails naming it
+    (:class:`SAM3ConfigError`)."""
     where = f"models.segmentation.sam3_thresholds.{version}"
     block = (scfg or {}).get("sam3_thresholds")
     if not isinstance(block, dict) or not isinstance(block.get(version), dict):
-        raise KeyError(f"config.yaml is missing '{where}' — the SAM3 detection / "
-                       f"confirmation thresholds of the model being built")
+        raise SAM3ConfigError(f"config.yaml is missing '{where}' — the SAM3 detection / "
+                              f"confirmation thresholds of the model being built")
     sec = block[version]
     out: Dict[str, Any] = {}
     for k in SAM3_THRESHOLD_KEYS:
         if k not in sec:
-            raise KeyError(f"config.yaml is missing '{where}.{k}'")
+            raise SAM3ConfigError(f"config.yaml is missing '{where}.{k}'")
         v = sec[k]
         if isinstance(v, bool) or not isinstance(v, (int, float)):
-            raise ValueError(f"'{where}.{k}' must be a number, got {v!r}")
+            raise SAM3ConfigError(f"'{where}.{k}' must be a number, got {v!r}")
         if k in _SAM3_PROB_KEYS:
             if not 0.0 <= float(v) <= 1.0:
-                raise ValueError(f"'{where}.{k}' = {v} is a probability, outside [0, 1]")
+                raise SAM3ConfigError(f"'{where}.{k}' = {v} is a probability, outside [0, 1]")
             out[k] = float(v)
         else:
             if int(v) != v or int(v) < 0:
-                raise ValueError(f"'{where}.{k}' must be a non-negative integer, got {v!r}")
+                raise SAM3ConfigError(f"'{where}.{k}' must be a non-negative integer, "
+                                      f"got {v!r}")
             out[k] = int(v)
     if out["masklet_confirmation_consecutive_det_thresh"] < 1:
-        raise ValueError(f"'{where}.masklet_confirmation_consecutive_det_thresh' must be "
-                         f">= 1 (a masklet needs at least one detection to be confirmed)")
+        raise SAM3ConfigError(f"'{where}.masklet_confirmation_consecutive_det_thresh' must "
+                              f"be >= 1 (a masklet needs at least one detection to be "
+                              f"confirmed)")
     if out["hotstart_delay"] > 0 and (out["hotstart_unmatch_thresh"] > out["hotstart_delay"]
                                       or out["hotstart_dup_thresh"] > out["hotstart_delay"]):
-        raise ValueError(f"'{where}': hotstart_unmatch_thresh and hotstart_dup_thresh must "
-                         f"not exceed hotstart_delay (the vendor constructor asserts it)")
+        raise SAM3ConfigError(f"'{where}': hotstart_unmatch_thresh and hotstart_dup_thresh "
+                              f"must not exceed hotstart_delay (the vendor constructor "
+                              f"asserts it)")
     return out
 
 
-def apply_sam3_thresholds(predictor, version: str, scfg: dict) -> Dict[str, Any]:
-    """Write the configured thresholds onto ``predictor.model`` and return
-    ``{"version", "applied", "vendor_built"}``. A model that lacks one of the
-    attributes (a vendor rename) FAILS the load: the configured value would
-    otherwise silently not apply — the bug class of 2026-09-23."""
-    values = sam3_thresholds(scfg, version)
+def apply_sam3_thresholds(predictor, version: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    """Write ``values`` (already validated by :func:`sam3_thresholds`) onto
+    ``predictor.model`` and return ``{"version", "applied", "vendor_built"}``.
+    A model that lacks one of the attributes (a vendor rename) FAILS the load
+    (:class:`SAM3ConfigError`): the configured value would otherwise silently
+    not apply — the bug class of 2026-09-23."""
     model = getattr(predictor, "model", None)
     if model is None:
-        raise RuntimeError(f"the SAM3 {version} predictor exposes no .model — the "
-                           f"configured thresholds cannot reach it")
+        raise SAM3ConfigError(f"the SAM3 {version} predictor exposes no .model — the "
+                              f"configured thresholds cannot reach it")
+    missing = [k for k in values if not hasattr(model, k)]
+    if missing:
+        raise SAM3ConfigError(f"the SAM3 {version} model ({type(model).__name__}) has no "
+                              f"attribute(s) {missing} — the vendor renamed them, and "
+                              f"models.segmentation.sam3_thresholds.{version}."
+                              f"{missing[0]} would silently not apply")
     built: Dict[str, Any] = {}
     for k, v in values.items():
-        if not hasattr(model, k):
-            raise RuntimeError(f"the SAM3 {version} model ({type(model).__name__}) has no "
-                               f"attribute '{k}' — the vendor renamed it, and "
-                               f"models.segmentation.sam3_thresholds.{version}.{k} would "
-                               f"silently not apply")
         built[k] = getattr(model, k)
         setattr(model, k, v)
     logger.info("SAM3 %s thresholds (models.segmentation.sam3_thresholds.%s): %s",
@@ -190,9 +226,15 @@ class SAM3Wrapper:
             if self.is_loaded:
                 return
 
-            scfg = (cfg.get("models", {}) or {}).get("segmentation", {}) or {}
+            scfg = segmentation_config()
             version = str(scfg.get("version", "sam3"))
-            logger.info(f"Loading SAM Model (version={version})...")
+            # the thresholds of the model about to be built are validated BEFORE
+            # the vendor builder: a bad key fails in milliseconds, naming it,
+            # instead of after a full model build per prompt (SAM3ConfigError is
+            # re-raised by the per-category loop, never skipped)
+            built_version = sam3_build_version(scfg)
+            thresholds = sam3_thresholds(scfg, built_version)
+            logger.info(f"Loading SAM Model (version={version}, builds {built_version})...")
             try:
                 if version == "sam3.1" and torch.cuda.is_available():
                     # SAM 3.1 Object Multiplex: joint multi-object tracking.
@@ -214,7 +256,7 @@ class SAM3Wrapper:
                         compile=bool(scfg.get("compile", False)),
                     )
                     self.applied_thresholds = apply_sam3_thresholds(
-                        self.predictor, "sam3.1", scfg)
+                        self.predictor, "sam3.1", thresholds)
                     torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
                     logger.info("SAM 3.1 Multiplex loaded on GPU (bfloat16 autocast active).")
                 elif torch.cuda.is_available():
@@ -223,7 +265,7 @@ class SAM3Wrapper:
                     gpus_to_use = [torch.cuda.current_device()]
                     self.predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
                     self.applied_thresholds = apply_sam3_thresholds(
-                        self.predictor, "sam3", scfg)
+                        self.predictor, "sam3", thresholds)
                     torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
                     logger.info("SAM3 Model loaded on GPU (bfloat16 autocast active).")
                 else:
@@ -235,7 +277,7 @@ class SAM3Wrapper:
                     # the model BUILT here is the 3.0 video model whatever the
                     # configured version, so its thresholds are the "sam3" block
                     self.applied_thresholds = apply_sam3_thresholds(
-                        self.predictor, "sam3", scfg)
+                        self.predictor, "sam3", thresholds)
                     logger.info("SAM3 Model loaded on CPU (float32, slower but functional).")
 
                 self.is_loaded = True

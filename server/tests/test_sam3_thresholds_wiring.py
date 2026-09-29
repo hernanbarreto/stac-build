@@ -10,7 +10,11 @@ never reaches the object that uses it, and a run that succeeds anyway. So:
 
   · every configured value is read back off the model the (stubbed) vendor
     builder returned, for the 3.1 GPU, 3.0 GPU and CPU paths;
-  · a missing key fails the load naming it; a vendor rename fails it too;
+  · a missing key fails the load naming it — BEFORE the vendor builder runs —,
+    a vendor rename fails it too, and the per-prompt loop RE-RAISES that error
+    instead of skipping the prompt (every prompt would otherwise end at zero
+    masklets, which the census would read as "thresholds too strict"); the SAM3
+    worker checks the block before SAM3 starts;
   · the production values are the vendor's OWN builder values (no behaviour
     change) — parsed from the vendor source, so a vendor bump that moves them
     shows up here.
@@ -61,12 +65,13 @@ def stubbed(monkeypatch, tmp_path):
     import torch
     import segmentation.sam3_wrapper as w
 
-    built = {}
+    built = {"n_builds": 0}
     pkg = types.ModuleType("sam3")
     pkg.__path__ = []
     mb = types.ModuleType("sam3.model_builder")
 
     def _multiplex(**kw):
+        built["n_builds"] += 1
         built["sam3.1"] = _Predictor(VENDOR_31)
         return built["sam3.1"]
 
@@ -125,28 +130,110 @@ def test_the_cpu_fallback_builds_the_30_model_and_takes_its_block(stubbed):
 
 
 @pytest.mark.parametrize("missing", KEYS)
-def test_a_missing_key_fails_the_load_naming_it(stubbed, missing):
-    load, _ = stubbed
+def test_a_missing_key_fails_the_load_naming_it_before_the_vendor_builder(stubbed, missing):
+    from segmentation.sam3_wrapper import SAM3ConfigError
+    load, built = stubbed
     vals = dict(TUNED)
     del vals[missing]
-    with pytest.raises(KeyError, match=f"sam3_thresholds.sam3.1.{missing}"):
+    with pytest.raises(SAM3ConfigError, match=f"sam3_thresholds.sam3.1.{missing}"):
         load("sam3.1", {"sam3.1": vals})
+    assert built["n_builds"] == 0, "the vendor model was built before the key was checked"
 
 
 def test_a_vendor_rename_fails_instead_of_silently_not_applying():
-    from segmentation.sam3_wrapper import apply_sam3_thresholds
+    from segmentation.sam3_wrapper import SAM3ConfigError, apply_sam3_thresholds
     renamed = dict(VENDOR_31)
     renamed["new_detection_thresh"] = renamed.pop("new_det_thresh")
-    with pytest.raises(RuntimeError, match="new_det_thresh"):
-        apply_sam3_thresholds(_Predictor(renamed), "sam3.1",
-                              {"sam3_thresholds": {"sam3.1": dict(TUNED)}})
+    with pytest.raises(SAM3ConfigError, match="new_det_thresh"):
+        apply_sam3_thresholds(_Predictor(renamed), "sam3.1", dict(TUNED))
 
 
 def test_the_hotstart_assertion_the_constructor_runs_is_kept():
-    from segmentation.sam3_wrapper import sam3_thresholds
+    from segmentation.sam3_wrapper import SAM3ConfigError, sam3_thresholds
     bad = dict(TUNED, hotstart_delay=3, hotstart_unmatch_thresh=4)
-    with pytest.raises(ValueError, match="hotstart"):
+    with pytest.raises(SAM3ConfigError, match="hotstart"):
         sam3_thresholds({"sam3_thresholds": {"sam3.1": bad}}, "sam3.1")
+
+
+# ── a config error is never a per-prompt failure ─────────────────────────
+
+class _ConfigBrokenSAM3:
+    """The wrapper as the per-prompt loop sees it: its lazy load (inside the
+    first process_batch) raises the config error, every time it is asked."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def process_batch(self, *a, **k):
+        from segmentation.sam3_wrapper import SAM3ConfigError
+        self.calls += 1
+        raise SAM3ConfigError("'models.segmentation.sam3_thresholds.sam3.1': "
+                              "hotstart_unmatch_thresh and hotstart_dup_thresh must not "
+                              "exceed hotstart_delay")
+
+    def release_batch_session(self):
+        pass
+
+    def unload_model(self):
+        pass
+
+    def load_model(self):
+        pass
+
+
+def test_the_per_prompt_loop_reraises_a_config_error_instead_of_skipping(tmp_path,
+                                                                        monkeypatch):
+    import torch
+    import segmentation.sam3_wrapper as w
+    from segmentation import pipeline as P
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    fake = _ConfigBrokenSAM3()
+    monkeypatch.setattr(w, "get_sam3_wrapper", lambda: fake)
+    frames = tmp_path / "frames_valid"
+    frames.mkdir()
+    files = [f"{i:06d}.jpg" for i in range(3)]
+    for f in files:
+        (frames / f).write_bytes(b"")
+    status = {}
+    with pytest.raises(w.SAM3ConfigError, match="hotstart"):
+        P._run_sam3_batched(frames, files, ["chair", "box", "conduit"], 10, 2, 0.3, 0.9,
+                            output_dir=tmp_path, cfg={"visualization": {
+                                "segment_colors": [[1, 2, 3]]}},
+                            prompt_status=status)
+    assert fake.calls == 1, "the next prompts were attempted after a config error"
+    assert status["chair"]["status"] == "failed"
+    assert "SAM3ConfigError" in status["chair"]["reason"]
+
+
+def test_the_sam3_worker_checks_the_thresholds_before_sam3_starts(tmp_path, monkeypatch):
+    """The wrapper loads lazily inside the first prompt; the worker must fail in
+    seconds, naming the key, before any frame is touched."""
+    import segmentation.sam3_wrapper as w
+    import segmentation_pipeline
+    from workers import sam3_worker
+    called = []
+    monkeypatch.setattr(segmentation_pipeline, "run_segmentation",
+                        lambda **kw: called.append(kw) or {"instances": []})
+    broken = yaml.safe_load((SERVER / "config.yaml").read_text())
+    for block in broken["models"]["segmentation"]["sam3_thresholds"].values():
+        del block["new_det_thresh"]
+    monkeypatch.setattr(w, "cfg", broken)
+    (tmp_path / "output").mkdir()
+    (tmp_path / "output" / "vlm_analysis.json").write_text('{"prompt": "chair"}')
+
+    class _Pipe:
+        def send_log(self, *a, **k):
+            pass
+
+        def send_progress(self, *a, **k):
+            pass
+
+        def check_cancel(self):
+            return False
+
+    with pytest.raises(w.SAM3ConfigError, match="new_det_thresh"):
+        sam3_worker._sam3_work(_Pipe(), str(tmp_path), broken)
+    assert not called, "SAM3 started before its thresholds were checked"
 
 
 # ── production = the vendor's own values (no behaviour change) ───────────

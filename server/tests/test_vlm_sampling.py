@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from segmentation.autoprompt.vlm_sampling import (  # noqa: E402
     AXIS_CHAINAGE, AXIS_INDEX, VLMSampling, VLMSamplingConfigError, crop_for_vlm,
-    load_vlm_sampling, plan_vlm_frames, tile_boxes, walk_chainage)
+    load_max_sam3_prompts, load_vlm_sampling, plan_vlm_frames, tile_boxes, walk_chainage)
 
 CONFIG_YAML = Path(__file__).resolve().parents[1] / "config.yaml"
 
@@ -273,3 +273,84 @@ def test_a_vocabulary_derived_under_another_sampling_is_not_reused(tmp_path, mon
     assert res2.prompt == res.prompt
     rec2 = json.loads((out / "autoprompt_concepts.json").read_text())
     assert rec2["reused"] is True
+
+
+# ── the BOUND on SAM3 prompts: declared, never a silent drop ─────────────
+
+def test_the_prompt_bound_is_read_strictly():
+    raw = yaml.safe_load(CONFIG_YAML.read_text())
+    assert load_max_sam3_prompts(raw) == raw["autoprompt"]["max_sam3_prompts"] >= 1
+    del raw["autoprompt"]["max_sam3_prompts"]
+    with pytest.raises(VLMSamplingConfigError, match="autoprompt.max_sam3_prompts"):
+        load_max_sam3_prompts(raw)
+
+
+def test_past_the_prompt_bound_every_name_is_recorded_not_prompted(tmp_path, monkeypatch):
+    """aggregate keeps every name and the consolidation removes none, so the
+    prompt count follows the VLM's phrasing — and SAM3 time is linear in it.
+    Past autoprompt.max_sam3_prompts the LEAST proposed names are not prompted,
+    each with 'BOUND REACHED' in its fate; the census accounting still closes."""
+    import semantic.client as sc
+    from segmentation.autoprompt.session_builder import AutoPrompter
+    from segmentation.census import build_census
+    _session(tmp_path, n_kf=40)
+    monkeypatch.setattr(sc, "get_semantic_client", lambda **kw: _FakeVLM((64, 36)))
+    cfg = _config(spacing_kf=8, tile_rows=2, tile_cols=2, max_calls=300)
+    cfg["autoprompt"]["max_sam3_prompts"] = 2
+    res = AutoPrompter(tmp_path, tmp_path / "output", config=cfg).run()
+    # every crop names the two small things, every full frame the other four:
+    # 'fire extinguisher' (30 calls incl. its plural) and 'doorbell panel' (24) lead
+    assert res.prompt.split(";") == ["fire extinguisher", "doorbell panel"]
+    vlm = json.loads((tmp_path / "output" / "vlm_analysis.json").read_text())
+    bound = vlm["census"]["prompt_bound"]
+    assert bound["bound_reached"] and bound["max_sam3_prompts"] == 2
+    assert set(bound["not_prompted"]) == {"white tiled floor", "cardboard box",
+                                          "red fire alarm box"}
+    fates = {c["concept"]: c for c in vlm["census"]["concepts"]}
+    for name in bound["not_prompted"]:
+        assert fates[name]["fate"] == "not_prompted"
+        assert "BOUND REACHED" in fates[name]["reason"]
+    rec = json.loads((tmp_path / "output" / "autoprompt_concepts.json").read_text())
+    assert set(rec["not_prompted_bound"]) == set(bound["not_prompted"])
+    assert rec["derived_under"]["max_sam3_prompts"] == 2
+    doc = build_census(tmp_path / "output", prompt=res.prompt, vlm_doc=vlm, gap_kf=1,
+                       frames_dir=tmp_path / "frames", log=lambda m: None)
+    assert doc["accounting"]["closed"] is True
+    assert doc["accounting"]["by_fate"]["not_prompted"] == 3
+
+
+class _Pipe:
+    def __init__(self):
+        self.logs = []
+
+    def send_log(self, msg, level="info"):
+        self.logs.append(msg)
+
+    def send_progress(self, *a, **k):
+        pass
+
+    def check_cancel(self):
+        return False
+
+
+@pytest.mark.parametrize("drop", ["vlm_sampling.spacing_kf", "max_sam3_prompts"])
+def test_the_vlm_stage_fails_on_a_config_error_instead_of_falling_back(tmp_path,
+                                                                       monkeypatch, drop):
+    """The auto-prompter's broad except falls back to InternVL3; a missing key
+    must fail the stage naming it, not silently change the prompts' source."""
+    import types
+    import semantic.client as sc
+    from workers import vlm_worker
+    _session(tmp_path, n_kf=10)
+    fallback = []
+    fake_sa = types.ModuleType("scene_analyzer")
+    fake_sa.analyze_scene = lambda *a, **k: fallback.append(1) or ("floor", {})
+    monkeypatch.setitem(sys.modules, "scene_analyzer", fake_sa)
+    monkeypatch.setattr(vlm_worker, "_ensure_semantic_service", lambda pipe, cfg: True)
+    monkeypatch.setattr(sc, "get_semantic_client", lambda **kw: _FakeVLM((64, 36)))
+    cfg = _config(spacing_kf=8, tile_rows=1, tile_cols=1, max_calls=300)
+    sec, _, key = drop.rpartition(".")
+    del (cfg["autoprompt"][sec] if sec else cfg["autoprompt"])[key]
+    with pytest.raises(VLMSamplingConfigError, match=f"autoprompt.{drop}"):
+        vlm_worker._vlm_work(_Pipe(), str(tmp_path), cfg)
+    assert not fallback, "fell back to InternVL3 on a config error"

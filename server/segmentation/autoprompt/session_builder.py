@@ -249,8 +249,9 @@ class AutoPrompter:
         signature = None                  # what the session vocabulary is derived under
         if self.understand_enabled:
             from .scene_understanding import GROUPING_VERSION, understand_frame, aggregate
-            from .vlm_sampling import (crop_for_vlm, load_vlm_sampling, plan_vlm_frames,
-                                       tile_boxes, walk_chainage)
+            from .vlm_sampling import (crop_for_vlm, load_max_sam3_prompts,
+                                       load_vlm_sampling, plan_vlm_frames, tile_boxes,
+                                       walk_chainage)
             # WHAT THE VLM NEVER SEES, IT CANNOT NAME — and in the SIMPLE
             # pipeline these phrases ARE the SAM3 prompts, so a frame left out
             # here is an object left out of the segmentation entirely.
@@ -262,6 +263,8 @@ class AutoPrompter:
             # intake there is no cloud, so pccr 2026-09-29 got the 8.
             vcfg = load_vlm_sampling(self._config)
             signature = {"vlm_sampling": asdict(vcfg),
+                         # a list derived under another prompt bound is another list
+                         "max_sam3_prompts": load_max_sam3_prompts(self._config),
                          "understand_cover": bool(self.understand_cover),
                          "grouping": GROUPING_VERSION}
             preselected = None
@@ -360,6 +363,27 @@ class AutoPrompter:
                 consolidation = None
                 prompt = ";".join(phrases)
                 prog(25, f"{len(phrases)} concepts (reused)")
+            # ── the BOUND on SAM3 prompts (autoprompt.max_sam3_prompts) ────
+            # `aggregate` keeps every distinct name and the consolidation removes
+            # none, so the prompt count follows the VLM's phrasing — and SAM3
+            # time is linear in it. Past the bound the names proposed by the
+            # FEWEST calls are not prompted (the understanding's own order:
+            # proposals incl. same-name variants, then first seen), each one
+            # declared here, in autoprompt_concepts.json and in the census.
+            from .vlm_sampling import load_max_sam3_prompts
+            max_prompts = load_max_sam3_prompts(self._config)
+            overflow: list[str] = []
+            if not _reused and len(phrases) > max_prompts:
+                overflow = phrases[max_prompts:]
+                phrases = phrases[:max_prompts]
+                print(f"[autoprompt] SAM3 prompt BOUND REACHED (autoprompt.max_sam3_prompts "
+                      f"= {max_prompts}): {len(overflow)} of {len(phrases) + len(overflow)} "
+                      f"name(s) NOT prompted, the least proposed: {overflow}")
+            print(f"[autoprompt] {len(phrases)} SAM3 prompt(s) (bound {max_prompts}) — "
+                  f"SAM3 time is linear in this count; its stage logs the measured s/prompt")
+            prompt_bound = {"max_sam3_prompts": max_prompts,
+                            "n_names": len(phrases) + len(overflow),
+                            "bound_reached": bool(overflow), "not_prompted": overflow}
             # ── the CONSOLIDATION pass (USER 2026-09-16) ─────────────────
             # The understanding ran frame by frame and no frame ever saw the
             # others' answers, so the union carries the same object under
@@ -430,6 +454,7 @@ class AutoPrompter:
                 "groups": (consolidation.to_dict() if consolidation else None),
                 "passes": (consolidation.passes if consolidation else 0),
                 "reused": bool(_reused),
+                "not_prompted_bound": overflow,
                 "derived_under": signature,
                 "scene_type": (understanding.scene_type if understanding else None),
             }
@@ -458,8 +483,8 @@ class AutoPrompter:
                 "census": self._census_record(
                     plan, calls, self._concept_fates(
                         understanding, phrases, reused=bool(_reused),
-                        consolidation=consolidation),
-                    reused=bool(_reused)),
+                        consolidation=consolidation, bounded_out=prompt_bound),
+                    reused=bool(_reused), prompt_bound=prompt_bound),
             }
             vlm_path = self.output_dir / "vlm_analysis.json"
             vlm_path.write_text(json.dumps(vlm_analysis, indent=2, ensure_ascii=False))
@@ -596,15 +621,18 @@ class AutoPrompter:
     # ── helpers ─────────────────────────────────────────────────────
     @staticmethod
     def _concept_fates(understanding, prompts: list[str], *, reused: bool,
-                       consolidation, detection_path: bool = False) -> list[dict]:
+                       consolidation, detection_path: bool = False,
+                       bounded_out: dict | None = None) -> list[dict]:
         """What became of EVERY phrase the VLM proposed (USER 2026-09-29: no
         concept may disappear without a recorded reason). One entry per distinct
         phrase, with the calls that proposed it and exactly one fate:
           · ``prompt``        — it is a SAM3 prompt itself;
           · ``merged``        — folded into the SAME NAME (``same_name_key``), the
                                 carrier is the prompt;
-          · ``not_prompted``  — with the reason (a reused session vocabulary,
-                                or the grounded-detection path).
+          · ``not_prompted``  — with the reason (the SAM3 prompt BOUND —
+                                ``bounded_out``, the ``prompt_bound`` record —, a
+                                reused session vocabulary, or the grounded-
+                                detection path).
         The consolidation's grouping travels as evidence (``consolidation``:
         the group and whether the phrase is its name, an alias or a part) — it
         groups for labelling, it never removes a prompt."""
@@ -612,6 +640,7 @@ class AutoPrompter:
             return []
         from .scene_understanding import _head_noun
         prompt_set = set(prompts)
+        over = list((bounded_out or {}).get("not_prompted") or [])
         role: dict[str, dict] = {}
         if consolidation is not None:
             cd = consolidation.to_dict()
@@ -641,6 +670,13 @@ class AutoPrompter:
                                f"same name as '{carrier}' — differs only in case, "
                                f"spacing, punctuation, a leading article / count word "
                                f"or a plural ending (same_name_key)"))
+            elif carrier in over:
+                bound = int(bounded_out["max_sam3_prompts"])
+                rank = bound + over.index(carrier) + 1
+                rec.update(fate="not_prompted", prompt=None,
+                           reason=(f"BOUND REACHED: autoprompt.max_sam3_prompts = {bound} "
+                                   f"of {bounded_out.get('n_names')} names; ranked by the "
+                                   f"VLM calls that proposed it, '{carrier}' is #{rank}"))
             elif reused:
                 rec.update(fate="not_prompted", prompt=None,
                            reason="the session vocabulary was reused "
@@ -657,7 +693,7 @@ class AutoPrompter:
 
     @staticmethod
     def _census_record(plan, calls: list[dict], fates: list[dict], *,
-                       reused: bool) -> dict:
+                       reused: bool, prompt_bound: dict | None = None) -> dict:
         """The VLM half of output/segmentation_census.json, written INTO the
         contract SAM3 reads (vlm_analysis.json) so it can never describe
         another run's prompts."""
@@ -670,6 +706,7 @@ class AutoPrompter:
             "n_parsed": sum(1 for c in calls if c["parsed"]),
             "concepts": fates,
             "vocabulary_reused": bool(reused),
+            "prompt_bound": prompt_bound,
         }
 
     def _gate(self, instances: list[Instance]) -> tuple[list[Instance], list[Instance]]:

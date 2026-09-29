@@ -126,6 +126,21 @@ def load_vlm_sampling(config: dict) -> VLMSampling:
     return cfg
 
 
+def load_max_sam3_prompts(config: dict) -> int:
+    """``autoprompt.max_sam3_prompts`` — the BOUND on the SAM3 prompts the
+    understanding may hand over (strict: a missing key fails naming it)."""
+    ap = (config or {}).get("autoprompt")
+    if not isinstance(ap, dict) or "max_sam3_prompts" not in ap:
+        raise VLMSamplingConfigError(
+            "config.yaml is missing mandatory key 'autoprompt.max_sam3_prompts' — the "
+            "BOUND on SAM3 prompts; there is no hidden default in code")
+    v = ap["max_sam3_prompts"]
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or int(v) != v or int(v) < 1:
+        raise VLMSamplingConfigError(
+            f"'autoprompt.max_sam3_prompts' must be an integer >= 1, got {v!r}")
+    return int(v)
+
+
 # ── the walk axis ─────────────────────────────────────────────────────────
 
 def _frame_num(filename: str) -> int:

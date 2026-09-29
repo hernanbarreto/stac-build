@@ -211,7 +211,10 @@ def test_the_sam3_worker_writes_the_census_after_segmentation(tmp_path, monkeypa
     chair = concept_label("black office chair")
 
     def fake_run_segmentation(frames_dir, output_dir, prompt, frame_map, boxes_map,
-                              on_progress):
+                              on_progress, prompt_status):
+        for c in prompt.split(";"):
+            prompt_status[c] = {"status": "ran", "n_objects": 0}
+        prompt_status["black office chair"]["n_objects"] = 1
         out = Path(output_dir)
         (out / "segmentation.json").write_text(json.dumps(
             {"prompt": prompt, "instances": [{"id": 0, "label": chair, "instance_id": 1}],
@@ -239,3 +242,182 @@ def test_the_sam3_worker_writes_the_census_after_segmentation(tmp_path, monkeypa
     assert rows["black office chair"]["masklets"][0]["visits"] == [[0, 1]]
     assert "conduit" in doc["zero_masklet_prompts"]
     assert any(ln.startswith("[census]") for ln in pipe.logs)
+
+
+def test_a_prompt_sam3_did_not_complete_is_not_a_zero(tmp_path):
+    """A prompt that failed (an exception, OOM twice, no frames) says nothing about
+    the thresholds; only a prompt SAM3 RAN and that confirmed nothing is a zero."""
+    und, fates = _fates()
+    prompts = und.objects
+    chair = concept_label("black office chair")
+    out = _session(tmp_path, prompts, [{"id": 0, "label": chair, "instance_id": 1}],
+                   {"f0_o0": _m()})
+    status = {p: {"status": "ran", "n_objects": 0} for p in prompts}
+    status["black office chair"] = {"status": "ran", "n_objects": 1}
+    status["doorbell panel"] = {"status": "failed", "reason": "CUDA out of memory twice"}
+    status["conduit"] = {"status": "not_reached",
+                         "reason": "the SAM3 run stopped before this prompt"}
+    lines = []
+    doc = build_census(out, prompt=";".join(prompts),
+                       vlm_doc={"census": {"concepts": fates, "calls": []}}, gap_kf=1,
+                       frames_dir=tmp_path / "frames", prompt_status=status,
+                       log=lines.append)
+    assert set(doc["zero_masklet_prompts"]) == {"cardboard box", "red fire alarm box"}
+    nc = {e["prompt"]: e for e in doc["prompts_not_completed_by_sam3"]}
+    assert set(nc) == {"doorbell panel", "conduit"}
+    assert nc["doorbell panel"]["reason"] == "CUDA out of memory twice"
+    rows = {r["prompt"]: r for r in doc["prompts"]}
+    assert rows["doorbell panel"]["sam3_status"]["status"] == "failed"
+    c = {x["concept"]: x for x in doc["concepts"]}
+    assert c["doorbell panel"]["sam3_not_completed"]["status"] == "failed"
+    assert not c["doorbell panel"].get("zero_masklets")
+    assert doc["accounting"]["n_prompts_not_completed_by_sam3"] == 2
+    assert any("did NOT complete" in ln and "doorbell panel" in ln for ln in lines)
+
+
+def test_the_census_is_a_sam3_stage_artifact():
+    """A Replace / cascade invalidation of SAM3 must not leave the previous run's
+    census on disk describing another run's prompts."""
+    from pipeline_manager import PipelineManager, StageId
+    assert "segmentation_census.json" in PipelineManager.STAGE_OUTPUT_FILES[StageId.SAM3]
+
+
+def test_a_segmentation_that_raises_still_writes_its_census(tmp_path, monkeypatch):
+    import yaml
+    import segmentation_pipeline
+    from workers import sam3_worker
+    und, fates = _fates()
+    prompts = und.objects
+
+    def raising_run_segmentation(frames_dir, output_dir, prompt, frame_map, boxes_map,
+                                 on_progress, prompt_status):
+        for c in prompt.split(";"):
+            prompt_status[c] = {"status": "not_reached", "reason": "stopped"}
+        prompt_status[prompts[0]] = {"status": "failed", "reason": "save failed"}
+        raise ValueError("frame 7 cannot be translated")
+
+    monkeypatch.setattr(segmentation_pipeline, "run_segmentation", raising_run_segmentation)
+    out = _session(tmp_path, prompts, [], {})
+    (out / "segmentation.json").unlink()
+    (out / "seg_masks.npz").unlink()
+    (out / CENSUS_NAME).write_text('{"stale": "another run"}')
+    (out / "vlm_analysis.json").write_text(json.dumps(
+        {"prompt": ";".join(prompts), "frame_map": {},
+         "census": {"concepts": fates, "calls": [], "sampling": None}}))
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
+    cfg["reconstruction"]["simple"]["exclusive_gpu"] = False
+    with pytest.raises(ValueError, match="cannot be translated"):
+        sam3_worker._sam3_work(_Pipe(), str(tmp_path), cfg)
+    doc = json.loads((out / CENSUS_NAME).read_text())
+    assert "cannot be translated" in doc["sam3"]["error"]
+    assert doc["zero_masklet_prompts"] == [], "nothing SAM3 completed is a zero"
+    assert {e["prompt"] for e in doc["prompts_not_completed_by_sam3"]} == set(prompts)
+
+
+# ── SAM3's masks are saved per prompt, each exactly once ─────────────────
+
+class _FakeSAM3:
+    """``process_batch`` as the per-prompt loop sees it: per category, the
+    masks SAM3 would produce {frame: {local obj id: pixel}} (one lit pixel per
+    object, so every mask is identifiable in the store)."""
+
+    def __init__(self, script, fail=()):
+        self.script, self.fail = script, set(fail)
+
+    def process_batch(self, batch_dir, category, index_mapping, boxes_by_local=None):
+        if category in self.fail:
+            raise RuntimeError(f"{category} exploded")
+        out = {}
+        for fr, objs in self.script.get(category, {}).items():
+            ids = sorted(objs)
+            masks = np.zeros((len(ids), 4, 4), np.uint8)
+            for k, oid in enumerate(ids):
+                masks[k].flat[objs[oid]] = 1
+            out[fr] = {"out_binary_masks": masks, "out_obj_ids": np.array(ids)}
+        return out
+
+    def release_batch_session(self):
+        pass
+
+    def unload_model(self):
+        pass
+
+    def load_model(self):
+        pass
+
+
+def test_every_masklet_is_saved_once_with_its_own_masks(tmp_path, monkeypatch):
+    """The incremental save used to re-upsert EVERY mask of the run after every
+    category: the first save gave SAM3's 1-based ids store ids 0,1,…, the second
+    found 1,… already 'existing' and wrote raw id k over store id k — a duplicate
+    object and chimera masks (pccr 2026-09-29: SAM3 166 objects, store 167).
+    Now each category saves only its own masks, once; a category that fails is
+    recorded and the others still run."""
+    import torch
+    import segmentation.sam3_wrapper as w
+    from segmentation import pipeline as P
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    script = {"chair": {0: {0: 1}, 1: {0: 1, 1: 2}, 2: {1: 2}},     # two chairs
+              "box": {0: {0: 3}}}                                  # one box
+    monkeypatch.setattr(w, "get_sam3_wrapper",
+                        lambda: _FakeSAM3(script, fail={"conduit"}))
+    frames = tmp_path / "frames_valid"
+    frames.mkdir()
+    files = [f"{i:06d}.jpg" for i in range(3)]
+    for f in files:
+        (frames / f).write_bytes(b"")
+    out = tmp_path / "output"
+    out.mkdir()
+    status = {}
+    all_masks, labels, seg_meta = P._run_sam3_batched(
+        frames, files, ["chair", "conduit", "box"], 10, 2, 0.3, 0.9, output_dir=out,
+        cfg={"visualization": {"segment_colors": [[1, 2, 3]]}}, prompt_status=status)
+    doc = json.loads((out / "segmentation.json").read_text())
+    assert sorted(i["label"] for i in doc["instances"]) == ["box", "chair", "chair"], \
+        "one store object per SAM3 masklet — no duplicate"
+    assert seg_meta["instances"] == doc["instances"]
+    z = np.load(out / "seg_masks.npz")
+    got = {}
+    for k in z.files:
+        if k.startswith("f") and "_o" in k:
+            f, o = k[1:].split("_o")
+            got.setdefault(int(o), {})[int(f)] = int(np.flatnonzero(z[k])[0])
+    # each stored object carries exactly ONE SAM3 masklet's masks (no chimera)
+    assert sorted(tuple(sorted(v.items())) for v in got.values()) == sorted([
+        ((0, 1), (1, 1)), ((1, 2), (2, 2)), ((0, 3),)])
+    assert status["chair"]["status"] == "ran" and status["chair"]["n_objects"] == 2
+    assert status["box"]["n_objects"] == 1
+    assert status["conduit"]["status"] == "failed"
+    assert "exploded" in status["conduit"]["reason"]
+    assert all_masks == {}, "the saved masks are not held a second time in RAM"
+
+
+def test_the_store_is_appended_not_rewritten(tmp_path):
+    """Each save used to decompress every mask the store held and recompress all
+    of them — quadratic over a run that saves once per prompt (pccr: ~10 s per
+    rewrite of 2,211 masks). The append keeps the stored entries AS STORED (same
+    bytes, same offsets), replaces / adds this call's, drops what is not kept —
+    the same logical content a full rewrite writes."""
+    import warnings
+    import zipfile
+    from segmentation.erase import _atomic_append_npz, _atomic_savez
+    path = tmp_path / "seg_masks.npz"
+    old = {"f0_o0": _m(), "f1_o0": _m(), "f2_o1": _m(), "obj_ids": np.array([0, 1]),
+           "stray": np.array([7])}
+    _atomic_savez(path, old)
+    before = {i.filename: (i.header_offset, i.compress_size)
+              for i in zipfile.ZipFile(path).infolist()}
+    new = {"f2_o1": _m(on=False), "f3_o2": _m(), "obj_ids": np.array([0, 1, 2])}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                  # no duplicate-name warning
+        _atomic_append_npz(path, new, keep={"f0_o0", "f1_o0", "f2_o1"})
+        z = np.load(path)
+        assert sorted(z.files) == ["f0_o0", "f1_o0", "f2_o1", "f3_o2", "obj_ids"], \
+            "one entry per name; a key not kept ('stray') is dropped"
+        assert not z["f2_o1"].any() and z["f3_o2"].any()
+        assert z["obj_ids"].tolist() == [0, 1, 2]
+    after = {i.filename: (i.header_offset, i.compress_size)
+             for i in zipfile.ZipFile(path).infolist()}
+    for kept in ("f0_o0.npy", "f1_o0.npy"):
+        assert after[kept] == before[kept], f"{kept} was rewritten instead of carried over"
+    assert zipfile.ZipFile(path).testzip() is None

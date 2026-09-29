@@ -17,7 +17,10 @@
 #     keyframe spans and their VISITS (runs of keyframes; a gap of more than
 #     ``segmentation.mask_filter.visit_gap_kf`` opens a new one — the user's one
 #     definition of a visit, read from the same key the mask filter reads).
-# Prompts with ZERO masklets are flagged, and so is every concept they carry.
+# Prompts with ZERO masklets are flagged, and so is every concept they carry —
+# but only when SAM3 RAN them (``run_segmentation``'s per-prompt status): a
+# prompt SAM3 never completed (skipped, failed, OOM twice, never reached) is
+# listed apart, with its reason, because it says nothing about the thresholds.
 # The accounting closes when every proposed phrase has exactly one fate and
 # every fate that names a prompt names one SAM3 actually received.
 #
@@ -39,6 +42,9 @@ import numpy as np
 CENSUS_NAME = "segmentation_census.json"
 CENSUS_VERSION = 1
 FATES = ("prompt", "merged", "not_prompted", "unaccounted")
+# the run_segmentation statuses of a prompt SAM3 did NOT run to the end (its
+# zero is not a zero); "ran" is the one whose zero is real
+_SAM3_NOT_COMPLETED = ("skipped", "failed", "not_reached")
 _MASK_KEY = re.compile(r"^f(\d+)_o(\d+)$")
 
 
@@ -133,6 +139,7 @@ def _masklet_positions(output_dir: Path, seg_doc: dict,
 
 def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: int,
                  frames_dir=None, seg_error: Optional[str] = None,
+                 prompt_status: Optional[Dict[str, dict]] = None,
                  sam3_thresholds: Optional[dict] = None,
                  log: Callable[[str], None] = print) -> dict:
     """Build, write (atomically) and log ``output/segmentation_census.json``.
@@ -140,7 +147,10 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
     ``prompt`` is what the SAM3 worker handed to ``run_segmentation`` — the
     authority on what SAM3 was asked; ``vlm_doc`` the vlm_analysis.json it read
     (None when there was none). ``seg_error`` is the segmentation's own error
-    when it failed — the census is still written, every prompt then at zero."""
+    when it failed — the census is still written, every prompt then at zero.
+    ``prompt_status`` is ``run_segmentation``'s per-prompt execution record
+    (``ran`` / ``skipped`` / ``failed`` / ``not_reached`` + reason); without it
+    every prompt's status is ``unknown``."""
     output_dir = Path(output_dir)
     frames_dir = Path(frames_dir) if frames_dir else output_dir.parent / "frames"
     prompts = split_prompt(prompt)
@@ -188,8 +198,11 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
                        "last_frame": _video(ks[-1]) if ks else None,
                        "visits": vis, "n_visits": len(vis)})
         seen = sorted({k for m in ms for k in positions.get(m["oid"], [])})
+        st = dict((prompt_status or {}).get(p) or {"status": "unknown",
+                                                    "reason": "no SAM3 execution record"})
         row = {"prompt": p, "label": labels[p],
                "raw_concepts": carried.get(p, []),
+               "sam3_status": st,
                "n_masklets": len(ms), "zero_masklets": not ms,
                "n_keyframes_seen": len(seen),
                "masklets": sorted(ms, key=lambda m: (m["first_kf"] is None, m["first_kf"] or 0,
@@ -199,7 +212,16 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
         if p in role_of:
             row["consolidation"] = role_of[p]
         prompt_rows.append(row)
-    zero = [r["prompt"] for r in prompt_rows if r["zero_masklets"]]
+    # a ZERO is a zero only when SAM3 ran the prompt (or when there is no record
+    # to say otherwise); a prompt SAM3 did not complete is not a threshold question
+    not_completed = [{"prompt": r["prompt"], **r["sam3_status"]} for r in prompt_rows
+                     if r["sam3_status"].get("status") in _SAM3_NOT_COMPLETED]
+    nc_set = {e["prompt"] for e in not_completed}
+    # (a prompt SAM3 ran WITH objects whose masklets this census cannot attribute —
+    # a run that raised after saving them — is not a zero either)
+    zero = [r["prompt"] for r in prompt_rows
+            if r["zero_masklets"] and r["prompt"] not in nc_set
+            and not int(r["sam3_status"].get("n_objects") or 0)]
     zero_set = set(zero)
     prompt_set = set(prompts)
 
@@ -218,6 +240,8 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
         by_fate[fate] += 1
         if c.get("prompt") in zero_set:
             c["zero_masklets"] = True
+        if c.get("prompt") in nc_set:
+            c["sam3_not_completed"] = (prompt_status or {}).get(c["prompt"])
     names = [c.get("concept") for c in concepts]
     duplicated = sorted({n for n in names if names.count(n) > 1})
     accounting = {
@@ -229,8 +253,9 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
         "concepts_not_reaching_sam3_prompt": dangling,
         "duplicated_concepts": duplicated,
         "n_prompts": len(prompts),
-        "n_prompts_with_masklets": len(prompts) - len(zero),
+        "n_prompts_with_masklets": sum(1 for r in prompt_rows if not r["zero_masklets"]),
         "n_prompts_zero_masklets": len(zero),
+        "n_prompts_not_completed_by_sam3": len(not_completed),
         "n_masklets": sum(r["n_masklets"] for r in prompt_rows),
         "prompts_without_proposal": [p for p in prompts if not carried.get(p)],
         # masklets in segmentation.json under a label no prompt of this run makes
@@ -261,10 +286,12 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
             "n_parsed": sum(1 for c in calls if c.get("parsed")),
             "calls": calls,
             "vocabulary_reused": (rec or {}).get("vocabulary_reused"),
+            "prompt_bound": (rec or {}).get("prompt_bound"),
         },
         "concepts": concepts,
         "prompts": prompt_rows,
         "zero_masklet_prompts": zero,
+        "prompts_not_completed_by_sam3": not_completed,
         "sam3": {"error": seg_error, "frame_space": space_note, "visit_gap_kf": gap_kf,
                  "n_keyframes": len(kf_files) if kf_files else None,
                  "thresholds": sam3_thresholds},
@@ -287,13 +314,22 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
             f"{doc['vlm']['n_parsed']} parsed")
     else:
         log("[census] the VLM record carries no sampling plan (scene understanding off)")
+    bound = (rec or {}).get("prompt_bound") or {}
+    if bound.get("bound_reached"):
+        log(f"[census] SAM3 prompt BOUND REACHED (autoprompt.max_sam3_prompts = "
+            f"{bound.get('max_sam3_prompts')}): {len(bound.get('not_prompted') or [])} "
+            f"name(s) not prompted, the least proposed first: {bound.get('not_prompted')}")
     log(f"[census] {len(concepts)} concept(s) proposed → {by_fate['prompt']} prompt(s), "
         f"{by_fate['merged']} merged as the same name, {by_fate['not_prompted']} not "
         f"prompted, {by_fate['unaccounted']} UNACCOUNTED; accounting "
         f"{'closed' if accounting['closed'] else 'NOT closed'}")
-    log(f"[census] SAM3: {len(prompts) - len(zero)}/{len(prompts)} prompt(s) produced "
-        f"{accounting['n_masklets']} masklet(s)"
-        + (f"; ZERO masklets: {zero}" if zero else "")
+    log(f"[census] SAM3: {accounting['n_prompts_with_masklets']}/{len(prompts)} prompt(s) "
+        f"produced {accounting['n_masklets']} masklet(s)"
+        + (f"; ZERO masklets (SAM3 ran them and confirmed nothing): {zero}" if zero else "")
         + (f"; segmentation error: {seg_error}" if seg_error else ""))
+    if not_completed:
+        log(f"[census] SAM3 did NOT complete {len(not_completed)} prompt(s) — not a threshold "
+            f"question: " + "; ".join(f"'{e['prompt']}' {e.get('status')} "
+                                      f"({e.get('reason')})" for e in not_completed))
     log(f"[census] → {out}")
     return doc

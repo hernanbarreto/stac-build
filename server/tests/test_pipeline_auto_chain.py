@@ -80,15 +80,17 @@ def test_segmentation_completeness_keys_load_through_their_strict_readers():
     read by strict readers inside "Reconstruir" (intake VLM, SAM3 load, SAM3
     worker). The production config must carry every key they require — a
     missing one fails the stage at load, naming it."""
-    from segmentation.autoprompt.vlm_sampling import load_vlm_sampling
+    from segmentation.autoprompt.vlm_sampling import load_max_sam3_prompts, load_vlm_sampling
     from segmentation.census import visit_gap_kf
-    from segmentation.sam3_wrapper import sam3_thresholds
+    from segmentation.sam3_wrapper import check_sam3_thresholds, sam3_thresholds
     raw = _raw()
     vs = load_vlm_sampling(raw)
     assert vs.max_calls >= vs.calls_per_frame
+    assert load_max_sam3_prompts(raw) >= 1
     assert visit_gap_kf(raw) == raw["segmentation"]["mask_filter"]["visit_gap_kf"]
     scfg = raw["models"]["segmentation"]
     assert sam3_thresholds(scfg, scfg["version"])
+    assert check_sam3_thresholds(scfg)       # the block of the model this host builds
 
 
 def test_certify_stage_registered_and_cascaded():
