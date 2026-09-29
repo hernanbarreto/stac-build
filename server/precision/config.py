@@ -267,6 +267,8 @@ class ColmapConfig:
 @dataclass(frozen=True)
 class DepthConfig:
     n_views: int                # BOUND: photometric / consistency views per keyframe
+    contradiction_views: int    # BOUND: the most covisible views asked "do you see through it?"
+                                # — a cost cap, not a decision (all of them cost 195 min on pccr)
     min_tri_deg: float          # view's median triangulation angle range (degrees)
     max_tri_deg: float
     n_hyp: int                  # hypotheses in inverse depth (plus the prior itself)
@@ -466,6 +468,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     cm = _sub(dp, "colmap", "depth")
     depth = DepthConfig(
         n_views=_num(dp, "n_views", "depth", lo=1, integer=True),
+        contradiction_views=_num(dp, "contradiction_views", "depth", lo=1, integer=True),
         min_tri_deg=_num(dp, "min_tri_deg", "depth", lo=0.0),
         max_tri_deg=_num(dp, "max_tri_deg", "depth", lo=0.0, hi=180.0, lo_excl=True),
         n_hyp=_num(dp, "n_hyp", "depth", lo=3, integer=True),

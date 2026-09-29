@@ -222,6 +222,22 @@ def test_tiers_textureless_is_prior_fill_or_discarded_never_tier0(scene):
     assert np.all(src7[flat & ~sig] == DS.DISCARD_LOW_CONF) and np.all(src7[sig] == DS.SOURCE_SWEEP)
 
 
+def test_a_view_contradicts_only_beyond_its_own_error(scene):
+    """pccr 2026-09-29: judged at τ_rel against priors 5-27 % off, ~100 views contradicted
+    almost every point. A view's farther surface contradicts only beyond ITS error."""
+    _, gt, views = scene
+    nb = [v[1] for v in views[:3]]
+    nw = [np.linalg.inv(c) for c in VIEWS[:3]]
+    ok, box, wall, _ = _regions(gt)
+    # the views' depths 5 % too far — a prior's typical error
+    far = [d * 1.05 for d in nb]
+    _, _, bad_tight = DS.consistency(gt, K, np.linalg.inv(REF), far, nw, tau_rel=0.01, tau_px=1.0)
+    assert np.median(bad_tight[ok & wall]) == 3               # τ_rel alone: all contradict
+    _, _, bad_own = DS.consistency(gt, K, np.linalg.inv(REF), far, nw, tau_rel=0.01, tau_px=1.0,
+                                   nbr_bad_margin=[0.10, 0.10, 0.10])
+    assert bad_own[ok & wall].max() == 0                     # within their own 10 %: none
+
+
 def test_conf_floor_is_the_min_max_fraction_of_the_frame():
     conf = np.array([[0.0, 1.0, 2.0, 10.0]])
     valid = np.ones_like(conf, bool)

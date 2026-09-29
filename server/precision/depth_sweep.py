@@ -362,13 +362,17 @@ def _nanmedian0(R):
 
 def consistency(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
                 nbr_depths: Sequence[np.ndarray], nbr_w2c: Sequence[np.ndarray],
-                tau_rel: float, tau_px: float, device=None, return_good: bool = False):
+                tau_rel: float, tau_px: float, device=None, return_good: bool = False,
+                nbr_bad_margin: Optional[Sequence] = None):
     """(n_consistent u8, residual_rel f32 = median |z_ij − d_j|/d_j over the
     consistent views, NaN where none, n_contradict u8 = views that measured a surface
     FARTHER along the ray — free space through the point) for one depth map against
     the given views'. With ``return_good`` a fourth item: the per-view agreement
-    masks (bool H×W each), for rules about WHICH views agree. A view's depth ≤ 0 is
-    'no measurement there'."""
+    masks (bool H×W each), for rules about WHICH views agree. ``nbr_bad_margin`` (one
+    per view: a scalar or that VIEW's H×W map) is the relative margin beyond which the
+    view's farther surface counts as a contradiction — the view's OWN depth error
+    (τ_rel for a measured depth, the calibrated prior error for Omega's), default
+    τ_rel. A view's depth ≤ 0 is 'no measurement there'."""
     import torch
     dev = device or "cpu"
     H, W = depth_i.shape
@@ -385,7 +389,8 @@ def consistency(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
     n_bad = torch.zeros(H * W, dtype=torch.int32, device=dev)
     rels = []
     goods = []
-    for dj, Tj in zip(nbr_depths, nbr_w2c):
+    margins = list(nbr_bad_margin) if nbr_bad_margin is not None else [None] * len(nbr_depths)
+    for dj, Tj, mj in zip(nbr_depths, nbr_w2c, margins):
         Tj = torch.as_tensor(Tj, dtype=torch.float64, device=dev)
         Pj = Tj[:3, :3] @ Pw + Tj[:3, 3:4]
         z = Pj[2]
@@ -414,7 +419,15 @@ def consistency(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
         # CONTRADICTION: the neighbour measured a surface FARTHER along the ray than
         # this point — it sees free space where the point claims to be (pccr
         # 2026-09-29: agreements alone let every frame-coherent Omega blob in)
-        bad = ok & (samp > z * (1.0 + tau_rel))
+        if mj is None:
+            marg = tau_rel
+        elif np.isscalar(mj):
+            marg = float(mj)
+        else:
+            mt = torch.as_tensor(np.asarray(mj, np.float64), device=dev)
+            marg = F.grid_sample(mt[None, None], grid, mode="nearest", padding_mode="border",
+                                 align_corners=True).reshape(-1)
+        bad = ok & (samp > z * (1.0 + marg))
         n_cons += good.int()
         n_bad += bad.int()
         rels.append(torch.where(good, rel, torch.full_like(rel, float("nan"))))
@@ -913,7 +926,8 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
         # angle: a floater is seen through by the far side of the room, not by the
         # eight nearest keyframes (USER 2026-09-29: "ampliar las vistas que ven a
         # los puntos")
-        contra_views[i] = [int(kf_others[j]) for j in np.flatnonzero(covis_k > 0)]
+        seen = np.flatnonzero(covis_k > 0)
+        contra_views[i] = [int(kf_others[j]) for j in seen[np.argsort(-covis_k[seen], kind="stable")]]
         no_cover[i] = [int(others[j]) for j in np.flatnonzero(covis == 0) if others[j] < n_kf]
         t_hb = _hb(pcfg.runner, t_hb, f"{LOG_TAG} priors + views: {i + 1}/{n_kf}", log)
 
@@ -1030,12 +1044,20 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
     # every keyframe's depth for the contradiction test: the swept depth where it has
     # signal, Omega's prior elsewhere — loaded once (≈ 1.5 MB per keyframe)
     best_depth: Dict[int, np.ndarray] = {}
+    best_margin: Dict[int, np.ndarray] = {}
     for j in swept:
         fj = inp.kf[j]
         pj = np.load(work / f"prior_{fj}.npy")
         sj = np.load(work / f"sweep_{fj}.npy")
         gj = np.load(work / f"signal_{fj}.npy")
-        best_depth[j] = np.where(gj & (sj > 0), sj, pj).astype(np.float32)
+        meas = gj & (sj > 0)
+        best_depth[j] = np.where(meas, sj, pj).astype(np.float32)
+        # the VIEW's own depth error decides when its farther surface contradicts:
+        # a measured depth → τ_rel; Omega's prior → its calibrated |error| quantile β
+        # (pccr 2026-09-29: judged at τ_rel 1.08 % against priors 5-27 % off, ~100
+        # views contradicted almost every point — 220 k points left of 9 M)
+        _, bj = beta_map(j)
+        best_margin[j] = np.where(meas, tau_rel, bj).astype(np.float32)
     n_far_only = 0
     n_contra_views_tot = 0
     counts_tot = {k: 0 for k in SOURCE_NAMES.values()}
@@ -1061,16 +1083,22 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
                                                  return_good=True)
         n_p, r_p, b_p_near, good_p = consistency(z0, inp.K, inp.kf_w2c[i], np_, nw, tau_rel,
                                                  inp.tau_px, device=dev, return_good=True)
-        # CONTRADICTION over EVERY view that sees the point, with its best depth
-        ca = [j for j in contra_views.get(i, []) if j in best_depth]
+        # CONTRADICTION: the most covisible views that see the point (depth.
+        # contradiction_views) VOTE with their best depth and their own error margin;
+        # a point is contradicted when more of them see through it than confirm it
+        ca = [j for j in contra_views.get(i, []) if j in best_depth][:int(dcfg.contradiction_views)]
         n_contra_views_tot += len(ca)
         if ca:
             cd_ = [best_depth[j] for j in ca]
             cw_ = [inp.kf_w2c[j] for j in ca]
-            _, _, b_s = consistency(np.where(sig, d, 0), inp.K, inp.kf_w2c[i], cd_, cw_, tau_rel,
-                                    inp.tau_px, device=dev)
-            _, _, b_p = consistency(z0, inp.K, inp.kf_w2c[i], cd_, cw_, tau_rel, inp.tau_px,
-                                    device=dev)
+            cm_ = [best_margin[j] for j in ca]
+            g_s_all, _, b_s_all = consistency(np.where(sig, d, 0), inp.K, inp.kf_w2c[i], cd_, cw_,
+                                              tau_rel, inp.tau_px, device=dev, nbr_bad_margin=cm_)
+            g_p_all, _, b_p_all = consistency(z0, inp.K, inp.kf_w2c[i], cd_, cw_, tau_rel,
+                                              inp.tau_px, device=dev, nbr_bad_margin=cm_)
+            # a contradiction counts only where it outvotes the confirmations of the same views
+            b_s = np.where(b_s_all.astype(np.int32) > g_s_all.astype(np.int32), b_s_all, 0).astype(np.uint8)
+            b_p = np.where(b_p_all.astype(np.int32) > g_p_all.astype(np.int32), b_p_all, 0).astype(np.uint8)
         else:
             b_s, b_p = b_s_near, b_p_near
         # INDEPENDENCE: an agreeing view a visit of walk away from this keyframe

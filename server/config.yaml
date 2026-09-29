@@ -2138,6 +2138,10 @@ reconstruction:
     # F6 — prior-guided plane sweep at native resolution (precision/depth_sweep.py)
     depth:
       n_views: 8                        # BOUND: photometric / consistency views per keyframe
+      contradiction_views: 32           # BOUND (cost cap): the most covisible keyframes whose
+                                        # depth is asked whether it sees free space through a
+                                        # point. All of them (~100 per keyframe on pccr) took F6
+                                        # from 12 to 195 min; the vote below does the deciding.
       min_tri_deg: 1.5                  # view's median triangulation angle range (degrees):
       max_tri_deg: 25.0                 # claude_stac.txt §4-F9 skeleton values (starting points)
       n_hyp: 64                         # hypotheses uniform in inverse depth (+ the prior)
