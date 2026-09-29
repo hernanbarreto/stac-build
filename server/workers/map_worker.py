@@ -535,6 +535,21 @@ def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
         raise RuntimeError("the precision core ended without F7's fuse_report.json — no "
                            "fused cloud was published")
 
+    # THE COMPARISON CLOUD (USER 2026-09-29: "conservamos [la época 0] mientras validamos,
+    # deben poder seleccionarse desde la UI"): Omega's raw chunks through the cleaning
+    # recipe the cloud stage always ran, consolidated, with their octree, into
+    # `_epoch_0/` registered as a selectable epoch — BEFORE the chunks are deleted.
+    # Its failure is loud but does not take the fused reconstruction with it.
+    from precision.epoch0_cloud import build_epoch0_cloud
+    pipe.send_progress(98, "Epoch 0: Omega's cloud for comparison...", stage="reconstruction")
+    try:
+        rep0 = build_epoch0_cloud(session_path, config, input_dir=output_dir, log=pipe.send_log,
+                                  progress=lambda pct, msg: pipe.send_progress(98, msg, stage="reconstruction"))
+        pipe.send_log(f"[epochs] epoch 0 (Omega, {rep0['n_points']:,} pts) stored in _epoch_0/ — "
+                      f"selectable against the fused cloud")
+    except Exception as e:  # noqa: BLE001 — declared, never silent
+        pipe.send_log(f"[epochs] ❌ epoch 0 comparison cloud NOT built: {e}", level="error")
+
     freed = _discard_previous_epochs(output_dir)
     pipe.send_log(f"[epochs] the fused cloud + epoch 0 (Omega) stay — {freed / 1048576:.0f} MB of "
                   f"previous epochs and Omega chunks discarded")
