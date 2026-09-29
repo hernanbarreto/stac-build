@@ -252,9 +252,23 @@ def _chainage_of_chunks(output_dir, session, ranges) -> np.ndarray:
     return np.array([float(d[min(int((a + b) // 2), len(d) - 1)]) for a, b in ranges])
 
 
+def _weighted_median(v, w) -> float:
+    """Median of `v` under weights `w`; with equal weights it is `np.median`
+    (the two middle values averaged on an even count)."""
+    v = np.asarray(v, np.float64)
+    w = np.asarray(w, np.float64)
+    o = np.argsort(v, kind="stable")
+    v, w = v[o], w[o]
+    c = np.cumsum(w) / float(w.sum())
+    k = int(np.searchsorted(c, 0.5 - 1e-12))
+    if abs(float(c[k]) - 0.5) <= 1e-12 and k + 1 < len(v):
+        return float(0.5 * (v[k] + v[k + 1]))
+    return float(v[k])
+
+
 def earn_the_right(r_free, closures, chain, sigma_seam: float,
                    min_holdout: int = 3, improve: float = 0.75,
-                   log: Callable = print) -> dict:
+                   hold_size: bool = False, log: Callable = print) -> dict:
     """Does the per-chunk solution EARN the right to touch the geometry?
 
     USER 2026-09-22, after test2's epoch 1 came out torn: *"debiamos tener una
@@ -286,6 +300,20 @@ def earn_the_right(r_free, closures, chain, sigma_seam: float,
       test2 18 closures contradicting each other (0.90-1.18),
             r zigzagging with a -16.7 % and a +19.2 % jump
             between ADJACENT chunks (~2 m of tearing at 10 m) → refuses
+
+    Every closure speaks with its OWN σ (`sigma` of the row, the tangential
+    residual over the object's extent — `visit_drift.scale_rows`): the ramp is
+    fitted by weighted least squares and the held-out error is a weighted
+    median, both at 1/σ², the weights the scale graph itself gives the rows. A
+    false identity the graph prices out (pccr epoch 6: a monitor matched 2.8 m
+    to the side, σ 1.30 against 0.01 for a genuine closure) used to decide the
+    ramp's slope and the verdict anyway, at full weight (2026-09-29).
+
+    `hold_size` (after the precision gauge): the ramp keeps the session's size
+    the way the minimum-norm free solution does — mean log r = 0 — instead of
+    pinning chunk 0. The gauge is the absolute scale along the WHOLE walk, so
+    the start is no more right than the end; the closures are relative and only
+    say how the residual is distributed.
     """
     # The sample is the CLOSURES, not the rows the solver fuses them into: one
     # row per chunk PAIR would have turned pccr's 13 independent measurements
@@ -295,7 +323,8 @@ def earn_the_right(r_free, closures, chain, sigma_seam: float,
     for c in (closures or []):
         ch = c.get("chunks") or ()
         if len(ch) == 2 and c.get("log_r") is not None:
-            rows.append((int(ch[0]), int(ch[1]), float(c["log_r"])))
+            sig = float(c.get("sigma") or 1.0)
+            rows.append((int(ch[0]), int(ch[1]), float(c["log_r"]), 1.0 / sig ** 2))
     rep: Dict[str, Any] = {"rows": len(rows), "n_chunks": n}
     if len(rows) < int(min_holdout) * 3:
         rep.update({"verdict": "free", "reason":
@@ -311,25 +340,33 @@ def earn_the_right(r_free, closures, chain, sigma_seam: float,
     x_free = np.log(np.asarray(r_free, np.float64))
 
     def _ramp_from(sample):
-        """eps of k = 1 + eps*d, least squares on the sample's own rows."""
-        A, b = [], []
-        for i, j, lr in sample:
+        """eps of k = 1 + eps*d, weighted least squares (1/σ²) on the
+        sample's own rows."""
+        A, b, sw = [], [], []
+        for i, j, lr, w in sample:
             A.append(chain[j] - chain[i])
             b.append(lr)
-        A = np.asarray(A, np.float64)[:, None]
-        b = np.asarray(b, np.float64)
+            sw.append(np.sqrt(w))
+        sw = np.asarray(sw, np.float64)
+        A = np.asarray(A, np.float64)[:, None] * sw[:, None]
+        b = np.asarray(b, np.float64) * sw
         if not len(A) or float(np.squeeze(A.T @ A)) <= 0:
             return 0.0
         return float(np.linalg.lstsq(A, b, rcond=None)[0][0])
 
     eps = _ramp_from(fit)
     x_ramp = eps * (np.asarray(chain, np.float64) - float(chain[0]))
+    if hold_size:
+        x_ramp = x_ramp - float(np.mean(x_ramp))   # differences — the judge — unchanged
 
     def _err(x):
-        return float(np.median([abs((x[j] - x[i]) - lr) for i, j, lr in held])) if held else np.inf
+        if not held:
+            return np.inf
+        return _weighted_median([abs((x[j] - x[i]) - lr) for i, j, lr, _w in held],
+                                [w for _i, _j, _lr, w in held])
 
     e_free, e_ramp, e_none = _err(x_free), _err(x_ramp), _err(np.zeros(n))
-    rep.update({"held_out": len(held), "fit_rows": len(fit),
+    rep.update({"held_out": len(held), "fit_rows": len(fit), "hold_size": bool(hold_size),
                 "err_free": round(e_free, 5), "err_ramp": round(e_ramp, 5),
                 "err_identity": round(e_none, 5), "ramp_eps": round(eps, 6)})
 
@@ -402,7 +439,9 @@ def stand_down_for_gauge(output_dir, s_da3: Dict[int, float], abs_rows: list,
     What holds the size then: the gauge. The remaining rows are all RELATIVE
     (closures and seams), so `solve_scale_graph` returns the minimum-norm
     solution — the geometric mean of the factors is 1 and the session's size is
-    the one the gauge set (CLAUDE.md, 2026-09-19 block)."""
+    the one the gauge set (CLAUDE.md, 2026-09-19 block). When `earn_the_right`
+    prefers its RAMP it is re-centred to the same size (`hold_size`), never
+    pinned at chunk 0."""
     from precision.gauge import gauge_applied
     from correction.epoch import current_epoch
     if not gauge_applied(output_dir):
@@ -548,8 +587,10 @@ def solve_scale_stage(output_dir, session, loop_measurements: List[dict], scfg, 
     # EARN THE RIGHT (USER 2026-09-22): the solution must explain closures it
     # was not fitted on, or step aside — see `earn_the_right`.
     try:
+        # after the gauge the ramp keeps the gauge's size, as the free solution does
         _earn = earn_the_right(r, rows_used, _chainage_of_chunks(output_dir, session, ranges),
-                               float(scfg.sigma_seam_log), log=log)
+                               float(scfg.sigma_seam_log), hold_size=gauge_rep is not None,
+                               log=log)
         rep["earned"] = _earn
         if _earn.get("verdict") == "ramp" and _earn.get("r_ramp"):
             r = np.asarray(_earn["r_ramp"], np.float64)

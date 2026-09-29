@@ -403,6 +403,9 @@ def solve_depth(output_dir: Path, log: Callable[[str], None] = print,
     nearest-centre rule that writes the records' ``chunk`` field). DECLARED: a
     single-pass session is ONE chunk — one degree of freedom, its size, which
     the gauge holds — so there the closures cannot move anything.
+
+    Returns ``(k_kf, t_kf, report)``; ``k_kf`` and ``t_kf`` are None when nothing
+    is applied, and the report says why (the acta records it either way).
     """
     from correction.config import load_correction_config
     from correction.epoch import current_epoch
@@ -430,18 +433,19 @@ def solve_depth(output_dir: Path, log: Callable[[str], None] = print,
     # be the OLD epoch's — and it used to be solved as if it were current
     stamp = _stamp()
     if stamp != now:
-        log("[depth] no closure could be measured on epoch "
-            f"{now}" + (f" (the rows on file were measured on epoch {stamp} — "
-                        f"not used)" if stamp is not None else "")
-            + " — no depth row to solve")
-        return None
+        reason = ("no closure could be measured on epoch "
+                  f"{now}" + (f" (the rows on file were measured on epoch {stamp} — "
+                              f"not used)" if stamp is not None else "")
+                  + " — no depth row to solve")
+        log(f"[depth] {reason}")
+        return None, None, {"applied": False, "reason": reason}
 
     session = load_session(output_dir)
     srep = solve_scale_stage(output_dir, session,
                              [], load_loops_config().certify.scale, log=log)
     if not srep.get("applied"):
         log(f"[depth] nothing to apply: {srep.get('reason')}")
-        return None
+        return None, None, srep
     ranges, owner = chunk_of_keyframes(output_dir, session.n_kf)
     k_kf, t_kf = scale_transforms(session, ranges, owner,
                                   np.asarray(srep["r"], np.float64))
@@ -653,10 +657,14 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
         cfg = cfg or load_correction_config()
     from precision.gauge import gauge_applied
     after_gauge = gauge_applied(output_dir)
+    k_kf = t_kf = None
+    srep: dict = {}
     if cfg.visit_drift.skip_when_gauge_applied and after_gauge:
-        log("[correction] DEPTH stands down: the precision gauge already applied the "
-            "continuous scale along the walk (gauge.json) — not applied twice")
-        dep = None
+        srep = {"applied": False,
+                "reason": "correction.visit_drift.skip_when_gauge_applied: the precision "
+                          "gauge already applied the continuous scale along the walk "
+                          "(gauge.json) — the depth stage stands down entirely"}
+        log(f"[correction] DEPTH stands down: {srep['reason']}")
     else:
         if after_gauge:
             # USER 2026-09-29: the closures ALSO correct after the gauge, on the
@@ -664,18 +672,23 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
             log("[correction] DEPTH on the RESIDUAL after the precision gauge: only the "
                 "closures measured on the current epoch drive it (the DA3 trend, anchor "
                 "and absolute rows stand down — the gauge already spent them)")
-        dep = solve_depth(output_dir, log=log, cfg=cfg)
+        k_kf, t_kf, srep = solve_depth(output_dir, log=log, cfg=cfg)
     _pc(_FLOOR_PCT, "correction: solving the floor on that geometry")
-    if dep is None:
+    # the acta records the depth stage either way: stood down by the switch,
+    # identity, one chunk, did not earn the right — they are not the same thing
+    depth_stage = {"stage": "depth", "applied": k_kf is not None,
+                   "after_gauge": bool(after_gauge),
+                   "stood_down_for_gauge": srep.get("stood_down_for_gauge")}
+    if k_kf is None:
         log("[correction] no depth correction — the floor runs on its own")
+        depth_stage.update({"status": "not_applied", "reason": srep.get("reason"),
+                            "n_chunks": srep.get("n_chunks")})
     else:
-        k_kf, t_kf, srep = dep
         pre = {"R_kf": np.tile(np.eye(3), (len(k_kf), 1, 1)),
                "t_kf": t_kf, "k_kf": k_kf}
-        stages.append({"stage": "depth", "r_per_chunk": srep.get("r"),
-                       "k_min": float(k_kf.min()), "k_max": float(k_kf.max()),
-                       "after_gauge": bool(after_gauge),
-                       "stood_down_for_gauge": srep.get("stood_down_for_gauge")})
+        depth_stage.update({"r_per_chunk": srep.get("r"),
+                            "k_min": float(k_kf.min()), "k_max": float(k_kf.max())})
+    stages.append(depth_stage)
 
     log("[correction] 2/2 — FLOOR on that geometry, composed and applied ONCE")
     from correction.run import run_floor
@@ -701,13 +714,17 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
     if not floor_applied and pre is not None:
         log("[correction] the floor did not apply — publishing the DEPTH "
             "correction on its own so what it solved is not lost")
+        _sd = srep.get("stood_down_for_gauge")
+        evidence = ("the closures are radial: a per-chunk depth factor from the "
+                    f"closures measured on epoch {_sd.get('current_epoch')} only — the "
+                    "DA3 anchor, trend and absolute rows stood down after the "
+                    "precision gauge" if _sd else
+                    "the closures are radial: a per-chunk depth factor, "
+                    "cross-checked against the DA3 anchors")
         try:
             rec2 = apply_transform_epoch(
                 output_dir, pre["R_kf"], pre["t_kf"], pre["k_kf"],
-                "scale_depth",
-                [{"kind": "depth",
-                  "evidence": "the closures are radial: a per-chunk depth "
-                              "factor, cross-checked against the DA3 anchors"}],
+                "scale_depth", [{"kind": "depth", "evidence": evidence}],
                 log=log, cfg=cfg)
             stages.append({"stage": "depth_alone", "status": "applied",
                            **{k: v for k, v in (rec2 or {}).items()

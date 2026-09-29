@@ -156,7 +156,9 @@ def test_solve_depth_remeasures_a_stale_stamp_and_never_solves_the_old_rows(tmp_
         return {"scale_rows": [], "rejected": []}  # nothing measurable on epoch 2
     monkeypatch.setattr(V, "measure_epoch", _measure)
     monkeypatch.setattr(V, "_repeatability_m", lambda o, d, log: 0.05)
-    assert V.solve_depth(out, log=lambda m: None, cfg=make_correction_cfg()) is None
+    k_kf, t_kf, rep = V.solve_depth(out, log=lambda m: None, cfg=make_correction_cfg())
+    assert k_kf is None and t_kf is None and not rep["applied"]
+    assert "epoch 2" in rep["reason"] and "not used" in rep["reason"], rep
     assert called == [1], "the stale stamp must trigger a re-measurement"
 
 
@@ -282,9 +284,8 @@ def test_a_radial_residual_in_one_chunk_is_corrected_after_the_gauge(tmp_path):
     scene, owner = _scene(tmp_path)
     out = scene.output_dir
     _rows(out, _closures(C_INJECTED))
-    dep = V.solve_depth(out, log=lambda m: None, cfg=make_correction_cfg())
-    assert dep is not None
-    k_kf, t_kf, srep = dep
+    k_kf, t_kf, srep = V.solve_depth(out, log=lambda m: None, cfg=make_correction_cfg())
+    assert k_kf is not None and srep["applied"], srep
     r = np.asarray(srep["r"])
     # the relative factor the closures measure, within the seam prior's pull
     assert abs(np.log(r[1] * C_INJECTED / r[0])) < 0.10 * abs(np.log(C_INJECTED)), r
@@ -320,7 +321,7 @@ def test_depth_and_floor_compose_into_one_epoch_after_the_gauge(tmp_path):
     res = V.run(tmp_path, log=lambda m: None, cfg=cfg)
     names = [s["stage"] for s in res["stages"]]
     assert names == ["depth", "floor_plane+depth"], res["stages"]
-    assert res["stages"][0]["after_gauge"] is True
+    assert res["stages"][0]["after_gauge"] is True and res["stages"][0]["applied"] is True
     assert res["stages"][1]["status"] == "applied", res["stages"]
     epoch, runs, npz = _epochs(out)
     assert epoch == 1 and len(runs) == 1 and runs[0]["kind"] == "floor", runs
@@ -339,7 +340,10 @@ def test_the_switch_still_stands_the_depth_down_when_asked(tmp_path):
     cfg = make_correction_cfg(**{"gates.mode": "advisory",
                                  "visit_drift.skip_when_gauge_applied": True})
     res = V.run(tmp_path, log=lambda m: None, cfg=cfg)
-    assert [s["stage"] for s in res["stages"]] == ["floor_plane"], res["stages"]
+    assert [s["stage"] for s in res["stages"]] == ["depth", "floor_plane"], res["stages"]
+    dep = res["stages"][0]
+    assert dep["applied"] is False and dep["after_gauge"] is True
+    assert "skip_when_gauge_applied" in dep["reason"], dep
     k = np.load(out / "corrections" / "epoch_1.npz")["k_kf"]
     assert np.all(k == 1.0)
 
@@ -350,8 +354,14 @@ def test_no_residual_is_identity_and_the_floor_still_applies(tmp_path):
     _rows(out, _closures(1.0))
     res = V.run(tmp_path, log=lambda m: None,
                 cfg=make_correction_cfg(**{"gates.mode": "advisory"}))
-    assert [s["stage"] for s in res["stages"]] == ["floor_plane"], res["stages"]
-    assert res["stages"][0]["status"] == "applied"
+    assert [s["stage"] for s in res["stages"]] == ["depth", "floor_plane"], res["stages"]
+    # the acta says WHY there is no depth: it ran after the gauge, on the
+    # closures alone, and solved to identity — not "the switch stood it down"
+    dep = res["stages"][0]
+    assert dep["applied"] is False and dep["after_gauge"] is True, dep
+    assert dep["stood_down_for_gauge"]["da3_trend_rows"], dep
+    assert "within the row" in dep["reason"], dep
+    assert res["stages"][1]["status"] == "applied"
     epoch, runs, npz = _epochs(out)
     assert epoch == 1 and len(runs) == 1 and npz == ["epoch_1.npz"]
     k = np.load(out / "corrections" / "epoch_1.npz")["k_kf"]
@@ -371,3 +381,96 @@ def test_a_single_pass_session_is_one_degree_of_freedom(tmp_path, n_rows):
     assert rep["n_chunks"] == 1 and not rep["applied"] and rep["r"] == [1.0]
     assert rep["loop_rows_intra_chunk"] == n_rows
     assert "ONE chunk" in rep["reason"]
+
+
+# ── the self-validation after the gauge (earn_the_right) ────────────────
+
+PCCR_PLAN = {"chunk_ranges": [[0, 83], [42, 125], [84, 167], [126, 209], [168, 251],
+                              [210, 289]], "chunk_size": 83, "overlap": 41, "n_keyframes": 289}
+# pccr epoch 6's false identity, as scale_loop_rows.json holds it
+MONITOR = _row(10, 271, 1.2055422981406194, 2.864091322872773, 2.1950020562916133, 120,
+               "monitor")
+# a second one of the same kind (the light fixture 5 m away; synthetic numbers)
+FIXTURE = _row(12, 280, 0.80, 5.1, 1.0, 130, "light_fixture")
+
+
+def _pccr(tmp_path, gauge=True):
+    out = _mock_out(tmp_path, PCCR_PLAN)
+    if gauge:
+        _gauge(out)
+    return out, _mock_session(289, 0.06)
+
+
+def _genuine(n):
+    """`n` radial start <-> end closures agreeing on +3.9 % — enough (>= 9) for
+    `earn_the_right` to hold some out and judge the ramp."""
+    return [_row(2 + i, 270 + i, 1 / 1.039, 0.01, 1.0, 200 + i, "desk") for i in range(n)]
+
+
+def test_after_the_gauge_the_ramp_keeps_the_gauges_size(tmp_path):
+    """The ramp used to be pinned at chunk 0 (k = 1 + eps*d from the start):
+    after the gauge that resized the session by ~2 % against the gauge's
+    absolute scale. It keeps the minimum-norm size, as the free solution does."""
+    out, sess = _pccr(tmp_path)
+    _rows(out, _genuine(12))
+    rep = S.solve_scale_stage(out, sess, [], _scfg(), log=lambda m: None)
+    assert rep["earned"]["verdict"] == "ramp" and rep["earned"]["hold_size"], rep["earned"]
+    assert rep["applied"], rep
+    r = np.asarray(rep["r"])
+    assert abs(float(np.mean(np.log(r)))) < 1e-9, r
+    assert np.all(np.diff(r) > 0), "the end of the walk grows against the start"
+    # control, no gauge: the drift-rate ramp still starts exact at chunk 0
+    out0, _ = _pccr(tmp_path / "nogauge", gauge=False)
+    _rows(out0, _genuine(12))
+    ctl = S.solve_scale_stage(out0, sess, [], _scfg(), log=lambda m: None)
+    assert ctl["earned"]["verdict"] == "ramp" and not ctl["earned"]["hold_size"]
+    assert ctl["r"][0] == 1.0
+    assert np.allclose(np.diff(np.log(ctl["r"])), np.diff(np.log(r)))
+
+
+@pytest.mark.parametrize("false_at", [(12,), (2, 5)], ids=["in_the_fit", "held_out"])
+def test_false_identities_do_not_steer_the_judge_after_the_gauge(tmp_path, false_at):
+    """A closure the graph prices out (σ 1.3-5 against 0.01) must not decide the
+    ramp's slope (in the fitted rows) nor the verdict (in the held-out rows)."""
+    out, sess = _pccr(tmp_path)
+    rows = _genuine(12)
+    _rows(out, rows)
+    good = S.solve_scale_stage(out, sess, [], _scfg(), log=lambda m: None)
+    for pos, bad in zip(false_at, (MONITOR, FIXTURE)):
+        rows.insert(pos, bad)
+    _rows(out, rows)
+    both = S.solve_scale_stage(out, sess, [], _scfg(), log=lambda m: None)
+    assert good["applied"] and both["applied"] == good["applied"], both
+    assert both["earned"]["verdict"] == good["earned"]["verdict"], (good["earned"],
+                                                                   both["earned"])
+    assert np.max(np.abs(np.log(both["r"]) - np.log(good["r"]))) < 0.002, (good["r"],
+                                                                            both["r"])
+
+
+def test_weighted_median_is_the_median_on_equal_weights():
+    for v in ([3.0, 1.0, 2.0], [4.0, 1.0, 3.0, 2.0], [0.5]):
+        assert S._weighted_median(v, [7.0] * len(v)) == float(np.median(v))
+    assert S._weighted_median([0.0, 0.0, 9.0, 9.0], [1e4, 1e4, 1.0, 1.0]) == 0.0
+
+
+def test_a_depth_applied_alone_after_the_gauge_says_what_drove_it(tmp_path, monkeypatch):
+    """The floor failed, the depth goes out alone: its ledger evidence names the
+    closures of the current epoch, not "cross-checked against the DA3 anchors"
+    (every anchor and trend row stood down after the gauge)."""
+    import correction.run as CR
+    from correction import ledger
+    scene, _owner = _scene(tmp_path)
+    out = scene.output_dir
+    _rows(out, _closures(C_INJECTED))
+
+    def _no_floor(*a, **k):
+        raise RuntimeError("floor unavailable in this test")
+    monkeypatch.setattr(CR, "run_floor", _no_floor)
+    res = V.run(tmp_path, log=lambda m: None,
+                cfg=make_correction_cfg(**{"gates.mode": "advisory"}))
+    assert [s["stage"] for s in res["stages"]] == ["depth", "floor_plane", "depth_alone"]
+    assert res["stages"][2]["status"] == "applied", res["stages"]
+    run = ledger.applied_runs(out)[-1]
+    ev = " ".join(d.get("evidence", "") for d in run["diagnosis"])
+    assert "closures measured on epoch 0" in ev and "stood down" in ev, ev
+    assert "cross-checked against the DA3 anchors" not in ev, ev
