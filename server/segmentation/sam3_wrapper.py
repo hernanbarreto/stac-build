@@ -22,6 +22,82 @@ if not logger.handlers:
 logger.propagate = False
 from config import cfg
 
+# ── detection / confirmation thresholds (models.segmentation.sam3_thresholds) ──
+# USER 2026-09-29 ("debe segmentar todo"): SAM3 decides which detections become
+# masklets by six numbers the vendor BUILDER hard-codes (no builder argument
+# exposes them). They are declared per version in config.yaml — defaults EQUAL
+# to the vendor's own values, so nothing changes until the user tunes them
+# against output/segmentation_census.json — and written onto the built model
+# object here, the one place every SAM3 model of this process is built. The
+# model reads each of them from `self.<name>` at run time (verified in
+# sam3_multiplex_base.py / sam3_video_base.py), so setting them after the build
+# is equivalent to passing them to the constructor — except for the hotstart
+# assertion the constructor runs, which `sam3_thresholds` re-checks.
+SAM3_THRESHOLD_KEYS = ("score_threshold_detection", "new_det_thresh", "hotstart_delay",
+                       "hotstart_unmatch_thresh", "hotstart_dup_thresh",
+                       "masklet_confirmation_consecutive_det_thresh")
+_SAM3_PROB_KEYS = ("score_threshold_detection", "new_det_thresh")
+
+
+def sam3_thresholds(scfg: dict, version: str) -> Dict[str, Any]:
+    """``models.segmentation.sam3_thresholds.<version>`` — strict: a missing
+    key fails naming it, a value out of its range fails naming it."""
+    where = f"models.segmentation.sam3_thresholds.{version}"
+    block = (scfg or {}).get("sam3_thresholds")
+    if not isinstance(block, dict) or not isinstance(block.get(version), dict):
+        raise KeyError(f"config.yaml is missing '{where}' — the SAM3 detection / "
+                       f"confirmation thresholds of the model being built")
+    sec = block[version]
+    out: Dict[str, Any] = {}
+    for k in SAM3_THRESHOLD_KEYS:
+        if k not in sec:
+            raise KeyError(f"config.yaml is missing '{where}.{k}'")
+        v = sec[k]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"'{where}.{k}' must be a number, got {v!r}")
+        if k in _SAM3_PROB_KEYS:
+            if not 0.0 <= float(v) <= 1.0:
+                raise ValueError(f"'{where}.{k}' = {v} is a probability, outside [0, 1]")
+            out[k] = float(v)
+        else:
+            if int(v) != v or int(v) < 0:
+                raise ValueError(f"'{where}.{k}' must be a non-negative integer, got {v!r}")
+            out[k] = int(v)
+    if out["masklet_confirmation_consecutive_det_thresh"] < 1:
+        raise ValueError(f"'{where}.masklet_confirmation_consecutive_det_thresh' must be "
+                         f">= 1 (a masklet needs at least one detection to be confirmed)")
+    if out["hotstart_delay"] > 0 and (out["hotstart_unmatch_thresh"] > out["hotstart_delay"]
+                                      or out["hotstart_dup_thresh"] > out["hotstart_delay"]):
+        raise ValueError(f"'{where}': hotstart_unmatch_thresh and hotstart_dup_thresh must "
+                         f"not exceed hotstart_delay (the vendor constructor asserts it)")
+    return out
+
+
+def apply_sam3_thresholds(predictor, version: str, scfg: dict) -> Dict[str, Any]:
+    """Write the configured thresholds onto ``predictor.model`` and return
+    ``{"version", "applied", "vendor_built"}``. A model that lacks one of the
+    attributes (a vendor rename) FAILS the load: the configured value would
+    otherwise silently not apply — the bug class of 2026-09-23."""
+    values = sam3_thresholds(scfg, version)
+    model = getattr(predictor, "model", None)
+    if model is None:
+        raise RuntimeError(f"the SAM3 {version} predictor exposes no .model — the "
+                           f"configured thresholds cannot reach it")
+    built: Dict[str, Any] = {}
+    for k, v in values.items():
+        if not hasattr(model, k):
+            raise RuntimeError(f"the SAM3 {version} model ({type(model).__name__}) has no "
+                               f"attribute '{k}' — the vendor renamed it, and "
+                               f"models.segmentation.sam3_thresholds.{version}.{k} would "
+                               f"silently not apply")
+        built[k] = getattr(model, k)
+        setattr(model, k, v)
+    logger.info("SAM3 %s thresholds (models.segmentation.sam3_thresholds.%s): %s",
+                version, version,
+                ", ".join(f"{k}={values[k]} (vendor built {built[k]})" for k in values))
+    return {"version": version, "applied": values, "vendor_built": built}
+
+
 class SAM3Wrapper:
     """
     Wrapper for SAM3 Video Predictor to handle text-prompt based segmentation
@@ -36,6 +112,8 @@ class SAM3Wrapper:
         self._interactive_sessions: Dict[str, dict] = {}  # state_id → session info dict
         # ONE batch session kept open and reused across concepts (see _session_for).
         self._batch_session: Optional[Tuple[str, str]] = None  # (batch_dir, session_id)
+        # what apply_sam3_thresholds wrote on the last model built (the census reads it)
+        self.applied_thresholds: Optional[Dict[str, Any]] = None
         logger.info("SAM3 Wrapper initialized (Lazy Loading Enabled: Model will load on first prompt).")
 
     # ── Batch session reuse ──────────────────────────────────────────
@@ -135,6 +213,8 @@ class SAM3Wrapper:
                         use_fa3=bool(scfg.get("use_fa3", False)),
                         compile=bool(scfg.get("compile", False)),
                     )
+                    self.applied_thresholds = apply_sam3_thresholds(
+                        self.predictor, "sam3.1", scfg)
                     torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
                     logger.info("SAM 3.1 Multiplex loaded on GPU (bfloat16 autocast active).")
                 elif torch.cuda.is_available():
@@ -142,6 +222,8 @@ class SAM3Wrapper:
                     from sam3.model_builder import build_sam3_video_predictor
                     gpus_to_use = [torch.cuda.current_device()]
                     self.predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
+                    self.applied_thresholds = apply_sam3_thresholds(
+                        self.predictor, "sam3", scfg)
                     torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
                     logger.info("SAM3 Model loaded on GPU (bfloat16 autocast active).")
                 else:
@@ -150,6 +232,10 @@ class SAM3Wrapper:
                     # CPU path: use single-device Sam3VideoPredictor (no MultiGPU)
                     from sam3.model.sam3_video_predictor import Sam3VideoPredictor
                     self.predictor = Sam3VideoPredictor()
+                    # the model BUILT here is the 3.0 video model whatever the
+                    # configured version, so its thresholds are the "sam3" block
+                    self.applied_thresholds = apply_sam3_thresholds(
+                        self.predictor, "sam3", scfg)
                     logger.info("SAM3 Model loaded on CPU (float32, slower but functional).")
 
                 self.is_loaded = True

@@ -87,23 +87,29 @@ class FrameUnderstanding:
     scene_type: str
     summary: str
     objects: list[str] = field(default_factory=list)
+    tile: str | None = None               # None = the full frame; "r<i>c<j>" = a crop of it
 
 
 @dataclass
 class SceneUnderstanding:
     scene_type: str                       # consensus across keyframes
     summary: str                          # representative summary
-    objects: list[str]                    # deduped union of understood objects
+    objects: list[str]                    # one phrase per NAME (see `aggregate`)
     per_frame: list[FrameUnderstanding] = field(default_factory=list)
+    # every phrase folded into another because it is the SAME NAME
+    # (`same_name_key`): {phrase: the phrase that carries it}
+    merged: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
             "scene_type": self.scene_type,
             "summary": self.summary,
             "objects": self.objects,
+            "merged_same_name": self.merged,
+            "grouping": GROUPING_VERSION,
             "origin": "vlm_proposed",
             "per_frame": [
-                {"frame_id": f.frame_id, "scene_type": f.scene_type,
+                {"frame_id": f.frame_id, "tile": f.tile, "scene_type": f.scene_type,
                  "summary": f.summary, "objects": f.objects}
                 for f in self.per_frame
             ],
@@ -126,7 +132,11 @@ def _norm_obj(s: str) -> str:
     return re.sub(r"\s+", " ", str(s).strip().lower())
 
 
-def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int = 512) -> FrameUnderstanding | None:
+def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int = 512,
+                     tile: str | None = None) -> FrameUnderstanding | None:
+    """One VLM call on one image — a keyframe, or (``tile``) a crop of it shown
+    at the frame's size. The prompt is the same for both: a crop is still an
+    image of the scene. None when the answer does not parse."""
     from semantic.types import system, user
     resp = client.chat([system(_SYSTEM), user(_PROMPT, images=[image])],
                         max_tokens=max_tokens, consumer="phase1.understand")
@@ -139,13 +149,16 @@ def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int 
         scene_type=str(d.get("scene_type", "")).strip(),
         summary=str(d.get("summary", "")).strip(),
         objects=objs,
+        tile=tile,
     )
 
 
 def _head_noun(phrase: str) -> str:
-    """Concept key of a noun phrase = its (plural-stripped) head noun, e.g.
-    'concrete support columns' -> 'column'. Used ONLY to merge near-duplicate
-    phrasings of the same concept across keyframes.
+    """The (plural-stripped) head noun of a noun phrase, e.g. 'concrete support
+    columns' -> 'column'. EVIDENCE only since 2026-09-29: the census reports it
+    and the consolidation's structural rescue reads it, but two phrases sharing
+    a head are no longer merged (`aggregate` folds true synonyms only —
+    'cardboard box' and 'red fire alarm box' share a head and are two objects).
 
     A trailing prepositional phrase is cut first: the head of 'desk with
     monitor' is 'desk', not 'monitor', and keying it on the attached object is
@@ -160,36 +173,84 @@ def _head_noun(phrase: str) -> str:
             break
     if not words:
         return phrase
-    w = words[-1]
+    return _singular(words[-1])
+
+
+# Words that change nothing about WHICH thing a phrase names when they lead it.
+_LEADING = ("a", "an", "the", "some", "several", "multiple", "many", "two", "three",
+            "four", "five", "six", "seven", "eight", "nine", "ten")
+# Bumped whenever the rule that folds one phrase into another changes: a
+# session vocabulary derived under another rule is not reused (session_builder).
+GROUPING_VERSION = "same_name_v1"
+
+
+def _singular(w: str) -> str:
     for suf in ("sses", "xes", "ches", "shes"):
         if w.endswith(suf):
             return w[:-2]
     return w[:-1] if w.endswith("s") and not w.endswith("ss") else w
 
 
-def aggregate(frames: list[FrameUnderstanding], min_object_freq: int = 1) -> SceneUnderstanding:
-    """Consensus scene_type + one RICH phrase per concept across keyframes.
-    Different frames phrase the same concept differently ('metro train car' /
-    'subway train car'); grouping by head noun keeps exactly one — the most
-    frequently used phrasing (ties → the richest) — so SAM3 gets one text
-    prompt per distinct object type, never N variants of the same thing."""
+def same_name_key(phrase: str) -> str:
+    """Two phrases are the SAME NAME — true synonyms, nothing else — when they
+    differ only in case, spacing, punctuation/hyphenation, a leading article or
+    count word, or plural endings: 'Fire extinguishers' = 'fire extinguisher',
+    'two computer monitors' = 'computer monitor', 'plastic-wrapped appliance' =
+    'plastic wrapped appliance'. A different word is a different name: 'red fire
+    extinguisher' and 'fire extinguisher' both stay."""
+    words = re.sub(r"[^\w\s]", " ", str(phrase).lower().replace("-", " ")).split()
+    while words and (words[0] in _LEADING or words[0].isdigit()):
+        words = words[1:]
+    return " ".join(_singular(w) for w in words) or _norm_obj(phrase)
+
+
+def aggregate(frames: list[FrameUnderstanding]) -> SceneUnderstanding:
+    """Consensus scene_type + the union of every phrase the calls proposed, ONE
+    per NAME (``same_name_key``).
+
+    USER 2026-09-29: *"debe segmentar todo, absolutamente preciso y completo"*.
+    This used to keep ONE phrase per HEAD NOUN, and that silently deleted
+    objects: on pccr 'cardboard box' was folded into 'red fire alarm box'
+    (head 'box'), the white / black / gray server racks into one, 'metal pipe'
+    into 'exposed ceiling pipes' — and none of the dropped phrases was ever
+    written anywhere. Only true synonyms are folded now, and every fold is kept
+    in ``merged`` (the census reads it). Deciding that two DIFFERENT names are
+    one object is not a lexical question: the consolidation pass groups them
+    for labelling and the cloud settles identity (``segmentation.dedupe_overlap``).
+
+    The scene type / summary come from the FULL frames — a crop of a floor is
+    not a statement about what kind of place this is — unless there are none.
+    (The old ``min_object_freq`` knob is gone: a frequency floor drops a phrase
+    seen once, and seen once is enough to NAME a thing.)"""
     frames = [f for f in frames if f is not None]
     if not frames:
         return SceneUnderstanding("unknown", "", [], [])
-    type_counts = Counter(f.scene_type for f in frames if f.scene_type)
+    full = [f for f in frames if f.tile is None] or frames
+    type_counts = Counter(f.scene_type for f in full if f.scene_type)
     scene_type = type_counts.most_common(1)[0][0] if type_counts else "unknown"
     # representative summary = a frame whose type == consensus, longest summary
-    cand = [f for f in frames if f.scene_type == scene_type] or frames
+    cand = [f for f in full if f.scene_type == scene_type] or full
     summary = max((f.summary for f in cand), key=len, default="")
     obj_counts = Counter(o for f in frames for o in set(f.objects))
-    by_head: dict[str, list[str]] = {}
-    for o, c in obj_counts.items():
-        if c >= min_object_freq:
-            by_head.setdefault(_head_noun(o), []).append(o)
-    objects = []
-    for head, variants in by_head.items():
-        best = max(variants, key=lambda v: (obj_counts[v], len(v)))
+    first_seen: dict[str, int] = {}
+    for i, f in enumerate(frames):
+        for o in f.objects:
+            first_seen.setdefault(o, i)
+    by_key: dict[str, list[str]] = {}
+    for o in obj_counts:
+        by_key.setdefault(same_name_key(o), []).append(o)
+    objects: list[str] = []
+    merged: dict[str, str] = {}
+    for key, variants in by_key.items():
+        # the most used spelling carries the name (ties → the plainest — the
+        # variants differ only by plural / article / punctuation, so the shortest
+        # is the bare singular — then alphabetical: deterministic)
+        best = sorted(variants, key=lambda v: (-obj_counts[v], len(v), v))[0]
         objects.append(best)
-    objects.sort(key=lambda o: -obj_counts[o])
+        for v in variants:
+            if v != best:
+                merged[v] = best
+    objects.sort(key=lambda o: (-sum(obj_counts[v] for v in by_key[same_name_key(o)]),
+                                first_seen[o], o))
     return SceneUnderstanding(scene_type=scene_type, summary=summary,
-                              objects=objects, per_frame=frames)
+                              objects=objects, per_frame=frames, merged=merged)

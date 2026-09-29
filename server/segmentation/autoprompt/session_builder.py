@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -79,8 +80,8 @@ class AutoPrompter:
         self.prompts_only = bool((((config or {}).get("reconstruction", {}) or {})
                                   .get("simple", {}) or {}).get("enabled", False))
         self.backend_name = cfg.get("backend", backend)
+        self._config = config or {}
         self.understand_enabled = cfg.get("understand", True)
-        self.understand_sample = cfg.get("understand_sample", 8)
         self.understand_cover = bool(cfg.get("understand_cover", True))
         self.understand_cover_voxel_m = float(cfg.get("understand_cover_voxel_m", 0.10))
         self.understand_cover_overlap = float(cfg.get("understand_cover_overlap", 0.50))
@@ -227,10 +228,15 @@ class AutoPrompter:
                 on_progress(pct, msg)
 
         kf = self._keyframe_files(keyframe_files)
-        # BA poses drive both the adaptive VLM sampling and the association
-        cam = self._load_camera()
-        kf_vlm = self._adaptive_sample(kf, cam)
-        prog(2, f"auto-prompt: {len(kf)} keyframes ({len(kf_vlm)} to the VLM)")
+        # BA poses drive the adaptive sampling and the association of the
+        # GROUNDED-DETECTION path only; the SIMPLE path never reads them (it used
+        # to compute them anyway and log "(48 to the VLM)" for frames nobody sent)
+        cam = None
+        kf_vlm = kf
+        if not self.prompts_only:
+            cam = self._load_camera()
+            kf_vlm = self._adaptive_sample(kf, cam)
+            prog(2, f"auto-prompt: {len(kf)} keyframes ({len(kf_vlm)} to the detector)")
 
         client = get_semantic_client(backend=self.backend_name, consumer="phase1.autoprompt")
         detector = GroundedDetector(client, self.vocab)
@@ -238,47 +244,73 @@ class AutoPrompter:
         # ── Step 1: understand the scene (what is this? what's in it?) ──
         understanding = None
         targets: list[str] | None = None
+        plan = None                       # which frames / crops the VLM was shown
+        calls: list[dict] = []            # one entry per VLM call, parsed or not
+        signature = None                  # what the session vocabulary is derived under
         if self.understand_enabled:
-            from .scene_understanding import understand_frame, aggregate
+            from .scene_understanding import GROUPING_VERSION, understand_frame, aggregate
+            from .vlm_sampling import (crop_for_vlm, load_vlm_sampling, plan_vlm_frames,
+                                       tile_boxes, walk_chainage)
             # WHAT THE VLM NEVER SEES, IT CANNOT NAME — and in the SIMPLE
             # pipeline these phrases ARE the SAM3 prompts, so a frame left out
             # here is an object left out of the segmentation entirely.
-            #
-            # The frames are chosen by COVERAGE of the scene, measured on the
-            # cloud's own per-point provenance: keep adding the keyframe that
-            # shows the most scene nobody has shown yet, until there is none
-            # left (USER 2026-09-16). The COUNT comes out of the place instead
-            # of going in — a small room needs few, a corridor needs many.
-            #
-            # It used to be `understand_sample`, a fixed 8 picked by linspace
-            # whatever the walk: 8 for 80 keyframes and 8 for 2000. pccr's main
-            # door was in none of them.
-            sample = None
+            # The frames are spread UNIFORMLY ALONG THE WALK (vlm_sampling.py):
+            # by walked chainage when intake/walk.json covers the keyframes, by
+            # keyframe index otherwise, each optionally shown also as a grid of
+            # enlarged crops so small objects get named. It used to be the
+            # coverage cover with an 8-frame linspace fallback — and at the
+            # intake there is no cloud, so pccr 2026-09-29 got the 8.
+            vcfg = load_vlm_sampling(self._config)
+            signature = {"vlm_sampling": asdict(vcfg),
+                         "understand_cover": bool(self.understand_cover),
+                         "grouping": GROUPING_VERSION}
+            preselected = None
             if self.understand_cover:
                 from .coverage_sample import cover_keyframes
-                sample = cover_keyframes(
+                preselected = cover_keyframes(
                     self.output_dir, self.session_dir, kf, _frame_num,
                     voxel_m=self.understand_cover_voxel_m,
                     max_overlap=self.understand_cover_overlap,
                     log=lambda m: print(f"[autoprompt] {m}"))
-            if sample is None:
-                # no cloud yet (or no provenance): fall back to the old even
-                # subsample, declared as the degraded path it is
-                sample = kf
-                if self.understand_sample and len(kf) > self.understand_sample:
-                    idx = np.linspace(0, len(kf) - 1, self.understand_sample).astype(int)
-                    sample = [kf[i] for i in idx]
-                print(f"[autoprompt] coverage unavailable — falling back to "
-                      f"{len(sample)} evenly spaced keyframe(s)")
+                if preselected is None:
+                    print("[autoprompt] coverage unavailable — the walk-uniform "
+                          "sampling decides the VLM frames")
+            chainage, axis_reason = walk_chainage(self.session_dir, kf)
+            plan = plan_vlm_frames(kf, vcfg, chainage=chainage, axis_reason=axis_reason,
+                                   preselected=preselected)
+            print(f"[autoprompt] {plan.summary()}")
+            prog(2, f"auto-prompt: {len(kf)} keyframes → {len(plan.frames)} to the VLM, "
+                    f"{plan.n_calls} call(s)")
             fus = []
-            for j, fn in enumerate(sample):
+            t0 = time.time()
+            for fr in plan.frames:
+                fn = fr["file"]
                 img = Image.open(self.frames_dir / fn).convert("RGB")
-                fu = understand_frame(client, img, _frame_num(fn))
-                if fu:
-                    fus.append(fu)
-                prog(2 + int(20 * (j + 1) / max(1, len(sample))), f"understanding {fn}")
+                views = [(None, None)] + tile_boxes(img.width, img.height, vcfg.tile_rows,
+                                                    vcfg.tile_cols, vcfg.tile_overlap_frac)
+                for tid, box in views:
+                    view = img if box is None else crop_for_vlm(img, box)
+                    fu = understand_frame(client, view, fr["frame"], tile=tid)
+                    calls.append({"frame": fr["frame"], "file": fn,
+                                  "keyframe_index": fr["keyframe_index"],
+                                  "position": fr["position"], "tile": tid,
+                                  "box": list(box) if box else None,
+                                  "parsed": fu is not None,
+                                  "n_objects": len(fu.objects) if fu else 0})
+                    if fu:
+                        fus.append(fu)
+                prog(2 + int(20 * len(calls) / max(1, plan.n_calls)),
+                     f"understanding {fn} ({len(views)} view(s), {len(calls)}/"
+                     f"{plan.n_calls} calls)")
+            n_bad = sum(1 for c in calls if not c["parsed"])
+            print(f"[autoprompt] VLM understanding: {len(calls)} call(s) in "
+                  f"{time.time() - t0:.0f} s; {n_bad} answer(s) did not parse")
             understanding = aggregate(fus)
             targets = understanding.objects
+            if understanding.merged:
+                print(f"[autoprompt] {len(understanding.merged)} phrase(s) folded into the "
+                      f"SAME NAME (case / plural / article / punctuation only): "
+                      f"{understanding.merged}")
             (self.output_dir).mkdir(parents=True, exist_ok=True)
             (self.output_dir / "scene_understanding.json").write_text(
                 json.dumps(understanding.to_dict(), indent=2, ensure_ascii=False))
@@ -300,12 +332,21 @@ class AutoPrompter:
             # written it is the answer, so re-running the semantic stages on the
             # same session segments the same concepts. Only the list is reused —
             # the understanding still runs and still describes the scene.
+            # REPRODUCIBLE MEANS SAME INPUTS → SAME LIST: a vocabulary derived
+            # under another VLM sampling (or another folding rule) answers a
+            # different question, so it is not reused — declared, never silent.
+            # A record written before the stamp existed carries none.
             _rec_path = self.output_dir / "autoprompt_concepts.json"
             _reused = None
             if getattr(self, "reuse_vocabulary", False) and _rec_path.exists():
                 try:
                     _prev = json.loads(_rec_path.read_text())
-                    _reused = [p for p in (_prev.get("prompts") or []) if p and p.strip()]
+                    if _prev.get("derived_under") != signature:
+                        print(f"[autoprompt] session vocabulary NOT reused: it was derived "
+                              f"under {_prev.get('derived_under')} and this run samples "
+                              f"under {signature} — deriving it again")
+                    else:
+                        _reused = [p for p in (_prev.get("prompts") or []) if p and p.strip()]
                 except Exception as _e:                      # noqa: BLE001
                     print(f"[autoprompt] ⚠ could not read the session vocabulary "
                           f"({_e}) — deriving it again")
@@ -388,7 +429,8 @@ class AutoPrompter:
                 "prompts": list(phrases),
                 "groups": (consolidation.to_dict() if consolidation else None),
                 "passes": (consolidation.passes if consolidation else 0),
-                "reused": False,
+                "reused": bool(_reused),
+                "derived_under": signature,
                 "scene_type": (understanding.scene_type if understanding else None),
             }
             if consolidation is not None and consolidation.passes == 0:
@@ -411,6 +453,13 @@ class AutoPrompter:
                 "review_queue": [],
                 "dubious_labels": [],
                 "thresholds": {},
+                # what the VLM looked at and what became of every phrase it
+                # proposed — read by segmentation/census.py after SAM3
+                "census": self._census_record(
+                    plan, calls, self._concept_fates(
+                        understanding, phrases, reused=bool(_reused),
+                        consolidation=consolidation),
+                    reused=bool(_reused)),
             }
             vlm_path = self.output_dir / "vlm_analysis.json"
             vlm_path.write_text(json.dumps(vlm_analysis, indent=2, ensure_ascii=False))
@@ -499,6 +548,11 @@ class AutoPrompter:
                 "confidence": self.confidence_threshold,
                 "association_iou": self.iou_threshold,
             },
+            "census": self._census_record(
+                plan, calls, self._concept_fates(
+                    understanding, [], reused=False, consolidation=None,
+                    detection_path=True),
+                reused=False),
         }
         vlm_path = self.output_dir / "vlm_analysis.json"
         vlm_path.write_text(json.dumps(vlm_analysis, indent=2, ensure_ascii=False))
@@ -540,6 +594,84 @@ class AutoPrompter:
         )
 
     # ── helpers ─────────────────────────────────────────────────────
+    @staticmethod
+    def _concept_fates(understanding, prompts: list[str], *, reused: bool,
+                       consolidation, detection_path: bool = False) -> list[dict]:
+        """What became of EVERY phrase the VLM proposed (USER 2026-09-29: no
+        concept may disappear without a recorded reason). One entry per distinct
+        phrase, with the calls that proposed it and exactly one fate:
+          · ``prompt``        — it is a SAM3 prompt itself;
+          · ``merged``        — folded into the SAME NAME (``same_name_key``), the
+                                carrier is the prompt;
+          · ``not_prompted``  — with the reason (a reused session vocabulary,
+                                or the grounded-detection path).
+        The consolidation's grouping travels as evidence (``consolidation``:
+        the group and whether the phrase is its name, an alias or a part) — it
+        groups for labelling, it never removes a prompt."""
+        if understanding is None:
+            return []
+        from .scene_understanding import _head_noun
+        prompt_set = set(prompts)
+        role: dict[str, dict] = {}
+        if consolidation is not None:
+            cd = consolidation.to_dict()
+            for name in cd.get("objects") or []:
+                role[name] = {"group": name, "as": "name"}
+            for key, kind in (("merged", "alias"), ("parts", "part")):
+                for name, members in (cd.get(key) or {}).items():
+                    for m in members:
+                        role[m] = {"group": name, "as": kind}
+        proposed: dict[str, list] = {}
+        for fu in understanding.per_frame:
+            for o in dict.fromkeys(fu.objects):
+                proposed.setdefault(o, []).append({"frame": fu.frame_id, "tile": fu.tile})
+        out = []
+        for phrase, by in proposed.items():
+            carrier = understanding.merged.get(phrase, phrase)
+            rec = {"concept": phrase, "proposed_by": by, "n_proposals": len(by),
+                   "head_noun": _head_noun(phrase)}
+            if detection_path:
+                rec.update(fate="not_prompted", prompt=None,
+                           reason="grounded-detection path (reconstruction.simple off): "
+                                  "the SAM3 prompts are the detector's labels, this "
+                                  "phrase was one of its targets")
+            elif carrier in prompt_set:
+                rec.update(fate="prompt" if carrier == phrase else "merged", prompt=carrier,
+                           reason=None if carrier == phrase else (
+                               f"same name as '{carrier}' — differs only in case, "
+                               f"spacing, punctuation, a leading article / count word "
+                               f"or a plural ending (same_name_key)"))
+            elif reused:
+                rec.update(fate="not_prompted", prompt=None,
+                           reason="the session vocabulary was reused "
+                                  "(autoprompt.reuse_vocabulary → output/"
+                                  "autoprompt_concepts.json): this run's understanding "
+                                  "describes the scene, the list is the pinned one")
+            else:
+                rec.update(fate="unaccounted", prompt=None,
+                           reason="no rule removed it and it is not a prompt — a bug")
+            if carrier in role:
+                rec["consolidation"] = role[carrier]
+            out.append(rec)
+        return out
+
+    @staticmethod
+    def _census_record(plan, calls: list[dict], fates: list[dict], *,
+                       reused: bool) -> dict:
+        """The VLM half of output/segmentation_census.json, written INTO the
+        contract SAM3 reads (vlm_analysis.json) so it can never describe
+        another run's prompts."""
+        return {
+            "version": 1,
+            "origin": "vlm_proposed",
+            "sampling": plan.to_dict() if plan is not None else None,
+            "calls": calls,
+            "n_calls": len(calls),
+            "n_parsed": sum(1 for c in calls if c["parsed"]),
+            "concepts": fates,
+            "vocabulary_reused": bool(reused),
+        }
+
     def _gate(self, instances: list[Instance]) -> tuple[list[Instance], list[Instance]]:
         accepted, review = [], []
         for inst in instances:

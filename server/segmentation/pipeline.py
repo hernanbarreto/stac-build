@@ -1064,8 +1064,10 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
         label = obj_labels.get(raw_id, categories[0] if categories else "object")
         # Rich SAM3 concept phrases ("concrete support column") become compact
         # id-like labels here — the ONE place labels are persisted — so folder
-        # names / JSON keys downstream never carry spaces.
-        label = re.sub(r"[^a-z0-9]+", "_", str(label).strip().lower()).strip("_")[:48] or "object"
+        # names / JSON keys downstream never carry spaces. The rule lives in
+        # census.concept_label so the census attributes masklets by it too.
+        from segmentation.census import concept_label
+        label = concept_label(label)
         
         if remapped_id in existing_by_id:
             # Update existing entry (label may have changed)

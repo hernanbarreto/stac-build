@@ -24,9 +24,15 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if server_dir not in sys.path:
         sys.path.insert(0, server_dir)
 
+    # The census (below) splits masklets into visits by the mask filter's own key:
+    # read it BEFORE SAM3 runs, so a config without it fails in seconds, not after.
+    from segmentation.census import visit_gap_kf
+    gap_kf = visit_gap_kf(config)
+
     # Read VLM analysis if available (written by vlm_worker)
     vlm_path = output_dir / "vlm_analysis.json"
     boxes_map = None
+    vlm_data = None
     if vlm_path.exists():
         vlm_data = json.loads(vlm_path.read_text())
         prompt = vlm_data.get("prompt", "")
@@ -96,6 +102,23 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     if pipe.check_cancel():
         return
+
+    # THE CENSUS (USER 2026-09-29: "debe segmentar todo, absolutamente preciso y
+    # completo"): what the VLM looked at, every concept it proposed and its fate,
+    # and per prompt the SAM3 masklets with their keyframe spans and visits —
+    # output/segmentation_census.json, from what is already on disk. Written on
+    # every run, a failed segmentation included (every prompt then at zero).
+    try:
+        from segmentation.census import build_census
+        from segmentation.sam3_wrapper import get_sam3_wrapper
+        build_census(output_dir, prompt=prompt, vlm_doc=vlm_data, gap_kf=gap_kf,
+                     frames_dir=frames_dir, seg_error=result.get("error"),
+                     sam3_thresholds=getattr(get_sam3_wrapper(), "applied_thresholds", None),
+                     log=pipe.send_log)
+    except Exception as e:  # noqa: BLE001 — a report bug never costs the masks
+        pipe.send_log(f"segmentation census FAILED ({type(e).__name__}: {e}) — the masks "
+                      f"are kept, output/segmentation_census.json is not written",
+                      level="warning")
 
     if "error" in result:
         raise RuntimeError(f"Segmentation failed: {result['error']}")
