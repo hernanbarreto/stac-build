@@ -297,6 +297,29 @@ reconstruction stage (pccr scan 2026-08-31, 289 kf / 2100 witness, walk 17.5 m):
     measurement is the drift-rate model (visit_drift_run, the 09-18 algorithm); NOT run
     (user's call; the two false closures would have to be excluded first).
 
+34. **SILHOUETTE LEAK EXPERIMENT (2026-09-29 night, USER: "dale, probemos")** — pccr,
+    metal_support_column #101 (6 kf, object 1.3–1.75 m, far background 0.4 m behind)
+    and red_fire_extinguisher #1 (6 kf, 3–3.9 m, background 1.2 m behind). Per keyframe
+    on the object's mask: leak share = the object's OWN edge pixels facing the far
+    background whose depth leaks > 20 % of the gap; leak p95 = the tail; interior =
+    median |d/d_omega − 1| inside the eroded mask after a per-object rescale; relief =
+    p90 − p10 of the depth inside (a flattened prediction shows small).
+        column        leak  p95   interior  relief    extinguisher  leak  p95  interior relief
+        Omega          89 %  29 cm    —      35 cm                   76 %  45 cm   —      24 cm
+        DA3 full       87 %  27 cm  0.8 %    36 cm                   48 %  30 cm  0.7 %   15 cm
+        DA3 crop       53 %  17 cm  6.6 %    14 cm                    0 %   0 cm  1.8 %   10 cm
+        DA3 MASKED     35 %  12 cm  4.3 %    16 cm                    0 %   0 cm  1.3 %    8 cm
+    → DA3 on the full frame is NOT sharper than Omega at the silhouette (the leak is
+    context mixing, both models do it). DA3 on the MASKED, ISOLATED object removes it:
+    leak 89 → 35 % and 76 → 0 %, tails 29 → 12 cm and 45 → 0 cm, interior within 1–4 %
+    of Omega after the rescale, relief consistent with the objects' real depth (a
+    column ~16 cm, an extinguisher ~8 cm; Omega's 35/24 cm are inflated by the leak).
+    Caveats: no scale of its own (Omega's per-object median gives it), monocular
+    interior shape (the silhouette consensus from other views is its check), only for
+    segmented objects (75 % of the cloud), one inference per (object, keyframe) mask
+    (2 383 on pccr ≈ 40 min GPU; restrict to masks with a far background). PLYs of the
+    two objects × 4 variants in output/_exp_depth_edges/ (scratchpad/exp_depth_edges.py).
+
 **Why:** each is a decision the user must take, not a bug to fix silently.
 **How to apply:** raise them together when the run ends; implement only what he
 approves. See [[user-wants-results-fast]].
