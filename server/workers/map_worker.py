@@ -102,12 +102,13 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
                       f"overrides frames_selector '{mode}'")
         mode = _sel
     sf_path = frames_dir / "selected_frames.json"
+    _vlm_done = False      # scene understanding already written while vLLM was up (I2)
     if mode == "parallax_lk":
         # Intake I0 → I1 → I2 in-process (CPU; I2's VLM / SAM3 only when
         # intake.content.enabled). replace on or off, the intake's marker decides step
         # by step what is already measured (intake/run.py): nothing measured is redone,
         # a missing or incomplete step runs.
-        _run_intake_selection(pipe, session_path, frames_dir, config, replace)
+        _vlm_done = _run_intake_selection(pipe, session_path, frames_dir, config, replace)
     elif not replace and sf_path.exists():
         pipe.send_log("Reusing existing selected_frames.json (replace=off)")
     elif mode == "fps":
@@ -290,7 +291,7 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # on the keyframes, before any geometry. The masks are 2-D per keyframe and do
     # not depend on the cloud; they are projected onto the points the cloud stage
     # delivers after F7 (workers/cloudcompy_worker.py) — no model runs twice.
-    _run_semantics_2d(pipe, session_path, config)
+    _run_semantics_2d(pipe, session_path, config, vlm_done=_vlm_done)
 
     # ── Step 2b: DA3-dense fusion frame set ──
     # The asymmetric design feeds DA3 the FULL blur-valid set (a superset of the VGGT
@@ -459,25 +460,45 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     _run_precision_core(pipe, session_path, output_dir, config)
 
 
-def _run_semantics_2d(pipe: WorkerPipe, session_path: Path, config: dict) -> None:
-    """VLM understand + SAM3 (autoprompt, everything) ONCE, at the intake, on the
-    keyframes — USER 2026-09-28: "si ya corrés VLM y SAM3 al inicio que ahí mismo
-    genere todo, y después no se vuelva a correr al final". Both run as the
-    pipeline's own workers (workers/vlm_worker.py, workers/sam3_worker.py) hosted
-    by this stage: vLLM comes up for the VLM and is stopped before SAM3 loads.
-    The mask→cloud projection is NOT done here (no cloud yet): the SAM3 worker
-    leaves the 2-D masks and the cloud stage projects them after F7. Gated by
-    reconstruction.precision.enabled and pipeline.auto_segment."""
+def _semantics_enabled(pipe: WorkerPipe, config: dict) -> bool:
     from precision.config import load_precision_config
-    from workers.base import run_stage_inline
     if not load_precision_config(config).enabled:
-        return
+        return False
     if not bool((config.get("pipeline") or {}).get("auto_segment", True)):
         pipe.send_log("pipeline.auto_segment is off — no VLM / SAM3 at the intake")
+        return False
+    return True
+
+
+def _run_vlm_understand(pipe: WorkerPipe, session_path: Path, config: dict) -> None:
+    """Scene understanding (workers/vlm_worker.py: the Qwen3-VL auto-prompter →
+    output/vlm_analysis.json, SAM3's vocabulary) on the keyframes, hosted by this
+    stage. Called while vLLM is already up (I2's GPU handover) so the VLM is loaded
+    once per run; from _run_semantics_2d otherwise."""
+    from workers.base import run_stage_inline
+    if not _semantics_enabled(pipe, config):
         return
     pipe.send_progress(4, "Scene analysis (VLM) on the keyframes...", stage="reconstruction")
     run_stage_inline(pipe, "workers.vlm_worker", str(session_path), config,
                      label="vlm", pct_range=(4.0, 4.5))
+
+
+def _run_semantics_2d(pipe: WorkerPipe, session_path: Path, config: dict, *,
+                      vlm_done: bool = False) -> None:
+    """VLM understand + SAM3 (autoprompt, everything) ONCE, at the intake, on the
+    keyframes — USER 2026-09-28: "si ya corrés VLM y SAM3 al inicio que ahí mismo
+    genere todo, y después no se vuelva a correr al final". Both run as the
+    pipeline's own workers (workers/vlm_worker.py, workers/sam3_worker.py) hosted
+    by this stage. With ``vlm_done`` the understanding was already written at I2's
+    handover (vLLM up once); SAM3 then works from the JSON with the card free.
+    The mask→cloud projection is NOT done here (no cloud yet): the SAM3 worker
+    leaves the 2-D masks and the cloud stage projects them after F7. Gated by
+    reconstruction.precision.enabled and pipeline.auto_segment."""
+    from workers.base import run_stage_inline
+    if not _semantics_enabled(pipe, config):
+        return
+    if not vlm_done:
+        _run_vlm_understand(pipe, session_path, config)
     pipe.send_progress(4.5, "Segmentation (SAM3) on the keyframes...", stage="reconstruction")
     run_stage_inline(pipe, "workers.sam3_worker", str(session_path), config,
                      label="sam3", pct_range=(4.5, 5.0))
@@ -1780,10 +1801,22 @@ def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path
     # the I2 tags, then is stopped BEFORE SAM3 segments the exclusion masks — the two
     # never share the card, and the stop is VERIFIED (no 'vllm serve' left) before
     # SAM3 loads; the next VLM consumer restarts it (ensure_service).
+    vlm_done = {"ran": False}
+
+    def _before_sam3():
+        # vLLM is up (it just tagged the keyframes): let it also UNDERSTAND the scene
+        # now (workers/vlm_worker.py → output/vlm_analysis.json, SAM3's vocabulary),
+        # so the VLM comes up ONCE per run — USER 2026-09-28: "no conviene, ya que
+        # está el vlm arriba, generar los json para cada etapa, y luego sam3.1
+        # trabajar con cada json, para no levantar bajar levantar bajar modelos" —
+        # then hand the card to SAM3, verified.
+        _run_vlm_understand(pipe, session_path, config)
+        vlm_done["ran"] = True
+        stop_semantic_service_verified(pipe, stage="intake I2 SAM3")
+
     res = run_intake(session_path, icfg, log=pipe.send_log, progress=None,
                      before_content=lambda: _ensure_semantic_or_fail(pipe, config),
-                     before_sam3=lambda: stop_semantic_service_verified(
-                         pipe, stage="intake I2 SAM3"),
+                     before_sam3=_before_sam3,
                      cancelled=pipe.check_cancel)
     ran = [k for k, v in res["steps"].items() if v.get("ran")]
     pipe.send_log(f"Intake steps run this time: {ran or 'none (every marker matched)'}")
@@ -1799,6 +1832,7 @@ def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path
                   f"quantum {icfg.parallax.parallax_quantum_px:g} px), {s['n_witness']} witness "
                   f"frames, {s['n_warnings']} coverage warning(s) → selected_frames.json / "
                   f"witness_frames.json")
+    return vlm_done["ran"]
 
 
 def _intake_da3_frames(frames_dir: Path) -> dict:
