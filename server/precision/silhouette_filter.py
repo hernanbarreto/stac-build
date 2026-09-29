@@ -14,15 +14,18 @@ native pixel → the lens (F0's maps) → ``precision.camera.mask_grid_for``). A
 belongs to no masklet is UNSEGMENTED and is never touched: silence is not a verdict.
 
 Its ELIGIBLE views: every keyframe j ≠ its birth keyframe where m has a (non-empty)
-mask, whose ray to the point makes an angle ≥ ``precision.refine.min_tri_deg`` with the
-birth ray (a view along the birth ray cannot tell where on it the point is), where the
-point projects inside the frame, and where it is NOT occluded according to view j's own
+mask, whose PARALLAX on the birth ray — φ = min(θ, 180° − θ), θ the angle at the point
+between the two rays — is ≥ ``precision.refine.min_tri_deg`` (a view along the birth
+line, in front of the point (θ ≈ 0°) or behind it (θ ≈ 180°, a walk loop around the
+object), sees every depth on that line at one pixel and cannot tell where on it the
+point is: a displacement along the ray moves ∝ |sin θ| in the view), where the point
+projects inside the frame, and where it is NOT occluded according to view j's own
 corrected depth (F6's): occluded when that depth is measured and the point lies deeper
 than it by more than ``loops.witness.occlusion_tol_rel`` — the witness module's rule.
 At most ``precision.cloud.silhouette_max_views`` views are tested per point (a COST cap):
 per (masklet, birth keyframe) group, the views that frame the group's centroid first,
-the widest triangulation angle at the centroid first, then the keyframe order —
-deterministic, and the most informative: parallax is what exposes a tail.
+the largest parallax at the centroid first, then the keyframe order — deterministic,
+and the most informative: parallax is what exposes a tail.
 
     rule 1 (own silhouette)   with ≥ silhouette_min_votes eligible views, the point
                               leaves when the share of them where it lands inside its
@@ -38,10 +41,12 @@ several masklets, and at this point of the chain there is no fused-object groupi
 to several masklets leaves only when EVERY one of its memberships says so — a point that
 fits one of its objects is part of it.
 
-Cost: one projection per (membership, tested view) pair — vectorised per view, all the
-memberships that test it at once — on the device ``precision.cloud.silhouette_device``
-declares (an unavailable device fails; nothing falls back). The report names the pairs
-tested and the seconds.
+Cost: one projection per (membership, tested view) pair — vectorised per view, the
+memberships that test it in blocks of ``precision.cloud.silhouette_block`` (a BOUND on
+the device memory of one step: the counts are accumulated per membership, so the block
+changes no verdict) — on the device ``precision.cloud.silhouette_device`` declares (an
+unavailable device fails; nothing falls back). The report names the pairs tested and
+the seconds.
 """
 
 from __future__ import annotations
@@ -69,6 +74,7 @@ class SilhouetteError(RuntimeError):
 @dataclass(frozen=True)
 class SilhouetteParams:
     max_views: int              # precision.cloud.silhouette_max_views (BOUND, cost)
+    block: int                  # precision.cloud.silhouette_block (BOUND, device memory)
     min_votes: int              # precision.cloud.silhouette_min_votes
     min_inside_frac: float      # precision.cloud.silhouette_min_inside_frac
     dilate_px: int              # segmentation.mask_filter.dilate_px
@@ -85,7 +91,8 @@ def params_from(pcfg, raw_cfg: dict) -> SilhouetteParams:
         raise SilhouetteError("segmentation.mask_filter.dilate_px is missing — the silhouette "
                               "filter dilates the SAM3 masks by that key, nothing is assumed")
     c = pcfg.cloud
-    return SilhouetteParams(max_views=int(c.silhouette_max_views), min_votes=int(c.silhouette_min_votes),
+    return SilhouetteParams(max_views=int(c.silhouette_max_views), block=int(c.silhouette_block),
+                            min_votes=int(c.silhouette_min_votes),
                             min_inside_frac=float(c.silhouette_min_inside_frac),
                             dilate_px=int(mf["dilate_px"]),
                             occlusion_tol_rel=float(load_loops_config(raw_cfg).witness.occlusion_tol_rel),
@@ -149,7 +156,9 @@ def masks_by_keyframe(output_dir: Path, masks) -> Dict[int, List[Tuple[int, str]
 def _view_order(cent: np.ndarray, birth_c: np.ndarray, views: np.ndarray, w2c: np.ndarray,
                 K: np.ndarray, hw: Tuple[int, int], birth: int, max_views: int) -> np.ndarray:
     """The views one (masklet, birth keyframe) group tests: those that frame its centroid
-    first, the widest angle at the centroid first, then the keyframe order."""
+    first, the largest parallax on the birth ray at the centroid first (|sin θ|: a view
+    from behind the object along the birth line has none, like one beside the birth
+    camera), then the keyframe order."""
     v = views[views != birth]
     if not len(v):
         return v
@@ -165,8 +174,8 @@ def _view_order(cent: np.ndarray, birth_c: np.ndarray, views: np.ndarray, w2c: n
     a = birth_c - cent
     b = C - cent
     cos = (b @ a) / np.maximum(np.linalg.norm(a) * np.linalg.norm(b, axis=1), 1e-12)
-    ang = np.arccos(np.clip(cos, -1.0, 1.0))
-    order = np.lexsort((v, -ang, ~framed))
+    parallax = np.arccos(np.clip(np.abs(cos), 0.0, 1.0))                # min(θ, 180° − θ)
+    order = np.lexsort((v, -parallax, ~framed))
     return v[order][:int(max_views)]
 
 
@@ -282,33 +291,35 @@ def silhouette_verdict(xyz: np.ndarray, birth: np.ndarray, members: Dict[int, np
                  else torch.zeros(H * W, **f64))
         if depth.numel() != H * W:
             raise SilhouetteError(f"the corrected depth of keyframe {j} is not on the {H}x{W} grid")
-        idx = torch.as_tensor(sel, device=dev)
-        X = X_all[t_pt[idx]]
         T = torch.as_tensor(np.asarray(w2c[j], np.float64), **f64)
-        P = X @ T[:3, :3].T + T[:3, 3]
-        z = P[:, 2]
-        front = z > 1e-6
-        zs = torch.where(front, z, torch.ones_like(z))
-        ur = torch.round(Kt[0, 0] * P[:, 0] / zs + Kt[0, 2]).long()
-        vr = torch.round(Kt[1, 1] * P[:, 1] / zs + Kt[1, 2]).long()
-        inframe = front & (ur >= 0) & (ur < W) & (vr >= 0) & (vr < H)
-        pix = torch.where(inframe, vr * W + ur, torch.zeros_like(ur))
-        dj = depth[pix]
-        occluded = (dj > 1e-6) & (z > dj * (1.0 + params.occlusion_tol_rel))
-        a = Cb_all[t_birth[idx]] - X
-        b = Cb_all[j] - X
-        cos = (a * b).sum(1) / torch.clamp(a.norm(dim=1) * b.norm(dim=1), min=1e-12)
-        mpix = t_lut[pix]
-        elig = inframe & ~occluded & (cos <= cos_min) & (mpix >= 0)
-        mp = torch.clamp(mpix, min=0)
-        ll = lab_local[t_lab[idx]]
-        if bool((ll < 0).any()):
-            raise SilhouetteError(f"keyframe {j} is a view of a masklet with no mask there")
-        own = dil[ll, mp]
-        other = (cnt[mp] - und[ll, mp].to(torch.int32)) > 0
-        n_elig[idx] += elig.to(torch.int32)
-        n_own[idx] += (elig & own).to(torch.int32)
-        n_oth[idx] += (elig & other).to(torch.int32)
+        for b0 in range(0, len(sel), int(params.block)):
+            idx = torch.as_tensor(sel[b0:b0 + int(params.block)], device=dev)
+            X = X_all[t_pt[idx]]
+            P = X @ T[:3, :3].T + T[:3, 3]
+            z = P[:, 2]
+            front = z > 1e-6
+            zs = torch.where(front, z, torch.ones_like(z))
+            ur = torch.round(Kt[0, 0] * P[:, 0] / zs + Kt[0, 2]).long()
+            vr = torch.round(Kt[1, 1] * P[:, 1] / zs + Kt[1, 2]).long()
+            inframe = front & (ur >= 0) & (ur < W) & (vr >= 0) & (vr < H)
+            pix = torch.where(inframe, vr * W + ur, torch.zeros_like(ur))
+            dj = depth[pix]
+            occluded = (dj > 1e-6) & (z > dj * (1.0 + params.occlusion_tol_rel))
+            a = Cb_all[t_birth[idx]] - X
+            b = Cb_all[j] - X
+            cos = (a * b).sum(1) / torch.clamp(a.norm(dim=1) * b.norm(dim=1), min=1e-12)
+            mpix = t_lut[pix]
+            # parallax on the birth ray, min(θ, 180° − θ) ≥ min_tri_deg: |cos θ| ≤ cos(min)
+            elig = inframe & ~occluded & (cos.abs() <= cos_min) & (mpix >= 0)
+            mp = torch.clamp(mpix, min=0)
+            ll = lab_local[t_lab[idx]]
+            if bool((ll < 0).any()):
+                raise SilhouetteError(f"keyframe {j} is a view of a masklet with no mask there")
+            own = dil[ll, mp]
+            other = (cnt[mp] - und[ll, mp].to(torch.int32)) > 0
+            n_elig[idx] += elig.to(torch.int32)
+            n_own[idx] += (elig & own).to(torch.int32)
+            n_oth[idx] += (elig & other).to(torch.int32)
     ne, no, nt = n_elig.cpu().numpy(), n_own.cpu().numpy(), n_oth.cpu().numpy()
     rule1 = (ne >= int(params.min_votes)) & (no < float(params.min_inside_frac) * ne)
     rule2 = (nt > 0) & (no == 0)
@@ -382,15 +393,23 @@ def run_filter(output_dir: Path, tmp: Path, frames: Dict[int, dict], kf: Sequenc
     masks_path = output_dir / str(doc.get("mask_file") or "seg_masks.npz")
     if not masks_path.exists():
         raise SilhouetteError(f"{masks_path} does not exist while {seg.name} names it")
-    kfs = mask_space.keyframe_numbers(output_dir) or []
-    if [int(x) for x in kfs] != [int(x) for x in kf]:
-        raise SilhouetteError("the mask space's keyframe list is not the camera's keyframe list — "
-                              "positions would name different keyframes")
     masklets = VD.masklet_visits(output_dir, log=lambda m: log(f"{LOG_TAG} {m}"))
     labels = {int(m.oid): str(m.label) for m in masklets}
     mask_kf = {int(m.oid): [int(k) for k in m.keyframes] for m in masklets}
     masks = np.load(masks_path)
     by_kf = masks_by_keyframe(output_dir, masks)
+    # What the store can testify about the keyframe list it was written over: a
+    # POSITION-keyed store records no keyframe numbers, only positions, so the one thing
+    # it can contradict is the list's LENGTH — a mask at a position this list does not
+    # have. (A list of the same length but other keyframes cannot be told from the
+    # store; the mask space and the positions in camera_frames.txt are all there is.)
+    space = mask_space.resolve(output_dir, masks=masks, log=lambda m: None)
+    if space.space == mask_space.SPACE_KEYFRAME:
+        beyond = sorted(f for f in space.mask_frames if not 0 <= int(f) < len(kf))
+        if beyond:
+            raise SilhouetteError(f"{masks_path.name} holds masks at keyframe position(s) {beyond[:8]} "
+                                  f"and camera_frames.txt lists {len(kf)} keyframes — the store was "
+                                  f"written over another keyframe list")
     probe = next((k for k in masks.files if _MASK_KEY.match(k)), None)
     if probe is None:
         log(f"{LOG_TAG} {masks_path.name} holds no mask — nothing judged")

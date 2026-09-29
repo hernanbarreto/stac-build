@@ -84,7 +84,7 @@ def load_f6(out: Path, inp) -> dict:
     """F6's report and its per-keyframe s_k, verified against the session: F6 must have
     run, on this camera epoch, and on this geometry epoch or one only NEW-CLOUD epochs
     followed (they move no camera). {"report", "path", "s_k" (per keyframe, NaN where F6
-    did not sweep), "frames" (the keyframes with a depth map)}."""
+    measured none), "frames" (the keyframes with a depth map)}."""
     from correction.epoch import epoch_kind
     from precision.depth_sweep import DEPTH_DIRNAME, REPORT_NAME
     out = Path(out)
@@ -119,7 +119,7 @@ def load_f6(out: Path, inp) -> dict:
         raise CorrectedCloudError(f"{rp} lists keyframe(s) {missing[:8]} whose depth map is missing "
                                   f"from {ddir}")
     if not frames:
-        raise CorrectedCloudError(f"{rp} swept no keyframe — there is no depth to build a cloud on")
+        raise CorrectedCloudError(f"{rp} wrote no keyframe — there is no depth to build a cloud on")
     return {"report": rep, "path": rp, "s_k": s_k, "frames": frames, "dir": ddir}
 
 
@@ -283,7 +283,7 @@ def write_chunks(inp, f6: dict, raw_cfg: dict, tmp: Path, log: Callable) -> List
         log(f"{LOG_TAG} chunk {k}: {len(members)} keyframes, conf threshold {thr:.3f} → {len(xyz):,} pts "
             f"(tier 0 {n_tier['tier0']:,}, tier 1 {n_tier['tier1']:,})")
     if n_no_f6:
-        log(f"{LOG_TAG} {n_no_f6} keyframe(s) without an F6 depth map (not swept) contribute nothing")
+        log(f"{LOG_TAG} {n_no_f6} keyframe(s) without an F6 depth map (no prior) contribute nothing")
     if not chunks:
         raise CorrectedCloudError("no F6 pixel survived the confidence gate in any chunk")
     return chunks
@@ -510,9 +510,16 @@ def run_corrected_cloud(session_dir: Path, pcfg, log: Callable = print,
     f6 = load_f6(out, inp)
     s_k = f6["s_k"]
     ok = np.isfinite(s_k)
-    _p(6, f"F6 ({f6['path']}): {len(f6['frames'])} of {len(inp.kf)} keyframes swept, tier-1 rule "
+    _p(6, f"F6 ({f6['path']}): {len(f6['frames'])} of {len(inp.kf)} keyframes with a depth map, tier-1 rule "
           f"{f6['report'].get('tier1_rule', 'confirmation (a report older than the rule switch)')}, "
           f"s_k median {np.median(s_k[ok]):.4f}, range {s_k[ok].min():.4f}–{s_k[ok].max():.4f}")
+    # the raw cloud (and the cleaner's memory — gpu_cloud_clean merges every chunk in one
+    # process) scale with F6's native grid, not with Omega's record grid: said up front
+    with np.load(inp.records_dir / f"frame_{inp.kf[0]}.npz") as z:
+        rec_h, rec_w = (int(x) for x in z["depth"].shape[:2])
+    px_ratio = float(inp.wh[0]) * float(inp.wh[1]) / float(rec_w * rec_h)
+    _p(8, f"F6's native grid {inp.wh[0]}x{inp.wh[1]} holds {px_ratio:.2f}x the pixels of Omega's record "
+          f"grid {rec_w}x{rec_h} — the raw cloud scales with it")
     tmp = out / TX_TMP
     if tmp.exists():
         shutil.rmtree(tmp)
@@ -523,9 +530,12 @@ def run_corrected_cloud(session_dir: Path, pcfg, log: Callable = print,
               "f6": {"report": str(f6["path"].relative_to(out)), "geometry_epoch": rep6.get("geometry_epoch"),
                      "camera_epoch": rep6.get("camera_epoch"), "tier1_rule": rep6.get("tier1_rule"),
                      "contradiction": rep6.get("contradiction"), "percent": rep6.get("percent"),
-                     "n_swept": len(f6["frames"])},
+                     "n_swept": rep6.get("n_swept"), "n_frames": len(f6["frames"]),
+                     "prior_only_keyframes": rep6.get("prior_only_keyframes")},
               "camera": [float(v) for v in inp.cam.params] if hasattr(inp.cam, "params") else None,
-              "grid": {"width": int(inp.wh[0]), "height": int(inp.wh[1]), "space": "undistorted native (F0 maps)"},
+              "grid": {"width": int(inp.wh[0]), "height": int(inp.wh[1]), "space": "undistorted native (F0 maps)",
+                       "record_grid": {"width": rec_w, "height": rec_h},
+                       "native_px_per_record_px": round(px_ratio, 4)},
               "per_frame": {str(f): {"s_k": float(s_k[i])} for i, f in enumerate(inp.kf) if np.isfinite(s_k[i])},
               "s_k": {"median": float(np.median(s_k[ok])), "min": float(s_k[ok].min()), "max": float(s_k[ok].max())},
               "recipe": ["F6 depth: tier 0 + tier 1 (maximum coverage, contradiction vote)",

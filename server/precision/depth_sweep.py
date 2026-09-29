@@ -1048,11 +1048,27 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
         + (f"ON — the {dcfg.contradiction_views} most covisible keyframes, each with its own "
            f"error margin, majority against the confirmations" if dcfg.contradiction
            else "OFF (precision.depth.contradiction false) — nothing is judged contradicted"))
+    # the keyframes pass 2 writes: the swept ones — and, at MAXIMUM COVERAGE, every keyframe
+    # with a prior. One with no photometric view in [min_tri_deg, max_tri_deg] (a rotation-
+    # only or static stretch, kept since coverage_trim is off) has no ZNCC signal anywhere:
+    # its pixels fall back to the prior exactly like any unconfirmed pixel of a swept one.
+    written = (list(swept) if dcfg.prior_requires_confirmation
+               else [i for i in range(n_kf) if has_prior[i]])
+    prior_only = sorted(set(written) - set(swept))
+    for i in prior_only:
+        shape = np.load(work / f"prior_{inp.kf[i]}.npy", mmap_mode="r").shape
+        np.save(work / f"sweep_{inp.kf[i]}.npy", np.zeros(shape, np.float32))
+        np.save(work / f"score_{inp.kf[i]}.npy", np.full(shape, np.nan, np.float32))
+        np.save(work / f"signal_{inp.kf[i]}.npy", np.zeros(shape, bool))
+    if prior_only:
+        log(f"{LOG_TAG} {len(prior_only)} keyframe(s) with a prior and no photometric view in "
+            f"the triangulation range (e.g. {[inp.kf[i] for i in prior_only[:8]]}): no sweep, "
+            f"their prior is judged like every unconfirmed pixel (maximum coverage)")
     # every keyframe's depth for the contradiction test: the swept depth where it has
     # signal, Omega's prior elsewhere — loaded once (≈ 1.5 MB per keyframe)
     best_depth: Dict[int, np.ndarray] = {}
     best_margin: Dict[int, np.ndarray] = {}
-    for j in swept:
+    for j in written:
         fj = inp.kf[j]
         pj = np.load(work / f"prior_{fj}.npy")
         sj = np.load(work / f"sweep_{fj}.npy")
@@ -1072,7 +1088,7 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
     cal_omega, cal_da3 = [], []
     da3_dir = out / "da3_run" / "results_output"
     t_hb = time.time()
-    for n_done, i in enumerate(swept):
+    for n_done, i in enumerate(written):
         f = inp.kf[i]
         d = np.load(work / f"sweep_{f}.npy")
         sc = np.load(work / f"score_{f}.npy")
@@ -1149,7 +1165,7 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
             "zncc_median_tier0": float(np.median(sc[t0m])) if t0m.any() else None,
             "prior_vs_tier0_median_rel": (float(np.median(np.abs(z0[t0m] / d[t0m] - 1)))
                                           if t0m.any() else None),
-            "boundary_hypothesis_frac": boundary_frac.get(i),
+            "boundary_hypothesis_frac": boundary_frac.get(i), "swept": i not in prior_only,
             "n_contradiction_views": len(ca),
             "s_k": float(s_k[i]), "s_k_samples": int(s_n[i]),
             "s_k_independent": float(s_k_raw[i])}
@@ -1167,7 +1183,7 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
             cn = cv2.remap(np.asarray(dc, np.float32), gx, gy, cv2.INTER_NEAREST,
                            borderValue=np.nan)
             cal_da3.append(CAL.sample_pairs(d, dn, cn, t0m, dcfg.calib_samples_per_frame, rng))
-        t_hb = _hb(pcfg.runner, t_hb, f"{LOG_TAG} consistency {n_done + 1}/{len(swept)}", log)
+        t_hb = _hb(pcfg.runner, t_hb, f"{LOG_TAG} consistency {n_done + 1}/{len(written)}", log)
 
     tables = {}
     for name, smp in (("omega", CAL.concat(cal_omega)), ("da3", CAL.concat(cal_da3))):
@@ -1182,7 +1198,8 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
     doc = {"version": REPORT_VERSION, "provenance": PROVENANCE, **inp.epochs,
            "params": asdict(dcfg),
            "device": str(dev), "seconds": round(time.time() - t_start, 1),
-           "n_keyframes": n_kf, "n_swept": len(swept),
+           "n_keyframes": n_kf, "n_swept": len(swept), "n_written": len(written),
+           "prior_only_keyframes": [inp.kf[i] for i in prior_only],
            "no_prior_keyframes": [inp.kf[i] for i in range(n_kf) if not has_prior[i]],
            "n_witness_views_available": len(inp.wit),
            "beta_source": beta_source, "zncc_floor": floor,
@@ -1191,7 +1208,7 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
            "tau_px": inp.tau_px, "heldout_rms_px": inp.heldout_rms_px,
            "s_k": {"min": float(np.nanmin(s_k)), "max": float(np.nanmax(s_k)),
                    "median": float(np.nanmedian(s_k))},
-           # every keyframe's s_k (per_frame holds only the swept ones): the corrected cloud
+           # every keyframe's s_k (per_frame holds only the written ones): the corrected cloud
            # and the chunk check carry Omega's depth to this epoch with it
            "s_k_by_frame": {str(f): float(s_k[i]) for i, f in enumerate(inp.kf) if np.isfinite(s_k[i])},
            "tier1_rule": tier1_rule, "contradiction": bool(dcfg.contradiction),

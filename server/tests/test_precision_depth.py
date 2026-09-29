@@ -52,15 +52,25 @@ def _texture(X, which):
     return 0.15 + 0.5 * _value_noise(a, b, g, 0.05) + 0.3 * _value_noise(a + 3.1, b - 1.7, g, 0.021)
 
 
-def render(c2w, K_=K, wh=(W, H), ss=2):
-    """(gray [0,1] quantised to 8 bits, z-depth) of the scene from camera c2w."""
+def render(c2w, K_=K, wh=(W, H), ss=2, lens=None):
+    """(gray [0,1] quantised to 8 bits, z-depth) of the scene from camera c2w. With
+    ``lens`` (k1, k2, p1, p2) the ORIGINAL frame of a distorted camera: each sample sees
+    along the ray of its UNDISTORTED position (the lens inverted to machine precision)."""
     w, h = wh[0] * ss, wh[1] * ss
     Ks = K_.copy()
     Ks[:2] *= ss
     Ks[0, 2] = (K_[0, 2] + 0.5) * ss - 0.5
     Ks[1, 2] = (K_[1, 2] + 0.5) * ss - 0.5
     v, u = np.mgrid[0:h, 0:w].astype(np.float64)
-    d = np.stack([(u - Ks[0, 2]) / Ks[0, 0], (v - Ks[1, 2]) / Ks[1, 1], np.ones_like(u)], -1)
+    if lens is None:
+        d = np.stack([(u - Ks[0, 2]) / Ks[0, 0], (v - Ks[1, 2]) / Ks[1, 1], np.ones_like(u)], -1)
+    else:
+        nat = np.stack([(u + 0.5) / ss - 0.5, (v + 0.5) / ss - 0.5], -1).reshape(-1, 1, 2)
+        und = cv2.undistortPointsIter(nat, K_, np.asarray(lens, np.float64), None, K_,
+                                      (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 200, 1e-14))
+        und = und.reshape(h, w, 2)
+        d = np.stack([(und[..., 0] - K_[0, 2]) / K_[0, 0], (und[..., 1] - K_[1, 2]) / K_[1, 1],
+                      np.ones_like(u)], -1)
     R, C = c2w[:3, :3], c2w[:3, 3]
     dw = d @ R.T
     best_t = np.full((h, w), np.inf)
@@ -397,9 +407,11 @@ def test_compare_counts_common_pixels(tmp_path):
 
 # ── the whole run on a synthetic session ─────────────────────────────────
 
-def _session(tmp_path, pcfg):
-    """Frames, camera, poses, Omega records, F4 tracks and an APPLIED F5 on the scene."""
-    from precision.camera import CameraModel, GridMap, save_camera_json
+def _session(tmp_path, pcfg, lens=None):
+    """Frames, camera, poses, Omega records, F4 tracks and an APPLIED F5 on the scene.
+    ``lens`` (k1, k2, p1, p2): the camera distorts — frames, records and track pixels are
+    those of the ORIGINAL (distorted) frame, as a real session's are."""
+    from precision.camera import CameraModel, GridMap, distort_points, save_camera_json
     from precision.refine import REFINE_NAME, RESIDUALS_NAME, WITNESS_FRAMES_NAME, WITNESS_POSES_NAME
     from precision.tracks import TRACKS_NAME
     s = tmp_path / "sess"
@@ -418,12 +430,13 @@ def _session(tmp_path, pcfg):
     kf.append(50)
     gh, gw = H // 2, W // 2
     grid = GridMap("omega", gw, gh, gw, gh, 0, 0, 0, 0, W, H, W, H)
-    camm = CameraModel(W, H, (K[0, 0], K[1, 1], K[0, 2], K[1, 2], 0, 0, 0, 0), "refine", 1, grid)
+    camm = CameraModel(W, H, (K[0, 0], K[1, 1], K[0, 2], K[1, 2], *(lens or (0, 0, 0, 0))), "refine", 1,
+                       grid)
     save_camera_json(out / "camera.json", camm, 1)
     (out / "geometry_epoch.json").write_text(json.dumps({"epoch": 1}))
     omega_units = 0.8                                     # the records' own units
     for f, c in list(zip(kf, kf_c2w)) + list(zip(wit, wit_c2w)):
-        img, z = render(c)
+        img, z = render(c, lens=lens)
         cv2.imwrite(str(fr / f"{f:06d}.png"), np.round(img * 255).astype(np.uint8))
         if f in kf:
             zg = cv2.resize(z, (gw, gh), interpolation=cv2.INTER_AREA)
@@ -451,12 +464,12 @@ def _session(tmp_path, pcfg):
                          np.stack([rng.uniform(BOX[0], BOX[1], 80), rng.uniform(BOX[2], BOX[3], 80),
                                    np.full(80, BOX_Z)], 1)])
     ot, of, ouv = [], [], []
-    zmaps = {f: render(c)[1] for f, c in zip(kf[:4], kf_c2w[:4])}
+    zmaps = {f: render(c, lens=lens)[1] for f, c in zip(kf[:4], kf_c2w[:4])}
     for t, X in enumerate(Xs):
         for f, c in zip(kf[:4], kf_c2w[:4]):
             w2c = np.linalg.inv(c)
             p = K @ (w2c[:3, :3] @ X + w2c[:3, 3])
-            u, v = p[:2] / p[2]
+            u, v = distort_points((p[:2] / p[2])[None], camm)[0]      # the original frame's pixel
             iu, iv = int(round(u)), int(round(v))
             # a track exists only where the point is SEEN (not behind the box)
             if not (0 <= iu < W and 0 <= iv < H) or abs(zmaps[f][iv, iu] - p[2]) > 0.01:
@@ -511,6 +524,16 @@ def test_run_sweep_end_to_end_on_a_synthetic_session(tmp_path, pcfg):
     assert rep["counts"]["prior_not_independent"] == 0
     assert set(rep["s_k_by_frame"]) == {str(f) for f in (10, 20, 30, 40, 50)}   # every keyframe's s_k
     assert any("MAXIMUM COVERAGE" in str(m) for m in logs)
+    # keyframe 50 sees a wall no other camera sees: no photometric view in the triangulation
+    # range, never swept — at maximum coverage its prior is still written, as tier 1
+    assert rep["n_swept"] == 4 and rep["n_written"] == 5 and rep["prior_only_keyframes"] == [50]
+    assert rep["per_frame"]["50"]["swept"] is False and rep["per_frame"]["10"]["swept"] is True
+    with np.load(out / DS.DEPTH_DIRNAME / "frame_50.npz") as z:
+        s50, d50 = z["source"], z["depth"]
+        assert np.all(np.isnan(z["ncc"]))                     # no ZNCC was measured there
+    has = s50 != DS.DISCARD_NO_PRIOR
+    assert has.mean() > 0.9
+    assert np.all(s50[has] == DS.SOURCE_PRIOR_FILL) and np.all(d50[has] > 0)
     # the untextured patch has no ZNCC signal: its pixels fall back to Omega's prior
     assert (src[flat & ok] == DS.SOURCE_PRIOR_FILL).mean() > 0.5
     assert np.all(depth[src == DS.SOURCE_PRIOR_FILL] > 0)
@@ -519,6 +542,87 @@ def test_run_sweep_end_to_end_on_a_synthetic_session(tmp_path, pcfg):
     # re-running reads β from the tier-0 calibration of this epoch
     doc2 = DS.run_sweep(s, pcfg, log=logs.append, device="cpu")
     assert doc2["beta_source"] == "tier0"
+
+
+LENS = (-0.12, 0.03, 0.002, -0.0015)          # ≈ 4 px of barrel at the corners
+
+
+def _cast(C, D):
+    """t of the nearest scene surface along C + t·D (the render's planes)."""
+    best = np.full(len(D), np.inf)
+    for zp, rect in ((WALL_Z, None), (BOX_Z, BOX), (FLAT_Z, FLAT)):
+        t = (zp - C[2]) / D[:, 2]
+        X = C + t[:, None] * D
+        ok = t > 0
+        if rect is not None:
+            ok &= (X[:, 0] >= rect[0]) & (X[:, 0] <= rect[1]) & (X[:, 1] >= rect[2]) & (X[:, 1] <= rect[3])
+        best = np.where(ok & (t < best), t, best)
+    return best
+
+
+def test_f6_output_feeds_the_corrected_cloud_through_a_real_lens(tmp_path, pcfg):
+    """The F6 → f7_cloud contract, end to end, on a camera that DISTORTS and Omega records on
+    a half-resolution grid of the distorted frame: F6's stored depth must be camera z on the
+    undistorted native grid of K (F0's maps, K_new = K), in metres (× s_k) — the exact
+    convention write_chunks unprojects with. Each entering point is compared with the TRUE
+    surface point of its own undistorted pixel, X_true = C + t·R·K⁻¹[u, v, 1] — the lens
+    there is the scene's, the frames were rendered through it."""
+    from correction.session import read_ply
+    from precision import corrected_cloud as CC
+    from precision.camera import distort_points
+    s, _ = _session(tmp_path, pcfg, lens=LENS)
+    DS.run_sweep(s, pcfg, log=lambda *a: None, device="cpu")
+    inp = DS.load_inputs(s, pcfg)
+    assert np.allclose(inp.cam.dist()[:4], LENS) and np.allclose(inp.K, K)
+    f6 = CC.load_f6(s / "output", inp)
+    tmp = tmp_path / "chunks"
+    gate = {"reconstruction": {"simple": {"conf_percentile": 20, "conf_min_norm": 0.1}}}
+    CC.write_chunks(inp, f6, gate, tmp, log=lambda m: None)
+    xyz, fg, pr, pc = [], [], [], []
+    for p in sorted(tmp.glob("chunk_*.ply")):
+        _, d = read_ply(p)
+        with np.load(p.with_name(p.stem + "_origins.npz")) as z:
+            fg.append(z["frame_global"]); pr.append(z["pixel_row"]); pc.append(z["pixel_col"])
+        xyz.append(np.stack([d["x"], d["y"], d["z"]], 1))
+    xyz, fg = np.concatenate(xyz).astype(np.float64), np.concatenate(fg).astype(np.int64)
+    pr, pc = np.concatenate(pr).astype(np.int64), np.concatenate(pc).astype(np.int64)
+    Kinv = np.linalg.inv(K)
+    err, err_lens_ignored, tier, periph = [], [], [], []
+    for i, f in enumerate(inp.kf):
+        m = fg == f
+        if not m.any():
+            continue
+        c2w = np.linalg.inv(inp.kf_w2c[i])
+        px = np.stack([pc[m], pr[m]], 1).astype(np.float64)
+        for rays, sink in ((px, err), (distort_points(px, inp.cam), err_lens_ignored)):
+            D = (np.c_[rays, np.ones(len(rays))] @ Kinv.T) @ c2w[:3, :3].T
+            t = _cast(c2w[:3, 3], D)
+            sink.append(np.linalg.norm(xyz[m] - (c2w[:3, 3] + t[:, None] * D), axis=1) / t)
+        with np.load(s / "output" / DS.DEPTH_DIRNAME / f"frame_{f}.npz") as z:
+            tier.append(z["source"][pr[m], pc[m]])
+        periph.append(np.hypot(pc[m] - K[0, 2], pr[m] - K[1, 2]) > 0.8 * np.hypot(K[0, 2], K[1, 2]))
+    err, err_lens_ignored = np.concatenate(err), np.concatenate(err_lens_ignored)
+    tier, periph = np.concatenate(tier), np.concatenate(periph)
+    t0 = tier == DS.SOURCE_SWEEP
+    assert set(np.unique(tier)) <= {DS.SOURCE_SWEEP, DS.SOURCE_PRIOR_FILL}
+    assert t0.sum() > 2000 and (~t0).sum() > 500 and periph.sum() > 200
+    assert np.median(err[t0]) < 0.01, f"tier 0 {np.median(err[t0]):.4f}"          # the sweep's tolerance
+    assert np.median(err[~t0]) < 0.03, f"tier 1 {np.median(err[~t0]):.4f}"        # Omega × s_k (±4 % ripple)
+    # the check has teeth: the same points read as pixels of the ORIGINAL frame (the lens
+    # ignored on either side of the contract) sit off their surface at the periphery
+    assert np.median(err_lens_ignored[periph & t0]) > 2 * np.median(err[periph & t0]) + 0.01
+
+
+def test_the_confirmation_rule_writes_only_the_swept_keyframes(tmp_path, pcfg):
+    """prior_requires_confirmation true: the rule until 2026-09-29, unchanged — a keyframe
+    with no photometric view is not written and nothing in it is confirmed."""
+    from dataclasses import replace
+    s, _ = _session(tmp_path, pcfg)
+    doc = DS.run_sweep(s, replace(pcfg, depth=replace(pcfg.depth, prior_requires_confirmation=True)),
+                       log=lambda *a: None, device="cpu")
+    assert doc["tier1_rule"] == "confirmation" and doc["prior_only_keyframes"] == []
+    assert doc["n_written"] == doc["n_swept"] == 4 and "50" not in doc["per_frame"]
+    assert not (s / "output" / DS.DEPTH_DIRNAME / "frame_50.npz").exists()
 
 
 def test_identical_sessions_give_bit_identical_depth(tmp_path, pcfg):

@@ -321,6 +321,7 @@ class CloudConfig:
     witness_filter: bool        # the witness filter on the corrected frames (drop_statuses leave)
     silhouette_filter: bool     # the SAM3-silhouette flyer filter (precision/silhouette_filter.py)
     silhouette_max_views: int   # BOUND (cost cap): views tested per point
+    silhouette_block: int       # BOUND (device memory): (point, view) pairs projected per step
     silhouette_min_votes: int   # eligible views a point needs before its own silhouette judges it
     silhouette_min_inside_frac: float   # share of those views inside its label's dilated mask
                                         # under which it leaves
@@ -586,6 +587,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     cloud = CloudConfig(source=str(src), witness_filter=_bool(cl, "witness_filter", "cloud"),
                         silhouette_filter=_bool(cl, "silhouette_filter", "cloud"),
                         silhouette_max_views=_num(cl, "silhouette_max_views", "cloud", lo=1, integer=True),
+                        silhouette_block=_num(cl, "silhouette_block", "cloud", lo=1, integer=True),
                         silhouette_min_votes=_num(cl, "silhouette_min_votes", "cloud", lo=1, integer=True),
                         silhouette_min_inside_frac=_num(cl, "silhouette_min_inside_frac", "cloud",
                                                         lo=0.0, hi=1.0, lo_excl=True),

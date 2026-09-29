@@ -39,34 +39,34 @@ def _c2w(yaw_deg: float) -> np.ndarray:
     return T
 
 
-def render(c2w: np.ndarray):
-    """(depth = camera z, id: 1 post / 2 wall, world Y of the hit) per pixel."""
+def render(c2w: np.ndarray, wall: bool = True):
+    """(depth = camera z, id: 1 post / 2 wall / 0 nothing, world Y of the hit) per pixel."""
     v, u = np.mgrid[0:H, 0:W].astype(np.float64)
     d = np.stack([(u - K[0, 2]) / K[0, 0], (v - K[1, 2]) / K[1, 1], np.ones_like(u)], -1) @ c2w[:3, :3].T
     C = c2w[:3, 3]
     with np.errstate(divide="ignore", invalid="ignore"):
         t1 = (POST[0] - C) / d
         t2 = (POST[1] - C) / d
+        t_wall = (WALL_Z - C[2]) / d[..., 2]
     tn = np.nanmax(np.minimum(t1, t2), -1)
     tf = np.nanmin(np.maximum(t1, t2), -1)
     hit_post = (tf >= tn) & (tn > 0)
-    t_wall = (WALL_Z - C[2]) / d[..., 2]
-    t = np.where(hit_post, tn, t_wall)                    # the post is in front of the wall
-    ident = np.where(hit_post, 1, 2)
+    hit_wall = np.isfinite(t_wall) & (t_wall > 0) & wall
+    t = np.where(hit_post, tn, np.where(hit_wall, t_wall, 0.0))     # the post is in front of the wall
+    ident = np.where(hit_post, 1, np.where(hit_wall, 2, 0))
     Y = C[1] + t * d[..., 1]
     return t, ident, Y                                     # d has camera z = 1: t IS the depth
 
 
-@pytest.fixture(scope="module")
-def scene():
-    c2w = np.stack([_c2w(a) for a in YAWS])
+def _scene(yaws=YAWS, wall=True):
+    c2w = np.stack([_c2w(a) for a in yaws])
     w2c = np.linalg.inv(c2w)
-    rend = [render(T) for T in c2w]
+    rend = [render(T, wall) for T in c2w]
     depth = [r[0] for r in rend]
     ident = [r[1] for r in rend]
     # masks on the native grid: the post everywhere; the wall only on the LEFT half
     masks = {j: {0: ident[j] == 1, 1: (ident[j] == 2) & (np.arange(W)[None, :] < W // 2)}
-             for j in range(len(YAWS))}
+             for j in range(len(yaws))}
     # points born in the birth keyframe
     t, idb, Yb = rend[BIRTH]
     v, u = np.mgrid[0:H, 0:W]
@@ -89,6 +89,11 @@ def scene():
     Ypt = np.concatenate([Yb[post], Yb[post], Yb[right_wall]])
     return {"c2w": c2w, "w2c": w2c, "depth": depth, "masks": masks, "xyz": xyz, "rows": rows,
             "cols": cols, "kind": kind, "Y": Ypt}
+
+
+@pytest.fixture(scope="module")
+def scene():
+    return _scene()
 
 
 @pytest.fixture(scope="module")
@@ -136,6 +141,45 @@ def test_a_post_with_a_backward_tail_loses_the_tail_and_keeps_the_body(scene, pa
     keep2, rep2 = _run(scene, replace(params, max_views=3))
     assert rep2["views_tested_per_membership"]["max"] <= 3
     assert rep2["pairs_tested"] < rep["pairs_tested"]
+
+
+def test_views_from_behind_along_the_birth_line_have_no_parallax(params):
+    """A walk loop around the post: three more keyframes look at it from BEHIND (175°,
+    −175°, 180° from the birth ray). Along the birth line a tail lands on the post's own
+    silhouette — they carry no parallax, like a view beside the birth camera. Under a
+    small cap they must not push out the side views: the tail still leaves (widest-angle
+    ranking kept the three back views and let most of the tail through)."""
+    sc = _scene(YAWS + (175.0, -175.0, 180.0), wall=False)
+    k = sc["kind"]
+    assert (k == 1).sum() > 200 and not (k == 2).any()
+    keep, rep = _run(sc, replace(params, max_views=3))
+    assert rep["views_tested_per_membership"]["max"] <= 3
+    assert not keep[k == 1].any(), f"{int(keep[k == 1].sum())} tail points survived"
+    assert keep[k == 0].all(), f"{int((~keep[k == 0]).sum())} body points left"
+    # ELIGIBILITY, not only the ranking: a side view (50°) sees the tail outside the post, the
+    # exact back view (180°) sees the tail points near the birth axis ON the post. Where the
+    # back view's parallax min(θ, 180° − θ) is under min_tri_deg it cannot vote — with one
+    # vote enough, the side view alone judges them (counted as a vote, the back view would
+    # hold them at 1 of 2 inside, not under the half)
+    p = replace(params, min_votes=1, min_inside_frac=0.5, min_tri_deg=6.0)
+    two = _scene((0.0, 50.0, 180.0), wall=False)
+    tail = two["kind"] == 1
+    C_b, C_back = two["c2w"][0][:3, 3], two["c2w"][2][:3, 3]
+    a, b = C_b - two["xyz"], C_back - two["xyz"]
+    cos = (a * b).sum(1) / (np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1))
+    near = tail & (np.degrees(np.arccos(np.clip(np.abs(cos), 0, 1))) < p.min_tri_deg)
+    assert near.sum() >= 20
+    keep2, _ = _run(two, p)
+    assert not keep2[near].any(), f"{int(keep2[near].sum())} of {int(near.sum())} near-axis tail points kept"
+
+
+def test_the_block_bound_changes_no_verdict(scene, params):
+    keep, rep = _run(scene, params)
+    keep_s, rep_s = _run(scene, replace(params, block=37))
+    assert np.array_equal(keep, keep_s)
+    for key in ("dropped", "dropped_by_rule", "dropped_by_label", "eligible_views_per_membership",
+                "pairs_tested"):
+        assert rep[key] == rep_s[key], key
 
 
 def test_occluded_views_do_not_vote(scene, params):
@@ -244,11 +288,10 @@ def _write_ply(path: Path, xyz, fg, pr, pc, tag, extra=0.0):
     write_ply(path, hdr, a)
 
 
-def test_the_step_filters_both_plys_with_the_same_rows(tmp_path, scene, params):
-    """run_filter on a session: segmentation.json + a HALF-resolution mask store keyed by
-    keyframe position, camera_frames.txt, the two PLYs of the cloud stage (the raw one
-    with other coordinates, as after the consolidation) — the same rows leave both."""
-    from correction.session import read_ply
+def _step_session(tmp_path, scene, extra_positions=()):
+    """segmentation.json + a HALF-resolution mask store keyed by keyframe position,
+    camera_frames.txt, the two PLYs of the cloud stage (the raw one with other
+    coordinates, as after the consolidation)."""
     out = tmp_path / "output"
     tmp = out / "_tx"
     tmp.mkdir(parents=True)
@@ -261,6 +304,8 @@ def test_the_step_filters_both_plys_with_the_same_rows(tmp_path, scene, params):
     for j, mm in scene["masks"].items():
         for oid, m in mm.items():
             store[f"f{j}_o{oid}"] = cv2.resize(m.astype(np.uint8), (W // 2, H // 2), interpolation=cv2.INTER_NEAREST)
+    for j in extra_positions:
+        store[f"f{j}_o0"] = store["f0_o0"]
     np.savez_compressed(out / "seg_masks.npz", **store)
     n = len(scene["xyz"])
     fg = np.full(n, frames_n[BIRTH])
@@ -268,6 +313,14 @@ def test_the_step_filters_both_plys_with_the_same_rows(tmp_path, scene, params):
     _write_ply(tmp / "cleaned_cloud.ply", scene["xyz"], fg, scene["rows"], scene["cols"], tag)
     _write_ply(tmp / "cleaned_cloud_raw.ply", scene["xyz"], fg, scene["rows"], scene["cols"], tag, extra=0.001)
     frames = {f: {"depth": scene["depth"][j]} for j, f in enumerate(frames_n)}
+    return out, tmp, frames, frames_n
+
+
+def test_the_step_filters_both_plys_with_the_same_rows(tmp_path, scene, params):
+    """run_filter on a session — the same rows leave both PLYs."""
+    from correction.session import read_ply
+    out, tmp, frames, frames_n = _step_session(tmp_path, scene)
+    n = len(scene["xyz"])
     v, u = np.mgrid[0:H, 0:W].astype(np.float32)
     rep = SF.run_filter(out, tmp, frames, frames_n, scene["w2c"], K, (W, H), (u, v), params, log=lambda m: None)
     assert rep["ran"] and rep["mask_grid"] == [H // 2, W // 2]
@@ -284,6 +337,16 @@ def test_the_step_filters_both_plys_with_the_same_rows(tmp_path, scene, params):
     assert kept[2] == (kind == 2).sum()                              # unsegmented: untouched
 
 
+def test_a_store_written_over_a_longer_keyframe_list_fails(tmp_path, scene, params):
+    """A position-keyed store records positions, not keyframe numbers: a mask at a position
+    camera_frames.txt does not have is the one thing it can testify — it belongs to
+    another keyframe list, and positions would name the wrong keyframes."""
+    out, tmp, frames, frames_n = _step_session(tmp_path, scene, extra_positions=(len(YAWS),))
+    v, u = np.mgrid[0:H, 0:W].astype(np.float32)
+    with pytest.raises(SF.SilhouetteError, match="another keyframe list"):
+        SF.run_filter(out, tmp, frames, frames_n, scene["w2c"], K, (W, H), (u, v), params, log=lambda m: None)
+
+
 def test_no_segmentation_touches_nothing(tmp_path, params):
     out = tmp_path / "output"
     out.mkdir()
@@ -297,8 +360,8 @@ def test_config_keys_are_mandatory_and_the_device_never_falls_back():
     from precision.config import PrecisionConfigError, load_precision_config
     c = load_precision_config().cloud
     assert c.silhouette_filter is True and c.silhouette_max_views >= 1 and 0 < c.silhouette_min_inside_frac <= 1
-    for key in ("silhouette_filter", "silhouette_max_views", "silhouette_min_votes", "silhouette_min_inside_frac",
-                "silhouette_device"):
+    for key in ("silhouette_filter", "silhouette_max_views", "silhouette_block", "silhouette_min_votes",
+                "silhouette_min_inside_frac", "silhouette_device"):
         bad = copy.deepcopy(raw)
         del bad["reconstruction"]["precision"]["cloud"][key]
         with pytest.raises(PrecisionConfigError, match=f"cloud.{key}"):
