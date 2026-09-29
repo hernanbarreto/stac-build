@@ -58,10 +58,10 @@ def test_every_point_has_its_witnesses_and_rebuilds_its_frame_and_pixel(swept):
     # the accounting closes: cloud + rejected = candidates
     rep = res["report"]
     assert rep["n_points"] + rep["n_rejected"] == rep["n_candidates"]
-        # the copies of a surface seen by several keyframes are CONSUMED by the winner
-        # within τ_rel × depth (the 4 mm voxel dedup is only the safety net behind it)
-        assert rep["rejected_by_reason"]["fused"] > 0
-        assert rep["fusion"]["n_fused"] == rep["rejected_by_reason"]["fused"]
+    # the copies of a surface seen by several keyframes are CONSUMED by the winner
+    # within τ_rel × depth (the 4 mm voxel dedup is only the safety net behind it)
+    assert rep["rejected_by_reason"]["fused"] > 0
+    assert rep["fusion"]["n_fused"] == rep["rejected_by_reason"]["fused"]
     assert len(res["rejected"]["reason"]) == rep["n_rejected"]
     # the viewer channels
     assert np.all(data["confidence"][~t0] == 0) and np.all(data["mv_votes"] == o["n_consistent"])
