@@ -28,17 +28,19 @@ def test_production_pipeline_runs_the_whole_chain():
     raw = _raw()
     assert raw["pipeline"]["auto_segment"] is True, "the automatic segmentation must be ON"
     # USER 2026-09-28: "Reconstruir" = ONE reconstruction stage that hosts the
-    # intake, VLM + SAM3 (once, on the keyframes), Omega and the core F0-F7, then
-    # the cloud stage projects the masks and delivers the fused cloud. No separate
-    # VLM / SAM3 / certification stage runs.
+    # intake, VLM + SAM3 (once, on the keyframes), Omega and the core, then the
+    # cloud stage projects the masks on the published cloud. USER 2026-09-29
+    # ("todo integrado, nada a mano"): the correction stage runs after it —
+    # closures → depth per chunk → floor (level) → re-level → chunk check —
+    # deliverable_only. No separate VLM / SAM3 stage runs.
     precision_on = bool(raw["reconstruction"]["precision"]["enabled"])
-    assert raw["certify"]["auto_after_segmentation"] is (not precision_on), \
-        "the automatic certification is ON exactly when the precision chain is not"
+    assert raw["certify"]["auto_after_segmentation"] is True, \
+        "the correction after the cloud stage is part of 'Reconstruir'"
     stages = build_pipeline_stages(backend=str(raw["reconstruction"]["backend"]))
     enabled = [s.id for s in stages if s.enabled]
     if precision_on:
-        want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY]
-        for off in (StageId.VLM, StageId.SAM3, StageId.CERTIFY):
+        want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.CERTIFY]
+        for off in (StageId.VLM, StageId.SAM3):
             assert off not in enabled, enabled
     else:
         # reconstruction → cleaned cloud → VLM → SAM3 → certification, in this order
@@ -62,7 +64,7 @@ def test_production_config_loads_through_every_typed_loader():
     assert cfg.certify.gates.mode == "advisory"
     assert cfg.graph.gate_mode == "advisory"
     assert cfg.loops.semantic.nonstructural_sigma_factor >= 1.0
-    assert cfg.certify.auto_after_segmentation is (not bool(_raw()["reconstruction"]["precision"]["enabled"]))
+    assert cfg.certify.auto_after_segmentation is True
     ccfg = load_correction_config(raw)
     assert ccfg.gates.mode == "advisory"
     assert ccfg.apply.potree_rebuild is True, "the certified epoch must carry its own octree"

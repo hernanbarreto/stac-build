@@ -83,5 +83,5 @@ def test_the_core_runs_inside_the_reconstruction_stage():
         text = pathlib.Path(mod.replace(".", "/") + ".py").read_text()
         assert "apply_pose_epoch" in text and "apply_transform_epoch(" not in text, mod
     keys = [s.key for s in RN.STEPS]
-    assert keys[0] == "f0_camera" and keys[-1] == "f7_fuse", keys
+    assert keys[0] == "f0_camera" and keys[-1] == "f6_check" and "f7_cloud" in keys, keys
     assert not any("measure" in k or "visit_drift" in s.module for k, s in zip(keys, RN.STEPS)), keys

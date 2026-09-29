@@ -19,6 +19,60 @@
   `/sys/fs/cgroup/memory/memory.usage_in_bytes` during long jobs; at most 2–3
   concurrent agents, each told these caps.
 
+## ⭐ THE PRODUCT IS THE CORRECTED OMEGA CLOUD — USER DECISION 2026-09-29 (evening)
+**"hasta ahora la mejor nube"** (pccr epoch 6) — and **"que quede todo en el pipeline
+… todo integrado, nada debe ejecutarse a mano por fuera"**. After a day of F6/F7
+witness-fusion clouds judged worse than Omega's own (9 M pts, then an over-filtered
+0.2 M), the cloud that won by eye is Omega's complete depth re-projected with the
+core's corrections: `point = c2w_F5 · (s_k · z_omega · K_F5⁻¹ [u,v,1])` — s_k measured
+against F5's landmarks pooled along the walk, F5's camera (fx 364→392) and poses (loop
+77 cm → ~15 cm at the objects) — through THE CLOUD STAGE'S OWN RECIPE (confidence gate
+per chunk, voxel + SOR, witness filter on the corrected frames, consolidation with
+trace normals from the corrected depth), published as a new-cloud epoch. Measured on
+pccr: floor-layer thickness per 1 m cell 20.3 cm (epoch 0) → 11.5 cm; the desk and the
+floor duplicates "prácticamente corregidos" — they were POSE/SCALE errors F2+F5 fix,
+not depth noise to filter.
+
+WIRED (all commits of 2026-09-29 evening):
+- `precision/corrected_cloud.py` = runner step **f7_cloud** (after F5). `reconstruction.
+  precision.cloud.source: omega_corrected` (default) | `fusion` (F6 sweep → F7, the §4-F7
+  chain, still selectable; COLMAP tier 2 with it). `precision/product.py` is the ONE
+  answer to "which cloud did the core publish, is it live" (pipeline probe, cloud stage,
+  map worker, viewer) — nothing keys on `fuse_report.json` alone any more.
+- The CERTIFY stage RUNS AGAIN under precision (`certify.auto_after_segmentation: true`,
+  `deliverable_only: true`): after the cloud stage projects the masks on the published
+  cloud, the correction = closures (`visit_drift.measure`) → depth per chunk → **floor
+  alignment model `level`** (`correction.floor.model_default: level` — ONE floor level;
+  `plane` kept chunk 0's 13.6 cm as a "real level change" on an invented repeatability
+  bar) → re-level → the chunk check. VLM + SAM3 still run once, in the intake.
+- `precision/chunk_check.py` (**f6_check**, last step; also in the acta): per keyframe
+  and per Omega chunk, floor band / ceiling band / camera over the session's floor plane
+  + DA3's own camera-to-floor. Verdicts ok · depth (floor and ceiling move APART) · pose
+  (TOGETHER) · level (floor alone) · intra (the trend drifts inside the chunk) ·
+  undecided, by bootstrap intervals at `confidence` AND beyond the instrument's own
+  resolution (the bands' spread; the ceiling's re-measured at floor-quiet seams — pccr:
+  58 cm, ducts and fixtures in the top band, so it testifies to nothing smaller). DA3 is
+  CONFIRMATION only (its per-chunk scale wanders ±12 %: chunks with a perfect floor read
+  0.89× / 1.12×). Report `output/precision/chunk_check.json`, `to_correct` per chunk.
+- Mask filter, FOURTH RULE (USER: *"no debes probar los puntos contra su propia máscara,
+  son contra el resto de las máscaras con las vistas de ellos"*): a point of X seen
+  unoccluded from a keyframe outside its own visit, inside ANOTHER object's mask and
+  never inside its own, leaves (`cloud_filter_masklets`, `group_roots` = masklets fused
+  into one object never conflict). The own-mask test was already cross-visit.
+- Viewer: no RANSAC floor leveling at session load on a baked-orientation session (it
+  wrote a 2.4°/−28 cm, then an 8.9°/−58 cm `floor_transform.npz` from another cloud and
+  every OBB sat in a frame the octree was not shown in).
+
+DECLARED, measured on pccr, not fixed: the per-keyframe floor alignment THICKENS the
+floor layer (11.5 → 16.9 cm, `level` and `plane` alike — its per-keyframe translations
+follow anchors with ~5 cm scatter and separate revisit copies) and leaves a +15 cm bump
+where demoted keyframes inherit their neighbours' correction; the user still judged
+epoch 6 the best cloud. Closures on epoch 6: 3 genuine (8/22/19 cm, start ↔ end of the
+walk, ~90 % radial, one direction) + 2 FALSE identities (a monitor 2.8 m, a fixture 5 m)
+that the translation knots must price out before any drift model applies. Segmentation
+completeness (VLM/SAM3 miss desks etc.) is open — it is also what makes the chunk-pair
+Sim(3) verification determined (≥ 4–5 objects with two visits).
+
 ## ⭐ BEST CONFIGURATION TO DATE — USER-VERIFIED 2026-08-19 (do NOT change)
 The user validated this exact config visually as **the best reconstruction
 configuration we have** ("quedó la mejor configuración... de momento no tocamos

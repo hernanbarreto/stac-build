@@ -325,6 +325,21 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                               "epoch": vd.get("epoch"),
                               "provenance": vd.get("provenance")}
         acta["epoch_after_correction"] = current_epoch(output_dir)
+        # the chunk / keyframe floor check on the corrected geometry (USER 2026-09-29:
+        # "verificación interna e intrachunk … que quede todo en el pipeline") — a
+        # report; its failure is declared, never the stage's
+        try:
+            from precision.config import load_precision_config
+            _pcfg = load_precision_config()
+            if _pcfg.enabled:
+                from precision.chunk_check import run_check
+                _chk = run_check(session_dir, _pcfg, log=log)
+                acta["chunk_check"] = {"chunks": [{"chunk": c["chunk"], "verdict": c["verdict"],
+                                                   "floor_h_m": c["floor_h_m"]} for c in _chk["chunks"]],
+                                       "to_correct": _chk["to_correct"]}
+        except Exception as _e:  # noqa: BLE001 — declared, never silent
+            log(f"[certify] chunk check not run: {_e}")
+            acta["chunk_check"] = {"error": str(_e)}
         base = load_session_frames(output_dir, log)   # poses moved under us
 
     for it in range(n_iters):

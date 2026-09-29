@@ -2201,6 +2201,16 @@ reconstruction:
                                         # bounds) runs on the fused cloud inside F7, each dropped
                                         # point in rejected_points.npz with its reason (voxel, sor).
                                         # (History, §4-F7: SOR/noise off by default, selectable.)
+    cloud:                              # THE PRODUCT (USER 2026-09-29, pccr: the corrected Omega cloud
+                                        # is "hasta ahora la mejor nube"; the witness fusion delivered
+                                        # 9 M / 0.2 M points judged worse) — precision/corrected_cloud.py
+      source: omega_corrected           # omega_corrected: Omega depth × s_k, F5 camera + poses, the
+                                        #   reconstruction's confidence gate, voxel + SOR, witnesses,
+                                        #   consolidation, octree (runner step f7_cloud)
+                                        # fusion: F6 sweep → F7 witness fusion (the §4-F7 chain)
+      witness_filter: true              # the witness filter fed the corrected frames (single_witness
+                                        #   leaves — pccr: 3.7 M of 25.5 M, the layers one keyframe invents)
+      consolidate: true                 # scene_consolidate with normals from the corrected depth maps
     chunk_check:                        # USER 2026-09-29: per-chunk AND per-keyframe verification of
                                         # the corrected geometry against the floor/ceiling, DA3 as the
                                         # independent instrument (precision/chunk_check.py). Verdict per
@@ -2764,7 +2774,9 @@ correction:
     scale_agree_tol: 0.05         # max |log| worsening of a DA3 anchor agreement ratio
     scale_mad_tol: 0.03           # max growth of the anchors' MAD
   floor:
-    model_default: plane          # ONE floor correction in the UI (plane + local trend);
+    model_default: level          # USER 2026-09-29: ONE floor level ("no está fusionado el escalón …
+                                  # esto lo teníamos resuelto"): with `plane` the solver kept chunk 0's
+                                  # 13.6 cm as a real level change on pccr. (History: plane + local trend;
                                   # level | profile stay selectable by API only (USER 2026-09-09;
                                   # plane keeps real slopes, level is y=0 everywhere)
     band_m: 0.5                   # floor band half-height around the low percentile
@@ -3285,7 +3297,11 @@ certify:                            # §4.8 ensemble witness + §9 certification
                                     # What it costs when on: the objective, the gates and
                                     # the regression verdict are not measured — the verdict
                                     # is the user's eye on the two epochs.
-  auto_after_segmentation: false    # USER 2026-09-28: F0-F7 replace the certification's
+  auto_after_segmentation: true     # USER 2026-09-29 evening: "todo integrado, nada a mano" — after the
+                                    # cloud stage projects the masks on the corrected cloud, the
+                                    # correction runs (closures → depth per chunk → floor level →
+                                    # re-level → chunk check), deliverable_only. (2026-09-28 it was
+                                    # false: F0-F7 replace the certification's
                                     # correction — the core runs INSIDE the reconstruction stage
                                     # (reconstruction.precision.enabled) and the CERTIFY stage
                                     # (F8) does not run. History: the ONE switch of the automatic

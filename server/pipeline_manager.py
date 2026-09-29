@@ -995,17 +995,8 @@ class PipelineManager:
             except Exception:
                 pass
             if precision_on:
-                rep = output_dir / "fuse_report.json"
-                if not rep.exists():
-                    return False, "no fused cloud (F7) yet"
-                try:
-                    ep = json.loads(rep.read_text()).get("epoch_to")
-                    live = json.loads((output_dir / "geometry_epoch.json").read_text()).get("epoch")
-                except (OSError, ValueError):
-                    return False, "fuse_report.json / geometry_epoch.json unreadable"
-                if ep != live:
-                    return False, f"the live epoch {live} is not the fused one {ep}"
-                return True, f"fused cloud (epoch {ep}) on disk"
+                from precision.product import product_is_live
+                return product_is_live(output_dir)
             return True, "poses + depth on disk"
 
         if stage_id == StageId.CLOUDCOMPY:
@@ -1162,10 +1153,13 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
         pass
 
     def _enabled(stage_id: StageId) -> bool:
-        if precision_on and stage_id in (StageId.VLM, StageId.SAM3, StageId.CERTIFY):
+        if precision_on and stage_id in (StageId.VLM, StageId.SAM3):
             # USER 2026-09-28: VLM + SAM3 run ONCE, inside the reconstruction stage
-            # (the intake), and the core F0-F7 runs there too; the certification
-            # (F8) does not run — the cloud stage projects the masks and delivers
+            # (the intake), and the core F0-F7 runs there too. The CERTIFY stage
+            # stays (USER 2026-09-29: "todo integrado, nada a mano"): after the cloud
+            # stage projects the masks on the corrected cloud it runs the correction
+            # — closures → depth per chunk → floor (level) → re-level → chunk check —
+            # in deliverable_only mode (no acta)
             return False
         if skip_cloudcompy and stage_id == StageId.CLOUDCOMPY:
             return False

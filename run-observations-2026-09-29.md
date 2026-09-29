@@ -221,6 +221,82 @@ reconstruction stage (pccr scan 2026-08-31, 289 kf / 2100 witness, walk 17.5 m):
     the cleaner recipe + consolidation + octree into _epoch_0/, registered in the
     manifest; map_worker runs it before deleting the chunks.
 
+29. **USER VERDICT 2026-09-29 16:30 — "EPOCH 0 CORRECTED" is the best cloud so far**:
+    Omega's own per-keyframe depth (the complete epoch-0 cloud) re-projected with the
+    core's corrections only — depth × s_k (gauge+BA scale, pooled ±1 m of walk), F5's
+    camera (fx 391.9 vs Omega 364.3) and F5's poses (the Omega pose graph had left the
+    loop 77 cm open) — same confidence gate, same cleaning (voxel+SOR), no F6/F7
+    filtering: 25.5 M pts. USER: "prácticamente corrigió la duplicidad del desk, no lo
+    hizo perfecto por poco, y prácticamente quedó corregido el piso, por poco, aún tiene
+    duplicidad pero poca". → the duplicates were POSE/SCALE errors (chunk scale ×1.34,
+    open loop, focal −7 %), which F2+F5 fix; the rest is Omega's per-frame depth noise.
+    Built by scratchpad/epoch0_corrected.py into output/_epoch0c/ (not a registered
+    epoch). Candidate light filters on it: the historical witness filter (single_witness,
+    fed the corrected poses/depths) and the own-error contradiction majority vote.
+    Open question to the user: make "Omega + F0/F2/F4/F5 + cleaning" the product and
+    keep F6/F7 for high-resolution captures.
+
+30. **Floor on the epoch-0-corrected cloud (USER: "quedó inclinado, aplicar
+    obligatoriamente la corrección de suelo que tenemos")**, both halves of what the
+    pipeline does, measured on _epoch0c/full (21.8 M pts):
+    (a) correction/floor.solve_floor (model plane, the run_floor solver): 271 of 289
+    keyframes gave a floor anchor; local scatter 5.2 mm, drift +7.3 mm/m, repeatability
+    47.7 mm, tilt bar 1.57°; per-keyframe translations ≤ 9.2 cm, no rotation. It KEPT a
+    level change: keyframes 63–288 (8.4 m of walk) sit +136 mm above the reference floor
+    of keyframes 0–62 — the drift explains 54 mm, the remaining 83 mm clears the 48 mm
+    repeatability, so by design (step demotion preserves real level changes) it was NOT
+    corrected. If pccr's floor is one level, that 13.6 cm is residual error the model
+    refuses to touch — the user's eye decides.
+    (b) the global re-level (the dominant low-band plane, fit_plane_ransac as
+    level_floor_core, baked instead of floor_transform.npz because no floor instance is
+    projected on this cloud yet): tilt 2.64° → 0.10°, floor centre y 0.428 → 0.001 m.
+    Result _epoch0c/floor/ (cleaned_cloud.ply, floor_solution.npz, level_transform.npz,
+    potree) — in the viewer slot 2026-09-29 ~17:00. NOTE the per-keyframe solver's
+    reference is the FIRST keyframes' floor, so it removes only the variation along the
+    walk; the global level is what puts the scene on +Y — the pipeline runs both, in
+    this order, after every epoch.
+
+31. **EPOCHS 5 AND 6 ON pccr (2026-09-29 17:35, by the pipeline's own path — scratchpad/
+    publish_0c.py, run at the user's word)**: epoch 5 = the epoch-0-corrected cloud
+    (+witness +MLS, 21.8 M pts) published as a new-cloud epoch; SAM3 masks projected on
+    it (46 instances; the floor = 4 masklets, 5.05 M pts); epoch 6 = correction-module
+    floor alignment, model LEVEL (applied, 20 min transactional); display re-level from
+    the segmented floor (0.02° → 0, y = 0). MEASURED after: floor per chunk in the
+    display frame c0 +0.1 / c1 −0.4 / c2 0.0 / **c3 −18.4** / c4 +0.2 / c5 +0.1 cm (c3's
+    low band in the CLOUD is a tail of under-floor flyers: from the depth maps its floor
+    is at −0.3 cm); floor-layer thickness per 1 m cell median **16.9 cm** (epoch 5
+    without the per-keyframe step: 11.5; epoch 0: 20.3) — the per-keyframe floor
+    alignment THICKENS the layer even in `level` mode (its per-keyframe translations
+    follow anchors with ~5 cm scatter and separate revisit copies); the chunk check on
+    epoch 6 still finds a +15 cm bump at the END of chunk 0 (kf ~55–62): keyframes the
+    solver demoted inherit the correction of their neighbours. Both epochs selectable;
+    epoch 5's stored display transform is 2.95° / −0.35 m (it shows leveled too).
+32. **The chunk/keyframe floor check (e88bf01)** — what it says of pccr epoch 5: chunk 0
+    INTRA (floor trend −2.4 … +14.8 cm inside the chunk, seams consistent), 1 undecided
+    (+2.9 cm), 2–5 ok; the ceiling is NOT a witness in this scene (58 cm of jumps at
+    seams with a quiet floor: ducts/fixtures in the top band), DA3's per-chunk scale
+    wanders ±12 % (confirmation only). So on pccr the check can SEE the chunk-0 drift
+    but cannot say pose vs depth from floor/ceiling; the seams' horizontal surfaces
+    (desks) or the walls' horizontal edges would be the next witness.
+
+33. **visit_drift.measure on epoch 6 (2026-09-29 18:00, nothing applied)** — the
+    instrument for the user's "the same disagreement the floor had, in scale/rotation/
+    translation": 59 masklets, 21 with 2+ visits → 5 determined closures (bar 10 cm =
+    2× repeatability 4.99 cm), all between the START (kf 0–19, chunk 0) and the END
+    (kf 254–288, chunk 5) of the walk: chair#100 8.2 cm (4.9 m away), desk#166 21.9 cm
+    (4.5 m), desk#167 19.2 cm (2.9 m), ~90 % radial, one common direction (+x, −z);
+    TWO FALSE IDENTITIES survived: monitor#120 (2.8 m, two monitors — priced in
+    scale_rows by its 286 cm tangential residual but still in instance_loops with σ 5
+    cm) and light_fixture#85 (5.1 m, two fixtures). From the 3 genuine ones (OBB centres
+    + closures): translation-only (5.7, 2.0, −15.2) cm residuals 8.5/5.7/3.3; rigid
+    (3.1°) no better; Sim(3) s 0.969 / 3.1° residuals 5.7/6.0/2.7 — 7 DOF from 3 points,
+    indicative only: the loop closes to ~15 cm at the objects, not proportional to
+    distance (not a clean scale), scale vs rotation NOT decidable with 3 objects. The
+    chunk-pair Sim(3) check needs ≥ 4–5 objects with two visits → the segmentation's
+    completeness is what makes the geometry verifiable. The existing correction for this
+    measurement is the drift-rate model (visit_drift_run, the 09-18 algorithm); NOT run
+    (user's call; the two false closures would have to be excluded first).
+
 **Why:** each is a decision the user must take, not a bug to fix silently.
 **How to apply:** raise them together when the run ends; implement only what he
 approves. See [[user-wants-results-fast]].

@@ -532,9 +532,11 @@ def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
     pipe.send_progress(84, "Precision core F0 → F7...", stage="reconstruction")
     run_stage_inline(pipe, "workers.precision_worker", str(session_path), config,
                      label="precision", pct_range=(84.0, 99.0))
-    if not (output_dir / "fuse_report.json").exists():
-        raise RuntimeError("the precision core ended without F7's fuse_report.json — no "
-                           "fused cloud was published")
+    from precision.product import product_is_live
+    _live, _why = product_is_live(output_dir)
+    if not _live:
+        raise RuntimeError(f"the precision core ended without a published cloud — {_why}")
+    pipe.send_log(f"[precision] product: {_why}")
 
     # THE COMPARISON CLOUD (USER 2026-09-29: "conservamos [la época 0] mientras validamos,
     # deben poder seleccionarse desde la UI"): Omega's raw chunks through the cleaning

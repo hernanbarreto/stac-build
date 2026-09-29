@@ -304,6 +304,16 @@ class FuseConfig:
                                 # same functions and parameters) on the fused cloud, inside F7
 
 
+# ── the product: corrected Omega cloud (default) or the witness fusion ─────
+
+@dataclass(frozen=True)
+class CloudConfig:
+    source: str                 # "omega_corrected" (Omega depth × s_k, F5 camera + poses, the cloud
+                                # stage's recipe — precision/corrected_cloud.py) | "fusion" (F6 sweep → F7)
+    witness_filter: bool        # the witness filter on the corrected frames (drop_statuses leave)
+    consolidate: bool           # the scene consolidation, normals from the corrected depth
+
+
 # ── chunk / keyframe floor check (USER 2026-09-29: "verificación interna e intrachunk") ──
 
 @dataclass(frozen=True)
@@ -343,6 +353,7 @@ class PrecisionConfig:
     refine: RefineConfig
     depth: DepthConfig
     fuse: FuseConfig
+    cloud: CloudConfig
     chunk_check: ChunkCheckConfig
     runner: RunnerConfig
 
@@ -552,6 +563,12 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         threads=_num(rn, "threads", "runner", lo=1, integer=True),
     )
 
+    cl = _sub(sec, "cloud", "")
+    src = _require(cl, "source", "cloud")
+    if src not in ("omega_corrected", "fusion"):
+        raise PrecisionConfigError(f"'{SECTION}.cloud.source' must be omega_corrected | fusion, got {src!r}")
+    cloud = CloudConfig(source=str(src), witness_filter=_bool(cl, "witness_filter", "cloud"),
+                        consolidate=_bool(cl, "consolidate", "cloud"))
     cc = _sub(sec, "chunk_check", "")
     chunk_check = ChunkCheckConfig(
         low_pct=_num(cc, "low_pct", "chunk_check", lo=0.0, hi=50.0),
@@ -566,4 +583,4 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     )
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
-                           chunk_check=chunk_check, runner=runner)
+                           cloud=cloud, chunk_check=chunk_check, runner=runner)

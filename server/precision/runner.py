@@ -59,10 +59,11 @@ STEPS: List[Step] = [
     Step("f3_probe", "F3 Omega resolution probe (report)", "mapanything",
          "precision.omega_probe", gpu=True),
     Step("f5_refine", "F5 joint refinement", "mapanything", "precision.refine"),
+    Step("f7_cloud", "F7-C corrected Omega cloud (the product)", "da3", "precision.corrected_cloud", gpu=True),
     Step("f6_sweep", "F6 native depth sweep", "da3", "precision.depth_sweep", gpu=True),
-    Step("f6_check", "F6 chunk / keyframe floor check (report)", "da3", "precision.chunk_check"),
     Step("f6_colmap", "F6 COLMAP reference (A/B)", "da3", "precision.depth_colmap", gpu=True),
     Step("f7_fuse", "F7 witness fusion", "da3", "precision.fuse"),
+    Step("f6_check", "chunk / keyframe floor check (report)", "da3", "precision.chunk_check"),
 ]
 
 
@@ -120,9 +121,19 @@ def resume_point(state: dict, steps: Sequence[Step], epoch_now: int) -> int:
 
 
 def chain_steps(pcfg, steps: Sequence[Step] = STEPS) -> List[Step]:
-    """The steps this configuration runs: the COLMAP A/B reference only when
-    precision.depth.colmap.enabled (it changes no geometry)."""
-    return [s for s in steps if not (s.key == "f6_colmap" and not pcfg.depth.colmap.enabled)]
+    """The steps this configuration runs: the product decides the chain —
+    ``cloud.source: omega_corrected`` runs f7_cloud and not the sweep/fusion,
+    ``fusion`` the sweep → fusion (with the COLMAP A/B reference only when
+    precision.depth.colmap.enabled; it changes no geometry). The check runs last."""
+    fusion = pcfg.cloud.source == "fusion"
+    drop = set()
+    if fusion:
+        drop.add("f7_cloud")
+        if not pcfg.depth.colmap.enabled:
+            drop.add("f6_colmap")
+    else:
+        drop.update({"f6_sweep", "f6_colmap", "f7_fuse"})
+    return [s for s in steps if s.key not in drop]
 
 
 def run_chain(session_dir: Path, pcfg, *, log: Callable = print,

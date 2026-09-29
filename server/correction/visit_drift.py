@@ -1135,6 +1135,37 @@ class FilterReport:
                 "detail": self.detail[:50], "provenance": "tool_measured"}
 
 
+def fused_object_roots(output_dir) -> Dict[int, int]:
+    """oid → the instance id of the FUSED object the masklet ends up in (itself when
+    nothing absorbed it). Masklets of one object never conflict with each other."""
+    import json as _json
+    p = Path(output_dir) / "segmentation_result.json"
+    if not p.exists():
+        return {}
+    try:
+        d = _json.loads(p.read_text())
+    except Exception:                                        # noqa: BLE001
+        return {}
+    absorbed: Dict[int, int] = {}
+    for k, v in (d.get("absorbed") or {}).items():
+        into = (v or {}).get("into")
+        if into is None:
+            continue
+        try:
+            absorbed[int(k)] = int(into)
+        except (TypeError, ValueError):
+            continue
+    out: Dict[int, int] = {}
+    ids = {int(inst.get("instance_id", inst.get("id", -1))) for inst in d.get("instances") or []}
+    for iid in ids | set(absorbed):
+        r, seen = int(iid), set()
+        while r in absorbed and absorbed[r] >= 0 and r not in seen:
+            seen.add(r)
+            r = absorbed[r]
+        out[int(iid) - 1] = r                # mask store oid = instance_id - 1
+    return out
+
+
 def fused_object_points(output_dir) -> Dict[int, int]:
     """oid → how many points the FUSED object it ends up in has.
 
@@ -1193,9 +1224,16 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
                           min_points: int, min_visit_share: float,
                           max_frames_per_visit: int, dilate_px: int,
                           log: Callable[[str], None] = print,
-                          group_points: Optional[Dict[int, int]] = None
+                          group_points: Optional[Dict[int, int]] = None,
+                          group_roots: Optional[Dict[int, int]] = None
                           ) -> Tuple[np.ndarray, FilterReport]:
     """STEP 12 — which points leave the cloud, once the pose is corrected.
+
+    USER 2026-09-29: *"no debes probar los puntos contra su propia máscara, son
+    contra el resto de las máscaras con las vistas de ellos"* — the fourth rule:
+    a point of this object that, seen UNOCCLUDED from a keyframe outside its own
+    visit, lands inside ANOTHER object's mask (``group_roots``: masklets fused into
+    one object are one object) and never inside its own, is not part of it.
 
     USER 2026-09-18: *"no me elimines lo unsegmented, solo los puntos que
     figuran como parte del objeto que luego de ser ajustado cae aun fuera de las
@@ -1237,7 +1275,39 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
     rep = FilterReport()
     by_oid = {m.oid: m for m in masklets}
     off_mask = 0
+    off_other = 0
     sr, sc = vis.Hm / float(vis.Ht), vis.Wm / float(vis.Wt)
+    roots = group_roots or {}
+    # the 3-D extent of every masklet: only objects that overlap can conflict
+    extents: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+    for o, ix in points_by_oid.items():
+        ix = np.asarray(ix, np.int64)
+        ix = ix[(ix >= 0) & (ix < n_points)]
+        if len(ix):
+            extents[int(o)] = (xyz[ix].min(0), xyz[ix].max(0))
+
+    def _project(P: np.ndarray, kf: int):
+        """(ok, r, c, visible) of world points in keyframe kf: in front, in frame,
+        and nothing measured in front of them."""
+        c2w = np.eye(4)
+        c2w[:3, :4] = vis.poses[kf][:3, :4]
+        M = np.linalg.inv(c2w)
+        q = (M[:3, :3] @ P.T).T + M[:3, 3]
+        z = q[:, 2]
+        fr = z > vis.min_depth
+        fx, fy, cx, cy = vis.K[kf]
+        u = np.full(len(P), -1.0)
+        v = np.full(len(P), -1.0)
+        u[fr] = fx * q[fr, 0] / z[fr] + cx
+        v[fr] = fy * q[fr, 1] / z[fr] + cy
+        ok = fr & (u >= 0) & (u < vis.Wt) & (v >= 0) & (v < vis.Ht)
+        if not ok.any():
+            return ok, None, None, None
+        r = np.clip((v[ok] * sr).astype(np.int64), 0, vis.Hm - 1)
+        c = np.clip((u[ok] * sc).astype(np.int64), 0, vis.Wm - 1)
+        zpix = vis.zbuf(kf)[r, c]
+        visible = ~(zpix < (z[ok] - vis.tol))     # nothing in front
+        return ok, r, c, visible
 
     for oid, idx in points_by_oid.items():
         idx = np.asarray(idx, np.int64)
@@ -1318,9 +1388,45 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
                 wo = w[ok]
                 saw[wo[visible]] = True
                 inside[wo[visible & hit]] = True
+        # THE REST OF THE MASKS, WITH THEIR VIEWS: from a keyframe outside the point's
+        # own visit, unoccluded, inside another object's mask and not inside its own
+        conflict = np.zeros(len(sub), bool)
+        my_root = roots.get(int(oid), int(oid) + 1)
+        lo, hi = xyz[sub].min(0), xyz[sub].max(0)
+        for y in masklets:
+            if int(y.oid) == int(oid) or roots.get(int(y.oid), int(y.oid) + 1) == my_root:
+                continue
+            ext = extents.get(int(y.oid))
+            if ext is None or (ext[1] < lo).any() or (ext[0] > hi).any():
+                continue
+            for (ya, yb) in y.visits:
+                frames_y = list(vis.masks_of(y.oid, (ya, yb)))
+                if not frames_y:
+                    continue
+                frames_y.sort(key=lambda it: -int(np.count_nonzero(it[1])))
+                for kf, my in frames_y[:int(max_frames_per_visit)]:
+                    own = np.zeros(len(sub), bool)
+                    for (xa, xb) in visits:                 # the point's own visit never votes
+                        if xa <= kf <= xb:
+                            own |= (sub_ks >= xa) & (sub_ks <= xb)
+                    w = np.flatnonzero(~own)
+                    if not w.size:
+                        continue
+                    ok, r, c, visible = _project(xyz[sub[w]], kf)
+                    if r is None:
+                        continue
+                    hit_y = _dilated(my, int(dilate_px))[r, c] > 0
+                    hit_x = np.zeros(len(r), bool)
+                    for _kf, mx in vis.masks_of(oid, (kf, kf)):
+                        hit_x |= _dilated(mx, int(dilate_px))[r, c] > 0
+                    wo = w[ok]
+                    conflict[wo[visible & hit_y & ~hit_x]] = True
         # judged and never inside: it is not part of this object
-        drop = saw & ~inside
-        off_mask += int(drop.sum())
+        drop_own = saw & ~inside
+        drop_other = conflict & ~inside & ~drop_own
+        off_mask += int(drop_own.sum())
+        off_other += int(drop_other.sum())
+        drop = drop_own | drop_other
         alive_idx = np.flatnonzero(alive)
         keep[idx[alive_idx[~drop]]] = True
 
@@ -1328,8 +1434,11 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
     keep |= ~seg
     kill = ~keep
     rep.dropped_points = int(kill.sum())
+    rep.detail.append({"reason": "inside another object's mask from another visit, never inside its own",
+                       "points": int(off_other)})
     log(f"[visit-drift] step 12: {rep.dropped_points:,} of {n_points:,} points "
         f"leave ({off_mask:,} still off their own mask after the correction, "
+        f"{off_other:,} inside another object's mask from another visit, "
         f"{rep.dropped_objects} masklet(s) under {min_points} points, "
         f"{rep.dropped_visits} visit(s) at or under {min_visit_share:.0%}); "
         f"{int((~seg).sum()):,} unsegmented points untouched")

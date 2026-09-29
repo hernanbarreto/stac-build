@@ -430,6 +430,7 @@ def scene_consolidate(output_dir: Path,
                       excluded_statuses=None,
                       artifacts_dir: Optional[Path] = None,
                       device: Optional[str] = None,
+                      normals_fn=None,
                       min_neighbors: Optional[int] = None,
                       query_block: Optional[int] = None,
                       candidate_budget: Optional[int] = None) -> dict:
@@ -511,7 +512,14 @@ def scene_consolidate(output_dir: Path,
     # (normals_from_trace → None, declared in the log and the report) takes
     # the PCA normals.
     normals, normals_source = None, "pca_knn"
-    if all(k_ in names for k_ in ("frame_global", "pixel_row", "pixel_col")):
+    if normals_fn is not None and all(k_ in names for k_ in ("frame_global", "pixel_row", "pixel_col")):
+        # the caller's own trace (precision/corrected_cloud: normals from the corrected
+        # depth maps, which the session's depth index does not hold)
+        normals = normals_fn(pts, np.asarray(data["frame_global"], np.int64),
+                             np.asarray(data["pixel_row"], np.int64), np.asarray(data["pixel_col"], np.int64))
+        if normals is not None:
+            normals_source = "trace"
+    elif all(k_ in names for k_ in ("frame_global", "pixel_row", "pixel_col")):
         from reconstruction.trace_normals import normals_from_trace
         # the depth maps, intrinsics and frame list live in the SESSION,
         # not in the staging directory a correction epoch consolidates in

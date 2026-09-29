@@ -195,14 +195,17 @@ def load_inputs(session_dir: Path, log: Callable = print):
                   and int(g.get("pad_left", 0)) == 0):
         raise ChunkCheckError("Omega's grid is not the native grid — the check needs the "
                               "F0 grid mapping before unprojecting Omega's depth")
-    rep = out / "depth_native" / "report.json"
     s_k = {f: 1.0 for f in frames}
-    s_k_source = "absent (1.0 — F6 has not measured the per-keyframe scale)"
-    if rep.exists():
+    s_k_source = "absent (1.0 — neither the corrected cloud nor F6 measured the per-keyframe scale)"
+    for rel in ("corrected_cloud.json", "depth_native/report.json"):
+        rep = out / rel
+        if not rep.exists():
+            continue
         pf = json.loads(rep.read_text()).get("per_frame") or {}
         if all(str(f) in pf and "s_k" in pf[str(f)] for f in frames):
             s_k = {f: float(pf[str(f)]["s_k"]) for f in frames}
-            s_k_source = "depth_native/report.json per_frame.s_k"
+            s_k_source = f"{rel} per_frame.s_k"
+            break
     rec = out / "omega_run" / "results_output"
     chunk = {}
     for f in frames:

@@ -7677,7 +7677,8 @@ async def viewer_websocket(websocket: WebSocket):
                         from potree_converter import convert_chunks_preview_to_potree
                         _job_dir = pipeline_manager.job_session_dir(sid)
                         session_path = Path(_job_dir) if _job_dir else _ctx(sid).session_dir
-                        if (session_path / "output" / "fuse_report.json").exists():
+                        from precision.product import product_report as _product_report
+                        if _product_report(session_path / "output") is not None:
                             # the reconstruction stage ended with F7's fused cloud and
                             # its own octree (USER 2026-09-28: the core runs inside the
                             # stage) — there are no raw chunks to preview, the cloud
@@ -7837,12 +7838,12 @@ async def viewer_websocket(websocket: WebSocket):
                     # fused epoch is live when fuse_report.json names the epoch the session
                     # is in (the same probe pipeline_manager uses to call the stage done)
                     try:
-                        _fuse_p = _ctx(sid).output_dir / "fuse_report.json"
+                        from precision.product import product_is_live as _product_is_live
+                        _p_live, _p_why = _product_is_live(_ctx(sid).output_dir)
                         _ge_p = _ctx(sid).output_dir / "geometry_epoch.json"
-                        if _fuse_p.exists() and _ge_p.exists():
-                            _fused_to = json.loads(_fuse_p.read_text()).get("epoch_to")
+                        if _p_live and _ge_p.exists():
                             _live = json.loads(_ge_p.read_text()).get("epoch")
-                            if _fused_to is not None and _fused_to == _live and _live != 0:
+                            if _live is not None and _live != 0:
                                 _certified = True
                                 _new_epoch = _live
                     except Exception as _e:  # noqa: BLE001

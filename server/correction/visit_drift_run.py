@@ -489,7 +489,7 @@ def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
         cfg.visit_drift.min_points, cfg.visit_drift.min_visit_share,
         int(get_param("segmentation.mask_filter.max_frames_per_visit", 8)),
         int(get_param("segmentation.mask_filter.dilate_px", 2)), log=log,
-        group_points=_grp)
+        group_points=_grp, group_roots=vd.fused_object_roots(output_dir))
     if not kill.any():
         log("  mask filter: every point is where its own mask says — nothing to do")
         return None
