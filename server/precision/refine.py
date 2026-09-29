@@ -465,7 +465,7 @@ def localize_witnesses(best: RungResult, fit_track_X: Dict[int, np.ndarray],
 
 
 def heldout_leave_one_view_out(held_g: Dict[int, List], best: RungResult, solver: dict,
-                               cfg) -> Dict[int, float]:
+                               cfg, max_px: float = float("inf")) -> Dict[int, float]:
     """Per keyframe: the RMS of its held-out observations reprojected from their track
     triangulated WITHOUT that view — the situation of a witness frame, measured
     against landmarks it never shaped. (A track triangulated with its own view
@@ -485,7 +485,16 @@ def heldout_leave_one_view_out(held_g: Dict[int, List], best: RungResult, solver
                 continue
             per.setdefault(i, []).append(
                 float(np.linalg.norm(project(X[None], best.w2c[i], params)[0] - np.asarray(p))))
-    return {i: float(np.sqrt(np.mean(np.square(v)))) for i, v in per.items()}
+    # a DEGENERATE residual (non-finite, or farther than the image diagonal) is a
+    # landmark the solve sent to infinity, not a frame's precision — pccr 2026-09-29:
+    # they made the per-frame RMS and the witness bound 106 px on a 464-px image
+    out = {}
+    for i, v in per.items():
+        a = np.asarray(v, np.float64)
+        a = a[np.isfinite(a) & (a >= 0.0) & (a <= max_px)]
+        if a.size:
+            out[i] = float(np.sqrt(np.mean(np.square(a))))
+    return out
 
 
 def heldout_bound(per_frame: Dict[int, float], cfg) -> float:
@@ -560,7 +569,8 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     core = refine_core(w2c0, cam.params, (cam.width, cam.height), tr["obs_track"], tr["obs_frame"],
                        tr["obs_uv_native"], split_obs, kf, sigma_rel, cfg, solver, log=log)
     best = core["best"]
-    bound = heldout_bound(heldout_leave_one_view_out(core["held_groups"], best, solver, cfg), cfg)
+    bound = heldout_bound(heldout_leave_one_view_out(core["held_groups"], best, solver, cfg,
+                                                     max_px=float(np.hypot(cam.width, cam.height))), cfg)
     wit = sorted(set(tr["obs_frame"][tr["frame_kind"] == KIND_WITNESS].tolist()) - set(kf))
     wloc = localize_witnesses(best, core["X"], tr["obs_track"], tr["obs_frame"],
                               tr["obs_uv_native"], wit, (cam.width, cam.height), bound, cfg)

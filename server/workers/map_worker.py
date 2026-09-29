@@ -2329,8 +2329,17 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         if _walk0 is not None and _scale_align_on and not (
                 _n_selected <= _chunk_cfg and (_max_walk0 <= 0 or _walk0 <= _max_walk0)):
             # I4 (claude_stac.txt §4-F2): the MEASURED walk sizes the chunks before
-            # Omega runs — one pass, no probe, no re-run, no pinned size
-            _fx, _ov = plan_chunks(_n_selected, _walk0, _cw0, max_size=max(_chunk_cfg, 24))
+            # Omega runs — one pass, no probe, no re-run. A POSITIVE
+            # chunk_frames_over_walk pins the size in keyframes here too (pccr
+            # 2026-09-29: it read 152 and this branch planned 198 from the metres)
+            _pin0 = int(_simple_cfg.get("chunk_frames_over_walk", 0) or 0)
+            if _pin0 > 0:
+                _fx = max(24, min(_pin0, int(_chunk_cfg)))
+                _ov = _fx // 2
+                _how = f"{_fx} keyframes pinned (chunk_frames_over_walk)"
+            else:
+                _fx, _ov = plan_chunks(_n_selected, _walk0, _cw0, max_size=max(_chunk_cfg, 24))
+                _how = f"{_cw0:g} m of REAL walk"
             _chunked_already = True
             _anchor_idx = plan_anchor_indices(_n_selected, _fx, _ov, _anch_per_chunk)
             _ensure_anchors([_sel_files[i] for i in _anchor_idx])
@@ -2359,7 +2368,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             _persist_chunk_plan(_fx, _ov, _n_selected, "walk-planned", _walk=_walk0)
             pipe.send_log(f"SIMPLE chunked-metric (I4): walk {_walk0:.1f} m measured by the "
                           f"DA3 windows → {len(chunk_ranges(_n_selected, _fx, _ov))} chunks of "
-                          f"{_fx} keyframes ({_cw0:g} m of walk, overlap {_ov}); ONE Omega pass")
+                          f"{_fx} keyframes ({_how}, overlap {_ov}); ONE Omega pass")
         elif _n_selected <= _chunk_cfg:
             vggt_config["Model"]["chunk_size"] = max(_n_selected, 2)
             vggt_config["Model"]["overlap"] = 0

@@ -39,7 +39,10 @@ V2_DTYPES = {"frame_global": np.int32, "pixel_row": np.int32, "pixel_col": np.in
              "ncc": np.float32, "source": np.uint8, "residual_rel": np.float32,
              "content_flags": np.uint8, "geometry_epoch": np.int16, "camera_epoch": np.int16}
 REJECT_REASONS = {"insufficient_witnesses": 1, "inconsistent": 2, "prior_fill_dropped": 3,
-                  "excluded_mask": 4, "dedup": 5, "unlocalized_frame": 6, "sor": 7}
+                  "excluded_mask": 4, "dedup": 5, "unlocalized_frame": 6, "sor": 7,
+                  "prior_low_conf": 8,      # tier-1 prior under the session's confidence floor
+                  "contradicted": 9,        # a view sees free space through the point
+                  "fused": 10}              # consumed by a winner within the consistency tolerance
 REJECT_NAMES = {v: k for k, v in REJECT_REASONS.items()}
 CONTENT_FLAG_BITS = {"reflective": 1, "low_info": 2}
 

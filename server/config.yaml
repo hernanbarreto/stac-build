@@ -1589,8 +1589,16 @@ reconstruction:
                                         # 0 disables the re-run entirely (one pass, always).
                                         # 25->15 (2026-07-09): test6 (29 m) was still bad
                                         # single-pass; the comfort proven so far is test2 ~10 m.
-    chunk_walk_m: 12.0                  # WALKED METRES per chunk when the re-run fires, 50 %
-                                        # overlap (USER 2026-09-23: "implementemos el chunk
+    chunk_walk_m: 5.0                   # metres of REAL walk (I3, DA3 windows) per chunk, 50 %
+                                        # overlap. 12 → 5 (2026-09-29): the 12 was calibrated
+                                        # on the INFLATED Omega-pass walk (pccr 44 m → 12
+                                        # inflated m = 59 kf = the accepted 60/30 layout —
+                                        # plan_chunks' own docstring). Fed the REAL DA3 walk
+                                        # (17.5 m) it made 198-kf chunks, 3.4× that layout, and
+                                        # Omega drifted 80 % (31.75 m of poses). 5 m of real
+                                        # walk = pccr's accepted 0.087 m/kf × 60. MEASURED
+                                        # answer pending: the Omega coherence probe.
+                                        # (History, USER 2026-09-23: "implementemos el chunk
                                         # walk 12, por algo estaban no?"). A size in FRAMES
                                         # covers a different DISTANCE in every scene, because
                                         # keyframes are parallax-uniform, not distance-uniform:
@@ -1606,15 +1614,12 @@ reconstruction:
                                         # 1's, inflated by the very drift that triggered the
                                         # re-run, which shortens the chunk in the direction
                                         # that helps.
-    chunk_frames_over_walk: 152         # >0 pins the chunk size in keyframes and ignores
-                                        # chunk_walk_m; with more keyframes than the card holds
-                                        # it also SKIPS the walk probe (chunked directly).
-                                        # 0 = metres decide (walk probe). USER 2026-09-28: 152 =
-                                        # 12 m on pccr 2026-08-24 (1329 kf over the 104.8 m its
-                                        # chunked run measured, 12.7 kf/m); the probe had read
-                                        # 1526.6 m and made 110 chunks. A density of ANOTHER
-                                        # scene needs its own value (or 0) until F2 measures
-                                        # the walk before Omega.
+    chunk_frames_over_walk: 0           # >0 pins the chunk size in keyframes (overlap half)
+                                        # on EVERY planning branch, chunk_walk_m ignored; 0 =
+                                        # metres of the DA3 walk decide. 152 → 0 (2026-09-29):
+                                        # 152 was "12 m at pccr 2026-08-24's density" for the
+                                        # inflated-walk era and was silently ignored by the
+                                        # walk-planned branch anyway (it planned 198).
     # (history) max_walk_single_pass_m was REMOVED 2026-09-22 (USER: *"no debe haber max walk,
     #   eso ya no aplica"*). It was the comfort limit that re-ran the whole
     #   reconstruction when the measured walk exceeded it — a second DA3 round and a
@@ -2118,7 +2123,12 @@ reconstruction:
       min_tri_deg: 1.5                  # view's median triangulation angle range (degrees):
       max_tri_deg: 25.0                 # claude_stac.txt §4-F9 skeleton values (starting points)
       n_hyp: 64                         # hypotheses uniform in inverse depth (+ the prior)
-      beta_max: 0.10                    # BOUND: cap of the relative search half-width; β itself
+      beta_max: 0.50                    # BOUND: cap of the relative search half-width; β itself
+                                        # 0.10 → 0.50 (2026-09-29): the landmark-calibrated prior
+                                        # error on pccr is 42 % (q0.95); at 0.10 36 % of pixels hit
+                                        # the search boundary, tier 0 fell to 2.1 % and the
+                                        # confidence calibration read exactly 1/0.9−1 = 0.111
+                                        # everywhere (truncated by the cap, circular)
                                         # is the calibrated |error| quantile of the prior
       beta_quantile: 0.95               # declared confidence (as everywhere else)
       patch_px: 7                       # ZNCC window side (odd)
@@ -2130,7 +2140,9 @@ reconstruction:
       tau_px_k: 2.0                     # τ_px = this × F5's held-out RMS
       min_consistent_views: 3           # §4-F9 skeleton (≥ 2 was the 2026-08-19 TSDF recipe)
       prior_fill: keep                  # keep | drop — tier 1 is marked, never hidden
-      prior_fill_min_views: 2
+      prior_fill_min_views: 3           # 2 → 3 (2026-09-29): a prior has no image evidence of
+                                        # its own; 6.7 M points entered on exactly 2 adjacent
+                                        # agreeing priors — never fewer views than tier 0 needs
       view_samples: 256                 # BOUND: prior points per keyframe for view selection
       min_scale_samples: 50             # BOUND: track depths that measure one keyframe's s_k
       calib_conf_bins: 8                # confidence calibration bins (equal count)

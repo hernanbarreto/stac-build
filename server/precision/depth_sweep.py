@@ -98,11 +98,15 @@ DISCARD_NO_SIGNAL = 3            # no ZNCC over the floor and the prior is not c
 DISCARD_INCONSISTENT = 4         # ZNCC signal, but the other views do not confirm the depth
 DISCARD_PRIOR_FILL_DROPPED = 5   # tier 1 under prior_fill: drop
 DISCARD_EXCLUDED = 6             # I2 exclusion mask
+DISCARD_LOW_CONF = 7             # tier-1 prior under the pipeline's ONE confidence floor
+DISCARD_CONTRADICTED = 8         # a consistency view sees FREE SPACE through the point
 SOURCE_NAMES = {SOURCE_SWEEP: "tier0", SOURCE_PRIOR_FILL: "tier1_prior_fill",
                 DISCARD_NO_PRIOR: "no_prior", DISCARD_NO_SIGNAL: "no_signal",
                 DISCARD_INCONSISTENT: "inconsistent",
                 DISCARD_PRIOR_FILL_DROPPED: "prior_fill_dropped",
-                DISCARD_EXCLUDED: "excluded_mask"}
+                DISCARD_EXCLUDED: "excluded_mask",
+                DISCARD_LOW_CONF: "prior_low_conf",
+                DISCARD_CONTRADICTED: "contradicted"}
 
 GRAY_MAX = float(np.iinfo(np.uint8).max)          # 8-bit frames, read on [0, 1]
 # the std of 8-bit rounding noise on the [0, 1] scale (a uniform error of one
@@ -373,6 +377,7 @@ def consistency(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
     w2c_it = torch.as_tensor(w2c_i, dtype=torch.float64, device=dev)
     Pw = c2w_i[:3, :3] @ Pc + c2w_i[:3, 3:4]
     n_cons = torch.zeros(H * W, dtype=torch.int32, device=dev)
+    n_bad = torch.zeros(H * W, dtype=torch.int32, device=dev)
     rels = []
     for dj, Tj in zip(nbr_depths, nbr_w2c):
         Tj = torch.as_tensor(Tj, dtype=torch.float64, device=dev)
@@ -400,14 +405,20 @@ def consistency(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
         ui, vi = Kt[0, 0] * Qi[0] / qz + Kt[0, 2], Kt[1, 1] * Qi[1] / qz + Kt[1, 2]
         err = torch.sqrt((ui - u) ** 2 + (vi - v) ** 2)
         good = ok & (rel < tau_rel) & (err < tau_px) & (Qi[2] > 1e-6)
+        # CONTRADICTION: the neighbour measured a surface FARTHER along the ray than
+        # this point — it sees free space where the point claims to be (pccr
+        # 2026-09-29: agreements alone let every frame-coherent Omega blob in)
+        bad = ok & (samp > z * (1.0 + tau_rel))
         n_cons += good.int()
+        n_bad += bad.int()
         rels.append(torch.where(good, rel, torch.full_like(rel, float("nan"))))
     if rels:
         res = _nanmedian0(torch.stack(rels))
     else:
         res = torch.full((H * W,), float("nan"), dtype=torch.float64, device=dev)
     return (n_cons.clamp(max=255).to(torch.uint8).reshape(H, W).cpu().numpy(),
-            res.reshape(H, W).cpu().numpy().astype(np.float32))
+            res.reshape(H, W).cpu().numpy().astype(np.float32),
+            n_bad.clamp(max=255).to(torch.uint8).reshape(H, W).cpu().numpy())
 
 
 def pair_mismatch(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
@@ -441,19 +452,51 @@ def pair_mismatch(depth_i: np.ndarray, K: np.ndarray, w2c_i: np.ndarray,
 
 def assign_tiers(sig: np.ndarray, n_s: np.ndarray, z0: np.ndarray, n_p: np.ndarray,
                  excl: Optional[np.ndarray], min_consistent_views: int,
-                 prior_fill_min_views: int, prior_fill: str) -> np.ndarray:
+                 prior_fill_min_views: int, prior_fill: str,
+                 bad_s: Optional[np.ndarray] = None, bad_p: Optional[np.ndarray] = None,
+                 low_conf: Optional[np.ndarray] = None) -> np.ndarray:
     """``source`` per pixel from the ZNCC signal, the sweep's and the prior's consistent
-    view counts, the prior and the exclusion mask."""
+    view counts, their CONTRADICTION counts (views that see free space through the
+    point), the prior, the confidence floor and the exclusion mask.
+
+    A measured (tier 0) depth stands while the views confirming it outnumber the
+    views contradicting it; a prior (tier 1) — Omega's own depth with no image
+    evidence of its own — stands only when NO view contradicts it and Omega's
+    confidence there is above the pipeline's floor (pccr 2026-09-29: 95 % of the
+    fused cloud was tier 1 admitted on agreements alone → layers and floaters)."""
     src = np.full(sig.shape, DISCARD_NO_SIGNAL, np.uint8)
-    tier0 = sig & (n_s >= int(min_consistent_views))
-    tier1 = ~sig & (z0 > 0) & (n_p >= int(prior_fill_min_views))
+    bs = np.zeros(sig.shape, np.uint8) if bad_s is None else bad_s
+    bp = np.zeros(sig.shape, np.uint8) if bad_p is None else bad_p
+    enough0 = sig & (n_s >= int(min_consistent_views))
+    tier0 = enough0 & (bs.astype(np.int32) < n_s.astype(np.int32))
+    enough1 = ~sig & (z0 > 0) & (n_p >= int(prior_fill_min_views))
+    tier1 = enough1 & (bp == 0)
     src[sig & ~tier0] = DISCARD_INCONSISTENT
+    src[enough0 & ~tier0] = DISCARD_CONTRADICTED
     src[tier1] = SOURCE_PRIOR_FILL if prior_fill == "keep" else DISCARD_PRIOR_FILL_DROPPED
+    src[enough1 & ~tier1] = DISCARD_CONTRADICTED
+    if low_conf is not None:
+        src[tier1 & low_conf] = DISCARD_LOW_CONF
     src[tier0] = SOURCE_SWEEP
     src[z0 <= 0] = DISCARD_NO_PRIOR
     if excl is not None:
         src[excl] = DISCARD_EXCLUDED
     return src
+
+
+def conf_floor_mask(conf: np.ndarray, valid: np.ndarray, conf_min_norm: float) -> np.ndarray:
+    """The pipeline's ONE confidence floor (reconstruction.simple.conf_min_norm, USER
+    2026-09-23) on a keyframe's Omega confidence: the min-max fraction over the
+    frame's valid pixels — the arithmetic of the viewer slider. True where the
+    prior is UNDER the floor."""
+    c = np.asarray(conf, np.float64)
+    ok = np.asarray(valid, bool) & np.isfinite(c)
+    if float(conf_min_norm) <= 0.0 or not ok.any():
+        return np.zeros(c.shape, bool)
+    lo, hi = float(c[ok].min()), float(c[ok].max())
+    if hi <= lo:
+        return np.zeros(c.shape, bool)
+    return ok & ((c - lo) / (hi - lo) < float(conf_min_norm))
 
 
 # ── view selection ───────────────────────────────────────────────────────
@@ -553,7 +596,16 @@ def load_inputs(session_dir: Path, pcfg) -> SweepInputs:
     if h.size == 0:
         raise DepthSweepError(f"{pdir / RESIDUALS_NAME} holds no held-out residual — τ_px "
                               f"cannot be measured")
-    rms = float(np.sqrt(np.mean(h ** 2)))
+    # the RMS over the tracks F5 could reproject: a DEGENERATE track (non-finite, or
+    # farther than the image diagonal) is a landmark the solve sent to infinity, not a
+    # residual — pccr 2026-09-29: 2.3 % of them (up to 90,850 px) made the RMS 259 px
+    # and τ_px 518 px on a 464-px-wide image, so the round-trip test never rejected
+    diag = float(np.hypot(cam.width, cam.height))
+    good = np.isfinite(h) & (h >= 0.0) & (h <= diag)
+    if not good.any():
+        raise DepthSweepError("every held-out residual of F5 is degenerate — τ_px cannot be "
+                              "measured")
+    rms = float(np.sqrt(np.mean(h[good] ** 2)))
     m1, m2, K = undistort_maps(cam)
     return SweepInputs(cam=cam, K=K, wh=(cam.width, cam.height), maps=(m1, m2), kf=kf,
                        kf_w2c=np.linalg.inv(kf_c2w), wit=wit,
@@ -667,25 +719,51 @@ def landmark_samples(session_dir: Path, pcfg, inp: SweepInputs) -> Dict[int, Dic
 
 
 def keyframe_scales(samples: Dict[int, Dict[str, np.ndarray]], n_kf: int,
-                    min_samples: int) -> Tuple[np.ndarray, np.ndarray]:
-    """(s_k, n used) per keyframe: the median of z_tri / z_rec, pooling the nearest
-    keyframes' ratios (by index) until ``min_samples``. NaN where the session has fewer."""
+                    min_samples: int, chainage: Optional[np.ndarray] = None,
+                    window_m: float = 0.0) -> Tuple[np.ndarray, np.ndarray]:
+    """(s_k, n used) per keyframe: the median of z_tri / z_rec over the ratios of every
+    keyframe within ``window_m / 2`` of WALK (``chainage`` per keyframe, metres) — the
+    drift of Omega's depth scale is smooth along the walk, so the estimate is pooled
+    along it. pccr 2026-09-29: independent per-keyframe medians jumped up to 27 %
+    between consecutive keyframes (38 of 288 pairs > 5 %) while the gauge's model
+    moves 0.25 %; each keyframe at its own scale layered the cloud. Without
+    chainage (or window 0) the pool is the nearest keyframes by index until
+    ``min_samples``. NaN where the session has fewer than ``min_samples``."""
     ratios = {i: s["z_tri"] / s["z_rec"] for i, s in samples.items() if s["z_rec"].size}
     s = np.full(n_kf, np.nan)
     n = np.zeros(n_kf, np.int64)
     total = sum(r.size for r in ratios.values())
     if total < min_samples:
         return s, n
+    half = float(window_m) / 2.0
+    use_walk = chainage is not None and half > 0
+
+    def in_window(j, k):
+        return (use_walk and np.isfinite(chainage[j]) and np.isfinite(chainage[k])
+                and abs(chainage[j] - chainage[k]) <= half)
+
     for k in range(n_kf):
-        pool, r = [], 0
+        pool: List[np.ndarray] = [ratios[j] for j in ratios if in_window(j, k)]
+        r = 0
         while sum(p.size for p in pool) < min_samples and r <= n_kf:
             for j in ({k - r, k + r} if r else {k}):
-                if j in ratios:
+                if j in ratios and not in_window(j, k):
                     pool.append(ratios[j])
             r += 1
         v = np.concatenate(pool)
         s[k], n[k] = float(np.median(v)), int(v.size)
     return s, n
+
+
+def keyframe_chainage(session_dir: Path, kf: Sequence[int]) -> Optional[np.ndarray]:
+    """Chainage (metres of walk) per keyframe from intake/walk.json (I3), NaN where a
+    keyframe has none; None when the walk was never measured."""
+    from intake.walk import load_walk
+    walk = load_walk(Path(session_dir))
+    if not walk or not walk.get("chainage"):
+        return None
+    c = {int(r["frame"]): float(r["chainage_m"]) for r in walk["chainage"]}
+    return np.array([c.get(int(f), np.nan) for f in kf], np.float64)
 
 
 # ── the run ──────────────────────────────────────────────────────────────
@@ -730,7 +808,21 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
 
     # s_k and β: measured before any pixel is swept
     lm = landmark_samples(session_dir, pcfg, inp)
-    s_k, s_n = keyframe_scales(lm, n_kf, int(dcfg.min_scale_samples))
+    # the scale of Omega's depth per keyframe, pooled along the WALK over the gauge's
+    # knot spacing (the drift is smooth; an independent median per keyframe is not)
+    chain = keyframe_chainage(session_dir, inp.kf)
+    s_k_raw, _ = keyframe_scales(lm, n_kf, int(dcfg.min_scale_samples))
+    s_k, s_n = keyframe_scales(lm, n_kf, int(dcfg.min_scale_samples), chainage=chain,
+                               window_m=float(pcfg.gauge.knot_walk_m))
+    if chain is None:
+        log(f"{LOG_TAG} intake/walk.json absent — s_k pooled by keyframe index, not along "
+            f"the walk")
+    else:
+        jumps = np.abs(np.diff(s_k)) / np.maximum(s_k[:-1], 1e-9)
+        jraw = np.abs(np.diff(s_k_raw)) / np.maximum(s_k_raw[:-1], 1e-9)
+        log(f"{LOG_TAG} s_k pooled over ±{pcfg.gauge.knot_walk_m / 2:g} m of walk: neighbour "
+            f"jumps median {np.nanmedian(jumps) * 100:.2f} % max {np.nanmax(jumps) * 100:.1f} % "
+            f"(independent medians: {np.nanmedian(jraw) * 100:.2f} % / {np.nanmax(jraw) * 100:.1f} %)")
     if not np.isfinite(s_k).any():
         raise DepthSweepError(f"fewer than {dcfg.min_scale_samples} track depths in the whole "
                               f"session — Omega's prior cannot be carried to this epoch")
@@ -882,6 +974,15 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
         f"pair(s)), τ_px {inp.tau_px:.2f} px")
 
     # pass 2: consistency, tiers, outputs
+    from config import cfg as _raw_cfg
+    try:
+        conf_floor = float(_raw_cfg["reconstruction"]["simple"]["conf_min_norm"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise DepthSweepError("reconstruction.simple.conf_min_norm is missing — the ONE "
+                              "confidence floor of the pipeline (USER 2026-09-23) gates the "
+                              "tier-1 prior too") from e
+    log(f"{LOG_TAG} tier-1 prior gated by the pipeline's confidence floor "
+        f"(reconstruction.simple.conf_min_norm {conf_floor:g}, min-max per keyframe)")
     counts_tot = {k: 0 for k in SOURCE_NAMES.values()}
     per_frame = {}
     cal_omega, cal_da3 = [], []
@@ -899,21 +1000,25 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
                         np.load(work / f"sweep_{inp.kf[j]}.npy"), 0) for j in nb]
         np_ = [np.load(work / f"prior_{inp.kf[j]}.npy") for j in nb]
         nw = [inp.kf_w2c[j] for j in nb]
-        n_s, r_s = consistency(np.where(sig, d, 0), inp.K, inp.kf_w2c[i], nd_, nw, tau_rel,
-                               inp.tau_px, device=dev)
-        n_p, r_p = consistency(z0, inp.K, inp.kf_w2c[i], np_, nw, tau_rel, inp.tau_px, device=dev)
+        n_s, r_s, b_s = consistency(np.where(sig, d, 0), inp.K, inp.kf_w2c[i], nd_, nw, tau_rel,
+                                    inp.tau_px, device=dev)
+        n_p, r_p, b_p = consistency(z0, inp.K, inp.kf_w2c[i], np_, nw, tau_rel, inp.tau_px,
+                                    device=dev)
         excl = read_exclusion(session_dir, f, inp.maps)
+        low = conf_floor_mask(c0, z0 > 0, conf_floor)
         src = assign_tiers(sig, n_s, z0, n_p, excl, dcfg.min_consistent_views,
-                           dcfg.prior_fill_min_views, dcfg.prior_fill)
+                           dcfg.prior_fill_min_views, dcfg.prior_fill,
+                           bad_s=b_s, bad_p=b_p, low_conf=low)
         depth = np.where(src == SOURCE_SWEEP, d, np.where(src == SOURCE_PRIOR_FILL, z0, 0))
         ncons = np.where(src == SOURCE_PRIOR_FILL, n_p, n_s).astype(np.uint8)
+        nbad = np.where(src == SOURCE_PRIOR_FILL, b_p, b_s).astype(np.uint8)
         res = np.where(src == SOURCE_PRIOR_FILL, r_p, r_s)
         nrm = normals_from_depth(depth, inp.K)
         # float32 everywhere: a precision product is not stored at half precision
         # (float16 kept 3 significant digits of a normal and of the residual)
         np.savez_compressed(ddir / f"frame_{f}.npz", depth=depth.astype(np.float32),
                             ncc=np.where(z0 > 0, sc, np.nan).astype(np.float32),
-                            n_consistent=ncons, source=src,
+                            n_consistent=ncons, n_contradict=nbad, source=src,
                             normal=nrm.astype(np.float32), residual_rel=res.astype(np.float32))
         cnt = {SOURCE_NAMES[k]: int((src == k).sum()) for k in SOURCE_NAMES}
         for k, v in cnt.items():
@@ -929,7 +1034,8 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
             "prior_vs_tier0_median_rel": (float(np.median(np.abs(z0[t0m] / d[t0m] - 1)))
                                           if t0m.any() else None),
             "boundary_hypothesis_frac": boundary_frac.get(i),
-            "s_k": float(s_k[i]), "s_k_samples": int(s_n[i])}
+            "s_k": float(s_k[i]), "s_k_samples": int(s_n[i]),
+            "s_k_independent": float(s_k_raw[i])}
         cal_omega.append(CAL.sample_pairs(d, z0, c0, t0m, dcfg.calib_samples_per_frame, rng))
         da3 = da3_dir / f"frame_{f}.npz"
         if da3.exists() and t0m.any():

@@ -68,10 +68,19 @@ def pack_keys(ijk: np.ndarray) -> np.ndarray:
     return (u[:, 0] << (2 * KEY_BITS)) | (u[:, 1] << KEY_BITS) | u[:, 2]
 
 
-def evidence(n_consistent: np.ndarray, ncc: np.ndarray) -> np.ndarray:
-    """Sortable evidence: the confirming views first, then the ZNCC (in [-1, 1],
-    so it never reaches the next view count)."""
-    return np.asarray(n_consistent, np.float64) * 4 + (np.nan_to_num(ncc, nan=-1.0) + 1.0)
+TIER_WEIGHT = 2 ** 12      # above any n_consistent × 4 + 2: a measured depth always ranks first
+
+
+def evidence(n_consistent: np.ndarray, ncc: np.ndarray,
+             source: Optional[np.ndarray] = None) -> np.ndarray:
+    """Sortable evidence: a MEASURED depth (tier 0) before any prior, then the
+    confirming views, then the ZNCC (in [-1, 1], so it never reaches the next view
+    count). pccr 2026-09-29: ordered by views alone, 87,901 tier-0 depths lost their
+    voxel to a tier-1 prior with more self-agreeing neighbours."""
+    from precision.depth_sweep import SOURCE_SWEEP
+    tier = (np.asarray(source) == SOURCE_SWEEP).astype(np.float64) * TIER_WEIGHT \
+        if source is not None else 0.0
+    return tier + np.asarray(n_consistent, np.float64) * 4 + (np.nan_to_num(ncc, nan=-1.0) + 1.0)
 
 
 def backproject(depth: np.ndarray, rows: np.ndarray, cols: np.ndarray, K: np.ndarray,
@@ -120,7 +129,8 @@ def _rgb_undistorted(frames_dir: Path, frame: int, maps) -> np.ndarray:
 
 def _candidate_codes(src: np.ndarray, n_cons: np.ndarray, fcfg, dcfg):
     """(entering mask, reject reason per pixel (0 = none / not a candidate))."""
-    from precision.depth_sweep import (DISCARD_EXCLUDED, DISCARD_INCONSISTENT,
+    from precision.depth_sweep import (DISCARD_CONTRADICTED, DISCARD_EXCLUDED,
+                                       DISCARD_INCONSISTENT, DISCARD_LOW_CONF,
                                        DISCARD_PRIOR_FILL_DROPPED, SOURCE_PRIOR_FILL,
                                        SOURCE_SWEEP)
     R = PV.REJECT_REASONS
@@ -133,6 +143,8 @@ def _candidate_codes(src: np.ndarray, n_cons: np.ndarray, fcfg, dcfg):
     reason[src == DISCARD_INCONSISTENT] = R["inconsistent"]
     reason[src == DISCARD_PRIOR_FILL_DROPPED] = R["prior_fill_dropped"]
     reason[src == DISCARD_EXCLUDED] = R["excluded_mask"]
+    reason[src == DISCARD_LOW_CONF] = R["prior_low_conf"]
+    reason[src == DISCARD_CONTRADICTED] = R["contradicted"]
     return enter, reason
 
 
@@ -161,8 +173,10 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
     rep, epochs, cam, kf, c2w, maps, K, tags = _load_inputs(session_dir, pcfg)
     t0 = time.time()
     voxel = float(fcfg.voxel_m)
-    # ── pass 1: who enters, its voxel and its evidence ───────────────────
-    keys, score, fidx, plin = [], [], [], []
+    # ── pass 0: every keyframe's entering pixels and its consistency views ──
+    per: Dict[int, Dict[str, np.ndarray]] = {}
+    kf_index = {int(f): i for i, f in enumerate(kf)}
+    views: Dict[int, List[int]] = {}
     n_cand = 0
     rej_counts = {k: 0 for k in PV.REJECT_REASONS}
     frames_used = []
@@ -171,24 +185,85 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
         if not p.exists():
             continue
         with np.load(p) as z:
-            depth, src, ncons, ncc = z["depth"], z["source"], z["n_consistent"], z["ncc"]
+            depth, src, ncons = z["depth"].astype(np.float32), z["source"], z["n_consistent"]
         enter, reason = _frame_codes(src, ncons, c2w[i], fcfg, dcfg)
         n_cand += int(enter.sum() + (reason > 0).sum())
-        rr, cc = np.nonzero(enter)
-        if rr.size:
-            X = backproject(depth, rr, cc, K, c2w[i])
-            keys.append(pack_keys(np.floor(X / voxel).astype(np.int64)))
-            score.append(evidence(ncons[rr, cc], ncc[rr, cc]).astype(np.float32))
-            fidx.append(np.full(rr.size, i, np.int32))
-            plin.append((rr * depth.shape[1] + cc).astype(np.int32))
+        per[i] = {"depth": np.where(enter, depth, 0.0).astype(np.float32), "src": src,
+                  "ncons": ncons, "enter": enter, "reason": reason,
+                  "consumed": np.zeros(depth.shape, bool), "winner": np.zeros(depth.shape, bool)}
+        pf = (rep.get("per_frame") or {}).get(str(int(f))) or {}
+        views[i] = [kf_index[int(v)] for v in pf.get("consistency_views", []) if int(v) in kf_index]
         frames_used.append(f)
-    if not keys:
+    if not per:
         raise FuseError("no pixel of depth_native passes the witness rule — nothing to fuse")
+    tau_rel = float(rep["tau_rel"])
+
+    # ── pass 1: CONSUMING FUSION ─────────────────────────────────────────
+    # A pixel that wins CONSUMES the pixels of its consistency views that see the
+    # same surface within the tolerance that admitted it (τ_rel × depth): they never
+    # spawn a point of their own. Measured depths (tier 0) win first, over every
+    # keyframe; priors (tier 1) only over other priors. pccr 2026-09-29 without
+    # this: every keyframe deposited its own copy of every surface — 12 keyframes
+    # per 2 cm floor cell, 53 mm apart — because the 4 mm dedup below is 14× finer
+    # than the consistency tolerance. The winner keeps its own coordinates.
+    n_fused = 0
+    for tier in (SOURCE_SWEEP, SOURCE_PRIOR_FILL):
+        for i in sorted(per):
+            d = per[i]
+            cand = d["enter"] & (d["src"] == tier) & ~d["consumed"]
+            if not cand.any():
+                continue
+            rr, cc = np.nonzero(cand)
+            d["winner"][rr, cc] = True
+            X = backproject(d["depth"], rr, cc, K, c2w[i])
+            for j in views[i]:
+                if j not in per:
+                    continue
+                w2c = np.linalg.inv(c2w[j])
+                P = X @ w2c[:3, :3].T + w2c[:3, 3]
+                z = P[:, 2]
+                front = z > 1e-6
+                u = np.rint(K[0, 0] * P[:, 0] / np.where(front, z, 1.0) + K[0, 2]).astype(np.int64)
+                v = np.rint(K[1, 1] * P[:, 1] / np.where(front, z, 1.0) + K[1, 2]).astype(np.int64)
+                H, W = d["depth"].shape
+                inside = front & (u >= 0) & (u < W) & (v >= 0) & (v < H)
+                if not inside.any():
+                    continue
+                u, v, z = u[inside], v[inside], z[inside]
+                dj = per[j]["depth"][v, u]
+                same = per[j]["enter"][v, u] & (dj > 0) & (np.abs(z - dj) <= tau_rel * dj)
+                if tier == SOURCE_PRIOR_FILL:
+                    same &= per[j]["src"][v, u] == SOURCE_PRIOR_FILL
+                per[j]["consumed"][v[same], u[same]] = True
+    for i, d in per.items():
+        fused = d["consumed"] & d["enter"] & ~d["winner"]
+        n_fused += int(fused.sum())
+    log(f"{LOG_TAG} consuming fusion: {n_fused:,} pixel(s) merged into a winner within "
+        f"τ_rel {tau_rel * 100:.2f} % of depth over {len(per)} keyframe(s)")
+
+    # ── pass 1b: the winners' voxel and evidence (the 4 mm dedup is a safety net
+    # for views the consistency lists did not pair) ─────────────────────
+    keys, score, fidx, plin = [], [], [], []
+    for i in sorted(per):
+        d = per[i]
+        f = kf[i]
+        rr, cc = np.nonzero(d["winner"])
+        if not rr.size:
+            continue
+        with np.load(ddir / f"frame_{f}.npz") as z:
+            ncc = z["ncc"]
+        X = backproject(d["depth"], rr, cc, K, c2w[i])
+        keys.append(pack_keys(np.floor(X / voxel).astype(np.int64)))
+        score.append(evidence(d["ncons"][rr, cc], ncc[rr, cc], d["src"][rr, cc]).astype(np.float32))
+        fidx.append(np.full(rr.size, i, np.int32))
+        plin.append((rr * d["depth"].shape[1] + cc).astype(np.int32))
+    if not keys:
+        raise FuseError("no pixel survived the consuming fusion — nothing to fuse")
     keys = np.concatenate(keys)
     score = np.concatenate(score)
     fidx = np.concatenate(fidx)
     plin = np.concatenate(plin)
-    # total order: voxel, then best evidence, then earliest frame, then pixel
+    # total order: voxel, then best evidence (tier, views, ZNCC), then earliest frame, then pixel
     order = np.lexsort((plin, fidx, -score.astype(np.float64), keys))
     first = np.ones(order.size, bool)
     first[1:] = keys[order[1:]] != keys[order[:-1]]
@@ -196,8 +271,8 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
     win[order[first]] = True
     n_entered = int(keys.size)
     del keys, score, order, first
-    log(f"{LOG_TAG} {n_entered:,} pixel(s) pass the witness rule over {len(frames_used)} "
-        f"keyframe(s); {int(win.sum()):,} voxel winner(s) at {voxel * 1000:.1f} mm")
+    log(f"{LOG_TAG} {n_entered:,} winner pixel(s) over {len(frames_used)} keyframe(s); "
+        f"{int(win.sum()):,} voxel winner(s) at {voxel * 1000:.1f} mm")
 
     # ── pass 2: rebuild the winners; every other candidate gets its reason ─
     cols: Dict[str, List[np.ndarray]] = {k: [] for k in PV.V2_FIELDS}
@@ -223,14 +298,19 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
 
     for i, f in enumerate(kf):
         p = ddir / f"frame_{f}.npz"
-        if not p.exists():
+        if not p.exists() or i not in per:
             continue
         with np.load(p) as z:
             depth, src, ncons, ncc = z["depth"], z["source"], z["n_consistent"], z["ncc"]
             res = z["residual_rel"].astype(np.float32)
-        enter, reason = _frame_codes(src, ncons, c2w[i], fcfg, dcfg)
+        enter, reason = per[i]["enter"], per[i]["reason"]
         flags = PV.content_flags_of(tags.get(int(f)))
         W = depth.shape[1]
+        fr_, fc_ = np.nonzero(per[i]["consumed"] & enter & ~per[i]["winner"])
+        if fr_.size:
+            _cols(rej, f, fr_, fc_, ncons, ncc, src, res, flags)
+            rej["reason"].append(np.full(fr_.size, PV.REJECT_REASONS["fused"], np.uint8))
+            rej_counts["fused"] += int(fr_.size)
         if i in bounds:
             a, b = bounds[i]
             lin = plin[a:b]
@@ -290,6 +370,8 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
                          "prior_fill_min_views": dcfg.prior_fill_min_views},
               "n_keyframes": len(frames_used), "n_candidates": n_cand,
               "n_points": int(len(data)), "n_rejected": n_rej,
+              "fusion": {"tau_rel": tau_rel, "merge_radius": "tau_rel × depth of the winner",
+                         "n_fused": int(n_fused), "order": "tier, views, ZNCC"},
               "rejected_by_reason": rej_counts,
               "points_by_tier": {"tier0": int(np.sum(tiers == SOURCE_SWEEP)),
                                  "tier1_prior_fill": int(np.sum(tiers == SOURCE_PRIOR_FILL))},

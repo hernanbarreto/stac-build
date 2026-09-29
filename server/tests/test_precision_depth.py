@@ -175,12 +175,17 @@ def test_consistency_counts_agreeing_views_and_rejects_a_wrong_depth(scene):
     _, gt, views = scene
     nb = [v[1] for v in views[:3]]
     nw = [np.linalg.inv(c) for c in VIEWS[:3]]
-    n, res = DS.consistency(gt, K, np.linalg.inv(REF), nb, nw, tau_rel=0.01, tau_px=1.0)
+    n, res, bad = DS.consistency(gt, K, np.linalg.inv(REF), nb, nw, tau_rel=0.01, tau_px=1.0)
     ok, box, wall, _ = _regions(gt)
     assert np.median(n[ok & wall]) == 3
     assert np.nanmedian(res[ok & wall]) < 0.005
-    n2, _ = DS.consistency(gt * 1.1, K, np.linalg.inv(REF), nb, nw, tau_rel=0.01, tau_px=1.0)
+    assert bad[ok & wall].max() == 0                       # nobody sees through a true surface
+    n2, _, bad2 = DS.consistency(gt * 1.1, K, np.linalg.inv(REF), nb, nw, tau_rel=0.01, tau_px=1.0)
     assert n2[ok].max() == 0
+    # a point placed 10 % IN FRONT of the true surface: the other views measure the
+    # surface FARTHER along its ray — they see free space through it → contradicted
+    n3, _, bad3 = DS.consistency(gt * 0.9, K, np.linalg.inv(REF), nb, nw, tau_rel=0.01, tau_px=1.0)
+    assert n3[ok].max() == 0 and np.median(bad3[ok & wall]) >= 2
 
 
 def test_tiers_textureless_is_prior_fill_or_discarded_never_tier0(scene):
@@ -203,6 +208,27 @@ def test_tiers_textureless_is_prior_fill_or_discarded_never_tier0(scene):
     assert np.all(src4[sig] == DS.DISCARD_INCONSISTENT)
     assert np.all(src4[flat] == DS.DISCARD_EXCLUDED)
     assert not np.any(src4 == DS.SOURCE_SWEEP)
+    # contradictions: a prior any view sees through is out; a measured depth stands
+    # while its confirming views outnumber the contradicting ones
+    one = np.ones(gt.shape, np.uint8)
+    src5 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 2, "keep", bad_s=one, bad_p=one)
+    assert np.all(src5[flat & ~sig] == DS.DISCARD_CONTRADICTED)
+    assert np.all(src5[sig] == DS.SOURCE_SWEEP)            # 3 views for, 1 against
+    src6 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 2, "keep", bad_s=one * 3)
+    assert np.all(src6[sig] == DS.DISCARD_CONTRADICTED)     # 3 for, 3 against
+    # the confidence floor: a low-confidence prior is out, a measured depth is not
+    low = np.ones(gt.shape, bool)
+    src7 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 2, "keep", low_conf=low)
+    assert np.all(src7[flat & ~sig] == DS.DISCARD_LOW_CONF) and np.all(src7[sig] == DS.SOURCE_SWEEP)
+
+
+def test_conf_floor_is_the_min_max_fraction_of_the_frame():
+    conf = np.array([[0.0, 1.0, 2.0, 10.0]])
+    valid = np.ones_like(conf, bool)
+    assert DS.conf_floor_mask(conf, valid, 0.10).tolist() == [[True, False, False, False]]
+    assert DS.conf_floor_mask(conf, valid, 0.25).tolist() == [[True, True, True, False]]
+    assert not DS.conf_floor_mask(conf, valid, 0.0).any()
+    assert not DS.conf_floor_mask(np.full((1, 4), 3.0), valid, 0.5).any()   # no range: nothing under
 
 
 def test_parabola_vertex_and_normals():
@@ -255,6 +281,18 @@ def test_keyframe_scales_pool_neighbours():
     assert np.isfinite(s).all()
     s2, _ = DS.keyframe_scales(samples, 4, 100)
     assert np.isnan(s2).all()
+
+
+def test_keyframe_scales_pool_along_the_walk_not_by_index():
+    # keyframes 0-3 at chainage 0, 0.3, 0.6, 5.0 m; the last one is far away
+    samples = {k: {"z_tri": np.full(60, v), "z_rec": np.full(60, 1.0), "conf": np.ones(60)}
+               for k, v in enumerate((1.0, 1.1, 1.2, 3.0))}
+    chain = np.array([0.0, 0.3, 0.6, 5.0])
+    s, n = DS.keyframe_scales(samples, 4, 10, chainage=chain, window_m=2.0)
+    assert s[0] == s[1] == s[2] == 1.1 and n[0] == 180         # the three within ±1 m pooled
+    assert s[3] == 3.0 and n[3] == 60                          # the far one alone
+    s_idx, _ = DS.keyframe_scales(samples, 4, 10)               # by index: each on its own
+    assert s_idx.tolist() == [1.0, 1.1, 1.2, 3.0]
 
 
 def test_colmap_io_roundtrips(tmp_path):
