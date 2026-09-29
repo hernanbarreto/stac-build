@@ -192,8 +192,18 @@ class ResolutionProbeConfig:
 
 
 @dataclass(frozen=True)
+class CoherenceProbeConfig:
+    enabled: bool
+    lengths: Tuple[int, ...]        # BOUND: nested window lengths (keyframes) tried, plus the whole set
+    heldout_confidence: float       # declared confidence of the half-to-half drift verdict
+    bootstrap: int                  # BOUND: resamples of the steps per half
+    seed: int                       # the bootstrap's fixed seed
+
+
+@dataclass(frozen=True)
 class OmegaConfig:
     resolution_probe: ResolutionProbeConfig
+    coherence_probe: CoherenceProbeConfig
 
 
 # ── F4: native-pixel tracks ───────────────────────────────────────────────
@@ -386,6 +396,16 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         window_frames=_num(rp, "window_frames", "omega.resolution_probe", lo=2, integer=True),
         # depth_pair_samples starves a pair under 500 samples
         pair_samples=_num(rp, "pair_samples", "omega.resolution_probe", lo=500, integer=True),
+    ), coherence_probe=CoherenceProbeConfig(
+        enabled=_bool(_sub(om, "coherence_probe", "omega"), "enabled", "omega.coherence_probe"),
+        lengths=tuple(int(v) for v in _num_list(_sub(om, "coherence_probe", "omega"), "lengths",
+                                                 "omega.coherence_probe", lo=4, integer=True)),
+        heldout_confidence=_num(_sub(om, "coherence_probe", "omega"), "heldout_confidence",
+                                "omega.coherence_probe", lo=0.5, hi=1.0),
+        bootstrap=_num(_sub(om, "coherence_probe", "omega"), "bootstrap", "omega.coherence_probe",
+                       lo=100, integer=True),
+        seed=_num(_sub(om, "coherence_probe", "omega"), "seed", "omega.coherence_probe", lo=0,
+                  integer=True),
     ))
 
     tk = _sub(sec, "tracks", "")
