@@ -536,20 +536,26 @@ def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
                            "fused cloud was published")
 
     freed = _discard_previous_epochs(output_dir)
-    pipe.send_log(f"[epochs] only the fused cloud stays — {freed / 1048576:.0f} MB of "
+    pipe.send_log(f"[epochs] the fused cloud + epoch 0 (Omega) stay — {freed / 1048576:.0f} MB of "
                   f"previous epochs and Omega chunks discarded")
     pipe.send_progress(99, "Fused cloud is the reconstruction", stage="reconstruction")
 
 
 def _discard_previous_epochs(output_dir: Path) -> int:
-    """Delete `_epoch_*/` (the previous epoch the apply keeps for Undo), `_tx_epoch_*/`
-    leftovers, `corrections/epoch_*.npz`, and Omega's raw cloud (`chunk_*.ply` with
-    its origins/meta — never merged, epoch 0 is not kept). Returns the bytes freed.
-    The ledger (corrections.jsonl) and geometry_epoch.json stay: the live epoch is
-    the fused one and the record says so."""
+    """Delete the intermediate epochs (`_epoch_1..N-1/`: the gauge's and the refine's
+    states), `_tx_epoch_*/` leftovers, `corrections/epoch_*.npz`, and Omega's raw
+    chunk PLYs (`chunk_*.ply` with its origins/meta — never merged). `_epoch_0/`
+    STAYS (USER 2026-09-29: "conservamos mientras validamos, deben poder
+    seleccionarse desde la UI") — it is the Omega cloud the fused one is judged
+    against, selectable through the certification kit (a new_cloud epoch is
+    swapped, not transformed). Returns the bytes freed. The ledger
+    (corrections.jsonl) and geometry_epoch.json stay: the live epoch is the fused
+    one and the record says so."""
     freed = 0
     for pattern in ("_epoch_*", "_tx_epoch_*"):
         for d in output_dir.glob(pattern):
+            if d.name == "_epoch_0":
+                continue
             if d.is_dir() and not d.is_symlink():
                 freed += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
                 shutil.rmtree(d, ignore_errors=True)
