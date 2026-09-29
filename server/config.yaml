@@ -2201,6 +2201,20 @@ reconstruction:
                                         # bounds) runs on the fused cloud inside F7, each dropped
                                         # point in rejected_points.npz with its reason (voxel, sor).
                                         # (History, §4-F7: SOR/noise off by default, selectable.)
+    chunk_check:                        # USER 2026-09-29: per-chunk AND per-keyframe verification of
+                                        # the corrected geometry against the floor/ceiling, DA3 as the
+                                        # independent instrument (precision/chunk_check.py). Verdict per
+                                        # chunk: depth | pose | level | ok | undecided, from bootstrap
+                                        # intervals at `confidence` — the sample's own noise is the bar.
+      low_pct: 5.0                      # percentile of a keyframe's heights that seeds its floor band
+      high_pct: 97.0                    # … its ceiling band
+      band_m: 0.08                      # half-height of the band around that percentile
+      min_points: 200                   # BOUND: fewer band samples = the keyframe does not see it
+      pixel_stride: 4                   # BOUND (cost): every 4th pixel of the depth maps
+      plane_min_inlier_frac: 0.2        # RANSAC acceptance of the session floor plane (pooled bands)
+      confidence: 0.95                  # declared confidence (as heldout_confidence)
+      bootstrap: 400                    # BOUND (cost)
+      seed: 0
     # F9 — runner (declared here so every stage heartbeats the same way)
     runner:
       heartbeat_s: 20                   # BOUND: seconds between progress lines of a long stage

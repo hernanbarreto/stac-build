@@ -304,6 +304,23 @@ class FuseConfig:
                                 # same functions and parameters) on the fused cloud, inside F7
 
 
+# ── chunk / keyframe floor check (USER 2026-09-29: "verificación interna e intrachunk") ──
+
+@dataclass(frozen=True)
+class ChunkCheckConfig:
+    low_pct: float              # percentile of a keyframe's heights that seeds its FLOOR band
+    high_pct: float             # … its CEILING band
+    band_m: float               # half-height of a band around that percentile (a measurement
+                                # definition, like silhouette_cell_m)
+    min_points: int             # BOUND: fewer band samples than this = the keyframe does not
+                                # see that surface (reported as such, never guessed)
+    pixel_stride: int           # BOUND (cost): every n-th pixel of the depth maps
+    plane_min_inlier_frac: float  # RANSAC acceptance of the session's floor plane over the pooled bands
+    confidence: float           # declared confidence of the bootstrap intervals that decide
+    bootstrap: int              # BOUND (cost): bootstrap resamples
+    seed: int                   # determinism
+
+
 # ── F9: runner (declared in F0 so every stage heartbeats the same way) ───
 
 @dataclass(frozen=True)
@@ -326,6 +343,7 @@ class PrecisionConfig:
     refine: RefineConfig
     depth: DepthConfig
     fuse: FuseConfig
+    chunk_check: ChunkCheckConfig
     runner: RunnerConfig
 
 
@@ -534,6 +552,18 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         threads=_num(rn, "threads", "runner", lo=1, integer=True),
     )
 
+    cc = _sub(sec, "chunk_check", "")
+    chunk_check = ChunkCheckConfig(
+        low_pct=_num(cc, "low_pct", "chunk_check", lo=0.0, hi=50.0),
+        high_pct=_num(cc, "high_pct", "chunk_check", lo=50.0, hi=100.0),
+        band_m=_num(cc, "band_m", "chunk_check", lo=0.0, lo_excl=True),
+        min_points=_num(cc, "min_points", "chunk_check", lo=1, integer=True),
+        pixel_stride=_num(cc, "pixel_stride", "chunk_check", lo=1, integer=True),
+        plane_min_inlier_frac=_num(cc, "plane_min_inlier_frac", "chunk_check", lo=0.0, hi=1.0, lo_excl=True),
+        confidence=_num(cc, "confidence", "chunk_check", lo=0.5, hi=1.0),
+        bootstrap=_num(cc, "bootstrap", "chunk_check", lo=10, integer=True),
+        seed=_num(cc, "seed", "chunk_check", lo=0, integer=True),
+    )
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
-                           runner=runner)
+                           chunk_check=chunk_check, runner=runner)

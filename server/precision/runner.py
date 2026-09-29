@@ -60,6 +60,7 @@ STEPS: List[Step] = [
          "precision.omega_probe", gpu=True),
     Step("f5_refine", "F5 joint refinement", "mapanything", "precision.refine"),
     Step("f6_sweep", "F6 native depth sweep", "da3", "precision.depth_sweep", gpu=True),
+    Step("f6_check", "F6 chunk / keyframe floor check (report)", "da3", "precision.chunk_check"),
     Step("f6_colmap", "F6 COLMAP reference (A/B)", "da3", "precision.depth_colmap", gpu=True),
     Step("f7_fuse", "F7 witness fusion", "da3", "precision.fuse"),
 ]
