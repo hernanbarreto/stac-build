@@ -30,16 +30,26 @@ def test_a_trailing_prepositional_phrase_does_not_steal_the_head():
     assert _head_noun("black server rack with open shelves") == "rack"
 
 
-def test_three_phrasings_of_one_floor_collapse_to_one_prompt():
-    """The floor arrived under three names from three keyframes and all three
-    survived into the prompt list — three SAM3 sessions over one surface."""
+def test_only_the_SAME_NAME_folds_and_every_fold_is_recorded():
+    """2026-09-15 this collapsed every phrase sharing a HEAD NOUN into one, and
+    that silently deleted objects: on pccr 2026-09-29 'cardboard box' vanished
+    into 'red fire alarm box' (head 'box') and was never written anywhere. USER
+    2026-09-29: "debe segmentar todo, absolutamente preciso y completo" — only
+    true synonyms fold now (case, plural, article, punctuation), each fold is
+    recorded for the census, and two DIFFERENT names are grouped by the
+    consolidation pass and settled on the cloud (segmentation.dedupe_overlap)."""
     frames = [
-        FrameUnderstanding(1, "server room", "", ["white tiled floor"]),
-        FrameUnderstanding(2, "server room", "", ["white tiled floor"]),
+        FrameUnderstanding(1, "server room", "", ["white tiled floor", "cardboard box"]),
+        FrameUnderstanding(2, "server room", "", ["white tiled floors", "red fire alarm box"]),
         FrameUnderstanding(3, "server room", "", ["white tiled floor with dark grout"]),
     ]
-    objs = aggregate(frames).objects
-    assert len([o for o in objs if "floor" in o]) == 1
+    und = aggregate(frames)
+    assert "cardboard box" in und.objects and "red fire alarm box" in und.objects
+    assert "white tiled floor with dark grout" in und.objects
+    assert len([o for o in und.objects if o.startswith("white tiled floor")]) == 2
+    assert und.merged == {"white tiled floors": "white tiled floor"}
+    assert set(und.objects) | set(und.merged) == {o for f in frames for o in f.objects}, \
+        "a phrase disappeared without a record"
 
 
 def test_an_honest_phrase_keeps_its_own_head():
@@ -80,20 +90,25 @@ def test_the_prompt_asks_for_one_name_per_object():
     assert "same physical thing twice" in p
 
 
-def test_the_frames_the_vlm_sees_are_a_COVER_not_a_count():
+def test_the_frames_the_vlm_sees_span_the_WHOLE_walk_not_a_count():
     """What the VLM never sees it cannot name, and in the SIMPLE pipeline these
     phrases ARE the SAM3 prompts — so a frame left out is an object left out of
-    the segmentation. pccr showed 8 frames picked by linspace across a
-    216-keyframe walk and the main door was in none of them. The frames are now
-    chosen by COVERAGE of the scene, so the count comes out of the place: 67
-    for pccr, and a small room would need a handful."""
+    the segmentation. pccr showed 8 frames picked by linspace across the walk
+    and the main door was in none of them. The coverage cover (2026-09-16)
+    cannot measure at the INTAKE, where the VLM runs since 2026-09-28 — there is
+    no cloud of this run — so pccr 2026-09-29 fell back to the same 8. The
+    frames are now spread uniformly along the walk at a declared density
+    (autoprompt.vlm_sampling; tests/test_vlm_sampling.py pins the rule); the
+    cover stays selectable for a session that has a cloud."""
     import yaml
     root = Path(__file__).resolve().parents[1]
     src = (root / "segmentation" / "autoprompt" / "session_builder.py").read_text()
-    assert "from .coverage_sample import cover_keyframes" in src
+    assert "plan_vlm_frames(" in src and "walk_chainage(" in src
     assert "if self.understand_cover:" in src
+    assert "understand_sample" not in src, "the fixed-count fallback came back"
     cfg = yaml.safe_load((root / "config.yaml").read_text())
-    assert cfg["autoprompt"]["understand_cover"] is True
+    assert cfg["autoprompt"]["understand_cover"] is False
+    assert "understand_sample" not in cfg["autoprompt"]
     assert 0.0 < float(cfg["autoprompt"]["understand_cover_overlap"]) <= 1.0
 
 

@@ -24,9 +24,21 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if server_dir not in sys.path:
         sys.path.insert(0, server_dir)
 
+    # The census (below) splits masklets into visits by the mask filter's own key:
+    # read it BEFORE SAM3 runs, so a config without it fails in seconds, not after.
+    from segmentation.census import visit_gap_kf
+    gap_kf = visit_gap_kf(config)
+    # Same for the SAM3 detection / confirmation thresholds of the model that will
+    # be built (models.segmentation.sam3_thresholds): the wrapper loads the model
+    # lazily inside the first prompt, and a bad key must fail the stage here,
+    # naming it — not end as every prompt at zero masklets.
+    from segmentation.sam3_wrapper import check_sam3_thresholds
+    check_sam3_thresholds()
+
     # Read VLM analysis if available (written by vlm_worker)
     vlm_path = output_dir / "vlm_analysis.json"
     boxes_map = None
+    vlm_data = None
     if vlm_path.exists():
         vlm_data = json.loads(vlm_path.read_text())
         prompt = vlm_data.get("prompt", "")
@@ -85,17 +97,48 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
         mapped_pct = 10 + (pct / 100) * 70
         pipe.send_progress(mapped_pct, msg, stage="sam3")
 
-    result = run_segmentation(
-        frames_dir=str(frames_dir),
-        output_dir=str(output_dir),
-        prompt=prompt,
-        frame_map=frame_map,
-        boxes_map=boxes_map,
-        on_progress=_seg_progress,
-    )
+    # THE CENSUS (USER 2026-09-29: "debe segmentar todo, absolutamente preciso y
+    # completo"): what the VLM looked at, every concept it proposed and its fate,
+    # and per prompt the SAM3 masklets with their keyframe spans and visits, and
+    # whether SAM3 RAN the prompt at all (prompt_status) — output/
+    # segmentation_census.json, from what is already on disk. Written on every
+    # run, a failed segmentation included — one that RAISED too, so the file on
+    # disk never describes another run's prompts.
+    prompt_status: dict = {}
+
+    def _census(seg_error):
+        try:
+            from segmentation.census import build_census
+            from segmentation.sam3_wrapper import get_sam3_wrapper
+            build_census(output_dir, prompt=prompt, vlm_doc=vlm_data, gap_kf=gap_kf,
+                         frames_dir=frames_dir, seg_error=seg_error,
+                         prompt_status=prompt_status,
+                         sam3_thresholds=getattr(get_sam3_wrapper(), "applied_thresholds",
+                                                 None),
+                         log=pipe.send_log)
+        except Exception as e:  # noqa: BLE001 — a report bug never costs the masks
+            pipe.send_log(f"segmentation census FAILED ({type(e).__name__}: {e}) — the "
+                          f"masks are kept, output/segmentation_census.json is not written",
+                          level="warning")
+
+    try:
+        result = run_segmentation(
+            frames_dir=str(frames_dir),
+            output_dir=str(output_dir),
+            prompt=prompt,
+            frame_map=frame_map,
+            boxes_map=boxes_map,
+            on_progress=_seg_progress,
+            prompt_status=prompt_status,
+        )
+    except Exception as e:
+        _census(f"{type(e).__name__}: {e}")
+        raise
 
     if pipe.check_cancel():
         return
+
+    _census(result.get("error"))
 
     if "error" in result:
         raise RuntimeError(f"Segmentation failed: {result['error']}")

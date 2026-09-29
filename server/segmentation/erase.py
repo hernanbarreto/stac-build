@@ -63,6 +63,42 @@ def _atomic_savez(path: Path, arrays: Dict[str, np.ndarray]) -> None:
             os.unlink(tmp)
 
 
+def _atomic_append_npz(path: Path, arrays: Dict[str, np.ndarray], *, keep) -> None:
+    """Write ``arrays`` into the npz at ``path`` WITHOUT touching the entries it
+    keeps: the entries named in ``keep`` (and not in ``arrays``) are carried
+    over AS STORED — never decompressed, never recompressed —, ``arrays``
+    replace or add theirs, every other entry is dropped. The same logical
+    content ``_atomic_savez({**kept, **arrays})`` would write, at the cost of the
+    new entries only. Atomic like ``_atomic_savez`` (a copy is edited, then
+    replaced).
+
+    A dropped / replaced entry leaves the central directory, which is what a
+    zip reader goes by; its old bytes stay in the file as unreferenced space
+    until the next full rewrite (``_atomic_savez``) compacts it."""
+    import shutil
+    import zipfile
+    fd, tmp = tempfile.mkstemp(dir=str(Path(path).parent), suffix=".tmp.npz")
+    os.close(fd)
+    try:
+        shutil.copyfile(path, tmp)
+        carry = {f"{k}.npy" for k in keep} - {f"{k}.npy" for k in arrays}
+        with zipfile.ZipFile(tmp, mode="a", compression=zipfile.ZIP_DEFLATED,
+                             allowZip64=True) as zf:
+            zf.filelist = [i for i in zf.filelist if i.filename in carry]
+            zf.NameToInfo = {i.filename: i for i in zf.filelist}
+            for key, val in arrays.items():
+                # how np.savez_compressed writes an entry (no pickled arrays)
+                with zf.open(f"{key}.npy", "w", force_zip64=True) as f:
+                    np.lib.format.write_array(f, np.asanyarray(val), allow_pickle=False)
+        os.replace(tmp, path)
+        if Path(path).name == "seg_masks.npz":
+            from segmentation import mask_space
+            mask_space.invalidate(Path(path).parent)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def _cube_hit(disp_pts: np.ndarray, c: np.ndarray, r: float,
               yaw: float = 0.0) -> np.ndarray:
     """Points inside a cube of half-side r centred at c, rotated ``yaw``

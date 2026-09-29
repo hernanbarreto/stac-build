@@ -36,7 +36,7 @@ logger = logging.getLogger("SegPipeline")
 
 def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
                      frame_map: dict = None, on_progress=None,
-                     boxes_map: dict = None) -> dict:
+                     boxes_map: dict = None, prompt_status: dict = None) -> dict:
     """
     Full segmentation pipeline: batched SAM3 → IoU ID matching → mask-to-point mapping.
 
@@ -52,6 +52,11 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
                    normalized xywh. Boxes are fed to SAM3's detector pathway
                    together with the text prompt at the seeded frames, so
                    multiple same-label instances are seeded individually.
+        prompt_status: Optional dict the caller owns, filled IN PLACE with one
+                   entry per category — ``ran`` / ``skipped`` / ``failed`` /
+                   ``not_reached`` + reason (``_run_sam3_batched``). It survives
+                   an exception, so the census can tell a prompt SAM3 never
+                   completed from one it ran and that confirmed nothing.
     """
     from config import cfg
     
@@ -71,6 +76,11 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
     if not categories:
         return {"error": "Empty prompt", "instances": []}
     
+    if prompt_status is not None:
+        for c in categories:
+            prompt_status[c] = {"status": "not_reached",
+                                "reason": "the SAM3 run stopped before this prompt"}
+
     print(f"[SegPipeline] Starting segmentation for {len(categories)} categories: {categories}")
     print(f"[SegPipeline] Frames: {frames_dir}  |  Batch: {batch_size} frames, {batch_overlap} overlap")
     
@@ -85,28 +95,30 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
     print(f"[SegPipeline] Using {total_frames} valid frames for segmentation")
     
     if total_frames == 0:
+        for c in (prompt_status or {}):
+            prompt_status[c] = {"status": "skipped", "reason": "no keyframes to segment"}
         return {"error": "No frames found", "instances": []}
     
     try:
-        # ── Step 2: Run SAM3 in batches with IoU matching (per category) ──
-        all_masks, obj_labels = _run_sam3_batched(
+        # ── Steps 2+3: SAM3 in batches with IoU matching, per category, each
+        # category's masks SAVED as it finishes (frames_valid/ is numbered
+        # 0,1,2… — SAM3 keys its masks by that KEYFRAME POSITION, not by the
+        # video frame number). The per-category save IS the save: re-upserting
+        # the whole run once more at the end shifted every id of the first
+        # category by one (see _run_sam3_batched).
+        all_masks, obj_labels, seg_meta = _run_sam3_batched(
             seg_frames_dir, frame_files, categories,
             batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
             output_dir=output_dir, cfg=cfg,
             frame_map=frame_map,
             on_progress=on_progress,
             boxes_map=boxes_map,
+            prompt_status=prompt_status,
         )
         
-        if not all_masks:
+        if seg_meta is None:
             print("[SegPipeline] ⚠️ SAM3 produced no masks")
             return {"error": "No masks generated", "instances": []}
-        
-        # ── Step 3: Save masks and metadata ──
-        # frames_valid/ is numbered 0,1,2… — SAM3 keys its masks by that
-        # KEYFRAME POSITION, not by the video frame number
-        seg_meta = _save_masks(output_dir, all_masks, categories, obj_labels, cfg,
-                               frame_space=mask_space.SPACE_KEYFRAME)
         
         # ── Step 4: Match masks to cloud and cache final result (ONCE) ──
         # In the anchored pipeline order (recon → vlm → sam3 → phase_r →
@@ -128,6 +140,9 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
         return seg_meta
     
     finally:
+        # the memoized SAM3 symlink dirs (idempotent; _run_sam3_batched clears
+        # them itself on the normal path, not when a category raises)
+        _clear_batch_dirs()
         # ── Cleanup: vaciar frames_valid/ completamente ──
         if frames_valid_dir and frames_valid_dir.exists():
             shutil.rmtree(str(frames_valid_dir), ignore_errors=True)
@@ -258,22 +273,47 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                       output_dir: Path = None, cfg: dict = None,
                       frame_map: dict = None,
                       on_progress=None,
-                      boxes_map: dict = None) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, str]]:
+                      boxes_map: dict = None,
+                      prompt_status: dict = None):
     """
     Process frames in overlapping batches, one category at a time.
     Each category gets its own SAM3 pass; obj_ids are remapped to avoid collisions.
-    Saves incrementally after each category if output_dir and cfg are provided.
-    
+
+    With ``output_dir`` and ``cfg`` every category's masks are SAVED as the
+    category finishes — only THAT category's masks, appended to the store
+    (``_save_masks`` upsert). It used to re-upsert EVERY mask of the run after
+    every category (and once more at the end): the first save gave the 1-based
+    SAM3 ids store ids 0,1,2…, the second found 1,2… already "existing" and
+    wrote raw id k over store id k — the first category left a duplicate object
+    and chimeras (pccr 2026-09-29: SAM3 said 166 objects, the store held 167),
+    and every save held two copies of all masks in RAM. A save that fails is
+    RAISED: it is the only save, nothing re-writes those masks later.
+
     If frame_map is provided, each category only processes the frames listed
     for that category (from VLM analysis), creating a temp directory with
     consecutive numbering for SAM3 propagation.
-    
+
+    ``prompt_status`` (optional, filled in place): per category ``ran`` (with
+    the objects / frames it produced and its seconds), ``skipped`` (no frames
+    to run on) or ``failed`` (+ reason). A :class:`SAM3ConfigError` is never a
+    per-category failure: it is re-raised and fails the run.
+
     Returns:
-        (all_masks, obj_labels)
-        - all_masks: Dict[orig_frame_idx, {global_obj_id: binary_mask}]
+        (all_masks, obj_labels, seg_meta)
+        - all_masks: Dict[orig_frame_idx, {global_obj_id: binary_mask}] — only
+          when NOT saving (no output_dir / cfg); empty otherwise
         - obj_labels: Dict[global_obj_id, category_label]
+        - seg_meta: what the last save wrote (segmentation.json), None when
+          nothing was saved
     """
-    from segmentation.sam3_wrapper import get_sam3_wrapper
+    from segmentation.sam3_wrapper import SAM3ConfigError, get_sam3_wrapper
+    import time as _time
+
+    persist = output_dir is not None and cfg is not None
+    status = prompt_status if prompt_status is not None else {}
+    seg_meta = None
+    t_sam3 = _time.time()
+    n_done = 0
     
     total_frames = len(frame_files)
     batch_step = batch_size - batch_overlap
@@ -389,16 +429,22 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                 else:
                     # VLM didn't find this category in any frame — skip entirely
                     print(f"[SegPipeline]   VLM frame_map: no matching frames found — skipping category")
+                    status[category] = {"status": "skipped",
+                                        "reason": "none of its VLM frame_map frames is "
+                                                  "among the keyframes"}
                     continue
             else:
                 # No VLM data at all for this category — skip
                 print(f"[SegPipeline]   No VLM frame_map for '{cat_label}' — skipping category")
+                status[category] = {"status": "skipped",
+                                    "reason": "no VLM frame_map entry for this category"}
                 continue
         
         # Compute batches for this category's frame subset
         cat_total = len(cat_frame_files)
         if cat_total == 0:
             print(f"[SegPipeline]   Skipping '{category}' — no frames in range")
+            status[category] = {"status": "skipped", "reason": "no frames in range"}
             continue
             
         cat_batches = []
@@ -529,13 +575,21 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             _log_vram("  after SAM3 reload")
         
         # ── Try category, recover from OOM once, skip if OOM again ──
+        # A SAM3ConfigError (models.segmentation.sam3_thresholds, a vendor
+        # rename) is NOT a category failure: every category would fail the same
+        # way and the run would end as "No masks generated" — re-raised.
         cat_masks = {}
+        t_cat = _time.time()
+        cat_status = {"status": "ran"}
         try:
             cat_masks = _process_category(
                 category, cat_batches, frames_dir, cat_frame_files, sam3,
                 batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
                 boxes_by_pos=cat_boxes
             )
+        except SAM3ConfigError as e:
+            status[category] = {"status": "failed", "reason": f"SAM3ConfigError: {e}"}
+            raise
         except Exception as e:
             if "out of memory" in str(e).lower():
                 _recover_sam3(sam3)
@@ -546,14 +600,24 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                         batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
                         boxes_by_pos=cat_boxes
                     )
+                    cat_status["note"] = "ran after one CUDA out-of-memory recovery"
+                except SAM3ConfigError as e2:
+                    status[category] = {"status": "failed", "reason": f"SAM3ConfigError: {e2}"}
+                    raise
                 except Exception as e2:
                     if "out of memory" in str(e2).lower():
                         print(f"[SegPipeline] ⛔ Category '{category}' failed twice with OOM — skipping")
+                        cat_status = {"status": "failed",
+                                      "reason": "CUDA out of memory twice (recovered once)"}
                         _recover_sam3(sam3)
                     else:
                         print(f"[SegPipeline] ⚠️ Category '{category}' retry failed: {e2}")
+                        cat_status = {"status": "failed",
+                                      "reason": f"after an OOM recovery: "
+                                                f"{type(e2).__name__}: {e2}"}
             else:
                 print(f"[SegPipeline] ⚠️ Category '{category}' failed: {e}")
+                cat_status = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
         
         # Collect unique obj_ids for this category
         cat_obj_ids = set()
@@ -561,6 +625,10 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             cat_obj_ids.update(fm.keys())
         
         print(f"[SegPipeline] Category '{category}': {len(cat_obj_ids)} objects across {len(cat_masks)} frames")
+        if cat_status["status"] == "ran":
+            cat_status.update(n_objects=len(cat_obj_ids), n_frames=len(cat_masks))
+        cat_status["seconds"] = round(_time.time() - t_cat, 1)
+        status[category] = cat_status
         
         # Remap this category's IDs to global space (offset by previous categories)
         cat_id_remap = {}
@@ -569,39 +637,56 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             cat_id_remap[local_id] = global_id
             obj_labels[global_id] = category
         
-        # Merge into all_masks with remapped global IDs
-        # Map local category frame indices back to global frame_files indices
+        # THIS category's masks with remapped global IDs, keyed by the global
+        # frame_files index (local_frame_idx is an index into cat_frame_files)
+        cat_global = {}
         for local_frame_idx, frame_masks in cat_masks.items():
-            # local_frame_idx is an index into cat_frame_files
-            # We need to map it back to the global frame_files index
             if local_frame_idx < len(cat_frame_indices):
                 global_frame_idx = cat_frame_indices[local_frame_idx]
             else:
                 global_frame_idx = local_frame_idx  # Fallback
-            
-            if global_frame_idx not in all_masks:
-                all_masks[global_frame_idx] = {}
+            dst = cat_global.setdefault(global_frame_idx, {})
             for local_id, mask in frame_masks.items():
-                all_masks[global_frame_idx][cat_id_remap[local_id]] = mask
+                dst[cat_id_remap[local_id]] = mask
+        del cat_masks
         
         # Advance offset for next category
         if cat_obj_ids:
             global_id_offset = max(cat_id_remap.values())
         
-        # Incremental save: persist MASKLETS after each category (cheap,
-        # crash-safe). The mask→cloud matching + per-instance cleaning
-        # (DBSCAN/SOR) runs ONCE at the end (Step 4) — running it per category
-        # interleaved N full matching passes with the segmentation for no
-        # benefit, and in the anchored pipeline order the cleaned cloud does
-        # not even exist yet at this point.
-        if output_dir and cfg and all_masks:
-            try:
-                categories_so_far = categories[:cat_idx + 1]
-                _save_masks(output_dir, all_masks, categories_so_far, obj_labels,
-                            cfg, frame_space=mask_space.SPACE_KEYFRAME)
-                print(f"[SegPipeline] 💾 Incremental save: {cat_idx+1}/{len(categories)} categories saved")
-            except Exception as e:
-                print(f"[SegPipeline] ⚠️ Incremental save failed: {e}")
+        # Save THIS category's masklets as it finishes (crash-safe; see the
+        # docstring for why only this category's). The mask→cloud matching +
+        # per-instance cleaning runs ONCE at the end (Step 4) — in the intake
+        # order the cleaned cloud does not even exist yet at this point.
+        if persist:
+            if cat_global:
+                try:
+                    seg_meta = _save_masks(output_dir, cat_global, categories[:cat_idx + 1],
+                                           obj_labels, cfg,
+                                           frame_space=mask_space.SPACE_KEYFRAME)
+                except Exception as e:
+                    status[category] = {**cat_status, "status": "failed",
+                                        "reason": f"its masks could not be saved: "
+                                                  f"{type(e).__name__}: {e}"}
+                    raise
+                print(f"[SegPipeline] 💾 Saved category {cat_idx+1}/{len(categories)}")
+        else:
+            for global_frame_idx, frame_masks in cat_global.items():
+                all_masks.setdefault(global_frame_idx, {}).update(frame_masks)
+        del cat_global
+
+        # measured, not assumed: SAM3 time per prompt on THIS run, and what the
+        # remaining prompts will take at that rate
+        n_done += 1
+        per_prompt = (_time.time() - t_sam3) / n_done
+        n_left = len(categories) - (cat_idx + 1)
+        print(f"[SegPipeline] ⏱ prompt {cat_idx+1}/{len(categories)} took "
+              f"{cat_status['seconds']:.0f} s; {per_prompt:.0f} s/prompt so far → "
+              f"~{per_prompt * n_left / 60:.0f} min for the {n_left} left")
+        if on_progress and n_left:
+            on_progress(((cat_idx + 1) / max(len(categories), 1)) * 100,
+                        f"SAM3 {cat_idx+1}/{len(categories)} prompts, "
+                        f"{per_prompt:.0f} s/prompt → ~{per_prompt * n_left / 60:.0f} min left")
         
         # VRAM cleanup between categories
         gc.collect()
@@ -617,11 +702,10 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
     sam3.unload_model()
     gc.collect()
     
-    total_objects = set()
-    for fm in all_masks.values():
-        total_objects.update(fm.keys())
-    print(f"\n[SegPipeline] SAM3 complete: {len(all_masks)} frames, "
-          f"{len(total_objects)} unique objects across {len(categories)} categories")
+    n_ran = sum(1 for c in categories if (status.get(c) or {}).get("status") == "ran")
+    print(f"\n[SegPipeline] SAM3 complete: {len(obj_labels)} unique objects across "
+          f"{len(categories)} categories ({n_ran} ran, {len(categories) - n_ran} skipped / "
+          f"failed) in {(_time.time() - t_sam3) / 60:.1f} min")
 
     # The batch session and the symlink dirs were kept alive across concepts.
     try:
@@ -630,7 +714,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         print(f"[SegPipeline]   ⚠️ Could not release SAM3 session: {e}")
     _clear_batch_dirs()
     
-    return all_masks, obj_labels
+    return all_masks, obj_labels, seg_meta
 
 
 # Symlink dirs are keyed by their exact frame list and reused: every concept sees
@@ -924,7 +1008,10 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     masks_path = output_dir / "seg_masks.npz"
     seg_path = output_dir / "segmentation.json"
     
-    existing_npz = {}
+    # the f*_o* entries the store already holds: KEPT AS STORED (never decompressed
+    # or recompressed — see _atomic_append_npz); only this call's masks are written
+    existing_mask_keys = set()
+    store_readable = False
     existing_instances = []
     existing_prompts = []
     max_existing_id = -1
@@ -933,14 +1020,14 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     
     if masks_path.exists():
         try:
-            old_data = np.load(masks_path)
-            for key in old_data.files:
-                if key.startswith("f") and "_o" in key:
-                    existing_npz[key] = old_data[key]
-            if "obj_ids" in old_data:
-                existing_obj_ids = set(old_data["obj_ids"].tolist())
-            if "frames" in old_data:
-                existing_frames = set(old_data["frames"].tolist())
+            with np.load(masks_path) as old_data:
+                existing_mask_keys = {key for key in old_data.files
+                                      if key.startswith("f") and "_o" in key}
+                if "obj_ids" in old_data.files:
+                    existing_obj_ids = set(old_data["obj_ids"].tolist())
+                if "frames" in old_data.files:
+                    existing_frames = set(old_data["frames"].tolist())
+            store_readable = True
         except Exception as e:
             print(f"[SegPipeline] ⚠️ Could not load existing NPZ: {e}")
     
@@ -989,13 +1076,12 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
         print(f"[SegPipeline] Upsert: {reused} existing objects updated, "
               f"{len(new_obj_ids_raw) - reused} new objects added")
     
-    # ── Build merged NPZ data ──
-    # Start with existing masks
-    npz_data = dict(existing_npz)
+    # ── The entries THIS call writes (the store's other masks stay as stored) ──
+    npz_data = {}
     
     # Add new masks with remapped IDs
     new_frame_indices = sorted(all_masks.keys())
-    mask_count = len(existing_npz)
+    mask_count = 0
     
     # If scaled_res not set (no chunk metadata), detect from first mask shape
     if scaled_res is None:
@@ -1032,12 +1118,19 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     npz_data[_mspace.NPZ_KEY] = _mspace.declaration(frame_space)
     
     # Save compressed NPZ — ATOMIC (tmp ending in .npz + replace): a crash
-    # mid-write must never truncate the session's masks (2026-08-29)
-    from segmentation.erase import _atomic_savez
-    _atomic_savez(masks_path, npz_data)
+    # mid-write must never truncate the session's masks (2026-08-29). Into a
+    # readable store the new entries are APPENDED: re-reading and recompressing
+    # every mask the store already holds made each save cost the whole store —
+    # quadratic over a run that saves once per prompt (pccr: ~10 s per rewrite
+    # of 2,211 masks, 814 MB decompressed in RAM).
+    from segmentation.erase import _atomic_append_npz, _atomic_savez
+    if store_readable:
+        _atomic_append_npz(masks_path, npz_data, keep=existing_mask_keys)
+    else:
+        _atomic_savez(masks_path, npz_data)
     _mspace.invalidate(output_dir)
     masks_mb = masks_path.stat().st_size / (1024 * 1024)
-    new_count = mask_count - len(existing_npz)
+    new_count = mask_count
     print(f"[SegPipeline] ✅ Saved masks: {masks_path.name} "
           f"({new_count} new masks, {len(all_obj_ids)} total objects, "
           f"{len(all_frames)} frames, {masks_mb:.1f} MB)")
@@ -1064,8 +1157,10 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
         label = obj_labels.get(raw_id, categories[0] if categories else "object")
         # Rich SAM3 concept phrases ("concrete support column") become compact
         # id-like labels here — the ONE place labels are persisted — so folder
-        # names / JSON keys downstream never carry spaces.
-        label = re.sub(r"[^a-z0-9]+", "_", str(label).strip().lower()).strip("_")[:48] or "object"
+        # names / JSON keys downstream never carry spaces. The rule lives in
+        # census.concept_label so the census attributes masklets by it too.
+        from segmentation.census import concept_label
+        label = concept_label(label)
         
         if remapped_id in existing_by_id:
             # Update existing entry (label may have changed)

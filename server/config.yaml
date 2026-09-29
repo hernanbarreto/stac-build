@@ -404,7 +404,14 @@ autoprompt:
   enabled: true                       # default path; false -> InternVL3 fallback
   backend: "qwen_local"               # semantic-service backend
   understand: true                    # comprehend the scene first; drives detection
-  understand_cover: true              # WHICH keyframes the VLM sees, measured instead of counted
+  understand_cover: false             # OFF 2026-09-29 — the VLM runs at the INTAKE (USER 2026-09-28:
+                                      # VLM + SAM3 once, before any geometry), where no cloud of this
+                                      # run exists: on a fresh session the cover can never measure and
+                                      # fell back to 8 linspace frames (pccr 2026-09-29, log: "[cover]
+                                      # no cloud on disk"), on a re-run it would read the PREVIOUS
+                                      # run's cloud. The frames now come from vlm_sampling below.
+                                      # true = the cover when a cloud exists, vlm_sampling otherwise.
+                                      # WHICH keyframes the VLM sees, measured instead of counted
                                       # (USER 2026-09-16). Each keyframe wrote its own points into
                                       # the cloud, so what it contributed to the scene is on disk:
                                       # voxelise, then keep adding the keyframe that shows the most
@@ -423,11 +430,41 @@ autoprompt:
   understand_cover_voxel_m: 0.10      # at what size two points are the same piece of scene. A
                                       # PHYSICAL size, declared: at 10 cm a doorway, an extinguisher
                                       # and a column are each several voxels wide.
-  understand_sample: 8                # FALLBACK ONLY — used when there is no cloud yet or it
-                                      # carries no per-point provenance, so coverage cannot be
-                                      # measured. It is the old rule and its flaw is why the cover
-                                      # exists: a fixed 8 by linspace, 8 for 80 keyframes and 8 for
-                                      # 2000, and pccr's main door appeared in none of them.
+  # REMOVED 2026-09-29 — `understand_sample: 8` (a fixed 8 keyframes by linspace, the
+  # fallback that ran on EVERY intake: pccr's 17.5 m walk was named from 8 images).
+  # A leftover fails the load naming its replacement (vlm_sampling.spacing_kf).
+  vlm_sampling:                       # WHICH pixels the VLM is shown to NAME the scene — its phrases
+                                      # ARE the SAM3 prompts, so what it never sees is never segmented
+                                      # (USER 2026-09-29: "debe segmentar todo, absolutamente preciso y
+                                      # completo"). segmentation/autoprompt/vlm_sampling.py. Every run
+                                      # records what it looked at in output/segmentation_census.json.
+    spacing_m: 0.5                    # one VLM keyframe per 0.5 m of walked chainage (intake/walk.json,
+                                      # when it covers the keyframes — a re-run; the walk is measured
+                                      # after I2), spread uniformly, both ends in. A DENSITY, not a
+                                      # measurement: the census shows what it names; tune with it.
+    spacing_kf: 8                     # the same density by keyframe index when there is no walk yet
+                                      # (every fresh intake): keyframes are parallax-uniform and
+                                      # measured 0.05-0.09 m/kf (test2 0.051, observatorio 0.053, pccr
+                                      # 0.06-0.087), so 8 kf ~ 0.4-0.7 m ~ spacing_m.
+    tile_rows: 2                      # every sampled frame is ALSO shown as a rows x cols grid of
+    tile_cols: 2                      # overlapping crops, each enlarged to the frame's own size, so a
+                                      # small object (doorbell panel, conduit) fills enough of the image
+                                      # to be named. 1 x 1 = no crops. 2 x 2 = 5 calls per frame.
+    tile_overlap_frac: 0.2            # share of a crop its neighbour repeats, so an object on a crop
+                                      # border is whole in one of them.
+    max_calls: 300                    # BOUND on VLM calls (frames x (1 + crops)), not a decision:
+                                      # past it the frames are thinned uniformly along the same axis
+                                      # (never the crops) and the log + census say "BOUND REACHED".
+                                      # pccr (289 kf) at 8 kf x 5 calls = 37 frames, 185 calls.
+  max_sam3_prompts: 150               # BOUND on the SAM3 prompts, not a decision: `aggregate` keeps
+                                      # every distinct name and the consolidation removes none, so the
+                                      # count follows the VLM's phrasing over the calls above (pccr's
+                                      # 8-frame understanding already gave 52 names). SAM3 time is
+                                      # linear in it: pccr 2026-09-29 ran 30 prompts over 289 keyframes
+                                      # in 24.6 min (~49 s each, server log) -> 150 ~ 2 h. Past it the
+                                      # names proposed by the FEWEST VLM calls (ties: seen later) are
+                                      # not prompted, each recorded in the log + census as "BOUND
+                                      # REACHED". The SAM3 stage logs its own measured s/prompt.
   consolidate_prompts: true           # second VLM pass over the ASSEMBLED concept list (USER
                                       # 2026-09-16: "una segunda pasada para que fusione conceptos
                                       # en un único prompt"). The understanding runs frame by frame
@@ -446,6 +483,11 @@ autoprompt:
                                # tokens that day. The understanding still runs and still
                                # describes the scene; only the LIST is pinned. Delete the
                                # file (or set false) to let the VLM propose it again.
+                               # SINCE 2026-09-29 the record is stamped `derived_under`
+                               # (vlm_sampling + understand_cover + the folding rule) and
+                               # reused ONLY under the same stamp: same inputs → same list.
+                               # A record from another sampling (or unstamped, as every
+                               # record before this date) is derived again — logged.
                                       # changes the list and stops when it changes nothing
                                       # (convergence). This only caps a model that oscillates, and
                                       # reaching it is declared in output/prompt_consolidation.json.
@@ -741,6 +783,33 @@ models:
                                        # (cross-batch ID stitching is unreliable; avoid it)
     batch_overlap: 10
     iou_match_threshold: 0.3
+
+    # Detection / confirmation gates of the SAM3 video model (USER 2026-09-29, with the
+    # segmentation census). The vendor BUILDERS hard-code them; segmentation/sam3_wrapper.
+    # load_model writes these onto the built model object (a vendor rename FAILS the load).
+    # Defaults are EXACTLY the vendor's own values per version — no behaviour change until
+    # the user tunes them against output/segmentation_census.json. One block per version:
+    # the two builders ship DIFFERENT values, and the CPU fallback builds the 3.0 model.
+    sam3_thresholds:
+      "sam3.1":                        # vendor/sam31 build_sam3_multiplex_video_predictor
+        score_threshold_detection: 0.4 # a detection below this never enters NMS / matching
+        new_det_thresh: 0.65           # score a detection needs to START a new masklet
+        hotstart_delay: 15             # frames a new masklet's output is held back while judged
+        hotstart_unmatch_thresh: 8     # ...dropped if unmatched by detections this many of them
+        hotstart_dup_thresh: 8         # ...dropped if overlapping an earlier one this many
+        masklet_confirmation_consecutive_det_thresh: 3   # CONSECUTIVE matched detections to
+                                       # confirm a masklet (masklet_confirmation_enable is true in
+                                       # this builder; the value is Sam3MultiplexBase's default).
+                                       # Keyframes are parallax-spaced: an object seen in < 3
+                                       # consecutive keyframes may never be confirmed.
+      "sam3":                          # vendor/sam3 build_sam3_video_model (temporal disambiguation on)
+        score_threshold_detection: 0.5
+        new_det_thresh: 0.7
+        hotstart_delay: 15
+        hotstart_unmatch_thresh: 8
+        hotstart_dup_thresh: 8
+        masklet_confirmation_consecutive_det_thresh: 3   # inert here: this builder sets
+                                       # masklet_confirmation_enable false
 
     # Per-segment cleaning (voxel grid + local PCA + depth peeling)
     segment_cleaning:
