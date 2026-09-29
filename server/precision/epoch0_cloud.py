@@ -274,51 +274,44 @@ def build_epoch0_cloud(session_dir: Path, config: dict, *, input_dir: Optional[P
                 log(f"{LOG_TAG} {line}")
         if proc.wait() != 0 or not cleaned.exists():
             raise Epoch0Error(f"the cleaner failed (exit {proc.returncode}) — epoch 0 not built")
-        sc = (config.get("postprocessing") or {}).get("scene_consolidate") or {}
-        if sc.get("enabled", True):
-            if progress:
-                progress(60, "epoch 0: consolidating (normal-aware MLS)")
-            from reconstruction.surface_fit.consolidate import scene_consolidate
-            from reconstruction.loops.config import load_loops_config
-            try:
-                sck = {k: sc[k] for k in ("min_radius_m", "max_radius_m", "iterations", "normal_gate")}
-            except KeyError as e:
-                raise Epoch0Error(f"postprocessing.scene_consolidate.{e.args[0]} is missing") from e
-            stats = scene_consolidate(
-                tmp, radius_m=sc.get("radius_m"), min_radius_m=float(sck["min_radius_m"]),
-                max_radius_m=float(sck["max_radius_m"]), iterations=int(sck["iterations"]),
-                normal_gate=float(sck["normal_gate"]),
-                excluded_statuses=load_loops_config(config).witness.mls_excluded_statuses)
-            rep["consolidate"] = {k: stats[k] for k in ("n_points", "radius_m", "mean_move_mm")
-                                  if k in stats}
-        if progress:
-            progress(80, "epoch 0: Potree octree")
-        from potree_converter import convert_ply_to_potree
-        ok = convert_ply_to_potree(session_dir, force=True, ply_override=cleaned,
-                                   potree_dir_override=tmp / "potree")
-        if not ok or not (tmp / "potree" / "metadata.json").exists():
-            raise Epoch0Error("the Potree build of epoch 0 failed — nothing registered")
-        rels = ["cleaned_cloud.ply"]
-        for rel in ("cleaned_cloud_raw.ply",):
-            if (tmp / rel).exists():
-                rels.append(rel)
-        rels.append("potree")
-        for rel in rels:
-            dst = e0 / rel
-            if dst.is_dir():
-                shutil.rmtree(dst)
-            elif dst.exists():
-                dst.unlink()
-            shutil.move(str(tmp / rel), str(dst))
-        register_in_manifest(e0, rels)
-        rep.update({"epoch_dir": str(e0), "artifacts": rels,
-                    "n_points": int(json.loads((e0 / "potree" / "metadata.json").read_text()).get("points", 0)),
-                    "seconds": round(time.time() - t0, 1)})
-        log(f"{LOG_TAG} epoch 0 = {rep['n_points']:,} pts in {e0} ({rep['seconds']} s), "
-            f"registered: {rels}")
+        # NO consolidation (USER 2026-09-29: "es solo para ver … hacé una simple"): epoch 0 is
+        # a comparison view — the cleaning recipe and the octree, nothing that takes 30 min
+        rep.update(finish_epoch0(session_dir, tmp, log=log, progress=progress))
+        rep["seconds"] = round(time.time() - t0, 1)
         return rep
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def finish_epoch0(session_dir: Path, tmp: Path, log: Callable = print,
+                  progress: Optional[Callable[[float, str], None]] = None) -> Dict[str, object]:
+    """``tmp/cleaned_cloud.ply`` (the cleaned Omega cloud) → its Potree octree → moved into
+    `_epoch_0/` and registered in the manifest."""
+    session_dir = Path(session_dir)
+    out = session_dir / "output"
+    e0 = out / EPOCH0_DIRNAME
+    cleaned = tmp / "cleaned_cloud.ply"
+    if not cleaned.exists():
+        raise Epoch0Error(f"{cleaned} is missing — nothing to publish as epoch 0")
+    if progress:
+        progress(80, "epoch 0: Potree octree")
+    from potree_converter import convert_ply_to_potree
+    ok = convert_ply_to_potree(session_dir, force=True, ply_override=cleaned,
+                               potree_dir_override=tmp / "potree")
+    if not ok or not (tmp / "potree" / "metadata.json").exists():
+        raise Epoch0Error("the Potree build of epoch 0 failed — nothing registered")
+    rels = ["cleaned_cloud.ply"] + (["cleaned_cloud_raw.ply"] if (tmp / "cleaned_cloud_raw.ply").exists() else []) + ["potree"]
+    for rel in rels:
+        dst = e0 / rel
+        if dst.is_dir():
+            shutil.rmtree(dst)
+        elif dst.exists():
+            dst.unlink()
+        shutil.move(str(tmp / rel), str(dst))
+    register_in_manifest(e0, rels)
+    n = int(json.loads((e0 / "potree" / "metadata.json").read_text()).get("points", 0))
+    log(f"{LOG_TAG} epoch 0 = {n:,} pts in {e0}, registered: {rels}")
+    return {"epoch_dir": str(e0), "artifacts": rels, "n_points": n}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -327,8 +320,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--session", required=True)
     ap.add_argument("--from-omega-npz", action="store_true",
                     help="rebuild Omega's raw cloud from omega_run/results_output (chunks gone)")
+    ap.add_argument("--finish", action="store_true",
+                    help="publish an already cleaned output/_tx_epoch0/cleaned_cloud.ply (octree + register)")
     args = ap.parse_args(argv)
     from config import cfg
+    if args.finish:
+        s = Path(args.session)
+        finish_epoch0(s, s / "output" / TMP_DIRNAME)
+        shutil.rmtree(s / "output" / TMP_DIRNAME, ignore_errors=True)
+        return 0
     build_epoch0_cloud(Path(args.session), cfg, from_records=args.from_omega_npz)
     return 0
 
