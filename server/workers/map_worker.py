@@ -14,6 +14,7 @@ import glob
 import tempfile
 from pathlib import Path
 from multiprocessing.connection import Connection
+from typing import Optional
 
 from workers.base import WorkerPipe, run_worker_safe
 
@@ -1909,6 +1910,48 @@ def _write_intake_da3_frames(frames_dir: Path) -> tuple:
     return path, doc
 
 
+def _run_coherence_probe(pipe: WorkerPipe, output_dir: Path, config: dict,
+                         capacity: int) -> Optional[dict]:
+    """Omega's coherence probe (precision/omega_coherence.py) as a subprocess in the
+    Omega env, before the Omega pass. Returns the verdict (chunk_keyframes,
+    overlap_keyframes, single_pass, why) or None when the probe is off. A probe that
+    fails FAILS the stage: the chunk decision rests on it (USER 2026-09-29, 2B) and
+    nothing is assumed in its place."""
+    import subprocess
+    from precision.config import load_precision_config
+    from workers.base import stop_semantic_service_verified
+    pc = load_precision_config(config)
+    if not (pc.enabled and pc.omega.coherence_probe.enabled):
+        return None
+    session_dir = output_dir.parent
+    stop_semantic_service_verified(pipe, stage="Omega coherence probe")
+    pipe.send_progress(6, "Omega coherence probe: how many keyframes chain coherently...",
+                       stage="reconstruction")
+    cmd = [pc.runner.python_mapanything, "-u", "-m", "precision.omega_coherence",
+           "--session", str(session_dir), "--capacity", str(int(capacity))]
+    server_dir = Path(__file__).resolve().parent.parent
+    proc = subprocess.Popen(cmd, cwd=str(server_dir), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    for line in proc.stdout:
+        line = line.rstrip()
+        if line:
+            pipe.send_log(line)
+        if pipe.check_cancel():
+            proc.terminate()
+            proc.wait()
+            raise RuntimeError("cancelled during the Omega coherence probe")
+    rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError(f"the Omega coherence probe failed (exit {rc}) — see the lines "
+                           f"above; the chunk decision rests on it")
+    from precision.omega_coherence import PROBE_NAME
+    doc = json.loads((output_dir / PROBE_NAME).read_text())
+    pipe.send_log(f"[chunk-plan] coherence probe: {doc['why']} → "
+                  + ("ONE pass" if doc["single_pass"] else
+                     f"chunks of {doc['chunk_keyframes']} keyframes, overlap {doc['overlap_keyframes']}"))
+    return doc
+
+
 def _run_da3_anchor(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                     anchor_files: list, recon_cfg: dict) -> None:
     """ISOLATED per-frame DA3 metric depth on the K scale-anchor frames — NO streaming.
@@ -2347,17 +2390,33 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         _max_walk0 = float(_simple_cfg.get("max_walk_single_pass_m", 0) or 0)
         _cw0 = float(_simple_cfg.get("chunk_walk_m", 12.0) or 12.0)
         _walk0 = float(_walk_doc["walk_length_m"]) if _walk_doc else None
-        if _walk0 is not None and _scale_align_on and not (
-                _n_selected <= _chunk_cfg and (_max_walk0 <= 0 or _walk0 <= _max_walk0)):
-            # I4 (claude_stac.txt §4-F2): the MEASURED walk sizes the chunks before
-            # Omega runs — one pass, no probe, no re-run. A POSITIVE
-            # chunk_frames_over_walk pins the size in keyframes here too (pccr
-            # 2026-09-29: it read 152 and this branch planned 198 from the metres)
-            _pin0 = int(_simple_cfg.get("chunk_frames_over_walk", 0) or 0)
+        # THE COHERENCE PROBE (USER 2026-09-29, decision 2B): with the walk measured,
+        # Omega itself is asked how many keyframes it chains coherently in THIS scene
+        # — nested passes compared with the DA3 walk (precision/omega_coherence.py).
+        # Its verdict decides single pass vs chunks and the chunk size; the metre
+        # rules (max_walk_single_pass_m, chunk_walk_m) are the fallback when it is off.
+        # An explicit pin (chunk_frames_over_walk > 0) still wins: it is the A/B knob.
+        _coh = None
+        _pin0 = int(_simple_cfg.get("chunk_frames_over_walk", 0) or 0)
+        if _walk0 is not None and _scale_align_on and _pin0 <= 0:
+            _coh = _run_coherence_probe(pipe, output_dir, config, int(_chunk_cfg))
+        if _coh is not None:
+            _chunk_it = not bool(_coh["single_pass"])
+        else:
+            _chunk_it = _walk0 is not None and _scale_align_on and not (
+                _n_selected <= _chunk_cfg and (_max_walk0 <= 0 or _walk0 <= _max_walk0))
+        if _chunk_it:
+            # I4 (claude_stac.txt §4-F2): the chunks are decided before Omega runs —
+            # one pass, no re-run. Precedence: pinned size > coherence probe > metres.
             if _pin0 > 0:
                 _fx = max(24, min(_pin0, int(_chunk_cfg)))
                 _ov = _fx // 2
                 _how = f"{_fx} keyframes pinned (chunk_frames_over_walk)"
+            elif _coh is not None:
+                _fx = max(2, min(int(_coh["chunk_keyframes"]), int(_chunk_cfg)))
+                _ov = int(_coh["overlap_keyframes"])
+                _how = (f"{_fx} keyframes MEASURED by the coherence probe — "
+                        f"{_coh['why']}")
             else:
                 _fx, _ov = plan_chunks(_n_selected, _walk0, _cw0, max_size=max(_chunk_cfg, 24))
                 _how = f"{_cw0:g} m of REAL walk"
@@ -2386,7 +2445,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                               f"keyframes, revisit = cameras < {_ref['dist_bar_m']:.2f} m "
                               f"(scene median depth) and < "
                               f"{math_deg(_ref['hfov_rad']) / 2.0:.1f}° apart (half the FOV)")
-            _persist_chunk_plan(_fx, _ov, _n_selected, "walk-planned", _walk=_walk0)
+            _persist_chunk_plan(_fx, _ov, _n_selected,
+                                "coherence-probed" if (_coh is not None and _pin0 <= 0) else "walk-planned",
+                                _walk=_walk0)
             pipe.send_log(f"SIMPLE chunked-metric (I4): walk {_walk0:.1f} m measured by the "
                           f"DA3 windows → {len(chunk_ranges(_n_selected, _fx, _ov))} chunks of "
                           f"{_fx} keyframes ({_how}, overlap {_ov}); ONE Omega pass")

@@ -1591,7 +1591,8 @@ reconstruction:
                                         # 0 disables the re-run entirely (one pass, always).
                                         # 25->15 (2026-07-09): test6 (29 m) was still bad
                                         # single-pass; the comfort proven so far is test2 ~10 m.
-    chunk_walk_m: 5.0                   # metres of REAL walk (I3, DA3 windows) per chunk, 50 %
+    chunk_walk_m: 5.0                   # FALLBACK when precision.omega.coherence_probe is off:
+                                        # metres of REAL walk (I3, DA3 windows) per chunk, 50 %
                                         # overlap. 12 → 5 (2026-09-29): the 12 was calibrated
                                         # on the INFLATED Omega-pass walk (pccr 44 m → 12
                                         # inflated m = 59 kf = the accepted 60/30 layout —
@@ -2077,6 +2078,21 @@ reconstruction:
         window_frames: 32               # BOUND: keyframes of the probe window
         pair_samples: 8000              # BOUND: surface samples per frame pair
                                         # (metric_lock.depth_pair_samples' own default)
+      coherence_probe:                  # USER 2026-09-29 (decision 2B): the chunk size is
+                                        # MEASURED — nested Omega passes on 32/64/128/... keyframes
+                                        # compared with the DA3 walk (I3); the largest window that
+                                        # keeps ONE scale (bootstrap CI of the half-to-half drift
+                                        # holds 0) sizes the chunks; the whole set coherent = one
+                                        # pass. Replaces chunk_walk_m / max_walk_single_pass_m
+                                        # when enabled (they stay as the fallback when it is off).
+                                        # precision/omega_coherence.py → output/omega_coherence.json
+        enabled: true
+        lengths: [32, 64, 128, 256, 512]  # BOUND: window lengths tried (plus the whole set when
+                                        # it fits the card); VGGT-Long's 60/30 and the card's
+                                        # ~500-frame ceiling bracket the range
+        heldout_confidence: 0.95        # declared confidence (as everywhere else)
+        bootstrap: 2000                 # BOUND: resamples of the steps per half
+        seed: 0
     # F4 — native-pixel sub-pixel tracks (precision/tracks.py; the fork's VGGSfM tracker)
     tracks:
       tracker_long_side: 1024           # BOUND: tracker input long side (native when smaller,
