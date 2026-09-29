@@ -51,7 +51,8 @@ REJECT_REASONS = {"insufficient_witnesses": 1, "inconsistent": 2, "prior_fill_dr
                   "prior_low_conf": 8,      # tier-1 prior under the session's confidence floor
                   "contradicted": 9,        # a view sees free space through the point
                   "fused": 10,              # consumed by a winner within the consistency tolerance
-                  "prior_not_independent": 11,  # tier-1 prior confirmed only within one visit of walk
+                  "prior_not_independent": 11,  # RETIRED 2026-09-29 (F6's independence rule): never
+                                                # written any more; kept so older files still read
                   "voxel": 12}              # the cleaning recipe's voxel pick (postprocessing.voxel_size)
 REJECT_NAMES = {v: k for k, v in REJECT_REASONS.items()}
 CONTENT_FLAG_BITS = {"reflective": 1, "low_info": 2}

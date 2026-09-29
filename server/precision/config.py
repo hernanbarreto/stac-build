@@ -283,7 +283,12 @@ class DepthConfig:
     tau_px_k: float             # τ_px = this × F5's held-out RMS
     min_consistent_views: int   # views that must confirm a tier-0 depth
     prior_fill: str             # keep | drop
-    prior_fill_min_views: int   # views that must confirm a tier-1 prior
+    prior_fill_min_views: int   # views that must confirm a tier-1 prior (only while
+                                # prior_requires_confirmation)
+    prior_requires_confirmation: bool   # false = maximum coverage: every prior pixel that is
+                                        # not tier 0 is tier 1 unless contradicted / under the
+                                        # confidence floor / excluded
+    contradiction: bool         # the majority own-error contradiction vote (the flyer filter)
     view_samples: int           # BOUND: prior points per keyframe for view selection
     min_scale_samples: int      # BOUND: track depths that measure one keyframe's s_k
     calib_conf_bins: int        # calibration bins (equal count)
@@ -306,11 +311,20 @@ class FuseConfig:
 
 # ── the product: corrected Omega cloud (default) or the witness fusion ─────
 
+DEVICES = ("cuda", "cpu")
+
 @dataclass(frozen=True)
 class CloudConfig:
-    source: str                 # "omega_corrected" (Omega depth × s_k, F5 camera + poses, the cloud
-                                # stage's recipe — precision/corrected_cloud.py) | "fusion" (F6 sweep → F7)
+    source: str                 # "omega_corrected" (F6's depth — tier 0 + tier 1 — with F5's camera +
+                                # poses, the cloud stage's recipe — precision/corrected_cloud.py) |
+                                # "fusion" (F6 sweep → F7)
     witness_filter: bool        # the witness filter on the corrected frames (drop_statuses leave)
+    silhouette_filter: bool     # the SAM3-silhouette flyer filter (precision/silhouette_filter.py)
+    silhouette_max_views: int   # BOUND (cost cap): views tested per point
+    silhouette_min_votes: int   # eligible views a point needs before its own silhouette judges it
+    silhouette_min_inside_frac: float   # share of those views inside its label's dilated mask
+                                        # under which it leaves
+    silhouette_device: str      # cuda | cpu — where the projection runs (no fallback)
     consolidate: bool           # the scene consolidation, normals from the corrected depth
 
 
@@ -513,6 +527,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         min_consistent_views=_num(dp, "min_consistent_views", "depth", lo=1, integer=True),
         prior_fill=_enum(dp, "prior_fill", "depth", PRIOR_FILL_MODES),
         prior_fill_min_views=_num(dp, "prior_fill_min_views", "depth", lo=1, integer=True),
+        prior_requires_confirmation=_bool(dp, "prior_requires_confirmation", "depth"),
+        contradiction=_bool(dp, "contradiction", "depth"),
         view_samples=_num(dp, "view_samples", "depth", lo=8, integer=True),
         min_scale_samples=_num(dp, "min_scale_samples", "depth", lo=1, integer=True),
         calib_conf_bins=_num(dp, "calib_conf_bins", "depth", lo=1, integer=True),
@@ -568,6 +584,12 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     if src not in ("omega_corrected", "fusion"):
         raise PrecisionConfigError(f"'{SECTION}.cloud.source' must be omega_corrected | fusion, got {src!r}")
     cloud = CloudConfig(source=str(src), witness_filter=_bool(cl, "witness_filter", "cloud"),
+                        silhouette_filter=_bool(cl, "silhouette_filter", "cloud"),
+                        silhouette_max_views=_num(cl, "silhouette_max_views", "cloud", lo=1, integer=True),
+                        silhouette_min_votes=_num(cl, "silhouette_min_votes", "cloud", lo=1, integer=True),
+                        silhouette_min_inside_frac=_num(cl, "silhouette_min_inside_frac", "cloud",
+                                                        lo=0.0, hi=1.0, lo_excl=True),
+                        silhouette_device=_enum(cl, "silhouette_device", "cloud", DEVICES),
                         consolidate=_bool(cl, "consolidate", "cloud"))
     cc = _sub(sec, "chunk_check", "")
     chunk_check = ChunkCheckConfig(

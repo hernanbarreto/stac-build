@@ -221,7 +221,8 @@ def _vd_cfg():
 def points_of_masklets(output_dir, frame_global: np.ndarray,
                        pixel_row: np.ndarray, pixel_col: np.ndarray,
                        log: Callable[[str], None] = print,
-                       aspect_tol: Optional[float] = None
+                       aspect_tol: Optional[float] = None,
+                       mask_pixels: Optional[Tuple[np.ndarray, np.ndarray]] = None
                        ) -> Dict[int, np.ndarray]:
     """Which cloud points belong to each SAM3 masklet.
 
@@ -233,6 +234,12 @@ def points_of_masklets(output_dir, frame_global: np.ndarray,
 
     Masklets overlap, so a point can belong to more than one; nothing here
     forces a winner.
+
+    ``mask_pixels`` = (rows, cols): the birth pixels ALREADY on the mask grid, for a
+    caller whose ``pixel_row``/``pixel_col`` do not live on the trace grid and that
+    maps them exactly itself (precision/silhouette_filter.py: F6's undistorted native
+    pixel through the session camera); the trace-grid scaling is then skipped and a
+    negative entry is a pixel the mask grid does not cover (it belongs to nothing).
     """
     import re
 
@@ -250,20 +257,29 @@ def points_of_masklets(output_dir, frame_global: np.ndarray,
     ks = kf_of_frame[np.clip(np.asarray(frame_global, np.int64), 0,
                              len(kf_of_frame) - 1)]
 
-    Ht, Wt = trace_grid(output_dir)
     probe = next(masks[k] for k in masks.files if k.startswith("f") and "_o" in k)
     Hm, Wm = int(probe.shape[0]), int(probe.shape[1])
-    sr, sc = Hm / float(Ht), Wm / float(Wt)
-    tol = float(_vd_cfg().grid_aspect_tol if aspect_tol is None else aspect_tol)
-    if abs(sr - sc) / max(sr, sc) > tol:
-        raise RuntimeError(
-            f"the mask grid ({Hm}x{Wm}) and the trace grid ({Ht}x{Wt}) do not "
-            f"share an aspect ratio ({sr:.4f} vs {sc:.4f}, over {tol}) — the "
-            f"points cannot be sampled against the masks")
-    rows = np.clip((np.asarray(pixel_row, np.int64) * sr).astype(np.int64), 0, Hm - 1)
-    cols = np.clip((np.asarray(pixel_col, np.int64) * sc).astype(np.int64), 0, Wm - 1)
-    log(f"[visit-drift] points -> masklets: trace {Ht}x{Wt} -> mask {Hm}x{Wm} "
-        f"(x{sr:.4f})")
+    if mask_pixels is None:
+        Ht, Wt = trace_grid(output_dir)
+        sr, sc = Hm / float(Ht), Wm / float(Wt)
+        tol = float(_vd_cfg().grid_aspect_tol if aspect_tol is None else aspect_tol)
+        if abs(sr - sc) / max(sr, sc) > tol:
+            raise RuntimeError(
+                f"the mask grid ({Hm}x{Wm}) and the trace grid ({Ht}x{Wt}) do not "
+                f"share an aspect ratio ({sr:.4f} vs {sc:.4f}, over {tol}) — the "
+                f"points cannot be sampled against the masks")
+        rows = np.clip((np.asarray(pixel_row, np.int64) * sr).astype(np.int64), 0, Hm - 1)
+        cols = np.clip((np.asarray(pixel_col, np.int64) * sc).astype(np.int64), 0, Wm - 1)
+        log(f"[visit-drift] points -> masklets: trace {Ht}x{Wt} -> mask {Hm}x{Wm} "
+            f"(x{sr:.4f})")
+    else:
+        mr = np.asarray(mask_pixels[0], np.int64)
+        mc = np.asarray(mask_pixels[1], np.int64)
+        covered = (mr >= 0) & (mr < Hm) & (mc >= 0) & (mc < Wm)
+        ks = np.where(covered, ks, -1)                 # uncovered: no keyframe, no masklet
+        rows, cols = np.clip(mr, 0, Hm - 1), np.clip(mc, 0, Wm - 1)
+        log(f"[visit-drift] points -> masklets: birth pixels given on the mask grid "
+            f"{Hm}x{Wm} ({int((~covered).sum()):,} not covered by it)")
 
     # points grouped by the keyframe they were born in, once
     order = np.argsort(ks, kind="stable")

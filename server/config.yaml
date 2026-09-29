@@ -2164,7 +2164,23 @@ reconstruction:
       prior_fill: keep                  # keep | drop — tier 1 is marked, never hidden
       prior_fill_min_views: 3           # 2 → 3 (2026-09-29): a prior has no image evidence of
                                         # its own; 6.7 M points entered on exactly 2 adjacent
-                                        # agreeing priors — never fewer views than tier 0 needs
+                                        # agreeing priors — never fewer views than tier 0 needs.
+                                        # Read ONLY while prior_requires_confirmation is true.
+      prior_requires_confirmation: false  # USER 2026-09-29 (pccr): MAXIMUM COVERAGE from F6. false =
+                                        # every pixel with a prior that is not tier 0 is tier 1
+                                        # (Omega × s_k) — the sweep's unconfirmed pixels fall back
+                                        # to the prior — unless contradicted (below), under the
+                                        # confidence floor or excluded. MEASURED: the confirmation
+                                        # rule (prior_fill_min_views views within τ_rel = the median
+                                        # prior disagreement, 1.08 %) threw 49 % of the scene out as
+                                        # 'inconsistent' while Omega's calibrated error is 10.8 % q95.
+                                        # true = that rule, exactly as before.
+      contradiction: true               # the flyer filter: a depth leaves when more of the
+                                        # contradiction_views see FREE SPACE through it (each with its
+                                        # OWN error margin) than confirm it — the majority vote that
+                                        # flagged 2.3 % on pccr. false = no contradiction test at all.
+                                        # (RETIRED 2026-09-29, USER: the "independent witness ≥ 1 m of
+                                        # walk" rule; its code 9 stays readable in old files.)
       view_samples: 256                 # BOUND: prior points per keyframe for view selection
       min_scale_samples: 50             # BOUND: track depths that measure one keyframe's s_k
       calib_conf_bins: 8                # confidence calibration bins (equal count)
@@ -2204,12 +2220,38 @@ reconstruction:
     cloud:                              # THE PRODUCT (USER 2026-09-29, pccr: the corrected Omega cloud
                                         # is "hasta ahora la mejor nube"; the witness fusion delivered
                                         # 9 M / 0.2 M points judged worse) — precision/corrected_cloud.py
-      source: omega_corrected           # omega_corrected: Omega depth × s_k, F5 camera + poses, the
-                                        #   reconstruction's confidence gate, voxel + SOR, witnesses,
-                                        #   consolidation, octree (runner step f7_cloud)
+      source: omega_corrected           # omega_corrected: F6's depth (tier 0 sweep + tier 1 Omega ×
+                                        #   s_k, maximum coverage) with F5's camera + poses, the
+                                        #   reconstruction's confidence gate per Omega chunk, voxel +
+                                        #   SOR, witnesses, silhouettes, consolidation, octree
+                                        #   (runner: … f5_refine → f6_sweep → f7_cloud → f6_check)
                                         # fusion: F6 sweep → F7 witness fusion (the §4-F7 chain)
       witness_filter: true              # the witness filter fed the corrected frames (single_witness
                                         #   leaves — pccr: 3.7 M of 25.5 M, the layers one keyframe invents)
+      silhouette_filter: true           # USER 2026-09-29: the flyer filter of the SAM3 silhouettes
+                                        #   (precision/silhouette_filter.py), after the witnesses and
+                                        #   before the consolidation. A point born inside masklet m's
+                                        #   mask is projected into every OTHER keyframe where m has a
+                                        #   mask, seen at ≥ refine.min_tri_deg from its birth ray, in
+                                        #   frame and not behind that view's own depth
+                                        #   (loops.witness.occlusion_tol_rel). It leaves when (1) with
+                                        #   ≥ silhouette_min_votes such views it lands inside its
+                                        #   label's DILATED mask (segmentation.mask_filter.dilate_px)
+                                        #   in less than silhouette_min_inside_frac of them, or (2) it
+                                        #   lands inside another label's mask and never inside its
+                                        #   own. Same-label masklets never conflict; unsegmented points
+                                        #   are never touched.
+      silhouette_max_views: 16          # BOUND (cost cap): views tested per point — the widest
+                                        #   triangulation angles at its (masklet, birth keyframe)
+                                        #   group first, views that frame the group first. Raising it
+                                        #   costs time linearly (see the module docstring)
+      silhouette_min_votes: 2           # the values of the ledger's former segmentation.mask_filter.
+      silhouette_min_inside_frac: 0.5   #   min_votes / min_inside_frac (CLAUDE.md, "INVENTED AND IT
+                                        #   DECIDES"), carried here by the 2026-09-29 plan: that block
+                                        #   stays free of them (tests/test_mask_audit.py — the audit
+                                        #   cuts nothing), this filter is the one that deletes
+      silhouette_device: cuda           # where the per-view projection runs (cuda | cpu); an
+                                        #   unavailable device FAILS the step — no silent fallback
       consolidate: true                 # scene_consolidate with normals from the corrected depth maps
     chunk_check:                        # USER 2026-09-29: per-chunk AND per-keyframe verification of
                                         # the corrected geometry against the floor/ceiling, DA3 as the

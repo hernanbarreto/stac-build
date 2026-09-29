@@ -189,6 +189,7 @@ def test_consistency_counts_agreeing_views_and_rejects_a_wrong_depth(scene):
 
 
 def test_tiers_textureless_is_prior_fill_or_discarded_never_tier0(scene):
+    """prior_requires_confirmation true: the rule until 2026-09-29, unchanged."""
     ref, gt, views = scene
     ok, box, wall, flat = _regions(gt)
     sig = np.zeros(gt.shape, bool)
@@ -196,30 +197,76 @@ def test_tiers_textureless_is_prior_fill_or_discarded_never_tier0(scene):
     n_s = np.where(sig, 3, 0).astype(np.uint8)
     z0 = gt.astype(np.float32)
     n_p = np.full(gt.shape, 2, np.uint8)
+    conf = dict(prior_requires_confirmation=True)
     src = DS.assign_tiers(sig, n_s, z0, n_p, None, min_consistent_views=2,
-                          prior_fill_min_views=2, prior_fill="keep")
+                          prior_fill_min_views=2, prior_fill="keep", **conf)
     assert np.all(src[sig] == DS.SOURCE_SWEEP)
     assert np.all(src[flat & ~sig] == DS.SOURCE_PRIOR_FILL)
-    src2 = DS.assign_tiers(sig, n_s, z0, np.zeros_like(n_p), None, 2, 2, "keep")
+    src2 = DS.assign_tiers(sig, n_s, z0, np.zeros_like(n_p), None, 2, 2, "keep", **conf)
     assert np.all(src2[flat & ~sig] == DS.DISCARD_NO_SIGNAL)
-    src3 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 2, "drop")
+    src3 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 2, "drop", **conf)
     assert np.all(src3[flat & ~sig] == DS.DISCARD_PRIOR_FILL_DROPPED)
-    src4 = DS.assign_tiers(sig, np.zeros_like(n_s), z0, n_p, flat, 2, 2, "keep")
+    src4 = DS.assign_tiers(sig, np.zeros_like(n_s), z0, n_p, flat, 2, 2, "keep", **conf)
     assert np.all(src4[sig] == DS.DISCARD_INCONSISTENT)
     assert np.all(src4[flat] == DS.DISCARD_EXCLUDED)
     assert not np.any(src4 == DS.SOURCE_SWEEP)
     # contradictions: a prior any view sees through is out; a measured depth stands
     # while its confirming views outnumber the contradicting ones
     one = np.ones(gt.shape, np.uint8)
-    src5 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 2, "keep", bad_s=one, bad_p=one)
+    src5 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 2, "keep", bad_s=one, bad_p=one, **conf)
     assert np.all(src5[flat & ~sig] == DS.DISCARD_CONTRADICTED)
     assert np.all(src5[sig] == DS.SOURCE_SWEEP)            # 3 views for, 1 against
-    src6 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 2, "keep", bad_s=one * 3)
+    src6 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 2, "keep", bad_s=one * 3, **conf)
     assert np.all(src6[sig] == DS.DISCARD_CONTRADICTED)     # 3 for, 3 against
     # the confidence floor: a low-confidence prior is out, a measured depth is not
     low = np.ones(gt.shape, bool)
-    src7 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 2, "keep", low_conf=low)
+    src7 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 2, "keep", low_conf=low, **conf)
     assert np.all(src7[flat & ~sig] == DS.DISCARD_LOW_CONF) and np.all(src7[sig] == DS.SOURCE_SWEEP)
+
+
+def test_max_coverage_keeps_unconfirmed_priors_and_still_drops_contradicted_ones(scene):
+    """USER 2026-09-29 (prior_requires_confirmation false): every prior pixel that is not
+    tier 0 is tier 1 — the sweep's unconfirmed pixels fall back to the prior, no view
+    count is asked — unless contradicted, under the confidence floor or excluded."""
+    _, gt, _ = scene
+    ok, box, wall, flat = _regions(gt)
+    H_, W_ = gt.shape
+    z0 = gt.astype(np.float32)
+    z0[:, :4] = 0                                            # no prior there
+    sig = np.zeros(gt.shape, bool)
+    sig[ok & (box | wall)] = True
+    n_s = np.where(sig, 3, 0).astype(np.uint8)
+    unconfirmed = sig & (np.arange(W_)[None, :] % 2 == 0)    # signal, but no view agrees
+    n_s[unconfirmed] = 0
+    n_p = np.zeros(gt.shape, np.uint8)                       # NO view confirms any prior
+    assert unconfirmed.sum() > 100 and (flat & ~sig & (z0 > 0)).sum() > 100
+    mc = dict(prior_requires_confirmation=False)
+    src = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 3, "keep", **mc)
+    assert np.all(src[sig & ~unconfirmed] == DS.SOURCE_SWEEP)            # tier 0 unchanged
+    assert np.all(src[unconfirmed] == DS.SOURCE_PRIOR_FILL)              # fell back to the prior
+    assert np.all(src[flat & ~sig & (z0 > 0)] == DS.SOURCE_PRIOR_FILL)   # no view count asked
+    assert np.all(src[z0 <= 0] == DS.DISCARD_NO_PRIOR)
+    assert not np.isin(src, [DS.DISCARD_NO_SIGNAL, DS.DISCARD_INCONSISTENT]).any()
+    # the same pixels under the confirmation rule are discarded — the switch is the difference
+    src_c = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 3, "keep", prior_requires_confirmation=True)
+    assert np.all(src_c[unconfirmed] == DS.DISCARD_INCONSISTENT)
+    assert np.all(src_c[flat & ~sig & (z0 > 0)] == DS.DISCARD_NO_SIGNAL)
+    # contradicted priors still leave (the majority own-error vote is the caller's bad_p)
+    bad_p = np.zeros(gt.shape, np.uint8)
+    contra = (np.arange(H_)[:, None] % 3 == 0) & (z0 > 0)
+    bad_p[contra] = 2
+    src2 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 3, "keep", bad_p=bad_p, **mc)
+    assert np.all(src2[contra & ~(sig & ~unconfirmed)] == DS.DISCARD_CONTRADICTED)
+    assert np.all(src2[contra & sig & ~unconfirmed] == DS.SOURCE_SWEEP)  # a tier-0 depth is not the prior
+    # a sweep outvoted by its contradictions falls back to the prior, judged on its own
+    bad_s = np.where(sig, 5, 0).astype(np.uint8)
+    src3 = DS.assign_tiers(sig, n_s, z0, n_p, None, 2, 3, "keep", bad_s=bad_s, **mc)
+    assert np.all(src3[sig] == DS.SOURCE_PRIOR_FILL)
+    # the confidence floor and the exclusion mask still hold
+    low = flat.copy()
+    src4 = DS.assign_tiers(sig, n_s, z0, n_p, box, 2, 3, "keep", low_conf=low, **mc)
+    assert np.all(src4[flat & ~sig & (z0 > 0)] == DS.DISCARD_LOW_CONF)
+    assert np.all(src4[box] == DS.DISCARD_EXCLUDED)
 
 
 def test_a_view_contradicts_only_beyond_its_own_error(scene):
@@ -385,8 +432,7 @@ def _session(tmp_path, pcfg):
                      conf=np.full((gh, gw), 2.0, np.float32), pose_c2w=c)
     np.savetxt(out / "camera_poses.txt", np.stack([c.ravel() for c in kf_c2w]))
     (out / "camera_frames.txt").write_text(" ".join(map(str, kf)))
-    # the DA3 walk (I3): chainage per keyframe — the sweep pools s_k along it and
-    # asks a tier-1 witness from another visit (correction.visit_drift.min_walk_m)
+    # the DA3 walk (I3): chainage per keyframe — the sweep pools s_k along it
     cen = np.array([c[:3, 3] for c in kf_c2w])
     chain = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(cen, axis=0), axis=1))])
     (s / "intake").mkdir(exist_ok=True)
@@ -457,6 +503,17 @@ def test_run_sweep_end_to_end_on_a_synthetic_session(tmp_path, pcfg):
     assert np.median(np.abs(depth[t0] / gt[t0] - 1)) < 0.01
     assert not np.any(src[flat & ok] == DS.SOURCE_SWEEP)
     assert doc["counts"]["tier0"] > 0
+    # maximum coverage (production): a prior pixel is tier 0 or tier 1 unless contradicted,
+    # under the confidence floor or excluded — nothing is left 'no_signal' / 'inconsistent',
+    # and the retired independence rule writes nothing
+    assert rep["tier1_rule"] == "max_coverage" and rep["contradiction"] is True
+    assert rep["counts"]["no_signal"] == 0 and rep["counts"]["inconsistent"] == 0
+    assert rep["counts"]["prior_not_independent"] == 0
+    assert set(rep["s_k_by_frame"]) == {str(f) for f in (10, 20, 30, 40, 50)}   # every keyframe's s_k
+    assert any("MAXIMUM COVERAGE" in str(m) for m in logs)
+    # the untextured patch has no ZNCC signal: its pixels fall back to Omega's prior
+    assert (src[flat & ok] == DS.SOURCE_PRIOR_FILL).mean() > 0.5
+    assert np.all(depth[src == DS.SOURCE_PRIOR_FILL] > 0)
     cal = CAL.load_calibration(out, {"geometry_epoch": 1, "camera_epoch": 1}, reference="tier0")
     assert cal is not None and "abs_err_quantile" in cal["models"]["omega"]
     # re-running reads β from the tier-0 calibration of this epoch
