@@ -196,9 +196,8 @@ def test_run_measures_and_reports_without_applying(tmp_path, monkeypatch):
     (tmp_path / "intake" / "walk.json").write_text(json.dumps(walk))
     poses = np.tile(np.eye(4), (len(frames), 1, 1))
     poses[:, 0, 3] = [chainage[f] for f in frames]
-    import correction.session as CS
-    monkeypatch.setattr(CS, "load_session",
-                        lambda out: SimpleNamespace(frames=frames, poses=poses))
+    import precision.poses_epoch as PE          # the gauge reads poses only — no cloud
+    monkeypatch.setattr(PE, "load_poses", lambda out: (frames, poses))
     cfg = SimpleNamespace(**{**GCFG.__dict__, "instruments": ("da3_windows", "da3_mono")})
     doc = G.run_gauge(tmp_path, cfg, apply=False, log=lambda *a: None)
     assert doc["applied"] is False and doc["applied_instrument"] in ("da3_windows", "da3_mono")

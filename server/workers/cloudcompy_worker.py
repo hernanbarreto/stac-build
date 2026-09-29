@@ -30,6 +30,21 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         raise FileNotFoundError(f"run_cloudcompy.sh not found at {script_path}")
 
     chunks = sorted(output_dir.glob("chunk_*.ply"))
+    # A FUSED cloud (F7) is the reconstruction: Omega's chunks, if any are still
+    # there, are never merged over it (USER 2026-09-29 — no working cloud, no filter
+    # before F7; the fused cloud enters by witnesses and is not cleaned here)
+    _fuse = output_dir / "fuse_report.json"
+    if chunks and _fuse.exists():
+        try:
+            import json as _fj
+            _ep = _fj.loads(_fuse.read_text()).get("epoch_to")
+            _live = _fj.loads((output_dir / "geometry_epoch.json").read_text()).get("epoch")
+        except (OSError, ValueError):
+            _ep, _live = None, None
+        if _ep is not None and _ep == _live:
+            pipe.send_log(f"Fused cloud (epoch {_ep}) is live — {len(chunks)} Omega chunk(s) "
+                          f"ignored, not merged")
+            chunks = []
     # LIGHT RESUME: chunks were already merged (and cleaned up) on a previous
     # run — e.g. this stage re-runs after Phase R corrected the merged cloud
     # in place. Skip merge/consolidate; only refresh Potree (if stale) and run

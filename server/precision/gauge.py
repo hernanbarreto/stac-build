@@ -42,7 +42,7 @@ Each per-frame gain is a Huber IRLS iterated to ``huber_tol``; one that reaches
 The application: keyframe k gets s_k = exp x(c_k) — depth × s_k about its own
 camera, the camera moved so the walk stays continuous (c'_k = c'_{k−1} +
 ½(s_k + s_{k−1})(c_k − c_{k−1})) — published as an epoch through
-``correction.visit_drift_run.apply_transform_epoch``, the path every other
+``precision.poses_epoch.apply_pose_epoch`` (poses only — no cloud before F7), the path every other
 correction takes. ``scale_diagnostics.json`` keeps its v1 keys and gains ``v2``.
 
 CLI: ``python -m precision.gauge --session <dir> [--no-apply]``.
@@ -624,10 +624,10 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
         rows += kd
         if not kd:
             absent.append("known_dims")
-    from correction.session import load_session
-    session = load_session(out)
+    from precision.poses_epoch import load_poses
+    frames, poses = load_poses(out)          # no cloud: the core needs none until F7
     if "vio" in inst:
-        vr = vio_rows(session_dir, session.frames, chainage, group_of)
+        vr = vio_rows(session_dir, frames, chainage, group_of)
         rows += vr or []
         if not vr:
             absent.append("vio")
@@ -638,18 +638,18 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
         rows += sr or []
         if not sr:
             absent.append("stray")
-    rows += visit_rows(out, session.frames, chainage, group_of, epoch)
+    rows += visit_rows(out, frames, chainage, group_of, epoch)
     model = solve(rows, max(chainage.values()), gcfg, log=log)
     knots = np.array(model["knots_m"])
     x = np.array(model["x"])
-    c_kf = np.array([chainage.get(f, np.nan) for f in session.frames])
+    c_kf = np.array([chainage.get(f, np.nan) for f in frames])
     if np.isnan(c_kf).any():
-        missing = [f for f, c in zip(session.frames, c_kf) if np.isnan(c)][:5]
+        missing = [f for f, c in zip(frames, c_kf) if np.isnan(c)][:5]
         raise GaugeError(f"{int(np.isnan(c_kf).sum())} keyframe(s) of the cloud have no "
                          f"chainage in walk.json (e.g. {missing}) — the walk and the "
                          f"reconstruction were made from different keyframe sets")
     s_kf = np.exp([float(hat(c, knots) @ x) for c in c_kf])
-    k_kf, t_kf = continuous_transforms(session.poses[:, :3, 3], s_kf)
+    k_kf, t_kf = continuous_transforms(poses[:, :3, 3], s_kf)
     doc = {"version": GAUGE_VERSION, "provenance": PROVENANCE, "geometry_epoch": epoch,
            "params": {"knot_walk_m": gcfg.knot_walk_m, "smooth_grid": list(gcfg.smooth_grid),
                       "huber_k": gcfg.huber_k, "huber_tol": gcfg.huber_tol,
@@ -664,9 +664,9 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
            "camera_shift_max_m": float(np.linalg.norm(t_kf, axis=1).max()),
            "applied": False}
     if apply:
-        from correction.visit_drift_run import apply_transform_epoch
+        from precision.poses_epoch import apply_pose_epoch
         R = np.tile(np.eye(3), (len(k_kf), 1, 1))
-        res = apply_transform_epoch(out, R, t_kf, k_kf, "gauge",
+        res = apply_pose_epoch(out, R, t_kf, k_kf, "gauge",
                                     [{"stage": "gauge", "instrument": model["applied_instrument"],
                                       "s_min": float(s_kf.min()), "s_max": float(s_kf.max())}],
                                     log=log)

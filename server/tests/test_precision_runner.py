@@ -4,6 +4,7 @@ the last finished step while the session is still in the epoch it left."""
 from __future__ import annotations
 
 import json
+import pathlib
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -72,8 +73,15 @@ def test_the_core_runs_inside_the_reconstruction_stage():
     assert DEFAULT_STAGE_ORDER.index(StageId.RECONSTRUCTION) < DEFAULT_STAGE_ORDER.index(StageId.CLOUDCOMPY)
     import workers.precision_worker as W
     assert callable(W.run)
+    import inspect
     import workers.map_worker as M
     assert callable(M._run_precision_core) and callable(M._run_semantics_2d)
+    # no working cloud: the core merges / filters nothing before F7 (USER 2026-09-29)
+    src = inspect.getsource(M._run_precision_core)
+    assert "cloudcompy_worker" not in src and "merge" not in src.lower().replace("merged", "")
+    for mod in ("precision.gauge", "precision.refine"):
+        text = pathlib.Path(mod.replace(".", "/") + ".py").read_text()
+        assert "apply_pose_epoch" in text and "apply_transform_epoch(" not in text, mod
     keys = [s.key for s in RN.STEPS]
     assert keys[0] == "f0_camera" and keys[-1] == "f7_fuse", keys
     assert not any("measure" in k or "visit_drift" in s.module for k, s in zip(keys, RN.STEPS)), keys

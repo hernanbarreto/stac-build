@@ -508,64 +508,56 @@ def _run_semantics_2d(pipe: WorkerPipe, session_path: Path, config: dict, *,
 
 def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
                         config: dict) -> None:
-    """F0 → F7 on the reconstruction this stage just produced, then discard every
-    epoch but the fused one.
+    """F0 → F7 on the reconstruction this stage just produced, then keep only the
+    fused cloud.
 
-    1. The chunk_*.ply Omega left are merged into ONE working cloud by the
-       cleaning worker with the epoch-0 recipe (conf gates, SOR, witnesses —
-       claude_stac.txt §4-F3), WITHOUT its octree and consolidation: this cloud
-       exists only for F2/F5 to warp and F7 to replace.
-    2. workers/precision_worker.py runs the core (precision/runner.py's step list,
-       each step its own subprocess, resumable).
-    3. USER 2026-09-28: "no quiero ninguna época 0, la única para visualizar debe
-       ser la N, el resto deben descartarse" — the previous-epoch copies the
-       transactional apply keeps (`_epoch_<N-1>/`, with their octrees), any
-       half-built `_tx_epoch_*` and the per-epoch replay files are deleted.
-    Gated by reconstruction.precision.enabled."""
-    import copy
+    The core needs NO cloud until F7 (USER 2026-09-29: "¿por qué filtramos una nube
+    que no vamos a usar todavía?"): F0 reads Omega's K, F2 the DA3 windows and
+    Omega's depth, F4 the frames, F5 the tracks, F6 Omega's depth × the measured
+    scale with F5's poses — F2 and F5 publish epochs of POSES only
+    (precision/poses_epoch.py) — and F7 builds the cloud from F6's depth and
+    publishes it with its octree. Omega's chunk PLYs (its raw cloud, epoch 0) are
+    never merged, filtered or shown; they are deleted with the previous epochs
+    once F7 has published (USER 2026-09-28: "no quiero ninguna época 0, la única
+    para visualizar debe ser la N, el resto deben descartarse").
+    workers/precision_worker.py runs the core (precision/runner.py's step list,
+    each step its own subprocess, resumable). Gated by
+    reconstruction.precision.enabled."""
     from precision.config import load_precision_config
     from workers.base import run_stage_inline
     if not load_precision_config(config).enabled:
         return
 
-    cfg = copy.deepcopy(config)
-    pp = cfg.setdefault("postprocessing", {})
-    if not isinstance(pp, dict):
-        pp = cfg["postprocessing"] = {}
-    pp["build_potree"] = False
-    sc = pp.get("scene_consolidate")
-    if not isinstance(sc, dict):
-        sc = pp["scene_consolidate"] = {}
-    sc["enabled"] = False
-    pipe.send_progress(84, "Merging the Omega chunks into the working cloud...",
-                       stage="reconstruction")
-    run_stage_inline(pipe, "workers.cloudcompy_worker", str(session_path), cfg,
-                     label="merge", pct_range=(84.0, 86.0))
-    if not (output_dir / "cleaned_cloud.ply").exists():
-        raise RuntimeError("the chunk merge produced no cleaned_cloud.ply — the precision "
-                           "core has nothing to refine")
-
-    pipe.send_progress(86, "Precision core F0 → F7...", stage="reconstruction")
+    pipe.send_progress(84, "Precision core F0 → F7...", stage="reconstruction")
     run_stage_inline(pipe, "workers.precision_worker", str(session_path), config,
-                     label="precision", pct_range=(86.0, 99.0))
+                     label="precision", pct_range=(84.0, 99.0))
+    if not (output_dir / "fuse_report.json").exists():
+        raise RuntimeError("the precision core ended without F7's fuse_report.json — no "
+                           "fused cloud was published")
 
     freed = _discard_previous_epochs(output_dir)
-    pipe.send_log(f"[epochs] only the fused epoch stays — {freed / 1048576:.0f} MB of "
-                  f"previous epochs discarded")
+    pipe.send_log(f"[epochs] only the fused cloud stays — {freed / 1048576:.0f} MB of "
+                  f"previous epochs and Omega chunks discarded")
     pipe.send_progress(99, "Fused cloud is the reconstruction", stage="reconstruction")
 
 
 def _discard_previous_epochs(output_dir: Path) -> int:
-    """Delete `_epoch_*/` (the previous epoch the apply keeps for Undo, octree
-    included), `_tx_epoch_*/` leftovers and `corrections/epoch_*.npz`. Returns
-    the bytes freed. The ledger (corrections.jsonl) and geometry_epoch.json stay:
-    the live epoch is the fused one and the record says so."""
+    """Delete `_epoch_*/` (the previous epoch the apply keeps for Undo), `_tx_epoch_*/`
+    leftovers, `corrections/epoch_*.npz`, and Omega's raw cloud (`chunk_*.ply` with
+    its origins/meta — never merged, epoch 0 is not kept). Returns the bytes freed.
+    The ledger (corrections.jsonl) and geometry_epoch.json stay: the live epoch is
+    the fused one and the record says so."""
     freed = 0
     for pattern in ("_epoch_*", "_tx_epoch_*"):
         for d in output_dir.glob(pattern):
             if d.is_dir() and not d.is_symlink():
                 freed += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
                 shutil.rmtree(d, ignore_errors=True)
+    for pattern in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
+        for f in output_dir.glob(pattern):
+            if f.is_file():
+                freed += f.stat().st_size
+                f.unlink(missing_ok=True)
     for f in (output_dir / "corrections").glob("epoch_*.npz"):
         freed += f.stat().st_size
         f.unlink(missing_ok=True)

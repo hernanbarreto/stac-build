@@ -23,10 +23,10 @@ def _precision_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     pcfg = load_precision_config(config)
     out = Path(session_dir) / "output"
-    for need in ("cleaned_cloud.ply", "camera_poses.txt"):
+    for need in ("camera_poses.txt", "camera_frames.txt"):
         if not (out / need).exists():
-            raise RuntimeError(f"No {need} in {out} — the reconstruction and the cloud cleaning "
-                               f"must run before the precision core")
+            raise RuntimeError(f"No {need} in {out} — the reconstruction (Omega) must run before "
+                               f"the precision core; it needs no cloud until F7 builds one")
 
     def _progress(pct, msg):
         pipe.send_progress(float(pct), str(msg), stage="precision")

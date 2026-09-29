@@ -38,7 +38,7 @@ row × angular speed, its correlation reported.
 Outputs (``output/precision``): ``refine.json``, ``refine_residuals.npz``,
 ``witness_poses.txt`` (+ ``witness_frames.txt``); ``output/camera.json`` at
 camera_epoch + 1; the keyframes' rigid motion as an epoch through
-``correction.visit_drift_run.apply_transform_epoch``.
+``precision.poses_epoch.apply_pose_epoch`` (poses only — no cloud before F7).
 
 CLI (the mapanything env: pycolmap 4): ``python -m precision.refine --session <dir>``.
 """
@@ -589,8 +589,8 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                                   report={"rung": best.name, "blocks": len(best.params_by_block)})
         save_camera_json(out / "camera.json", new_cam, epochs.get("geometry_epoch"))
         T = np.linalg.inv(best.w2c) @ w2c0              # c2w_new · w2c_old: world motion
-        from correction.visit_drift_run import apply_transform_epoch
-        res = apply_transform_epoch(out, T[:, :3, :3], T[:, :3, 3], np.ones(len(T)), "refine",
+        from precision.poses_epoch import apply_pose_epoch
+        res = apply_pose_epoch(out, T[:, :3, :3], T[:, :3, 3], np.ones(len(T)), "refine",
                                     [{"stage": "refine", "rung": best.name}], log=log)
         doc["applied"] = bool(res)
         doc["epoch_to"] = (res or {}).get("epoch_to")
