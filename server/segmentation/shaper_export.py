@@ -790,6 +790,22 @@ def export_shaper_pkls(
             c2w_4[:c2w.shape[0], :c2w.shape[1]] = c2w
             T_cam_model = np.linalg.inv(T_world_to_model @ c2w_4).astype(np.float32)
             vis_pts_model = sub_pts_zup[mask].astype(np.float32)
+            if cam.grid is not None:
+                # THE WHOLE OBJECT IN THIS VIEW (USER 2026-09-30): the vendor builds each
+                # view's mask and crop from object_point_projections — the SLAM points it
+                # was trained on are every object point the camera sees. The points BORN in
+                # this frame (after voxel / witness / silhouette filtering) leave a mask full
+                # of holes, so project ALL of the object's points through the same pinhole
+                # (the frame is undistorted, K is the session camera).
+                w2c = np.linalg.inv(c2w_4)
+                q = sub_pts @ w2c[:3, :3].T + w2c[:3, 3]
+                zf = q[:, 2] > 1e-6
+                u_all = K_frame[0, 0] * q[:, 0] / np.where(zf, q[:, 2], 1.0) + K_frame[0, 2]
+                v_all = K_frame[1, 1] * q[:, 1] / np.where(zf, q[:, 2], 1.0) + K_frame[1, 2]
+                inside = zf & (u_all >= 0) & (u_all <= W_img - 1) & (v_all >= 0) & (v_all <= H_img - 1)
+                if inside.sum() >= min_view_points:
+                    uv_full = np.stack([u_all[inside], v_all[inside]], 1).astype(np.float32)
+                    vis_pts_model = sub_pts_zup[inside].astype(np.float32)
 
             # full-frame mask for the captioner (it re-reads the full frame)
             bin_mask_full = np.zeros((H_img, W_img), dtype=bool)

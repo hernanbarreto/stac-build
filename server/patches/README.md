@@ -87,3 +87,12 @@ Copy over `vendor/sam31/sam3/model/sam3_base_predictor.py`. Upstream main
 `model.init_state()`, but the multiplex model's `init_state` doesn't accept
 it → `TypeError` on every start_session. The patch filters the kwargs by the
 target signature. Re-apply after updating vendor/sam31.
+
+## shaper_camera_PATCHED.py (30-09-2026)
+Copia de vendor/ShapeR/preprocessing/camera.py con `CameraTW.from_surreal` aceptando
+cámaras PINHOLE expresadas como Fisheye624: (a) distorsión cero (parche previo) y
+(b) el pinhole EXACTO que escribe server/segmentation/shaper_export.py — radial
+k0..k5 = coeficientes de la serie de tan(θ)/θ, tangencial y prisma 0. Sin esto el
+vendor no encuentra un "valid radius" para relaciones de aspecto no-Aria (464×832) y
+aborta. Al reinstalar ShapeR:
+  cp server/patches/shaper_camera_PATCHED.py vendor/ShapeR/preprocessing/camera.py

@@ -2693,14 +2693,16 @@ shaper:                       # USER 2026-09-29: ShapeR REPLACES MeshFlow behind
                               # mask) + a Qwen3-VL description → vendor/ShapeR (env `shaper`,
                               # checkpoints in vendor/ShapeR/checkpoints) → output/shape/<obj>/<obj>.glb
   engine: shaper              # shaper | meshflow (the MeshFlow path stays selectable)
-  preset: quality             # vendor preset: quality (16 views, 50 steps — the released ckpt's
-                              # tuning), balance (16/25), speed (4/10)
-  max_views: 32               # views stored per object PKL; the preset picks its 16 from these
+  preset: max                 # USER 2026-09-30: "la mayor cantidad que ShapeR permita" — run_shaper_batch
+                              # preset max = 32 views (every view's DINO tokens are kept at inference),
+                              # 100 steps, CFG 4. (Vendor presets: quality 16/50, balance 16/25, speed 4/10.)
+  max_views: 32               # views stored per object PKL (parallax-diverse); the preset feeds all 32
   min_view_points: 50         # a view needs this many of the object's points to be kept
   grayscale: true             # the released checkpoint is trained on Aria SLAM (grayscale) frames
   image_format: png           # lossless per-view frames in the PKL
-  auto_caption: true          # Qwen3-VL (the pipeline's VLM service) describes each object from its
-                              # isolated best views; a manual caption from the UI wins
+  auto_caption: false         # USER 2026-09-30: the description IS the SAM3 prompt (the segment's
+                              # label — the phrase SAM3 found it with). true = Qwen3-VL describes it
+                              # from its isolated best views. A manual caption from the UI always wins.
   fit_to_cloud: true          # coverage-aware fit of the generated mesh to the segment's cloud
 
 meshflow:
