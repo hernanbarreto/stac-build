@@ -56,4 +56,8 @@ def product_is_live(output_dir) -> Tuple[bool, str]:
     ep = rep.get("epoch_to")
     if ep != live:
         return False, f"the live epoch {live} is not the published one {ep} ({rep['product_file']})"
+    # the record is not the cloud (pccr 2026-09-30: the report and the octree survived, the
+    # PLY was deleted — a probe that trusted the record called the stage done)
+    if not (out / "cleaned_cloud.ply").exists():
+        return False, f"{rep['product_file']} names epoch {ep} but cleaned_cloud.ply is not on disk"
     return True, f"{rep['product_file'].split('.')[0]} (epoch {ep}) on disk"

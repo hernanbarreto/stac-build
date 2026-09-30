@@ -290,3 +290,16 @@ def test_provenance_carries_f6_and_moves_the_pixels_to_the_record_grid(f6_inputs
         dc = np.abs(b["pixel_col"] - np.rint(uv[:, 0]))
         dr = np.abs(b["pixel_row"] - np.rint(uv[:, 1]))
         assert (dc + dr == 0).mean() > 0.99 and max(dc.max(), dr.max()) <= 1
+
+
+def test_the_product_needs_its_cloud_on_disk(tmp_path):
+    """pccr 2026-09-30: the report and the octree survived, the PLY was deleted — the
+    record alone is not a published cloud."""
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "geometry_epoch.json").write_text(json.dumps({"epoch": 3}))
+    (out / CC.CLOUD_REPORT).write_text(json.dumps({"epoch_to": 3}))
+    live, why = PR.product_is_live(out)
+    assert not live and "cleaned_cloud.ply is not on disk" in why
+    _ply(out / "cleaned_cloud.ply", 10)
+    assert PR.product_is_live(out)[0]

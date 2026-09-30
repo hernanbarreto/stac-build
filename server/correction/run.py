@@ -331,9 +331,12 @@ def run_select(output_dir, epoch: int, operator: str = "user",
         try:
             moves.append((ledger.load_epoch_npz(output_dir, e), inverse))
         except RuntimeError as err:
-            raise RuntimeError(
-                f"epoch {e} has no persisted transform, so the instance store "
-                f"cannot follow the geometry to epoch {epoch}: {err}")
+            # the transform only carries the store's FINDINGS anchors (points and OBBs
+            # are refit from the swapped cloud); a precision run deleted its poses-only
+            # epochs' transforms (pccr 2026-09-30: "¿por qué no puedo ver la época 0?")
+            # — the epoch is still selected, and the log says what did not follow
+            log(f"  ⚠ epoch {e} has no persisted transform ({err}) — the geometry is "
+                f"selected; the instance store's finding anchors stay where they are")
 
     res = select_epoch(output_dir, epoch, log=log)
 

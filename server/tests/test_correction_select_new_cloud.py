@@ -278,13 +278,15 @@ def test_every_epoch_survives_a_full_tour(pccr, store_calls):
                 assert (d / a["rel"]).exists(), f"{d.name}/{a['rel']} missing"
 
 
-def test_a_transform_epoch_without_its_npz_is_still_refused(pccr, store_calls):
+def test_a_transform_epoch_without_its_npz_still_selects_and_says_so(pccr, store_calls):
+    """pccr 2026-09-30 ("¿por qué no puedo ver la época 0?"): a precision run deleted
+    its poses-only epochs' transforms; the geometry is selected anyway — the transform
+    only carried the store's finding anchors — and the log says what did not follow."""
     (pccr / "corrections" / "epoch_2.npz").unlink()
-    before = _state(pccr)
-    with pytest.raises(RuntimeError, match="epoch 2 has no persisted transform"):
-        run_select(pccr, 0, "test", log=lambda m: None)
-    assert _state(pccr) == before and not store_calls
-    assert not (pccr / f"{PREV_PREFIX}3").exists()
+    logs = []
+    run_select(pccr, 0, "test", log=logs.append)
+    assert _state(pccr) == STATE[0]
+    assert any("epoch 2 has no persisted transform" in m for m in logs)
 
 
 # ── the kind: record, then ledger, then transform ─────────────────────────
@@ -314,8 +316,10 @@ def test_a_record_without_kind_is_classified_from_the_ledger(pccr, store_calls):
 
 def test_a_record_without_kind_and_no_ledger_is_a_transform(pccr, store_calls):
     _record(pccr, 3, 2, None)
-    with pytest.raises(RuntimeError, match="epoch 3 has no persisted transform"):
-        run_select(pccr, 0, "test", log=lambda m: None)
+    assert epoch_kind(pccr, 3) == EPOCH_KIND_TRANSFORM
+    logs = []
+    run_select(pccr, 0, "test", log=logs.append)
+    assert any("epoch 3 has no persisted transform" in m for m in logs)
 
 
 # ── the swap stays atomic ─────────────────────────────────────────────────

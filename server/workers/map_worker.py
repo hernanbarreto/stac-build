@@ -561,7 +561,7 @@ def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
 
 def _discard_previous_epochs(output_dir: Path) -> int:
     """Delete the intermediate epochs (`_epoch_1..N-1/`: the gauge's and the refine's
-    states), `_tx_epoch_*/` leftovers, `corrections/epoch_*.npz`, and Omega's raw
+    states), `_tx_epoch_*/` leftovers and Omega's raw
     chunk PLYs (`chunk_*.ply` with its origins/meta — never merged). `_epoch_0/`
     STAYS (USER 2026-09-29: "conservamos mientras validamos, deben poder
     seleccionarse desde la UI") — it is the Omega cloud the fused one is judged
@@ -582,9 +582,8 @@ def _discard_previous_epochs(output_dir: Path) -> int:
             if f.is_file():
                 freed += f.stat().st_size
                 f.unlink(missing_ok=True)
-    for f in (output_dir / "corrections").glob("epoch_*.npz"):
-        freed += f.stat().st_size
-        f.unlink(missing_ok=True)
+    # corrections/epoch_*.npz STAY: they are small, and selecting epoch 0 walks the
+    # transforms of every epoch between it and the live one (pccr 2026-09-30)
     return freed
 
 
