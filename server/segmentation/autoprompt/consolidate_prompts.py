@@ -205,15 +205,12 @@ def _merge_prompt(scene_type: str, phrases: list[str]) -> str:
     listing = "\n".join(f"- {p}" for p in phrases)
     return (
         f"These phrases name things seen in ONE {scene_type or 'place'}:\n\n{listing}\n\n"
-        "Merge ONLY the phrases that MEAN THE SAME THING — the same kind of object with "
-        "the same colour and material, worded differently ('white painted wall' = "
-        "'white wall'; 'metal conduit pipe' = 'metal conduit'). Everything else stays "
-        "separate:\n"
-        "- a different COLOUR or MATERIAL is a different object ('white wall' ≠ 'beige "
-        "wall' ≠ 'red painted wall'; 'glass door' ≠ 'wooden door');\n"
-        "- a different KIND of object is a different object ('desk' ≠ 'workbench' ≠ "
-        "'table'; 'door' ≠ 'doorway'; 'door' ≠ 'door frame');\n"
-        "- when unsure, keep them separate.\n"
+        "Merge the phrases that name the SAME KIND of object. Colour, material, finish, "
+        "size, state and position do NOT make a different kind (USER 2026-09-30: 'piso es "
+        "piso'): 'black metal desk' = 'wooden desk' = 'desk'; 'white tiled floor' = 'gray "
+        "floor' = 'floor tiles' = 'floor'; 'doorway in distance' = 'doorway'. Only a "
+        "different KIND stays separate: 'desk' ≠ 'chair' ≠ 'door'; 'door' ≠ 'door frame'; "
+        "'wall' ≠ 'column'. Pick as 'name' the plainest category word of the group.\n"
         "Return JSON:\n"
         '{"groups": [{"name": "<the plainest phrase FROM THE LIST>", '
         '"same_as": ["<other phrases from the list that mean exactly the same>"]}]}\n'
@@ -223,7 +220,7 @@ def _merge_prompt(scene_type: str, phrases: list[str]) -> str:
 
 
 def merge_synonyms(client, scene_type: str, phrases: list[str], head_of: Callable[[str], str],
-                   max_tokens: int = 4096,
+                   max_phrases_per_call: int = 0, max_tokens: int = 4096,
                    log: Callable[[str], None] = print) -> dict[str, str]:
     """USER 2026-09-29: *"una segunda pasada de VLM sobre los prompts para fundir los
     que significan lo mismo"*. One VLM call per HEAD-NOUN family with 2+ phrases
@@ -233,9 +230,14 @@ def merge_synonyms(client, scene_type: str, phrases: list[str], head_of: Callabl
     meaning' merges (the 2026-09-22 lesson: colour / material / kind differences
     are different objects — 'white workbench' ← 'desk' destroyed a desk)."""
     from semantic.types import system, user
-    families: dict[str, list[str]] = {}
-    for p in phrases:
-        families.setdefault(head_of(p), []).append(p)
+    # the whole list in ONE call when it fits the bound (a kind is often named with
+    # different head nouns: 'floor tiles' / 'floor'); per head-noun family otherwise
+    if len(phrases) <= int(max_phrases_per_call):
+        families = {"*": list(phrases)}
+    else:
+        families = {}
+        for p in phrases:
+            families.setdefault(head_of(p), []).append(p)
     alias_of: dict[str, str] = {}
     n_calls = 0
     for head, fam in families.items():

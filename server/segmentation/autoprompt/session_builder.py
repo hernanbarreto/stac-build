@@ -390,7 +390,9 @@ class AutoPrompter:
                 prog(23, f"merging synonyms over {len(phrases)} names")
                 synonyms = merge_synonyms(
                     client, understanding.scene_type if understanding else "", phrases,
-                    _head_noun, log=lambda m: print(f"[autoprompt] {m}"))
+                    _head_noun, max_phrases_per_call=int(self.cfg["merge_max_phrases_per_call"]),
+                    max_tokens=int(self.cfg["merge_max_tokens"]),
+                    log=lambda m: print(f"[autoprompt] {m}"))
                 if synonyms:
                     _props = Counter()
                     for fu in (understanding.per_frame if understanding else []):

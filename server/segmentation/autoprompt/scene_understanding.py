@@ -32,15 +32,18 @@ _PROMPT = (
     'Study this image and return JSON:\n'
     '{"scene_type": "<short phrase: what kind of place/space is this>",\n'
     ' "summary": "<1-2 sentences: the setting and what is happening>",\n'
-    ' "objects": ["<RICH noun phrase for every distinct object or surface '
+    ' "objects": ["<the COMMON NAME of every kind of object or surface '
     'visible>", ...]}\n'
-    "Each object must be a RICH, descriptive noun phrase (2-5 words) that a "
-    "text-promptable segmenter can match visually: include material, color or "
-    "context when it helps discriminate — e.g. 'concrete support column', "
-    "'overhead fluorescent light fixture', 'yellow metro train car' — never a "
-    "bare word like 'column' when a richer phrase describes it better. One "
-    "phrase PER OBJECT TYPE (all wheels are one entry). Base everything ONLY "
-    "on what is visible.\n"
+    # USER 2026-09-30: "prompts sin tanto detalle a SAM3 … piso es piso, no piso gris, piso
+    # verde con blanco … desk de metal color negro es desk, punto" — a rich phrase per
+    # variant made SAM3 segment the same object 20 times under 20 names.
+    "Each entry is the plain CATEGORY NAME of an object type, 1-2 words, the way a "
+    "person would name it: 'floor', 'wall', 'ceiling', 'door', 'desk', 'table', "
+    "'office chair', 'fire extinguisher', 'server rack', 'column', 'pipe', 'duct', "
+    "'backpack'. NEVER colour, material, finish, size, state or position words "
+    "('black metal desk' is 'desk'; 'white tiled floor' is 'floor'; 'doorway in the "
+    "distance' is 'doorway'). One entry PER KIND of object (all desks are one entry). "
+    "Base everything ONLY on what is visible.\n"
     # Every phrase here becomes ONE SAM3 text prompt and therefore ONE segment,
     # so a compound phrase asks the segmenter for a mask spanning two different
     # things and a second name for the same thing asks for a duplicate of it.
@@ -181,7 +184,7 @@ _LEADING = ("a", "an", "the", "some", "several", "multiple", "many", "two", "thr
             "four", "five", "six", "seven", "eight", "nine", "ten")
 # Bumped whenever the rule that folds one phrase into another changes: a
 # session vocabulary derived under another rule is not reused (session_builder).
-GROUPING_VERSION = "same_name_v1"
+GROUPING_VERSION = "category_names_v2"   # 2026-09-30: plain category names + kind merge
 
 
 def _singular(w: str) -> str:

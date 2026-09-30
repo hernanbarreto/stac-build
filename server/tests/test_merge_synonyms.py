@@ -51,3 +51,13 @@ def test_production_turns_it_on_with_one_pass_per_keyframe():
     assert raw["autoprompt"]["merge_synonyms"] is True
     v = raw["autoprompt"]["vlm_sampling"]
     assert v["all_keyframes"] is True and v["tile_rows"] == 1 and v["tile_cols"] == 1
+
+
+def test_the_whole_list_goes_in_one_call_when_it_fits_and_kinds_merge():
+    phrases = ["floor", "white tiled floor", "floor tiles", "desk", "black metal desk", "chair"]
+    PHRASES.update(phrases)
+    vlm = FakeVLM({"floor": {"groups": [{"name": "floor", "same_as": ["white tiled floor", "floor tiles"]},
+                                        {"name": "desk", "same_as": ["black metal desk"]}]}})
+    alias = merge_synonyms(vlm, "office", phrases, _head_noun, max_phrases_per_call=400, log=lambda m: None)
+    assert len(vlm.asked) == 1 and set(vlm.asked[0]) == set(phrases)
+    assert alias == {"white tiled floor": "floor", "floor tiles": "floor", "black metal desk": "desk"}
