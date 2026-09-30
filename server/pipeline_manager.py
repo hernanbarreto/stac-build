@@ -742,7 +742,9 @@ class PipelineManager:
         recon_requested = any(
             s.stage.enabled and s.stage.id == StageId.RECONSTRUCTION
             for s in job.stages)
+        wiped_this_run = False
         if replace or recon_requested:
+            wiped_this_run = True
             if recon_requested and not replace:
                 logger.info("[Pipeline] reconstruction stage requested → output/ "
                             "wiped unconditionally (a reconstruction never reuses "
@@ -777,8 +779,12 @@ class PipelineManager:
                     continue
             upstream_ran = True
 
-            # Clean up previous outputs if in replace mode (cascade invalidation)
-            if replace and output_dir.exists():
+            # Clean up previous outputs if in replace mode (cascade invalidation) — NOT when
+            # this run already wiped output/: then every file here was produced BY THIS RUN
+            # (pccr 2026-09-30: the reconstruction stage publishes cleaned_cloud.ply — F0-F7
+            # + f7_cloud — and the cloud stage's cleanup deleted it the moment it started:
+            # "No chunk_*.ply … reconstruction produced no cloud")
+            if replace and output_dir.exists() and not wiped_this_run:
                 self._cleanup_stage_outputs(
                     output_dir, stage_state.stage.id,
                     session_dir=Path(session_dir)
