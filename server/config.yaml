@@ -2165,7 +2165,14 @@ reconstruction:
                                         # pass. Replaces chunk_walk_m / max_walk_single_pass_m
                                         # when enabled (they stay as the fallback when it is off).
                                         # precision/omega_coherence.py → output/omega_coherence.json
-        enabled: true
+        enabled: false                  # OFF 2026-09-30 (pccr): its rule chose ONE 289-kf pass —
+                                        # 128 kf drifted +301 % while 256/289 read "coherent" only
+                                        # because their intervals were too wide to exclude zero, and
+                                        # at 289 Omega measured 7.4 m of a 17.5 m walk. Back on only
+                                        # with a monotone rule (the largest window whose SMALLER ones
+                                        # are all coherent) and a bound on the interval's width.
+                                        # Chunks come from chunk_walk_m (5 m of real walk, the
+                                        # layout of the best cloud so far, 83/41 kf on pccr).
         lengths: [32, 64, 128, 256, 512]  # BOUND: window lengths tried (plus the whole set when
                                         # it fits the card); VGGT-Long's 60/30 and the card's
                                         # ~500-frame ceiling bracket the range
