@@ -356,6 +356,17 @@ segmentation:
                               # comparison it makes is across visits (off the mask here, on it
                               # there = drift duplicate; off everywhere = attached junk), which
                               # needs no threshold at all.
+  obb_orientation:            # USER 2026-09-30: the OBB's yaw from the object's own VERTICAL planes
+                              # (RANSAC), the one leaving the least empty footprint; bottom face always
+                              # parallel to y = 0. No vertical plane → minimum-area rectangle.
+    enabled: true
+    ransac_iters: 200         # BOUND: RANSAC hypotheses per plane
+    dist_m: 0.02              # inlier band of a plane (the cloud's surface noise, ~2 cm)
+    vertical_tol_deg: 10.0    # a plane is vertical when its normal is within this of horizontal
+    min_plane_frac: 0.1       # a plane counts when it holds this share of the sample
+    max_planes: 4             # BOUND: planes extracted per object
+    sample: 20000             # BOUND (cost): points sampled per object (deterministic)
+    seed: 0
   obb_core:
     enabled: true             # the OBB extent comes from where the points CONCENTRATE, not from
                               # the two most extreme points. min()/max() lets ONE stray point a

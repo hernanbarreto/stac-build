@@ -1404,6 +1404,52 @@ def _obb_core_points(points_xyz: np.ndarray, cfg: dict):
     return core, int(n - len(core))
 
 
+
+def _vertical_plane_yaws(points_xyz: np.ndarray, vcfg: dict) -> list:
+    """Yaw (atan2(n_z, n_x)) of each VERTICAL plane of an object, found by sequential RANSAC
+    on a deterministic sample of its points (segmentation.obb_orientation): a plane counts
+    when its normal is within ``vertical_tol_deg`` of horizontal and it holds at least
+    ``min_plane_frac`` of the sample."""
+    keys = ("ransac_iters", "dist_m", "vertical_tol_deg", "min_plane_frac", "max_planes", "sample", "seed")
+    missing = [k for k in keys if k not in vcfg]
+    if missing:
+        raise KeyError(f"config.yaml segmentation.obb_orientation is missing {missing}")
+    P = np.asarray(points_xyz, np.float64)
+    if len(P) < 10:
+        return []
+    rng = np.random.default_rng(int(vcfg["seed"]))
+    if len(P) > int(vcfg["sample"]):
+        P = P[rng.choice(len(P), int(vcfg["sample"]), replace=False)]
+    sin_tol = np.sin(np.radians(float(vcfg["vertical_tol_deg"])))
+    min_n = max(10, int(float(vcfg["min_plane_frac"]) * len(P)))
+    dist = float(vcfg["dist_m"])
+    yaws, rest = [], P
+    for _ in range(int(vcfg["max_planes"])):
+        if len(rest) < min_n:
+            break
+        best_n, best_cnt, best_a = None, 0, None
+        for _it in range(int(vcfg["ransac_iters"])):
+            a, b, c = rest[rng.choice(len(rest), 3, replace=False)]
+            n = np.cross(b - a, c - a)
+            ln = np.linalg.norm(n)
+            if ln < 1e-12:
+                continue
+            n = n / ln
+            if abs(n[1]) > sin_tol:          # not vertical: a horizontal face gives no yaw
+                continue
+            cnt = int((np.abs((rest - a) @ n) < dist).sum())
+            if cnt > best_cnt:
+                best_cnt, best_n, best_a = cnt, n, a
+        if best_n is None or best_cnt < min_n:
+            break
+        inl = np.abs((rest - best_a) @ best_n) < dist
+        Q = rest[inl]
+        c0 = Q.mean(0)
+        n = np.linalg.svd(Q - c0, full_matrices=False)[2][2]      # least-squares normal
+        yaws.append(float(np.arctan2(n[2], n[0])))
+        rest = rest[~inl]
+    return yaws
+
 def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
     """Compute minimum Oriented Bounding Box for floor-aligned coordinates.
     
@@ -1440,19 +1486,29 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
     pts_xz = points_xyz[:, [0, 2]]  # (N, 2): [x, z]
     
     best_angle = 0.0
-    
-    if face_normals and len(face_normals) > 0:
-        # Use dominant face normal to orient the OBB
-        # Find face with most points
-        dominant_normal = max(face_normals, key=lambda fn: fn[1])[0]
-        
-        # Project face normal to XZ plane (ignore Y component)
-        nxz = np.array([dominant_normal[0], dominant_normal[2]])
-        nxz_len = np.linalg.norm(nxz)
-        if nxz_len > 0.1:  # face has meaningful XZ component
-            nxz = nxz / nxz_len
-            # Angle of the face normal in XZ (the OBB aligns PERPENDICULAR to the face)
-            best_angle = np.arctan2(nxz[1], nxz[0])
+    # THE YAW (USER 2026-09-30: "el cálculo de los OBB debe ser por RANSAC para saber cómo
+    # orientarlo — muchas veces queda cruzado —, coplanar con el plano dominante, dejando el
+    # menor vacío posible, siempre con la cara inferior paralela a y = 0"): the object's own
+    # VERTICAL planes (sequential RANSAC; a horizontal face — a table top, a floor — gives no
+    # direction in plan and used to leave the box on the world axes), and among them the one
+    # whose box leaves the least empty footprint. No vertical plane → the minimum-area
+    # rectangle (rotating calipers), as before.
+    _vcfg = ((_server_cfg.get("segmentation", {}) or {}).get("obb_orientation", {}) or {})
+    cands = _vertical_plane_yaws(points_xyz, _vcfg) if _vcfg.get("enabled", False) else []
+    for fn in (face_normals or []):
+        n3 = np.asarray(fn[0], np.float64)
+        nxz = np.array([n3[0], n3[2]])
+        if np.linalg.norm(nxz) > 0.1:
+            cands.append(float(np.arctan2(nxz[1], nxz[0])))
+
+    def _footprint(a):
+        c, s_ = np.cos(-a), np.sin(-a)
+        r = pts_xz @ np.array([[c, -s_], [s_, c]]).T
+        e = r.max(axis=0) - r.min(axis=0)
+        return float(e[0] * e[1])
+
+    if cands:
+        best_angle = min(cands, key=_footprint)
     else:
         # Fallback: convex hull + rotating calipers
         try:
