@@ -43,13 +43,17 @@ _PROMPT = (
     # USER 2026-09-30: "prompts sin tanto detalle a SAM3 … piso es piso, no piso gris, piso
     # verde con blanco … desk de metal color negro es desk, punto" — a rich phrase per
     # variant made SAM3 segment the same object 20 times under 20 names.
+    # GENERIC (USER 2026-09-30: "no es un prompt genérico, es un prompt hecho para pccr"):
+    # rules only, no example object from any particular scene
     "Each 'category' is the plain CATEGORY NAME of an object type, 1-2 words, the way a "
-    "person would name it: 'floor', 'wall', 'ceiling', 'door', 'desk', 'table', "
-    "'office chair', 'fire extinguisher', 'server rack', 'column', 'pipe', 'duct', "
-    "'backpack'. NEVER colour, material, finish, size, state or position words "
-    "('black metal desk' is 'desk'; 'white tiled floor' is 'floor'; 'doorway in the "
-    "distance' is 'doorway'); colour and material go in 'description' only. One entry "
-    "PER KIND of object (all desks are one entry). "
+    "person would name it, at the level of generality of: furniture, tool, vehicle, "
+    "pipe, column, beam, wall, floor, ceiling, door, window, stair, cable, equipment, "
+    "container, sign, light. "
+    # USER 2026-09-30: "agregale furniture, tools, vehicle, structural, pipes, column, etc"
+    # — the GRANULARITY, stated with generic classes that fit any scene
+    "NEVER colour, material, finish, size, state or position words "
+    "in the category; colour and material go in 'description' only. One entry PER KIND "
+    "of object (every instance of a kind is one entry). "
     "Base everything ONLY on what is visible.\n"
     # Every phrase here becomes ONE SAM3 text prompt and therefore ONE segment,
     # so a compound phrase asks the segmenter for a mask spanning two different
@@ -57,15 +61,11 @@ _PROMPT = (
     # USER 2026-09-15: "son objetos compuestos, eso no está bien".
     "THREE RULES ABOUT THE LIST, and they matter more than richness:\n"
     "1. ATOMIC objects only. Never a compound and never a phrase joining two "
-    "things with 'with', 'and', 'containing' or 'on': write 'desk' and "
-    "'monitor' as two entries, never 'desk with computer'; 'server rack' and "
-    "'glass door', never 'server rack with glass doors'. The modifiers may "
-    "describe the object itself (material, colour, shape) but never a "
-    "DIFFERENT object attached to it.\n"
+    "things with 'with', 'and', 'containing' or 'on': two things are two entries. "
+    "The description may describe the object itself (material, colour, shape) but "
+    "never a DIFFERENT object attached to it.\n"
     "2. ONE name per object. Do not name the same physical thing twice under "
-    "different words: if you already wrote 'white tiled floor', do not also "
-    "write 'checkered floor tiles' or 'tiled floor with dark grout'. Pick the "
-    "one phrase that best describes it and use only that.\n"
+    "different words. Pick the one name that fits it best and use only that.\n"
     # USER 2026-09-15: "ojo que Qwen no segmentó una puerta, la puerta
     # principal por ejemplo, es fundamental; puertas, ventanas, paredes, pisos,
     # techos, columnas, etc., eso es estructural, debe estar".

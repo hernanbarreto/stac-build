@@ -80,8 +80,18 @@ def test_the_prompt_forbids_compounds():
     is in the prompt scene_understanding actually sends."""
     p = _PROMPT.lower()
     assert "atomic" in p
-    assert "desk with computer" in p, "the compound rule lost its example"
     assert "'with'" in p or '"with"' in p
+    assert "two things are two entries" in p
+
+
+def test_the_prompts_carry_no_example_from_any_scene():
+    """USER 2026-09-30: "no es un prompt genérico, es un prompt hecho para pccr" — the
+    prompts state RULES; object names from one scene bias the VLM on every other one."""
+    from segmentation.autoprompt.consolidate_prompts import _merge_prompt, _prompt
+    texts = [_PROMPT.lower(), _merge_prompt("room", ["a"]).lower(), _prompt("room", ["a"]).lower()]
+    for w in ("desk", "table", "server rack", "fire extinguisher", "backpack", "office chair",
+              "white tiled floor", "doorway in"):
+        assert not any(w in t for t in texts), w
 
 
 def test_the_prompt_asks_for_one_name_per_object():

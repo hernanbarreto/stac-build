@@ -69,16 +69,14 @@ def _prompt(scene_type: str, phrases: list[str]) -> str:
         '              "parts":   ["<phrases from the list that are PARTS of this object>"]}]}\n\n'
         "Rules:\n"
         "1. SAME THING means the same physical object or surface, however "
-        "differently worded: 'white tiled floor', 'checkered floor tiles' and "
-        "'tiled floor with dark grout' are one floor. Pieces of one continuous "
-        "surface are the SAME surface, not different objects — a floor is one "
-        "floor even when different frames saw different patches of it.\n"
+        "differently worded. Pieces of one continuous surface are the SAME "
+        "surface, not different objects, even when different frames saw different "
+        "patches of it.\n"
         "2. A PART is something you could not point at separately from two "
-        "metres away with a handheld camera: a rack's fan, hard drive, label, "
-        "cable management or mounting bracket are parts of the rack. A door "
-        "handle is part of the door. Parts go in 'parts', never in 'objects'.\n"
+        "metres away with a handheld camera. Parts go in 'parts', never in "
+        "'objects'.\n"
         "3. DIFFERENT objects stay separate even when they touch or look alike. "
-        "A wall and a cabinet against it are two objects. When unsure, keep "
+        "When unsure, keep "
         "them separate — a wrong merge destroys an object, a missed merge only "
         "leaves a duplicate.\n"
         "4. Structure is never a part of anything: every floor, ceiling, wall, "
@@ -205,13 +203,14 @@ def _merge_prompt(scene_type: str, phrases: list[str]) -> str:
     listing = "\n".join(f"- {p}" for p in phrases)
     return (
         f"These phrases name things seen in ONE {scene_type or 'place'}:\n\n{listing}\n\n"
+        # GENERIC (USER 2026-09-30): rules only, no example from any scene and no forced
+        # identity between kinds — two kinds that are one object in a scene are fused
+        # AFTER SAM3 by their shared points (segmentation.dedupe_overlap, label-agnostic)
         "Merge the phrases that name the SAME KIND of object. Colour, material, finish, "
         "size, state and position do NOT make a different kind (USER 2026-09-30: 'piso es "
-        "piso'): 'black metal desk' = 'wooden desk' = 'desk'; 'white tiled floor' = 'gray "
-        "floor' = 'floor tiles' = 'floor'; 'doorway in distance' = 'doorway'; a work surface "
-        "is ONE kind: 'desk' = 'table' = 'workbench' = 'counter'. Only a "
-        "different KIND stays separate: 'desk' ≠ 'chair' ≠ 'door'; 'door' ≠ 'door frame'; "
-        "'wall' ≠ 'column'. Pick as 'name' the plainest category word of the group.\n"
+        "piso'). Different kinds stay separate, and so does a part and its whole. When "
+        "unsure, keep them separate. Pick as 'name' the plainest category word of the "
+        "group.\n"
         "Return JSON:\n"
         '{"groups": [{"name": "<the plainest phrase FROM THE LIST>", '
         '"same_as": ["<other phrases from the list that mean exactly the same>"]}]}\n'
