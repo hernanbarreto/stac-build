@@ -461,6 +461,10 @@ autoprompt:
                                       # past it the frames are thinned uniformly along the same axis
                                       # (never the crops) and the log + census say "BOUND REACHED".
                                       # pccr (289 kf) at 8 kf x 5 calls = 37 frames, 185 calls.
+  sam3_fallback_max: 3                # BOUND: a prompt SAM3 confirmed NOTHING for is retried with at most
+                                      # this many of its origins — the VLM's visual descriptions of it
+                                      # (most frequent first), then the names merged into it (USER
+                                      # 2026-09-30: "column" 0 masklets, "metal support column" 62 kf)
   merge_max_phrases_per_call: 400     # BOUND: the whole name list goes to ONE merge call up to this
                                       # many names (a kind is often named with different heads —
                                       # 'floor tiles' / 'floor'); beyond, one call per head noun

@@ -62,6 +62,34 @@ def _frame_num(filename: str) -> int:
     return int(os.path.splitext(os.path.basename(filename))[0])
 
 
+def build_fallback_prompts(understanding, phrases: list[str], synonyms: dict,
+                           n_max: int) -> dict[str, list[str]]:
+    """Per SAM3 prompt, its ORIGINS in the order SAM3 should try them when the bare
+    category confirms nothing: the visual descriptions the VLM gave its objects (most
+    frequent first), then the names merged into it (same name / synonym merge)."""
+    pset = set(phrases)
+    descs: dict[str, Counter] = {}
+    alias: dict[str, Counter] = {}
+    for fu in understanding.per_frame:
+        for o in dict.fromkeys(fu.objects):
+            c0 = understanding.merged.get(o, o)
+            c = synonyms.get(c0, c0)
+            if c not in pset:
+                continue
+            de = (getattr(fu, "descriptions", {}) or {}).get(o)
+            if de and de != c:
+                descs.setdefault(c, Counter())[de] += 1
+            if o != c:
+                alias.setdefault(c, Counter())[o] += 1
+    out: dict[str, list[str]] = {}
+    for c in phrases:
+        cand = [d for d, _ in (descs.get(c) or Counter()).most_common()]
+        cand += [a for a, _ in (alias.get(c) or Counter()).most_common() if a not in cand]
+        if cand:
+            out[c] = cand[:int(n_max)]
+    return out
+
+
 class AutoPrompter:
     def __init__(
         self,
@@ -499,6 +527,14 @@ class AutoPrompter:
             (self.output_dir / "autoprompt_concepts.json").write_text(
                 json.dumps(_rec, indent=2, ensure_ascii=False))
             prompt = ";".join(phrases)
+            # THE FALLBACKS (USER 2026-09-30: "si hay un prompt que no produjo nada es que a
+            # SAM3 le falta detalle — a ese se lo puede probar con los que se originó"): per
+            # prompt, the visual descriptions the VLM gave its objects (most frequent first),
+            # then the names merged into it; SAM3 tries them in order only when the bare
+            # category confirms nothing (segmentation.pipeline._run_sam3_batched).
+            fallback_prompts = (build_fallback_prompts(understanding, phrases, synonyms,
+                                                       int(self.cfg["sam3_fallback_max"]))
+                                if (understanding is not None and not _reused) else {})
             self.output_dir.mkdir(parents=True, exist_ok=True)
             vlm_analysis = {
                 "source": "qwen3vl_autoprompt_simple",
@@ -506,6 +542,7 @@ class AutoPrompter:
                 "scene_understanding": understanding.to_dict() if understanding else None,
                 "consolidation": consolidation.to_dict() if consolidation else None,
                 "prompt": prompt,
+                "fallback_prompts": fallback_prompts,
                 "frame_map": {},          # empty → SAM3 runs every phrase on ALL frames
                 "boxes": {},              # NO box seeds, ever, in this mode
                 "instances": [],

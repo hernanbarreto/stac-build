@@ -32,17 +32,24 @@ _PROMPT = (
     'Study this image and return JSON:\n'
     '{"scene_type": "<short phrase: what kind of place/space is this>",\n'
     ' "summary": "<1-2 sentences: the setting and what is happening>",\n'
-    ' "objects": ["<the COMMON NAME of every kind of object or surface '
-    'visible>", ...]}\n'
+    ' "objects": [{"category": "<the COMMON NAME of the kind of object>", '
+    '"description": "<2-5 words that describe THIS one visually: colour, material, '
+    'shape>"}, ...]}\n'
+    # USER 2026-09-30: the CATEGORY is the SAM3 prompt ("prompts sin tanto detalle");
+    # the DESCRIPTION is kept as the fallback when a bare category finds nothing
+    # ("column" found no masklet on pccr where "metal support column" found one in 62
+    # keyframes) — "a ese se lo puede probar con los que se originó".
+
     # USER 2026-09-30: "prompts sin tanto detalle a SAM3 … piso es piso, no piso gris, piso
     # verde con blanco … desk de metal color negro es desk, punto" — a rich phrase per
     # variant made SAM3 segment the same object 20 times under 20 names.
-    "Each entry is the plain CATEGORY NAME of an object type, 1-2 words, the way a "
+    "Each 'category' is the plain CATEGORY NAME of an object type, 1-2 words, the way a "
     "person would name it: 'floor', 'wall', 'ceiling', 'door', 'desk', 'table', "
     "'office chair', 'fire extinguisher', 'server rack', 'column', 'pipe', 'duct', "
     "'backpack'. NEVER colour, material, finish, size, state or position words "
     "('black metal desk' is 'desk'; 'white tiled floor' is 'floor'; 'doorway in the "
-    "distance' is 'doorway'). One entry PER KIND of object (all desks are one entry). "
+    "distance' is 'doorway'); colour and material go in 'description' only. One entry "
+    "PER KIND of object (all desks are one entry). "
     "Base everything ONLY on what is visible.\n"
     # Every phrase here becomes ONE SAM3 text prompt and therefore ONE segment,
     # so a compound phrase asks the segmenter for a mask spanning two different
@@ -91,6 +98,7 @@ class FrameUnderstanding:
     summary: str
     objects: list[str] = field(default_factory=list)
     tile: str | None = None               # None = the full frame; "r<i>c<j>" = a crop of it
+    descriptions: dict[str, str] = field(default_factory=dict)   # category → its visual description
 
 
 @dataclass
@@ -113,7 +121,7 @@ class SceneUnderstanding:
             "origin": "vlm_proposed",
             "per_frame": [
                 {"frame_id": f.frame_id, "tile": f.tile, "scene_type": f.scene_type,
-                 "summary": f.summary, "objects": f.objects}
+                 "summary": f.summary, "objects": f.objects, "descriptions": f.descriptions}
                 for f in self.per_frame
             ],
         }
@@ -146,13 +154,24 @@ def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int 
     d = _parse(resp.content or "")
     if d is None:
         return None
-    objs = [_norm_obj(o) for o in d.get("objects", []) if str(o).strip()]
+    objs, descs = [], {}
+    for o in d.get("objects", []) or []:
+        if isinstance(o, dict):                   # {"category", "description"}
+            cat = _norm_obj(o.get("category") or o.get("name") or "")
+            if cat:
+                objs.append(cat)
+                de = _norm_obj(o.get("description") or "")
+                if de and de != cat:
+                    descs.setdefault(cat, de)
+        elif str(o).strip():                      # a bare string (older answers)
+            objs.append(_norm_obj(o))
     return FrameUnderstanding(
         frame_id=frame_id,
         scene_type=str(d.get("scene_type", "")).strip(),
         summary=str(d.get("summary", "")).strip(),
         objects=objs,
         tile=tile,
+        descriptions=descs,
     )
 
 

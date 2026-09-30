@@ -38,12 +38,14 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # Read VLM analysis if available (written by vlm_worker)
     vlm_path = output_dir / "vlm_analysis.json"
     boxes_map = None
+    fallback_prompts = None
     vlm_data = None
     if vlm_path.exists():
         vlm_data = json.loads(vlm_path.read_text())
         prompt = vlm_data.get("prompt", "")
         frame_map = vlm_data.get("frame_map", {})
         boxes_map = vlm_data.get("boxes") or None  # Phase 1 per-instance box seeds
+        fallback_prompts = vlm_data.get("fallback_prompts") or None   # USER 2026-09-30
         # SIMPLE pipeline: the VLM contributes ONLY the concept vocabulary. SAM3 alone
         # searches, identifies and tracks each concept over the WHOLE sampled frame set
         # (empty frame_map → all frames; with ~1 fps sampling that is a single SAM3
@@ -130,6 +132,7 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
             boxes_map=boxes_map,
             on_progress=_seg_progress,
             prompt_status=prompt_status,
+            fallback_prompts=fallback_prompts,
         )
     except Exception as e:
         _census(f"{type(e).__name__}: {e}")

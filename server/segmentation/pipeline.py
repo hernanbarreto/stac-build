@@ -36,7 +36,8 @@ logger = logging.getLogger("SegPipeline")
 
 def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
                      frame_map: dict = None, on_progress=None,
-                     boxes_map: dict = None, prompt_status: dict = None) -> dict:
+                     boxes_map: dict = None, prompt_status: dict = None,
+                     fallback_prompts: dict = None) -> dict:
     """
     Full segmentation pipeline: batched SAM3 → IoU ID matching → mask-to-point mapping.
 
@@ -114,6 +115,7 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
             on_progress=on_progress,
             boxes_map=boxes_map,
             prompt_status=prompt_status,
+            fallback_prompts=fallback_prompts,
         )
         
         if seg_meta is None:
@@ -274,7 +276,8 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                       frame_map: dict = None,
                       on_progress=None,
                       boxes_map: dict = None,
-                      prompt_status: dict = None):
+                      prompt_status: dict = None,
+                      fallback_prompts: dict = None):
     """
     Process frames in overlapping batches, one category at a time.
     Each category gets its own SAM3 pass; obj_ids are remapped to avoid collisions.
@@ -619,6 +622,31 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                 print(f"[SegPipeline] ⚠️ Category '{category}' failed: {e}")
                 cat_status = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
         
+        # THE FALLBACK (USER 2026-09-30): the bare category confirmed NOTHING → SAM3
+        # lacks detail; try its origins (the VLM's descriptions, the merged names) in
+        # order, keep the first that finds something — under THIS category's label
+        if cat_status["status"] == "ran" and not any(len(fm) for fm in cat_masks.values()):
+            _tried = []
+            for _alt in (fallback_prompts or {}).get(category, []) or []:
+                _tried.append(_alt)
+                print(f"[SegPipeline] '{category}' confirmed nothing — retrying with its origin '{_alt}'")
+                try:
+                    _alt_masks = _process_category(
+                        _alt, cat_batches, frames_dir, cat_frame_files, sam3,
+                        batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
+                        boxes_by_pos=cat_boxes)
+                except SAM3ConfigError:
+                    raise
+                except Exception as _e:  # noqa: BLE001 — declared, the next origin is tried
+                    print(f"[SegPipeline] ⚠️ fallback '{_alt}' failed: {_e}")
+                    continue
+                if any(len(fm) for fm in _alt_masks.values()):
+                    cat_masks = _alt_masks
+                    cat_status["fallback_prompt"] = _alt
+                    break
+            if _tried:
+                cat_status["fallbacks_tried"] = _tried
+
         # Collect unique obj_ids for this category
         cat_obj_ids = set()
         for fm in cat_masks.values():

@@ -211,7 +211,7 @@ def test_the_sam3_worker_writes_the_census_after_segmentation(tmp_path, monkeypa
     chair = concept_label("black office chair")
 
     def fake_run_segmentation(frames_dir, output_dir, prompt, frame_map, boxes_map,
-                              on_progress, prompt_status):
+                              on_progress, prompt_status, fallback_prompts=None):
         for c in prompt.split(";"):
             prompt_status[c] = {"status": "ran", "n_objects": 0}
         prompt_status["black office chair"]["n_objects"] = 1
@@ -290,7 +290,7 @@ def test_a_segmentation_that_raises_still_writes_its_census(tmp_path, monkeypatc
     prompts = und.objects
 
     def raising_run_segmentation(frames_dir, output_dir, prompt, frame_map, boxes_map,
-                                 on_progress, prompt_status):
+                                 on_progress, prompt_status, fallback_prompts=None):
         for c in prompt.split(";"):
             prompt_status[c] = {"status": "not_reached", "reason": "stopped"}
         prompt_status[prompts[0]] = {"status": "failed", "reason": "save failed"}
