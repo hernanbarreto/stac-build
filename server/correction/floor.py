@@ -33,6 +33,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 
 import time
+from pathlib import Path
 
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
@@ -41,7 +42,7 @@ from correction.config import CorrectionConfig
 from correction.session import CorrectionSession
 
 UP = np.array([0.0, 1.0, 0.0])
-FLOOR_MODELS = ("level", "plane", "profile")
+FLOOR_MODELS = ("level", "plane", "profile", "chunk")
 
 
 def _keyframe_floor(session: CorrectionSession, k: int,
@@ -221,6 +222,8 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
     if model not in FLOOR_MODELS:
         raise RuntimeError(f"unknown floor model {model!r} — valid: "
                            f"{FLOOR_MODELS}")
+    if model == "chunk":
+        return solve_floor_by_chunk(session, cfg, rng, log=log)
     n_kf = session.n_kf
     candidates = (sorted(set(int(k) for k in keyframes))
                   if keyframes else list(range(n_kf)))
@@ -561,3 +564,106 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
             "exam": {"anchor_floor_residuals": exam,
                      "worst_residual_mm": round(worst * 1000, 2)},
             "floor_npz": floor_npz}
+
+
+# ── model "chunk" (USER 2026-09-30: "tenemos la segmentación de piso, el piso por chunk
+#    llevarlo a cero") ─────────────────────────────────────────────────────────────────
+
+def _omega_chunk_of_keyframes(session: CorrectionSession) -> np.ndarray:
+    """The Omega chunk that OWNS each keyframe (the reconstruction's own records)."""
+    out = np.full(session.n_kf, -1, np.int64)
+    rec = Path(session.output_dir) / "omega_run" / "results_output"
+    for i, f in enumerate(session.frames):
+        p = rec / f"frame_{int(f)}.npz"
+        if p.exists():
+            with np.load(p) as z:
+                out[i] = int(z["chunk"]) if "chunk" in z.files else 0
+    if (out < 0).any():
+        raise RuntimeError(f"{int((out < 0).sum())} keyframe(s) have no Omega record in {rec} — "
+                           f"the chunk of a keyframe is unknown")
+    return out
+
+
+def _segmented_floor_rows(session: CorrectionSession, labels) -> np.ndarray:
+    """Rows of the cloud the projected segmentation labels as floor."""
+    import json as _json
+    p = Path(session.output_dir) / "segmentation_result.json"
+    if not p.exists():
+        raise RuntimeError("segmentation_result.json is missing — the chunk floor model reads "
+                           "the SEGMENTED floor")
+    inst = _json.loads(p.read_text()).get("instances") or []
+    want = {str(l).strip().lower() for l in labels}
+    rows = [np.asarray(i.get("globalIndices") or [], np.int64) for i in inst
+            if str(i.get("label", "")).strip().lower() in want]
+    rows = np.concatenate(rows) if rows else np.zeros(0, np.int64)
+    rows = rows[(rows >= 0) & (rows < len(session.xyz))]
+    return np.unique(rows)
+
+
+def solve_floor_by_chunk(session: CorrectionSession, cfg: CorrectionConfig,
+                         rng: np.random.Generator, log=print) -> dict:
+    """ONE rigid motion per Omega chunk: the chunk's SEGMENTED floor plane → horizontal at
+    y = 0 (rotation about the chunk's floor centroid, then the vertical offset). Every
+    keyframe of a chunk gets the same transform, so no two keyframes of a chunk are moved
+    apart (the per-keyframe models failed the continuity gate on pccr and layered the
+    floor). A chunk with too little segmented floor stays where it is, declared."""
+    fl = cfg.floor
+    ck = _omega_chunk_of_keyframes(session)
+    rows = _segmented_floor_rows(session, fl.chunk_floor_labels)
+    if not len(rows):
+        raise RuntimeError(f"no point is segmented as {list(fl.chunk_floor_labels)} — nothing to "
+                           f"level the chunks with")
+    n_kf = session.n_kf
+    R_kf = np.tile(np.eye(3), (n_kf, 1, 1))
+    t_kf = np.zeros((n_kf, 3))
+    per_chunk, anchors = [], []
+    ks_rows = session.ks[rows]
+    for c in sorted(set(ck.tolist())):
+        kfs = np.flatnonzero(ck == c)
+        mine = rows[np.isin(ks_rows, kfs)]
+        info = {"chunk": int(c), "keyframes": [int(kfs[0]), int(kfs[-1])], "floor_points": int(len(mine))}
+        if len(mine) < fl.min_inliers:
+            info.update(role="unchanged", why=f"only {len(mine)} segmented floor point(s)")
+            per_chunk.append(info)
+            log(f"  floor[chunk {c}]: {info['why']} — left as it is")
+            continue
+        P = session.xyz[mine]
+        S = P if len(P) <= fl.ransac_sample else P[rng.choice(len(P), fl.ransac_sample, replace=False)]
+        best, bn = None, -1
+        for _ in range(fl.ransac_iters):
+            a, b_, c_ = S[rng.choice(len(S), 3, replace=False)]
+            nrm = np.cross(b_ - a, c_ - a)
+            ln = np.linalg.norm(nrm)
+            if ln < 1e-9:
+                continue
+            nrm /= ln
+            if nrm[1] < 0:
+                nrm = -nrm
+            cnt = int((np.abs((S - a) @ nrm) < fl.ransac_tol_m).sum())
+            if cnt > bn:
+                bn, best = cnt, (nrm, a)
+        nrm, a = best
+        inl = np.abs((S - a) @ nrm) < fl.ransac_refit_band_m
+        cen = S[inl].mean(0)
+        nrm = np.linalg.svd(S[inl] - cen, full_matrices=False)[2][2]
+        if nrm[1] < 0:
+            nrm = -nrm
+        R = _rot_between(nrm, UP)
+        t = cen - R @ cen                       # rotate about the floor centroid
+        t[1] -= float(cen[1])                   # … and bring that floor to y = 0
+        R_kf[kfs] = R
+        t_kf[kfs] = t
+        tilt = float(np.degrees(np.arccos(np.clip(nrm @ UP, -1, 1))))
+        info.update(role="anchor", tilt_deg=round(tilt, 3), floor_y_m=round(float(cen[1]), 4),
+                    inliers=int(inl.sum()), sample=int(len(S)))
+        per_chunk.append(info)
+        anchors.append({"kf": int(kfs[len(kfs) // 2]), "rot_deg": round(tilt, 3),
+                        "t_m": round(float(abs(cen[1])), 4), "chunk": int(c)})
+        log(f"  floor[chunk {c}] kf {kfs[0]}-{kfs[-1]}: {len(mine):,} segmented floor pts, plane tilt "
+            f"{tilt:.2f}°, floor at y {cen[1] * 100:+.1f} cm → horizontal at y = 0")
+    return {"R_kf": R_kf, "t_kf": t_kf, "k_kf": np.ones(n_kf), "anchors": anchors,
+            "n_demoted": sum(1 for i in per_chunk if i["role"] != "anchor"),
+            "per_kf_report": per_chunk, "model": "chunk",
+            "model_params": {"labels": list(fl.chunk_floor_labels), "per_chunk": per_chunk},
+            "exam": {"anchor_floor_residuals": [], "worst_residual_mm": 0.0},
+            "floor_npz": {"s": np.float64(1.0), "R": np.eye(3), "t": np.zeros(3)}}

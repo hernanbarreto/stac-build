@@ -19,7 +19,7 @@ class CorrectionConfigError(RuntimeError):
     or out of range. The message always names the offending key."""
 
 
-_FLOOR_MODELS = ("level", "plane", "profile")
+_FLOOR_MODELS = ("level", "plane", "profile", "chunk")
 _DEPTH_MODES = ("sidecar", "rewrite")
 
 
@@ -78,6 +78,7 @@ class GatesConfig:
 @dataclass(frozen=True)
 class FloorConfig:
     model_default: str
+    chunk_floor_labels: Tuple[str, ...]   # model chunk: the segmentation labels that ARE floor
     band_m: float
     low_band_pct: float
     min_tilt_deg: float
@@ -387,8 +388,13 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
         raise CorrectionConfigError(
             f"'correction.floor.model_default' must be one of "
             f"{_FLOOR_MODELS}, got {model_default!r}")
+    _cfl = _require(fl, "chunk_floor_labels", "floor")
+    if not isinstance(_cfl, list) or not _cfl or not all(isinstance(x, str) and x.strip() for x in _cfl):
+        raise CorrectionConfigError("'correction.floor.chunk_floor_labels' must be a non-empty list "
+                                    "of label names")
     floor = FloorConfig(
         model_default=model_default,
+        chunk_floor_labels=tuple(x.strip().lower() for x in _cfl),
         band_m=_num(fl, "band_m", "floor", lo=0.0, lo_excl=True),
         low_band_pct=_num(fl, "low_band_pct", "floor", lo=0.0, hi=50.0),
         min_tilt_deg=_num(fl, "min_tilt_deg", "floor", lo=0.0, hi=90.0),

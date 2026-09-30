@@ -63,7 +63,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
             "scale_agree_tol": 0.05, "scale_mad_tol": 0.03,
         },
         "floor": {
-            "model_default": "plane", "band_m": 0.5, "low_band_pct": 5.0,
+            "model_default": "plane", "chunk_floor_labels": ["floor"], "band_m": 0.5, "low_band_pct": 5.0,
             "min_tilt_deg": 1.0,
             "max_tilt_deg": 10.0, "min_inliers": 60,
             "min_inlier_ratio": 0.5, "ransac_tol_m": 0.02,

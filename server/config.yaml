@@ -2918,7 +2918,12 @@ correction:
     scale_agree_tol: 0.05         # max |log| worsening of a DA3 anchor agreement ratio
     scale_mad_tol: 0.03           # max growth of the anchors' MAD
   floor:
-    model_default: level          # USER 2026-09-29: ONE floor level ("no está fusionado el escalón …
+    model_default: chunk          # USER 2026-09-30: "tenemos la segmentación de piso, el piso por chunk
+                                  # llevarlo a cero" — ONE rigid motion per Omega chunk: its SEGMENTED
+                                  # floor plane → horizontal at y = 0. The per-keyframe `level` failed the
+                                  # continuity gate on pccr and layered the floor (11.5 → 16.9 cm).
+    chunk_floor_labels: [floor]   # the segmentation labels that ARE the floor (the VLM's category name)
+    # (was) model_default: level  # USER 2026-09-29: ONE floor level ("no está fusionado el escalón …
                                   # esto lo teníamos resuelto"): with `plane` the solver kept chunk 0's
                                   # 13.6 cm as a real level change on pccr. (History: plane + local trend;
                                   # level | profile stay selectable by API only (USER 2026-09-09;
