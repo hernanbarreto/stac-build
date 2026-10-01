@@ -83,8 +83,18 @@
   "shapePhase": {
     "captioning": "describing",
     "exporting_pkl": "exporting {done}/{total}",
+    "exporting_ply": "exporting {done}/{total}",
     "pkl_ready": "exported",
+    "ply_ready": "exported",
+    "skipped": "skipped",
     "reconstructing": "reconstructing {done}/{total}",
+    "icp_ok": "aligned (ICP)",
+    "icp_skip": "ICP skipped",
+    "fit_applied": "fitted to the cloud",
+    "fit_noop": "fit: no change",
+    "fit_error": "fit failed",
+    "warn": "warning",
+    "texturing": "texturing {done}/{total}",
     "done": "done",
     "error": "error",
     "idle": "idle"

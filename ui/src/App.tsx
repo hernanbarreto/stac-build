@@ -681,12 +681,17 @@ function App() {
   // Live progress for the in-flight shape run
   type ShapeInstanceProgress = {
     id: number
-    phase: string  // captioning | exporting_pkl | pkl_ready | reconstructing | done | error
+    // server/main.py `_shape_progress`: exporting_ply | exporting_pkl | captioning | ply_ready |
+    // skipped | reconstructing | icp_ok | icp_skip | fit_applied | fit_noop | fit_error |
+    // texturing | done | error
+    phase: string
     elapsed?: number
     error?: string
     mesh?: string
+    reason?: string
+    textured?: boolean
   }
-  const [, setShapeProgress] = useState<Record<number, ShapeInstanceProgress>>({})
+  const [shapeProgress, setShapeProgress] = useState<Record<number, ShapeInstanceProgress>>({})
   const [shapeOverall, setShapeOverall] = useState<{ phase: string; total?: number; done?: number }>({ phase: 'idle' })
 
   const refreshShapeStatus = useCallback(async () => {
@@ -2302,7 +2307,7 @@ function App() {
 
       <MeshingDialog open={showTsdfModal} onClose={() => setShowTsdfModal(false)} segments={segments} selected={tsdfSelected}
         onToggle={id => setTsdfSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}
-        tsdfStatus={tsdfStatus} tsdfProgress={tsdfProgress} tsdfOverall={tsdfOverall} tsdfRunning={tsdfRunning} shapeRunning={shapeRunning} shapeOverall={shapeOverall}
+        tsdfStatus={tsdfStatus} tsdfProgress={tsdfProgress} tsdfOverall={tsdfOverall} tsdfRunning={tsdfRunning} shapeRunning={shapeRunning} shapeProgress={shapeProgress} shapeOverall={shapeOverall}
         onObject={runObjectMeshing} onMesh={runMesh} />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />

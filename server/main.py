@@ -3986,10 +3986,14 @@ async def delete_segmentation_instance(request: Request):
 
 
 # ── Shape progress tracking ─────────────────────────────────────
-# Per-session, per-instance state for the Shape pipeline. Read by
-# /api/segmentation/shape/progress/:session_id.
+# Per-session, per-instance state for the Shape (ShapeR) job. Read by
+# /api/segmentation/shape/progress/:session_id; the MeshingDialog shows them.
 #
-# Phases: pending → captioning → exporting_pkl → reconstructing → done | error
+# Per-instance phases, in order: exporting_ply (the request reset) → exporting_pkl
+# → captioning (only the on-demand captioner) → ply_ready | skipped →
+# reconstructing → icp_ok | icp_skip → fit_applied | fit_noop | fit_error → done
+# → texturing → done | error. Overall: exporting_ply → reconstructing →
+# texturing → done | error.
 _shape_progress: Dict[str, Dict[int, Dict[str, Any]]] = {}
 _shape_progress_lock = asyncio.Lock()
 
@@ -4003,11 +4007,10 @@ _shape_in_flight: Dict[str, Any] = {
     "key": None, "event": None, "result": None, "completed_at": None,
 }
 
-# Global single-flight slot for the MeshFlow subprocess (inherited from the
-# retired ShapeR path, where spawning a second batch OOM-killed the first on
-# 2026-05-09). One generative batch at a time, regardless of session: the
-# pipeline holds ~5 GB of weights + inference tensors on the GPU and a
-# parallel spawn buys no throughput, only risk.
+# Global single-flight slot for the generative subprocess (ShapeR since
+# 2026-09-29; MeshFlow stays selectable). Spawning a second batch OOM-killed the
+# first on 2026-05-09: one generative batch at a time, regardless of session —
+# the model holds the GPU and a parallel spawn buys no throughput, only risk.
 _meshflow_subprocess: Optional["asyncio.subprocess.Process"] = None
 _meshflow_subprocess_lock = asyncio.Lock()
 # Strong references to fire-and-forget background tasks. The event loop only keeps
@@ -4033,11 +4036,15 @@ async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
                                    ply_paths: List[Path],
                                    inst_id_by_pkl: Dict[str, int],
                                    engine: str = "meshflow"):
-    """Spawn run_meshflow.sh and parse [BATCH] events for live UI progress.
+    """Spawn the generative batch and parse its [BATCH] events for live UI progress.
 
-    Single-flight globally (see _meshflow_subprocess above). Output GLBs are
-    GENERATIVE visual assets: ``<stem>_visual.glb`` + ``metric: false`` in
-    meta.json — never metric deliverables.
+    ``engine="shaper"`` (config.yaml ``shaper.engine``, the default): run_shaper.sh →
+    run_shaper_batch.py over the PKLs ``export_shaper_pkls`` wrote — ``<stem>.glb``
+    + ``<stem>.meta.json`` next to each PKL, fitted to the segment's cloud, then
+    the scan-frame texture baked on (``shaper.texture``). ``engine="meshflow"``:
+    run_meshflow.sh over segment PLYs → ``<stem>_visual.glb`` + folder meta.json.
+    Both are GENERATIVE assets (trusted for presence / position / extent, never
+    metric deliverables). Single-flight globally (see _meshflow_subprocess above).
     """
     global _meshflow_subprocess
 
@@ -4052,7 +4059,7 @@ async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
         if (_meshflow_subprocess is not None
                 and _meshflow_subprocess.returncode is None):
             existing_pid = _meshflow_subprocess.pid
-            msg = (f"Another MeshFlow subprocess is already running "
+            msg = (f"Another generative subprocess is already running "
                    f"(pid={existing_pid}). Refusing to spawn a second one — "
                    f"one generative batch at a time.")
             print(f"[Shape] ⚠ {msg}")
@@ -4060,26 +4067,38 @@ async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
             return
 
     server_dir = Path(__file__).resolve().parent
+    texture = False
     if engine == "shaper":
         # USER 2026-09-29: ShapeR replaces MeshFlow behind the generative button.
         # ONE PKL per object (segment points + multi-view frames + description).
+        # Every decision is a config.yaml `shaper:` key — a missing one fails here.
         scfg = (cfg or {}).get("shaper") or {}
-        for _k in ("preset", "fit_to_cloud"):
+        for _k in ("preset", "fit_to_cloud", "simplify_faces", "texture"):
             if _k not in scfg:
                 raise RuntimeError(f"config.yaml is missing 'shaper.{_k}'")
         cmd = ["bash", str(server_dir / "run_shaper.sh"),
                "--pkls", *[str(p) for p in ply_paths],
                "--output_dir", str(output_dir / "shape"),
-               "--config", str(scfg["preset"])]
+               "--config", str(scfg["preset"]),
+               "--simplify_faces", str(int(scfg["simplify_faces"]))]
         if not bool(scfg["fit_to_cloud"]):
             cmd += ["--no_fit_to_cloud"]
-        # the GPU: ShapeR needs it whole — the chat VLM (vLLM) steps aside, back after
+        texture = bool(scfg["texture"])
+        # The GPU: ShapeR needs it whole — the chat VLM (vLLM) steps aside, back
+        # after. FATAL when it does not (2026-10-01): until then the failed stop was
+        # only printed and ShapeR spawned against a 40 GB-resident vLLM.
         try:
             from workers.base import stop_semantic_service_verified
             await asyncio.get_event_loop().run_in_executor(
                 None, lambda: stop_semantic_service_verified(None, stage="shaper", log=print))
-        except Exception as _e:  # noqa: BLE001 — declared
-            print(f"[Shape] ⚠ could not stop the VLM service before ShapeR: {_e}")
+        except Exception as _e:  # noqa: BLE001 — declared, and it ends the job
+            msg = f"ShapeR needs the whole GPU and the VLM service could not be stopped: {_e}"
+            print(f"[Shape] ❌ {msg}")
+            for _iid in inst_id_by_pkl.values():
+                _shape_set(session_id, int(_iid), phase="error", error=msg)
+            _shape_set_overall(session_id, phase="error", error=msg,
+                               finished_at=time.time())
+            return
     else:
         script = server_dir / "run_meshflow.sh"
         mcfg = (cfg or {}).get("meshflow", {}) or {}
@@ -4119,6 +4138,31 @@ async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
 
     async with _meshflow_subprocess_lock:
         _meshflow_subprocess = proc
+
+    # The scan-frame texture (USER 2026-10-01, pipeline_final.md §11: ShapeR
+    # objects "+ a texture baked from the scan frames"): baked onto every finished
+    # mesh when `shaper.texture` is on, ONE texrecon at a time (the pod's CPU is
+    # shared) and never fatal — a failed bake keeps the vertex-coloured mesh, and
+    # parts no camera saw stay untextured (bake_object_glb invents nothing).
+    tex_tasks: List["asyncio.Task"] = []
+    tex_lock = asyncio.Lock()
+
+    async def _texture(iid: int, glb: Path) -> None:
+        async with tex_lock:
+            _shape_set(session_id, iid, phase="texturing")
+
+            def _bake() -> bool:
+                from reconstruction.texture_bake import bake_object_glb
+                return bool(bake_object_glb(glb, output_dir.parent, output_dir))
+
+            try:
+                ok = await asyncio.get_event_loop().run_in_executor(None, _bake)
+            except Exception as _e:  # noqa: BLE001 — non-fatal, declared
+                print(f"[Shape] ⚠ texture bake failed for {glb.name}: {_e}")
+                ok = False
+            print(f"[Shape]   texture of {glb.name}: "
+                  f"{'baked' if ok else 'NOT baked — mesh kept vertex-coloured'}")
+            _shape_set(session_id, iid, phase="done", textured=ok)
 
     done_count = 0
     while True:
@@ -4178,6 +4222,8 @@ async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
                 update["mesh"] = kv.get("out", "")
                 done_count += 1
                 _shape_set_overall(session_id, done=done_count)
+                if texture and kv.get("out"):
+                    tex_tasks.append(asyncio.ensure_future(_texture(inst_id, Path(kv["out"]))))
             elif status == "error":
                 update["phase"] = "error"
                 update["error"] = kv.get("msg", "unknown")
@@ -4185,11 +4231,17 @@ async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
 
     rc = await proc.wait()
     if engine == "shaper":
-        # the chat VLM comes back the moment ShapeR frees the GPU (USER 2026-08-28: always on)
+        # The chat VLM comes back the moment ShapeR frees the GPU (USER 2026-08-28:
+        # always on). _semantic_reload_if_idle BLOCKS (health probe + Popen) — in
+        # the executor, never inline in the event loop (fixed 2026-10-01).
         try:
-            _semantic_reload_if_idle("shaper done")
+            await asyncio.get_event_loop().run_in_executor(
+                None, _semantic_reload_if_idle, "shaper done")
         except Exception as _e:  # noqa: BLE001 — declared
             print(f"[Shape] ⚠ VLM reload after ShapeR failed: {_e}")
+    if tex_tasks:
+        _shape_set_overall(session_id, phase="texturing")
+        await asyncio.gather(*tex_tasks, return_exceptions=True)
     # Release the single-flight slot so the next /shape/export can spawn.
     async with _meshflow_subprocess_lock:
         if _meshflow_subprocess is proc:
@@ -4204,23 +4256,29 @@ async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
 
 @app.post("/api/segmentation/shape/export")
 async def export_shape_inputs(request: Request):
-    """Export per-instance segment PLYs and (optionally) chain MeshFlow
-    generation. Replaces the retired ShapeR PKL exporter — MeshFlow consumes
-    the segment geometry directly, so no captions/multi-view renders.
+    """The Meshing dialog's "Object" button (USER 2026-10-01: every selected
+    object through ShapeR). Exports the per-instance inputs and (by default)
+    chains the generative batch in the background — see _run_meshflow_subprocess.
+
+    ``shaper.engine: shaper`` (default): one PKL per object (``export_shaper_pkls``
+    — the segment's points, every posed keyframe that sees it, the VLM's stored
+    description) → run_shaper_batch → ``<stem>.glb`` + ``<stem>.meta.json``.
+    ``shaper.engine: meshflow``: segment PLYs → MeshFlow (``<stem>_visual.glb``).
 
     Body:
         session_id: str
         instance_ids: Optional[list[int]] — filter to these IDs only
-        auto_reconstruct: bool (default True) — chain MeshFlow inference
-        (captions / auto_caption are accepted but ignored — deprecated with
-        ShapeR; MeshFlow has no text conditioning)
+        auto_reconstruct: bool (default True) — chain the generative batch
+        captions: Optional[{instance_id: str}] — manual descriptions (win over
+            the stored VLM caption; human_validated)
+        auto_caption: Optional[bool] — override ``shaper.auto_caption`` (the
+            on-demand captioner, used only for instances with no stored caption)
 
-    Routing: architectural classes and oversized segments are SKIPPED here
-    (they belong to the metric surface_fit / TSDF paths) — see the response's
-    "skipped" list. Outputs are GENERATIVE visual assets (metric: false).
+    Instances with no usable view / too few points are SKIPPED — see the
+    response's "skipped" list. Outputs are GENERATIVE assets, never metric.
 
-    A browser retry after timeout will hit the in-flight guard below and wait
-    for the original request's result instead of spawning a parallel run.
+    A browser retry after timeout hits the in-flight guard below and waits for
+    the original request's result instead of spawning a parallel run.
     """
     import threading as _threading
     body = await request.json()
@@ -4313,18 +4371,28 @@ async def export_shape_inputs(request: Request):
 
         def _export_shaper():
             from segmentation.shaper_export import export_shaper_pkls
+            from reconstruction.loops.config import load_loops_config
             from segmentation.object_captioner import caption_object_qwen
             for _k in ("max_views", "min_view_points", "grayscale", "image_format", "auto_caption"):
                 if _k not in scfg:
                     raise RuntimeError(f"config.yaml is missing 'shaper.{_k}'")
             manual = {int(k): v for k, v in (body.get("captions") or {}).items()}
             auto_cap = bool(body.get("auto_caption", scfg["auto_caption"]))
+
+            def _on_phase(iid: int, phase: str) -> None:
+                # per-instance phase for the dialog (exporting_pkl | captioning);
+                # _shape_set is the thread-safe helper
+                _shape_set(session_id, iid, phase=phase)
+
             pkls = export_shaper_pkls(
                 output_dir=output_dir, frames_dir=frames_dir, segments_result=segments_result,
                 session_dir=output_dir.parent, obj_ids=instance_ids,
                 caption_fn=caption_object_qwen if auto_cap else None, captions=manual,
                 image_format=str(scfg["image_format"]), grayscale=bool(scfg["grayscale"]),
-                max_views=int(scfg["max_views"]), min_view_points=int(scfg["min_view_points"]))
+                max_views=int(scfg["max_views"]), min_view_points=int(scfg["min_view_points"]),
+                on_phase=_on_phase,
+                # a candidate view must SEE the object, not a wall in front of it
+                occlusion_tol_rel=float(load_loops_config(cfg).witness.occlusion_tol_rel))
             done = {p.stem for p in pkls}
             skipped = []
             for inst in segments_result.get("instances", []):
@@ -4399,7 +4467,7 @@ async def export_shape_inputs(request: Request):
             print(f"[Shape]   skipped {s_['label']}_{s_['instance_id']}: {s_['reason']}")
 
         if auto_reconstruct and exported:
-            print(f"[Shape] auto_reconstruct=True — scheduling background MeshFlow task", flush=True)
+            print(f"[Shape] auto_reconstruct=True — scheduling the background {engine} batch", flush=True)
             async def _bg():
                 print(f"[Shape] _bg ENTER — about to call _run_meshflow_subprocess", flush=True)
                 try:
@@ -4520,10 +4588,12 @@ async def shape_list(session_id: str):
         glb_files = sorted(obj_folder.glob("*.glb"))
         if not glb_files:
             continue
-        # prefer the MeshFlow output (<folder>_visual.glb) over legacy names
-        glb_file = next((g for g in glb_files if g.stem.endswith("_visual")),
-                        glb_files[0])
-        # sidecar: legacy <glb>.meta.json, else the folder-level meta.json
+        # the mesh with its own <stem>.meta.json sidecar (ShapeR) is the published
+        # one; the legacy MeshFlow <stem>_visual.glb (folder meta.json) only when no
+        # sidecar exists — until 2026-10-01 `_visual` won over a ShapeR mesh next to it
+        from segmentation.shaper_export import pick_shape_glb
+        glb_file = pick_shape_glb(glb_files)
+        # sidecar: <stem>.meta.json (ShapeR), else the folder-level meta.json (MeshFlow)
         meta = None
         for meta_file in (glb_file.with_suffix(".meta.json"),
                           obj_folder / "meta.json"):

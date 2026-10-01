@@ -83,8 +83,18 @@
   "shapePhase": {
     "captioning": "describiendo",
     "exporting_pkl": "exportando {done}/{total}",
+    "exporting_ply": "exportando {done}/{total}",
     "pkl_ready": "exportado",
+    "ply_ready": "exportado",
+    "skipped": "omitido",
     "reconstructing": "reconstruyendo {done}/{total}",
+    "icp_ok": "alineado (ICP)",
+    "icp_skip": "ICP omitido",
+    "fit_applied": "ajustado a la nube",
+    "fit_noop": "ajuste: sin cambio",
+    "fit_error": "ajuste falló",
+    "warn": "aviso",
+    "texturing": "texturizando {done}/{total}",
     "done": "listo",
     "error": "error",
     "idle": "inactivo"

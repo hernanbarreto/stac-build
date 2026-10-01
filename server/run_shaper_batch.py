@@ -33,20 +33,12 @@ from typing import Optional
 
 import numpy as np
 import torch
-import omegaconf
 import trimesh
 from scipy.spatial import cKDTree
 
-# vendor/ShapeR is added to PYTHONPATH by run_shaper.sh
-from dataset.shaper_dataset import InferenceDataset
-from model.download import setup_checkpoints
-from model.flow_matching.shaper_denoiser import ShapeRDenoiser
-from model.text.hf_embedder import (
-    DummyTextFeatureExtractor,
-    MemoryEfficientTextFeatureExtractor,
-)
-from model.vae3d.autoencoder import MichelangeloLikeAutoencoderWrapper
-from postprocessing.helper import remove_floating_geometry
+# vendor/ShapeR (added to PYTHONPATH by run_shaper.sh) and omegaconf are imported
+# inside main(): the argument parser and the fit/ICP helpers are unit-tested in
+# the backend env, where the vendor package does not exist.
 
 
 # Same presets as vendor/ShapeR/infer_shape.py.
@@ -365,7 +357,8 @@ def _write_meta(meta_path: Path, pkl_sample: dict, glb_path: Path,
                 icp_residual_m: float, icp_iters: int,
                 preset: str, num_views: int, num_steps: int,
                 elapsed_s: float,
-                fit_stats: Optional[dict] = None):
+                fit_stats: Optional[dict] = None,
+                simplify_faces: int = 0):
     """Write per-mesh metadata for auditability + UI loading."""
     # T_model_world maps world(Y-up) → model_zup (rotation + translation).
     # Recover world centroid + AABB by inverting and projecting points.
@@ -384,6 +377,9 @@ def _write_meta(meta_path: Path, pkl_sample: dict, glb_path: Path,
         "instance_id": int(pkl_sample.get("instance_id", pkl_sample.get("global_id", -1))),
         "label": pkl_sample.get("label", ""),
         "caption": pkl_sample.get("caption", ""),
+        # where the description came from (shaper_export.resolve_caption):
+        # manual | vlm_object | vlm_concept | vlm_on_demand | label
+        "caption_source": pkl_sample.get("caption_source", "label"),
         "glb_file": glb_path.name,
         "centroid_world": centroid_world,
         "bbox_min_world": bb_min,
@@ -396,9 +392,14 @@ def _write_meta(meta_path: Path, pkl_sample: dict, glb_path: Path,
         "n_source_points": int(pkl_sample.get("n_source_points", 0)),
         "n_views": int(pkl_sample.get("n_views", 0)),
         "source_frames": pkl_sample.get("source_frames", []),
+        # the view pool the PKL was picked from (USER 2026-10-01: every posed
+        # keyframe that sees the object is a candidate)
+        "n_candidate_frames": int(pkl_sample.get("n_candidate_frames", 0)),
+        "n_posed_frames": int(pkl_sample.get("n_posed_frames", 0)),
         "shaper_preset": preset,
         "shaper_num_views": int(num_views),
         "shaper_num_steps": int(num_steps),
+        "simplify_faces": int(simplify_faces),
         "elapsed_s": round(float(elapsed_s), 2),
         "generated_at": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
@@ -406,7 +407,9 @@ def _write_meta(meta_path: Path, pkl_sample: dict, glb_path: Path,
         json.dump(meta, f, indent=2)
 
 
-def main():
+def build_arg_parser() -> argparse.ArgumentParser:
+    """The batch's command line (the backend's ``_run_meshflow_subprocess`` builds
+    it from ``config.yaml shaper:``; unit-tested without the vendor package)."""
     ap = argparse.ArgumentParser("ShapeR Batch Inference")
     ap.add_argument("--pkls", nargs="+", required=True,
                     help="List of input .pkl paths (absolute).")
@@ -426,7 +429,11 @@ def main():
                     help="Override classifier-free guidance. -1 disables it; values "
                          "~2-5 push the mesh to follow the point cloud / images / text.")
     ap.add_argument("--no_remove_floating", action="store_true")
-    ap.add_argument("--no_simplify", action="store_true")
+    ap.add_argument("--simplify_faces", type=int, default=125000,
+                    help="Quadric-decimate the generated mesh to this many faces; 0 keeps "
+                         "the VAE's full triangulation. The backend passes config.yaml "
+                         "shaper.simplify_faces; 125000 is the value this script hardcoded "
+                         "until 2026-10-01 (kept as the default for a bare command line).")
     ap.add_argument("--use_text", action="store_true", default=True)
     ap.add_argument("--ckpt_root", default=None,
                     help="Override path to vendor/ShapeR (where checkpoints/ lives).")
@@ -444,7 +451,27 @@ def main():
                          "below the coverage threshold (occluded). Allows ShapeR "
                          "to extend beyond the cloud where the scan is sparse, "
                          "but never more than this multiple (default: 1.5).")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_arg_parser().parse_args()
+    if int(args.simplify_faces) < 0:
+        emit(f"item idx=-1 name=- status=error msg=simplify_faces must be >= 0 "
+             f"(got {args.simplify_faces})")
+        sys.exit(2)
+
+    import omegaconf
+    # vendor/ShapeR is on PYTHONPATH (run_shaper.sh)
+    from dataset.shaper_dataset import InferenceDataset
+    from model.download import setup_checkpoints
+    from model.flow_matching.shaper_denoiser import ShapeRDenoiser
+    from model.text.hf_embedder import (
+        DummyTextFeatureExtractor,
+        MemoryEfficientTextFeatureExtractor,
+    )
+    from model.vae3d.autoencoder import MichelangeloLikeAutoencoderWrapper
+    from postprocessing.helper import remove_floating_geometry
 
     pkl_paths = [Path(p).resolve() for p in args.pkls]
     for p in pkl_paths:
@@ -572,9 +599,10 @@ def main():
 
                 if not args.no_remove_floating:
                     mesh = remove_floating_geometry(mesh)
-                if not args.no_simplify:
+                # config.yaml shaper.simplify_faces (0 = the VAE's full triangulation)
+                if int(args.simplify_faces) > 0 and len(mesh.faces) > int(args.simplify_faces):
                     try:
-                        mesh = mesh.simplify_quadric_decimation(face_count=125000)
+                        mesh = mesh.simplify_quadric_decimation(face_count=int(args.simplify_faces))
                     except Exception as e:
                         emit(f"item idx={idx} name={name} status=warn msg=simplify_failed:{e}")
 
@@ -665,6 +693,7 @@ def main():
                     num_steps=num_steps,
                     elapsed_s=elapsed,
                     fit_stats=fit_stats,
+                    simplify_faces=int(args.simplify_faces),
                 )
 
                 emit(f"item idx={idx} name={name} status=done "

@@ -15,10 +15,13 @@ vendor/ShapeR/dataset/shaper_dataset.py consumes:
     camera_params           Tensor (V,16)       Fisheye624 [fx,fy,cx,cy,k0..k5,p0,p1,s0..s3]
     visible_points_model    list[Tensor (Mi,3)] points visible in view i (model frame)
     object_point_projections list[Tensor (Mi,2)] (u,v) of those points
-    caption                 str                 narrative caption (ShapeR conditioning) or label
-    caption_fields          dict|None            {category, shape, material, detail} or None (manual/fallback)
+    caption                 str                 the object's description (ShapeR conditioning)
+    caption_fields          dict|None            {category, shape, material, detail}; None only for the bare label
+    caption_source          str                 manual | vlm_object | vlm_concept | vlm_on_demand | label
     category                str                 SAM3 label (fallback caption)
     label, instance_id, n_source_points, n_views, source_frames  metadata
+    n_candidate_frames      int                 posed keyframes that SAW the object (the view pool)
+    n_posed_frames          int                 posed keyframes with a frame on disk
 
 Backend-agnostic — auto-detects pose source for lidar/Stray, DA3, MapAnything,
 hybrid, gaus_slam_*. Pinhole intrinsics get embedded as Fisheye624 with zero
@@ -535,6 +538,249 @@ def _parse_manual_caption(text: str) -> Dict[str, str]:
     return fields
 
 
+# ── Views: the camera on the image, the projection ─────────────────
+
+def _K_on_image(cam: CameraSource, K_src: np.ndarray, W_img: int, H_img: int,
+                frame_path: Path) -> np.ndarray:
+    """The intrinsics on the JPG's pixel grid.
+
+    Precision sessions: K is the session camera on the NATIVE grid and ``frames/``
+    must BE the native video — a resampled frame would silently shift every
+    projection, so it fails here. Other backends record K at their processing
+    resolution (DA3 384×688 vs 360×640 JPGs): rescale to the image — in EITHER
+    direction — from the declared source resolution (Stray) or the centred
+    principal point (2·cx, 2·cy: exact for the pinhole DA3 / MapAnything models).
+    """
+    if cam.grid is not None and cam.camera is not None:
+        if (W_img, H_img) != (int(cam.camera.width), int(cam.camera.height)):
+            raise RuntimeError(f"{frame_path.name} is {W_img}x{H_img}, the session camera "
+                               f"is {cam.camera.width}x{cam.camera.height} — frames/ is not "
+                               f"the native video")
+        return np.asarray(K_src, dtype=np.float64)
+    if cam.source_resolution is not None:
+        src_h, src_w = float(cam.source_resolution[0]), float(cam.source_resolution[1])
+    else:
+        src_w, src_h = 2.0 * float(K_src[0, 2]), 2.0 * float(K_src[1, 2])
+    sx = (W_img / src_w) if src_w > 1.0 else 1.0
+    sy = (H_img / src_h) if src_h > 1.0 else 1.0
+    if abs(sx - 1.0) < 0.01:
+        sx = 1.0
+    if abs(sy - 1.0) < 0.01:
+        sy = 1.0
+    if sx != 1.0 or sy != 1.0:
+        return _scale_K(np.asarray(K_src, dtype=np.float64), sx, sy)
+    return np.asarray(K_src, dtype=np.float64)
+
+
+def _project_pinhole(points_world: np.ndarray, c2w_4: np.ndarray, K: np.ndarray,
+                     W_img: int, H_img: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(u, v, inside) of ``points_world`` through the pinhole ``K`` of the camera
+    at ``c2w_4``: ``inside`` = in front of the camera and within the image."""
+    w2c = np.linalg.inv(c2w_4)
+    q = points_world @ w2c[:3, :3].T + w2c[:3, 3]
+    zf = q[:, 2] > 1e-6
+    z = np.where(zf, q[:, 2], 1.0)
+    u = K[0, 0] * q[:, 0] / z + K[0, 2]
+    v = K[1, 1] * q[:, 1] / z + K[1, 2]
+    inside = zf & (u >= 0) & (u <= W_img - 1) & (v >= 0) & (v <= H_img - 1)
+    return u, v, inside
+
+
+def published_depth_fn(output_dir: Path, log: Callable[[str], None] = logger.info
+                       ) -> Optional[Callable[[int], Optional[np.ndarray]]]:
+    """``keyframe -> the depth map the PUBLISHED cloud was built from`` (Omega's record ×
+    the per-keyframe bend / scale of ``corrected_cloud.json``, composed with the
+    certification's transform epochs — precision.chunk_check.load_inputs, the one
+    reader of that model), or None when the session has no such model (a cloud not
+    built from Omega's records: then no occlusion test can be made and the caller
+    says so). Maps are cached: one npz read per keyframe for every object."""
+    try:
+        from precision.chunk_check import load_inputs, scale_map
+        (frames, _c2w, _K, s_k, src, _chunk, _chain, rec, _da3, bend,
+         composed) = load_inputs(Path(output_dir).parent, log=lambda m: None)
+    except Exception as e:  # noqa: BLE001 — declared by the caller
+        log(f"[ShaperExport] no published depth model ({e}) — no occlusion test")
+        return None
+    if not str(src).startswith("corrected_cloud.json"):
+        log(f"[ShaperExport] the cloud's depth model is not on record ({src}) — no occlusion test")
+        return None
+    offset = composed.get("offset") or {}
+    cache: Dict[int, Optional[np.ndarray]] = {}
+    known = set(int(f) for f in frames)
+
+    def depth(fidx: int) -> Optional[np.ndarray]:
+        fidx = int(fidx)
+        if fidx in cache:
+            return cache[fidx]
+        D = None
+        p = Path(rec) / f"frame_{fidx}.npz"
+        if fidx in known and p.exists():
+            with np.load(p) as z:
+                d0 = np.asarray(z["depth"], np.float64)
+            D = d0 * scale_map(s_k[fidx], bend.get(fidx), d0.shape[0], d0.shape[1])
+            off = float(offset.get(fidx, 0.0))
+            if off:
+                D = np.where(d0 > 0, D + off, D)
+            D = np.where(np.isfinite(d0) & (d0 > 0), D, 0.0).astype(np.float32)
+        cache[fidx] = D
+        return D
+
+    return depth
+
+
+def occluded_points(pts_world: np.ndarray, c2w_4: np.ndarray, u: np.ndarray, v: np.ndarray,
+                    inside: np.ndarray, W_img: int, H_img: int, D: Optional[np.ndarray],
+                    tol_rel: float) -> np.ndarray:
+    """Points of ``inside`` that lie BEHIND the keyframe's own surface by more than
+    ``tol_rel`` of its depth (``loops.witness.occlusion_tol_rel``, the witness rule):
+    the camera sees something else there — a wall between it and the object. A pixel
+    with no depth says nothing (the point is not counted occluded)."""
+    occ = np.zeros(len(pts_world), bool)
+    if D is None or not inside.any():
+        return occ
+    w2c = np.linalg.inv(c2w_4)
+    z = pts_world[inside] @ w2c[2, :3] + w2c[2, 3]
+    Hd, Wd = D.shape
+    uu = np.clip((u[inside] * Wd / float(W_img)).astype(np.int64), 0, Wd - 1)
+    vv = np.clip((v[inside] * Hd / float(H_img)).astype(np.int64), 0, Hd - 1)
+    d = D[vv, uu]
+    occ[np.flatnonzero(inside)] = (d > 0) & (z > d * (1.0 + float(tol_rel)))
+    return occ
+
+
+# ── The description ─────────────────────────────────────────────────
+
+CAPTION_FIELDS = ("category", "shape", "material", "detail")
+
+
+def _stored_shape_caption(inst: dict) -> Optional[dict]:
+    """The VLM's description the segmentation stored on the instance
+    (``shape_caption`` = {caption, category, shape, material, detail, provenance,
+    source: "concept" | "object", generated}). A list of candidates yields the
+    "object" one over the "concept" one (USER 2026-10-01: the description of the
+    object itself beats the description of the concept it was found by)."""
+    raw = inst.get("shape_caption")
+    if not raw:
+        return None
+    cands = raw if isinstance(raw, list) else [raw]
+    cands = [c for c in cands if isinstance(c, dict) and str(c.get("caption") or "").strip()]
+    if not cands:
+        return None
+    rank = {"object": 0, "concept": 1}
+    cands.sort(key=lambda c: rank.get(str(c.get("source") or ""), 2))
+    return cands[0]
+
+
+def resolve_caption(inst_id: int, label: str, inst: dict,
+                    captions: Optional[Dict[int, str]],
+                    caption_fn: Optional[Callable],
+                    caption_frames: List[str],
+                    masks_fn: Optional[Callable[[], Dict[str, np.ndarray]]] = None,
+                    on_phase: Optional[Callable[[int, str], None]] = None,
+                    ) -> Tuple[str, Optional[Dict[str, str]], str]:
+    """(caption, caption_fields, caption_source) for one instance, in this order
+    of precedence (USER 2026-10-01):
+
+    1. ``captions[inst_id]`` — typed in the UI (human_validated) → ``manual``;
+    2. ``inst["shape_caption"]`` — the VLM's description stored by the
+       segmentation, "object" over "concept" → ``vlm_object`` | ``vlm_concept``;
+    3. ``caption_fn`` — the on-demand captioner, ONLY when nothing is stored (the
+       endpoint hands it in only under ``shaper.auto_caption``) → ``vlm_on_demand``;
+    4. the SAM3 label → ``label`` (caption_fields None: nothing was described).
+
+    ``caption_fields`` is always filled from a stored description (empty strings
+    for fields it lacks — never None when a description exists)."""
+    if captions and inst_id in captions and str(captions[inst_id]).strip():
+        text = str(captions[inst_id]).strip()
+        return text, _parse_manual_caption(text), "manual"
+    stored = _stored_shape_caption(inst)
+    if stored is not None:
+        fields = {k: str(stored.get(k) or "") for k in CAPTION_FIELDS}
+        source = str(stored.get("source") or "")
+        return (str(stored["caption"]).strip(), fields,
+                "vlm_object" if source == "object" else "vlm_concept")
+    if caption_fn is not None:
+        try:
+            if on_phase is not None:
+                on_phase(int(inst_id), "captioning")
+            masks = masks_fn() if masks_fn is not None else {}
+            res = caption_fn(caption_frames, masks, label)
+            if isinstance(res, dict) and str(res.get("caption") or "").strip():
+                return (str(res["caption"]).strip(),
+                        {k: str(res.get(k) or "") for k in CAPTION_FIELDS}, "vlm_on_demand")
+            if isinstance(res, str) and res.strip():
+                return res.strip(), _parse_manual_caption(res.strip()), "vlm_on_demand"
+        except Exception as e:  # noqa: BLE001 — declared; the label stands in
+            logger.warning(f"  Caption generation failed for {label}_{inst_id}: {e}")
+    return label, None, "label"
+
+
+def _sam3_view_masks(output_dir: Path, inst_id: int,
+                     frame_paths: List[str]) -> Dict[str, np.ndarray]:
+    """{frame filename: SAM3 mask} of this instance in the given views, from the
+    session's ``seg_masks.npz`` — the real silhouettes for the captioner's crops,
+    not the speckle of projected points. The instance's npz object ids are the
+    ``segmentation.json`` instances that carry its ``instance_id`` (several
+    masklets fused into one object are unioned); mask keys live in the store's
+    own frame space (``mask_space``). Empty when the session has no store."""
+    output_dir = Path(output_dir)
+    store = output_dir / "seg_masks.npz"
+    if not store.exists():
+        return {}
+    oids: List[int] = []
+    seg_doc = output_dir / "segmentation.json"
+    if seg_doc.exists():
+        try:
+            doc = json.loads(seg_doc.read_text())
+            oids = [int(i["id"]) for i in doc.get("instances", [])
+                    if int(i.get("instance_id", -1)) == int(inst_id) and "id" in i]
+        except Exception as e:  # noqa: BLE001 — declared below
+            logger.warning(f"[ShaperExport] segmentation.json unreadable ({e}) — "
+                           f"using the store's own convention for instance {inst_id}")
+    if not oids:
+        oids = [int(inst_id) - 1]      # the store's convention (hole_audit.calibrate_oid)
+    out: Dict[str, np.ndarray] = {}
+    try:
+        from segmentation import mask_space
+        with np.load(store, allow_pickle=True) as z:
+            ms = mask_space.resolve(output_dir, masks=z)
+            files = set(z.files)
+            for fp in frame_paths:
+                stem = Path(fp).stem
+                if not stem.isdigit():
+                    continue
+                acc = None
+                for oid in oids:
+                    key = ms.key(int(stem), oid)
+                    if key is None or key not in files:
+                        continue
+                    m = np.asarray(z[key]) > 0
+                    acc = m if acc is None else (acc | m)
+                if acc is not None and acc.any():
+                    out[Path(fp).name] = acc
+    except Exception as e:  # noqa: BLE001 — declared; the caller falls back
+        logger.warning(f"[ShaperExport] SAM3 masks unavailable for instance {inst_id}: {e}")
+        return {}
+    return out
+
+
+# ── The published mesh of a shape folder ────────────────────────────
+
+def pick_shape_glb(glb_files: List[Path]) -> Optional[Path]:
+    """The GLB ``shape_list`` publishes for one object folder: the one whose own
+    ``<stem>.meta.json`` sidecar exists (ShapeR's ``run_shaper_batch`` writes the
+    pair; the newest sidecar wins when several do). Without any sidecar the
+    legacy MeshFlow ``<stem>_visual.glb`` (folder-level meta.json), else the first
+    GLB. Until 2026-10-01 ``_visual`` won over a ShapeR mesh sitting next to it."""
+    files = [Path(g) for g in glb_files]
+    if not files:
+        return None
+    with_meta = [g for g in files if g.with_suffix(".meta.json").exists()]
+    if with_meta:
+        return max(with_meta, key=lambda g: g.with_suffix(".meta.json").stat().st_mtime)
+    return next((g for g in files if g.stem.endswith("_visual")), files[0])
+
+
 # ── Main export ─────────────────────────────────────────────────────
 
 def export_shaper_pkls(
@@ -548,12 +794,16 @@ def export_shaper_pkls(
     image_format: str = "png",       # "png" or "jpg"
     grayscale: bool = True,           # ShapeR released ckpt expects grayscale
     max_views: int = 0,               # 0 = auto (32 pool); else cap views per object
-    min_view_points: int = 50,        # drop views with < N projected points
+    min_view_points: int = 50,        # a keyframe is a view when ≥ N object points project inside it
+    on_phase: Optional[Callable[[int, str], None]] = None,   # UI: (instance_id, "exporting_pkl" | "captioning")
+    occlusion_tol_rel: Optional[float] = None,  # loops.witness.occlusion_tol_rel; None = no occlusion test
 ) -> List[Path]:
     """Export one ShapeR-compatible .pkl per segmented instance.
 
-    Reads cleaned_cloud.ply traceability + segmentation_result.json. Auto-detects
-    camera source (Stray/lidar, DA3, MapAnything) from session/output layout.
+    Reads cleaned_cloud.ply + segmentation_result.json. Auto-detects the camera
+    source (precision camera.json, Stray/lidar, DA3, MapAnything) from the
+    session/output layout. Views: every posed keyframe that sees the object
+    (see the candidate block below); caption: see :func:`resolve_caption`.
     """
     output_dir = Path(output_dir)
     frames_dir = Path(frames_dir)
@@ -582,18 +832,10 @@ def export_shaper_pkls(
     logger.info(f"[ShaperExport] PLY: {len(xyz):,} points, "
                 f"{len(np.unique(frame_global))} unique frames")
 
-    # Cast pixel coords to int once
+    # The traceability (birth frame / pixel) is REPORTED, no longer used to pick
+    # views (USER 2026-10-01): the views are the posed keyframes that see the object.
     pr_all = pixel_row.astype(np.int32)
     pc_all = pixel_col.astype(np.int32)
-    fg_all = frame_global.astype(np.int64)
-
-    # Global PLY traceability resolution. The previous per-object heuristic
-    # used the object's max pixel in a frame as the source resolution proxy,
-    # which fails when an object only spans a sub-region of the frame: the
-    # heuristic falsely concludes the PLY was at lower res and rescales (u,v)
-    # off the object. Compute it once from the whole cloud, where the max
-    # span reaches every pixel reachable by the camera at PLY-traceability
-    # resolution.
     ply_src_h = int(pr_all.max()) + 1 if len(pr_all) else 1
     ply_src_w = int(pc_all.max()) + 1 if len(pc_all) else 1
     logger.info(f"[ShaperExport] PLY traceability resolution ≈ "
@@ -603,6 +845,9 @@ def export_shaper_pkls(
     cam = _load_camera_source(session_dir, output_dir)
     if cam is None:
         return []
+    # the occlusion test of the candidate views needs the depth the cloud was built from
+    depth_of = (published_depth_fn(output_dir, log=logger.info)
+                if occlusion_tol_rel is not None else None)
 
     # ── Detect world-up convention (once per session) ──
     # Different reconstruction backends emit different conventions:
@@ -618,6 +863,12 @@ def export_shaper_pkls(
     T_zup_session = _R_TO_ZUP[world_up].astype(np.float64)
     logger.info(f"[ShaperExport] backend={cam.backend}  "
                 f"detected world-up={world_up}  → applying rotation to Z-up")
+    # the session lens, once: every view is rectified to the undistorted image plane
+    undist_maps = None
+    if cam.camera is not None and np.any(cam.camera.dist()):
+        from precision.camera import undistort_maps
+        _mx, _my, _ = undistort_maps(cam.camera)
+        undist_maps = (_mx, _my)
 
     # ── Get instances ──
     instances = segments_result.get("instances", [])
@@ -645,10 +896,9 @@ def export_shaper_pkls(
             logger.warning(f"  [{label}_{inst_id}] too few points ({len(gi)}) — skipping")
             continue
 
+        if on_phase is not None:
+            on_phase(int(inst_id), "exporting_pkl")
         sub_pts = xyz[gi].astype(np.float64)
-        sub_fg = fg_all[gi]
-        sub_pr = pr_all[gi]
-        sub_pc = pc_all[gi]
 
         # Center sub-cloud at bbox midpoint, then rotate Y-up (OpenCV/ARKit
         # world) into Z-up (ShapeR training convention). Vendor's
@@ -674,111 +924,76 @@ def export_shaper_pkls(
         # inverts to put the predicted mesh back into the original Y-up world.
         T_world_to_model = T_zup @ T_center
 
-        unique_frames = np.unique(sub_fg).astype(int)
-        logger.info(f"[ShaperExport] {label}_{inst_id}: {len(gi):,} pts, "
-                    f"{len(unique_frames)} candidate frames")
-
-        # How many views to keep in the PKL. ``max_views`` ≤ 0 → 32 — the batch
-        # script's presets select num_views (16 for quality, 24 for `max`) from
-        # this pool, so 32 leaves headroom to pick the best/most-diverse subset for
-        # any preset (and to push --num_views up to 32 without re-exporting). Views
-        # are cheap in the PKL relative to re-running the whole export. Pre-trim the
-        # *candidates* by raw point count if there are far more than we'd ever keep.
+        # ── Candidate views: EVERY posed keyframe that SEES the object ──
+        # USER 2026-10-01: "armar los pkl a máxima resolución posible". Until then a
+        # candidate was a frame where the object's points were BORN, and it needed
+        # ``min_view_points`` born there: pccr's backpack reached the PKL with 12
+        # views for a preset that reads 32 (the vendor pads with repeats — no new
+        # evidence). After voxel / witness / silhouette filtering a point's birth
+        # frame says nothing about which cameras saw it. Now ALL of the object's
+        # points are projected with every posed keyframe's camera and the frame is
+        # a candidate when ≥ ``min_view_points`` land inside the image in front of
+        # it; the score + parallax-diverse pick of ``max_views`` is unchanged. No
+        # occlusion test exists in this exporter and none is invented here (the
+        # vendor builds each view's mask and crop from these projections).
         n_keep = int(max_views) if (max_views and int(max_views) > 0) else 32
-        if len(unique_frames) > 4 * n_keep:
-            counts = np.array([(sub_fg == f).sum() for f in unique_frames])
-            unique_frames = unique_frames[np.argsort(-counts)[:4 * n_keep]]
-
         obj_centroid_world = sub_pts.mean(axis=0)
-        per_frame: List[Dict] = []      # gathered, cropped-to-object conditioning
-        skipped_no_frame = skipped_no_pose = skipped_no_K = 0
-
-        for fidx in unique_frames:
-            fidx = int(fidx)
+        skipped_no_frame = skipped_no_K = 0
+        n_posed_on_disk = 0
+        n_occluded = 0
+        seen: List[Dict] = []           # frames that see the object; images not decoded yet
+        for fidx in sorted(int(f) for f in cam.pose_map.keys()):
             frame_path = frames_dir / f"{fidx:06d}.jpg"
             if not frame_path.exists():
                 skipped_no_frame += 1
-                continue
-            c2w = cam.pose_map.get(fidx)
-            if c2w is None:
-                skipped_no_pose += 1
                 continue
             K_src = cam.K_for(fidx)
             if K_src is None:
                 skipped_no_K += 1
                 continue
-
-            with Image.open(str(frame_path)) as im:
+            n_posed_on_disk += 1
+            with Image.open(str(frame_path)) as im:      # header only — no decode
                 W_img, H_img = im.size
-                pil = im.convert("L" if grayscale else "RGB")
-                img_np = np.array(pil)
-            if cam.camera is not None and np.any(cam.camera.dist()):
+            K_frame = _K_on_image(cam, np.asarray(K_src, dtype=np.float64), W_img, H_img, frame_path)
+            c2w = cam.pose_map[fidx]
+            c2w_4 = np.eye(4, dtype=np.float64)
+            c2w_4[:c2w.shape[0], :c2w.shape[1]] = c2w
+            u_all, v_all, inside = _project_pinhole(sub_pts, c2w_4, K_frame, W_img, H_img)
+            if depth_of is not None:
+                # a camera behind a wall projects the object inside its image too: the
+                # points its own surface hides are not seen from there
+                occ = occluded_points(sub_pts, c2w_4, u_all, v_all, inside, W_img, H_img,
+                                      depth_of(fidx), occlusion_tol_rel)
+                n_occluded += int(occ.sum())
+                inside = inside & ~occ
+            n_in = int(inside.sum())
+            if n_in < min_view_points:
+                continue
+            seen.append({"fidx": fidx, "frame_path": frame_path, "c2w_4": c2w_4,
+                         "K_full": K_frame, "W": W_img, "H": H_img,
+                         "u": u_all, "v": v_all, "inside": inside, "n_pts": n_in})
+        n_candidates = len(seen)
+        logger.info(f"[ShaperExport] {label}_{inst_id}: {len(gi):,} pts, seen by "
+                    f"{n_candidates} of {n_posed_on_disk} posed keyframes "
+                    f"(no_frame={skipped_no_frame} no_K={skipped_no_K}; occlusion test "
+                    f"{'on' if depth_of is not None else 'OFF'}, {n_occluded:,} point-views hidden)")
+        # Images are decoded only for the frames that can still be picked: the
+        # ``4 × n_keep`` best-covered candidates (the pre-trim the exporter always ran).
+        if len(seen) > 4 * n_keep:
+            seen.sort(key=lambda d: -d["n_pts"])
+            seen = seen[:4 * n_keep]
+
+        per_frame: List[Dict] = []      # gathered conditioning, full frames
+        for d in seen:
+            fidx, frame_path, W_img, H_img = d["fidx"], d["frame_path"], d["W"], d["H"]
+            with Image.open(str(frame_path)) as im:
+                img_np = np.array(im.convert("L" if grayscale else "RGB"))
+            if undist_maps is not None:
                 # the frame through the session lens → the undistorted image plane (same K)
                 import cv2 as _cv2
-                from precision.camera import undistort_maps
-                _mx, _my, _ = undistort_maps(cam.camera)
-                img_np = _cv2.remap(img_np, _mx, _my, _cv2.INTER_LINEAR)
-
-            # Subset of this object's points seen in this frame.
-            mask = sub_fg == fidx
-            if mask.sum() < min_view_points:
-                continue
-
-            # Bring the traceability pixels AND the intrinsics into the JPG's
-            # resolution. The backend records BOTH at its processing resolution
-            # (e.g. DA3 depth 384×688), which is frequently NOT the resolution of
-            # the saved JPGs (e.g. 360×640). The two must be rescaled to the image
-            # — in EITHER direction.
-            #
-            # Source resolution: prefer the backend's declared source_resolution
-            # (Stray sets it from the RGB frames); otherwise use the intrinsics'
-            # centered principal point (2·cx, 2·cy) — exact for the pinhole DA3/
-            # MapAnything models and, unlike the old max-traceability-pixel guess,
-            # independent of how much of the frame the object's cloud covers.
-            #
-            # The previous `ply_src * 1.2 < H_img` guard only ever UP-scaled (image
-            # ≫ traceability) and silently ignored DA3's down-scale case → every
-            # projection landed shifted toward the bottom-right and points past the
-            # JPG bound got clipped. That is the mask-misalignment ShapeR saw.
-            pr_obj = sub_pr[mask].astype(np.float32)
-            pc_obj = sub_pc[mask].astype(np.float32)
-            if cam.grid is not None:
-                # EXACT: traceability grid → native pixels (F0 GridMap), then the lens
-                from precision.camera import grid_to_native, undistort_points
-                uv_nat = grid_to_native(np.stack([pc_obj, pr_obj], 1), cam.grid)
-                if cam.camera is not None and np.any(cam.camera.dist()):
-                    from precision.config import load_precision_config
-                    from precision.camera import undistort_solver
-                    uv_nat = undistort_points(uv_nat, cam.camera,
-                                              **undistort_solver(load_precision_config().camera))
-                if (W_img, H_img) != (int(cam.camera.width), int(cam.camera.height)):
-                    raise RuntimeError(f"{frame_path.name} is {W_img}x{H_img}, the session camera "
-                                       f"is {cam.camera.width}x{cam.camera.height} — frames/ is not "
-                                       f"the native video")
-                pc_obj, pr_obj = uv_nat[:, 0].astype(np.float32), uv_nat[:, 1].astype(np.float32)
-                K_frame = np.asarray(K_src, dtype=np.float64)
-            else:
-                if cam.source_resolution is not None:
-                    src_h, src_w = (float(cam.source_resolution[0]),
-                                    float(cam.source_resolution[1]))
-                else:
-                    src_w = 2.0 * float(K_src[0, 2])
-                    src_h = 2.0 * float(K_src[1, 2])
-                sx = (W_img / src_w) if src_w > 1.0 else 1.0
-                sy = (H_img / src_h) if src_h > 1.0 else 1.0
-                if abs(sx - 1.0) < 0.01:
-                    sx = 1.0
-                if abs(sy - 1.0) < 0.01:
-                    sy = 1.0
-                if sx != 1.0 or sy != 1.0:
-                    pr_obj = pr_obj * sy
-                    pc_obj = pc_obj * sx
-                    K_frame = _scale_K(K_src, sx, sy)
-                else:
-                    K_frame = np.asarray(K_src, dtype=np.float64)
-
-            uv_full = np.stack([np.clip(pc_obj, 0, W_img - 1),
-                                np.clip(pr_obj, 0, H_img - 1)], axis=1).astype(np.float32)
+                img_np = _cv2.remap(img_np, undist_maps[0], undist_maps[1], _cv2.INTER_LINEAR)
+            inside = d["inside"]
+            uv_full = np.stack([d["u"][inside], d["v"][inside]], 1).astype(np.float32)
 
             # Feed the full frame to ShapeR. The vendor's dataset/image_processor
             # builds its own object-tight crop from ``object_point_projections``
@@ -786,28 +1001,12 @@ def export_shaper_pkls(
             # pre-crop would only nudge the principal point in a way the released
             # ckpt wasn't trained on. Heterogeneous per-frame crop sizes also
             # break the batch stacker in `get_image_data_based_on_strategy`.
-            c2w_4 = np.eye(4, dtype=np.float64)
-            c2w_4[:c2w.shape[0], :c2w.shape[1]] = c2w
+            c2w_4 = d["c2w_4"]
             T_cam_model = np.linalg.inv(T_world_to_model @ c2w_4).astype(np.float32)
-            vis_pts_model = sub_pts_zup[mask].astype(np.float32)
-            if cam.grid is not None:
-                # THE WHOLE OBJECT IN THIS VIEW (USER 2026-09-30): the vendor builds each
-                # view's mask and crop from object_point_projections — the SLAM points it
-                # was trained on are every object point the camera sees. The points BORN in
-                # this frame (after voxel / witness / silhouette filtering) leave a mask full
-                # of holes, so project ALL of the object's points through the same pinhole
-                # (the frame is undistorted, K is the session camera).
-                w2c = np.linalg.inv(c2w_4)
-                q = sub_pts @ w2c[:3, :3].T + w2c[:3, 3]
-                zf = q[:, 2] > 1e-6
-                u_all = K_frame[0, 0] * q[:, 0] / np.where(zf, q[:, 2], 1.0) + K_frame[0, 2]
-                v_all = K_frame[1, 1] * q[:, 1] / np.where(zf, q[:, 2], 1.0) + K_frame[1, 2]
-                inside = zf & (u_all >= 0) & (u_all <= W_img - 1) & (v_all >= 0) & (v_all <= H_img - 1)
-                if inside.sum() >= min_view_points:
-                    uv_full = np.stack([u_all[inside], v_all[inside]], 1).astype(np.float32)
-                    vis_pts_model = sub_pts_zup[inside].astype(np.float32)
+            vis_pts_model = sub_pts_zup[inside].astype(np.float32)
 
-            # full-frame mask for the captioner (it re-reads the full frame)
+            # full-frame mask of the projections: the captioner's FALLBACK when the
+            # session holds no SAM3 mask for this view (see _sam3_view_masks)
             bin_mask_full = np.zeros((H_img, W_img), dtype=bool)
             bin_mask_full[uv_full[:, 1].astype(int), uv_full[:, 0].astype(int)] = True
 
@@ -819,19 +1018,18 @@ def export_shaper_pkls(
             cdir = obj_centroid_world - c2w_4[:3, 3]
             cdir = cdir / (np.linalg.norm(cdir) + 1e-9)
             per_frame.append({
-                "fidx": fidx, "img_full": img_np, "uv_full": uv_full, "K_full": K_frame,
+                "fidx": fidx, "img_full": img_np, "uv_full": uv_full, "K_full": d["K_full"],
                 "T_cam_model": T_cam_model, "vis_pts": vis_pts_model,
                 "frame_path": str(frame_path), "bin_mask_full": bin_mask_full,
-                "n_pts": int(mask.sum()), "coverage": float(coverage),
+                "n_pts": int(d["n_pts"]), "coverage": float(coverage),
                 "centeredness": max(0.0, 1.0 - float(cdist)), "sharp": _sharpness(img_np),
                 "cdir": cdir,
             })
 
         if not per_frame:
             logger.warning(
-                f"  [{label}_{inst_id}] no usable frames "
-                f"(no_frame={skipped_no_frame} no_pose={skipped_no_pose} "
-                f"no_K={skipped_no_K}) — skipping"
+                f"  [{label}_{inst_id}] no posed keyframe sees ≥ {min_view_points} of its points "
+                f"(posed={n_posed_on_disk} no_frame={skipped_no_frame} no_K={skipped_no_K}) — skipping"
             )
             continue
 
@@ -847,7 +1045,8 @@ def export_shaper_pkls(
             dirs = np.stack([d["cdir"] for d in per_frame])
             keep = _pick_diverse_views(scores, dirs, min(n_keep, len(per_frame)))
             per_frame = [per_frame[i] for i in keep.tolist()]   # best-first order
-        logger.info(f"[ShaperExport] {label}_{inst_id}: {len(per_frame)} views kept")
+        logger.info(f"[ShaperExport] {label}_{inst_id}: {len(per_frame)} of "
+                    f"{n_candidates} candidate views kept")
 
         image_data = [encode(d["img_full"]) for d in per_frame]
         Ts_cam_model = [d["T_cam_model"] for d in per_frame]
@@ -856,31 +1055,21 @@ def export_shaper_pkls(
         obj_proj = [torch.from_numpy(d["uv_full"]) for d in per_frame]
         used_frames = [d["fidx"] for d in per_frame]
         caption_frames = [d["frame_path"] for d in per_frame]
-        caption_masks = {Path(d["frame_path"]).name: d["bin_mask_full"] for d in per_frame}
 
-        # Caption resolution. Manual captions (from the UI) are plain strings.
-        # caption_fn — the structured InternVL captioner — returns a dict with
-        # the narrative `caption` (ShapeR conditioning) plus the structured
-        # fields {category, shape, material, detail} the reconstruction
-        # classifier consumes downstream.
-        caption_text = label
-        caption_fields: Optional[Dict[str, str]] = None
-        if captions and inst_id in captions:
-            caption_text = captions[inst_id]
-            caption_fields = _parse_manual_caption(caption_text)
-            print(f"  Caption (manual): {caption_text[:80]}")
-        elif caption_fn is not None:
-            try:
-                res = caption_fn(caption_frames, caption_masks, label)
-                if isinstance(res, dict):
-                    caption_text = res.get("caption") or label
-                    caption_fields = {k: res.get(k, "") for k in
-                                      ("category", "shape", "material", "detail")}
-                else:
-                    caption_text = res or label
-                print(f"  Caption (auto):   {caption_text[:80]}")
-            except Exception as e:
-                logger.warning(f"  Caption generation failed: {e}")
+        # The description (USER 2026-10-01: "la descripción de los objetos la que
+        # armó el VLM"): manual > stored ``shape_caption`` > on-demand captioner >
+        # label — see resolve_caption. The on-demand captioner gets the SAM3 masks
+        # of the kept views (the projected-point speckle only where none exists).
+        def _masks_for_captioner() -> Dict[str, np.ndarray]:
+            masks = _sam3_view_masks(output_dir, int(inst_id), caption_frames)
+            if not masks:
+                masks = {Path(d["frame_path"]).name: d["bin_mask_full"] for d in per_frame}
+            return masks
+
+        caption_text, caption_fields, caption_source = resolve_caption(
+            int(inst_id), label, inst, captions, caption_fn, caption_frames,
+            _masks_for_captioner, on_phase=on_phase)
+        print(f"  Caption ({caption_source}): {caption_text[:80]}")
 
         # Build PKL — schema mirrors vendor/ShapeR/dataset/shaper_dataset.py.
         # points_model + Ts_camera_model + visible_points_model are all in the
@@ -904,6 +1093,7 @@ def export_shaper_pkls(
 
             "caption":                 caption_text,
             "caption_fields":          caption_fields,
+            "caption_source":          caption_source,
             "category":                label,
             "label":                   label,
             "instance_id":             int(inst_id),
@@ -911,6 +1101,10 @@ def export_shaper_pkls(
             "n_source_points":         int(len(gi)),
             "n_views":                 len(image_data),
             "source_frames":           [int(f) for f in used_frames],
+            # the view pool (USER 2026-10-01): how many posed keyframes saw the object
+            # and how many posed keyframes the session had on disk
+            "n_candidate_frames":      int(n_candidates),
+            "n_posed_frames":          int(n_posed_on_disk),
             "is_ariagen2":             False,
         }
 

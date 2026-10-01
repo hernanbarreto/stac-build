@@ -2768,13 +2768,32 @@ shaper:                       # USER 2026-09-29: ShapeR REPLACES MeshFlow behind
                               # preset max = 32 views (every view's DINO tokens are kept at inference),
                               # 100 steps, CFG 4. (Vendor presets: quality 16/50, balance 16/25, speed 4/10.)
   max_views: 32               # views stored per object PKL (parallax-diverse); the preset feeds all 32
-  min_view_points: 50         # a view needs this many of the object's points to be kept
+  min_view_points: 50         # USER 2026-10-01 ("armar los pkl a máxima resolución posible"): EVERY
+                              # posed keyframe is a candidate view — all of the object's points are
+                              # projected with its camera and the frame is kept when at least this
+                              # many land inside the image in front of it (no occlusion test exists
+                              # in the exporter; none was invented). Until then only the frames where
+                              # the object's points were BORN counted, each needing this many born
+                              # there: pccr's backpack reached ShapeR with 12 views for a 32-view
+                              # preset (the vendor pads with repeats — no new evidence).
   grayscale: true             # the released checkpoint is trained on Aria SLAM (grayscale) frames
   image_format: png           # lossless per-view frames in the PKL
-  auto_caption: false         # USER 2026-09-30: the description IS the SAM3 prompt (the segment's
-                              # label — the phrase SAM3 found it with). true = Qwen3-VL describes it
-                              # from its isolated best views. A manual caption from the UI always wins.
+  auto_caption: false         # USER 2026-10-01: the description is THE VLM'S, stored on the instance by
+                              # the segmentation (`shape_caption`: caption + category/shape/material/
+                              # detail, source object|concept — "object" wins). Precedence in the PKL
+                              # export: a manual caption from the UI (human_validated) > the stored
+                              # description > this on-demand captioner (Qwen3-VL over the SAM3-mask
+                              # crops of the kept views, ONLY for an instance with nothing stored,
+                              # ONLY when true) > the SAM3 label. `caption_source` in the PKL and the
+                              # mesh's .meta.json says which one it was.
   fit_to_cloud: true          # coverage-aware fit of the generated mesh to the segment's cloud
+  simplify_faces: 125000      # quadric decimation of the generated mesh to this many faces; 0 = keep
+                              # the VAE's full triangulation. 125000 is what run_shaper_batch hardcoded
+                              # until 2026-10-01 — declared, not changed.
+  texture: true               # USER 2026-10-01 (pipeline_final.md §11): the scan-frame texture is baked
+                              # onto every generated mesh (reconstruction/texture_bake.bake_object_glb,
+                              # one texrecon at a time, non-fatal — a failed bake keeps the vertex-
+                              # coloured mesh); parts no camera saw stay untextured, never invented.
 
 meshflow:
   steps: 28                   # flow-matching denoise steps (vendor default)
