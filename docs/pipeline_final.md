@@ -41,7 +41,7 @@ que describiste es correcto").
 | 10 | One final epoch | `certify.single_final_epoch: true`, `correction.apply.keep_only_live_epoch` | no Omega comparison cloud (`_epoch_0`) is built; after the certification every `_epoch_<N>/` is deleted (ledger + `corrections/epoch_<N>.npz` stay) |
 | 11 | Object descriptions | `segmentation/object_captioner.caption_session_objects` (end of certify) | ONE Qwen3-VL call per object over its largest SAM3-mask views → `shape_caption` source `object` (config `segmentation.object_captions`) |
 
-**On demand (Meshing dialog):** **Object** = ShapeR on every selected instance (`/api/segmentation/
+**On demand (Meshing dialog; search + select / deselect all, nothing preselected):** **Object** = ShapeR on every selected instance (keyed by `instance_id`; every face oriented OUTWARD by ray parity — `reconstruction/orient_outward.py` — before and after the texture bake; drawn in the viewer in its segment colour) (`/api/segmentation/
 shape/export` → `segmentation/shaper_export.py` → `run_shaper_batch.py`, env `shaper`, preset max):
 PKL views = every posed keyframe that SEES the object (occlusion test with the published depth +
 `loops.witness.occlusion_tol_rel`), max 32; caption = manual > VLM object > VLM concept > label;
@@ -99,7 +99,14 @@ retry carries the category, not bare adjectives (pccr: a 'window' fallback got a
    erase endpoint must refuse while it returns a transaction.
 5. **Pre-existing broken test:** `segmentation/autoprompt/tests/test_associate.py::
    test_adaptive_sampling_scales_with_camera_path` — its fixture lacks `autoprompt.merge_synonyms`.
-6. Keep this file updated with every change of the above.
+6. **Shadows, step 2 (optional):** the point cloud CASTS shadows too (a second pass over millions of points
+   from the light — measure the fps cost first). Step 1 is done: meshes cast + receive, points receive
+   (`ui/src/components/shadows.ts`, View → Shadows).
+7. **Viewer additions of 2026-10-01 to validate by eye on pccr:** the gravity sandbox (place with the mouse,
+   grab and throw, the cloud is solid, spheres with the STAC Build logo), the reference human in Add
+   object, ShapeR objects drawn in their segment colour, rename / delete of generated and placed objects,
+   one search + show / hide all over every list, fly-to on every row, fixed-size dialogs.
+8. Keep this file updated with every change of the above.
 
 ## §11 · Deliverables for the BIM comparison (USER 2026-09-30)
 
