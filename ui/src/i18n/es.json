@@ -1086,5 +1086,13 @@
     "permissionsHint": "Permití el acceso a la cámara y al movimiento cuando se pida",
     "startArkit": "Iniciar AR (ARKit)",
     "startAr": "Iniciar AR"
+  },
+  "physics": {
+    "title": "Gravedad: soltar esfera",
+    "hint": "Rebota en el piso (y = 0) y en las mallas; la nube de puntos no es sólida. Cae desde 1,5 m sobre el centro de la vista.",
+    "diameter": "Diámetro",
+    "bounce": "Rebote",
+    "drop": "Soltar",
+    "clear": "Borrar"
   }
 }

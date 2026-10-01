@@ -30,6 +30,7 @@ import {
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
   ListTodo, FileCheck2, Puzzle, PanelLeftClose, PanelLeftOpen,
+  Circle,
 } from 'lucide-react'
 import { useI18n, getT } from './i18n'
 import { useLayout } from './layout/LayoutContext'
@@ -62,6 +63,7 @@ import { PipelineDialog } from './features/PipelineDialog'
 import { ResumeDialog } from './features/ResumeDialog'
 import { ObjectLibraryDialog } from './features/ObjectLibraryDialog'
 import { MeshingDialog } from './features/MeshingDialog'
+import { PhysicsPanel } from './features/PhysicsPanel'
 import { ConsolePanel, JobsPanel, PropertiesPanel } from './features/DockPanels'
 
 /** Translator for callbacks defined before the i18n hook is read. */
@@ -125,6 +127,10 @@ function App() {
   const [showObjectLibrary, setShowObjectLibrary] = useState(false)
   const [objectLibrary, setObjectLibrary] = useState<Array<{ source: string; session?: string; name: string; url: string; size_mb: number }>>([])
   const [sceneObjSel, setSceneObjSel] = useState<number | null>(null)
+  // gravity sandbox (USER 2026-10-01)
+  const [physicsOpen, setPhysicsOpen] = useState(false)
+  const [physicsDiameterCm, setPhysicsDiameterCm] = useState(20)
+  const [physicsBounce, setPhysicsBounce] = useState(0.7)
   const [placedObjects, setPlacedObjects] = useState<Array<{ id: number; name: string; visible: boolean }>>([])
   const [alignTargets, setAlignTargets] = useState<Array<{ key: string; label: string }>>([])
   const [alignTarget, setAlignTarget] = useState('')
@@ -1865,6 +1871,7 @@ function App() {
       { id: 'undobrush', label: t('brush.undo'), icon: <Undo2 aria-hidden />, onSelect: undoBrush },
       { id: 'align', label: t('toolbar.alignCloud'), icon: <Move aria-hidden />, shortcut: 'G', disabled: sabanaVisible, checked: activeTool === 'align', onSelect: () => setActiveTool(activeTool === 'align' ? 'navigate' : 'align') },
       { id: 'addobj', label: t('toolbar.addObject'), icon: <Package aria-hidden />, onSelect: openObjectLibrary },
+      { id: 'physics', label: t('physics.title'), icon: <Circle aria-hidden />, checked: physicsOpen, onSelect: () => setPhysicsOpen(v => !v) },
       { type: 'separator', id: 's3' },
       { id: 'section', label: t('toolbar.sectionBox'), icon: <Scissors aria-hidden />, shortcut: 'X', checked: activeTool === 'section-box', onSelect: () => setActiveTool('section-box') },
       { id: 'resetsection', label: t('toolbar.resetSection'), icon: <Unlock aria-hidden />, onSelect: () => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') } },
@@ -2166,6 +2173,13 @@ function App() {
                 targets: alignTargets, target: alignTarget, onTarget: setAlignTarget, onRemove: () => viewportRef.current?.removeSelectedSceneObject(),
               } : null}
             />
+          )}
+
+          {hasSession && !sessionLoading && physicsOpen && (
+            <PhysicsPanel diameterCm={physicsDiameterCm} onDiameterCm={setPhysicsDiameterCm} bounce={physicsBounce} onBounce={setPhysicsBounce}
+              onDrop={() => viewportRef.current?.physicsDrop(physicsDiameterCm / 100, physicsBounce)}
+              onClear={() => viewportRef.current?.physicsClear()}
+              onClose={() => { setPhysicsOpen(false); viewportRef.current?.physicsClear() }} />
           )}
 
           {hasSession && !sessionLoading && (

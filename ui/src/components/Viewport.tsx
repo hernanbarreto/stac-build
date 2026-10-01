@@ -19,6 +19,7 @@ import { Button } from './ui/Button'
 import { IconButton } from './ui/IconButton'
 import { Slider } from './ui/Field'
 import type { ReadoutAnchor, ViewPreset } from './viewport/ViewportHud'
+import { PhysicsSandbox } from './physics'
 
 /** Translator for callbacks (the active language is read at call time). */
 const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
@@ -110,6 +111,10 @@ export interface SegmentInstance {
 }
 
 export interface ViewportHandle {
+    /** gravity sandbox (USER 2026-10-01): drop a sphere 1.5 m above the point the view orbits;
+     *  it bounces on the floor y = 0 and on every visible mesh, never on the point cloud */
+    physicsDrop: (diameterM: number, restitution: number) => void
+    physicsClear: () => void
     sendCommand: (cmd: Record<string, unknown>) => void
     sendCommandPreserveCamera: (cmd: Record<string, unknown>) => void
     toggleOBB: (key: string, visible: boolean) => void
@@ -643,6 +648,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // persisted per session (matrix), removable without ever touching the
     // source GLB. ─────────────────────────────────────────────────────────
     const sceneObjectsGroupRef = useRef<THREE.Group | null>(null)
+    const physicsRef = useRef<PhysicsSandbox | null>(null)
     const sceneObjByIdRef = useRef<Map<number, THREE.Group>>(new Map())
     const [selSceneObj, setSelSceneObj] = useState<number | null>(null)
     const [sceneObjMode, setSceneObjMode] = useState<'translate' | 'rotate' | 'scale'>('translate')
@@ -2758,6 +2764,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     out.push({ key: `mesh:${c.name.slice(5)}`, label: c.name.slice(5) })
             return out
         },
+        physicsDrop: (diameterM: number, restitution: number) => {
+            const tgt = controlsRef.current?.target
+            if (!tgt || !physicsRef.current) return
+            void physicsRef.current.drop(new THREE.Vector3(tgt.x, tgt.y + 1.5, tgt.z), diameterM, restitution)
+        },
+        physicsClear: () => { physicsRef.current?.clear() },
         alignSceneObject: (op: 'floor' | 'same_base' | 'on_top' | 'center_xz' | 'center_y', targetKey?: string) => {
             const id = selSceneObjRef.current
             if (id == null) return
@@ -2945,6 +2957,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // Very subtle fog — only noticeable at 200+ meters, never obscures close-up detail
         scene.fog = new THREE.FogExp2(tokenHex(VP.clear), 0.0003)
         sceneRef.current = scene
+        const physics = new PhysicsSandbox(scene)
+        physics.setSolidRoots(() => [sceneObjectsGroupRef.current, shapesGroupRef.current, tsdfGroupRef.current,
+                                     reconSceneGroupRef.current].filter((g): g is THREE.Group => !!g))
+        physicsRef.current = physics
+        const physicsClock = new THREE.Clock()
 
         // Environment map for PBR (image-based lighting): a PMREM-prefiltered version
         // of `RoomEnvironment` (a procedural neutral studio). Without this, metals look
@@ -3111,6 +3128,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const animate = () => {
             animFrameRef.current = requestAnimationFrame(animate)
             controls.update()
+            physics.step(physicsClock.getDelta())
 
             // Re-anchor target: when zoom brings camera very close to target,
             // push target forward to maintain minimum orbit radius.
@@ -3618,6 +3636,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // Cleanup
         return () => {
             cancelAnimationFrame(animFrameRef.current)
+            physics.dispose(); physicsRef.current = null
             resizeObserver.disconnect()
             renderer.domElement.removeEventListener('click', onCanvasClick)
             renderer.domElement.removeEventListener('contextmenu', onContextMenu)
