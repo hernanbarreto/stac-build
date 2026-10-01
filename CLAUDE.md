@@ -1,5 +1,23 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ CURRENT STATE 2026-10-01 — read `docs/pipeline_final.md` FIRST (it supersedes the
+## pipeline descriptions below wherever they disagree)
+- **The pipeline = pccr EPOCH 8, validated by the user as the best cloud** (*"es la mejor,
+  incorporar al pipeline"*): intake → VLM+SAM3 (all keyframes; the same VLM call prepares the
+  ShapeR descriptions) → Omega (5 m chunks, 50 %) → F0/F2/F4/F3 → F5 (R1) → **`f6_bend`**
+  (`precision/depth_on_f5.py`, `cloud.source: omega_bent`: Omega's depth bent to F5's landmarks
+  EXACTLY as epoch 7 — 10-step IRLS, ±0 by held-out, 2.80 % — + epoch 8's edge-keeping vote) →
+  cloud publish → mask projection + OBBs → certification (depth per chunk, floor per chunk blended,
+  mask filter, chunk check) → **ONE final epoch** (`certify.single_final_epoch`) → per-object VLM
+  description (`shape_caption`). Meshing: Object = ShapeR (max-resolution PKL, VLM caption,
+  texture); Mesh = point2cad (pending, to define).
+- **The pending lists A (reconstruction pipeline) and B (general) live in `docs/pipeline_final.md`**,
+  validated by the user 2026-10-01. Update that file with every change.
+- **How to work (USER, hard-earned 2026-10-01):** ONE task at a time, never several agents at once on
+  the user's session; never change a validated recipe on a hypothesis — and when porting it, reproduce
+  its numbers EXACTLY on the real session before saying it is done; when the user says "para / detenete",
+  stop everything immediately and wait; short answers, no token burn on tests nobody asked for.
+
 ## ⭐⭐ READ FIRST — USER DECISION 2026-09-28 (overrides any older rule below)
 - **F0→F9 of `claude_stac.txt` are ABSOLUTE PRIORITY.** Precision is not
   negotiable; NO over-engineering — the result must be 100 % reliable, not
