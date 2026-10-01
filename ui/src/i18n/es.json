@@ -1093,6 +1093,7 @@
     "diameter": "Diámetro",
     "bounce": "Rebote",
     "drop": "Soltar",
-    "clear": "Borrar"
+    "clear": "Borrar",
+    "count": "Esferas en escena: {n}"
   }
 }

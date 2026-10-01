@@ -131,6 +131,12 @@ function App() {
   const [physicsOpen, setPhysicsOpen] = useState(false)
   const [physicsDiameterCm, setPhysicsDiameterCm] = useState(20)
   const [physicsBounce, setPhysicsBounce] = useState(0.7)
+  const [physicsCount, setPhysicsCount] = useState(0)
+  useEffect(() => {                       // how many spheres are still in the scene (they fall out)
+    if (!physicsOpen) return
+    const id = window.setInterval(() => setPhysicsCount(viewportRef.current?.physicsCount() ?? 0), 500)
+    return () => window.clearInterval(id)
+  }, [physicsOpen])
   const [placedObjects, setPlacedObjects] = useState<Array<{ id: number; name: string; visible: boolean }>>([])
   const [alignTargets, setAlignTargets] = useState<Array<{ key: string; label: string }>>([])
   const [alignTarget, setAlignTarget] = useState('')
@@ -2176,7 +2182,7 @@ function App() {
           )}
 
           {hasSession && !sessionLoading && physicsOpen && (
-            <PhysicsPanel diameterCm={physicsDiameterCm} onDiameterCm={setPhysicsDiameterCm} bounce={physicsBounce} onBounce={setPhysicsBounce}
+            <PhysicsPanel diameterCm={physicsDiameterCm} onDiameterCm={setPhysicsDiameterCm} bounce={physicsBounce} onBounce={setPhysicsBounce} count={physicsCount}
               onDrop={() => viewportRef.current?.physicsDrop(physicsDiameterCm / 100, physicsBounce)}
               onClear={() => viewportRef.current?.physicsClear()}
               onClose={() => { setPhysicsOpen(false); viewportRef.current?.physicsClear() }} />

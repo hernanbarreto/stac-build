@@ -11,6 +11,7 @@ import { useT } from '../i18n'
 export function PhysicsPanel(p: {
   diameterCm: number; onDiameterCm: (v: number) => void
   bounce: number; onBounce: (v: number) => void
+  count: number
   onDrop: () => void; onClear: () => void; onClose: () => void
 }) {
   const t = useT()
@@ -21,6 +22,7 @@ export function PhysicsPanel(p: {
         <Button variant="ghost" size="sm" aria-label={t('common.close')} icon={<X aria-hidden />} onClick={p.onClose} />
       </div>
       <p className="stac-physics__hint">{t('physics.hint')}</p>
+      <span className="stac-mono">{t('physics.count', { n: p.count })}</span>
       <Slider label={t('physics.diameter')} value={p.diameterCm} onChange={p.onDiameterCm} min={2} max={100} step={1} unit="cm" />
       <Slider label={t('physics.bounce')} value={p.bounce} onChange={p.onBounce} min={0} max={1} step={0.05} digits={2} />
       <div className="stac-physics__actions">

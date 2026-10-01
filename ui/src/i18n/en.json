@@ -1093,6 +1093,7 @@
     "diameter": "Diameter",
     "bounce": "Bounce",
     "drop": "Drop",
-    "clear": "Clear"
+    "clear": "Clear",
+    "count": "Spheres in the scene: {n}"
   }
 }

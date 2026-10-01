@@ -257,7 +257,7 @@ export class PhysicsSandbox {
         for (let i = this.balls.length - 1; i >= 0; i--) {
             const b = this.balls[i]
             const p = b.body.translation(), q = b.body.rotation()
-            if (p.y < this.lostY()) { this.removeBall(i); continue }
+            if (b !== this.held?.ball && p.y < this.lostY()) { this.removeBall(i); continue }
             b.mesh.position.set(p.x, p.y, p.z)
             b.mesh.quaternion.set(q.x, q.y, q.z, q.w)
         }
@@ -265,6 +265,7 @@ export class PhysicsSandbox {
 
     private removeBall(i: number) {
         const b = this.balls[i]
+        if (this.held?.ball === b) this.held = null      // never leave a hand holding a sphere that is gone
         this.world?.removeRigidBody(b.body)
         this.group.remove(b.mesh)
         b.mesh.geometry.dispose(); (b.mesh.material as THREE.Material).dispose()

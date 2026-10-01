@@ -115,6 +115,8 @@ export interface ViewportHandle {
      *  it bounces on the point cloud and every visible mesh; with no surface under it it falls and is gone */
     physicsDrop: (diameterM: number, restitution: number) => void
     physicsClear: () => void
+    /** spheres in the scene right now */
+    physicsCount: () => number
     sendCommand: (cmd: Record<string, unknown>) => void
     sendCommandPreserveCamera: (cmd: Record<string, unknown>) => void
     toggleOBB: (key: string, visible: boolean) => void
@@ -649,6 +651,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // source GLB. ─────────────────────────────────────────────────────────
     const sceneObjectsGroupRef = useRef<THREE.Group | null>(null)
     const physicsRef = useRef<PhysicsSandbox | null>(null)
+    const throwEndRef = useRef<(() => void) | null>(null)
     const sceneObjByIdRef = useRef<Map<number, THREE.Group>>(new Map())
     const [selSceneObj, setSelSceneObj] = useState<number | null>(null)
     const [sceneObjMode, setSceneObjMode] = useState<'translate' | 'rotate' | 'scale'>('translate')
@@ -2769,7 +2772,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (!tgt || !physicsRef.current) return
             void physicsRef.current.drop(new THREE.Vector3(tgt.x, tgt.y + 1.5, tgt.z), diameterM, restitution)
         },
-        physicsClear: () => { physicsRef.current?.clear() },
+        physicsClear: () => { physicsRef.current?.clear(); throwEndRef.current?.() },
+        physicsCount: () => physicsRef.current?.count ?? 0,
         alignSceneObject: (op: 'floor' | 'same_base' | 'on_top' | 'center_xz' | 'center_y', targetKey?: string) => {
             const id = selSceneObjRef.current
             if (id == null) return
@@ -3131,6 +3135,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             animFrameRef.current = requestAnimationFrame(animate)
             controls.update()
             physics.step(physicsClock.getDelta())
+            if (!physics.holding) throwEndRef.current?.()     // the held sphere was removed: give the hand back
 
             // Re-anchor target: when zoom brings camera very close to target,
             // push target forward to maintain minimum orbit radius.
@@ -3623,6 +3628,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // GRAB AND THROW a physics sphere (USER 2026-10-01: "la tengo que poder manipular para lanzar"):
         // press on a sphere, drag it on the plane facing the camera, let go — it leaves with the hand's
         // velocity. Capture phase on the container, so the orbit controls never see the gesture.
+        let throwing = false
         const throwRay = new THREE.Raycaster()
         const throwPlane = new THREE.Plane()
         const throwHit = new THREE.Vector3()
@@ -3644,7 +3650,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             throwOffset.copy(ball.position).sub(throwHit)
             controls.enabled = false
             physics.grab(ball)
+            throwing = true
             renderer.domElement.style.cursor = 'grabbing'
+        }
+        // the hand ALWAYS comes back: a release that never arrived (pointer released outside the
+        // window, focus lost) or a sphere removed while held ends the grab — pccr 2026-10-01 the
+        // cursor stayed a hand and the orbit stayed off
+        const endThrow = () => {
+            if (physics.holding) physics.release()
+            throwing = false
+            controls.enabled = true
+            renderer.domElement.style.cursor = ''
         }
         const onThrowMove = (e: PointerEvent) => {
             if (!physics.holding) return
@@ -3653,15 +3669,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (throwRay.ray.intersectPlane(throwPlane, throwHit)) physics.moveHeld(throwHit.add(throwOffset))
         }
         const onThrowUp = (e: PointerEvent) => {
-            if (!physics.holding) return
+            if (!throwing) return
             e.stopPropagation()
-            physics.release()
-            controls.enabled = true
-            renderer.domElement.style.cursor = ''
+            endThrow()
         }
         container.addEventListener('pointerdown', onThrowDown, true)
         window.addEventListener('pointermove', onThrowMove, true)
         window.addEventListener('pointerup', onThrowUp, true)
+        window.addEventListener('pointercancel', onThrowUp, true)
+        window.addEventListener('blur', endThrow)
+        throwEndRef.current = () => { if (throwing) endThrow() }
         renderer.domElement.addEventListener('click', onCanvasClick)
         renderer.domElement.addEventListener('contextmenu', onContextMenu)
         renderer.domElement.addEventListener('mousedown', onSectionDown)
@@ -3683,6 +3700,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             container.removeEventListener('pointerdown', onThrowDown, true)
             window.removeEventListener('pointermove', onThrowMove, true)
             window.removeEventListener('pointerup', onThrowUp, true)
+            window.removeEventListener('pointercancel', onThrowUp, true)
+            window.removeEventListener('blur', endThrow)
             physics.dispose(); physicsRef.current = null
             resizeObserver.disconnect()
             renderer.domElement.removeEventListener('click', onCanvasClick)
