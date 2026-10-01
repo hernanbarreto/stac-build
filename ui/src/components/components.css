@@ -1115,7 +1115,9 @@
   left: var(--sp-4);
   bottom: calc(var(--sp-4) + var(--toolbar-float-h));
   z-index: 5;
-  width: 260px;
+  width: 300px;
+  max-width: calc(100% - 2 * var(--sp-4));
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
@@ -1128,4 +1130,5 @@
 }
 .stac-physics__head { display: flex; align-items: center; justify-content: space-between; }
 .stac-physics__hint { color: var(--text-3); margin: 0; }
-.stac-physics__actions { display: flex; gap: var(--sp-2); }
+.stac-physics__actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }   /* the buttons wrap, never overflow */
+.stac-physics__actions > :first-child { flex-basis: 100%; justify-content: center; }  /* Place: its own row */
