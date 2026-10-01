@@ -2298,7 +2298,12 @@ function App() {
           try {
             const r = await fetch('/api/objects/scene/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, name: it.name, url: it.url }) })
             const d = await r.json()
-            if (d.ok) { setShowObjectLibrary(false); await viewportRef.current?.placeSceneObject(d.object) }
+            if (d.ok) {
+              setShowObjectLibrary(false)
+              await viewportRef.current?.placeSceneObject(d.object)
+              // a collection object (the reference human…) stands ON the floor, y = 0 (USER 2026-10-01)
+              if (it.source === 'collection') viewportRef.current?.alignSceneObject('floor')
+            }
           } catch { report(t('library.addFailed'), 'err') }
         }} />
 
