@@ -419,6 +419,25 @@ segmentation:
                               # object is not visible → the whole segmentation degraded
                               # and the Manager became unusable. 0.5 = pre-experiment
                               # behavior. Coverage of far frames needs a different tool.
+  object_captions:            # USER 2026-10-01: "la descripción de los objetos la que armó el VLM
+                              # como descripción para ShapeR … el VLM, para preparar los prompts,
+                              # pasa SAM3 y las descripciones para ShapeR". The understanding pass
+                              # that names the SAM3 prompts ALSO describes every KIND for ShapeR
+                              # (vlm_analysis.json `shape_descriptions`); each projected instance
+                              # inherits its concept's description (`shape_caption`, source
+                              # 'concept'), and after the certification — the last mutation of the
+                              # instances and the last GPU-exclusive stage — Qwen3-VL refines one
+                              # per OBJECT from its largest SAM3-mask views (source 'object').
+                              # segmentation/object_captioner.py; every caption is vlm_proposed, a
+                              # missing one stays missing (never the label as if VLM-made).
+    enabled: true             # false = the concept descriptions only (no per-object VLM pass)
+    views: 4                  # BOUND (cost): mask keyframes shown per object, largest mask first —
+                              # ONE VLM call per object whatever the value (pccr ~100 objects ~100
+                              # calls; the cold start of vLLM after SAM3 is ~4.5 min, declared)
+    understand_max_tokens: 2048  # BOUND: the understanding answer now carries one shape entry per
+                              # kind; a truncated answer does not parse and loses the FRAME's
+                              # categories (= SAM3 prompts). The service's own
+                              # semantic.generation.max_tokens (was a 512 literal in code).
 
 autoprompt:
   enabled: true                       # default path; false -> InternVL3 fallback

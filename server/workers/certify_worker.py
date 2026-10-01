@@ -6,6 +6,10 @@
 # graph → depth by correspondences → witnesses; one pending epoch per
 # iteration (selectable in the kit), acta in output/certify_acta.json.
 #
+# After the certification — the last mutation of the instances and the last
+# GPU-exclusive step of the pipeline — every object gets its ShapeR description
+# from the session's Qwen3-VL (USER 2026-10-01; segmentation/object_captioner.py).
+#
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
 import sys
@@ -13,6 +17,40 @@ from pathlib import Path
 from multiprocessing.connection import Connection
 
 from workers.base import WorkerPipe, run_worker_safe
+
+
+def _caption_objects(pipe: WorkerPipe, session_path: Path, config: dict, ccfg):
+    """One ShapeR description per object (USER 2026-10-01: "la descripción de
+    los objetos la que armó el VLM como descripción para ShapeR"): Qwen3-VL
+    sees every instance isolated in its best SAM3-mask views, ONE call per
+    object, written back on the instance as `shape_caption` (source 'object',
+    vlm_proposed). Runs HERE because the certification is the last stage that
+    rewrites the instances and the last one that needs the GPU to itself: the
+    service is brought up if SAM3 / the reconstruction stopped it (cold start
+    ~4.5 min, declared) and LEFT UP — the pipeline's end reloads it anyway.
+    Never fails the stage: a failure is logged and the concept descriptions
+    the instances inherited at the projection stay."""
+    if not ccfg.enabled:
+        pipe.send_log("[captions] segmentation.object_captions.enabled is false — the "
+                      "instances keep the concept descriptions of the prompt pass")
+        return None
+    try:
+        from segmentation.object_captioner import caption_session_objects
+        pipe.send_progress(96, "ShapeR descriptions: one Qwen3-VL call per object "
+                               f"({ccfg.views} view(s) each)", stage="certify")
+        res = caption_session_objects(session_path / "output", session_path,
+                                      views=ccfg.views, log=pipe.send_log,
+                                      cancelled=pipe.check_cancel, config=config)
+        pipe.send_log(f"[captions] object descriptions: {res.get('generated')} generated, "
+                      f"{res.get('kept')} kept, {res.get('failed')} failed, "
+                      f"{res.get('skipped')} skipped of {res.get('n_instances')} instance(s)"
+                      + (f" — {res['reason']}" if res.get("reason") else ""),
+                      level="warning" if res.get("skipped") else "info")
+        return res
+    except Exception as e:  # noqa: BLE001 — declared, never fails the stage
+        pipe.send_log(f"[captions] per-object descriptions failed ({type(e).__name__}: {e}) "
+                      f"— the concept descriptions stay", level="warning")
+        return None
 
 
 def _certify_work(pipe: WorkerPipe, session_dir: str, config: dict):
@@ -26,6 +64,10 @@ def _certify_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     from reconstruction.loops.config import load_loops_config
     cfg = load_loops_config(config)
+    # the per-object description pass reads its keys HERE, before the hour of
+    # certification: a missing / bad key fails the stage naming it, now
+    from segmentation.object_captioner import load_object_captions
+    captions_cfg = load_object_captions(config)
 
     cloud = output_dir / "cleaned_cloud.ply"
     if not cloud.exists():
@@ -86,6 +128,11 @@ def _certify_work(pipe: WorkerPipe, session_dir: str, config: dict):
                   f"objective {_m(mi, 'objective')} → {_m(mf, 'objective')}; "
                   f"duplicates {_m(mi, 'duplicates', 'n')} → {_m(mf, 'duplicates', 'n')}; "
                   f"closure median {_m(mi, 'closure', 'median_m')} → {_m(mf, 'closure', 'median_m')} m")
+
+    # the instances are final now: describe each one for ShapeR (never fatal)
+    if seg.exists():
+        _caption_objects(pipe, session_path, config, captions_cfg)
+
     pipe.send_progress(100, f"Certification: {acta.get('stop_reason')} "
                             f"(epoch {acta.get('epoch_final')})", stage="certify")
 

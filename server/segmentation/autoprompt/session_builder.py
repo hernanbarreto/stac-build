@@ -22,6 +22,7 @@ import os
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -87,6 +88,47 @@ def build_fallback_prompts(understanding, phrases: list[str], synonyms: dict,
         cand += [a for a, _ in (alias.get(c) or Counter()).most_common() if a not in cand]
         if cand:
             out[c] = cand[:int(n_max)]
+    return out
+
+
+def build_shape_descriptions(understanding, phrases: list[str], synonyms: dict,
+                             generated: str | None = None) -> dict[str, dict]:
+    """Per SAM3 prompt, its ShapeR description (``object_captioner.shape_caption``,
+    source ``concept``) — USER 2026-10-01: the pass that prepares the prompts also
+    prepares the ShapeR descriptions. Aggregated like the fallback prompts: every
+    call's ``shape`` entry for a kind folded into the prompt it became (same name,
+    then the merge pass), the MOST FREQUENT wording wins, ties go to the first
+    seen. A prompt no call described has no entry — nothing is invented."""
+    from segmentation.object_captioner import shape_caption
+    pset = set(phrases)
+    votes: dict[str, Counter] = {}
+    fields_of: dict[tuple[str, str], dict] = {}
+    first: dict[tuple[str, str], int] = {}
+    n = 0
+    for fu in understanding.per_frame:
+        for o in dict.fromkeys(fu.objects):
+            c0 = understanding.merged.get(o, o)
+            c = synonyms.get(c0, c0)
+            if c not in pset:
+                continue
+            f = (getattr(fu, "shapes", {}) or {}).get(o)
+            if not f:
+                continue
+            # the kind is named by its PROMPT ('columns' folded into 'column')
+            f = dict(f, category=c)
+            text = shape_caption(f, c, "concept", generated="-")["caption"]
+            votes.setdefault(c, Counter())[text] += 1
+            fields_of.setdefault((c, text), f)
+            first.setdefault((c, text), n)
+            n += 1
+    out: dict[str, dict] = {}
+    stamp = generated or datetime.now().isoformat(timespec="seconds")
+    for c in phrases:
+        cnt = votes.get(c)
+        if not cnt:
+            continue
+        best = sorted(cnt, key=lambda t: (-cnt[t], first[(c, t)]))[0]
+        out[c] = shape_caption(fields_of[(c, best)], c, "concept", generated=stamp)
     return out
 
 
@@ -319,6 +361,11 @@ class AutoPrompter:
             print(f"[autoprompt] {plan.summary()}")
             prog(2, f"auto-prompt: {len(kf)} keyframes → {len(plan.frames)} to the VLM, "
                     f"{plan.n_calls} call(s)")
+            # The answer now carries one ShapeR shape entry per kind (USER 2026-10-01),
+            # and a truncated answer does not parse — the FRAME's categories (= SAM3
+            # prompts) would be lost with it. Its bound is declared, never a literal.
+            from segmentation.object_captioner import load_object_captions
+            understand_max_tokens = int(load_object_captions(self._config).understand_max_tokens)
             fus = []
             t0 = time.time()
             for fr in plan.frames:
@@ -328,7 +375,8 @@ class AutoPrompter:
                                                     vcfg.tile_cols, vcfg.tile_overlap_frac)
                 for tid, box in views:
                     view = img if box is None else crop_for_vlm(img, box)
-                    fu = understand_frame(client, view, fr["frame"], tile=tid)
+                    fu = understand_frame(client, view, fr["frame"], tile=tid,
+                                          max_tokens=understand_max_tokens)
                     calls.append({"frame": fr["frame"], "file": fn,
                                   "keyframe_index": fr["keyframe_index"],
                                   "position": fr["position"], "tile": tid,
@@ -535,6 +583,19 @@ class AutoPrompter:
             fallback_prompts = (build_fallback_prompts(understanding, phrases, synonyms,
                                                        int(self.cfg["sam3_fallback_max"]))
                                 if (understanding is not None and not _reused) else {})
+            # THE SHAPER DESCRIPTIONS (USER 2026-10-01: "el VLM, para preparar los prompts,
+            # pasa SAM3 y las descripciones para ShapeR"): per prompt, the description the
+            # understanding gave that kind — every projected instance of the concept
+            # inherits it (segmentation/pipeline.py, source 'concept') until the per-object
+            # pass after the certification refines it. Built on a REUSED list as well: the
+            # understanding still ran and still described the kinds it named.
+            shape_descriptions = (build_shape_descriptions(understanding, phrases, synonyms)
+                                  if understanding is not None else {})
+            _undescribed = [p for p in phrases if p not in shape_descriptions]
+            print(f"[autoprompt] ShapeR descriptions: {len(shape_descriptions)} of "
+                  f"{len(phrases)} prompt(s) described by the understanding"
+                  + (f"; without one (concept only, no caption inherited): {_undescribed}"
+                     if _undescribed else ""))
             self.output_dir.mkdir(parents=True, exist_ok=True)
             vlm_analysis = {
                 "source": "qwen3vl_autoprompt_simple",
@@ -543,6 +604,7 @@ class AutoPrompter:
                 "consolidation": consolidation.to_dict() if consolidation else None,
                 "prompt": prompt,
                 "fallback_prompts": fallback_prompts,
+                "shape_descriptions": shape_descriptions,
                 "frame_map": {},          # empty → SAM3 runs every phrase on ALL frames
                 "boxes": {},              # NO box seeds, ever, in this mode
                 "instances": [],
@@ -633,6 +695,11 @@ class AutoPrompter:
             "scene_understanding": understanding.to_dict() if understanding else None,
             "prompt": prompt,
             "frame_map": frame_map,
+            # the understanding's descriptions, keyed by its own phrases; the detector's
+            # labels only inherit one when they coincide with a phrase (declared)
+            "shape_descriptions": (build_shape_descriptions(
+                understanding, list(understanding.objects), {})
+                if understanding is not None else {}),
             # extras beyond the InternVL3 contract (ignored by the SAM3 worker,
             # consumed by review UI / Phase R / audit):
             "boxes": self._boxes_by_label_frame(accepted + review, fid_to_file),

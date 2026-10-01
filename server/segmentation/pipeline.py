@@ -3010,6 +3010,13 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # reading this file.
     out_of_place = np.zeros(n_pts, bool)
 
+    # The ShapeR description every instance inherits from its CONCEPT (USER 2026-10-01:
+    # the VLM pass that named the SAM3 prompts also described each kind —
+    # vlm_analysis.json `shape_descriptions`); the per-object one that replaces it is
+    # attached after the certification (segmentation/object_captioner.py).
+    from segmentation.object_captioner import concept_caption_lookup
+    _concept_caption = concept_caption_lookup(output_dir)
+
     for iid, group_obj_ids in instance_groups.items():
         # Merge all points assigned to any obj_id in this instance group
         all_matched = np.where(np.isin(point_obj_id, group_obj_ids))[0].astype(np.int64)
@@ -3054,7 +3061,10 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             "total_points": int(len(all_matched)),
             "globalIndices": all_matched.tolist(),
         }
-        
+        _cap = _concept_caption(label)
+        if _cap is not None:
+            instance["shape_caption"] = _cap       # source 'concept', vlm_proposed
+
         # Add voxel mesh data if available
         if voxel_mesh_data:
             instance["voxel_mesh"] = {
@@ -3740,6 +3750,10 @@ def _match_and_save_result_locked(output_dir, ply_path=None, new_obj_ids=None):
         # Merge: keep old instances (not replaced by new), add new
         merged = [inst for inst in prev_instances if inst["id"] not in new_ids]
         merged.extend(new_instances)
+        # a per-OBJECT ShapeR description survives the re-projection of its instance
+        # (same instance_id + label) — never downgraded to the concept's (USER 2026-10-01)
+        from segmentation.object_captioner import carry_object_captions
+        carry_object_captions(prev_instances, merged)
 
         total_pts = result.get("total_points", prev_result.get("total_points", 0))
         # EXCLUSIVITY INVARIANT (USER 2026-08-31): a new category's masks can

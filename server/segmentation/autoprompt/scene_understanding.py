@@ -34,7 +34,22 @@ _PROMPT = (
     ' "summary": "<1-2 sentences: the setting and what is happening>",\n'
     ' "objects": [{"category": "<the COMMON NAME of the kind of object>", '
     '"description": "<2-5 words that describe THIS one visually: colour, material, '
-    'shape>"}, ...]}\n'
+    'shape>", '
+    '"shape": {"form": "<the dominant geometric form, e.g. flat vertical surface, '
+    'rectangular box, vertical cylinder, thin elongated bar, irregular organic volume>", '
+    '"material": "<the main material(s)>", '
+    '"detail": "<ONE short sentence, at most 20 words: the most distinctive visible '
+    'features>"}}, ...]}\n'
+    # USER 2026-10-01: "el VLM, para preparar los prompts, pasa SAM3 y las descripciones
+    # para ShapeR" — the SAME call that names the SAM3 prompts describes each kind for
+    # ShapeR (a 3D shape generator conditioned on a narrative caption: category, form,
+    # material, detail — segmentation/object_captioner.py composes it). The entry is
+    # parsed defensively: a kind without it simply has no description, nothing is
+    # invented in its place.
+    "The 'shape' entry is for a 3D shape generator: 'form' names the dominant geometric "
+    "form of this kind of object, 'material' its main material(s), 'detail' one short "
+    "sentence with its most distinctive visible features. Geometric, concrete, only "
+    "what is visible.\n"
     # USER 2026-09-30: the CATEGORY is the SAM3 prompt ("prompts sin tanto detalle");
     # the DESCRIPTION is kept as the fallback when a bare category finds nothing
     # ("column" found no masklet on pccr where "metal support column" found one in 62
@@ -99,6 +114,9 @@ class FrameUnderstanding:
     objects: list[str] = field(default_factory=list)
     tile: str | None = None               # None = the full frame; "r<i>c<j>" = a crop of it
     descriptions: dict[str, str] = field(default_factory=dict)   # category → its visual description
+    # category → the ShapeR fields {category, shape, material, detail} the call gave
+    # that kind (USER 2026-10-01); absent when the answer carried none
+    shapes: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -121,7 +139,8 @@ class SceneUnderstanding:
             "origin": "vlm_proposed",
             "per_frame": [
                 {"frame_id": f.frame_id, "tile": f.tile, "scene_type": f.scene_type,
-                 "summary": f.summary, "objects": f.objects, "descriptions": f.descriptions}
+                 "summary": f.summary, "objects": f.objects, "descriptions": f.descriptions,
+                 "shapes": f.shapes}
                 for f in self.per_frame
             ],
         }
@@ -149,20 +168,24 @@ def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int 
     at the frame's size. The prompt is the same for both: a crop is still an
     image of the scene. None when the answer does not parse."""
     from semantic.types import system, user
+    from segmentation.object_captioner import fields_from_shape_entry
     resp = client.chat([system(_SYSTEM), user(_PROMPT, images=[image])],
                         max_tokens=max_tokens, consumer="phase1.understand")
     d = _parse(resp.content or "")
     if d is None:
         return None
-    objs, descs = [], {}
+    objs, descs, shapes = [], {}, {}
     for o in d.get("objects", []) or []:
-        if isinstance(o, dict):                   # {"category", "description"}
+        if isinstance(o, dict):                   # {"category", "description", "shape"}
             cat = _norm_obj(o.get("category") or o.get("name") or "")
             if cat:
                 objs.append(cat)
                 de = _norm_obj(o.get("description") or "")
                 if de and de != cat:
                     descs.setdefault(cat, de)
+                sh = fields_from_shape_entry(o.get("shape"), cat)
+                if sh is not None:
+                    shapes.setdefault(cat, sh)
         elif str(o).strip():                      # a bare string (older answers)
             objs.append(_norm_obj(o))
     return FrameUnderstanding(
@@ -172,6 +195,7 @@ def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int 
         objects=objs,
         tile=tile,
         descriptions=descs,
+        shapes=shapes,
     )
 
 
