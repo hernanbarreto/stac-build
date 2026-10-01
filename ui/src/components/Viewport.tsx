@@ -20,6 +20,7 @@ import { IconButton } from './ui/IconButton'
 import { Slider } from './ui/Field'
 import type { ReadoutAnchor, ViewPreset } from './viewport/ViewportHud'
 import { PhysicsSandbox } from './physics'
+import { SceneShadows, pointShadowUniforms, POINT_SHADOW_VERT_DECL, POINT_SHADOW_VERT_MAIN, POINT_SHADOW_FRAG_DECL } from './shadows'
 
 /** Translator for callbacks (the active language is read at call time). */
 const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
@@ -115,6 +116,8 @@ export interface ViewportHandle {
      *  it bounces on the point cloud and every visible mesh; with no surface under it it falls and is gone */
     physicsDrop: (diameterM: number, restitution: number) => void
     physicsClear: () => void
+    /** meshes cast and receive shadows, the point cloud receives them (USER 2026-10-01) */
+    setShadows: (on: boolean) => void
     /** fly to a listed object: a placed one (id), a generated one (instance id), a mesh (folder) */
     flyToObject: (kind: 'placed' | 'shape' | 'tsdf', key: string | number) => boolean
     /** spheres in the scene right now */
@@ -248,7 +251,7 @@ const vertexShader = `
   // lowest-common-denominator path every driver handles — no dynamic uniform
   // indexing, no uniform-vector pressure.
   uniform sampler2D uSegVisTex;
-
+${POINT_SHADOW_VERT_DECL}
   void main() {
     vClassId = classId;
     vConfidence = confidence;
@@ -256,7 +259,7 @@ const vertexShader = `
     vMvVotes = mvVotes;
     vColor = color;
     vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
-
+${POINT_SHADOW_VERT_MAIN}
     // Segment visibility lookup (done here because classId attribute is exact)
     if (classId < 0.0) {
       vSegVisible = 1.0; // always visible (e.g. sábana)
@@ -314,7 +317,7 @@ const fragmentShader = `
   // confidence-filter preview (brush): points BELOW this threshold light up
   // red — they would move to unsegmented on apply. -1.0 = off.
   uniform float uConfHl;
-
+${POINT_SHADOW_FRAG_DECL}
   void main() {
     // Segment visibility filter (computed in vertex shader for precision)
     if (vSegVisible < 0.5) discard;
@@ -379,6 +382,7 @@ const fragmentShader = `
       finalColor = mix(finalColor, vec3(1.0, 0.25, 0.2), 0.7);
     }
 
+    finalColor *= pointShadow();     // the meshes' shadows fall on the cloud (USER 2026-10-01)
     gl_FragColor = vec4(finalColor, alpha * uOpacity);
   }
 `
@@ -670,6 +674,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const sceneObjectsGroupRef = useRef<THREE.Group | null>(null)
     const physicsRef = useRef<PhysicsSandbox | null>(null)
     const throwEndRef = useRef<(() => void) | null>(null)
+    const shadowsRef = useRef<SceneShadows | null>(null)
     const shapeLoadGenRef = useRef(0)
     const tsdfLoadGenRef = useRef(0)
     // PLACING a sphere (USER 2026-10-01: "debe aparecer en el mouse y al hacer click se debe soltar"):
@@ -2827,6 +2832,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             void physicsRef.current.drop(new THREE.Vector3(tgt.x, tgt.y + 1.5, tgt.z), diameterM, restitution)
         },
         physicsClear: () => { physicsRef.current?.clear(); throwEndRef.current?.() },
+        setShadows: (on: boolean) => { shadowsRef.current?.setEnabled(on) },
         physicsCount: () => physicsRef.current?.count ?? 0,
         physicsPlace: (diameterM: number, restitution: number) => {
             const scene = sceneRef.current
@@ -3166,6 +3172,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         controlsRef.current = controls
 
         // Shader material for point cloud
+        const pointShadowU = pointShadowUniforms()   // shared by reference: the shadow pass updates them
         const material = new THREE.ShaderMaterial({
             vertexShader,
             fragmentShader,
@@ -3188,6 +3195,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 sectionBoxMax: { value: new THREE.Vector3(100, 100, 100) },
                 uSelBoxOn: { value: false },
                 uSelBoxInv: { value: new THREE.Matrix4() },
+                ...pointShadowU,
             },
             vertexColors: true,
             transparent: true,
@@ -3195,6 +3203,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             depthTest: true,
         })
         materialRef.current = material
+
+        // SHADOWS (USER 2026-10-01): meshes cast and receive, the points receive
+        const shadows = new SceneShadows(scene, renderer, () => [pointShadowU], dirLight)
+        shadows.setRoots(() => [physics.group, sceneObjectsGroupRef.current, shapesGroupRef.current, tsdfGroupRef.current,
+                                reconSceneGroupRef.current].filter((g): g is THREE.Group => !!g))
+        shadowsRef.current = shadows
 
         // Empty point cloud geometry (will be populated from server data)
         const geometry = new THREE.BufferGeometry()
@@ -3208,7 +3222,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const animate = () => {
             animFrameRef.current = requestAnimationFrame(animate)
             controls.update()
-            physics.step(physicsClock.getDelta())
+            const frameDt = physicsClock.getDelta()
+            physics.step(frameDt)
+            shadows.update(frameDt)
             if (!physics.holding) throwEndRef.current?.()     // the held sphere was removed: give the hand back
 
             // Re-anchor target: when zoom brings camera very close to target,
@@ -3817,6 +3833,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             window.removeEventListener('pointercancel', onThrowUp, true)
             window.removeEventListener('blur', endThrow)
             physics.dispose(); physicsRef.current = null
+            shadows.dispose(); shadowsRef.current = null
             placeRef.current = null
             resizeObserver.disconnect()
             renderer.domElement.removeEventListener('click', onCanvasClick)

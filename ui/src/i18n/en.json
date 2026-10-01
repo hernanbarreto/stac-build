@@ -189,7 +189,8 @@
     "shortcuts": "Keyboard shortcuts",
     "about": "About STAC Build",
     "userManagement": "User management",
-    "logout": "Sign out"
+    "logout": "Sign out",
+    "shadows": "Shadows"
   },
   "palette": {
     "title": "Command palette",

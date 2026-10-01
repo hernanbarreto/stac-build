@@ -189,7 +189,8 @@
     "shortcuts": "Atajos de teclado",
     "about": "Acerca de STAC Build",
     "userManagement": "Gestión de usuarios",
-    "logout": "Salir"
+    "logout": "Salir",
+    "shadows": "Sombras"
   },
   "palette": {
     "title": "Paleta de comandos",
