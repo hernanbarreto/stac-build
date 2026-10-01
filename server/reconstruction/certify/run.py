@@ -28,9 +28,13 @@ corrected one).
 
 Order inside an iteration: scale → poses → depth (poses on an open scale do
 not close). Every epoch stays on disk and is SELECTABLE in the kit (USER
-2026-09-16: nothing is approved and nothing is undone). The acta
-(output/certify_acta.json) lists the iterations, their metrics, gates and
-where and why the loop stopped.
+2026-09-16: nothing is approved and nothing is undone) — unless
+``certify.single_final_epoch`` is on (USER 2026-09-30: *"debe quedar una sola
+época que es la final"*): then, once the correction published and the chunk
+check ran, every stored epoch directory is deleted and the live epoch is the
+ONE deliverable (`correction.apply.keep_only_live_epoch`; the acta lists them
+as ``epochs_discarded``). The acta (output/certify_acta.json) lists the
+iterations, their metrics, gates and where and why the loop stopped.
 """
 
 from __future__ import annotations
@@ -296,6 +300,10 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         log("[certify] deliverable-only: the correction runs and publishes its "
             "epoch; the §9 measurement, the iteration loop and the acta metrics "
             "are SKIPPED (certify.deliverable_only: true)")
+    # ONE FINAL EPOCH (USER 2026-09-30: *"debe quedar una sola época que es la
+    # final"*, docs/pipeline_final.md §10): read here, acted on at the end —
+    # after the correction published and the chunk check measured the result
+    _single_final = bool(getattr(ccert, "single_final_epoch", False))
     if apply and not _deliverable_only:
         s0 = load_session(output_dir)
         i0 = _instances()
@@ -667,6 +675,22 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         acta["stop_reason"] = ("deliverable-only: correction applied and its epoch "
                                "published; §9 measurement, iterations and acta "
                                "metrics skipped by certify.deliverable_only")
+
+    # ── ONE FINAL EPOCH ───────────────────────────────────────────────────
+    # USER 2026-09-30: *"debe quedar una sola época que es la final"*. The
+    # correction published, the chunk check measured the published geometry,
+    # the reports are written: the stored epochs (the states this stage left
+    # behind) go, the live epoch is the deliverable. The ledger and the
+    # per-epoch warps stay (replay, provenance). Declared, never silent: a
+    # directory that could not be deleted leaves the deliverable intact.
+    if apply and _single_final:
+        from correction.apply import keep_only_live_epoch
+        try:
+            acta["epochs_discarded"] = keep_only_live_epoch(output_dir, log=log)
+        except Exception as e:  # noqa: BLE001 — declared, never silent
+            log(f"[certify] ⚠ stored epochs NOT discarded ({e}) — the live epoch "
+                f"is still the deliverable")
+            acta["epochs_discarded"] = {"error": str(e)}
     acta["metrics_final"] = (last_m if last_m is not None else
                              (prev if prev is not None else acta.get("metrics_initial")))
     acta["epoch_final"] = current_epoch(output_dir)

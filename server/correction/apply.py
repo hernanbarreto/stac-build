@@ -52,6 +52,60 @@ def assert_no_interrupted_swap(output_dir: Path) -> None:
             f"directories before running anything else on this session")
 
 
+def publish_in_flight(output_dir) -> Optional[str]:
+    """The name of a transaction directory (``_tx_epoch_<N>/``, or any other
+    ``_tx_*/`` a publisher stages in — the corrected cloud, the bend, the
+    comparison cloud) present under output/, None when there is none. A
+    publish is in flight (or crashed) while one exists: an operation that
+    rewrites the live cloud must refuse rather than race the swap."""
+    out = Path(output_dir)
+    for d in sorted(out.glob("_tx_*")):
+        if d.is_dir() and not d.is_symlink():
+            return d.name
+    return None
+
+
+def keep_only_live_epoch(output_dir, log=print) -> List[int]:
+    """Delete every stored epoch (``_epoch_<N>/``) and every ``_tx_epoch_*/``
+    leftover, and NOTHING else — the session keeps ONE epoch, the live one
+    (USER 2026-09-30: *"debe quedar una sola época que es la final"*;
+    docs/pipeline_final.md §10; ``certify.single_final_epoch``).
+
+    What stays, on purpose: ``geometry_epoch.json`` (the live record),
+    ``corrections.jsonl`` (append-only history) and ``corrections/epoch_<N>.npz``
+    (the exact warps: `correction.replay` and the instance store still follow
+    them; `next_epoch` still counts them so no number is ever recycled).
+    Runs under the same cross-process octree lock the swap and the select use,
+    so no build or swap lands in the middle. A half-swapped session (journal on
+    disk) is refused: its stored directory is the rollback data.
+
+    Returns the epoch numbers whose directories were deleted, ascending.
+    """
+    output_dir = Path(output_dir)
+    from potree_converter import _potree_lock
+    discarded: List[int] = []
+    with _potree_lock(output_dir):
+        assert_no_interrupted_swap(output_dir)
+        for d in sorted(output_dir.glob(f"{PREV_PREFIX}*")):
+            if not d.is_dir() or d.is_symlink():
+                continue
+            try:
+                epoch = int(d.name[len(PREV_PREFIX):])
+            except ValueError:
+                continue
+            shutil.rmtree(d)
+            discarded.append(epoch)
+        for d in sorted(output_dir.glob(f"{TX_PREFIX}*")):
+            if d.is_dir() and not d.is_symlink():
+                shutil.rmtree(d)
+                log(f"  stale transaction {d.name}/ removed")
+    discarded.sort()
+    log(f"  single final epoch {current_epoch(output_dir)}: "
+        + (f"stored epoch(s) {discarded} deleted" if discarded else "no stored epoch to delete")
+        + " (ledger and corrections/epoch_*.npz kept)")
+    return discarded
+
+
 # ── warp ─────────────────────────────────────────────────────────────────
 
 def warp_full_cloud(session: CorrectionSession, R_kf: np.ndarray,

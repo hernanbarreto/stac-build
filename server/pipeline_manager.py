@@ -33,7 +33,7 @@ class StageId(str, Enum):
 
 
 STAGE_REGISTRY = {
-    StageId.RECONSTRUCTION:   {"label": "Reconstruction (intake · VLM+SAM3 · Ω · F0-F7)", "icon": "🔨", "module": "workers.map_worker"},
+    StageId.RECONSTRUCTION:   {"label": "Reconstruction (intake · VLM+SAM3 · Ω · F0-F6 bend)", "icon": "🔨", "module": "workers.map_worker"},
     StageId.CLOUDCOMPY:       {"label": "Cloud → viewer (octree + segmentation)", "icon": "🧹", "module": "workers.cloudcompy_worker"},
     StageId.PGSR:             {"label": "Precision (PGSR)",  "icon": "💎", "module": "workers.pgsr_worker"},
     StageId.TSDF:             {"label": "TSDF Mesh",         "icon": "🧊", "module": "workers.tsdf_worker"},
@@ -781,9 +781,9 @@ class PipelineManager:
 
             # Clean up previous outputs if in replace mode (cascade invalidation) — NOT when
             # this run already wiped output/: then every file here was produced BY THIS RUN
-            # (pccr 2026-09-30: the reconstruction stage publishes cleaned_cloud.ply — F0-F7
-            # + f7_cloud — and the cloud stage's cleanup deleted it the moment it started:
-            # "No chunk_*.ply … reconstruction produced no cloud")
+            # (pccr 2026-09-30: the reconstruction stage publishes cleaned_cloud.ply — the
+            # precision core's depth stage, f6_bend — and the cloud stage's cleanup deleted it
+            # the moment it started: "No chunk_*.ply … reconstruction produced no cloud")
             if replace and output_dir.exists() and not wiped_this_run:
                 self._cleanup_stage_outputs(
                     output_dir, stage_state.stage.id,
@@ -994,7 +994,9 @@ class PipelineManager:
             if not (has_poses and (has_depth or (output_dir / "cleaned_cloud.ply").exists())):
                 return False, "no reconstruction artifacts"
             # with the precision core inside this stage (USER 2026-09-28) the
-            # reconstruction is complete only when F7's fused cloud is the live one
+            # reconstruction is complete only when the core's published cloud (f6_bend)
+            # is the live epoch — or the live epoch descends from it through the
+            # certification's transform epochs (precision.product)
             precision_on = False
             try:
                 from config import cfg as _c5
@@ -1163,11 +1165,12 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
     def _enabled(stage_id: StageId) -> bool:
         if precision_on and stage_id in (StageId.VLM, StageId.SAM3):
             # USER 2026-09-28: VLM + SAM3 run ONCE, inside the reconstruction stage
-            # (the intake), and the core F0-F7 runs there too. The CERTIFY stage
-            # stays (USER 2026-09-29: "todo integrado, nada a mano"): after the cloud
-            # stage projects the masks on the corrected cloud it runs the correction
-            # — closures → depth per chunk → floor (level) → re-level → chunk check —
-            # in deliverable_only mode (no acta)
+            # (the intake), and the precision core (F0 → F6 bend) runs there too. The
+            # CERTIFY stage stays (USER 2026-09-29: "todo integrado, nada a mano"):
+            # after the cloud stage projects the masks on the published cloud it runs
+            # the correction — closures → depth per chunk → floor → mask filter →
+            # chunk check — in deliverable_only mode (no acta) and leaves ONE final
+            # epoch (certify.single_final_epoch, USER 2026-09-30)
             return False
         if skip_cloudcompy and stage_id == StageId.CLOUDCOMPY:
             return False

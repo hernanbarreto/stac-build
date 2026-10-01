@@ -197,19 +197,35 @@ def load_inputs(session_dir: Path, log: Callable = print):
                               "F0 grid mapping before unprojecting Omega's depth")
     s_k = {f: 1.0 for f in frames}
     bend = {f: (0.0, 0.0) for f in frames}
+    offset = {f: 0.0 for f in frames}
+    cloud_epoch = None
     s_k_source = "absent (1.0 — neither the corrected cloud nor F6 measured the per-keyframe scale)"
     for rel in ("corrected_cloud.json", "depth_native/report.json"):
         rep = out / rel
         if not rep.exists():
             continue
-        pf = json.loads(rep.read_text()).get("per_frame") or {}
+        doc = json.loads(rep.read_text())
+        pf = doc.get("per_frame") or {}
         if all(str(f) in pf and "s_k" in pf[str(f)] for f in frames):
             s_k = {f: float(pf[str(f)]["s_k"]) for f in frames}
             # the depth on F5 (f6_bend) publishes k(u, v) = s_k + c1·u' + c2·v' per keyframe:
             # the check measures the cloud that was PUBLISHED, bend included
             bend = {f: tuple(float(x) for x in (pf[str(f)].get("bend") or (0.0, 0.0))) for f in frames}
             s_k_source = f"{rel} per_frame.s_k" + (" + bend" if any(b != (0.0, 0.0) for b in bend.values()) else "")
+            cloud_epoch = doc.get("epoch_to")
             break
+    # the certification warps that cloud per keyframe (depth × k + b about the camera, then
+    # rigid): the depth that is LIVE is the cloud epoch's composed with every transform epoch
+    # above it — the rigid part is already in camera_poses.txt, the depth part is composed here
+    epochs_composed: List[int] = []
+    if cloud_epoch is not None:
+        s_k, bend, offset, epochs_composed = compose_transform_epochs(out, frames, int(cloud_epoch), s_k, bend)
+        if epochs_composed:
+            s_k_source += (f" × depth factor of transform epoch(s) {epochs_composed} "
+                           f"(corrections/epoch_<N>.npz k_kf" + (", b_kf" if any(offset.values()) else "")
+                           + f"; live epoch {epochs_composed[-1]})")
+        else:
+            s_k_source += f" (live epoch {cloud_epoch} is the cloud epoch)"
     rec = out / "omega_run" / "results_output"
     chunk = {}
     for f in frames:
@@ -222,7 +238,51 @@ def load_inputs(session_dir: Path, log: Callable = print):
     chain = keyframe_chainage(Path(session_dir), frames)
     log(f"{LOG_TAG} {len(frames)} keyframes, {len(set(chunk.values()))} Omega chunk(s), "
         f"s_k from {s_k_source}, chainage {'measured' if chain is not None else 'NOT measured (no walk)'}")
-    return frames, c2w, K, s_k, s_k_source, chunk, chain, rec, out / "da3_run" / "results_output", bend
+    return (frames, c2w, K, s_k, s_k_source, chunk, chain, rec, out / "da3_run" / "results_output", bend,
+            {"offset": offset, "epochs_composed": epochs_composed})
+
+
+def compose_transform_epochs(out: Path, frames: Sequence[int], cloud_epoch: int,
+                             s_k: Dict[int, float], bend: Dict[int, tuple]
+                             ) -> Tuple[Dict[int, float], Dict[int, tuple], Dict[int, float], List[int]]:
+    """``(s_k, bend, offset, epochs)``: the published cloud's per-keyframe depth model
+    composed with every TRANSFORM epoch between the cloud epoch and the live one.
+
+    A transform epoch moves keyframe f's points along their rays, z' = k·z + b about
+    the keyframe's own camera (correction.apply.warp_full_cloud; k_kf, b_kf of
+    corrections/epoch_<N>.npz), then rigidly — and the rigid part moves the camera with
+    them, so camera_poses.txt already carries it. Epochs compose in lineage order:
+    K ← k·K, B ← k·B + b, and the cloud's k(u, v) = s_k + c1·u' + c2·v' becomes
+    K·k(u, v) + B. A new-cloud epoch on the way, or a keyframe an epoch does not
+    name, is a structural impossibility of the check and is refused by name."""
+    from correction.epoch import EPOCH_KIND_TRANSFORM, current_epoch, epoch_kind, epoch_lineage
+    from correction.ledger import load_epoch_npz
+    live = int(current_epoch(out))
+    lineage = epoch_lineage(out, live)
+    if int(cloud_epoch) not in lineage:
+        raise ChunkCheckError(f"the live epoch {live} does not descend from the cloud epoch {cloud_epoch} "
+                              f"(ancestry {lineage}) — the check cannot say what depth is live")
+    after = lineage[lineage.index(int(cloud_epoch)) + 1:]
+    K = {f: 1.0 for f in frames}
+    B = {f: 0.0 for f in frames}
+    for e in after:
+        if epoch_kind(out, e) != EPOCH_KIND_TRANSFORM:
+            raise ChunkCheckError(f"epoch {e} is a new cloud, not a transform of the cloud epoch "
+                                  f"{cloud_epoch} — its depth is not Omega's × a factor")
+        npz = load_epoch_npz(out, e)
+        by_frame = {int(f): j for j, f in enumerate(npz["frames"])}
+        missing = [f for f in frames if f not in by_frame]
+        if missing:
+            raise ChunkCheckError(f"corrections/epoch_{e}.npz names no transform for keyframe(s) "
+                                  f"{missing[:5]}{'…' if len(missing) > 5 else ''}")
+        for f in frames:
+            j = by_frame[f]
+            k, b = float(npz["k_kf"][j]), float(npz["b_kf"][j])
+            K[f] = k * K[f]
+            B[f] = k * B[f] + b
+    s_k2 = {f: float(s_k[f]) * K[f] for f in frames}
+    bend2 = {f: (float(bend[f][0]) * K[f], float(bend[f][1]) * K[f]) for f in frames}
+    return s_k2, bend2, B, [int(e) for e in after]
 
 
 def scale_map(s_k: float, bend, H: int, W: int):
@@ -236,8 +296,11 @@ def scale_map(s_k: float, bend, H: int, W: int):
 
 
 def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Path, cfg,
-                 log: Callable = print, bend: Optional[Dict[int, tuple]] = None) -> Tuple[List[Row], dict]:
-    """Two passes over the depth maps: the dominant floor plane, then every height."""
+                 log: Callable = print, bend: Optional[Dict[int, tuple]] = None,
+                 offset: Optional[Dict[int, float]] = None) -> Tuple[List[Row], dict]:
+    """Two passes over the depth maps: the dominant floor plane, then every height.
+    ``offset`` (metres along the ray, per keyframe) is the affine part a transform epoch
+    composed on the published depth — added only where Omega measured a depth."""
     t0 = time.time()
     floor_pool = []
     world_pts: Dict[int, np.ndarray] = {}
@@ -245,6 +308,9 @@ def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Pa
         with np.load(omega_dir / f"frame_{f}.npz") as z:
             d0 = np.asarray(z["depth"], np.float64)
             d = d0 * scale_map(s_k[f], bend.get(f) if bend else None, d0.shape[0], d0.shape[1])
+            off = float(offset.get(f, 0.0)) if offset else 0.0
+            if off != 0.0:
+                d = np.where(np.isfinite(d0) & (d0 > 0), d + off, d)
         X = unproject(d, K, c2w[i], cfg.pixel_stride)
         world_pts[f] = X
         if len(X):
@@ -490,17 +556,19 @@ def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional
     t0 = time.time()
     session_dir = Path(session_dir)
     cfg = pcfg.chunk_check
-    frames, c2w, K, s_k, s_k_source, chunk, chain, omega_dir, da3_dir, bend = load_inputs(session_dir, log)
+    (frames, c2w, K, s_k, s_k_source, chunk, chain, omega_dir, da3_dir, bend,
+     composed) = load_inputs(session_dir, log)
     if chainage is not None:
         chain = np.asarray(chainage, np.float64)
-    rows, plane = measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir, da3_dir, cfg, log, bend=bend)
+    rows, plane = measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir, da3_dir, cfg, log, bend=bend,
+                               offset=composed["offset"])
     pool_m = float(pcfg.gauge.knot_walk_m) / 2.0
     verdicts = judge(rows, cfg, pool_m, log)
     rep = {"version": 1, "provenance": PROVENANCE, **_epochs(session_dir / "output"),
            "params": {"low_pct": cfg.low_pct, "high_pct": cfg.high_pct, "band_m": cfg.band_m,
                       "min_points": cfg.min_points, "pixel_stride": cfg.pixel_stride,
                       "confidence": cfg.confidence, "bootstrap": cfg.bootstrap, "pool_walk_m": pool_m,
-                      "s_k_source": s_k_source},
+                      "s_k_source": s_k_source, "depth_epochs_composed": composed["epochs_composed"]},
            "plane": plane, **verdicts, "seconds": round(time.time() - t0, 1)}
     pdir = session_dir / "output" / "precision"
     pdir.mkdir(parents=True, exist_ok=True)

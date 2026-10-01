@@ -477,6 +477,12 @@ class CertifyConfig:
                                     # measurement, no iteration loop, no acta metrics
                                     # (USER 2026-09-22 — the deliverable is epoch 0 and
                                     # the corrected epoch 1, judged by eye)
+    single_final_epoch: bool        # USER 2026-09-30 ("debe quedar una sola época que es
+                                    # la final"): the session keeps ONE epoch — no Omega
+                                    # comparison cloud is built (_epoch_0) and every stored
+                                    # _epoch_<N>/ is deleted once the certification published
+                                    # (correction.apply.keep_only_live_epoch); the ledger and
+                                    # the per-epoch npz stay (replay, provenance)
     objective: ObjectiveWeights
     gates: CertifyGates
     scale: CertifyScale
@@ -930,6 +936,7 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
         regression_eps=_num(ce, "regression_eps", P, lo=0),
         auto_after_segmentation=_bool(ce, "auto_after_segmentation", P),
         deliverable_only=_bool(ce, "deliverable_only", P),
+        single_final_epoch=_bool(ce, "single_final_epoch", P),
         objective=objective, gates=gates, scale=scale, visit_loops=visit_loops,
         known_answer=known, envelope=envelope, determinism=determinism)
 

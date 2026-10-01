@@ -291,7 +291,8 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # ── SEMANTICS, ONCE, HERE (USER 2026-09-28): VLM understand + SAM3 autoprompt
     # on the keyframes, before any geometry. The masks are 2-D per keyframe and do
     # not depend on the cloud; they are projected onto the points the cloud stage
-    # delivers after F7 (workers/cloudcompy_worker.py) — no model runs twice.
+    # delivers after the precision core published its cloud
+    # (workers/cloudcompy_worker.py) — no model runs twice.
     _run_semantics_2d(pipe, session_path, config, vlm_done=_vlm_done)
 
     # ── Step 2b: DA3-dense fusion frame set ──
@@ -455,9 +456,10 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # DELETED by USER ORDER 2026-09-05: "eliminá todo lo de dinov3 y fase 5")
 
     # ── THE PRECISION CORE, INSIDE THE RECONSTRUCTION (USER 2026-09-28: "f0 a f7 es
-    # etapa de reconstrucción, antes de cloudcompy"): the chunks Omega left become
-    # the working cloud, F0 → F7 refine camera, poses and depth against the images
-    # and F7 publishes the fused cloud — the ONLY cloud the session keeps.
+    # etapa de reconstrucción, antes de cloudcompy"): F0 → F5 refine camera and poses
+    # against the images, the depth stage (F6 bend: Omega's depth bent to F5 per
+    # keyframe + multi-view vote, USER 2026-10-01) publishes THE cloud with its
+    # octree, the chunk check reports on it.
     _run_precision_core(pipe, session_path, output_dir, config)
 
 
@@ -493,8 +495,8 @@ def _run_semantics_2d(pipe: WorkerPipe, session_path: Path, config: dict, *,
     by this stage. With ``vlm_done`` the understanding was already written at I2's
     handover (vLLM up once); SAM3 then works from the JSON with the card free.
     The mask→cloud projection is NOT done here (no cloud yet): the SAM3 worker
-    leaves the 2-D masks and the cloud stage projects them after F7. Gated by
-    reconstruction.precision.enabled and pipeline.auto_segment."""
+    leaves the 2-D masks and the cloud stage projects them on the published cloud.
+    Gated by reconstruction.precision.enabled and pipeline.auto_segment."""
     from workers.base import run_stage_inline
     if not _semantics_enabled(pipe, config):
         return
@@ -504,23 +506,26 @@ def _run_semantics_2d(pipe: WorkerPipe, session_path: Path, config: dict, *,
     run_stage_inline(pipe, "workers.sam3_worker", str(session_path), config,
                      label="sam3", pct_range=(4.5, 5.0))
     pipe.send_log("Semantics done at the intake: vlm_analysis.json + segmentation.json + "
-                  "seg_masks.npz (2-D) — projected onto the fused cloud by the cloud stage")
+                  "seg_masks.npz (2-D) — projected onto the published cloud by the cloud stage")
 
 
 def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
                         config: dict) -> None:
-    """F0 → F7 on the reconstruction this stage just produced, then keep only the
-    fused cloud.
+    """The precision core on the reconstruction this stage just produced, then keep
+    only the published cloud.
 
-    The core needs NO cloud until F7 (USER 2026-09-29: "¿por qué filtramos una nube
-    que no vamos a usar todavía?"): F0 reads Omega's K, F2 the DA3 windows and
-    Omega's depth, F4 the frames, F5 the tracks, F6 Omega's depth × the measured
-    scale with F5's poses — F2 and F5 publish epochs of POSES only
-    (precision/poses_epoch.py) — and F7 builds the cloud from F6's depth and
-    publishes it with its octree. Omega's chunk PLYs (its raw cloud, epoch 0) are
-    never merged, filtered or shown; they are deleted with the previous epochs
-    once F7 has published (USER 2026-09-28: "no quiero ninguna época 0, la única
-    para visualizar debe ser la N, el resto deben descartarse").
+    The core needs NO cloud until its depth stage (USER 2026-09-29: "¿por qué
+    filtramos una nube que no vamos a usar todavía?"): F0 reads Omega's K, F2 the
+    DA3 windows and Omega's depth, F4 the frames, F5 the tracks — F2 and F5 publish
+    epochs of POSES only (precision/poses_epoch.py) — and the depth stage (F6 bend,
+    cloud.source omega_bent; or the F6 sweep → F7 chain) builds the cloud and
+    publishes it with its octree. Omega's chunk PLYs (its raw cloud) are never
+    merged, filtered or shown; they are deleted with the previous epochs once the
+    cloud is published (USER 2026-09-28: "no quiero ninguna época 0, la única para
+    visualizar debe ser la N, el resto deben descartarse"). The Omega comparison
+    cloud (`_epoch_0/`, USER 2026-09-29 "conservamos mientras validamos") is built
+    ONLY while `certify.single_final_epoch` is off: with it on the session keeps
+    one epoch (USER 2026-09-30) and that cloud is the artifact it forbids.
     workers/precision_worker.py runs the core (precision/runner.py's step list,
     each step its own subprocess, resumable). Gated by
     reconstruction.precision.enabled."""
@@ -528,8 +533,10 @@ def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
     from workers.base import run_stage_inline
     if not load_precision_config(config).enabled:
         return
+    from reconstruction.loops.config import load_loops_config
+    single_final = bool(load_loops_config(config).certify.single_final_epoch)
 
-    pipe.send_progress(84, "Precision core F0 → F7...", stage="reconstruction")
+    pipe.send_progress(84, "Precision core F0 → F6 bend...", stage="reconstruction")
     run_stage_inline(pipe, "workers.precision_worker", str(session_path), config,
                      label="precision", pct_range=(84.0, 99.0))
     from precision.product import product_is_live
@@ -538,41 +545,48 @@ def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
         raise RuntimeError(f"the precision core ended without a published cloud — {_why}")
     pipe.send_log(f"[precision] product: {_why}")
 
-    # THE COMPARISON CLOUD (USER 2026-09-29: "conservamos [la época 0] mientras validamos,
-    # deben poder seleccionarse desde la UI"): Omega's raw chunks through the cleaning
-    # recipe the cloud stage always ran, consolidated, with their octree, into
-    # `_epoch_0/` registered as a selectable epoch — BEFORE the chunks are deleted.
-    # Its failure is loud but does not take the fused reconstruction with it.
-    from precision.epoch0_cloud import build_epoch0_cloud
-    pipe.send_progress(98, "Epoch 0: Omega's cloud for comparison...", stage="reconstruction")
-    try:
-        rep0 = build_epoch0_cloud(session_path, config, input_dir=output_dir, log=pipe.send_log,
-                                  progress=lambda pct, msg: pipe.send_progress(98, msg, stage="reconstruction"))
-        pipe.send_log(f"[epochs] epoch 0 (Omega, {rep0['n_points']:,} pts) stored in _epoch_0/ — "
-                      f"selectable against the fused cloud")
-    except Exception as e:  # noqa: BLE001 — declared, never silent
-        pipe.send_log(f"[epochs] ❌ epoch 0 comparison cloud NOT built: {e}", level="error")
+    if single_final:
+        # ONE FINAL EPOCH (USER 2026-09-30): no comparison cloud, no epoch 0 on disk
+        pipe.send_log("[epochs] certify.single_final_epoch: no Omega comparison cloud is "
+                      "built and no stored epoch is kept — the session keeps ONE epoch")
+    else:
+        # THE COMPARISON CLOUD (USER 2026-09-29: "conservamos [la época 0] mientras
+        # validamos, deben poder seleccionarse desde la UI"): Omega's raw chunks through
+        # the cleaning recipe the cloud stage always ran, consolidated, with their
+        # octree, into `_epoch_0/` registered as a selectable epoch — BEFORE the chunks
+        # are deleted. Its failure is loud but does not take the reconstruction with it.
+        from precision.epoch0_cloud import build_epoch0_cloud
+        pipe.send_progress(98, "Epoch 0: Omega's cloud for comparison...", stage="reconstruction")
+        try:
+            rep0 = build_epoch0_cloud(session_path, config, input_dir=output_dir, log=pipe.send_log,
+                                      progress=lambda pct, msg: pipe.send_progress(98, msg, stage="reconstruction"))
+            pipe.send_log(f"[epochs] epoch 0 (Omega, {rep0['n_points']:,} pts) stored in _epoch_0/ — "
+                          f"selectable against the published cloud")
+        except Exception as e:  # noqa: BLE001 — declared, never silent
+            pipe.send_log(f"[epochs] ❌ epoch 0 comparison cloud NOT built: {e}", level="error")
 
-    freed = _discard_previous_epochs(output_dir)
-    pipe.send_log(f"[epochs] the fused cloud + epoch 0 (Omega) stay — {freed / 1048576:.0f} MB of "
-                  f"previous epochs and Omega chunks discarded")
-    pipe.send_progress(99, "Fused cloud is the reconstruction", stage="reconstruction")
+    freed = _discard_previous_epochs(output_dir, keep_epoch0=not single_final)
+    pipe.send_log(f"[epochs] the published cloud{'' if single_final else ' + epoch 0 (Omega)'} "
+                  f"stay{'s' if single_final else ''} — {freed / 1048576:.0f} MB of previous "
+                  f"epochs and Omega chunks discarded")
+    pipe.send_progress(99, "Published cloud is the reconstruction", stage="reconstruction")
 
 
-def _discard_previous_epochs(output_dir: Path) -> int:
+def _discard_previous_epochs(output_dir: Path, keep_epoch0: bool = True) -> int:
     """Delete the intermediate epochs (`_epoch_1..N-1/`: the gauge's and the refine's
     states), `_tx_epoch_*/` leftovers and Omega's raw
     chunk PLYs (`chunk_*.ply` with its origins/meta — never merged). `_epoch_0/`
-    STAYS (USER 2026-09-29: "conservamos mientras validamos, deben poder
-    seleccionarse desde la UI") — it is the Omega cloud the fused one is judged
-    against, selectable through the certification kit (a new_cloud epoch is
-    swapped, not transformed). Returns the bytes freed. The ledger
-    (corrections.jsonl) and geometry_epoch.json stay: the live epoch is the fused
-    one and the record says so."""
+    STAYS while ``keep_epoch0`` (USER 2026-09-29: "conservamos mientras validamos,
+    deben poder seleccionarse desde la UI") — it is the Omega cloud the published
+    one is judged against, selectable through the certification kit (a new_cloud
+    epoch is swapped, not transformed); under `certify.single_final_epoch` the
+    caller passes False and it goes with the rest (USER 2026-09-30: one epoch).
+    Returns the bytes freed. The ledger (corrections.jsonl) and geometry_epoch.json
+    stay: the live epoch is the published one and the record says so."""
     freed = 0
     for pattern in ("_epoch_*", "_tx_epoch_*"):
         for d in output_dir.glob(pattern):
-            if d.name == "_epoch_0":
+            if keep_epoch0 and d.name == "_epoch_0":
                 continue
             if d.is_dir() and not d.is_symlink():
                 freed += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())

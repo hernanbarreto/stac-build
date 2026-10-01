@@ -2116,12 +2116,16 @@ reconstruction:
   precision:
     enabled: true                       # the claude_stac.txt precision pipeline. USER 2026-09-28:
                                         # ONE reconstruction stage = intake (I0-I4) → VLM + SAM3
-                                        # ONCE on the keyframes → ONE Omega pass → chunk merge →
-                                        # F0 → F2 → F4 → F3 probe → F5 → F6 (+COLMAP A/B) → F7;
-                                        # the fused cloud is the ONLY cloud kept (previous epochs
-                                        # discarded). Then the cloud stage projects the masks and
-                                        # delivers it to the viewer. No VLM / SAM3 / certification
-                                        # stage runs afterwards (F8/F9 do not run).
+                                        # ONCE on the keyframes → ONE Omega pass (chunks of walk)
+                                        # → F0 camera → F2 gauge → F4 tracks → F3 probe → F5
+                                        # refinement → F6 bend (cloud.source omega_bent, USER
+                                        # 2026-10-01: Omega's depth bent to F5 per keyframe +
+                                        # multi-view vote = THE cloud, published with its octree)
+                                        # → chunk check (report). Then the cloud stage projects
+                                        # the masks and the CERTIFY stage corrects (depth per
+                                        # chunk, floor, mask filter) and leaves ONE final epoch
+                                        # (certify.single_final_epoch). The F6 sweep → F7 chain
+                                        # stays selectable (cloud.source omega_corrected | fusion).
     # F0 — session camera + exact grid-to-native mappings (precision/camera.py)
     camera:
       model: OPENCV                     # [fx, fy, cx, cy, k1, k2, p1, p2] in native pixels
@@ -3516,14 +3520,26 @@ certify:                            # §4.8 ensemble witness + §9 certification
                                     # ademas del epoch0 que es la original, la 1 es la
                                     # corregida luego que termina, no hace falta ahora
                                     # correr el acta etc, que lleva muchisimo tiempo"*.
-                                    # true  = the CORRECTION runs, publishes epoch 1 and
-                                    #         the stage ends. Epoch 0 stays selectable, so
-                                    #         both states the user compares are on disk.
+                                    # true  = the CORRECTION runs, publishes its epoch and
+                                    #         the stage ends (with single_final_epoch below
+                                    #         that epoch is the ONLY one left on disk).
                                     # false = the full §9 certification: metrics before and
                                     #         after, the iteration loop and the acta.
                                     # What it costs when on: the objective, the gates and
                                     # the regression verdict are not measured — the verdict
-                                    # is the user's eye on the two epochs.
+                                    # is the user's eye on the delivered cloud.
+  single_final_epoch: true          # USER 2026-09-30: *"debe quedar una sola época que es la
+                                    # final"* (docs/pipeline_final.md §10). true = the session
+                                    # keeps ONE epoch: the reconstruction stage builds no Omega
+                                    # comparison cloud (no _epoch_0/) and discards every stored
+                                    # epoch; the certification, once its epoch is published and
+                                    # the chunk check ran, deletes every _epoch_<N>/ and
+                                    # _tx_epoch_*/ (correction.apply.keep_only_live_epoch) and
+                                    # the acta lists them as `epochs_discarded`. What STAYS:
+                                    # geometry_epoch.json, corrections.jsonl and
+                                    # corrections/epoch_<N>.npz (replay + provenance).
+                                    # false = every epoch stays on disk and is selectable in
+                                    # the kit (the 2026-09-16 behaviour, kept for evaluation).
   auto_after_segmentation: true     # USER 2026-09-29 evening: "todo integrado, nada a mano" — after the
                                     # cloud stage projects the masks on the corrected cloud, the
                                     # correction runs (closures → depth per chunk → floor level →

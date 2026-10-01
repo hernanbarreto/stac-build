@@ -767,6 +767,9 @@ def certify_cfg(**over) -> dict:
          # certification; production runs with deliverable_only: true (USER
          # 2026-09-22 — correction, epoch, and the stage ends)
          "deliverable_only": False,
+         # the fixtures assert that every epoch stays selectable; production keeps ONE
+         # (USER 2026-09-30, certify.single_final_epoch: true)
+         "single_final_epoch": False,
          "objective_weights": {"loop_residual_m": 1.0, "seam_residual_m": 1.0, "closure_m": 1.0,
                                "depth_disagreement_frac": 5.0, "duplicates": 0.1},
          "gates": {"mode": "advisory", "max_seam_degradation_m": 0.005,

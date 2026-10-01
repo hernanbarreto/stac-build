@@ -1,10 +1,12 @@
 # STAC-Builder: Precision Worker (Subprocess)
-# claude_stac.txt §3 CORE, hosted by the reconstruction stage right after Omega and
-# the chunk merge (USER 2026-09-28: "f0 a f7 es etapa de reconstrucción, antes de
-# cloudcompy"): F0 camera → F2 gauge → F4 tracks → F3 probe → F5 refinement → F6
-# native depth (+ COLMAP reference) → F7 witness fusion → the fused cloud IS the
-# reconstruction. The steps and their resume live in precision/runner.py (the one
-# list, also `python -m precision.runner`).
+# claude_stac.txt §3 CORE, hosted by the reconstruction stage right after Omega
+# (USER 2026-09-28: "f0 a f7 es etapa de reconstrucción, antes de cloudcompy"):
+# F0 camera → F2 gauge → F4 tracks → F3 probe → F5 refinement → F6 bend (Omega's
+# depth bent to F5 per keyframe + multi-view vote, USER 2026-10-01 — the epoch-7
+# recipe; cloud.source omega_bent) → the published cloud IS the reconstruction →
+# chunk check (report). The F6 sweep → F7 chain stays selectable (omega_corrected |
+# fusion). The steps and their resume live in precision/runner.py (the one list,
+# also `python -m precision.runner`).
 
 import sys
 from pathlib import Path
@@ -26,7 +28,8 @@ def _precision_work(pipe: WorkerPipe, session_dir: str, config: dict):
     for need in ("camera_poses.txt", "camera_frames.txt"):
         if not (out / need).exists():
             raise RuntimeError(f"No {need} in {out} — the reconstruction (Omega) must run before "
-                               f"the precision core; it needs no cloud until F7 builds one")
+                               f"the precision core; it needs no cloud until the depth stage "
+                               f"builds one")
 
     def _progress(pct, msg):
         pipe.send_progress(float(pct), str(msg), stage="precision")
@@ -42,9 +45,9 @@ def _precision_work(pipe: WorkerPipe, session_dir: str, config: dict):
         if pipe.check_cancel():
             return
         raise RuntimeError(str(e)) from e
-    pipe.send_log(f"[precision] F0-F7 done in {rep['seconds'] / 60:.1f} min — the fused cloud is "
-                  f"epoch {rep['epoch']} (earlier epochs stay selectable)")
-    pipe.send_progress(100, f"Precision F0-F7: epoch {rep['epoch']}", stage="precision")
+    pipe.send_log(f"[precision] core done in {rep['seconds'] / 60:.1f} min — the published cloud "
+                  f"(cloud.source {pcfg.cloud.source}) is epoch {rep['epoch']}")
+    pipe.send_progress(100, f"Precision core: epoch {rep['epoch']}", stage="precision")
 
 
 def run(conn: Connection, session_dir: str, config: dict):
